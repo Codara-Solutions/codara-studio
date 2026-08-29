@@ -100,6 +100,10 @@ import {
   nativeCliAccounts,
   NativeCliAccountError,
 } from "./orchestration/native-cli-accounts";
+import {
+  assertPiAccountProfileIsNotActive as assertPiAccountProfileIsNotActiveInRuns,
+  PI_ACCOUNT_IN_USE_MESSAGE,
+} from "./orchestration/pi-account-run-guard";
 import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
 import { focusStudioWindow } from "./window-focus";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
@@ -667,17 +671,6 @@ async function spawnPreparedNativeCliLogin(
 
 const PI_ACCOUNT_PROFILE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const PI_ACCOUNT_TERMINAL_RUN_STATUSES = new Set<RunState["status"]>([
-  "complete",
-  "failed",
-  "cancelled",
-]);
-const PI_ACCOUNT_TERMINAL_ATTEMPT_STATUSES = new Set<
-  RunState["workerAttempts"][number]["status"]
->(["succeeded", "failed", "timed_out", "cancelled"]);
-const PI_ACCOUNT_IN_USE_MESSAGE =
-  "This account is still in use by an active Cora run or worker. Finish or cancel that work before deleting it.";
-
 function piSubscriptionProviderFromIpc(value: unknown): PiSubscriptionProvider {
   if (isPiSubscriptionProvider(value)) return value;
   throw new TypeError("Unsupported Pi subscription provider");
@@ -701,30 +694,11 @@ function piAccountLabelFromIpc(value: unknown, required: boolean): string | unde
   return label;
 }
 
-function runOwnsActivePiAccountProfile(run: RunState, profileId: string): boolean {
-  if (!PI_ACCOUNT_TERMINAL_RUN_STATUSES.has(run.status)) {
-    if (run.chatAccountProfileId === profileId) return true;
-    // The live selector is next-turn-only. A running chat may therefore have
-    // an older actual identity stamped on its durable call after the selector
-    // has moved; keep that account until the owning run settles too.
-    if (run.sparkCalls.some((call) => call.accountProfileId === profileId)) {
-      return true;
-    }
-  }
-  return run.workerAttempts.some(
-    (attempt) =>
-      attempt.accountProfileId === profileId &&
-      !PI_ACCOUNT_TERMINAL_ATTEMPT_STATUSES.has(attempt.status),
-  );
-}
-
 async function assertPiAccountProfileIsNotActive(profileId: string): Promise<void> {
   try {
     const { listRuns } = await getRunStore();
     const runs = await listRuns();
-    if (runs.some((run) => runOwnsActivePiAccountProfile(run, profileId))) {
-      throw new Error(PI_ACCOUNT_IN_USE_MESSAGE);
-    }
+    assertPiAccountProfileIsNotActiveInRuns(runs, profileId);
   } catch (error) {
     if (error instanceof Error && error.message === PI_ACCOUNT_IN_USE_MESSAGE) throw error;
     // Deletion is the unsafe branch when durable ownership cannot be read.

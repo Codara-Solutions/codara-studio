@@ -4680,6 +4680,7 @@ export default function App() {
           title: input.title,
           origin: input.origin,
           nativeClaudeProfileId: input.nativeClaudeProfileId,
+          nativeCliLoginToken: input.nativeCliLoginToken,
         });
         agentTerminalPlacementsRef.current.set(minted.tabId, {
           workspaceId: input.workspaceId,
@@ -4694,7 +4695,11 @@ export default function App() {
         title: input.title,
         origin: input.origin,
         nativeClaudeProfileId: input.nativeClaudeProfileId,
+        nativeCliLoginToken: input.nativeCliLoginToken,
       });
+      // Account sign-in is explicitly user-initiated from `cora auth cli`, so
+      // unlike agent-created terminals it should come to the foreground.
+      if (input.nativeCliLoginToken) tabs.setActiveTab(tabId);
       const placementWorkspaceId =
         input.workspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
       agentTerminalPlacementsRef.current.set(tabId, {

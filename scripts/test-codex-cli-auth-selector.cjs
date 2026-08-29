@@ -8,12 +8,13 @@ const path = require("node:path");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
-const SOURCE = path.join(ROOT, "src", "main", "orchestration", "codex-cli-auth-selector.ts");
+const source = (name) =>
+  path.join(ROOT, "src", "main", "orchestration", name);
 const PROFILE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
-async function loadContract() {
+async function loadContract(entryPoint) {
   const output = await esbuild.build({
-    entryPoints: [SOURCE],
+    entryPoints: [entryPoint],
     bundle: true,
     format: "cjs",
     platform: "node",
@@ -34,7 +35,7 @@ function writePrivate(file, value) {
 }
 
 async function main() {
-  const T = await loadContract();
+  const T = await loadContract(source("codex-cli-auth-selector.ts"));
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-auth-test-"));
   try {
     const store = {
@@ -97,10 +98,103 @@ async function main() {
       inheritedCodexHome,
       "selector never mutates process env",
     );
-    console.log("Codex CLI auth-only selector contracts passed");
+    await T.finalizeCodexCliLogout(store, PROFILE);
+    assert.equal(fs.existsSync(live), false);
+    assert.equal(fs.existsSync(managed), false);
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
+
+  const G = await loadContract(source("grok-cli-auth-selector.ts"));
+  const grokFixture = fs.mkdtempSync(
+    path.join(os.tmpdir(), "codara-grok-auth-test-"),
+  );
+  try {
+    const store = {
+      rootDir: path.join(grokFixture, ".codarastudio", "grok-cli"),
+      personalHomeDir: path.join(grokFixture, ".grok"),
+    };
+    const live = path.join(store.personalHomeDir, "auth.json");
+    const managed = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
+    writePrivate(live, "GROK_PERSONAL");
+    writePrivate(managed, "GROK_MANAGED");
+
+    assert.equal(await G.ensureGrokCliAuthVault(store), "personal");
+    assert.equal(await G.activateGrokCliAccount(store, PROFILE), "personal");
+    assert.equal(fs.readFileSync(live, "utf8"), "GROK_MANAGED");
+    writePrivate(live, "GROK_MANAGED_REFRESHED");
+    assert.equal(await G.activateGrokCliAccount(store, "personal"), PROFILE);
+    assert.equal(fs.readFileSync(managed, "utf8"), "GROK_MANAGED_REFRESHED");
+    assert.equal(fs.readFileSync(live, "utf8"), "GROK_PERSONAL");
+    await G.finalizeGrokCliLogout(store, "personal");
+    assert.equal(fs.existsSync(live), false);
+    assert.equal(fs.existsSync(G.grokCliPersonalAuthFile(store.rootDir)), false);
+  } finally {
+    fs.rmSync(grokFixture, { recursive: true, force: true });
+  }
+
+  const C = await loadContract(source("claude-cli-auth-selector.ts"));
+  const claudeFixture = fs.mkdtempSync(
+    path.join(os.tmpdir(), "codara-claude-auth-test-"),
+  );
+  try {
+    const store = {
+      rootDir: path.join(claudeFixture, ".codarastudio", "claude-cli"),
+      personalConfigDir: path.join(claudeFixture, ".claude"),
+      personalConfigDirEnv: null,
+    };
+    const managedDir = path.join(store.rootDir, "accounts", PROFILE);
+    const credential = (name) =>
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: `${name}_ACCESS`,
+          refreshToken: `${name}_REFRESH`,
+        },
+      });
+    const slots = new Map([
+      ["personal", credential("CLAUDE_PERSONAL")],
+      [managedDir, credential("CLAUDE_MANAGED")],
+    ]);
+    const backend = {
+      async read(_configDir, configDirEnv) {
+        return slots.get(configDirEnv || "personal") || null;
+      },
+      async write(_configDir, configDirEnv, value) {
+        slots.set(configDirEnv || "personal", value);
+      },
+      async clear(_configDir, configDirEnv) {
+        slots.delete(configDirEnv || "personal");
+      },
+    };
+
+    assert.equal(await C.ensureClaudeCliAuthVault(store, backend), "personal");
+    assert.equal(
+      await C.activateClaudeCliAccount(store, PROFILE, backend),
+      "personal",
+    );
+    assert.equal(
+      slots.get("personal"),
+      credential("CLAUDE_MANAGED"),
+      "the selected Claude credential becomes the one official live login",
+    );
+    slots.set("personal", credential("CLAUDE_MANAGED_REFRESHED"));
+    assert.equal(
+      await C.activateClaudeCliAccount(store, "personal", backend),
+      PROFILE,
+    );
+    assert.equal(
+      slots.get(managedDir),
+      credential("CLAUDE_MANAGED_REFRESHED"),
+      "a refreshed live credential is saved back into its account slot",
+    );
+    assert.equal(slots.get("personal"), credential("CLAUDE_PERSONAL"));
+    await C.finalizeClaudeCliLogout(store, "personal", backend);
+    assert.equal(slots.has("personal"), false);
+  } finally {
+    fs.rmSync(claudeFixture, { recursive: true, force: true });
+  }
+
+  console.log("Native CLI auth-only selector contracts passed");
 }
 
 main().catch((error) => {

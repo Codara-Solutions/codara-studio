@@ -25,6 +25,9 @@ export interface CreateAgentTerminalInput {
   // Main-resolved identity for a local phone-created Claude terminal. SSH
   // terminals never receive local account profiles.
   nativeClaudeProfileId?: string;
+  // One-time main-owned native CLI login plan. The renderer only carries the
+  // opaque token into pty:spawn; executable, argv and environment stay in main.
+  nativeCliLoginToken?: string;
   // Trusted device origin supplied by main. Phone-created terminals use this
   // for a live tab badge and tooltip instead of the amber agent tint.
   origin?: TerminalLeafOrigin;

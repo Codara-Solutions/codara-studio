@@ -774,6 +774,8 @@ export interface NativeCliAccountRuntimeInspection {
   runtime: NativeCliAccountRuntime;
   defaultProfileId: string;
   profiles: NativeCliAccountProfile[];
+  /** True when only this provider's local account inspection failed. */
+  unavailable?: boolean;
 }
 
 export interface NativeCliAccountsInspection {

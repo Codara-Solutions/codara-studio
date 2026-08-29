@@ -4,7 +4,7 @@ import {
   type ExecFileOptions,
 } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import {
   claudeCliManagedProfileConfigDir,
   CLAUDE_CLI_PERSONAL_PROFILE_ID,
@@ -40,7 +40,6 @@ import {
   resolveCodexCliExecutionProfile,
 } from "./codex-cli-profile-execution";
 import {
-  GROK_CLI_AUTH_FILE,
   GROK_CLI_PERSONAL_PROFILE_ID,
   grokCliManagedProfilePaths,
   GrokCliAccountProfileLeasedError,
@@ -79,7 +78,18 @@ import { isAgentRuntimeKind } from "../../shared/agent-families";
 import {
   activateCodexCliAccount,
   ensureCodexCliAuthVault,
+  finalizeCodexCliLogout,
 } from "./codex-cli-auth-selector";
+import {
+  activateClaudeCliAccount,
+  ensureClaudeCliAuthVault,
+  finalizeClaudeCliLogout,
+} from "./claude-cli-auth-selector";
+import {
+  activateGrokCliAccount,
+  ensureGrokCliAuthVault,
+  finalizeGrokCliLogout,
+} from "./grok-cli-auth-selector";
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
@@ -126,6 +136,8 @@ export interface NativeCliAccountRuntimeInspection {
   runtime: NativeCliAccountRuntime;
   defaultProfileId: string;
   profiles: NativeCliAccountProfile[];
+  /** This provider failed independently; sibling providers remain usable. */
+  unavailable?: boolean;
 }
 
 export interface NativeCliAccountsInspection {
@@ -526,6 +538,18 @@ export interface NativeCliAccountServiceOptions {
   codexAuthSelector?: (profileId: string) => Promise<unknown>;
   /** Test seam for the one-time migration of the historical personal login. */
   codexAuthVaultInitializer?: () => Promise<unknown>;
+  /** Test seam. Production swaps Claude OAuth credentials in the official slot. */
+  claudeAuthSelector?: (profileId: string) => Promise<unknown>;
+  /** Test seam for preserving the historical Claude Code login. */
+  claudeAuthVaultInitializer?: () => Promise<unknown>;
+  /** Test seam. Production swaps only auth.json in the official Grok home. */
+  grokAuthSelector?: (profileId: string) => Promise<unknown>;
+  /** Test seam for preserving the historical Grok login. */
+  grokAuthVaultInitializer?: () => Promise<unknown>;
+  /** Test seams for removing a logged-out credential from the live slot. */
+  claudeAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
+  codexAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
+  grokAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
   /** Close every live session for a runtime before its account changes. */
   sessionShutdown?: NativeCliAccountSessionShutdown;
 }
@@ -552,6 +576,13 @@ export class NativeCliAccountService {
   private readonly now: () => number;
   private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
   private readonly codexAuthVaultInitializer: () => Promise<unknown>;
+  private readonly claudeAuthSelector: (profileId: string) => Promise<unknown>;
+  private readonly claudeAuthVaultInitializer: () => Promise<unknown>;
+  private readonly grokAuthSelector: (profileId: string) => Promise<unknown>;
+  private readonly grokAuthVaultInitializer: () => Promise<unknown>;
+  private readonly claudeAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
+  private readonly codexAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
+  private readonly grokAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
   private sessionShutdown: NativeCliAccountSessionShutdown;
   private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
   private readonly expiredLoginTokens = new Map<string, number>();
@@ -615,6 +646,53 @@ export class NativeCliAccountService {
               await activateCodexCliAccount(this.codexStore, defaultProfileId);
             }
           });
+    this.claudeAuthSelector =
+      options.claudeAuthSelector ??
+      (options.claudeStore
+        ? async () => undefined
+        : (profileId) => activateClaudeCliAccount(this.claudeStore, profileId));
+    this.claudeAuthVaultInitializer =
+      options.claudeAuthVaultInitializer ??
+      (options.claudeStore
+        ? async () => undefined
+        : async () => {
+            const active = await ensureClaudeCliAuthVault(this.claudeStore);
+            const { defaultProfileId } = await this.claudeStore.snapshot();
+            if (active !== defaultProfileId) {
+              await activateClaudeCliAccount(this.claudeStore, defaultProfileId);
+            }
+          });
+    this.grokAuthSelector =
+      options.grokAuthSelector ??
+      (options.grokStore
+        ? async () => undefined
+        : (profileId) => activateGrokCliAccount(this.grokStore, profileId));
+    this.grokAuthVaultInitializer =
+      options.grokAuthVaultInitializer ??
+      (options.grokStore
+        ? async () => undefined
+        : async () => {
+            const active = await ensureGrokCliAuthVault(this.grokStore);
+            const { defaultProfileId } = await this.grokStore.snapshot();
+            if (active !== defaultProfileId) {
+              await activateGrokCliAccount(this.grokStore, defaultProfileId);
+            }
+          });
+    this.claudeAuthLogoutFinalizer =
+      options.claudeAuthLogoutFinalizer ??
+      (options.claudeStore
+        ? async () => undefined
+        : (profileId) => finalizeClaudeCliLogout(this.claudeStore, profileId));
+    this.codexAuthLogoutFinalizer =
+      options.codexAuthLogoutFinalizer ??
+      (options.codexStore
+        ? async () => undefined
+        : (profileId) => finalizeCodexCliLogout(this.codexStore, profileId));
+    this.grokAuthLogoutFinalizer =
+      options.grokAuthLogoutFinalizer ??
+      (options.grokStore
+        ? async () => undefined
+        : (profileId) => finalizeGrokCliLogout(this.grokStore, profileId));
     this.sessionShutdown =
       options.sessionShutdown ?? (async () => ({ closedSessionCount: 0 }));
     this.grokIdentityReader =
@@ -707,10 +785,10 @@ export class NativeCliAccountService {
         try {
           configDir = profile.managed
             ? claudeCliManagedProfileConfigDir(this.claudeStore.rootDir, profile.id)
-            : this.claudeStore.personalConfigDir;
+            : this.claudeStore.personalProfileConfigDir;
           configDirEnv = profile.managed
             ? configDir
-            : this.claudeStore.personalConfigDirEnv;
+            : this.claudeStore.personalProfileConfigDirEnv;
         } catch {
           return;
         }
@@ -776,7 +854,7 @@ export class NativeCliAccountService {
           authFile = profile.managed
             ? grokCliManagedProfilePaths(this.grokStore.rootDir, profile.id)
                 .authFile
-            : join(this.grokStore.personalHomeDir, GROK_CLI_AUTH_FILE);
+            : this.grokStore.personalAuthFile;
         } catch {
           return;
         }
@@ -796,6 +874,7 @@ export class NativeCliAccountService {
   ): Promise<NativeCliAccountRuntimeInspection> {
     try {
       if (runtime === "claude") {
+        await this.claudeAuthVaultInitializer();
         const inspection = await this.claudeStore.inspect();
         const identities = await this.claudeAccountIdentities(
           inspection.profiles,
@@ -814,7 +893,8 @@ export class NativeCliAccountService {
         };
       }
       const store = runtime === "grok" ? this.grokStore : this.codexStore;
-      if (runtime === "codex") await this.codexAuthVaultInitializer();
+      if (runtime === "grok") await this.grokAuthVaultInitializer();
+      else await this.codexAuthVaultInitializer();
       const inspection = await store.inspect();
       const identities =
         runtime === "grok"
@@ -844,10 +924,24 @@ export class NativeCliAccountService {
       const runtime = normalizeRuntime(rawRuntime);
       return { runtimes: [await this.inspectRuntime(runtime)] };
     }
+    const inspectIndependently = async (
+      runtime: NativeCliAccountRuntime,
+    ): Promise<NativeCliAccountRuntimeInspection> => {
+      try {
+        return await this.inspectRuntime(runtime);
+      } catch {
+        return {
+          runtime,
+          defaultProfileId: "personal",
+          profiles: [],
+          unavailable: true,
+        };
+      }
+    };
     const [claude, codex, grok] = await Promise.all([
-      this.inspectRuntime("claude"),
-      this.inspectRuntime("codex"),
-      this.inspectRuntime("grok"),
+      inspectIndependently("claude"),
+      inspectIndependently("codex"),
+      inspectIndependently("grok"),
     ]);
     return { runtimes: [claude, codex, grok] };
   }
@@ -1068,6 +1162,13 @@ export class NativeCliAccountService {
         );
       }
       if (before.inspection.defaultProfileId === profileId) {
+        try {
+          if (runtime === "claude") await this.claudeAuthSelector(profileId);
+          else if (runtime === "grok") await this.grokAuthSelector(profileId);
+          else await this.codexAuthSelector(profileId);
+        } catch (error) {
+          throw this.sanitizeStoreError(runtime, profileId, error);
+        }
         return {
           profile: before.profile,
           inspection: before.inspection,
@@ -1091,19 +1192,42 @@ export class NativeCliAccountService {
         );
       }
       try {
+        const previousProfileId = before.inspection.defaultProfileId;
         if (runtime === "claude") {
           await this.claudeStore.setDefaultProfile(profileId);
+          try {
+            await this.claudeAuthSelector(profileId);
+          } catch (error) {
+            await this.claudeStore
+              .setDefaultProfile(previousProfileId)
+              .catch(() => undefined);
+            await this.claudeAuthSelector(previousProfileId).catch(
+              () => undefined,
+            );
+            throw error;
+          }
         } else if (runtime === "grok") {
           await this.grokStore.setDefaultProfile(profileId);
+          try {
+            await this.grokAuthSelector(profileId);
+          } catch (error) {
+            await this.grokStore
+              .setDefaultProfile(previousProfileId)
+              .catch(() => undefined);
+            await this.grokAuthSelector(previousProfileId).catch(
+              () => undefined,
+            );
+            throw error;
+          }
         } else {
           await this.codexStore.setDefaultProfile(profileId);
           try {
             await this.codexAuthSelector(profileId);
           } catch (error) {
             await this.codexStore
-              .setDefaultProfile(before.inspection.defaultProfileId)
+              .setDefaultProfile(previousProfileId)
               .catch(() => undefined);
-            await this.codexAuthSelector(before.inspection.defaultProfileId).catch(
+            await this.codexAuthSelector(previousProfileId).catch(
               () => undefined,
             );
             throw error;
@@ -1454,6 +1578,13 @@ export class NativeCliAccountService {
         );
       }
       this.assertProcessSucceeded("logout", runtime, profileId, result);
+      if (runtime === "claude") {
+        await this.claudeAuthLogoutFinalizer(profileId);
+      } else if (runtime === "grok") {
+        await this.grokAuthLogoutFinalizer(profileId);
+      } else {
+        await this.codexAuthLogoutFinalizer(profileId);
+      }
     });
   }
 

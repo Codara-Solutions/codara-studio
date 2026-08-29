@@ -52,6 +52,39 @@ Housekeeping: `cora ws prune` removes workspaces whose directory no longer
 exists (bench runs register throwaway tmpdirs as real workspaces; the bench
 also prunes its own after grading).
 
+## Accounts
+
+`cora auth list` shows both account layers in one Hermes-style directory:
+Cora's OAuth subscriptions and the native Claude Code, Codex, and Grok
+identities used by Studio terminals. They remain independent on purpose.
+
+```sh
+cora auth list
+cora auth add anthropic "Work Claude"
+cora auth login anthropic "Work Claude"       # reconnect
+cora auth use anthropic "Work Claude"         # future Cora chats
+cora auth rename anthropic "Work Claude" "Team Claude"
+cora auth remove anthropic "Team Claude"
+
+cora auth cli list claude
+cora auth cli add claude "Work CLI"
+cora auth cli login claude "Work CLI"          # reconnect
+cora auth cli use claude "Work CLI"            # new Studio terminals
+cora auth cli rename claude "Work CLI" "Team CLI"
+cora auth cli logout claude "Team CLI"
+cora auth cli remove claude "Team CLI"
+```
+
+Every printed `#1`, `#2`, … is selectable, so the short form
+`cora auth use anthropic 2` works too.
+
+Subscription sign-in opens the provider page and finishes in the invoking
+terminal. Native CLI sign-in opens a guarded Studio terminal because those
+tools own an interactive CLI ceremony. Add `--default` to make a reconnect the
+default after it succeeds; destructive commands confirm unless `--yes` is
+present. Existing Cora runs and already-open terminals keep their frozen
+account when a default changes.
+
 ## The live dashboard
 
 `cora watch` repaints a dashboard of the active run every second: status,

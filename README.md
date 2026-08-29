@@ -70,6 +70,7 @@ cora runs                # list runs straight off disk (works app-closed)
 cora watch <run>         # live dashboard of a run and its subagents
 cora log <run>           # the conversation transcript
 cora board <run>         # the run's kanban board
+cora auth list           # Cora subscriptions + native CLI identities
 cora bench               # the harness benchmark (see cli/README.md)
 cora ws prune            # remove workspaces whose directory is gone
 cora rpc preview.list    # raw JSON-RPC escape hatch (any method)
@@ -104,8 +105,18 @@ each account. On Windows, managed accounts keep the older fully-isolated
 behavior.
 
 ```sh
-cora status          # includes every account's subscription clocks
+cora auth list                         # every Cora + native CLI account
+cora auth add anthropic "Work Claude"  # add a Cora subscription in-browser
+cora auth use anthropic "Work Claude"  # default for future Cora chats
+cora auth cli list claude              # Claude Code terminal identities
+cora auth cli add claude "Work CLI"    # sign in in a guarded Studio terminal
+cora auth cli use claude "Work CLI"    # Active account for new terminals
 ```
+
+The two account roles are deliberately separate. `cora auth use` chooses a
+Cora subscription for future chats; `cora auth cli use` chooses the native
+Claude/Codex/Grok identity for new Studio terminals. Existing Cora runs and
+already-open terminals keep the account they started with.
 
 Codara never reads, copies, or refreshes a credential for any of this: it points
 directories, and the CLIs own everything inside them.

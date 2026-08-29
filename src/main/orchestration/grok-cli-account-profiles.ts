@@ -90,6 +90,8 @@ export interface GrokCliProfileLeaseView {
 export interface GrokCliAccountProfileStoreOptions {
   /** Existing Grok home represented by the synthetic `personal` profile. */
   personalHomeDir?: string;
+  /** Optional private auth slot for that historical personal login. */
+  personalAuthFile?: string;
   /** Test seam. Production uses cryptographically random UUIDv4 values. */
   idFactory?: () => string;
   /** Test seam. */
@@ -571,6 +573,7 @@ export class GrokCliAccountProfileStore {
   readonly accountsDir: string;
   readonly filePath: string;
   readonly personalHomeDir: string;
+  readonly personalAuthFile: string;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly authChecker: GrokCliAuthChecker;
@@ -593,6 +596,10 @@ export class GrokCliAccountProfileStore {
     this.filePath = join(this.rootDir, GROK_CLI_ACCOUNT_PROFILES_FILE);
     this.personalHomeDir = resolve(
       options.personalHomeDir?.trim() || defaultPersonalGrokHomeDir(),
+    );
+    this.personalAuthFile = resolve(
+      options.personalAuthFile?.trim() ||
+        join(this.personalHomeDir, GROK_CLI_AUTH_FILE),
     );
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
@@ -752,8 +759,8 @@ export class GrokCliAccountProfileStore {
           id: GROK_CLI_PERSONAL_PROFILE_ID,
           label: "Existing Grok login",
           managed: false,
-          homeDir: this.personalHomeDir,
-          authFile: join(this.personalHomeDir, GROK_CLI_AUTH_FILE),
+          homeDir: dirname(this.personalAuthFile),
+          authFile: this.personalAuthFile,
         },
         ...snapshot.profiles.map((profile) => {
           const paths = grokCliManagedProfilePaths(this.rootDir, profile.id);
@@ -941,8 +948,8 @@ export class GrokCliAccountProfileStore {
         : normalizeGrokCliProfileId(input.profileId);
     let label = "Existing Grok login";
     let managed = false;
-    let homeDir = this.personalHomeDir;
-    let authFile = join(homeDir, GROK_CLI_AUTH_FILE);
+    let homeDir = dirname(this.personalAuthFile);
+    let authFile = this.personalAuthFile;
     if (profileId !== GROK_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new GrokCliAccountProfileNotFoundError(profileId);

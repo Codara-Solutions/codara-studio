@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  familyForRuntime,
   runtimeForSubscription,
   type AgentRuntimeKind,
 } from "@shared/agent-families";
@@ -77,6 +78,8 @@ export interface AccountCardView {
   pairHint?: string;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
+  /** Empty provider state that still offers both connection actions. */
+  placeholder?: boolean;
 }
 
 export interface AccountProviderView {
@@ -103,19 +106,7 @@ export interface AccountProviderView {
   addCliLabel: string;
 }
 
-/**
- * One "Add account" button per provider opens this chooser. Both options were
- * side-by-side buttons before, which asked the reader to know what "for Cora"
- * meant; each one now says what it signs in and what that sign-in is used for.
- * Each option runs the same flow its button used to run.
- */
-interface AddAccountChoice {
-  id: "cora" | "cli";
-  title: string;
-  detail: string;
-  disabled: boolean;
-  onChoose: () => void;
-}
+type AddAccountDestination = "cora" | "cli";
 
 export interface AccountActions {
   /** Connect a card that only has a CLI sign-in to Cora (same login flow as
@@ -594,23 +585,70 @@ function CardOverflowMenu({
   );
 }
 
-function AddAccountMenu({
-  label,
-  choices,
-  disabled,
-  primary,
+export function AccountAddPicker({
+  providers,
+  actions,
 }: {
-  label: string;
-  choices: ReadonlyArray<AddAccountChoice>;
-  disabled: boolean;
-  primary: boolean;
+  providers: ReadonlyArray<AccountProviderView>;
+  actions: AccountActions;
 }) {
   const [open, setOpen] = useState(false);
+  const [selectedProvider, setSelectedProvider] =
+    useState<PiSubscriptionProvider | null>(null);
+  const [destination, setDestination] =
+    useState<AddAccountDestination | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const selectedView = providers.find(
+    (view) => view.provider === selectedProvider,
+  );
+  const selectedRuntime = selectedView
+    ? runtimeForSubscription(selectedView.provider)
+    : null;
+  const selectedFamily = selectedRuntime
+    ? familyForRuntime(selectedRuntime)
+    : null;
+  const providerDisabled = (view: AccountProviderView) =>
+    (view.coraDisabled || view.coraBusy) &&
+    (view.cliDisabled || view.cliLoading);
+  const disabled = providers.every(providerDisabled);
+
+  const clearActiveForm = () => {
+    if (destination === "cora") actions.onCancelAddCora();
+    if (destination === "cli") actions.onCancelAddCli();
+  };
+
+  const close = () => {
+    clearActiveForm();
+    setOpen(false);
+    setSelectedProvider(null);
+    setDestination(null);
+  };
+
+  const finish = () => {
+    setOpen(false);
+    setSelectedProvider(null);
+    setDestination(null);
+  };
+
+  const back = () => {
+    if (destination) {
+      clearActiveForm();
+      setDestination(null);
+      return;
+    }
+    setSelectedProvider(null);
+  };
 
   useEffect(() => {
-    if (disabled) setOpen(false);
+    if (!disabled) return;
+    setOpen(false);
+    setSelectedProvider(null);
+    setDestination(null);
   }, [disabled]);
+
+  const stage = destination
+    ? `${selectedProvider}:${destination}`
+    : selectedProvider ?? "provider";
 
   return (
     <>
@@ -618,76 +656,338 @@ function AddAccountMenu({
         ref={triggerRef}
         type="button"
         className="spark-btn"
-        aria-haspopup="menu"
+        aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={label}
+        aria-label="Add an account"
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          if (open) {
+            close();
+            return;
+          }
+          setSelectedProvider(null);
+          setDestination(null);
+          setOpen(true);
+        }}
         style={{
-          ...(primary ? PRIMARY_BUTTON_STYLE : BUTTON_STYLE),
+          ...PRIMARY_BUTTON_STYLE,
+          flex: "0 0 auto",
           ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
         }}
       >
+        <span aria-hidden style={{ fontSize: 15, lineHeight: 1 }}>+</span>
         Add account
       </button>
-      {/* The shared .spark-menu popover surface, portalled for the reasons on
-          SETTINGS_MENU_Z above. The item class brings hover/disabled; only the
-          two-line grid layout is local. Crucially, the items are NOT
-          .spark-btn: that class pins height to 26px, which is what made the
-          two-line options overlap each other and the card text behind them. */}
+      {/* Portalled because Settings' scrolling pane clips in-place popovers. */}
       <AnchoredMenu
         anchorRef={triggerRef}
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={close}
         className="spark-menu"
-        role="menu"
-        ariaLabel={label}
+        role="dialog"
+        ariaLabel="Add an account"
         placement="below"
         align="end"
+        focusSignal={stage}
         zIndex={SETTINGS_MENU_Z}
       >
-        <div style={{ width: 268, display: "grid", gap: 2 }}>
-          {choices.map((choice) => (
-            <button
-              key={choice.id}
-              type="button"
-              role="menuitem"
-              className="spark-menu-item"
-              disabled={choice.disabled}
-              onClick={() => {
-                setOpen(false);
-                choice.onChoose();
-              }}
-              style={{
-                display: "grid",
-                gap: 2,
-                textAlign: "left",
-                padding: "7px 8px",
-                height: "auto",
-              }}
-            >
+        <div style={{ width: 388, display: "grid", gap: 8, padding: 5 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: selectedProvider
+                ? "26px minmax(0, 1fr) 26px"
+                : "minmax(0, 1fr) 26px",
+              alignItems: "start",
+              gap: 7,
+              padding: "3px 3px 5px",
+            }}
+          >
+            {selectedProvider ? (
+              <button
+                type="button"
+                className="spark-btn"
+                aria-label="Back"
+                onClick={back}
+                style={{ ...BUTTON_STYLE, width: 26, minHeight: 26, padding: 0 }}
+              >
+                ←
+              </button>
+            ) : null}
+            <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
               <span
                 style={{
                   color: "var(--ink)",
-                  fontSize: 12,
-                  fontWeight: 650,
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 13,
+                  fontWeight: 700,
                 }}
               >
-                {choice.title}
+                {!selectedView
+                  ? "Choose an agent"
+                  : destination
+                    ? `Name this ${selectedFamily?.displayName} account`
+                    : `Add ${selectedFamily?.displayName}`}
               </span>
               <span
                 style={{
                   color: "var(--muted)",
-                  fontSize: 11,
-                  fontWeight: 400,
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 10.5,
                   lineHeight: 1.4,
-                  whiteSpace: "normal",
                 }}
               >
-                {choice.detail}
+                {!selectedView
+                  ? "Pick the account you want to connect."
+                  : destination
+                    ? destination === "cli"
+                      ? "Name it now; the sign-in terminal opens next."
+                      : "A clear name makes switching accounts easy later."
+                    : "Choose where this sign-in should be used."}
               </span>
+            </div>
+            <button
+              type="button"
+              className="spark-btn"
+              aria-label="Close account picker"
+              onClick={close}
+              style={{
+                ...BUTTON_STYLE,
+                width: 26,
+                minHeight: 26,
+                padding: 0,
+                color: "var(--muted)",
+              }}
+            >
+              ×
             </button>
-          ))}
+          </div>
+
+          {!selectedView ? (
+            <div
+              role="listbox"
+              aria-label="Agent"
+              style={{ display: "grid", gap: 5 }}
+            >
+              {providers.map((view) => {
+                const runtime = runtimeForSubscription(view.provider);
+                const family = familyForRuntime(runtime);
+                const brand = agentBrandColor(runtime);
+                const unavailable = providerDisabled(view);
+                return (
+                  <button
+                    key={view.provider}
+                    type="button"
+                    role="option"
+                    aria-selected="false"
+                    className="spark-menu-item"
+                    disabled={unavailable}
+                    onClick={() => setSelectedProvider(view.provider)}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "38px minmax(0, 1fr) auto",
+                      alignItems: "center",
+                      gap: 10,
+                      minHeight: 54,
+                      padding: "8px 10px",
+                      textAlign: "left",
+                    }}
+                  >
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 36,
+                        height: 36,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: 10,
+                        color: brand,
+                        border: `1px solid color-mix(in oklch, ${brand} 34%, transparent)`,
+                        background: `color-mix(in oklch, ${brand} 14%, transparent)`,
+                      }}
+                    >
+                      <RuntimeMark runtime={runtime} size={20} />
+                    </span>
+                    <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                      <span
+                        style={{
+                          color: "var(--ink)",
+                          fontSize: 12.5,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {family.displayName}
+                      </span>
+                      <span
+                        style={{
+                          color: "var(--muted)",
+                          fontSize: 10.5,
+                          lineHeight: 1.35,
+                        }}
+                      >
+                        {view.label} · Cora or {view.cliLabel}
+                      </span>
+                    </span>
+                    <span aria-hidden style={{ color: brand, fontSize: 18 }}>›</span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : !destination ? (
+            <div
+              role="listbox"
+              aria-label={`Where to use ${selectedFamily?.displayName}`}
+              style={{ display: "grid", gap: 5 }}
+            >
+              <button
+                type="button"
+                role="option"
+                aria-selected="false"
+                className="spark-menu-item"
+                disabled={selectedView.coraDisabled || selectedView.coraBusy}
+                onClick={() => {
+                  setDestination("cora");
+                  actions.onBeginAddCora(selectedView.provider);
+                }}
+                style={{ minHeight: 52, padding: "8px 10px" }}
+              >
+                <span
+                  aria-hidden
+                  style={{ display: "inline-flex", color: "var(--accent)" }}
+                >
+                  <CodaraMark size={20} />
+                </span>
+                <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                  <span
+                    style={{
+                      color: "var(--ink)",
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                    }}
+                  >
+                    Connect to Cora
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontSize: 10.5,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    Use it for Cora chats, workers, and automations.
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                role="option"
+                aria-selected="false"
+                className="spark-menu-item"
+                disabled={selectedView.cliDisabled || selectedView.cliLoading}
+                onClick={() => {
+                  setDestination("cli");
+                  actions.onBeginAddCli(selectedView.provider);
+                }}
+                style={{ minHeight: 52, padding: "8px 10px" }}
+              >
+                <span
+                  aria-hidden
+                  style={{
+                    display: "inline-flex",
+                    color: agentBrandColor(selectedRuntime!),
+                  }}
+                >
+                  <RuntimeMark runtime={selectedRuntime!} size={20} />
+                </span>
+                <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                  <span
+                    style={{
+                      color: "var(--ink)",
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                    }}
+                  >
+                    Sign in to {selectedView.cliLabel}
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontSize: 10.5,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    Use it when you run {selectedView.cliLabel} in a terminal.
+                  </span>
+                </span>
+              </button>
+            </div>
+          ) : (
+            <form
+              aria-label={`Name for the new ${selectedFamily?.displayName} account`}
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (destination === "cora") {
+                  if (selectedView.coraDisabled) return;
+                  actions.onAddCora(selectedView.provider);
+                } else {
+                  if (
+                    selectedView.cliDisabled ||
+                    !selectedView.addCliLabel.trim()
+                  ) return;
+                  actions.onAddCli(selectedView.provider);
+                }
+                finish();
+              }}
+              style={{ display: "grid", gap: 8, padding: "2px 3px 3px" }}
+            >
+              <input
+                autoFocus
+                aria-label={`Name for the new ${selectedFamily?.displayName} account`}
+                className="spark-input"
+                maxLength={80}
+                placeholder={
+                  destination === "cora"
+                    ? "Account name (optional)"
+                    : "Account name"
+                }
+                value={
+                  destination === "cora"
+                    ? selectedView.addCoraLabel
+                    : selectedView.addCliLabel
+                }
+                onChange={(event) => {
+                  if (destination === "cora") {
+                    actions.onAddCoraLabel(event.currentTarget.value);
+                  } else {
+                    actions.onAddCliLabel(event.currentTarget.value);
+                  }
+                }}
+                style={INPUT_STYLE}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: 6,
+                }}
+              >
+                <ActionButton onClick={back}>Back</ActionButton>
+                <button
+                  type="submit"
+                  className="spark-btn is-primary"
+                  disabled={
+                    destination === "cora"
+                      ? selectedView.coraDisabled
+                      : selectedView.cliDisabled ||
+                        !selectedView.addCliLabel.trim()
+                  }
+                >
+                  {destination === "cora" ? "Connect" : "Continue"}
+                </button>
+              </div>
+            </form>
+          )}
         </div>
       </AnchoredMenu>
     </>
@@ -744,59 +1044,6 @@ function ConnectionLine({ state }: { state: ConnectionState }) {
         {state.text}
       </span>
     </span>
-  );
-}
-
-function AddAccountForm({
-  ariaLabel,
-  placeholder,
-  submitLabel,
-  value,
-  disabled,
-  onValue,
-  onSubmit,
-  onCancel,
-}: {
-  ariaLabel: string;
-  placeholder: string;
-  submitLabel: string;
-  value: string;
-  disabled: boolean;
-  onValue: (next: string) => void;
-  onSubmit: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <form
-      aria-label={ariaLabel}
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (disabled) return;
-        onSubmit();
-      }}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto auto",
-        gap: 6,
-      }}
-    >
-      <input
-        aria-label={ariaLabel}
-        autoFocus
-        className="spark-input"
-        value={value}
-        maxLength={80}
-        placeholder={placeholder}
-        onChange={(event) => onValue(event.currentTarget.value)}
-        style={INPUT_STYLE}
-      />
-      <button type="submit" className="spark-btn is-primary" disabled={disabled}>
-        {submitLabel}
-      </button>
-      <ActionButton disabled={disabled} onClick={onCancel}>
-        Cancel
-      </ActionButton>
-    </form>
   );
 }
 
@@ -897,8 +1144,9 @@ function AccountCard({
   const cliUsing = Boolean(cli?.authState === "connected" && cli.active);
   const active = coraUsing || cliUsing;
   const coraControlsDisabled = coraDisabled || coraBusy;
+  const cliMutationDisabled = cliDisabled || cliBusy;
   const cliControlsDisabled =
-    cliDisabled || cliBusy || Boolean(cli?.inUse);
+    cliMutationDisabled || Boolean(cli?.inUse);
   const cliSwitchDisabled = cliDisabled || cliBusy;
   const cliNeedsSignIn =
     !cli ||
@@ -996,15 +1244,22 @@ function AccountCard({
       run: () => actions.onCliSignIn(card),
     });
   }
-  menuActions.push({
-    id: "rename",
-    label: "Rename",
-    disabled: cora ? coraControlsDisabled : cliControlsDisabled,
-    run: () => {
-      setRenaming(true);
-      setDeleteArmed(null);
-    },
-  });
+  if (cora || cli) {
+    menuActions.push({
+      id: "rename",
+      label: "Rename",
+      // Renaming only changes Codara's local label. An active CLI process must
+      // block credential mutations, but it has no reason to block this metadata
+      // edit. For paired cards, wait for both facets' real mutations to finish.
+      disabled:
+        (cora ? coraControlsDisabled : false) ||
+        (cli ? cliMutationDisabled : false),
+      run: () => {
+        setRenaming(true);
+        setDeleteArmed(null);
+      },
+    });
+  }
   const destructiveActions: CardAction[] = [];
   if (cli?.authState === "connected") {
     destructiveActions.push({
@@ -1141,11 +1396,13 @@ function AccountCard({
             </span>
           ) : null}
         </div>
-        <CardOverflowMenu
-          label={`More actions for ${card.label}`}
-          groups={[menuActions, destructiveActions]}
-          onClose={() => setDeleteArmed(null)}
-        />
+        {menuActions.length > 0 || destructiveActions.length > 0 ? (
+          <CardOverflowMenu
+            label={`More actions for ${card.label}`}
+            groups={[menuActions, destructiveActions]}
+            onClose={() => setDeleteArmed(null)}
+          />
+        ) : null}
       </div>
 
       <div style={{ display: "grid", gap: 0 }}>
@@ -1269,7 +1526,6 @@ function AccountProviderGroup({
   view: AccountProviderView;
   actions: AccountActions;
 }) {
-  const addBusy = view.addingCora || view.addingCli;
   const runtime = runtimeForSubscription(view.provider);
   const brand = agentBrandColor(runtime);
 
@@ -1319,58 +1575,7 @@ function AccountProviderGroup({
             {view.detail}
           </span>
         </div>
-        <AddAccountMenu
-          label={`Add a ${view.label} account`}
-          primary={view.cards.length === 0}
-          disabled={
-            addBusy ||
-            ((view.coraDisabled || view.coraBusy) &&
-              (view.cliDisabled || view.cliLoading))
-          }
-          choices={[
-            {
-              id: "cora",
-              title: "Connect to Cora",
-              detail: "Used for chats, workers, and automations.",
-              disabled: view.coraDisabled || view.coraBusy,
-              onChoose: () => actions.onBeginAddCora(view.provider),
-            },
-            {
-              id: "cli",
-              title: `Sign in to ${view.cliLabel}`,
-              detail: `Used when you run ${view.cliLabel} in the terminal. Name it now, sign in next.`,
-              disabled: view.cliDisabled || view.cliLoading,
-              onChoose: () => actions.onBeginAddCli(view.provider),
-            },
-          ]}
-        />
       </div>
-
-      {view.addingCora ? (
-        <AddAccountForm
-          ariaLabel={`Name for the new ${view.label} account in Cora`}
-          placeholder="Name this account (optional)"
-          submitLabel="Connect"
-          value={view.addCoraLabel}
-          disabled={view.coraDisabled}
-          onValue={actions.onAddCoraLabel}
-          onSubmit={() => actions.onAddCora(view.provider)}
-          onCancel={actions.onCancelAddCora}
-        />
-      ) : null}
-
-      {view.addingCli ? (
-        <AddAccountForm
-          ariaLabel={`Name for the new ${view.cliLabel} account`}
-          placeholder="Name this account"
-          submitLabel="Continue"
-          value={view.addCliLabel}
-          disabled={view.cliDisabled || !view.addCliLabel.trim()}
-          onValue={actions.onAddCliLabel}
-          onSubmit={() => actions.onAddCli(view.provider)}
-          onCancel={actions.onCancelAddCli}
-        />
-      ) : null}
 
       {view.cliError ? (
         <div

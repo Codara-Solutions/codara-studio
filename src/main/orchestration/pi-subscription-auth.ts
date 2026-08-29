@@ -92,7 +92,7 @@ interface ActiveFlow {
   targetProfileId?: string;
   label?: string;
   makeDefault?: boolean;
-  ownerId: number;
+  ownerId: string;
   abort: AbortController;
   releaseLoginGate: () => void;
   pendingPrompt: {
@@ -101,6 +101,18 @@ interface ActiveFlow {
     reject(error: Error): void;
     removeAbortListener(): void;
   } | null;
+}
+
+/**
+ * Transport-neutral owner for an OAuth ceremony. The desktop renderer and the
+ * Cora CLI each provide one; only sanitized progress events cross this seam.
+ * Credentials remain inside this main-process module and are persisted
+ * directly into the isolated Pi auth store.
+ */
+export interface PiSubscriptionAuthOwner {
+  id: string;
+  emit(event: PiSubscriptionAuthEvent): void;
+  focus?(): void;
 }
 
 export interface StartPiSubscriptionProfileLoginInput {
@@ -188,8 +200,18 @@ function publicPrompt(prompt: OAuthInteractionPrompt): PiSubscriptionPrompt {
   };
 }
 
-function send(owner: WebContents, event: PiSubscriptionAuthEvent): void {
-  if (!owner.isDestroyed()) owner.send("pi-subscriptions:event", event);
+function webContentsAuthOwner(owner: WebContents): PiSubscriptionAuthOwner {
+  return {
+    id: `window:${owner.id}`,
+    emit: (event) => {
+      if (!owner.isDestroyed()) owner.send("pi-subscriptions:event", event);
+    },
+    focus: () => focusStudioWindow(owner),
+  };
+}
+
+function send(owner: PiSubscriptionAuthOwner, event: PiSubscriptionAuthEvent): void {
+  owner.emit(event);
 }
 
 // Auth-store mutations reach EVERY window, not just the one that ran the login
@@ -201,6 +223,21 @@ function broadcastSubscriptionsChanged(provider: PiSubscriptionProvider): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("pi-subscriptions:event", event);
   }
+}
+
+/** Re-read account metadata after a rename/default mutation and wake every UI. */
+export async function refreshPiSubscriptionsAfterMetadataChange(
+  provider: PiSubscriptionProvider,
+): Promise<PiSubscriptionOverview> {
+  const [{ invalidatePiSubscriptionUsageCache }, { invalidatePiModelCatalogCache }] =
+    await Promise.all([
+      import("./pi-subscription-usage"),
+      import("./pi-model-catalog"),
+    ]);
+  invalidatePiSubscriptionUsageCache();
+  invalidatePiModelCatalogCache();
+  broadcastSubscriptionsChanged(provider);
+  return inspectPiSubscriptions();
 }
 
 async function openOAuthUrl(url: string): Promise<void> {
@@ -433,7 +470,7 @@ function oauthStateFromAuthUrl(url: string): string | null {
   }
 }
 
-async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
+async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promise<void> {
   const { provider, requestId } = flow;
   const meta = PROVIDER_META[provider];
   let callback: PiOAuthCallbackServer | null = null;
@@ -570,7 +607,7 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
     });
     // The user finished in the browser; bring them back to the Settings window
     // that started this instead of leaving them to find Studio themselves.
-    focusStudioWindow(owner);
+    owner.focus?.();
   } catch (error) {
     const cancelled = flow.abort.signal.aborted || /cancelled|canceled|aborted/i.test(safeAuthError(error));
     send(owner, {
@@ -581,7 +618,7 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
     });
     // A cancel came from Studio, so the user is already here; a real failure
     // happened out in the browser and needs the window pulled back.
-    if (!cancelled) focusStudioWindow(owner);
+    if (!cancelled) owner.focus?.();
   } finally {
     callback?.close();
     settlePendingPrompt(flow, new Error("Login finished"));
@@ -590,9 +627,9 @@ async function runLogin(flow: ActiveFlow, owner: WebContents): Promise<void> {
   }
 }
 
-export async function startPiSubscriptionProfileLogin(
+export async function startPiSubscriptionProfileLoginForOwner(
   input: StartPiSubscriptionProfileLoginInput,
-  owner: WebContents,
+  owner: PiSubscriptionAuthOwner,
 ): Promise<PiSubscriptionProfileLoginRequest> {
   const provider = providerFrom(input.provider);
   let targetProfileId: string | undefined;
@@ -658,6 +695,13 @@ export async function startPiSubscriptionProfileLogin(
   }
 }
 
+export async function startPiSubscriptionProfileLogin(
+  input: StartPiSubscriptionProfileLoginInput,
+  owner: WebContents,
+): Promise<PiSubscriptionProfileLoginRequest> {
+  return startPiSubscriptionProfileLoginForOwner(input, webContentsAuthOwner(owner));
+}
+
 /** Compatibility entry point: reconnect the provider default, or create it. */
 export async function startPiSubscriptionLogin(
   rawProvider: unknown,
@@ -683,6 +727,13 @@ export function answerPiSubscriptionPrompt(
   input: { requestId?: unknown; promptId?: unknown; value?: unknown },
   owner: WebContents,
 ): void {
+  answerPiSubscriptionPromptForOwner(input, webContentsAuthOwner(owner));
+}
+
+export function answerPiSubscriptionPromptForOwner(
+  input: { requestId?: unknown; promptId?: unknown; value?: unknown },
+  owner: PiSubscriptionAuthOwner,
+): void {
   const requestId = typeof input?.requestId === "string" ? input.requestId : "";
   const promptId = typeof input?.promptId === "string" ? input.promptId : "";
   const value = typeof input?.value === "string" ? input.value.trim() : "";
@@ -697,6 +748,13 @@ export function answerPiSubscriptionPrompt(
 }
 
 export function cancelPiSubscriptionLogin(rawRequestId: unknown, owner: WebContents): void {
+  cancelPiSubscriptionLoginForOwner(rawRequestId, webContentsAuthOwner(owner));
+}
+
+export function cancelPiSubscriptionLoginForOwner(
+  rawRequestId: unknown,
+  owner: PiSubscriptionAuthOwner,
+): void {
   const requestId = typeof rawRequestId === "string" ? rawRequestId : "";
   const flow = activeFlows.get(requestId);
   if (!flow || flow.ownerId !== owner.id) return;

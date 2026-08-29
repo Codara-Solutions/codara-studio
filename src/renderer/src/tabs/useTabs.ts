@@ -886,6 +886,7 @@ export interface AgentTerminalTabOptions {
   origin?: TerminalLeafOrigin;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
+  nativeCliLoginToken?: string;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -915,6 +916,9 @@ export function appendAgentTerminalToWorkspaceLayout(
         : {}),
       ...(options?.nativeGrokProfileId
         ? { nativeGrokProfileId: options.nativeGrokProfileId }
+        : {}),
+      ...(options?.nativeCliLoginToken
+        ? { nativeCliLoginToken: options.nativeCliLoginToken }
         : {}),
     },
     activePaneId: paneId,
@@ -1851,6 +1855,9 @@ export function useTabs(
           : {}),
         ...(options?.nativeGrokProfileId
           ? { nativeGrokProfileId: options.nativeGrokProfileId }
+          : {}),
+        ...(options?.nativeCliLoginToken
+          ? { nativeCliLoginToken: options.nativeCliLoginToken }
           : {}),
       };
       const title = options?.title?.trim() || "terminals";

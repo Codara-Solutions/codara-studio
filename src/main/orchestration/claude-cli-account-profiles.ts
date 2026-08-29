@@ -140,6 +140,10 @@ export interface ClaudeCliAccountProfileStoreOptions {
    * process.env.CLAUDE_CONFIG_DIR; null preserves the legacy unset behavior.
    */
   personalConfigDirEnv?: string | null;
+  /** Optional private config slot for the historical personal login. */
+  personalProfileConfigDir?: string;
+  /** Exact selector used when signing into that private personal slot. */
+  personalProfileConfigDirEnv?: string | null;
   idFactory?: () => string;
   now?: () => Date;
   /** Token-blind checker; production uses `claude auth status --json`. */
@@ -804,6 +808,8 @@ export class ClaudeCliAccountProfileStore {
   readonly filePath: string;
   readonly personalConfigDir: string;
   readonly personalConfigDirEnv: string | null;
+  readonly personalProfileConfigDir: string;
+  readonly personalProfileConfigDirEnv: string | null;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly authChecker: ClaudeCliAuthChecker;
@@ -843,6 +849,23 @@ export class ClaudeCliAccountProfileStore {
         this.personalConfigDirEnv ||
         defaultPersonalClaudeConfigDir(),
     );
+    this.personalProfileConfigDir = resolve(
+      options.personalProfileConfigDir?.trim() || this.personalConfigDir,
+    );
+    const hasPersonalProfileConfigEnvOption = Object.prototype.hasOwnProperty.call(
+      options,
+      "personalProfileConfigDirEnv",
+    );
+    const personalProfileConfigDirEnv = hasPersonalProfileConfigEnvOption
+      ? options.personalProfileConfigDirEnv
+      : options.personalProfileConfigDir
+        ? this.personalProfileConfigDir
+        : this.personalConfigDirEnv;
+    this.personalProfileConfigDirEnv =
+      typeof personalProfileConfigDirEnv === "string" &&
+      personalProfileConfigDirEnv.trim()
+        ? resolve(personalProfileConfigDirEnv)
+        : null;
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.leases = options.leases;
@@ -967,7 +990,7 @@ export class ClaudeCliAccountProfileStore {
           id: CLAUDE_CLI_PERSONAL_PROFILE_ID,
           label: "Existing Claude login",
           managed: false,
-          configDir: this.personalConfigDir,
+          configDir: this.personalProfileConfigDir,
         },
         ...snapshot.profiles.map((profile) => ({
           id: profile.id,
@@ -986,7 +1009,7 @@ export class ClaudeCliAccountProfileStore {
             configDir: candidate.configDir,
             configDirEnv: candidate.managed
               ? candidate.configDir
-              : this.personalConfigDirEnv,
+              : this.personalProfileConfigDirEnv,
           });
         } catch {
           status = { connected: false, reason: "unavailable" };
@@ -1158,8 +1181,8 @@ export class ClaudeCliAccountProfileStore {
         : normalizeClaudeCliProfileId(input.profileId);
     let label = "Existing Claude login";
     let managed = false;
-    let configDir = this.personalConfigDir;
-    let configDirEnv = this.personalConfigDirEnv;
+    let configDir = this.personalProfileConfigDir;
+    let configDirEnv = this.personalProfileConfigDirEnv;
     if (profileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new ClaudeCliAccountProfileNotFoundError(profileId);

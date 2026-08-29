@@ -90,7 +90,18 @@ import {
   readSubscriptionHeadroomSummary,
   runtimeLimitReached,
 } from "./orchestration/subscription-headroom";
-import { AGENT_FAMILY_IDS, isAgentRuntimeKind } from "../shared/agent-families";
+import {
+  AGENT_FAMILY_IDS,
+  isAgentRuntimeKind,
+  isPiSubscriptionProvider,
+} from "../shared/agent-families";
+import {
+  assertPiAccountProfileIsNotActive as assertPiAccountProfileIsNotActiveInRuns,
+  PI_ACCOUNT_IN_USE_MESSAGE,
+} from "./orchestration/pi-account-run-guard";
+import type {
+  PiSubscriptionAuthEvent,
+} from "@shared/types";
 import type {
   AppPreferences,
   AppState,
@@ -571,6 +582,26 @@ async function dispatch(
         return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
+      case "accounts.use":
+      case "accounts.rename":
+      case "accounts.remove":
+      case "accounts.login.start":
+      case "accounts.login.poll":
+      case "accounts.login.respond":
+      case "accounts.login.cancel":
+      case "nativeAccounts.list":
+      case "nativeAccounts.use":
+      case "nativeAccounts.rename":
+      case "nativeAccounts.remove":
+      case "nativeAccounts.logout":
+      case "nativeAccounts.add":
+      case "nativeAccounts.login":
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Account settings are user-owned.");
+        }
+        return method.startsWith("nativeAccounts.")
+          ? await handleNativeAccounts(method, params, id)
+          : await handleSubscriptionAccounts(method, params, id);
       case "profiles.list":
       case "profiles.create":
       case "profiles.use":
@@ -1430,6 +1461,319 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
   }
+}
+
+const CLI_AUTH_SESSION_TTL_MS = 15 * 60_000;
+const CLI_AUTH_EVENT_LIMIT = 96;
+
+interface CliSubscriptionAuthSession {
+  id: string;
+  owner: {
+    id: string;
+    emit(event: PiSubscriptionAuthEvent): void;
+  };
+  requestId: string | null;
+  events: PiSubscriptionAuthEvent[];
+  done: boolean;
+  touchedAt: number;
+}
+
+const cliSubscriptionAuthSessions = new Map<string, CliSubscriptionAuthSession>();
+
+function enqueueCliSubscriptionAuthEvent(
+  session: CliSubscriptionAuthSession,
+  event: PiSubscriptionAuthEvent,
+): void {
+  if (session.events.length >= CLI_AUTH_EVENT_LIMIT) {
+    const disposable = session.events.findIndex((entry) => entry.type === "progress");
+    session.events.splice(disposable >= 0 ? disposable : 0, 1);
+  }
+  session.events.push(event);
+  session.touchedAt = Date.now();
+  if (event.type === "completed" || event.type === "failed" || event.type === "cancelled") {
+    session.done = true;
+  }
+}
+
+async function pruneCliSubscriptionAuthSessions(): Promise<void> {
+  const now = Date.now();
+  const expired = [...cliSubscriptionAuthSessions.values()].filter(
+    (session) => now - session.touchedAt > CLI_AUTH_SESSION_TTL_MS,
+  );
+  if (expired.length === 0) return;
+  const { cancelPiSubscriptionLoginForOwner } = await import(
+    "./orchestration/pi-subscription-auth"
+  );
+  for (const session of expired) {
+    cliSubscriptionAuthSessions.delete(session.id);
+    if (session.requestId && !session.done) {
+      cancelPiSubscriptionLoginForOwner(session.requestId, session.owner);
+    }
+  }
+}
+
+function requireCliSubscriptionAuthSession(
+  params: Record<string, unknown>,
+): CliSubscriptionAuthSession {
+  const sessionId = stringParam(params, "sessionId");
+  const session = sessionId ? cliSubscriptionAuthSessions.get(sessionId) : undefined;
+  if (!session) throw new Error("This Cora account sign-in is no longer active");
+  session.touchedAt = Date.now();
+  return session;
+}
+
+async function assertPiAccountProfileCanBeDeleted(profileId: string): Promise<void> {
+  try {
+    const runs = await (await getRunStore()).listRuns();
+    assertPiAccountProfileIsNotActiveInRuns(runs, profileId);
+  } catch (error) {
+    if (error instanceof Error && error.message === PI_ACCOUNT_IN_USE_MESSAGE) throw error;
+    throw new Error(
+      "Codara could not verify whether this account is used by an active run. The account was not deleted.",
+    );
+  }
+}
+
+async function handleSubscriptionAccounts(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  await pruneCliSubscriptionAuthSessions();
+  const auth = await import("./orchestration/pi-subscription-auth");
+
+  if (method === "accounts.login.start") {
+    const provider = stringParam(params, "provider");
+    if (!isPiSubscriptionProvider(provider)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
+    }
+    const label = stringParam(params, "label");
+    const profileId = stringParam(params, "profileId");
+    const sessionId = randomBytes(24).toString("hex");
+    const session: CliSubscriptionAuthSession = {
+      id: sessionId,
+      owner: undefined as unknown as CliSubscriptionAuthSession["owner"],
+      requestId: null,
+      events: [],
+      done: false,
+      touchedAt: Date.now(),
+    };
+    session.owner = {
+      id: `cora-cli:${sessionId}`,
+      emit: (event) => enqueueCliSubscriptionAuthEvent(session, event),
+    };
+    cliSubscriptionAuthSessions.set(sessionId, session);
+    try {
+      const request = await auth.startPiSubscriptionProfileLoginForOwner(
+        {
+          provider,
+          ...(profileId ? { profileId } : {}),
+          ...(label ? { label } : {}),
+          ...(params.makeDefault === true ? { makeDefault: true } : {}),
+        },
+        session.owner,
+      );
+      session.requestId = request.requestId;
+      return successResponse(id, { sessionId, ...request });
+    } catch (error) {
+      cliSubscriptionAuthSessions.delete(sessionId);
+      throw error;
+    }
+  }
+
+  if (method === "accounts.login.poll") {
+    const session = requireCliSubscriptionAuthSession(params);
+    const events = session.events.splice(0);
+    const done = session.done;
+    if (done && session.events.length === 0) cliSubscriptionAuthSessions.delete(session.id);
+    return successResponse(id, { events, done });
+  }
+
+  if (method === "accounts.login.respond") {
+    const session = requireCliSubscriptionAuthSession(params);
+    const promptId = stringParam(params, "promptId");
+    if (!session.requestId || !promptId) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "promptId is required");
+    }
+    const value = typeof params.value === "string" ? params.value : "";
+    auth.answerPiSubscriptionPromptForOwner(
+      { requestId: session.requestId, promptId, value },
+      session.owner,
+    );
+    return successResponse(id, { ok: true });
+  }
+
+  if (method === "accounts.login.cancel") {
+    const session = requireCliSubscriptionAuthSession(params);
+    if (session.requestId) {
+      auth.cancelPiSubscriptionLoginForOwner(session.requestId, session.owner);
+    }
+    return successResponse(id, { ok: true });
+  }
+
+  const profileId = stringParam(params, "profileId");
+  if (!profileId) return errorResponse(id, ERR_INVALID_PARAMS, "profileId is required");
+
+  if (method === "accounts.rename") {
+    const label = stringParam(params, "label");
+    if (!label) return errorResponse(id, ERR_INVALID_PARAMS, "label is required");
+    const profile = await auth.renamePiAccountProfile(profileId, label);
+    const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(profile.provider);
+    return successResponse(id, { profile, overview });
+  }
+
+  if (method === "accounts.use") {
+    const provider = stringParam(params, "provider");
+    if (!isPiSubscriptionProvider(provider)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
+    }
+    await auth.setDefaultPiAccountProfile(provider, profileId);
+    const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(provider);
+    return successResponse(id, {
+      account: overview.profiles?.find((profile) => profile.id === profileId) ?? null,
+      overview,
+    });
+  }
+
+  if (method === "accounts.remove") {
+    const overview = await auth.deletePiSubscriptionProfile(profileId, {
+      ownershipGuard: async (profile) => {
+        await assertPiAccountProfileCanBeDeleted(profile.id);
+        return false;
+      },
+    });
+    return successResponse(id, { removed: profileId, overview });
+  }
+
+  return errorResponse(id, ERR_METHOD_NOT_FOUND, `unknown method: ${method}`);
+}
+
+function broadcastNativeCliAccountsChangedFromSocket(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("native-cli-accounts:changed");
+  }
+}
+
+function nativeRuntimeParam(params: Record<string, unknown>): "claude" | "codex" | "grok" {
+  const runtime = stringParam(params, "runtime");
+  if (!isAgentRuntimeKind(runtime)) {
+    throw new TypeError("runtime must be claude, codex, or grok");
+  }
+  return runtime;
+}
+
+async function openNativeCliAccountLogin(
+  runtime: "claude" | "codex" | "grok",
+  profileId: string,
+  label: string,
+  options: { removeOnFailure: boolean; activateOnSuccess: boolean },
+): Promise<{ tabId: string; paneId: string; profileId: string }> {
+  const { nativeCliAccounts } = await import("./orchestration/native-cli-accounts");
+  const prepared = await nativeCliAccounts.prepareLogin({
+    runtime,
+    profileId,
+    ...(options.removeOnFailure
+      ? { removeProfileOnMismatch: true, removeProfileOnFailure: true }
+      : {}),
+    ...(options.activateOnSuccess ? { activateOnSuccess: true } : {}),
+  });
+  try {
+    const terminal = await requestTerminalOp<{ tabId: string; paneId: string }>("create", {
+      nativeCliLoginToken: prepared.launchToken,
+      title: `${runtime === "claude" ? "Claude Code" : runtime === "codex" ? "Codex CLI" : "Grok Build"} sign-in · ${label}`,
+    });
+    return { ...terminal, profileId };
+  } catch (error) {
+    await nativeCliAccounts.cancelPreparedLogin(prepared.launchToken).catch(() => false);
+    throw error;
+  }
+}
+
+async function handleNativeAccounts(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const { nativeCliAccounts } = await import("./orchestration/native-cli-accounts");
+  if (method === "nativeAccounts.list") {
+    const runtimeValue = stringParam(params, "runtime");
+    const runtime = runtimeValue && isAgentRuntimeKind(runtimeValue) ? runtimeValue : undefined;
+    if (runtimeValue && !runtime) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "runtime must be claude, codex, or grok");
+    }
+    const inspection = await nativeCliAccounts.inspect(runtime);
+    return successResponse(id, {
+      runtimes: inspection.runtimes.map((group) => ({
+        runtime: group.runtime,
+        defaultProfileId: group.defaultProfileId,
+        profiles: group.profiles.map((profile) => ({
+          runtime: profile.runtime,
+          id: profile.id,
+          label: profile.label,
+          managed: profile.managed,
+          isDefault: profile.isDefault,
+          connected: profile.connected,
+          inUse: profile.inUse,
+          status: profile.status,
+        })),
+      })),
+    });
+  }
+
+  const runtime = nativeRuntimeParam(params);
+  if (method === "nativeAccounts.add") {
+    const label = stringParam(params, "label");
+    if (!label) return errorResponse(id, ERR_INVALID_PARAMS, "label is required");
+    const created = await nativeCliAccounts.create({ runtime, label });
+    broadcastNativeCliAccountsChangedFromSocket();
+    const terminal = await openNativeCliAccountLogin(runtime, created.profile.id, created.profile.label, {
+      removeOnFailure: true,
+      activateOnSuccess: true,
+    });
+    return successResponse(id, { profile: created.profile, terminal });
+  }
+
+  const profileId = stringParam(params, "profileId");
+  if (!profileId) return errorResponse(id, ERR_INVALID_PARAMS, "profileId is required");
+
+  if (method === "nativeAccounts.login") {
+    const inspection = await nativeCliAccounts.inspect(runtime);
+    const profile = inspection.runtimes[0]?.profiles.find((entry) => entry.id === profileId);
+    if (!profile) throw new Error(`Native ${runtime} account not found: ${profileId}`);
+    const terminal = await openNativeCliAccountLogin(runtime, profileId, profile.label, {
+      removeOnFailure: false,
+      activateOnSuccess: params.makeDefault === true,
+    });
+    return successResponse(id, { profile, terminal });
+  }
+
+  if (method === "nativeAccounts.use") {
+    const result = await nativeCliAccounts.setDefault({ runtime, profileId });
+    broadcastNativeCliAccountsChangedFromSocket();
+    return successResponse(id, result);
+  }
+
+  if (method === "nativeAccounts.rename") {
+    const label = stringParam(params, "label");
+    if (!label) return errorResponse(id, ERR_INVALID_PARAMS, "label is required");
+    const result = await nativeCliAccounts.rename({ runtime, profileId, label });
+    broadcastNativeCliAccountsChangedFromSocket();
+    return successResponse(id, result);
+  }
+
+  if (method === "nativeAccounts.logout") {
+    await nativeCliAccounts.logout({ runtime, profileId });
+    broadcastNativeCliAccountsChangedFromSocket();
+    return successResponse(id, await nativeCliAccounts.inspect(runtime));
+  }
+
+  if (method === "nativeAccounts.remove") {
+    const result = await nativeCliAccounts.delete({ runtime, profileId });
+    broadcastNativeCliAccountsChangedFromSocket();
+    return successResponse(id, result);
+  }
+
+  return errorResponse(id, ERR_METHOD_NOT_FOUND, `unknown method: ${method}`);
 }
 
 async function handleChatSend(

@@ -253,6 +253,40 @@ async function main() {
         ),
       serializedAccounts.slice(0, 240),
     );
+    const selectedAccount = await rpc(handshake, "accounts.use", {
+      provider: "anthropic",
+      profileId: account?.id,
+    });
+    check(
+      "accounts.use selects the Cora default through the root CLI socket",
+      selectedAccount.result?.account?.id === account?.id &&
+        selectedAccount.result?.account?.isDefault === true,
+      JSON.stringify(selectedAccount).slice(0, 240),
+    );
+    const renamedAccount = await rpc(handshake, "accounts.rename", {
+      profileId: account?.id,
+      label: "Socket subscription",
+    });
+    check(
+      "accounts.rename updates account metadata without touching credentials",
+      renamedAccount.result?.profile?.label === "Socket subscription" &&
+        !JSON.stringify(renamedAccount).includes(ACCOUNT_ACCESS_SECRET) &&
+        !JSON.stringify(renamedAccount).includes(ACCOUNT_REFRESH_SECRET),
+      JSON.stringify(renamedAccount).slice(0, 240),
+    );
+    const nativeAccounts = await rpc(handshake, "nativeAccounts.list", {});
+    const nativeRows = nativeAccounts.result?.runtimes?.flatMap((group) => group.profiles ?? []) ?? [];
+    check(
+      "nativeAccounts.list exposes all three sanitized CLI account groups",
+      nativeAccounts.result?.runtimes?.map((group) => group.runtime).join(",") ===
+        "claude,codex,grok" &&
+        nativeRows.every((profile) =>
+          Object.keys(profile).every((key) =>
+            ["runtime", "id", "label", "managed", "isDefault", "connected", "inUse", "status"].includes(key),
+          ),
+        ),
+      JSON.stringify(nativeAccounts).slice(0, 240),
+    );
 
     // Public Cora lifecycle: a directory that is not yet in spark-state is
     // registered as a workspace before its managed run starts. startAutopilot
@@ -366,7 +400,7 @@ async function main() {
       profileId: account?.id,
     });
     check(
-      "accounts.select is no longer a socket method (account choice lives in Settings)",
+      "accounts.select stays retired (defaults use accounts.use; recovery uses chat.resume)",
       Boolean(removedAccountSelect.error),
       JSON.stringify(removedAccountSelect).slice(0, 180),
     );

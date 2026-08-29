@@ -8,6 +8,7 @@ const read = (relativePath) =>
 
 const shared = read("src/shared/types.ts");
 const ipc = read("src/main/ipc.ts");
+const runGuard = read("src/main/orchestration/pi-account-run-guard.ts");
 const preload = read("src/preload/index.ts");
 const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const cards = read("src/renderer/src/components/AccountCards.tsx");
@@ -46,13 +47,14 @@ assert.match(ipc, /setDefaultPiAccountProfile/);
 assert.match(ipc, /deletePiSubscriptionProfile/);
 assert.match(ipc, /ownershipGuard:\s*async \(profile\)/);
 assert.match(ipc, /const \{ listRuns \} = await getRunStore\(\)/);
-assert.match(ipc, /run\.chatAccountProfileId === profileId/);
-assert.match(ipc, /run\.sparkCalls\.some\(\(call\) => call\.accountProfileId === profileId\)/);
-assert.match(ipc, /attempt\.accountProfileId === profileId/);
-assert.match(ipc, /"complete",\s*"failed",\s*"cancelled"/);
-assert.match(ipc, /"succeeded",\s*"failed",\s*"timed_out",\s*"cancelled"/);
+assert.match(ipc, /assertPiAccountProfileIsNotActiveInRuns\(runs, profileId\)/);
+assert.match(runGuard, /run\.chatAccountProfileId === profileId/);
+assert.match(runGuard, /run\.sparkCalls\.some\(\(call\) => call\.accountProfileId === profileId\)/);
+assert.match(runGuard, /attempt\.accountProfileId === profileId/);
+assert.match(runGuard, /"complete",\s*"failed",\s*"cancelled"/);
+assert.match(runGuard, /"succeeded",\s*"failed",\s*"timed_out",\s*"cancelled"/);
 assert.ok(
-  ipc.includes(
+  runGuard.includes(
     "This account is still in use by an active Cora run or worker. Finish or cancel that work before deleting it.",
   ),
 );
@@ -71,8 +73,8 @@ for (const api of [
   assert.ok(preload.includes(api), `${api} renderer API must exist`);
 }
 
-// One "Add account" button per provider opens a chooser naming both sign-ins in
-// plain language; each option still runs the flow its old button ran.
+// One top-level "Add account" button opens the branded family picker; choosing
+// a family then names both isolated destinations in plain language.
 for (const action of [
   "Add account",
   "Connect to Cora",
@@ -88,17 +90,23 @@ assert.ok(
   cards.includes("Using"),
   "the account Cora or the CLI is running on must be marked Using",
 );
+assert.match(cards, /export function AccountAddPicker\(/);
+assert.match(settings, /<AccountAddPicker providers=\{providerViews\} actions=\{accountActions\} \/>/);
+assert.equal(
+  (cards.match(/\n\s*Add account\n/g) ?? []).length,
+  1,
+  "the Accounts UI must render one global Add account trigger",
+);
 assert.match(cards, /aria-haspopup="menu"/);
+assert.match(cards, /aria-haspopup="dialog"/);
 assert.match(cards, /role="menuitem"/);
-// The chooser popover rides the shared .spark-menu surface — opaque panel,
-// hairline, shadow, the same recipe every other dropdown uses — and its
-// two-line options are .spark-menu-item rows, never fixed-height .spark-btn
-// rows (whose pinned 26px height made the options overlap each other and let
-// the card text behind show through).
+assert.match(cards, /role="listbox"/);
+assert.match(cards, /role="option"/);
+// The picker rides the shared .spark-menu surface and its large branded rows
+// use the flexible menu-item primitive rather than fixed-height buttons.
 assert.match(cards, /className="spark-menu"/);
 assert.match(cards, /className="spark-menu-item"/);
 assert.doesNotMatch(cards, /role="menuitem"\s+className="spark-btn"/);
-assert.doesNotMatch(cards, /className="spark-btn"\s+disabled=\{choice\.disabled\}/);
 // Each card has two independently switchable roles. Use-for-Cora and
 // use-for-CLI are always named, never a combined "Use this account". Rename,
 // reconnect, sign out, and delete wait behind the "···" menu.
@@ -141,18 +149,26 @@ assert.match(cards, /actions\.onCoraConnect\(card\)/);
 // Every card can be renamed — CLI sign-ins without a native name field get a
 // Codara-side display name through the same Rename affordance.
 assert.match(cards, /onCliRename/);
-assert.match(cards, /title: "Connect to Cora"/);
-assert.match(cards, /detail: "Used for chats, workers, and automations\."/);
-assert.match(cards, /title: `Sign in to \$\{view\.cliLabel\}`/);
-assert.match(
-  cards,
-  /Used when you run \$\{view\.cliLabel\} in the terminal\. Name it now, sign in next\./,
-);
-assert.match(cards, /onChoose: \(\) => actions\.onBeginAddCora\(view\.provider\)/);
-assert.match(cards, /onChoose: \(\) => actions\.onBeginAddCli\(view\.provider\)/);
-// The two side-by-side buttons the chooser replaced are gone.
+assert.ok(cards.includes("Connect to Cora"));
+assert.ok(cards.includes("Use it for Cora chats, workers, and automations."));
+assert.ok(cards.includes("Sign in to {selectedView.cliLabel}"));
+assert.ok(cards.includes("Use it when you run {selectedView.cliLabel} in a terminal."));
+assert.match(cards, /actions\.onBeginAddCora\(selectedView\.provider\)/);
+assert.match(cards, /actions\.onBeginAddCli\(selectedView\.provider\)/);
+// Claude, Codex, and Grok are derived from the family registry and rendered
+// with their real brand marks rather than duplicated labels or image assets.
+assert.match(cards, /familyForRuntime\(runtime\)/);
+assert.match(cards, /\{family\.displayName\}/);
+assert.match(cards, /<RuntimeMark runtime=\{runtime\} size=\{20\} \/>/);
+assert.match(cards, /\{view\.label\} · Cora or \{view\.cliLabel\}/);
+// The old per-provider and side-by-side add buttons are gone.
 assert.doesNotMatch(cards, /Add an account for Cora/);
 assert.doesNotMatch(cards, /Add a \{view\.cliLabel\} account/);
+const providerGroupSource = cards.slice(
+  cards.indexOf("function AccountProviderGroup("),
+  cards.indexOf("export default function AccountCards("),
+);
+assert.doesNotMatch(providerGroupSource, /Add account/);
 // Plain language: no configuration vocabulary anywhere the user can read it.
 for (const jargon of ["OAuth", "credential", "profile\"", "managed account"]) {
   assert.equal(
@@ -361,5 +377,5 @@ assert.doesNotMatch(
 );
 
 console.log(
-  "PASS Pi multi-account Settings, sanitized IPC that carries only an anonymous account fingerprint and the account's own email, one card per paired account, the CLI-only usage explanation, the live-run deletion guard, and portalled unclipped account menus",
+  "PASS Pi multi-account Settings, one branded top-level account picker, sanitized IPC that carries only an anonymous account fingerprint and the account's own email, one card per paired account, the CLI-only usage explanation, the live-run deletion guard, and portalled unclipped account menus",
 );

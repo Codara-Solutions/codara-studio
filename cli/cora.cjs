@@ -30,6 +30,15 @@ ${c.bold("PROFILES & MEMORY")}
                                        create isolated profile + memory
   profile use <name|id>                select the default for new chats
 
+${c.bold("ACCOUNTS")}
+  auth list [provider]                 list Cora + native CLI accounts
+  auth add <provider> [label]          connect another Cora subscription
+  auth use <provider> <#|label|id>     default account for new Cora chats
+  auth login|rename|remove <provider> …
+  auth cli list [claude|codex|grok]    list managed terminal identities
+  auth cli add|login|use|rename|logout|remove <runtime> …
+                                       manage Claude/Codex/Grok CLI accounts
+
 ${c.bold("RUNS & AGENTS")}
   runs                         list runs (works offline)
   run <run>                    one run in detail
@@ -76,7 +85,7 @@ function parseArgs(argv) {
       continue;
     }
     const name = arg.slice(2);
-    const boolFlags = new Set(["json", "wait", "all", "keep", "verbose", "direct", "managed"]);
+    const boolFlags = new Set(["json", "wait", "all", "keep", "verbose", "direct", "managed", "default", "yes"]);
     if (boolFlags.has(name)) flags[name] = true;
     else flags[name] = argv[++i];
   }
@@ -106,6 +115,10 @@ async function main() {
 
     case "profile":
       return require("./commands/profiles.cjs").profile(args, flags);
+
+    case "auth":
+    case "accounts":
+      return require("./commands/auth.cjs").auth(args, flags);
 
     case "status":
       return require("./commands/status.cjs").status(args, flags);

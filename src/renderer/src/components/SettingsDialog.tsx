@@ -47,6 +47,7 @@ import SubscriptionUsage, {
   type UsageEntry,
 } from "./SubscriptionUsage";
 import AccountCards, {
+  AccountAddPicker,
   type AccountActions,
   type AccountCardView,
   type AccountProviderView,
@@ -2258,6 +2259,7 @@ function AccountsSettings() {
         (entry) => entry.runtime === descriptor.runtime,
       );
       const cliProfiles = inspected?.profiles ?? [];
+      const cliUnavailable = inspected?.unavailable === true;
 
       // Identity pairing: the only account identity that crosses IPC is an
       // anonymous sha256 of the vendor account id, computed on both sides in
@@ -2411,6 +2413,17 @@ function AccountsSettings() {
         ),
         ...cliOnlyCards,
       ];
+      const visibleCards: AccountCardView[] =
+        cards.length > 0
+          ? cards
+          : [
+              {
+                key: `empty:${descriptor.provider}`,
+                label: `${familyForRuntime(descriptor.runtime).displayName} account`,
+                provider: descriptor.provider,
+                placeholder: true,
+              },
+            ];
 
       const coraCount = piProfiles.length;
       const cliCount = cliProfiles.filter(
@@ -2428,14 +2441,16 @@ function AccountsSettings() {
         label: descriptor.label,
         cliLabel: descriptor.cliLabel,
         detail,
-        cards,
+        cards: visibleCards,
         coraDisabled: !overview?.runtimeInstalled,
         coraBusy: busyProvider !== null || accountMutationId !== null,
         cliDisabled: Boolean(cliBusy),
         cliLoading: cliLoading && !cliInspection,
-        cliError: Boolean(cliError && !cliInspection),
+        cliError: cliUnavailable || Boolean(cliError && !cliInspection),
         cliPersonalMissing: Boolean(
-          inspected && !cliProfiles.some((profile) => !profile.managed),
+          inspected &&
+            !cliUnavailable &&
+            !cliProfiles.some((profile) => !profile.managed),
         ),
         addingCora: addingProvider === descriptor.provider,
         addCoraLabel: addingProvider === descriptor.provider ? addLabel : "",
@@ -2555,9 +2570,28 @@ function AccountsSettings() {
       if (!label) return;
       setAddingCliProvider(null);
       setAddCliLabel("");
-      void mutateCli({ runtime, action: "creating" }, () =>
-        window.spark.nativeCliAccounts.create({ runtime, label }),
-      );
+      void (async () => {
+        setCliBusy({ runtime, action: "creating" });
+        setCliError(null);
+        setCliNotice(null);
+        try {
+          const created = await window.spark.nativeCliAccounts.create({
+            runtime,
+            label,
+          });
+          await refreshCli();
+          await signInCli(runtime, created.profile.id, label, {
+            removeProfileOnFailure: true,
+            activateOnSuccess: true,
+          });
+        } catch (err) {
+          setCliError(
+            (err as Error).message ||
+              "Could not create the command-line account.",
+          );
+          setCliBusy(null);
+        }
+      })();
     },
     onCancelAddCli: () => {
       setAddingCliProvider(null);
@@ -2579,7 +2613,9 @@ function AccountsSettings() {
     },
     onCliSignIn: (card) => {
       if (!card.cli) return;
-      void signInCli(card.cli.runtime, card.cli.profileId, card.label);
+      void signInCli(card.cli.runtime, card.cli.profileId, card.label, {
+        activateOnSuccess: true,
+      });
     },
     onCliSignOut: (card) => {
       if (!card.cli) return;
@@ -2658,10 +2694,23 @@ function AccountsSettings() {
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
-      <SectionTitle
-        title="Accounts"
-        detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A CLI switch safely closes that CLI's running sessions before changing accounts, then opens a fresh session. Verified matches share one card."
-      />
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 14,
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ minWidth: 0, flex: "1 1 420px" }}>
+          <SectionTitle
+            title="Accounts"
+            detail="Each account can be the one Cora uses, the one the terminal uses, or both. Cora switches immediately. A CLI switch safely closes that CLI's running sessions before changing accounts, then opens a fresh session. Verified matches share one card."
+          />
+        </div>
+        <AccountAddPicker providers={providerViews} actions={accountActions} />
+      </div>
       <div style={{ display: "grid", gap: 10 }}>
         {overview?.profiles || cliInspection ? (
           <AccountCards providers={providerViews} actions={accountActions} />

@@ -94,9 +94,35 @@ function cliFails(...args) {
 
 const help = cli("help");
 assert.match(help, /██/, "help shows the Codara logo");
-for (const command of ["chat", "start", "send", "watch", "agents", "board", "whiteboard", "auto", "bench", "runs"]) {
+for (const command of ["chat", "start", "send", "watch", "agents", "board", "whiteboard", "auto", "auth", "bench", "runs"]) {
   assert.match(help, new RegExp(`\\b${command}\\b`), `help lists ${command}`);
 }
+
+const {
+  formatNativeAccounts,
+  formatSubscriptionAccounts,
+  resolveAccount,
+} = require(path.join(ROOT, "cli", "commands", "auth.cjs"));
+const subscriptionListing = formatSubscriptionAccounts([
+  { id: "anthropic-one", provider: "anthropic", label: "Work", status: "configured", isDefault: true, remainingPercent: 72 },
+  { id: "anthropic-two", provider: "anthropic", label: "Personal", status: "unavailable", isDefault: false },
+], "anthropic");
+assert.match(subscriptionListing, /anthropic \(2 accounts\)/);
+assert.match(subscriptionListing, /#1\s+Work\s+connected\s+72% left\s+← default/);
+assert.match(subscriptionListing, /anthropic-one/);
+assert.equal(resolveAccount([
+  { id: "profile-123", label: "Work" },
+  { id: "profile-456", label: "Personal" },
+], "profile-4").label, "Personal");
+assert.equal(resolveAccount([
+  { id: "profile-123", label: "Work" },
+  { id: "profile-456", label: "Personal" },
+], "#2").label, "Personal");
+const nativeListing = formatNativeAccounts([{ runtime: "claude", profiles: [
+  { id: "personal", label: "Personal", managed: false, inUse: false, isDefault: true, status: "connected" },
+] }], "claude");
+assert.match(nativeListing, /claude \(1 account\)/);
+assert.match(nativeListing, /Personal\s+connected\s+personal\s+← default/);
 
 // ── full-screen chat's pure view helpers ───────────────────────────────────
 

@@ -36,11 +36,12 @@ assert.match(
 // Pi subscription connect: focus on success and on a real failure, never on a
 // cancel the user issued from inside Studio (they are already looking at it).
 assert.match(subscriptionAuth, /import \{ focusStudioWindow \} from "\.\.\/window-focus";/);
+assert.match(subscriptionAuth, /focus: \(\) => focusStudioWindow\(owner\),/);
 assert.match(
   subscriptionAuth,
-  /type: "completed",[\s\S]{0,400}?focusStudioWindow\(owner\);/,
+  /type: "completed",[\s\S]{0,400}?owner\.focus\?\.\(\);/,
 );
-assert.match(subscriptionAuth, /if \(!cancelled\) focusStudioWindow\(owner\);/);
+assert.match(subscriptionAuth, /if \(!cancelled\) owner\.focus\?\.\(\);/);
 assert.doesNotMatch(
   subscriptionAuth,
   /type: "cancelled"[^\n]*\n\s*focusStudioWindow/,
