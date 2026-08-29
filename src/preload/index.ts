@@ -961,6 +961,13 @@ const api = {
       ipcRenderer.invoke("scheduler:resume", id),
     stop: (id: string): Promise<ScheduledJob | undefined> =>
       ipcRenderer.invoke("scheduler:stop", id),
+    // History housekeeping: remove one recorded pass (live pass refused).
+    deleteHistoryEntry: (
+      jobId: string,
+      runId: string,
+      startedAt: string,
+    ): Promise<ScheduledJob | undefined> =>
+      ipcRenderer.invoke("scheduler:deleteHistoryEntry", { jobId, runId, startedAt }),
     getDetail: (id: string): Promise<AutomationDetail | null> =>
       ipcRenderer.invoke("scheduler:getDetail", id),
     // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.

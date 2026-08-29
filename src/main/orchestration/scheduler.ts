@@ -394,6 +394,24 @@ export async function patchJob(
   return next;
 }
 
+// History housekeeping: remove one recorded pass from an automation's history,
+// matched by runId + startedAt (runId alone repeats when a run is re-recorded
+// across loop cycles). The pass that is live right now cannot be removed — its
+// record is still being written by the loop driver.
+export async function deleteHistoryEntry(
+  jobId: string,
+  runId: string,
+  startedAt: string,
+): Promise<ScheduledJob | undefined> {
+  return patchJob(jobId, (job) => {
+    if (job.state.status === "running" && job.state.currentRunId === runId) return job;
+    return {
+      ...job,
+      history: job.history.filter((r) => !(r.runId === runId && r.startedAt === startedAt)),
+    };
+  });
+}
+
 // Loop-driver support: append/replace a history record (matched by runId +
 // iteration — iteration alone collides across loop cycles, since "Run now" and
 // trigger re-fires reset the counter while history is retained) and set live

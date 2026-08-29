@@ -1215,7 +1215,7 @@ function AutomationDetail({
 
       {/* History */}
       <Section label="History" count={job.history.length}>
-        <HistoryTimeline history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
+        <HistoryTimeline jobId={job.id} history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
       </Section>
 
       {/* Read-only configuration; the actions for it (Edit / Delete) live in
@@ -1681,10 +1681,12 @@ function LivePassCard({
 // ── History timeline (accordion + run peek) ──────────────────────────────────
 
 function HistoryTimeline({
+  jobId,
   history,
   liveRunId,
   onOpenLiveBoard,
 }: {
+  jobId: string;
   history: AutomationRunRecord[];
   liveRunId?: string;
   onOpenLiveBoard: () => void;
@@ -1813,14 +1815,29 @@ function HistoryTimeline({
                       Live board →
                     </button>
                   ) : (
-                    <button
-                      type="button"
-                      className="spark-btn"
-                      style={{ height: 22, padding: "0 9px", fontSize: 10.5 }}
-                      onClick={() => setPeekRunId(peekRunId === rec.runId ? null : rec.runId)}
-                    >
-                      {peekRunId === rec.runId ? "Close peek" : "Peek run"}
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="spark-btn"
+                        style={{ height: 22, padding: "0 9px", fontSize: 10.5, color: "var(--danger)" }}
+                        title="Remove this pass from the history. The run record on disk is untouched."
+                        onClick={() => {
+                          setExpanded(null);
+                          setPeekRunId(null);
+                          void window.spark.scheduler.deleteHistoryEntry(jobId, rec.runId, rec.startedAt);
+                        }}
+                      >
+                        Remove
+                      </button>
+                      <button
+                        type="button"
+                        className="spark-btn"
+                        style={{ height: 22, padding: "0 9px", fontSize: 10.5 }}
+                        onClick={() => setPeekRunId(peekRunId === rec.runId ? null : rec.runId)}
+                      >
+                        {peekRunId === rec.runId ? "Close peek" : "Peek run"}
+                      </button>
+                    </>
                   )}
                 </div>
                 {peekRunId === rec.runId && <RunPeek runId={rec.runId} onClose={() => setPeekRunId(null)} />}

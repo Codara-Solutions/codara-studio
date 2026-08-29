@@ -2700,6 +2700,18 @@ export function registerIpc(): void {
     },
   );
 
+  // Remove one recorded pass from an automation's history (live pass refused).
+  handle(
+    "scheduler:deleteHistoryEntry",
+    async (
+      _e,
+      input: { jobId: string; runId: string; startedAt: string },
+    ): Promise<ScheduledJob | undefined> => {
+      const { deleteHistoryEntry } = await getScheduler();
+      return deleteHistoryEntry(input.jobId, input.runId, input.startedAt);
+    },
+  );
+
   // Pause an automation's loop (trigger stays armed).
   handle("scheduler:pause", async (_e, id: string): Promise<ScheduledJob | undefined> => {
     const { pauseJob } = await getScheduler();
