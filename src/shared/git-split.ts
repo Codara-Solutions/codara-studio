@@ -117,3 +117,105 @@ export function splitPlanViolation(
   }
   return null;
 }
+
+// ── Dependency-aware ordering ────────────────────────────────────────────────
+// File-level splitting can't put one file in two commits, but it CAN order
+// commits so foundations land before the code importing them — that is the
+// difference between a history that bisects and one that doesn't. The signal
+// comes from the diffs themselves: symbols a group's added lines EXPORT vs.
+// symbols other groups' added lines IMPORT.
+
+export interface GitSplitGroupSymbols {
+  exports: string[];
+  imports: string[];
+}
+
+const ADDED_EXPORT_RE =
+  /^\+\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/;
+const ADDED_NAMED_IMPORT_RE = /^\+\s*import\s+(?:type\s+)?\{([^}]+)\}/;
+const ADDED_DEFAULT_IMPORT_RE = /^\+\s*import\s+(?:type\s+)?([A-Za-z_$][\w$]*)\s+from/;
+
+/**
+ * Pull the exported / imported symbol names out of a unified diff's ADDED
+ * lines. Removed and context lines are ignored — only what a commit newly
+ * introduces or newly consumes creates an ordering constraint.
+ */
+export function extractDiffSymbols(diff: string): GitSplitGroupSymbols {
+  const exports = new Set<string>();
+  const imports = new Set<string>();
+  for (const line of diff.split("\n")) {
+    if (!line.startsWith("+") || line.startsWith("++")) continue;
+    const exp = ADDED_EXPORT_RE.exec(line);
+    if (exp) exports.add(exp[1]);
+    const named = ADDED_NAMED_IMPORT_RE.exec(line);
+    if (named) {
+      for (const raw of named[1].split(",")) {
+        // "type Foo as Bar" -> the SOURCE name Foo is what the exporter declares.
+        const name = raw.trim().replace(/^type\s+/, "").split(/\s+as\s+/)[0]?.trim();
+        if (name) imports.add(name);
+      }
+    } else {
+      const dflt = ADDED_DEFAULT_IMPORT_RE.exec(line);
+      if (dflt) imports.add(dflt[1]);
+    }
+  }
+  return { exports: [...exports], imports: [...imports] };
+}
+
+/**
+ * Stable topological order over the groups: if group A's added imports name a
+ * symbol group B's added exports declare, B comes first. Independent groups
+ * keep their original relative order; a cycle (genuinely interleaved work)
+ * degrades to the original order for the groups involved rather than failing.
+ * Returns the new order as indices into the input array.
+ */
+export function orderSplitGroups(symbols: readonly GitSplitGroupSymbols[]): number[] {
+  const n = symbols.length;
+  if (n <= 1) return symbols.map((_, i) => i);
+  const exportOwner = new Map<string, number[]>();
+  symbols.forEach((s, i) => {
+    for (const name of s.exports) {
+      const owners = exportOwner.get(name) ?? [];
+      owners.push(i);
+      exportOwner.set(name, owners);
+    }
+  });
+  // deps[i] = set of groups i must come AFTER.
+  const deps: Array<Set<number>> = symbols.map(() => new Set());
+  symbols.forEach((s, i) => {
+    for (const name of s.imports) {
+      for (const owner of exportOwner.get(name) ?? []) {
+        if (owner !== i) deps[i].add(owner);
+      }
+    }
+  });
+  // Kahn's algorithm, always emitting the READY group with the lowest original
+  // index — that is what keeps untouched plans in their original order.
+  const emitted = new Set<number>();
+  const order: number[] = [];
+  while (order.length < n) {
+    let pick = -1;
+    for (let i = 0; i < n; i++) {
+      if (emitted.has(i)) continue;
+      let ready = true;
+      for (const dep of deps[i]) {
+        if (!emitted.has(dep)) {
+          ready = false;
+          break;
+        }
+      }
+      if (ready) {
+        pick = i;
+        break;
+      }
+    }
+    if (pick === -1) {
+      // Cycle: emit the remaining groups in original order.
+      for (let i = 0; i < n; i++) if (!emitted.has(i)) order.push(i);
+      break;
+    }
+    emitted.add(pick);
+    order.push(pick);
+  }
+  return order;
+}

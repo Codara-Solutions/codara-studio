@@ -1,7 +1,9 @@
 import type { GitFileChange, GitStatus } from "@shared/types";
 import {
   GIT_SPLIT_MAX_GROUPS,
+  extractDiffSymbols,
   normalizeSplitGroups,
+  orderSplitGroups,
   splitPlanViolation,
   type GitSplitExecuteResult,
   type GitSplitGroup,
@@ -38,6 +40,7 @@ Rules:
 - Group by PURPOSE, not by folder: a feature and its tests/docs belong together; an unrelated bugfix or rename belongs apart.
 - Every changed file must appear in exactly one group. Never invent paths.
 - SHARED PLUMBING: a file whose changes serve several purposes (shared type files, ipc/preload wiring, registries) goes in the FIRST group that needs it. Later groups must not claim it.
+- HITCHHIKERS: an unrelated small fix or cleanup (a positioning bug, a typo fix, a stray rename) must be its OWN group with a fix:/chore: style subject, not folded into a feature group. Exception: when one FILE mixes feature work and the fix, the file stays with the feature (files are atomic here) and that group's message must mention the fix.
 - Prefer 2-5 groups. If the changes genuinely form one unit of work, return a single group.
 - Order groups so earlier commits do not depend on later ones when detectable — a group importing a symbol another group introduces must come AFTER it.
 - Each group's "message" is a placeholder subject line under ~72 chars (final messages are written separately from each group's own diff).
@@ -185,6 +188,7 @@ async function writeGroupMessages(
   cwd: string,
   status: GitStatus,
   groups: GitSplitGroup[],
+  groupDiffs: string[],
   recentSubjects: string,
   settings: Awaited<ReturnType<typeof loadSettings>>,
 ): Promise<GitSplitGroup[]> {
@@ -195,7 +199,7 @@ async function writeGroupMessages(
 
   const messages = await Promise.all(
     groups.map(async (group, index) => {
-      const diff = await groupDiff(cwd, status, group.files);
+      const diff = groupDiffs[index] ?? (await groupDiff(cwd, status, group.files));
       if (!diff.trim()) return null;
       const prompt = truncate(
         `RECENT COMMIT SUBJECTS (style guide):
@@ -287,9 +291,25 @@ Group the changed files into separate commits and answer with the JSON object on
     }
     if (groups.length > GIT_SPLIT_MAX_GROUPS) return fallbackPlan(paths);
 
+    // Dependency-aware ordering: read each group's exact diff once, extract
+    // added exports/imports, and topologically sort so foundations (shared
+    // types, plumbing) land before the commits importing them — the model's
+    // ordering is a suggestion; the diffs are the truth.
+    const diffs = await Promise.all(groups.map((g) => groupDiff(cwd, status, g.files)));
+    const order = orderSplitGroups(diffs.map(extractDiffSymbols));
+    const orderedGroups = order.map((i) => groups[i]);
+    const orderedDiffs = order.map((i) => diffs[i]);
+
     // Pass 2: honest messages, one per group, each written from only its own
     // diff (runs in parallel; failures keep the pass-1 placeholder subject).
-    const withMessages = await writeGroupMessages(cwd, status, groups, recentSubjects, settings);
+    const withMessages = await writeGroupMessages(
+      cwd,
+      status,
+      orderedGroups,
+      orderedDiffs,
+      recentSubjects,
+      settings,
+    );
     return { ok: true, source: "ai", groups: withMessages };
   } catch (err) {
     const e = err as { message?: unknown };

@@ -54,10 +54,13 @@ async function bundle(entry, extra = {}) {
 
 // Loaded inside main() — esbuild's plugin API is async-only.
 let normalizeSplitGroups, splitPlanViolation, parsePlanText, executeSplitCommits, planSplitCommits;
+let extractDiffSymbols, orderSplitGroups;
 
 async function loadModules() {
   const shared = await bundle("src/shared/git-split.ts");
   ({ normalizeSplitGroups, splitPlanViolation } = shared);
+  extractDiffSymbols = shared.extractDiffSymbols;
+  orderSplitGroups = shared.orderSplitGroups;
   const mainMod = await bundle("src/main/git-split-commits.ts", {
     stub: /orchestration\/pi-commit-one-shot|^\.\/storage$|^\.\/inline-ai$/,
     stubSource: `
@@ -291,6 +294,81 @@ function commitFilesNoRename(git, ref) {
     res = await planSplitCommits(empty);
     assert.strictEqual(res.ok, false, "non-repo refused");
     console.log("PASS planSplitCommits guards + model-down fallback");
+  }
+
+  /* ═══ 8b. dependency ordering: extractDiffSymbols + orderSplitGroups ═══ */
+  {
+    // Symbol extraction from added lines only.
+    const sym = extractDiffSymbols(
+      [
+        "+export interface GitDiffStats {",
+        "+export function computeDiffStats(cwd) {",
+        "+export const FOO_LIMIT = 4;",
+        '+import { GitDiffStats, type GitFileDiffStat } from "@shared/types";',
+        '+import ChangeTree from "./ChangeTree";',
+        '-import { OldThing } from "./gone";', // removed line: ignored
+        " import { ContextThing } from './ctx';", // context line: ignored
+        '+import { renamed as alias } from "./x";',
+      ].join("\n"),
+    );
+    assert.deepStrictEqual(
+      [...sym.exports].sort(),
+      ["FOO_LIMIT", "GitDiffStats", "computeDiffStats"],
+      "added exports extracted",
+    );
+    assert.ok(
+      sym.imports.includes("GitDiffStats") &&
+        sym.imports.includes("GitFileDiffStat") &&
+        sym.imports.includes("ChangeTree") &&
+        sym.imports.includes("renamed"),
+      `added imports extracted (source names, type strip, default, alias): ${sym.imports}`,
+    );
+    assert.ok(!sym.imports.includes("OldThing"), "removed-line import ignored");
+    assert.ok(!sym.imports.includes("ContextThing"), "context-line import ignored");
+
+    // Ordering: group 0 imports what group 2 exports -> 2 must come first;
+    // group 1 is independent and keeps its relative position.
+    const order = orderSplitGroups([
+      { exports: [], imports: ["SharedType"] }, // feature (depends on 2)
+      { exports: [], imports: [] }, // independent
+      { exports: ["SharedType"], imports: [] }, // foundations
+    ]);
+    assert.ok(
+      order.indexOf(2) < order.indexOf(0),
+      `foundations before dependent: ${order}`,
+    );
+    // No dependencies -> original order untouched.
+    assert.deepStrictEqual(
+      orderSplitGroups([
+        { exports: ["A"], imports: [] },
+        { exports: ["B"], imports: [] },
+      ]),
+      [0, 1],
+      "independent groups keep original order",
+    );
+    // Cycle -> degrade to original order, never throw or drop a group.
+    const cyc = orderSplitGroups([
+      { exports: ["A"], imports: ["B"] },
+      { exports: ["B"], imports: ["A"] },
+    ]);
+    assert.deepStrictEqual([...cyc].sort(), [0, 1], "cycle keeps every group");
+    console.log("PASS dependency ordering: symbols + topological sort + cycle degrade");
+  }
+
+  /* ═══ 8c. end-to-end ordering on a real repo (fallback-free path) ═══ */
+  {
+    // A repo where the "feature" file imports a symbol the "types" file adds.
+    // With the model stubbed out, planSplitCommits falls back to one group —
+    // so exercise the ordering path directly: two groups, wrong order in,
+    // right order out, via the real per-group diffs.
+    const { dir, git } = makeRepo({ "types.ts": "export const OLD = 1;\n", "feature.ts": "// empty\n" });
+    writeFileSync(path.join(dir, "types.ts"), "export const OLD = 1;\nexport interface NewShape { a: number }\n");
+    writeFileSync(path.join(dir, "feature.ts"), 'import { NewShape } from "./types";\nexport const use = (x: NewShape) => x.a;\n');
+    const featDiff = git("diff", "--", "feature.ts");
+    const typesDiff = git("diff", "--", "types.ts");
+    const order = orderSplitGroups([extractDiffSymbols(featDiff), extractDiffSymbols(typesDiff)]);
+    assert.deepStrictEqual(order, [1, 0], `types-first from real git diffs: ${order}`);
+    console.log("PASS dependency ordering: real git diffs sort foundations first");
   }
 
   /* ═══ 9. source contract: the renderer wiring exists ═══ */
