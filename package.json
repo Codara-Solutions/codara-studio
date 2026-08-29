@@ -1,6 +1,6 @@
 {
   "name": "codara-studio",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Codara Studio — cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
   "main": "out/main/index.js",
   "author": "Etienne",

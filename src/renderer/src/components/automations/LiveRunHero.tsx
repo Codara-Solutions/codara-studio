@@ -182,7 +182,7 @@ export default function LiveRunHero({
       )}
 
       {/* Live activity feed */}
-      <LiveActivityFeed worker={feedWorker} shown={shown} />
+      <LiveActivityFeed worker={feedWorker} shown={shown} emptyLabel={stepsOnlyLabel(job)} />
 
       {/* Blocked question, answerable in place. */}
       {pendingQuestion && liveRun && (
@@ -225,12 +225,28 @@ export default function LiveRunHero({
 
 // The focused worker's ordered activity stream, tailed live. Sticks to the
 // bottom while new output arrives unless the user scrolled up to read.
+// When a pass's entry nodes are STEPS there is no worker to feed from — the
+// hero says which step is executing instead of a misleading "Worker
+// launching…" that nothing will ever fulfil.
+function stepsOnlyLabel(job: ScheduledJob): string | null {
+  const graph = job.graph;
+  if (!graph) return null;
+  const entrySteps = (graph.entryNodeIds ?? [])
+    .map((id) => graph.nodes.find((n) => n.id === id))
+    .filter((n): n is NonNullable<typeof n> => Boolean(n && n.kind !== "worker"));
+  if (entrySteps.length === 0) return null;
+  const label = (entrySteps[0] as { label?: string }).label ?? "steps";
+  return `Running step: ${label}…`;
+}
+
 function LiveActivityFeed({
   worker,
   shown,
+  emptyLabel,
 }: {
   worker: AutomationWorkerInfo | null;
   shown: boolean;
+  emptyLabel?: string | null;
 }): React.ReactElement {
   const [content, setContent] = useState("");
   const [failure, setFailure] = useState<string | null>(null);
@@ -284,7 +300,7 @@ function LiveActivityFeed({
         className="loom-hero__feed loom-hero__feed--empty spark-mono"
         style={failure ? { color: "var(--danger)" } : undefined}
       >
-        {failure ?? (worker ? "Worker starting…" : "Worker launching…")}
+        {failure ?? (worker ? "Worker starting…" : emptyLabel ?? "Worker launching…")}
       </div>
     );
   }

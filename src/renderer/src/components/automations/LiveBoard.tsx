@@ -121,10 +121,18 @@ export default function LiveBoard({
   // new pass delivers a fresh liveRun that replaces the retained one.
   const lastRunRef = useRef<RunState | null>(null);
   if (liveRun) lastRunRef.current = liveRun;
-  const run = liveRun ?? lastRunRef.current;
+  const retained = liveRun ?? lastRunRef.current;
 
   const status = job.state.status;
   const loomLive = status === "running" || status === "blocked";
+
+  // A steps-only pass creates its run record only when it FINISHES, so while
+  // one is in flight there is no live run — and painting the retained
+  // previous run would show last pass's terminal states ("done", old
+  // outputs) under a live pass. Treat the retained run as stale then: the
+  // board renders entry steps as running instead (deriveNodeStatuses).
+  const retainedIsStale = loomLive && !liveRun;
+  const run = retainedIsStale ? null : retained;
 
   // ── terminal sheet state ────────────────────────────────────────────────
   // Closed until the user clicks a worker node — the whiteboard opens clean.
@@ -222,8 +230,8 @@ export default function LiveBoard({
 
   // ── live graph → ReactFlow nodes/edges ──────────────────────────────────
   const statuses = useMemo(
-    () => deriveNodeStatuses(job, run, workers),
-    [job, run, workers],
+    () => deriveNodeStatuses(job, run, workers, { liveWithoutRun: retainedIsStale }),
+    [job, run, workers, retainedIsStale],
   );
 
   const { nodes, edges } = useMemo(() => {
@@ -1405,10 +1413,21 @@ function deriveNodeStatuses(
   job: ScheduledJob,
   run: RunState | null,
   workers: AutomationWorkerInfo[],
+  opts: { liveWithoutRun?: boolean } = {},
 ): Map<string, LiveNodeStatus> {
   const graph = graphForJob(job);
   const map = new Map<string, LiveNodeStatus>();
   for (const n of graph.nodes) map.set(n.id, "pending");
+
+  // A live steps-only pass has no run record yet: the truthful render is its
+  // entry steps executing and everything downstream pending.
+  if (opts.liveWithoutRun) {
+    for (const id of graph.entryNodeIds ?? []) {
+      const node = graph.nodes.find((n) => n.id === id);
+      if (node && node.kind !== "worker" && map.has(id)) map.set(id, "running");
+    }
+    return map;
+  }
 
   const pass = run?.loomPass;
   if (pass) {
