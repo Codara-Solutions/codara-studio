@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
 import type { GitLogRow } from "@shared/types";
 import { BranchIcon, CheckoutIcon, CopyIcon, RevertIcon, UndoIcon } from "./git-ui";
 
@@ -33,15 +33,37 @@ export default function CommitMenu({
 }: Props): React.ReactElement | null {
   // Tracks which destructive row is armed for its confirming second click.
   const [confirm, setConfirm] = useState<"checkout" | "revert" | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // Vertical position. First render uses a rough estimate; the layout effect
+  // below re-clamps with the REAL rendered height before paint, so a menu
+  // opened near the bottom edge is never cut off by an estimate gone stale
+  // (the old fixed guess ignored added rows and undersized real content).
+  const [top, setTop] = useState(() => y);
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const margin = 8;
+    const height = el.offsetHeight;
+    const available = window.innerHeight - margin * 2;
+    // Taller than the window: pin to the top margin and scroll inside.
+    if (height > available) {
+      setMaxHeight(available);
+      setTop(margin);
+      return;
+    }
+    setMaxHeight(null);
+    setTop(Math.max(margin, Math.min(y, window.innerHeight - height - margin)));
+    // Re-measure when the row set changes shape (armed confirm labels swap
+    // text only, so height is stable across confirm state).
+  }, [y, row.refs, row.isHead]);
 
   if (!row.hash) return null;
   const hash = row.hash;
   const refs = row.refs ?? [];
 
-  // Roughly size the menu so it can be flipped back on-screen near an edge.
-  const estHeight = 188 + refs.length * 34 + (row.isHead ? 34 : 0);
   const left = Math.max(8, Math.min(x, window.innerWidth - MENU_WIDTH - 8));
-  const top = Math.max(8, Math.min(y, window.innerHeight - estHeight - 8));
 
   const run = (fn: () => void): void => {
     fn();
@@ -50,6 +72,7 @@ export default function CommitMenu({
 
   return (
     <div
+      ref={menuRef}
       className="spark-menu"
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
@@ -64,6 +87,7 @@ export default function CommitMenu({
         zIndex: 200,
         borderRadius: 9,
         padding: 6,
+        ...(maxHeight !== null ? { maxHeight, overflowY: "auto" } : {}),
       }}
     >
       <div

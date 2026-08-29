@@ -4,12 +4,13 @@
 // Dev harness: run the REAL commit-message pipeline end-to-end against a repo.
 //
 //   node scripts/dev-commit-message-preview.cjs [repoPath] [--model <selection>] [--show-prompt]
+//   node scripts/dev-commit-message-preview.cjs [repoPath] --split
 //
-// Bundles src/main/git-commit-message.ts with the production prompt builder,
-// sanitizer, and Pi one-shot spawn (real subscription accounts from
-// ~/.codara), stubbing only the Electron shell (storage/app). Prints the
-// generated message so prompt changes can be evaluated on real diffs instead
-// of shipped blind.
+// Bundles src/main/git-commit-message.ts (or, with --split, the
+// git-split-commits planner) with the production prompt builder, sanitizer,
+// and Pi one-shot spawn (real subscription accounts from ~/.codara), stubbing
+// only the Electron shell (storage/app). Prints the generated message / plan
+// so prompt changes can be evaluated on real diffs instead of shipped blind.
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -19,11 +20,12 @@ const esbuild = require("esbuild");
 const ROOT = path.resolve(__dirname, "..");
 
 function parseArgs(argv) {
-  const args = { repo: ROOT, model: null, showPrompt: false };
+  const args = { repo: ROOT, model: null, showPrompt: false, split: false };
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--model") args.model = argv[++i];
     else if (argv[i] === "--show-prompt") args.showPrompt = true;
+    else if (argv[i] === "--split") args.split = true;
     else rest.push(argv[i]);
   }
   if (rest[0]) args.repo = path.resolve(rest[0]);
@@ -31,7 +33,7 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const { repo, model, showPrompt } = parseArgs(process.argv.slice(2));
+  const { repo, model, showPrompt, split } = parseArgs(process.argv.slice(2));
   const codaraHome = process.env.CODARA_HOME_DIR ?? path.join(os.homedir(), ".codarastudio");
   const settingsFile = path.join(codaraHome, "spark-settings.json");
   const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
@@ -43,7 +45,7 @@ async function main() {
   try {
     const outfile = path.join(temporaryRoot, "generator.cjs");
     await esbuild.build({
-      entryPoints: [path.join(ROOT, "src", "main", "git-commit-message.ts")],
+      entryPoints: [path.join(ROOT, "src", "main", split ? "git-split-commits.ts" : "git-commit-message.ts")],
       outfile,
       bundle: true,
       platform: "node",
@@ -130,6 +132,24 @@ async function main() {
     delete require.cache[outfile];
     const generator = require(outfile);
     const startedAt = Date.now();
+    if (split) {
+      const plan = await generator.planSplitCommits(repo);
+      const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+      if (!plan.ok) {
+        console.error(`[preview] SPLIT FAILED after ${elapsed}s: ${plan.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.error(`[preview] split plan (source=${plan.source}) in ${elapsed}s:\n`);
+      plan.groups.forEach((g, i) => {
+        console.log(`── Commit ${i + 1} ─ ${g.files.length} file(s) ──`);
+        if (g.reason) console.log(`   (${g.reason})`);
+        console.log(g.message.split("\n").map((l) => `   ${l}`).join("\n"));
+        for (const f of g.files) console.log(`     • ${f}`);
+        console.log("");
+      });
+      return;
+    }
     const result = await generator.generateCommitMessage(repo);
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     if (!result.ok) {
