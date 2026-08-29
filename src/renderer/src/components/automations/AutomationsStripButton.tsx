@@ -5,10 +5,10 @@
 //
 // Idle: the node-flow automations glyph on the same accent pill as the ✦ Cora
 // button beside it, so the two Cora-owned doors read as one family. While an
-// automation is RUNNING
-// or BLOCKED it becomes the glanceable live cue — spinner arc (or danger dot)
-// plus the automation's name — reusing the exact status logic of the welcome
-// row via the shared useAutomationsStatus hook.
+// automation is RUNNING or BLOCKED the glyph slot alone becomes the live cue
+// (spinner arc, or danger dot) — the pill stays the fixed "Auto" chip and the
+// hover title carries the automation's name — reusing the exact status logic
+// of the welcome row via the shared useAutomationsStatus hook.
 //
 // Opening routes through the spark:open-automations-tab broadcast (App owns
 // the tab store), matching the house cross-module event pattern.
@@ -104,17 +104,10 @@ export default function AutomationsStripButton({
       ) : (
         <AutomationsGlyph size={12} />
       )}
-      {/* "Auto" at rest (the ✦ Cora pill's sibling); the live automation's
-          name takes the slot while one is running or needs input. */}
-      <span
-        style={{
-          maxWidth: 140,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {live ? live.name : "Auto"}
-      </span>
+      {/* Always "Auto": the chip keeps its shape and the leading glyph alone
+          carries the live state (spinner while running, danger dot when
+          blocked). The hovered title names the live automation. */}
+      <span>Auto</span>
     </button>
   );
 }
