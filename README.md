@@ -1,10 +1,28 @@
 # Codara Studio
 
 Desktop control surface (Electron) for supervising AI coding agents — terminals,
-runs, automations, and a built-in browser Preview.
+runs, automations, and a built-in browser Preview. One window where your agents
+work, ask questions, and ship, while you watch.
 
-- Product overview: [`PRODUCT.md`](./PRODUCT.md)
-- Visual/design system: [`DESIGN.md`](./DESIGN.md)
+**Download:** [studio.codarasolutions.com](https://studio.codarasolutions.com)
+(macOS signed and notarized; Windows installer is unsigned for now, see
+[SECURITY.md](./SECURITY.md) for how to verify it). The app self-updates:
+every push to `main` becomes a release and running apps hear about it within
+seconds over SSE.
+
+**Contributing:** external changes land through pull requests, see
+[CONTRIBUTING.md](./CONTRIBUTING.md). Vulnerability reports go through
+[SECURITY.md](./SECURITY.md). Conventions for AI agents working in this repo
+live in [AGENTS.md](./AGENTS.md).
+
+## Developing
+
+```sh
+npm install
+npm run dev        # hot-reloading Electron dev build
+npm run typecheck  # node + web + e2e
+npm run test:all   # unit suites
+```
 
 ## Preview browser-use
 
@@ -142,12 +160,16 @@ remain until their run is deleted, and failed closes retry automatically.
 
 ## Releasing
 
-Bump `version` in package.json, then `npm run release:mac` and
-`npm run release:win` — each builds, signs (and notarizes on macOS when
-`.env.releases` carries the Apple credentials), and uploads to the release
-bucket behind https://studio.codarasolutions.com. Running apps hear the SSE
-push within a minute and self-update. The "Release Codara Studio" automation
-in Codara Studio runs the whole sequence on every push to main.
+`npm run release:all` (or `release:mac` / `release:win`) builds from a
+pristine `git worktree` at HEAD, bumps the patch version inside it, signs
+(and notarizes on macOS when `.env.releases` carries the Apple credentials),
+uploads to the release bucket behind https://studio.codarasolutions.com, and
+cherry-picks the `release: vX.Y.Z` bump commit back onto your branch. Running
+apps hear the SSE push within seconds and self-update. The "Release Codara
+Studio" automation runs the whole sequence on every push to `main`; a push
+whose HEAD is already a release commit is skipped by the guard, so the bump
+commit itself never triggers a second release. Release credentials live in
+the untracked `.env.releases` and are needed only by maintainers who publish.
 
 ## License
 
