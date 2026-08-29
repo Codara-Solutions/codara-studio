@@ -621,7 +621,9 @@ function ensureTray(): void {
 }
 
 function registerUpdaterAfterFirstPaint(windowForEvents: BrowserWindow): void {
-  if (!app.isPackaged) return;
+  // Dev builds load the module too: registerAutoUpdater itself skips update
+  // CHECKS when unpackaged but still opens the SSE stream, whose git-push
+  // webhook events drive instant fetches for git triggers.
   void import("./auto-updater")
     .then(({ registerAutoUpdater }) => registerAutoUpdater(windowForEvents))
     .catch((err) => console.warn("[main] auto-updater failed to load:", err));

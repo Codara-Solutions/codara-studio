@@ -63,7 +63,10 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   // and would spam the console with "ENOENT: ... app-update.yml". We log once
   // and bail — nothing about the dev workflow benefits from running it.
   if (!app.isPackaged) {
-    console.log("[auto-updater] skipped in dev");
+    console.log("[auto-updater] update checks skipped in dev");
+    // The SSE stream still runs: its git-push webhook events drive instant
+    // fetches for git triggers, which dev instances use like packaged ones.
+    subscribeToReleasePush({ handleReleases: false });
     return;
   }
 
@@ -164,7 +167,7 @@ function safeCheck(): Promise<void> {
 
 let sseBackoffMs = 5_000;
 
-function subscribeToReleasePush(): void {
+function subscribeToReleasePush(opts: { handleReleases: boolean } = { handleReleases: true }): void {
   const controller = new AbortController();
   app.on("before-quit", () => controller.abort());
 
@@ -190,8 +193,10 @@ function subscribeToReleasePush(): void {
           const frame = buffer.slice(0, idx);
           buffer = buffer.slice(idx + 2);
           if (/^event:\s*release$/m.test(frame)) {
-            console.log("[auto-updater] release push received — checking");
-            void safeCheck();
+            if (opts.handleReleases) {
+              console.log("[auto-updater] release push received — checking");
+              void safeCheck();
+            }
           } else if (/^event:\s*git-push$/m.test(frame)) {
             // A GitHub webhook reached the website: some watched remote just
             // gained commits. Fetch immediately so git triggers (and the
