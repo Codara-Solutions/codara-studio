@@ -1952,13 +1952,48 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   // Tolerate malformed persisted jobs (loop without stop): the scheduler
   // backfills on read, but a bad record must never take down the renderer.
   const stop = job.loop?.stop ?? {};
-  const chips: string[] = [];
-  if (typeof stop.maxIterations === "number") chips.push(`max ${stop.maxIterations}`);
-  if (typeof stop.budgetUsd === "number") chips.push(`est. ${fmtUsd(stop.budgetUsd)}`);
-  if (stop.untilTestsPass) chips.push("tests pass");
-  if (stop.untilGitClean) chips.push("git clean");
-  if (stop.untilPhrase) chips.push(`phrase: ${stop.untilPhrase}`);
-  if (stop.untilCommand) chips.push("custom cmd");
+  // Every chip says what it IS in words and explains itself on hover — the
+  // old `est. $0.00` badge read as noise and hid where the setting lives
+  // (the Loop node's "Safety caps" in the editor).
+  const chips: { label: string; hint: string }[] = [];
+  if (typeof stop.maxIterations === "number") {
+    chips.push({
+      label: `max ${stop.maxIterations} iteration${stop.maxIterations === 1 ? "" : "s"}`,
+      hint: "Hard stop after this many iterations per fire. Edit: Loop node → Safety caps.",
+    });
+  }
+  // budgetUsd <= 0 means "no cap" (engine semantics) — showing $0.00 as a
+  // stop would be a lie.
+  if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0) {
+    chips.push({
+      label: `budget ${fmtUsd(stop.budgetUsd)}`,
+      hint: "Hard stop once the loop's estimated AI spend reaches this. Edit: Loop node → Safety caps → Est. budget.",
+    });
+  }
+  if (stop.untilTestsPass) {
+    chips.push({
+      label: `until tests pass${stop.testCommand ? ` (${stop.testCommand})` : ""}`,
+      hint: "The loop ends once the test command exits 0. Edit: Loop node → Stop when.",
+    });
+  }
+  if (stop.untilGitClean) {
+    chips.push({
+      label: "until git is clean",
+      hint: "The loop ends once the working tree has no changes. Edit: Loop node → Stop when.",
+    });
+  }
+  if (stop.untilPhrase) {
+    chips.push({
+      label: `until phrase: ${stop.untilPhrase}`,
+      hint: "The loop ends when the worker's summary contains this phrase. Edit: Loop node → Stop when.",
+    });
+  }
+  if (stop.untilCommand) {
+    chips.push({
+      label: `until command passes (${stop.untilCommand})`,
+      hint: "The loop ends once this shell command exits 0. Edit: Loop node → Stop when.",
+    });
+  }
   const nodes = orderedNodes(graphForJob(job));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1968,11 +2003,16 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
         <ConfigKey label="Stops" />
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {chips.length === 0 ? (
-            <span style={{ fontSize: 11, color: "var(--muted-2)" }}>safety caps only</span>
+            <span
+              style={{ fontSize: 11, color: "var(--muted-2)" }}
+              title="No stop conditions set — the loop runs its natural course. Add caps in the editor: Loop node → Safety caps."
+            >
+              no caps — engine defaults
+            </span>
           ) : (
             chips.map((c) => (
-              <span key={c} className="spark-badge">
-                {c}
+              <span key={c.label} className="spark-badge" title={c.hint}>
+                {c.label}
               </span>
             ))
           )}

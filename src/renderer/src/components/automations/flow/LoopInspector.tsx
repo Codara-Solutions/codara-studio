@@ -92,13 +92,13 @@ export default function LoopInspector({
               hint="hard stop"
             />
             <CapBox
-              label="Est. budget"
+              label="Budget cap"
               suffix="$"
               value={loop.budget}
               placeholder="—"
               step={0.5}
               onChange={(v) => set({ budget: v })}
-              hint="approx spend"
+              hint="AI spend hard stop · blank or 0 = no cap"
             />
           </div>
         </Group>
