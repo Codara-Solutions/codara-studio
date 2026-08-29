@@ -161,7 +161,10 @@ remain until their run is deleted, and failed closes retry automatically.
 ## Releasing
 
 `npm run release:all` (or `release:mac` / `release:win`) builds from a
-pristine `git worktree` at HEAD, bumps the patch version inside it, signs
+pristine `git worktree` at HEAD, bumps the version inside it (semantic, from
+the conventional commits since the last release: a breaking change bumps the
+major, `feat:` the minor, anything else the patch; `RELEASE_BUMP` overrides),
+signs
 (and notarizes on macOS when `.env.releases` carries the Apple credentials),
 uploads to the release bucket behind https://studio.codarasolutions.com, and
 cherry-picks the `release: vX.Y.Z` bump commit back onto your branch. Running

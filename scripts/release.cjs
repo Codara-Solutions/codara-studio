@@ -70,6 +70,28 @@ function capture(cmd, args, cwd) {
   return res.stdout.trim();
 }
 
+// Semantic bump from the conventional-commit subjects since the last release
+// commit ("release: vX.Y.Z"): breaking change -> major, feat -> minor,
+// anything else -> patch. RELEASE_BUMP=major|minor|patch overrides.
+function bumpLevel(cwd) {
+  const forced = process.env.RELEASE_BUMP;
+  if (forced === "major" || forced === "minor" || forced === "patch") return forced;
+  let range = "HEAD";
+  const last = spawnSync(
+    "git",
+    ["log", "--grep", "^release: v", "--format=%H", "-1", "HEAD"],
+    { cwd, encoding: "utf8" },
+  ).stdout.trim();
+  if (last) range = `${last}..HEAD`;
+  const log = spawnSync("git", ["log", "--format=%s%n%b", range], {
+    cwd,
+    encoding: "utf8",
+  }).stdout;
+  if (/^[a-z]+(\([^)]*\))?!:/m.test(log) || /BREAKING CHANGE/.test(log)) return "major";
+  if (/^feat(\([^)]*\))?:/m.test(log)) return "minor";
+  return "patch";
+}
+
 const sha = process.env.RELEASE_SHA || capture("git", ["rev-parse", "HEAD"], ROOT);
 const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "codara-release-"));
 
@@ -100,7 +122,7 @@ try {
   run("git", ["worktree", "add", "--detach", worktree, sha], ROOT);
   fs.symlinkSync(path.join(ROOT, "node_modules"), path.join(worktree, "node_modules"), "junction");
 
-  run("npm", ["version", "patch", "--no-git-tag-version"], worktree);
+  run("npm", ["version", bumpLevel(worktree), "--no-git-tag-version"], worktree);
   newVersion = JSON.parse(
     fs.readFileSync(path.join(worktree, "package.json"), "utf8"),
   ).version;
