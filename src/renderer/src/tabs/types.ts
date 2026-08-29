@@ -298,9 +298,10 @@ export interface DiffTab extends BaseTab {
   // hash gone after a rebase simply loads as a diff error, same degradation
   // contract as the working-tree case.
   commitHash?: string;
-  // VS Code-style preview semantics for commit diff tabs: opening another
-  // commit file REPLACES this tab until it is pinned (double-click on the
-  // tab or on the history row). Mirrors EditorTab.preview.
+  // VS Code-style preview semantics: opening another diff (working-tree or
+  // commit) REPLACES this tab until it is pinned by a double-click on the
+  // row or the tab pill. One shared preview slot across both diff flavors.
+  // Mirrors EditorTab.preview.
   preview?: boolean;
 }
 

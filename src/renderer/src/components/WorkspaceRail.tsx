@@ -170,7 +170,7 @@ interface RailProps {
   // Shared git status (owned by App) — feeds the Source Control panel and
   // the explorer's changed-file decorations from one poll.
   git: SharedGitStatus;
-  onOpenDiffTab: (file: GitFileChange) => void;
+  onOpenDiffTab: (file: GitFileChange, options?: { pin?: boolean }) => void;
   onOpenCommitDiffTab: (path: string, hash: string, options?: { pin?: boolean }) => void;
   activeDiffTarget: { path: string; staged: boolean } | null;
   // Explorer context-menu "Open Changes" for a changed file (absolute path).

@@ -1253,7 +1253,12 @@ export interface UseTabsApi {
   // Open (or focus) the diff tab for a changed file. Identity is
   // (path, staged) — the same file can have a Working Tree tab and a Staged
   // tab open side by side, exactly like VS Code's separate diff editors.
-  openDiffTab: (path: string, staged: boolean, options?: { focus?: boolean }) => TabId;
+  // Opens as a preview (next row click replaces it) unless options.pin.
+  openDiffTab: (
+    path: string,
+    staged: boolean,
+    options?: { focus?: boolean; pin?: boolean },
+  ) => TabId;
   // Open (or focus) a file's diff within a specific commit — a read-only
   // workbench tab keyed by (path, commitHash), opened from CommitDetail.
   // Opens as a VS Code-style preview (next commit file replaces it) unless
@@ -3298,32 +3303,62 @@ export function useTabs(
   // both run INSIDE the updater (same double-click race note as
   // openAutomationsTab above).
   const openDiffTab = useCallback(
-    (path: string, staged: boolean, options?: { focus?: boolean }): TabId => {
-      const existingId = tabsRef.current.find(
-        (t): t is DiffTab =>
-          t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
-      )?.id;
-      const resultId = existingId ?? makeId("diff");
+    (
+      path: string,
+      staged: boolean,
+      options?: { focus?: boolean; pin?: boolean },
+    ): TabId => {
+      let outId: TabId | null = null;
       setTabs((curr) => {
         const existing = curr.find(
           (t): t is DiffTab =>
             t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
         );
         if (existing) {
+          outId = existing.id;
           if (options?.focus !== false) setActiveId(existing.id);
+          if (options?.pin && existing.preview) {
+            return curr.map((t) =>
+              t.id === existing.id && t.kind === "diff" ? { ...t, preview: false } : t,
+            );
+          }
           return curr;
         }
+        // Reuse the shared preview diff slot (working-tree or commit flavor):
+        // swap its payload instead of stacking a new pill per clicked row.
+        const reusable = curr.find(
+          (t): t is DiffTab => t.kind === "diff" && Boolean(t.preview),
+        );
+        if (reusable) {
+          outId = reusable.id;
+          if (options?.focus !== false) setActiveId(reusable.id);
+          return curr.map((t) =>
+            t.id === reusable.id && t.kind === "diff"
+              ? {
+                  ...t,
+                  title: basename(path),
+                  path,
+                  staged,
+                  commitHash: undefined,
+                  preview: !options?.pin,
+                }
+              : t,
+          );
+        }
+        const id = makeId("diff");
+        outId = id;
         const tab: DiffTab = {
-          id: resultId,
+          id,
           kind: "diff",
           title: basename(path),
           path,
           staged,
+          preview: !options?.pin,
         };
-        if (options?.focus !== false) setActiveId(resultId);
+        if (options?.focus !== false) setActiveId(id);
         return [...curr, tab];
       });
-      return resultId;
+      return (outId ?? makeId("diff")) as TabId;
     },
     [],
   );

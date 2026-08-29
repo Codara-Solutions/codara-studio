@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import type { GitFileChange } from "@shared/types";
+import type { GitFileChange, GitFileDiffStat } from "@shared/types";
 import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
 import {
   IconButton,
@@ -19,9 +19,23 @@ interface Props {
   selected: boolean;
   disabled: boolean;
   onOpenDiff: (file: GitFileChange) => void;
+  /** Double-click: open/promote the diff as a persistent (pinned) tab. */
+  onPinDiff: (file: GitFileChange) => void;
   onStage: (file: GitFileChange) => void;
   onUnstage: (file: GitFileChange) => void;
   onDiscard: (file: GitFileChange) => void;
+  /**
+   * +added/−removed counts for this row (Hermes-style). Optional — rows
+   * render without the column while stats load or when the backend has no
+   * entry for the path.
+   */
+  stat?: GitFileDiffStat;
+  /**
+   * Left padding in px when the row sits inside the explorer-style ChangeTree.
+   * When set, the row shows only the file NAME — the tree's folder rows carry
+   * the location, so repeating the dir would be noise.
+   */
+  indent?: number;
 }
 
 // One file in a change section. The trailing slot shows the status glyph at
@@ -35,9 +49,12 @@ const ChangeRow = React.memo(function ChangeRow({
   selected,
   disabled,
   onOpenDiff,
+  onPinDiff,
   onStage,
   onUnstage,
   onDiscard,
+  stat,
+  indent,
 }: Props) {
   const [hover, setHover] = useState(false);
   const { dir, name } = splitPath(file.path);
@@ -48,15 +65,16 @@ const ChangeRow = React.memo(function ChangeRow({
   return (
     <div
       onClick={() => onOpenDiff(file)}
+      onDoubleClick={() => onPinDiff(file)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${statusLabel(file.status)} — ${file.path}`}
+      title={`${statusLabel(file.status)} — ${file.path} (double-click to keep the tab open)`}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 6,
         height: 24,
-        padding: "0 8px 0 14px",
+        padding: `0 8px 0 ${indent ?? 14}px`,
         cursor: "default",
         background: selected ? "var(--accent-soft)" : hover ? "var(--hover)" : "transparent",
         // Selected rows carry the app's active-row affordance: an accent edge
@@ -92,28 +110,33 @@ const ChangeRow = React.memo(function ChangeRow({
         >
           {name}
         </span>
-        <span
-          style={{
-            color: "var(--muted-2)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            minWidth: 0,
-          }}
-        >
-          {dir}
-        </span>
+        {/* Flat lists carry the dir inline; in the tree the folder rows above
+            already say where the file lives. */}
+        {indent === undefined ? (
+          <span
+            style={{
+              color: "var(--muted-2)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              minWidth: 0,
+            }}
+          >
+            {dir}
+          </span>
+        ) : null}
       </span>
 
       <span
         onClick={(e) => e.stopPropagation()}
         style={{
-          flex: `0 0 ${slotWidth}px`,
+          flex: `0 0 auto`,
           display: "flex",
           alignItems: "center",
           justifyContent: "flex-end",
           gap: 2,
+          minWidth: slotWidth,
         }}
       >
         {hover && !disabled ? (
@@ -137,17 +160,44 @@ const ChangeRow = React.memo(function ChangeRow({
             </>
           )
         ) : (
-          <span
-            aria-hidden
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              fontWeight: 700,
-              color,
-            }}
-          >
-            {statusGlyph(file.status)}
-          </span>
+          <>
+            {/* Hermes-style per-file counts: green additions, red deletions,
+                tabular digits so columns align down the list. Binary files
+                and zero-count sides stay blank — the numbers only appear
+                when they say something. */}
+            {stat && !stat.binary && (stat.additions > 0 || stat.deletions > 0) ? (
+              <span
+                aria-hidden
+                style={{
+                  display: "inline-flex",
+                  gap: 5,
+                  marginRight: 6,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10,
+                  fontVariantNumeric: "tabular-nums",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {stat.additions > 0 ? (
+                  <span style={{ color: "var(--ok)" }}>+{stat.additions}</span>
+                ) : null}
+                {stat.deletions > 0 ? (
+                  <span style={{ color: "var(--danger)" }}>−{stat.deletions}</span>
+                ) : null}
+              </span>
+            ) : null}
+            <span
+              aria-hidden
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                fontWeight: 700,
+                color,
+              }}
+            >
+              {statusGlyph(file.status)}
+            </span>
+          </>
         )}
       </span>
     </div>

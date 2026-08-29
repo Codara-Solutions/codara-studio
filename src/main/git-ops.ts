@@ -1,9 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   GitDiff,
   GitDiffLine,
+  GitDiffStats,
   GitFileChange,
+  GitFileDiffStat,
   GitFileStatus,
   GitLog,
   GitLogRow,
@@ -83,6 +85,7 @@ function makeCachedReader<T>(ttlMs: number, compute: (cwd: string) => Promise<T>
 
 const statusReader = makeCachedReader<GitStatus>(2000, computeGitStatus);
 const logReader = makeCachedReader<GitLog>(3000, computeGitLog);
+const diffStatsReader = makeCachedReader<GitDiffStats>(2000, computeDiffStats);
 
 export function getGitStatus(cwd: string): Promise<GitStatus> {
   return statusReader.read(cwd);
@@ -92,6 +95,10 @@ export function getGitLog(cwd: string): Promise<GitLog> {
   return logReader.read(cwd);
 }
 
+export function getGitDiffStats(cwd: string): Promise<GitDiffStats> {
+  return diffStatsReader.read(cwd);
+}
+
 // Drop cached reads for a cwd so the next poll reflects a mutation at once.
 // Exported as the canonical cache-bust hook for the sibling mutation modules
 // (git-branches, git-stash, git-apply) — they call this after a change so the
@@ -99,6 +106,82 @@ export function getGitLog(cwd: string): Promise<GitLog> {
 export function invalidateGitCache(cwd: string): void {
   statusReader.invalidate(cwd);
   logReader.invalidate(cwd);
+  diffStatsReader.invalidate(cwd);
+}
+
+// ── Per-file diff stats (+added / −removed) ──────────────────────────────────
+
+// `git diff --numstat -z` per side. Rename entries carry the counts in the
+// header token and their two paths as the following NUL-separated tokens; the
+// stat is filed under the NEW path (what the change lists render). Binary
+// files report "-" counts and surface as `binary: true`.
+function parseNumstatZ(stdout: string, into: Map<string, GitFileDiffStat>): void {
+  const tokens = stdout.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (!token) continue;
+    const match = /^(-|\d+)\t(-|\d+)\t(.*)$/s.exec(token);
+    if (!match) continue;
+    const binary = match[1] === "-" || match[2] === "-";
+    const stat: GitFileDiffStat = {
+      additions: binary ? 0 : Number(match[1]),
+      deletions: binary ? 0 : Number(match[2]),
+      binary,
+    };
+    let path = match[3];
+    if (!path) {
+      // Rename/copy: the two following tokens are old path, new path.
+      i += 2;
+      path = tokens[i] ?? "";
+    }
+    if (path) into.set(path, stat);
+  }
+}
+
+// Untracked files never appear in `git diff`, but a review list without their
+// line counts reads as "empty change". Count the lines ourselves; NUL bytes
+// mark a binary. Capped read keeps a stray huge asset from stalling the poll.
+const UNTRACKED_STAT_MAX_BYTES = 4 * 1024 * 1024;
+async function statUntracked(cwd: string, relPath: string): Promise<GitFileDiffStat> {
+  try {
+    const abs = join(cwd, relPath);
+    const size = (await stat(abs)).size;
+    if (size > UNTRACKED_STAT_MAX_BYTES) return { additions: 0, deletions: 0, binary: true };
+    const buffer = await readFile(abs);
+    if (buffer.includes(0)) return { additions: 0, deletions: 0, binary: true };
+    if (buffer.length === 0) return { additions: 0, deletions: 0, binary: false };
+    let lines = 0;
+    for (const byte of buffer) if (byte === 10) lines++;
+    if (buffer[buffer.length - 1] !== 10) lines++;
+    return { additions: lines, deletions: 0, binary: false };
+  } catch {
+    return { additions: 0, deletions: 0, binary: true };
+  }
+}
+
+async function computeDiffStats(cwd: string): Promise<GitDiffStats> {
+  const staged = new Map<string, GitFileDiffStat>();
+  const unstaged = new Map<string, GitFileDiffStat>();
+  try {
+    const [stagedOut, unstagedOut, untrackedOut] = await Promise.all([
+      runGit(cwd, ["diff", "--cached", "--numstat", "-z", "--no-ext-diff"]).then((r) => r.stdout).catch(() => ""),
+      runGit(cwd, ["diff", "--numstat", "-z", "--no-ext-diff"]).then((r) => r.stdout).catch(() => ""),
+      runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"]).then((r) => r.stdout).catch(() => ""),
+    ]);
+    parseNumstatZ(stagedOut, staged);
+    parseNumstatZ(unstagedOut, unstaged);
+    const untrackedPaths = untrackedOut.split("\0").filter(Boolean);
+    const untrackedStats = await Promise.all(
+      untrackedPaths.map((path) => statUntracked(cwd, path)),
+    );
+    untrackedPaths.forEach((path, index) => unstaged.set(path, untrackedStats[index]));
+  } catch {
+    // Stats are decoration — a failure must never break the change lists.
+  }
+  return {
+    staged: Object.fromEntries(staged),
+    unstaged: Object.fromEntries(unstaged),
+  };
 }
 
 // ── Status ───────────────────────────────────────────────────────────────────

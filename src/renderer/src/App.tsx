@@ -3876,9 +3876,13 @@ export default function App() {
   }, []);
 
   // Open a changed file's diff as a workbench tab (Source Control row click).
-  const handleOpenDiffTab = useCallback((file: GitFileChange) => {
-    tabsRef.current.openDiffTab(file.path, file.staged);
-  }, []);
+  // Single click = shared preview tab; double click passes pin=true.
+  const handleOpenDiffTab = useCallback(
+    (file: GitFileChange, options?: { pin?: boolean }) => {
+      tabsRef.current.openDiffTab(file.path, file.staged, options);
+    },
+    [],
+  );
 
   // Open a file's diff within a commit as a workbench tab (history file row).
   // Single click = preview tab (replaced by the next file); double = pinned.
