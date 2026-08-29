@@ -197,6 +197,12 @@ const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
 const windowIcon = app.isPackaged
   ? join(process.resourcesPath, `build/${iconFile}`)
   : join(__dirname, `../../build/${iconFile}`);
+// The bare Codara mark on a transparent square — the menu-bar/tray source.
+// The app icon is an OPAQUE rounded tile now, and the macOS template
+// conversion keeps only alpha, so feeding it the tile renders a solid blob.
+const trayIconPath = app.isPackaged
+  ? join(process.resourcesPath, "build/tray.png")
+  : join(__dirname, "../../build/tray.png");
 
 let mainWindow: BrowserWindow | null = null;
 // Tray + background-running state (Feature: "close to tray"). `isQuitting`
@@ -588,11 +594,17 @@ function ensureTray(): void {
     // in blurry or oversized rendering. Explicitly resize to 18×18 for the
     // macOS menu bar (Win32 uses the path directly; the taskbar notification
     // area handles DPI scaling on its own).
-    let trayImage = nativeImage.createFromPath(windowIcon);
+    // macOS/Linux draw the bare transparent mark (falling back to the app
+    // icon if the asset is missing); win32 keeps the colored .ico.
+    let source = nativeImage.createFromPath(trayIconPath);
+    if (source.isEmpty() || process.platform === "win32") {
+      source = nativeImage.createFromPath(windowIcon);
+    }
+    let trayImage = source;
     if (process.platform === "darwin") {
-      trayImage = menuBarTemplateImage(trayImage);
+      trayImage = menuBarTemplateImage(source);
     } else if (process.platform !== "win32") {
-      trayImage = trayImage.resize({ width: 18, height: 18 });
+      trayImage = source.resize({ width: 18, height: 18 });
     }
     tray = new Tray(trayImage);
     tray.setToolTip("Codara Studio");

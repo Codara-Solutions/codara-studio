@@ -243,6 +243,7 @@
     "extraResources": [
       "build/icon.ico",
       "build/icon.png",
+      "build/tray.png",
       {
         "from": "resources/shell-integration",
         "to": "shell-integration"
