@@ -139,3 +139,12 @@ commands work everywhere.
 
 Temporary worker panes close automatically when a run settles. Service panes
 remain until their run is deleted, and failed closes retry automatically.
+
+## Releasing
+
+Bump `version` in package.json, then `npm run release:mac` and
+`npm run release:win` — each builds, signs (and notarizes on macOS when
+`.env.releases` carries the Apple credentials), and uploads to the release
+bucket behind https://studio.codarasolutions.com. Running apps hear the SSE
+push within a minute and self-update. The "Release Codara Studio" automation
+in Codara Studio runs the whole sequence on every push to main.
