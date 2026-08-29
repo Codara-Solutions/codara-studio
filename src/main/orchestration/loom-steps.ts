@@ -57,6 +57,10 @@ export interface StepContext {
   /** Owning loom + workspace — the notify action's click target. */
   automationId?: string;
   workspaceId?: string;
+  /** Live streaming sink: called with each stdout/stderr chunk of a
+   *  command/script child as it arrives (other action types do not stream).
+   *  Chunks are capped by STEP_STREAM_CAP like the captured buffers. */
+  onOutput?: (chunk: string) => void;
 }
 
 /** Render a step template against the pass context. Same substitution rules
@@ -136,7 +140,12 @@ function capAppend(buf: { text: string; truncated: boolean }, chunk: string): vo
  *  killing the whole process group on timeout. Never rejects. */
 export function runShellCapture(
   command: string,
-  opts: { cwd: string; env?: Record<string, string>; timeoutMs: number },
+  opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    timeoutMs: number;
+    onOutput?: (chunk: string) => void;
+  },
 ): Promise<ShellRun> {
   return new Promise((resolvePromise) => {
     const { exe, args } = shellFor();
@@ -167,8 +176,14 @@ export function runShellCapture(
     }
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => capAppend(out, chunk));
-    child.stderr?.on("data", (chunk: string) => capAppend(err, chunk));
+    child.stdout?.on("data", (chunk: string) => {
+      capAppend(out, chunk);
+      opts.onOutput?.(chunk);
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      capAppend(err, chunk);
+      opts.onOutput?.(chunk);
+    });
     child.on("error", (e) => {
       finish({ exitCode: null, signal: null, spawnError: e.message });
     });
@@ -276,7 +291,12 @@ async function runCommandAction(
   if (!command) return { ok: false, output: "", durationMs: 0, error: "empty command" };
   const cwd = resolveCwd(action.cwd, ctx);
   const env = { ...stepEnv(ctx), ...(ctx.env ?? {}), ...renderRecord(action.env, ctx) };
-  const run = await runShellCapture(command, { cwd, env, timeoutMs: effectiveStepTimeoutMs(node) });
+  const run = await runShellCapture(command, {
+    cwd,
+    env,
+    timeoutMs: effectiveStepTimeoutMs(node),
+    onOutput: ctx.onOutput,
+  });
   return shellResult(run, startedAt);
 }
 
@@ -296,7 +316,12 @@ async function runScriptAction(
     const { cmd, env: langEnv } = scriptCommand(action.language, file, interpreter);
     const cwd = resolveCwd(action.cwd, ctx);
     const env = { ...stepEnv(ctx), ...(ctx.env ?? {}), ...(langEnv ?? {}), ...renderRecord(action.env, ctx) };
-    const run = await runShellCapture(cmd, { cwd, env, timeoutMs: effectiveStepTimeoutMs(node) });
+    const run = await runShellCapture(cmd, {
+      cwd,
+      env,
+      timeoutMs: effectiveStepTimeoutMs(node),
+      onOutput: ctx.onOutput,
+    });
     return shellResult(run, startedAt);
   } finally {
     void rm(dir, { recursive: true, force: true }).catch(() => undefined);

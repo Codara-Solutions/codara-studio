@@ -54,6 +54,14 @@ export interface InlineResolution {
   skipped: string[];
 }
 
+/** Live progress of inline STEP nodes: emitted around each executeStep so a
+ *  caller can persist "running"/settled node states and stream child output
+ *  while a long step (a release build) is still executing. */
+export type StepProgressEvent =
+  | { kind: "started"; nodeId: string; label: string }
+  | { kind: "output"; nodeId: string; chunk: string }
+  | { kind: "settled"; nodeId: string; label: string; status: "succeeded" | "failed"; output: string };
+
 export interface InlineContext {
   cwd: string;
   vars: Record<string, string>;
@@ -62,6 +70,8 @@ export interface InlineContext {
   notify?: StepContext["notify"];
   automationId?: string;
   workspaceId?: string;
+  /** Optional live-progress sink; see StepProgressEvent. */
+  onStepEvent?: (event: StepProgressEvent) => void;
 }
 
 export function emptyResolution(): InlineResolution {
@@ -136,6 +146,8 @@ export async function resolveInlineNodes(
       if (!node || node.kind !== "step") continue;
       const parents = upstreamOf(graph, stepId);
       const incoming = parents.map((pid) => projected[pid]?.output ?? "");
+      const label = node.label?.trim() || stepId;
+      ctx.onStepEvent?.({ kind: "started", nodeId: stepId, label });
       const result = await executeStep(node, {
         cwd: ctx.cwd,
         vars: ctx.vars,
@@ -145,12 +157,22 @@ export async function resolveInlineNodes(
         env: { ...(ctx.env ?? {}), SPARK_NODE_ID: node.id },
         automationId: ctx.automationId,
         workspaceId: ctx.workspaceId,
+        onOutput: ctx.onStepEvent
+          ? (chunk) => ctx.onStepEvent?.({ kind: "output", nodeId: stepId, chunk })
+          : undefined,
       });
       const outcome = stepOutcome(node, result);
       projected[stepId] = { status: outcome.status, output: outcome.output };
+      ctx.onStepEvent?.({
+        kind: "settled",
+        nodeId: stepId,
+        label,
+        status: outcome.status,
+        output: outcome.output,
+      });
       out.steps.push({
         nodeId: stepId,
-        label: node.label?.trim() || stepId,
+        label,
         status: outcome.status,
         output: outcome.output,
         result,

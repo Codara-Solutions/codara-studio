@@ -181,8 +181,14 @@ export default function LiveRunHero({
         </div>
       )}
 
-      {/* Live activity feed */}
-      <LiveActivityFeed worker={feedWorker} shown={shown} emptyLabel={stepsOnlyLabel(job)} />
+      {/* Live activity feed. A steps-only pass has no worker; its streamed
+          step output is tailed from the run's stepsLogPath instead. */}
+      <LiveActivityFeed
+        worker={feedWorker}
+        shown={shown}
+        emptyLabel={stepsOnlyLabel(job)}
+        logPathOverride={liveRun?.loomPass?.stepsLogPath ?? null}
+      />
 
       {/* Blocked question, answerable in place. */}
       {pendingQuestion && liveRun && (
@@ -243,16 +249,18 @@ function LiveActivityFeed({
   worker,
   shown,
   emptyLabel,
+  logPathOverride,
 }: {
   worker: AutomationWorkerInfo | null;
   shown: boolean;
   emptyLabel?: string | null;
+  logPathOverride?: string | null;
 }): React.ReactElement {
   const [content, setContent] = useState("");
   const [failure, setFailure] = useState<string | null>(null);
   const scrollRef = useRef<HTMLPreElement | null>(null);
   const stickToBottomRef = useRef(true);
-  const logPath = worker?.stdoutLogPath;
+  const logPath = worker?.stdoutLogPath ?? logPathOverride ?? undefined;
 
   useEffect(() => {
     setContent("");

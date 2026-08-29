@@ -419,23 +419,115 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       const nodeOutputs: Record<string, string> = {};
       let entryStepFailed = false;
       let stepOnlySummary = "";
+      // Looms v3.1: a loom with NO worker nodes at all gets a LIVE run for the
+      // pass, created before the steps execute, so the hub shows the running
+      // step and tails its output. Mixed graphs (steps feeding workers) keep
+      // the settle-then-launch path: their run is born with the worker wave.
+      const pureStepsLoom = graph.nodes.every((n) => n.kind !== "worker");
+      let liveStepRun: RunState | null = null;
       if (hasInlineEntry) {
         // Entry steps can run for many minutes (a release build, a long
         // script). Persist a live "running" state BEFORE executing them so
         // the hub shows the pass while it happens — previously a steps-only
         // pass looked idle until it was already finished.
+        if (pureStepsLoom) {
+          try {
+            const { startStepOnlyPass } = await import("./run-store");
+            liveStepRun = await startStepOnlyPass({
+              workspaceId: job.input.workspaceId,
+              workspaceName: job.input.workspaceName,
+              cwd: job.input.cwd,
+              origin: job.input.origin,
+              projectPolicyMode: job.input.projectPolicyMode,
+              automationId: id,
+              title: `Loom: ${job.name} — pass ${passIter + 1}`,
+              vars: passVars,
+              entryNodeIds: entryIds,
+            });
+          } catch (err) {
+            // Degrade to the after-the-fact record path; the pass still runs.
+            console.warn(`[loop] live steps-only run failed to start for ${id}:`, err);
+            liveStepRun = null;
+          }
+        }
         await patchJob(id, (j) => ({
           ...j,
           lastRunAt: startedAt,
-          state: { ...j.state, status: "running", nextFireAt: undefined },
+          ...(liveStepRun ? { lastRunId: liveStepRun.id } : {}),
+          state: {
+            ...j.state,
+            status: "running",
+            nextFireAt: undefined,
+            ...(liveStepRun ? { currentRunId: liveStepRun.id } : {}),
+          },
         }));
+
+        // Live progress plumbing: node transitions and streamed child output
+        // are serialized onto one promise chain so run commits and log appends
+        // keep execution order without blocking the resolver.
+        const stepsLogPath = liveStepRun?.loomPass?.stepsLogPath;
+        let progressChain: Promise<unknown> = Promise.resolve();
+        const enqueue = (task: () => Promise<unknown>): void => {
+          progressChain = progressChain.then(task).catch(() => undefined);
+        };
+        const liveRunId = liveStepRun?.id;
+        const onStepEvent = liveRunId
+          ? (event: import("./loom-resolve").StepProgressEvent): void => {
+              const runId = liveRunId;
+              if (event.kind === "started") {
+                if (stepsLogPath) {
+                  enqueue(async () => {
+                    const { promises: nodeFs } = await import("node:fs");
+                    await nodeFs.appendFile(stepsLogPath, `\n=== ${event.label} ===\n`, "utf8");
+                  });
+                }
+                enqueue(async () => {
+                  const { updateStepOnlyNode } = await import("./run-store");
+                  await updateStepOnlyNode({ runId, nodeId: event.nodeId, status: "running" });
+                });
+              } else if (event.kind === "output") {
+                if (stepsLogPath) {
+                  enqueue(async () => {
+                    const { promises: nodeFs } = await import("node:fs");
+                    await nodeFs.appendFile(stepsLogPath, event.chunk, "utf8");
+                  });
+                }
+              } else {
+                const note = stepNoteMessage({
+                  nodeId: event.nodeId,
+                  label: event.label,
+                  status: event.status,
+                  output: event.output,
+                  result: { ok: event.status === "succeeded", output: event.output, durationMs: 0 },
+                });
+                enqueue(async () => {
+                  const { updateStepOnlyNode } = await import("./run-store");
+                  await updateStepOnlyNode({
+                    runId,
+                    nodeId: event.nodeId,
+                    status: event.status,
+                    output: event.output,
+                    note,
+                  });
+                });
+              }
+            }
+          : undefined;
+
         const res = await resolveInlineNodes(graph, projected, {
           cwd: job.input.cwd,
           vars: passVars,
-          env: { SPARK_AUTOMATION_ID: id },
+          env: {
+            SPARK_AUTOMATION_ID: id,
+            ...(liveStepRun ? { SPARK_RUN_ID: liveStepRun.id } : {}),
+          },
           automationId: id,
           workspaceId: job.input.workspaceId,
+          onStepEvent,
         });
+        // Every queued progress commit lands before the finalize below reads
+        // or rewrites the pass, so live and settled states cannot interleave.
+        await progressChain;
         for (const m of res.merges) preResolved.push({ nodeId: m.nodeId, kind: "merge", status: "succeeded", output: m.output });
         for (const g of res.guards) preResolved.push({ nodeId: g.nodeId, kind: "guard", status: "succeeded", output: g.output, branchResult: g.branch });
         for (const st of res.steps) preResolved.push({ nodeId: st.nodeId, kind: "step", status: st.status, output: st.output, note: stepNoteMessage(st) });
@@ -450,16 +542,26 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         workerEntries = readyIds
           .map((nid) => graph.nodes.find((n) => n.id === nid))
           .filter((n): n is WorkerDef => n?.kind === "worker");
-        // The pass summary reports EVERY executed step (label + note), not
-        // just the last one, so the run peek shows what actually happened.
-        // Bounded so a chatty script cannot flood the transcript.
-        const stepReport = res.steps
-          .map((st) => stepNoteMessage(st))
-          .join("\n\n")
-          .slice(0, 4000);
-        stepOnlySummary = failedStep
-          ? stepReport || stepNoteMessage(failedStep)
-          : stepReport || "Pass finished: no worker was reachable from the trigger.";
+        // Pass summary: with a LIVE run every step already left its own note,
+        // so the summary is the sink step's note (the loop's {{lastOutput}}
+        // contract). Without one (legacy path), report every step, bounded so
+        // a chatty script cannot flood the transcript.
+        const lastStep = res.steps.length > 0 ? res.steps[res.steps.length - 1] : undefined;
+        if (liveStepRun) {
+          stepOnlySummary = failedStep
+            ? stepNoteMessage(failedStep)
+            : lastStep
+              ? stepNoteMessage(lastStep)
+              : "Pass finished: no worker was reachable from the trigger.";
+        } else {
+          const stepReport = res.steps
+            .map((st) => stepNoteMessage(st))
+            .join("\n\n")
+            .slice(0, 4000);
+          stepOnlySummary = failedStep
+            ? stepReport || stepNoteMessage(failedStep)
+            : stepReport || "Pass finished: no worker was reachable from the trigger.";
+        }
       }
 
       if (workerEntries.length === 0) {
@@ -468,23 +570,34 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           await finalize(id, "iteration-failed");
           return;
         }
-        // Looms v3: a STEPS-ONLY pass (or an entry step that failed). Record a
-        // run that is born terminal so the pass has a transcript + loomPass and
-        // the loop driver decides continuation through onTerminal as usual.
-        const { recordStepOnlyPass } = await import("./run-store");
-        run = await recordStepOnlyPass({
-          workspaceId: job.input.workspaceId,
-          workspaceName: job.input.workspaceName,
-          cwd: job.input.cwd,
-          origin: job.input.origin,
-          projectPolicyMode: job.input.projectPolicyMode,
-          automationId: id,
-          title: `Loom: ${job.name} — pass ${passIter + 1}`,
-          vars: passVars,
-          preResolved,
-          status: entryStepFailed ? "failed" : "complete",
-          summary: stepOnlySummary,
-        });
+        // Looms v3: a STEPS-ONLY pass (or an entry step that failed). A live
+        // run (started before the steps) is finalized in place; otherwise the
+        // pass is recorded after the fact exactly as before. Either way the
+        // loop driver decides continuation through the same onTerminal path.
+        if (liveStepRun) {
+          const { finalizeStepOnlyPass } = await import("./run-store");
+          run = await finalizeStepOnlyPass({
+            runId: liveStepRun.id,
+            preResolved,
+            status: entryStepFailed ? "failed" : "complete",
+            summary: stepOnlySummary,
+          });
+        } else {
+          const { recordStepOnlyPass } = await import("./run-store");
+          run = await recordStepOnlyPass({
+            workspaceId: job.input.workspaceId,
+            workspaceName: job.input.workspaceName,
+            cwd: job.input.cwd,
+            origin: job.input.origin,
+            projectPolicyMode: job.input.projectPolicyMode,
+            automationId: id,
+            title: `Loom: ${job.name} — pass ${passIter + 1}`,
+            vars: passVars,
+            preResolved,
+            status: entryStepFailed ? "failed" : "complete",
+            summary: stepOnlySummary,
+          });
+        }
         stepOnly = true;
       } else {
 

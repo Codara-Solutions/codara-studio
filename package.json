@@ -1,7 +1,7 @@
 {
   "name": "codara-studio",
   "version": "0.3.3",
-  "description": "Codara Studio — cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
+  "description": "Codara Studio \u2014 cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
   "main": "out/main/index.js",
   "author": "Etienne",
   "private": true,
@@ -138,7 +138,8 @@
     "test:tab-reorder": "node scripts/test-tab-reorder.cjs",
     "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs",
     "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs",
-    "test:all": "node scripts/run-all-tests.cjs"
+    "test:all": "node scripts/run-all-tests.cjs",
+    "test:step-live-stream": "node scripts/test-step-live-stream.cjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",

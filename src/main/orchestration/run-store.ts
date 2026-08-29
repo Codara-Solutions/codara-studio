@@ -2346,6 +2346,197 @@ export async function recordStepOnlyPass(input: RecordStepOnlyPassInput): Promis
   });
 }
 
+// ── Looms v3.1: LIVE steps-only passes ──────────────────────────────────────
+// recordStepOnlyPass (above) records a pass after the fact: created and
+// finalized in one breath, invisible while it executed. These three give a
+// steps-only pass the same live presence a worker pass has: the run exists
+// from the first step, each step settles into loomPass as it finishes, and
+// the combined child output streams into stepsLogPath for the hub to tail.
+
+export interface StartStepOnlyPassInput {
+  workspaceId: string;
+  workspaceName?: string;
+  cwd: string;
+  origin?: RecordStepOnlyPassInput["origin"];
+  projectPolicyMode?: RecordStepOnlyPassInput["projectPolicyMode"];
+  automationId: string;
+  title: string;
+  vars?: Record<string, string>;
+  /** The pass's entry inline nodes; painted "running" from the start. */
+  entryNodeIds: string[];
+}
+
+export async function startStepOnlyPass(input: StartStepOnlyPassInput): Promise<RunState> {
+  let run = await createRun({
+    workspaceId: input.workspaceId,
+    workspaceName: input.workspaceName ?? "workspace",
+    cwd: input.cwd,
+    origin: input.origin,
+    projectPolicyMode: input.projectPolicyMode,
+    title: input.title,
+    automationId: input.automationId,
+    executionMode: "direct",
+    chatBackend: "pi",
+    chatMode: "auto",
+  });
+  const stepsLogPath = join(runDir(run.id), "steps.log");
+  try {
+    await fs.writeFile(stepsLogPath, "", { flag: "a" });
+  } catch {
+    /* the tail treats a missing file as "not yet"; streaming just degrades */
+  }
+  return commitRunChange(run, {
+    type: "direct_run.started",
+    message: "Loom step-only pass started",
+    payload: { automationId: input.automationId, model: null, stepOnly: true, live: true },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      const nodeStates: NonNullable<RunState["loomPass"]>["nodeStates"] = {};
+      for (const id of input.entryNodeIds) {
+        nodeStates[id] = { status: "running", attemptIds: [], layer: 0 };
+      }
+      draft.loomPass = {
+        graphVersion: 1,
+        nodeStates,
+        layerCursor: 0,
+        pendingNodeIds: [...input.entryNodeIds],
+        vars: input.vars && Object.keys(input.vars).length > 0 ? input.vars : undefined,
+        stepsLogPath,
+      };
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "started",
+        startedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/** One inline node's live transition: "running" when a step starts, or its
+ *  settled status + output (and transcript note) when it finishes. */
+export async function updateStepOnlyNode(input: {
+  runId: string;
+  nodeId: string;
+  status: "running" | "succeeded" | "failed";
+  output?: string;
+  note?: string;
+}): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  return commitRunChange(run, {
+    type: "direct_run.step_progress",
+    message: `Step ${input.nodeId}: ${input.status}`,
+    payload: { nodeId: input.nodeId, status: input.status },
+    mutate: (draft, timestamp) => {
+      const pass = draft.loomPass;
+      if (!pass) return false;
+      const prior = pass.nodeStates[input.nodeId];
+      pass.nodeStates[input.nodeId] = {
+        status: input.status,
+        attemptIds: prior?.attemptIds ?? [],
+        output: input.output ?? prior?.output,
+        layer: prior?.layer ?? 0,
+        activations: prior?.activations,
+        branchResult: prior?.branchResult,
+      };
+      if (input.status !== "running") {
+        pass.pendingNodeIds = pass.pendingNodeIds.filter((id) => id !== input.nodeId);
+      } else if (!pass.pendingNodeIds.includes(input.nodeId)) {
+        pass.pendingNodeIds.push(input.nodeId);
+      }
+      if (input.note) {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: input.note,
+          attachments: [],
+          intent: "answer",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
+          createdAt: timestamp,
+          loomNodeId: input.nodeId,
+        });
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/** Finalize a live steps-only pass started by startStepOnlyPass. Node states
+ *  are reconciled from the full resolution (guards/merges/skips included);
+ *  step notes were already pushed live by updateStepOnlyNode, so only the
+ *  pass summary is appended here (when it differs from the last note). */
+export async function finalizeStepOnlyPass(input: {
+  runId: string;
+  preResolved: PreResolvedNode[];
+  status: "complete" | "failed";
+  summary: string;
+}): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const status: RunStatus = input.status;
+  return commitRunChange(run, {
+    type: "direct_run.finalized",
+    message:
+      status === "complete" ? "Loom step-only pass finalized: complete" : "Loom step-only pass failed",
+    payload: {
+      attemptIds: [],
+      reportStatuses: [],
+      nextStatus: status,
+      settledNodeIds: [],
+      advancingTo: null,
+      retryingNodeIds: null,
+      resolvedMergeNodeIds: input.preResolved.filter((n) => n.kind === "merge").map((n) => n.nodeId),
+      resolvedGuardNodeIds: input.preResolved.filter((n) => n.kind === "guard").map((n) => n.nodeId),
+      resolvedStepNodeIds: input.preResolved.filter((n) => n.kind === "step").map((n) => n.nodeId),
+      skippedNodeIds: input.preResolved.filter((n) => n.status === "skipped").map((n) => n.nodeId),
+      stepOnly: true,
+      live: true,
+    },
+    mutate: (draft, timestamp) => {
+      const pass = draft.loomPass;
+      if (!pass) return false;
+      for (const pr of input.preResolved) {
+        const prior = pass.nodeStates[pr.nodeId];
+        pass.nodeStates[pr.nodeId] = {
+          status: pr.status,
+          attemptIds: prior?.attemptIds ?? [],
+          output: pr.output ?? prior?.output,
+          layer: prior?.layer ?? 0,
+          branchResult: pr.branchResult,
+        };
+      }
+      pass.pendingNodeIds = [];
+      const lastNote = [...draft.humanMessages].reverse().find((m) => m.author === "spark");
+      if (input.summary.trim() && lastNote?.message !== input.summary) {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: input.summary,
+          attachments: [],
+          intent: "answer",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
+          createdAt: timestamp,
+        });
+      }
+      draft.status = status;
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: status === "complete" ? "idle" : "failed",
+        lastAction: "direct_run_finalized",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
 // watchdog and boot recovery. Ends with finalizeDirectRun so the loop driver
 // sees a terminal run.

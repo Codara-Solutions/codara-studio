@@ -2765,6 +2765,11 @@ export interface RunState {
      * acyclic pass — byte-identical to before.
      */
     backEdgeVisits?: Record<string, number>;
+    /** Looms v3.1 (live steps-only passes): the combined stdout/stderr log the
+     *  executing steps stream into, tailed by the hub's live feed exactly like
+     *  a worker attempt's stdoutLogPath. Set when the pass was started live
+     *  (startStepOnlyPass); absent on worker passes and legacy records. */
+    stepsLogPath?: string;
   };
 }
 
