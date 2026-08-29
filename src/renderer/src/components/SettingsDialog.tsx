@@ -1595,30 +1595,44 @@ function GithubWebhookSettings() {
   return (
     <>
       <SectionTitle
-        title="GitHub push webhooks"
-        detail="Make git triggers fire seconds after a push instead of on the next background fetch. Paste your webhook URL below, then add it to a repository (Settings → Webhooks → Add webhook, content type application/json, just the push event) — the button opens the right page."
+        title="Instant git triggers"
+        detail="Install the Codara Studio app on your GitHub account and pushes reach your git-triggered automations in seconds instead of on the next background fetch. GitHub asks which account and repositories during install; pick All repositories to cover future repos too. Codara Studio only receives a content-free 'something was pushed' signal — your code and repository names never pass through it."
       />
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          className="spark-input spark-mono"
-          value={url}
-          onChange={(e) => save(e.target.value)}
-          placeholder="https://studio.codarasolutions.com/hooks/github/…"
-          style={{ flex: 1, minWidth: 260 }}
-        />
-        <button type="button" className="spark-btn" onClick={copy} disabled={!url.trim()}>
-          {copied ? "Copied ✓" : "Copy URL"}
-        </button>
         <button
           type="button"
-          className="spark-btn"
+          className="spark-btn is-primary"
           onClick={() => {
-            void window.spark.openExternal("https://github.com");
+            void window.spark.openExternal(
+              "https://github.com/apps/codara-studio/installations/new",
+            );
           }}
         >
-          Open GitHub
+          Install the GitHub App
         </button>
+        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Without it, pushes are still picked up by the background fetch within a few minutes.
+        </span>
       </div>
+      <details>
+        <summary style={{ fontSize: 11.5, color: "var(--muted)", cursor: "default" }}>
+          Advanced: custom webhook receiver
+        </summary>
+        <div
+          style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}
+        >
+          <input
+            className="spark-input spark-mono"
+            value={url}
+            onChange={(e) => save(e.target.value)}
+            placeholder="https://studio.codarasolutions.com/hooks/github/…"
+            style={{ flex: 1, minWidth: 260 }}
+          />
+          <button type="button" className="spark-btn" onClick={copy} disabled={!url.trim()}>
+            {copied ? "Copied ✓" : "Copy URL"}
+          </button>
+        </div>
+      </details>
     </>
   );
 }

@@ -428,8 +428,21 @@ function TriggerForm({
             />
           </Field>
           <Hint>
-            Watches this workspace's repository. Pushes are noticed by the background auto-fetch;
-            local moves are noticed within ~20 seconds.
+            Watches this workspace's repository. Local moves are noticed within ~20 seconds;
+            pushes are noticed by the background fetch within a few minutes — or in seconds
+            with the{" "}
+            <a
+              href="https://github.com/apps/codara-studio/installations/new"
+              onClick={(e) => {
+                e.preventDefault();
+                void window.spark.openExternal(
+                  "https://github.com/apps/codara-studio/installations/new",
+                );
+              }}
+            >
+              Codara Studio GitHub App
+            </a>{" "}
+            installed on your account.
           </Hint>
         </Group>
       )}
