@@ -4,8 +4,10 @@
 // Integration test for src/main/git-auto-fetch.ts against REAL git: a bare
 // file:// remote, a workspace clone, a teammate clone that pushes, and a
 // worktree of the workspace. Proves the actual command shapes (for-each-ref
-// format, the fetch flag set, rev-list/log ranges, config reads, common-dir
-// resolution) work on the installed git — the unit test only drives a fake.
+// format, the fetch flag set, config reads, common-dir resolution) work on the
+// installed git — the unit test only drives a fake. The fetcher raises no
+// notifications (github-push-watch.ts owns those); this asserts that it
+// refreshes every workspace of a repository when a ref really moves.
 // Everything is local; no network, no credentials.
 
 const assert = require("node:assert/strict");
@@ -172,11 +174,8 @@ function commit(cwd, file, message, who) {
     git(etienne, ["push", "-q", "-u", "origin", "feat/x"]);
     h.now += 3 * 60_000;
     await mod.runGitAutoFetchPass();
-    assert.equal(h.published.length, 1, `logs: ${h.logs.join(" | ")}`);
-    assert.equal(h.published[0].title, "Etienne pushed to codara-studio");
-    assert.equal(h.published[0].body, "2 commits to feat/x — wire it up");
-    assert.deepEqual(h.published[0].target, { type: "workspace", workspaceId: "ws", panel: "git" });
-    assert.deepEqual(h.invalidated, [workspace]);
+    assert.equal(h.published.length, 0, `the fetcher must not notify; logs: ${h.logs.join(" | ")}`);
+    assert.deepEqual(h.invalidated, [workspace], "the panel is told to refresh");
     assert.deepEqual(h.broadcasts, [[workspace]]);
     // The workspace's remote-tracking ref really moved (no --prune, no FETCH_HEAD).
     assert.equal(git(workspace, ["rev-parse", "origin/feat/x"]), git(etienne, ["rev-parse", "feat/x"]));
@@ -188,8 +187,8 @@ function commit(cwd, file, message, who) {
     git(etienne, ["push", "-q", "origin", "main"]);
     h.now += 3 * 60_000;
     await mod.runGitAutoFetchPass();
-    assert.equal(h.published.length, 1, "own push must not alert");
-    assert.equal(h.invalidated.length, 2, "but the panel is told to refresh");
+    assert.equal(h.published.length, 0);
+    assert.equal(h.invalidated.length, 2, "a second real change refreshes again");
     assert.equal(git(workspace, ["rev-list", "--count", "HEAD..origin/main"]), "1", "workspace is now 1 behind");
 
     // Add a worktree on feat/x as a second workspace: one repo, two cwds; a
@@ -222,10 +221,12 @@ function commit(cwd, file, message, who) {
     const fetchesBefore = h.broadcasts.length;
     h.now += 3 * 60_000;
     await mod.runGitAutoFetchPass();
-    assert.equal(h.published.length, 2);
-    assert.equal(h.published[1].target.workspaceId, "wt", "routes to the worktree checked out on feat/x");
-    assert.equal(h.published[1].body, "1 commit to feat/x — follow-up on the worktree branch");
-    assert.deepEqual(h.broadcasts[fetchesBefore], [workspace, worktree]);
+    assert.equal(h.published.length, 0);
+    assert.deepEqual(
+      h.broadcasts[fetchesBefore],
+      [workspace, worktree],
+      "one fetch refreshes every workspace sharing the repository",
+    );
 
     mod.stopGitAutoFetch();
     console.log("PASS: git-auto-fetch against real git");

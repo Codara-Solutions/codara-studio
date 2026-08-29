@@ -1172,6 +1172,9 @@ app.whenReady().then(async () => {
       void import("./git-auto-fetch")
         .then((m) => m.nudgeGitAutoFetch("resume"))
         .catch(() => undefined);
+      void import("./github-push-watch")
+        .then((m) => m.nudgeGitHubPushWatch())
+        .catch(() => undefined);
     }, 1500);
     resumeTimer.unref();
   });
@@ -1266,6 +1269,16 @@ app.whenReady().then(async () => {
     )
     .catch((err) => {
       logMain("git-auto-fetch", `failed to start: ${String(err)}`);
+    });
+
+  // "A teammate pushed" alerts, sourced from GitHub's Events API so the
+  // pusher's identity is read rather than guessed from commit emails. Separate
+  // from the fetcher above: that one keeps local git state fresh, this one
+  // decides what is worth telling the user about.
+  void import("./github-push-watch")
+    .then((m) => m.startGitHubPushWatch({ isOnline: () => net.isOnline() }))
+    .catch((err) => {
+      logMain("github-push-watch", `failed to start: ${String(err)}`);
     });
 
   // Arm automations (cron / interval / folder-watch triggers) and resume any

@@ -347,7 +347,10 @@ async function main() {
 
   mod.noteTerminalUserInput("p5");
   const beforeLimit = alertCount();
-  feed("p5", "You've hit your usage limit · resets at 5pm");
+  // The banner starts its own row, as a real CLI prints it — the classifier
+  // requires that (a phrase buried mid-line is prose or code about the topic,
+  // not the CLI announcing it).
+  feed("p5", "\r\nYou've hit your usage limit · resets at 5pm\r\n");
   check(
     "usage-limit terminal outcome is a failure, not a successful completion",
     alertCount() === beforeLimit + 1 && T.alerts.at(-1).kind === "failed",
@@ -376,6 +379,53 @@ async function main() {
   // ── Scenario 11: unexpected exit preserves same-id respawn monitoring ──
   T.exits.get("p1")?.({ exitCode: 0 });
   check("unexpected pty exit re-arms the tap for a same-id respawn", T.taps.has("p1"));
+
+  // ── Scenario 12: banner classifier false-alarm corpus ─────────────────
+  // The credential/limit detectors used to be substring scans over the whole
+  // decoded stream, so the agent WRITING code about auth alerted the user
+  // about auth (measured 2026-08-29: 45 of 195 delivered alerts in 32h were
+  // this single false positive). Every line below is real text an agent
+  // prints while editing or reading code; none may classify.
+  const MUST_NOT_CLASSIFY = [
+    `  if (res.status === 401) throw new Error("Unauthorized");`,
+    `// returns 403 unauthorized when the token is missing`,
+    `const AUTH_FAILURE = /Authentication failed|could not read Username/i;`,
+    `test: authentication required -> pauses the repo`,
+    `README: if authentication fails, run gh auth login`,
+    `expect(err.message).toBe("invalid api key")`,
+    `docs: rate limit exceeded handling`,
+    `console.log("fatal error in parser")`,
+    `fatal error: x.h file not found`,
+    `  * unauthorized`,
+    `Unauthorized`,
+    `-  authentication failed = true;`,
+    `| 401 | Unauthorized | token missing |`,
+    `  "message": "Bad credentials", "status": "401"`,
+  ];
+  for (const line of MUST_NOT_CLASSIFY) {
+    check(
+      `code text is not a problem banner: ${line.trim().slice(0, 44)}`,
+      mod.classifyBannerLine(line) === null,
+    );
+  }
+
+  // ...while the CLI's own banners, which own their line, still classify.
+  const MUST_CLASSIFY = [
+    [`Invalid API key · Please run /login`, "blocked"],
+    [`⏺ OAuth token expired`, "blocked"],
+    [`  Not logged in`, "blocked"],
+    [`Authentication required`, "blocked"],
+    [`You've hit your usage limit`, "failed"],
+    [`Usage limit reached`, "failed"],
+    [`│ Credit balance is too low`, "failed"],
+    [`Request failed after 5 retries`, "failed"],
+  ];
+  for (const [line, want] of MUST_CLASSIFY) {
+    check(
+      `real CLI banner still classifies (${want}): ${line.trim().slice(0, 40)}`,
+      mod.classifyBannerLine(line) === want,
+    );
+  }
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

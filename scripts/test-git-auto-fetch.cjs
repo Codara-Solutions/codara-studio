@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 "use strict";
 
-// Unit tests for src/main/git-auto-fetch.ts — the background auto-fetch +
-// "teammate pushed" scheduler. The module is esbuild-bundled straight from
-// src/ with its side-effecting siblings (git-exec, git-ops, storage, notify,
-// preferences-store, github-work-queue) replaced by inline stubs, and driven
-// through its injected dependencies with a scripted fake `runGit`.
+// Unit tests for src/main/git-auto-fetch.ts — the background fetch scheduler
+// that keeps remote-tracking refs current. It raises no notifications
+// (github-push-watch.ts owns those); several cases below assert exactly that.
+// The module is esbuild-bundled straight from src/ with its side-effecting
+// siblings replaced by inline stubs, and driven through its injected
+// dependencies with a scripted fake `runGit`.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -323,25 +324,6 @@ test("pure helpers: classifyFailure / args / env / format", async ({ mod }) => {
   assert.equal(env.GIT_SSH_COMMAND, "ssh -i key", "must not clobber the user's ssh command");
   assert.equal(env.GIT_ASKPASS, "echo");
   assert.equal(env.SSH_ASKPASS_REQUIRE, "never");
-
-  assert.deepEqual(
-    mod.formatPushNotification("codara-studio", [{ branch: "feat/x", count: 3, authors: ["Etienne"], subject: "wire it up" }]),
-    { title: "Etienne pushed to codara-studio", body: "3 commits to feat/x — wire it up" },
-  );
-  assert.deepEqual(
-    mod.formatPushNotification("repo", [
-      { branch: "a", count: 1, authors: ["Etienne"], subject: "s" },
-      { branch: "b", count: 60, authors: ["Maria"], subject: "t" },
-      { branch: "c", count: 1, authors: ["Etienne"], subject: "u" },
-    ], 2),
-    { title: "Etienne and Maria pushed to repo", body: "50+ commits to a, b and 3 more" },
-  );
-  assert.equal(
-    mod.formatPushNotification("repo", [
-      { branch: "a", count: 1, authors: ["A", "B", "C"], subject: "s" },
-    ]).title,
-    "3 teammates pushed to repo",
-  );
 });
 
 test("no ref change → zero side effects; first pass seeds silently", async ({ mod }) => {
@@ -375,7 +357,7 @@ test("no ref change → zero side effects; first pass seeds silently", async ({ 
   mod.stopGitAutoFetch();
 });
 
-test("teammate push → one grouped publish, rearm first, caches busted, renderer told", async ({ mod }) => {
+test("a moved ref refreshes the panel and raises no notification (github-push-watch owns alerts)", async ({ mod }) => {
   const world = makeWorld();
   world.addRepo("/r1/.git");
   world.bind("/r1", "/r1/.git");
@@ -389,14 +371,8 @@ test("teammate push → one grouped publish, rearm first, caches busted, rendere
   ], { parentSha: "m1" });
   h.now += 3 * 60_000;
   await h.pass();
-  assert.equal(h.published.length, 1);
-  const [event] = h.published;
-  assert.equal(event.kind, "git.teammate-push");
-  assert.equal(event.sourceKey, "git:" + keyOf("/r1/.git"));
-  assert.equal(event.title, "Etienne pushed to codara-studio");
-  assert.equal(event.body, "3 commits to feat/x — wire it up");
-  assert.deepEqual(event.target, { type: "workspace", workspaceId: "w1", panel: "git" });
-  assert.deepEqual(h.rearmed, ["git:" + keyOf("/r1/.git")]);
+  assert.equal(h.published.length, 0, "the fetcher must never notify");
+  assert.equal(h.rearmed.length, 0);
   assert.deepEqual(h.invalidated, ["/r1"]);
   assert.deepEqual(h.broadcasts, [["/r1"]]);
   // A second push to the same branch later: publishes again (rearm each time).
@@ -405,38 +381,8 @@ test("teammate push → one grouped publish, rearm first, caches busted, rendere
   ]);
   h.now += 3 * 60_000;
   await h.pass();
-  assert.equal(h.published.length, 2);
-  assert.equal(h.published[1].body, "1 commit to feat/x — more");
-  assert.equal(h.rearmed.length, 2);
-  mod.stopGitAutoFetch();
-});
-
-test("own commits (author or committer = me, local or global email) are filtered; refs still refresh", async ({ mod }) => {
-  const world = makeWorld();
-  world.addRepo("/r1/.git", { userEmail: "", globalEmail: ME.toUpperCase() });
-  world.bind("/r1", "/r1/.git");
-  const h = await makeHarness(mod, { workspaces: [ws("w1", "/r1")], world });
-  h.advancePastBoot();
-  await h.pass();
-  world.push("/r1/.git", "refs/remotes/origin/main", [
-    { sha: "j1", an: "Jorge", ae: ME, s: "mine from laptop" },
-    // Etienne's commit that I rebased and pushed: author him, committer me.
-    { sha: "j2", an: "Etienne", ae: "etienne@codara.test", ce: ME, s: "rebased" },
-  ]);
-  h.now += 3 * 60_000;
-  await h.pass();
-  assert.equal(h.published.length, 0, "no alert for my own push");
-  assert.deepEqual(h.invalidated, ["/r1"], "but the panel still refreshes (behind count)");
-  assert.equal(h.broadcasts.length, 1);
-  // Mixed push: only the teammate's commit counts.
-  world.push("/r1/.git", "refs/remotes/origin/main", [
-    { sha: "j3", an: "Jorge", ae: ME, s: "mine" },
-    { sha: "e1", an: "Etienne", ae: "etienne@codara.test", s: "theirs" },
-  ]);
-  h.now += 3 * 60_000;
-  await h.pass();
-  assert.equal(h.published.length, 1);
-  assert.equal(h.published[0].body, "1 commit to main — theirs");
+  assert.equal(h.published.length, 0);
+  assert.deepEqual(h.broadcasts, [["/r1"], ["/r1"]], "each real change refreshes again");
   mod.stopGitAutoFetch();
 });
 
@@ -463,10 +409,8 @@ test("worktrees sharing one common dir → one fetch; click targets the workspac
   h.now += 3 * 60_000;
   await h.pass();
   assert.equal(h.fetchCalls().length, 2);
-  assert.equal(h.published.length, 1);
-  assert.equal(h.published[0].target.workspaceId, "wt", "routes to the worktree checked out on feat/x");
-  assert.equal(h.published[0].title, "Etienne pushed to codara-studio", "named after the primary workspace");
-  assert.deepEqual(h.invalidated, ["/r1", "/wt/feat"]);
+  assert.equal(h.published.length, 0);
+  assert.deepEqual(h.invalidated, ["/r1", "/wt/feat"], "every workspace of the repo refreshes");
   mod.stopGitAutoFetch();
 });
 
@@ -566,7 +510,7 @@ test("in-flight user op skips the repo; offline skips the pass; disabled pref st
   mod.stopGitAutoFetch();
 });
 
-test("idle machine stretches the interval ×5; notifyTeammatePushes=false still refreshes but stays quiet", async ({ mod }) => {
+test("idle machine stretches the interval ×5", async ({ mod }) => {
   const world = makeWorld();
   world.addRepo("/r1/.git");
   world.bind("/r1", "/r1/.git");
@@ -575,7 +519,6 @@ test("idle machine stretches the interval ×5; notifyTeammatePushes=false still 
   await h.pass();
   assert.equal(mod.getGitAutoFetchSnapshot()[0].nextDueAt, h.now + 15 * 60_000);
   h.idleSeconds = 0;
-  h.prefs.notifyTeammatePushes = false;
   world.push("/r1/.git", "refs/remotes/origin/main", [
     { sha: "e1", an: "Etienne", ae: "etienne@codara.test", s: "quiet" },
   ]);
@@ -655,28 +598,6 @@ test("repo with no remote or two non-origin remotes is skipped; scheduler timer 
   mod.nudgeGitAutoFetch("resume");
   assert.equal(mod.getGitAutoFetchSnapshot()[0].nextDueAt, h.now + mod.GIT_AUTO_FETCH_NUDGE_DELAY_MS);
   assert.equal(h.timers[h.timers.length - 1].ms, mod.GIT_AUTO_FETCH_MIN_TICK_MS);
-  mod.stopGitAutoFetch();
-});
-
-test("new branch on a repo with many refs uses the default branch as the negative ref (no argv blowup)", async ({ mod }) => {
-  const world = makeWorld();
-  const refs = [["refs/remotes/origin/HEAD", "m1"], ["refs/remotes/origin/main", "m1"]];
-  for (let i = 0; i < 300; i++) refs.push([`refs/remotes/origin/old/${i}`, "m1"]);
-  world.addRepo("/r1/.git", { refs });
-  world.bind("/r1", "/r1/.git");
-  const h = await makeHarness(mod, { workspaces: [ws("w1", "/r1")], world });
-  h.advancePastBoot();
-  await h.pass();
-  world.push("/r1/.git", "refs/remotes/origin/feat/new", [
-    { sha: "e1", an: "Etienne", ae: "etienne@codara.test", s: "brand new branch" },
-  ], { parentSha: "m1" });
-  h.now += 3 * 60_000;
-  await h.pass();
-  assert.equal(h.published.length, 1);
-  const log = world.calls.find((c) => c.args.includes("log"));
-  assert.ok(log.args.includes("^refs/remotes/origin/HEAD"));
-  assert.ok(log.args.length < 20, "a handful of args, not 300 negatives");
-  assert.equal(h.published[0].body, "1 commit to feat/new — brand new branch");
   mod.stopGitAutoFetch();
 });
 

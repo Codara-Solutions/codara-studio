@@ -99,7 +99,7 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   // from a phantom chime after the fact.
   logMain(
     "notify",
-    `channels id=${event.id} focused=${appFocused} toast=${channels.inApp && !!win && appFocused} native=${channels.native && (!appFocused || !channels.inApp)} sound=${channels.sound && !!win} osCues=${channels.osCues}`,
+    `channels id=${event.id} focused=${appFocused} toast=${channels.inApp && !!win && appFocused} native=${channels.native && (!appFocused || !channels.inApp)} sound=${channels.sound && !!win && !event.silent} osCues=${channels.osCues}`,
   );
 
   // In-app toast: only when the window is focused, so it can actually be seen.
@@ -129,7 +129,9 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
     }
   }
 
-  if (channels.sound && win) {
+  // event.silent suppresses only the chime — informational alerts still get
+  // their toast, bell entry and OS cue.
+  if (channels.sound && win && !event.silent) {
     try {
       win.webContents.send("notification:sound", { kind: event.soundKind });
     } catch (err) {

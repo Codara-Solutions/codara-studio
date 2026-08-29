@@ -328,12 +328,13 @@ function attach(w: PaneWatcher): void {
     // exit. The notifier owns off-screen attention: if a live manual agent's
     // terminal process dies non-zero, tell the user instead of silently
     // removing the watcher.
-    if (!w.excluded && !w.disposing && w.runtime && info.exitCode !== 0) {
-      deliver(
-        w,
-        "failed",
-        `${runtimeLabel(w.runtime)} terminal exited with code ${info.exitCode}.`,
-      );
+    // Only a real non-zero exit STATUS is a crash worth alerting on. A missing
+    // code (pty killed on teardown, host suspend, signal death) produced
+    // "exited with code undefined" alerts that told the user nothing; the
+    // renderer's own pty:exit handler still paints the red chip either way.
+    const exitCode = typeof info.exitCode === "number" ? info.exitCode : null;
+    if (!w.excluded && !w.disposing && w.runtime && exitCode !== null && exitCode !== 0) {
+      deliver(w, "failed", `${runtimeLabel(w.runtime)} terminal exited with code ${exitCode}.`);
     }
     if (w.disposing) {
       removeWatcher(w.paneId);
@@ -504,18 +505,56 @@ const ALT_SCREEN_LEAVE = "\x1b[?1049l";
 // generic working→idle heuristic. Keep these deliberately narrow: agent
 // transcripts regularly contain words such as "error" and "authentication"
 // in ordinary prose, so only recognizable CLI failure/login copy qualifies.
-const CREDENTIAL_PROBLEM_RE = /(?:not\s*(?:logged|signed)\s*in|authentication\s*(?:is\s*)?(?:required|failed)|oauth\s*(?:token\s*)?(?:expired|invalid)|unauthorized\s*(?:request|account)?|invalid\s*(?:api\s*)?key)/i;
-const HARD_FAILURE_RE = /(?:you(?:'|’)ve\s*hit\s*your\s*(?:usage|rate)\s*limit|(?:usage|rate)\s*limit\s*(?:reached|exceeded|exhausted)|(?:credit|quota)\s*(?:is\s*)?(?:exhausted|exceeded)|(?:request|connection)\s*failed\s*after\s*\d+\s*retr(?:y|ies)|(?:fatal|unrecoverable)\s*error)/i;
+// These two tables used to be substring scans over the whole decoded stream,
+// which meant the agent WRITING code about authentication alerted the user
+// about authentication: `throw new Error("Unauthorized")`, a regex literal
+// containing "Authentication failed", or `console.log("fatal error")` each
+// fired a "needs you" (live-measured 2026-08-29: 45 of 195 delivered alerts in
+// 32h were this one false positive). The stream carries the agent's file
+// reads, diffs and tool output, so a substring test can never distinguish the
+// CLI's own status banner from the text it is editing.
+//
+// The fix is shape, not vocabulary: a banner OWNS its line. Each candidate
+// line is normalized (TUI glyphs and box drawing stripped), rejected if it
+// carries code punctuation, and then matched ANCHORED at the start. Bare
+// "unauthorized" and the generic "fatal error" are gone entirely — the former
+// is a stock HTTP status string and the latter is what every compiler prints.
+const CREDENTIAL_LINE_RE =
+  /^(?:not\s+(?:logged|signed)\s+in|authentication\s+(?:is\s+)?(?:required|failed)|oauth\s+token\s+(?:expired|invalid)|unauthorized\s+(?:request|account)|invalid\s+api\s+key)\b/i;
+const HARD_FAILURE_LINE_RE =
+  /^(?:you(?:'|’)ve\s+hit\s+your\s+(?:usage|rate)\s+limit|(?:usage|rate)\s+limit\s+(?:reached|exceeded|exhausted)|credit\s+balance\s+(?:is\s+)?too\s+low|(?:credit|quota)\s+(?:balance\s+)?(?:is\s+)?(?:exhausted|exceeded)|(?:request|connection)\s+failed\s+after\s+\d+\s+retr(?:y|ies))\b/i;
 
-function regexEndsPast(re: RegExp, text: string, freshFrom: number): boolean {
-  const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
-  const global = new RegExp(re.source, flags);
-  let match: RegExpExecArray | null;
-  while ((match = global.exec(text))) {
-    if (match.index + match[0].length > freshFrom) return true;
-    if (match[0].length === 0) global.lastIndex += 1;
-  }
-  return false;
+// Leading TUI decoration a banner can carry: Ink bullets, box drawing, list
+// markers, quote bars.
+const LINE_DECORATION_RE = /^[\s>│┃|*•●○◆◇⏺⎿└├─┌┐┘╭╮╰╯═║✗✘×✖!⚠]+/u;
+// Punctuation that effectively never appears in a CLI status banner but is
+// everywhere in source code, diffs and log lines. One hit disqualifies the
+// line, which is what keeps the agent's own edits from alerting the user.
+// The apostrophe is deliberately NOT here — real copy says "You've hit your
+// usage limit" — and quoted code that uses it ("throw new Error('…')") is
+// already disqualified by its brackets and semicolon.
+const CODE_PUNCTUATION_RE = /[{}();=<>[\]"`\\]|\/\/|\/\*|::|=>/;
+// A banner is a sentence, not a paragraph or a minified blob.
+const MAX_BANNER_LINE_LENGTH = 160;
+
+// Normalize one stream line to the text a human would read as the message,
+// or null when the line cannot be a banner at all.
+function bannerLine(rawLine: string): string | null {
+  const line = rawLine.replace(LINE_DECORATION_RE, "").trim();
+  if (!line || line.length > MAX_BANNER_LINE_LENGTH) return null;
+  if (CODE_PUNCTUATION_RE.test(line)) return null;
+  return line;
+}
+
+// One stream line → the problem it announces, if any. Exported so the false-
+// alarm corpus in scripts/test-terminal-agent-notify.cjs tests the SHIPPING
+// patterns rather than a copy of them.
+export function classifyBannerLine(rawLine: string): "blocked" | "failed" | null {
+  const line = bannerLine(rawLine);
+  if (!line) return null;
+  if (CREDENTIAL_LINE_RE.test(line)) return "blocked";
+  if (HARD_FAILURE_LINE_RE.test(line)) return "failed";
+  return null;
 }
 
 // `plain` is the ALREADY-STRIPPED carry+chunk text (onChunk strips once and
@@ -524,17 +563,24 @@ function detectTerminalProblem(
   plain: string,
   freshFrom: number,
 ): { kind: "blocked" | "failed"; body: string } | null {
-  if (regexEndsPast(CREDENTIAL_PROBLEM_RE, plain, freshFrom)) {
-    return {
-      kind: "blocked",
-      body: "Authentication is required before the agent can continue.",
-    };
-  }
-  if (regexEndsPast(HARD_FAILURE_RE, plain, freshFrom)) {
-    return {
-      kind: "failed",
-      body: "The agent stopped because it hit a usage, quota, or unrecoverable service error.",
-    };
+  // Walk the stream line by line, judging only lines that reach into the
+  // freshly arrived bytes (a banner sitting in the carry was already judged on
+  // an earlier chunk). The body quotes the banner verbatim instead of a
+  // generic guess, so the alert is self-evidencing: if a line ever matches
+  // that shouldn't, the notification itself shows what it was.
+  // Segments break on CR as well as LF: TUIs rewrite a row with a bare \r,
+  // so LF-only splitting would run several visual lines together and hide a
+  // banner behind whatever was printed before it.
+  let segmentStart = 0;
+  for (let i = 0; i <= plain.length; i++) {
+    const ch = i < plain.length ? plain[i] : "\n";
+    if (ch !== "\n" && ch !== "\r") continue;
+    // Judge the segment only if it reaches into the freshly arrived bytes.
+    if (i > freshFrom) {
+      const kind = classifyBannerLine(plain.slice(segmentStart, i));
+      if (kind) return { kind, body: bannerLine(plain.slice(segmentStart, i)) as string };
+    }
+    segmentStart = i + 1;
   }
   return null;
 }

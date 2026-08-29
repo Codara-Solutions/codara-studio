@@ -16,19 +16,24 @@ import {
 } from "./git-exec";
 import { invalidateGitCache } from "./git-ops";
 import { createLimiter, workQueueRelevantFingerprint } from "./github-work-queue";
-import { publish, rearm, type PublishInput } from "./notify";
 import { getPreferenceCached } from "./preferences-store";
 import { loadState, onStateSaved } from "./storage";
 
-// Background auto-fetch + "teammate pushed" alerts.
+// Background auto-fetch: keeps every workspace's remote-tracking refs current
+// so ahead/behind, the branch list and the history graph are right without the
+// user pressing Fetch.
 //
 // One `git fetch` per unique repository (worktree workspaces share their
 // parent's .git and are fetched once), on a timer, against the one remote the
 // checked-out branch tracks. Remote refs are snapshotted before/after; when a
-// ref moved, the commits in the new range are attributed and — if anyone
-// other than the local git user authored or committed them — one grouped
-// notification per repository is published through the unified notify
-// pipeline. The Source Control poll is told to refresh at the same time.
+// ref moved, the Source Control panel is told to refresh.
+//
+// This module deliberately raises NO notifications. Attributing a push from
+// local commit metadata means guessing identity from author/committer emails,
+// which misfires on exactly the common case (a squash-merged PR is authored by
+// a users.noreply.github.com address matching nobody's user.email, so the
+// user's own merges looked like a teammate's). github-push-watch.ts owns
+// "someone pushed" alerts and asks GitHub who pushed instead of inferring it.
 //
 // The whole point of this module is to be cheap:
 //   - a chained, unref'd setTimeout to the next due repository — no heartbeat;
@@ -60,12 +65,7 @@ export const GIT_AUTO_FETCH_FIRST_DELAY_MS = 30_000;
 export const GIT_AUTO_FETCH_MIN_TICK_MS = 10_000;
 export const GIT_AUTO_FETCH_MAX_TICK_MS = 300_000;
 export const GIT_AUTO_FETCH_MAX_BACKOFF_MS = 3_600_000;
-export const GIT_AUTO_FETCH_IDENTITY_TTL_MS = 3_600_000;
-export const GIT_AUTO_FETCH_MAX_RANGES_PER_PASS = 10;
 export const GIT_AUTO_FETCH_NUDGE_DELAY_MS = 10_000;
-// rev-list --count is capped one past the display ceiling so "50+" is exact.
-export const GIT_AUTO_FETCH_COUNT_CAP = 51;
-export const GIT_AUTO_FETCH_SAMPLE_COMMITS = 20;
 
 const UNIT = "\x1f";
 
@@ -80,8 +80,6 @@ export interface GitAutoFetchDependencies {
   invalidateGitCache(cwd: string): void;
   loadState(): Promise<AppState>;
   onStateSaved(listener: (state: AppState) => void): () => void;
-  publish(input: PublishInput): void;
-  rearm(sourceKey: string): void;
   getPreference<K extends keyof AppPreferences>(key: K): AppPreferences[K];
   canonicalizePath(p: string): Promise<string>;
   pathExists(p: string): Promise<boolean>;
@@ -107,8 +105,6 @@ function productionDependencies(): GitAutoFetchDependencies {
     invalidateGitCache,
     loadState,
     onStateSaved,
-    publish,
-    rearm,
     getPreference: (key) => getPreferenceCached(key),
     canonicalizePath: (p) => realpath(p),
     pathExists: async (p) => {
@@ -246,94 +242,6 @@ export function diffSnapshots(before: RefSnapshot, after: RefSnapshot): RefChang
   return changes;
 }
 
-// ── Commits ─────────────────────────────────────────────────────────────────
-
-export interface CommitSample {
-  sha: string;
-  authorName: string;
-  authorEmail: string;
-  committerEmail: string;
-  subject: string;
-}
-
-export function parseCommitSample(stdout: string): CommitSample[] {
-  const commits: CommitSample[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    const [sha, authorName, authorEmail, committerEmail, ...rest] = line.split(UNIT);
-    if (!sha) continue;
-    commits.push({
-      sha: sha.trim(),
-      authorName: (authorName ?? "").trim(),
-      authorEmail: (authorEmail ?? "").trim(),
-      committerEmail: (committerEmail ?? "").trim(),
-      subject: rest.join(UNIT).trim(),
-    });
-  }
-  return commits;
-}
-
-// A commit is "mine" if I authored OR committed it: a teammate's commit I
-// rebased/cherry-picked and pushed carries their author email but my
-// committer email, and must not be reported back to me as their push.
-export function filterTeammateCommits(
-  commits: CommitSample[],
-  identity: ReadonlySet<string>,
-): CommitSample[] {
-  if (identity.size === 0) return commits;
-  return commits.filter(
-    (commit) =>
-      !identity.has(commit.authorEmail.toLowerCase()) &&
-      !identity.has(commit.committerEmail.toLowerCase()),
-  );
-}
-
-export interface BranchPush {
-  /** Short branch name without the remote prefix ("feat/x"). */
-  branch: string;
-  /** Teammate commits in the range; > 50 renders as "50+". */
-  count: number;
-  /** Distinct author display names, most recent first. */
-  authors: string[];
-  /** Subject of the most recent teammate commit. */
-  subject: string;
-}
-
-function formatCount(count: number): string {
-  return count > GIT_AUTO_FETCH_COUNT_CAP - 1 ? "50+" : String(count);
-}
-
-function listNames(names: string[]): string {
-  if (names.length === 1) return names[0];
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names.length} teammates`;
-}
-
-export function formatPushNotification(
-  repoName: string,
-  pushes: BranchPush[],
-  extraBranches = 0,
-): { title: string; body: string } {
-  const authors: string[] = [];
-  for (const push of pushes) {
-    for (const author of push.authors) {
-      if (!authors.includes(author)) authors.push(author);
-    }
-  }
-  const title = `${listNames(authors)} pushed to ${repoName}`;
-  const total = pushes.reduce((sum, push) => sum + push.count, 0);
-  const commits = `${formatCount(total)} commit${total === 1 ? "" : "s"}`;
-  if (pushes.length === 1 && extraBranches === 0) {
-    const [push] = pushes;
-    const subject = push.subject ? ` — ${push.subject}` : "";
-    return { title, body: `${commits} to ${push.branch}${subject}` };
-  }
-  const shown = pushes.slice(0, 2).map((push) => push.branch);
-  const more = pushes.length - shown.length + extraBranches;
-  const tail = more > 0 ? ` and ${more} more` : "";
-  return { title, body: `${commits} to ${shown.join(", ")}${tail}` };
-}
-
 // ── Runtime state ───────────────────────────────────────────────────────────
 
 interface RepoEntry {
@@ -348,7 +256,6 @@ interface RepoEntry {
   paused: boolean;
   seeded: boolean;
   lastRefs: RefSnapshot | null;
-  identity: { emails: Set<string>; expiresAt: number } | null;
   lastFetchAt: number;
 }
 
@@ -433,21 +340,6 @@ function resolveRemote(cwd: string): Promise<string | null> {
   return pending;
 }
 
-async function resolveIdentity(repo: RepoEntry): Promise<Set<string>> {
-  const now = deps.now();
-  if (repo.identity && repo.identity.expiresAt > now) return repo.identity.emails;
-  const emails = new Set<string>();
-  for (const args of [
-    ["config", "--get", "user.email"],
-    ["config", "--global", "--get", "user.email"],
-  ]) {
-    const email = (await readText(repo.cwd, args)).toLowerCase();
-    if (email) emails.add(email);
-  }
-  repo.identity = { emails, expiresAt: now + GIT_AUTO_FETCH_IDENTITY_TTL_MS };
-  return emails;
-}
-
 async function snapshotRemoteRefs(cwd: string, remote: string): Promise<RefSnapshot> {
   const { stdout } = await deps.runGit(
     cwd,
@@ -524,7 +416,6 @@ async function rebuildRepoTable(state: AppState): Promise<void> {
       paused: previous?.paused ?? false,
       seeded: previous?.seeded ?? false,
       lastRefs: previous?.lastRefs ?? null,
-      identity: previous?.identity ?? null,
       lastFetchAt: previous?.lastFetchAt ?? 0,
     });
   }
@@ -552,114 +443,6 @@ function queueRebuild(state: AppState): Promise<void> {
 }
 
 // ── One repository, one pass ────────────────────────────────────────────────
-
-async function describeRefChange(
-  cwd: string,
-  change: RefChange,
-  defaultRef: string | null,
-): Promise<{ count: number; sample: CommitSample[] }> {
-  // Changed ref: old..new (also correct after a force-push — the rewritten
-  // commits are exactly what's new). New ref: everything not on the default
-  // branch; never `--not <every old sha>`, which blows the Windows argv limit.
-  const range = change.oldSha
-    ? [`${change.oldSha}..${change.newSha}`]
-    : defaultRef
-      ? [change.newSha, `^${defaultRef}`]
-      : [change.newSha];
-  const countText = await readText(cwd, [
-    "rev-list",
-    "--count",
-    `--max-count=${GIT_AUTO_FETCH_COUNT_CAP}`,
-    ...range,
-  ]);
-  const count = Number.parseInt(countText, 10);
-  const { stdout } = await deps.runGit(
-    cwd,
-    [
-      "log",
-      `--max-count=${GIT_AUTO_FETCH_SAMPLE_COMMITS}`,
-      `--pretty=format:%H${UNIT}%an${UNIT}%ae${UNIT}%ce${UNIT}%s`,
-      ...range,
-    ],
-    { internal: true },
-  );
-  const sample = parseCommitSample(stdout);
-  return { count: Number.isFinite(count) ? count : sample.length, sample };
-}
-
-function shortBranch(ref: string, remote: string): string {
-  const prefix = `refs/remotes/${remote}/`;
-  return ref.startsWith(prefix) ? ref.slice(prefix.length) : ref.replace(/^refs\/remotes\//, "");
-}
-
-function pickDefaultRef(snapshot: RefSnapshot, remote: string): string | null {
-  for (const candidate of [
-    `refs/remotes/${remote}/HEAD`,
-    `refs/remotes/${remote}/main`,
-    `refs/remotes/${remote}/master`,
-  ]) {
-    if (snapshot.has(candidate)) return candidate;
-  }
-  return null;
-}
-
-async function pickTargetWorkspace(repo: RepoEntry, branches: string[]): Promise<Workspace> {
-  if (repo.workspaces.length > 1) {
-    for (const workspace of repo.workspaces) {
-      const current = await readText(workspace.cwd, ["branch", "--show-current"]);
-      if (current && branches.includes(current)) return workspace;
-    }
-  }
-  return primaryWorkspace(repo.workspaces);
-}
-
-async function notifyForChanges(repo: RepoEntry, changes: RefChange[]): Promise<void> {
-  const identity = await resolveIdentity(repo);
-  const defaultRef = pickDefaultRef(repo.lastRefs ?? new Map(), repo.remote);
-  const pushes: BranchPush[] = [];
-  const considered = changes.slice(0, GIT_AUTO_FETCH_MAX_RANGES_PER_PASS);
-  for (const change of considered) {
-    const { count, sample } = await describeRefChange(repo.cwd, change, defaultRef);
-    const teammate = filterTeammateCommits(sample, identity);
-    if (teammate.length === 0) continue;
-    const authors: string[] = [];
-    for (const commit of teammate) {
-      const name = commit.authorName || commit.authorEmail || "Someone";
-      if (!authors.includes(name)) authors.push(name);
-    }
-    pushes.push({
-      branch: shortBranch(change.ref, repo.remote),
-      // The sample covers the whole range when it's short, so the filtered
-      // count is exact; longer ranges report the range size (approximate).
-      count: count <= GIT_AUTO_FETCH_SAMPLE_COMMITS ? teammate.length : count,
-      authors,
-      subject: teammate[0].subject,
-    });
-  }
-  if (pushes.length === 0) return;
-  const extraBranches = changes.length - considered.length;
-  const { title, body } = formatPushNotification(repo.displayName, pushes, extraBranches);
-  const target = await pickTargetWorkspace(
-    repo,
-    pushes.map((push) => push.branch),
-  );
-  const sourceKey = `git:${repo.key}`;
-  // The policy's no-repeat rule would swallow a second push to the same
-  // repository (same kind, same source). We already established that refs
-  // moved, so rearm right before publishing; keeping the sourceKey stable
-  // (rather than embedding the sha) keeps the policy's per-source map bounded
-  // by repository count.
-  deps.rearm(sourceKey);
-  deps.publish({
-    kind: "git.teammate-push",
-    sourceKey,
-    tone: "success",
-    soundKind: "done",
-    title,
-    body,
-    target: { type: "workspace", workspaceId: target.id, panel: "git" },
-  });
-}
 
 async function runRepoPass(repo: RepoEntry, intervalMs: number): Promise<void> {
   const now = deps.now();
@@ -689,8 +472,6 @@ async function runRepoPass(repo: RepoEntry, intervalMs: number): Promise<void> {
     const cwds = repo.workspaces.map((workspace) => workspace.cwd);
     for (const cwd of cwds) deps.invalidateGitCache(cwd);
     deps.broadcastRemoteUpdated(cwds);
-    if (deps.getPreference("notifyTeammatePushes") === false) return;
-    await notifyForChanges(repo, changes);
   } catch (err) {
     const message = errorText(err);
     const failure = classifyFailure(message);

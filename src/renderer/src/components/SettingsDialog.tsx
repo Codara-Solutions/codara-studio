@@ -1503,7 +1503,7 @@ function GeneralSettings({
 
       <SectionTitle
         title="Git"
-        detail="Codara Studio can fetch every local workspace's remote in the background: one fetch per repository (worktrees share it), never pruning, at most two at a time, nothing while you're offline, and far less often while the machine is idle. When a fetch brings in commits by someone other than your git user.email you get one grouped alert per repository — “Etienne pushed 3 commits to feat/x” — and clicking it jumps to that workspace's Source Control graph. Your own pushes from another machine stay quiet."
+        detail="Codara Studio can fetch every local workspace's remote in the background: one fetch per repository (worktrees share it), never pruning, at most two at a time, nothing while you're offline, and far less often while the machine is idle — so ahead/behind and the history graph stay current without pressing Fetch. Separately, it can watch your GitHub repositories for pushes by other people and tell you about them."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
@@ -1546,7 +1546,7 @@ function GeneralSettings({
               </div>
               <ToggleRow
                 title="Notify me when teammates push"
-                desc="One grouped alert per repository per fetch, only for commits whose author or committer isn't your git user.email. Uses the notification channels above; Do Not Disturb still mutes it."
+                desc="Asks GitHub who pushed (via the signed-in gh account), so your own merges never come back as someone else's. One grouped alert per repository, silent by default — a toast and a bell entry, no chime. Needs gh to be signed in; non-GitHub remotes are not watched."
                 checked={preferences.notifyTeammatePushes !== false}
                 onChange={(v) => void setPreference("notifyTeammatePushes", v)}
               />

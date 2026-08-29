@@ -1516,6 +1516,10 @@ export interface NotifyEvent {
   soundKind: NotificationSoundKind;
   target: NavigationTarget;
   createdAt: string;
+  // Informational alerts (a teammate pushed) opt out of the audible channel:
+  // they are worth a toast and a bell entry, but the chime is reserved for
+  // "something is waiting on you". The other channels are unaffected.
+  silent?: boolean;
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.
