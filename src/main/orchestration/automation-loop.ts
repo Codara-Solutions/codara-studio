@@ -258,8 +258,11 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       await finalize(id, "max-iterations");
       return;
     }
+    // budgetUsd <= 0 means "no budget cap": steps-only looms (and Cora
+    // authoring one) naturally write 0 for a $0 pipeline, which must not
+    // read as "already over budget before iteration 1".
     const budget = job.loop.stop.budgetUsd;
-    if (typeof budget === "number" && (job.state.spentUsd ?? 0) >= budget) {
+    if (typeof budget === "number" && budget > 0 && (job.state.spentUsd ?? 0) >= budget) {
       await finalize(id, "budget");
       return;
     }
@@ -1288,8 +1291,9 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
   const fresh = (await getJob(id)) ?? job;
   const stop = fresh.loop.stop;
 
-  // Hard caps re-checked with fresh spend.
-  if (typeof stop.budgetUsd === "number" && spentUsd >= stop.budgetUsd) {
+  // Hard caps re-checked with fresh spend. budgetUsd <= 0 = no cap (see the
+  // matching guard at iteration start).
+  if (typeof stop.budgetUsd === "number" && stop.budgetUsd > 0 && spentUsd >= stop.budgetUsd) {
     await finalize(id, "budget");
     return;
   }
