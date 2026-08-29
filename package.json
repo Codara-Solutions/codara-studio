@@ -67,6 +67,7 @@
     "package:mac": "npm run build && electron-builder --mac",
     "release:mac": "node scripts/release.cjs mac",
     "release:win": "node scripts/release.cjs win",
+    "release:all": "node scripts/release.cjs all",
     "package:linux": "npm run build && electron-builder --linux",
     "postinstall": "node scripts/stamp-dev-electron-icon.cjs && electron-builder install-app-deps && node scripts/brand-pi-oauth-page.cjs",
     "test:usage-windows": "node scripts/test-usage-windows.cjs",
