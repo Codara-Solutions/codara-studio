@@ -192,6 +192,12 @@ function subscribeToReleasePush(): void {
           if (/^event:\s*release$/m.test(frame)) {
             console.log("[auto-updater] release push received — checking");
             void safeCheck();
+          } else if (/^event:\s*git-push$/m.test(frame)) {
+            // A GitHub webhook reached the website: some watched remote just
+            // gained commits. Fetch immediately so git triggers (and the
+            // "teammate pushed" surfaces) react in seconds, not minutes.
+            console.log("[auto-updater] git-push webhook event — nudging fetch");
+            void import("./git-auto-fetch").then((m) => m.nudgeGitAutoFetchNow());
           }
         }
       }

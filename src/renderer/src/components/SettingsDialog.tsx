@@ -1556,7 +1556,70 @@ function GeneralSettings({
       ) : null}
 
       {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+      <GithubWebhookSettings />
     </div>
+  );
+}
+
+// GitHub push webhooks: instant git triggers instead of the 3-minute fetch
+// cadence. The webhook URL (carrying its secret path token) is the user's to
+// paste once — it is remembered locally, never bundled with the app.
+function GithubWebhookSettings() {
+  const [url, setUrl] = useState<string>(() => {
+    try {
+      return window.localStorage.getItem("codara.githubWebhookUrl") ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [copied, setCopied] = useState(false);
+  const save = (value: string): void => {
+    setUrl(value);
+    try {
+      window.localStorage.setItem("codara.githubWebhookUrl", value);
+    } catch {
+      /* storage unavailable: the field still works for this session */
+    }
+  };
+  const copy = (): void => {
+    void window.spark.clipboard
+      .writeText(url.trim())
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => {});
+  };
+  return (
+    <>
+      <SectionTitle
+        title="GitHub push webhooks"
+        detail="Make git triggers fire seconds after a push instead of on the next background fetch. Paste your webhook URL below, then add it to a repository (Settings → Webhooks → Add webhook, content type application/json, just the push event) — the button opens the right page."
+      />
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          className="spark-input spark-mono"
+          value={url}
+          onChange={(e) => save(e.target.value)}
+          placeholder="https://studio.codarasolutions.com/hooks/github/…"
+          style={{ flex: 1, minWidth: 260 }}
+        />
+        <button type="button" className="spark-btn" onClick={copy} disabled={!url.trim()}>
+          {copied ? "Copied ✓" : "Copy URL"}
+        </button>
+        <button
+          type="button"
+          className="spark-btn"
+          onClick={() => {
+            void window.spark.openExternal("https://github.com");
+          }}
+        >
+          Open GitHub
+        </button>
+      </div>
+    </>
   );
 }
 

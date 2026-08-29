@@ -554,6 +554,20 @@ export async function runGitAutoFetchPass(): Promise<void> {
 // Bring every repository's next fetch forward (short jitter, never
 // immediately). "resume" always nudges; "focus" only when the last pass is
 // older than one interval, so ordinary alt-tabbing costs nothing.
+// A push webhook told us the remote moved RIGHT NOW: fetch everything at
+// once (tiny jitter only). The per-repo snapshot diff downstream makes the
+// pass a no-op for repos that didn't move, so firing broadly is cheap and
+// avoids brittle webhook-payload -> local-repo name matching.
+export function nudgeGitAutoFetchNow(): void {
+  if (!started || !enabled()) return;
+  const dueAt = deps.now() + jitter(500);
+  for (const repo of repos.values()) {
+    if (repo.paused) continue;
+    if (repo.nextDueAt > dueAt) repo.nextDueAt = dueAt;
+  }
+  scheduleNextPass();
+}
+
 export function nudgeGitAutoFetch(reason: "resume" | "focus"): void {
   if (!started || !enabled()) return;
   const now = deps.now();
