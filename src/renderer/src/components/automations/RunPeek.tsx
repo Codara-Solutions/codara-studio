@@ -114,7 +114,9 @@ export default function RunPeek({
                   color: m.author === "user" ? "var(--muted)" : "var(--accent-text)",
                 }}
               >
-                {m.author === "user" ? "you" : "spark"}
+                {/* "spark" is the internal author id (legacy codename) — the
+                    user-facing brand for the orchestrator voice is Cora. */}
+                {m.author === "user" ? "you" : "cora"}
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div

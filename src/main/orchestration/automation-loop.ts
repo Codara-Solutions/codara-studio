@@ -420,6 +420,15 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       let entryStepFailed = false;
       let stepOnlySummary = "";
       if (hasInlineEntry) {
+        // Entry steps can run for many minutes (a release build, a long
+        // script). Persist a live "running" state BEFORE executing them so
+        // the hub shows the pass while it happens — previously a steps-only
+        // pass looked idle until it was already finished.
+        await patchJob(id, (j) => ({
+          ...j,
+          lastRunAt: startedAt,
+          state: { ...j.state, status: "running", nextFireAt: undefined },
+        }));
         const res = await resolveInlineNodes(graph, projected, {
           cwd: job.input.cwd,
           vars: passVars,
@@ -441,12 +450,16 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         workerEntries = readyIds
           .map((nid) => graph.nodes.find((n) => n.id === nid))
           .filter((n): n is WorkerDef => n?.kind === "worker");
-        const lastStep = res.steps.length > 0 ? res.steps[res.steps.length - 1] : undefined;
+        // The pass summary reports EVERY executed step (label + note), not
+        // just the last one, so the run peek shows what actually happened.
+        // Bounded so a chatty script cannot flood the transcript.
+        const stepReport = res.steps
+          .map((st) => stepNoteMessage(st))
+          .join("\n\n")
+          .slice(0, 4000);
         stepOnlySummary = failedStep
-          ? stepNoteMessage(failedStep)
-          : lastStep
-            ? stepNoteMessage(lastStep)
-            : "Pass finished: no worker was reachable from the trigger.";
+          ? stepReport || stepNoteMessage(failedStep)
+          : stepReport || "Pass finished: no worker was reachable from the trigger.";
       }
 
       if (workerEntries.length === 0) {
