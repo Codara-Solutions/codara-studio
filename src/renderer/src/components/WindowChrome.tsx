@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import SystemMeters from "./SystemMeters";
+import { CodaraMark } from "./BrandMarks";
 import UsageMeters from "./UsageMeters";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -292,9 +293,15 @@ function WindowChrome({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          gap: 6,
           pointerEvents: "none",
         }}
       >
+        {/* The brand mark follows the workspace accent, so the titlebar
+            quietly says which workspace's colour you are living in. */}
+        <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+          <CodaraMark size={11} />
+        </span>
         <span
           style={{
             color: "var(--muted)",
