@@ -16838,9 +16838,27 @@ function recomputeRunCostRollups(run: RunState): void {
     // the attempt somehow lacks one.
     const runtime = attempt.runtime ?? owningTask?.runtimePreference;
     if (!runtime) continue;
+    // Subscription-account attempts report REAL token counts but no billed
+    // cost (the plan absorbs it). Price those actual tokens at the table's
+    // list rate so the estimate is the usage's real value, not a guess; the
+    // hardcoded token guesses remain only for attempts with no usage at all
+    // (interactive pty CLIs, legacy runs).
+    const measuredTokens =
+      (attempt.inputTokens ?? 0) + (attempt.outputTokens ?? 0) + (attempt.cacheReadTokens ?? 0);
     runWorkerTotal += estimateWorkerCostUsd({
       runtime,
       modelHint: owningTask?.modelHint,
+      usage:
+        measuredTokens > 0
+          ? {
+              // The estimator expects OpenAI-shape usage where the prompt count
+              // INCLUDES cached tokens (it subtracts cache reads back out);
+              // attempt counters store them separately, so recombine here.
+              input_tokens: (attempt.inputTokens ?? 0) + (attempt.cacheReadTokens ?? 0),
+              output_tokens: attempt.outputTokens ?? 0,
+              cache_read_input_tokens: attempt.cacheReadTokens ?? 0,
+            }
+          : undefined,
       estimatedInputTokens,
       estimatedOutputTokens,
     });

@@ -75,7 +75,17 @@ export default function RunPeek({
           {run?.title ?? (missing ? "Run no longer on disk" : "Loading…")}
         </span>
         {run && (
-          <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted)" }}>
+          <span
+            className="spark-mono spark-num"
+            style={{ fontSize: 10, color: "var(--muted)" }}
+            title={
+              (run.estimatedWorkerCostUsd ?? 0) > 0
+                ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
+                  fmtUsd((run.totalCostUsd ?? 0) + (run.measuredWorkerCostUsd ?? 0))
+                : "Billed spend"
+            }
+          >
+            {(run.estimatedWorkerCostUsd ?? 0) > 0 ? "est. " : ""}
             {fmtUsd(
               (run.totalCostUsd ?? 0) +
                 (run.measuredWorkerCostUsd ?? 0) +

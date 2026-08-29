@@ -1753,7 +1753,17 @@ function HistoryTimeline({
                 <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={rec.summary}>
                   {rec.summary || rec.status}
                 </span>
-                <span className="spark-mono spark-num" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
+                <span
+                  className="spark-mono spark-num"
+                  style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}
+                  title={
+                    (rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0)
+                      ? "Includes estimated value of subscription usage priced at public list rates; billed spend: " +
+                        fmtUsd(rec.measuredCostUsd ?? 0)
+                      : "Billed spend"
+                  }
+                >
+                  {(rec.costUsd ?? 0) > (rec.measuredCostUsd ?? 0) ? "est. " : ""}
                   {fmtUsd(rec.costUsd)}
                 </span>
                 <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>

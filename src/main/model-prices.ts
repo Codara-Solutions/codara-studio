@@ -44,7 +44,10 @@ export interface ModelPrice {
 }
 
 // Keyed on `provider/model` slugs (the vendor-prefixed form every runtime in
-// Codara can be normalized to). Snapshotted 2026-07 against vendor list prices
+// Codara can be normalized to). Anthropic rows refreshed 2026-08 against the
+// vendor list prices (Opus 5 tier 5/25, Sonnet 5 2/10, Fable 5 10/50; cache
+// reads 0.1x input, 5-minute cache writes 1.25x input); other vendors
+// snapshotted 2026-07
 // — update when a vendor changes prices or Codara starts using a new model.
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
@@ -52,15 +55,15 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   // rate; refresh from the vendor if that changes.
   // cacheWrite is the 5-minute prompt-cache write rate: 1.25x input across the
   // Anthropic family (cross-checked against the openrouter listings).
-  "anthropic/claude-opus-5": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
   // Retained so historical runs on the older id still price instead of
   // silently costing zero.
-  "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+  "anthropic/claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
   "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
-  "anthropic/claude-fable-5": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+  "anthropic/claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
   "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-  "anthropic/claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+  "anthropic/claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
   "anthropic/claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
