@@ -6,13 +6,16 @@ import {
   type GitHubMergeStrategy,
   type GitHubPullRequestSummary,
   type GitHubPublishResult,
+  type GitHubShareDraft,
+  type GitHubShareResult,
   type GitHubWorkQueueItem,
   type GitHubWorkspaceStatus,
+  isValidShareBranchName,
 } from "@shared/github";
 import type { GitStatus } from "@shared/types";
 import { ChevronIcon } from "../icons";
 import GitHubWorkQueue from "./GitHubWorkQueue";
-import { RefreshIcon, Spinner } from "./git-ui";
+import { RefreshIcon, SparkleIcon, Spinner } from "./git-ui";
 
 interface Props {
   cwd: string;
@@ -30,6 +33,12 @@ interface Props {
   /** The block's one refresh affordance — re-reads status and queue. */
   onRefresh: () => void;
   onPublished: () => void;
+  /**
+   * The local sync + commit composer, rendered INSIDE this section's body so
+   * everything Git lives under the one GITHUB header. Provided by GitPanel
+   * (which owns all the composer state); null when the repo is not ready.
+   */
+  composer?: React.ReactNode;
 }
 
 interface Snapshot {
@@ -54,12 +63,13 @@ export default function GitHubSection({
   queue,
   onRefresh,
   onPublished,
+  composer,
 }: Props): React.ReactElement {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(false);
-  // Collapsed until asked for: the block is a secondary read of a remote, and
-  // Source Control's own status is what the panel is opened for.
-  const [collapsed, setCollapsed] = useState(true);
+  // Expanded by default: the section now hosts the commit composer (the
+  // panel's primary workflow), not just the secondary GitHub reads.
+  const [collapsed, setCollapsed] = useState(false);
   const [headerHover, setHeaderHover] = useState(false);
   const [refreshHover, setRefreshHover] = useState(false);
   // Background/initial reads are intentionally invisible in the header. Only
@@ -93,9 +103,11 @@ export default function GitHubSection({
     [],
   );
 
-  // A new workspace context starts the block fresh — back to collapsed.
+  // A new workspace context starts the block fresh — open, since the section
+  // hosts the commit composer (the panel's primary workflow), with any
+  // stale per-workspace state dropped.
   useEffect(() => {
-    setCollapsed(true);
+    setCollapsed(false);
     setQueueMerge(null);
     setQueueSummary({ loading: false, total: null });
   }, [cwd]);
@@ -149,11 +161,11 @@ export default function GitHubSection({
     [cwd],
   );
 
-  // A new workspace or branch has no snapshot yet, so that read is loud. It
-  // waits for the block to be opened: each read is a `gh` subprocess tree, and
-  // the block now starts collapsed, so an eager read would spend that on a
-  // section nobody has asked to see. Expanding re-runs this effect, which is
-  // also what picks up a branch that moved while the block was closed.
+  // A new workspace or branch has no snapshot yet, so that read is loud. The
+  // block starts open, so this normally fires right away; if the user has
+  // collapsed it, the read waits (each one is a `gh` subprocess tree) until
+  // the section is expanded again — which is also what picks up a branch that
+  // moved while the block was closed.
   useEffect(() => {
     if (collapsed) return;
     loadStatus(false);
@@ -295,6 +307,19 @@ export default function GitHubSection({
     ? `${ready.repository.url.replace(/\/+$/, "")}/issues`
     : null;
 
+  // ── Two rooms (V2b): "Save" (local: sync, message, commit, split) and
+  // "Review" (the journey timeline + everything on GitHub). The room bar is
+  // the mental model: first save your work, then walk it through review.
+  // Auto-pick: a PR or queue item pulls the user to Review when the working
+  // tree is clean; otherwise Save. A manual click wins until the workspace
+  // changes.
+  const [room, setRoom] = useState<"save" | "review" | null>(null);
+  useEffect(() => setRoom(null), [cwd]);
+  const dirtyCount = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length : 0;
+  const reviewCount = count ?? 0;
+  const activeRoom: "save" | "review" =
+    room ?? (dirtyCount === 0 && (ready?.pullRequest || reviewCount > 0) ? "review" : "save");
+
   return (
     <section
       aria-label="GitHub"
@@ -424,12 +449,72 @@ export default function GitHubSection({
           padding: "8px 10px 10px",
         }}
       >
+        {/* Room bar — the section's mental model: save work, then review it.
+            Counts pull the eye to the room that has something waiting. */}
+        <div
+          role="tablist"
+          aria-label="GitHub rooms"
+          style={{
+            display: "flex",
+            gap: 2,
+            padding: 3,
+            borderRadius: 8,
+            border: "1px solid var(--rule-soft)",
+            background: "var(--bg)",
+          }}
+        >
+          <RoomTab
+            label="Save"
+            title="Save your work locally — sync, commit, split"
+            active={activeRoom === "save"}
+            count={dirtyCount}
+            onClick={() => setRoom("save")}
+          />
+          <RoomTab
+            label="Review"
+            title="Walk your work through review on GitHub"
+            active={activeRoom === "review"}
+            count={reviewCount}
+            onClick={() => setRoom("review")}
+          />
+        </div>
+
+        {/* ── Save room: local git. Rendered even while the gh CLI is
+            unavailable, because local Git needs no GitHub. Hidden (not
+            unmounted) so composer draft state survives room switches. */}
+        <div
+          style={{
+            display: activeRoom === "save" ? "flex" : "none",
+            flexDirection: "column",
+            gap: 7,
+          }}
+        >
+          {composer}
+        </div>
+
+        {/* ── Review room: the journey timeline + GitHub state. */}
+        <div
+          style={{
+            display: activeRoom === "review" ? "flex" : "none",
+            flexDirection: "column",
+            gap: 7,
+          }}
+        >
         {!status ? (
           <MutedText>Checking GitHub…</MutedText>
         ) : status.kind !== "ready" ? (
           <Guidance status={status} />
         ) : (
           <>
+            <JourneyTimeline
+              gitStatus={gitStatus}
+              pullRequest={status.pullRequest ?? null}
+              blockReason={blockReason}
+              onShare={() => {
+                setPublishResult(null);
+                setPublishOpen(true);
+              }}
+            />
             {status.pullRequest ? (
               <PullRequestView
                 status={status}
@@ -441,35 +526,34 @@ export default function GitHubSection({
                   setMergeOpen(true);
                 }}
               />
-            ) : (
-              <>
-                <div style={{ fontSize: 11, lineHeight: 1.45, color: "var(--ink-dim)" }}>
-                  {nothingOpen ? (
-                    "No open issues or pull requests for this repository."
-                  ) : (
-                    <>
-                      No pull request for{" "}
-                      <span style={{ fontFamily: "var(--font-mono)", color: "var(--ink)" }}>
-                        {currentBranch ?? "this branch"}
-                      </span>{" "}
-                      yet.
-                    </>
-                  )}
-                </div>
-                {blockReason === null ? (
-                  <ActionButton
-                    label="Publish as PR"
-                    title="Review, commit any working changes, push this branch, and create its GitHub pull request"
-                    onClick={() => {
-                      setPublishResult(null);
-                      setPublishOpen(true);
-                    }}
-                  />
-                ) : (
-                  <MutedText>{blockReason}</MutedText>
-                )}
-              </>
-            )}
+            ) : nothingOpen && dirtyCount === 0 && gitStatus?.ahead === 0 ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "7px 9px",
+                  borderRadius: 7,
+                  border: "1px dashed var(--rule)",
+                  color: "var(--muted)",
+                  fontSize: 10.5,
+                  lineHeight: 1.4,
+                }}
+              >
+                <span
+                  aria-hidden
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 999,
+                    background: "var(--ok)",
+                    opacity: 0.7,
+                    flex: "0 0 auto",
+                  }}
+                />
+                All clear — no open pull requests or issues.
+              </div>
+            ) : null}
             {queue ? (
               <GitHubWorkQueue
                 key={queue.sourceWorkspaceId}
@@ -506,9 +590,10 @@ export default function GitHubSection({
             </div>
           </>
         )}
+        </div>
       </div>
       {publishOpen && status?.kind === "ready" ? (
-        <PublishPullRequestDialog
+        <ShareForReviewDialog
           cwd={cwd}
           gitStatus={gitStatus}
           repository={status.repository}
@@ -563,23 +648,36 @@ function publishBlockReason(
   status: GitStatus,
   defaultBranch: string | undefined,
 ): string | null {
-  if (status.detached) return "Check out a topic branch before publishing a pull request.";
+  if (status.detached) return "Check out a branch before sharing your work.";
   if (!status.branch || !defaultBranch) {
-    return "A default and current branch are required before publishing a pull request.";
+    return "A default and current branch are required before sharing your work.";
   }
-  if (status.branch === defaultBranch) {
-    return "Create or switch to a topic branch before publishing a pull request.";
-  }
-  if (status.hasConflicts) return "Resolve merge conflicts before publishing this branch.";
+  if (status.hasConflicts) return "Resolve the merge conflicts before sharing this work.";
   if (status.behind > 0) {
     return status.ahead > 0
-      ? "This branch has diverged from its upstream. Pull or merge before publishing."
-      : "Pull the upstream changes before publishing this branch.";
+      ? "This branch has diverged from its upstream. Pull or merge before sharing."
+      : "Pull the latest changes before sharing this work.";
+  }
+  // Sharing from the default branch is fine now — the share flow creates a
+  // topic branch on the way — but only when there is actually work to share.
+  if (
+    status.branch === defaultBranch &&
+    status.staged.length + status.unstaged.length === 0 &&
+    status.ahead === 0
+  ) {
+    return "No new work to share yet — everything is already on GitHub.";
   }
   return null;
 }
 
-function PublishPullRequestDialog({
+// The one-button "Share for review" flow. Opens on an AI-drafted proposal
+// (branch, title, commit message, description) generated from the actual diff
+// by the user's commit-message model; the user reviews plain-language fields
+// and confirms. Behind the confirm, the reviewed host transaction creates the
+// topic branch when needed, commits, pushes, and opens the PR. Technical
+// detail (branch name, draft toggle) lives in a collapsed "Details"
+// disclosure so the default surface stays approachable.
+function ShareForReviewDialog({
   cwd,
   gitStatus,
   repository,
@@ -597,15 +695,47 @@ function PublishPullRequestDialog({
   onPublished: () => void;
 }): React.ReactElement {
   const dirty = gitStatus.staged.length + gitStatus.unstaged.length;
-  const [title, setTitle] = useState(() => pullRequestTitle(gitStatus.branch));
+  const onDefaultBranch = gitStatus.branch === repository.defaultBranch;
+  const [drafting, setDrafting] = useState(true);
+  const [draftSource, setDraftSource] = useState<GitHubShareDraft["source"] | null>(null);
+  const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [commitMessage, setCommitMessage] = useState(() => pullRequestTitle(gitStatus.branch));
+  const [commitMessage, setCommitMessage] = useState("");
+  const [branch, setBranch] = useState("");
   const [draft, setDraft] = useState(true);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
 
+  // Ask the backend for the AI proposal once, on open. A failure silently
+  // falls back to deterministic drafts server-side, so this never errors the
+  // dialog — the fields just fill in.
   useEffect(() => {
-    titleRef.current?.focus();
+    let cancelled = false;
+    window.spark.github
+      .shareDraft(cwd)
+      .then((proposal) => {
+        if (cancelled) return;
+        setTitle((current) => current || proposal.title);
+        setCommitMessage((current) => current || proposal.commitMessage);
+        setBody((current) => current || proposal.description);
+        setBranch((current) => current || proposal.branch);
+        setDraftSource(proposal.source);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDraftSource("fallback");
+        setBranch((current) => current || `share/changes-${Date.now().toString(36)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setDrafting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !submitting) onClose();
     };
@@ -613,16 +743,30 @@ function PublishPullRequestDialog({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, submitting]);
 
+  // Focus the title once drafting lands so review starts at the top field.
+  useEffect(() => {
+    if (!drafting) titleRef.current?.focus();
+  }, [drafting]);
+
+  const branchInvalid = onDefaultBranch && !isValidShareBranchName(branch.trim());
+  const blocked =
+    submitting ||
+    drafting ||
+    !title.trim() ||
+    (dirty > 0 && !commitMessage.trim()) ||
+    branchInvalid;
+
   const submit = async () => {
-    if (submitting || !title.trim() || (dirty > 0 && !commitMessage.trim())) return;
+    if (blocked) return;
     setSubmitting(true);
     onResult(null);
     try {
-      const result = await window.spark.github.publish(cwd, {
+      const result: GitHubShareResult = await window.spark.github.share(cwd, {
         title: title.trim(),
         body,
         draft,
         ...(dirty > 0 ? { commitMessage: commitMessage.trim() } : {}),
+        ...(onDefaultBranch ? { branch: branch.trim() } : {}),
       });
       onResult(result);
       if (result.ok) onPublished();
@@ -662,9 +806,9 @@ function PublishPullRequestDialog({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Publish branch as a GitHub pull request"
+        aria-label="Share your work for review on GitHub"
         style={{
-          width: "min(560px, calc(100vw - 48px))",
+          width: "min(600px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           padding: 18,
@@ -677,72 +821,175 @@ function PublishPullRequestDialog({
         }}
       >
         <div>
-          <div style={{ color: "var(--ink)", fontSize: 14, fontWeight: 700 }}>
-            Publish this worktree
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              color: "var(--ink)",
+              fontSize: 14,
+              fontWeight: 700,
+            }}
+          >
+            Share for review
+            {drafting ? (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  color: "var(--accent-text)",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                }}
+              >
+                <Spinner size={10} /> Drafting from your changes…
+              </span>
+            ) : draftSource === "ai" ? (
+              <span
+                title="Pre-filled by your commit-message model from the actual diff"
+                style={{
+                  padding: "2px 7px",
+                  borderRadius: 999,
+                  border: "1px solid color-mix(in oklch, var(--accent) 35%, transparent)",
+                  background: "color-mix(in oklab, var(--accent) 10%, transparent)",
+                  color: "var(--accent-text)",
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                }}
+              >
+                AI draft
+              </span>
+            ) : null}
           </div>
           <div style={{ marginTop: 4, color: "var(--muted)", fontSize: 11.5, lineHeight: 1.5 }}>
             {dirty > 0
-              ? `Commit all ${dirty} changed ${dirty === 1 ? "file" : "files"}, then push `
-              : "Push "}
-            <code style={{ color: "var(--ink-dim)" }}>{gitStatus.branch}</code> and create a{" "}
-            {draft ? "draft " : ""}pull request into{" "}
+              ? `Save all ${dirty} changed ${dirty === 1 ? "file" : "files"} and send`
+              : "Send"}{" "}
+            your work to GitHub as a {draft ? "draft " : ""}pull request so it can be reviewed
+            before it joins{" "}
             <code style={{ color: "var(--ink-dim)" }}>
-              {repository.defaultBranch ?? "the default branch"}
+              {repository.defaultBranch ?? "the main branch"}
             </code>
-            .
+            . Nothing changes on{" "}
+            <code style={{ color: "var(--ink-dim)" }}>
+              {repository.defaultBranch ?? "main"}
+            </code>{" "}
+            until the review is approved.
           </div>
         </div>
 
-        <PublishField label="Pull request title">
+        <PublishField label="What is this change?">
           <input
             ref={titleRef}
             value={title}
             maxLength={256}
             disabled={submitting}
+            placeholder={drafting ? "Drafting…" : "A one-line summary"}
             onChange={(event) => setTitle(event.target.value)}
             style={publishInputStyle}
           />
         </PublishField>
-        {dirty > 0 ? (
-          <PublishField label={`Commit message · ${dirty} changed ${dirty === 1 ? "file" : "files"}`}>
-            <input
-              value={commitMessage}
-              maxLength={512}
-              disabled={submitting}
-              onChange={(event) => setCommitMessage(event.target.value)}
-              style={publishInputStyle}
-            />
-          </PublishField>
-        ) : null}
-        <PublishField label="Description">
+        <PublishField label="Tell reviewers more (optional)">
           <textarea
             value={body}
             maxLength={32_768}
             rows={7}
             disabled={submitting}
-            placeholder="What changed, and how was it verified?"
+            placeholder={drafting ? "Drafting…" : "What changed, and why?"}
             onChange={(event) => setBody(event.target.value)}
             style={{ ...publishInputStyle, resize: "vertical", minHeight: 112 }}
           />
         </PublishField>
 
-        <label
+        <button
+          type="button"
+          aria-expanded={detailsOpen}
+          onClick={() => setDetailsOpen((value) => !value)}
           style={{
+            appearance: "none",
+            border: "none",
+            background: "transparent",
+            padding: 0,
             display: "flex",
             alignItems: "center",
-            gap: 8,
-            color: "var(--ink-dim)",
-            fontSize: 11.5,
+            gap: 5,
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+            cursor: "default",
           }}
         >
-          <input
-            type="checkbox"
-            checked={draft}
-            disabled={submitting}
-            onChange={(event) => setDraft(event.target.checked)}
-          />
-          Create as draft
-        </label>
+          <ChevronIcon open={detailsOpen} />
+          Details
+        </button>
+        {detailsOpen ? (
+          <div style={{ display: "grid", gap: 13 }}>
+            {dirty > 0 ? (
+              <PublishField
+                label={`Save note (commit message) · ${dirty} changed ${dirty === 1 ? "file" : "files"}`}
+              >
+                <textarea
+                  value={commitMessage}
+                  maxLength={4096}
+                  rows={3}
+                  disabled={submitting}
+                  onChange={(event) => setCommitMessage(event.target.value)}
+                  style={{ ...publishInputStyle, resize: "vertical", minHeight: 56 }}
+                />
+              </PublishField>
+            ) : null}
+            {onDefaultBranch ? (
+              <PublishField label="New branch for this work">
+                <input
+                  value={branch}
+                  maxLength={120}
+                  disabled={submitting}
+                  onChange={(event) => setBranch(event.target.value)}
+                  style={{
+                    ...publishInputStyle,
+                    fontFamily: "var(--font-mono)",
+                    ...(branchInvalid && branch.trim()
+                      ? { borderColor: "color-mix(in srgb, var(--danger) 55%, transparent)" }
+                      : {}),
+                  }}
+                />
+                {branchInvalid && branch.trim() ? (
+                  <span style={{ color: "var(--danger)", fontSize: 10.5 }}>
+                    Branch names use letters, digits, dashes and at most one slash.
+                  </span>
+                ) : (
+                  <span style={{ color: "var(--muted-2)", fontSize: 10.5 }}>
+                    Your work moves onto this branch so{" "}
+                    {repository.defaultBranch ?? "the main branch"} stays untouched.
+                  </span>
+                )}
+              </PublishField>
+            ) : null}
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                color: "var(--ink-dim)",
+                fontSize: 11.5,
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={draft}
+                disabled={submitting}
+                onChange={(event) => setDraft(event.target.checked)}
+              />
+              Open as a draft (reviewers see it, merging stays off until it is ready)
+            </label>
+          </div>
+        ) : null}
 
         {previousResult && !previousResult.ok ? (
           <div
@@ -761,10 +1008,10 @@ function PublishPullRequestDialog({
             {previousResult.committed || previousResult.pushed ? (
               <div style={{ marginTop: 3, color: "var(--muted)" }}>
                 Completed before the failure:{" "}
-                {[previousResult.committed ? "commit" : "", previousResult.pushed ? "push" : ""]
+                {[previousResult.committed ? "save" : "", previousResult.pushed ? "upload" : ""]
                   .filter(Boolean)
                   .join(", ")}
-                . Retry will reconcile the branch before creating a PR.
+                . Sharing again picks up where it left off.
               </div>
             ) : null}
           </div>
@@ -774,10 +1021,8 @@ function PublishPullRequestDialog({
           <DialogButton label="Cancel" disabled={submitting} onClick={onClose} />
           <DialogButton
             primary
-            label={submitting ? "Publishing…" : draft ? "Publish draft PR" : "Publish PR"}
-            disabled={
-              submitting || !title.trim() || (dirty > 0 && !commitMessage.trim())
-            }
+            label={submitting ? "Sharing…" : "Share for review"}
+            disabled={blocked}
             onClick={() => void submit()}
           />
         </div>
@@ -1042,15 +1287,6 @@ const publishInputStyle: React.CSSProperties = {
   outline: "none",
 };
 
-function pullRequestTitle(branch: string | undefined): string {
-  const leaf = (branch ?? "").split("/").filter(Boolean).pop() ?? "";
-  const words = leaf
-    .replace(/^(issue|feat|feature|fix|chore)[-_]?\d*[-_]?/i, "")
-    .replace(/[-_]+/g, " ")
-    .trim();
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Publish changes";
-}
-
 const linkButtonStyle: React.CSSProperties = {
   appearance: "none",
   padding: 0,
@@ -1237,6 +1473,303 @@ function MutedText({ children }: { children: React.ReactNode }): React.ReactElem
     <div style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted-2)" }}>
       {children}
     </div>
+  );
+}
+
+// THE button of the section: one accent-filled action that runs the whole
+// share ceremony. Deliberately the only filled button in Source Control so
+// the panel keeps a single obvious next step.
+// One tab of the room bar. The count badge only renders when something is
+// actually waiting in that room.
+function RoomTab({
+  label,
+  title,
+  active,
+  count,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  active: boolean;
+  count: number;
+  onClick: () => void;
+}): React.ReactElement {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        flex: 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        height: 24,
+        border: "none",
+        borderRadius: 6,
+        cursor: "default",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 700,
+        background: active
+          ? "color-mix(in oklab, var(--panel-raised, var(--panel)) 88%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        color: active ? "var(--ink)" : "var(--muted)",
+        boxShadow: active ? "var(--lift-lo, 0 1px 4px rgba(0,0,0,.25))" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span>{label}</span>
+      {count > 0 ? (
+        <span
+          style={{
+            minWidth: 15,
+            padding: "0 4px",
+            borderRadius: 999,
+            border: "1px solid var(--accent-edge)",
+            background: "var(--accent-soft)",
+            color: "var(--accent-text)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 8.5,
+            fontWeight: 700,
+            fontVariantNumeric: "tabular-nums",
+            lineHeight: "13px",
+            textAlign: "center",
+          }}
+        >
+          {count > 99 ? "99+" : count}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+// The Review room's spine: the journey a change travels, drawn as a vertical
+// timeline anyone can read — Saved → Shared → Checks → Merge. The current
+// stage glows and carries its single action; everything else is context.
+// Non-technical users see WHERE THEY ARE instead of a wall of git nouns.
+function JourneyTimeline({
+  gitStatus,
+  pullRequest,
+  blockReason,
+  onShare,
+}: {
+  gitStatus: GitStatus | null;
+  pullRequest: GitHubPullRequestSummary | null;
+  blockReason: string | null;
+  onShare: () => void;
+}): React.ReactElement {
+  const dirty = gitStatus ? gitStatus.staged.length + gitStatus.unstaged.length : 0;
+  const ahead = gitStatus?.ahead ?? 0;
+
+  type Step = {
+    key: string;
+    state: "done" | "now" | "idle";
+    title: string;
+    detail: string;
+    action?: React.ReactNode;
+  };
+
+  let steps: Step[];
+  if (pullRequest) {
+    const checksDone =
+      pullRequest.checks.total > 0 &&
+      pullRequest.checks.pending === 0 &&
+      pullRequest.checks.failed === 0;
+    const checksFailed = pullRequest.checks.failed > 0;
+    const checksRunning = pullRequest.checks.pending > 0;
+    steps = [
+      {
+        key: "saved",
+        state: dirty > 0 ? "now" : "done",
+        title: dirty > 0 ? "New edits not shared yet" : "Work saved",
+        detail:
+          dirty > 0
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed since sharing — save and push to update the PR`
+            : "everything is committed",
+      },
+      {
+        key: "shared",
+        state: "done",
+        title: `Shared as PR #${pullRequest.number}`,
+        detail: pullRequest.isDraft ? "draft — mark it ready below" : "open for review",
+      },
+      {
+        key: "checks",
+        state: checksRunning ? "now" : checksDone || checksFailed ? "done" : "idle",
+        title: checksFailed
+          ? "Checks found problems"
+          : checksRunning
+            ? "GitHub is testing your changes"
+            : checksDone
+              ? "All checks passed"
+              : "Checks",
+        detail: checkLabel(pullRequest.checks),
+      },
+      {
+        key: "merge",
+        state: checksDone && !pullRequest.isDraft ? "now" : "idle",
+        title: "Merge",
+        detail:
+          checksDone && !pullRequest.isDraft
+            ? "ready — review and merge below"
+            : "after checks pass",
+      },
+    ];
+  } else if (dirty > 0 || ahead > 0) {
+    steps = [
+      {
+        key: "saved",
+        state: dirty > 0 ? "now" : "done",
+        title: dirty > 0 ? "Save your work" : "Work saved",
+        detail:
+          dirty > 0
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed — commit in the Save room`
+            : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
+      },
+      {
+        key: "share",
+        state: dirty === 0 || blockReason === null ? "now" : "idle",
+        title: "Share for review",
+        detail: blockReason ?? "Codara drafts the summary for you",
+        action:
+          blockReason === null ? <ShareButton onClick={onShare} /> : undefined,
+      },
+      { key: "checks", state: "idle", title: "Checks", detail: "GitHub tests your changes" },
+      { key: "merge", state: "idle", title: "Merge", detail: "the work lands in main" },
+    ];
+  } else {
+    // Nothing in flight — the timeline collapses to a single quiet line
+    // instead of parading four empty stages.
+    return (
+      <div style={{ fontSize: 11, lineHeight: 1.45, color: "var(--muted)" }}>
+        Everything is shared. New edits will start the journey again.
+      </div>
+    );
+  }
+
+  return (
+    <div role="list" aria-label="Review journey" style={{ display: "flex", flexDirection: "column" }}>
+      {steps.map((step, index) => {
+        const last = index === steps.length - 1;
+        const numberColor =
+          step.state === "done" ? "var(--ok)" : step.state === "now" ? "var(--accent-text)" : "var(--muted-2)";
+        return (
+          <div key={step.key} role="listitem" style={{ display: "flex", gap: 9, minWidth: 0 }}>
+            {/* rail */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 15, flex: "0 0 15px" }}>
+              <span
+                aria-hidden
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: 999,
+                  flex: "0 0 14px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 8,
+                  fontWeight: 800,
+                  fontFamily: "var(--font-mono)",
+                  color: step.state === "now" ? "var(--bg)" : numberColor,
+                  background: step.state === "now" ? "var(--accent)" : "transparent",
+                  border: `1.5px solid ${step.state === "now" ? "var(--accent)" : step.state === "done" ? "var(--ok)" : "var(--rule)"}`,
+                }}
+              >
+                {step.state === "done" ? "✓" : index + 1}
+              </span>
+              {!last ? (
+                <span
+                  aria-hidden
+                  style={{
+                    width: 1.5,
+                    flex: 1,
+                    minHeight: 8,
+                    background:
+                      step.state === "done"
+                        ? "color-mix(in oklab, var(--ok) 40%, transparent)"
+                        : "var(--rule-soft)",
+                  }}
+                />
+              ) : null}
+            </div>
+            {/* body */}
+            <div style={{ flex: 1, minWidth: 0, paddingBottom: last ? 0 : 9 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 650,
+                  color: step.state === "now" ? "var(--ink)" : step.state === "done" ? "var(--ink-dim)" : "var(--muted)",
+                  lineHeight: 1.35,
+                }}
+              >
+                {step.title}
+              </div>
+              <div style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.4, marginTop: 1 }}>
+                {step.detail}
+              </div>
+              {step.action ? <div style={{ marginTop: 7 }}>{step.action}</div> : null}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ShareButton({ onClick }: { onClick: () => void }): React.ReactElement {
+  const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  return (
+    <button
+      type="button"
+      title="Save your changes, send them to GitHub, and open a pull request for review — Codara drafts the summary for you"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      style={{
+        appearance: "none",
+        alignSelf: "stretch",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 7,
+        padding: "7px 12px",
+        borderRadius: 7,
+        border: "1px solid color-mix(in oklch, var(--accent) 55%, transparent)",
+        background: pressed
+          ? "color-mix(in oklab, var(--accent) 26%, var(--panel))"
+          : hover
+            ? "color-mix(in oklab, var(--accent) 20%, var(--panel))"
+            : "color-mix(in oklab, var(--accent) 14%, var(--panel))",
+        color: "var(--accent-text)",
+        boxShadow: hover ? "0 0 14px color-mix(in oklab, var(--accent-glow, var(--accent)) 30%, transparent)" : "none",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11.5,
+        fontWeight: 700,
+        cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <SparkleIcon />
+      Share for review
+    </button>
   );
 }
 

@@ -247,6 +247,48 @@ export type StartGitHubPullRequestResult =
 export const GITHUB_PUBLISH_MAX_TITLE_LENGTH = 256;
 export const GITHUB_PUBLISH_MAX_BODY_LENGTH = 128 * 1024;
 export const GITHUB_PUBLISH_MAX_COMMIT_MESSAGE_LENGTH = 16 * 1024;
+export const GITHUB_SHARE_MAX_BRANCH_LENGTH = 120;
+
+/** A single Git branch segment: letters/digits, dash/dot/underscore inside. */
+const SHARE_BRANCH_RE = /^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)*$/i;
+
+/**
+ * True when `name` is a plausible topic-branch name we are willing to create:
+ * bounded, slash-segmented, no ".."/".lock", and not a protected default name.
+ */
+export function isValidShareBranchName(name: string): boolean {
+  if (!name || name.length > GITHUB_SHARE_MAX_BRANCH_LENGTH) return false;
+  if (name.includes("..") || name.endsWith(".lock")) return false;
+  if (!SHARE_BRANCH_RE.test(name)) return false;
+  const lower = name.toLowerCase();
+  return lower !== "main" && lower !== "master" && lower !== "develop" && lower !== "head";
+}
+
+/**
+ * AI-drafted proposal for "Share for review": everything the dialog pre-fills.
+ * `source` tells the renderer whether the model wrote it or the deterministic
+ * fallback did (the dialog stays identical either way — no dead ends).
+ */
+export interface GitHubShareDraft {
+  /** Suggested topic branch (only used when sharing from the default branch). */
+  branch: string;
+  title: string;
+  commitMessage: string;
+  description: string;
+  source: "ai" | "fallback";
+}
+
+/**
+ * Explicit user intent for the one-button share flow. Superset of
+ * GitHubPublishInput: `branch` authorizes creating + checking out a topic
+ * branch first when the workspace sits on the repository's default branch.
+ */
+export interface GitHubShareInput extends GitHubPublishInput {
+  branch?: string;
+}
+
+/** Publish outcome plus the topic branch share created on the way, if any. */
+export type GitHubShareResult = GitHubPublishResult & { createdBranch?: string };
 
 /**
  * Explicit user intent for turning the active local worktree into a GitHub PR.

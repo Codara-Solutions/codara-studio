@@ -102,7 +102,23 @@ async function main() {
       path.join(ROOT, "src", "renderer", "src", "components", "CreateCopyDialog.tsx"),
       "utf8",
     );
-    assert.match(surface, /label="Publish as PR"/);
+    assert.match(surface, /<ShareButton/);
+    assert.match(surface, /Share for review/);
+    assert.match(
+      surface,
+      /window\.spark\.github\s*\n?\s*\.shareDraft\(cwd\)/,
+      "the dialog must pre-fill from the AI share draft",
+    );
+    assert.match(
+      surface,
+      /window\.spark\.github\.share\(cwd,/,
+      "the confirm button must use the share transaction (branch + publish)",
+    );
+    assert.doesNotMatch(
+      surface,
+      /label="Publish as PR"/,
+      "the jargon publish affordance is replaced by Share for review",
+    );
     assert.doesNotMatch(
       surface,
       /Issue → isolated worktree → draft PR/,
@@ -131,9 +147,17 @@ async function main() {
       createCopyDialog,
       /separate Git worktree,[\s\S]*agents[\s\S]*work in parallel without changing this checkout/,
     );
-    assert.match(surface, /window\.spark\.github\.publish\(cwd,/);
+    assert.doesNotMatch(
+      surface,
+      /window\.spark\.github\.publish\(cwd,/,
+      "the Source Control surface must route through the share transaction, not raw publish",
+    );
     assert.match(surface, /const \[draft,\s*setDraft\]\s*=\s*useState\(true\)/);
-    assert.match(surface, /Commit all.*changed/);
+    assert.match(
+      surface,
+      /Save all.*changed/,
+      "the dialog explains committing in plain language",
+    );
     assert.match(surface, /previousResult\.committed \|\| previousResult\.pushed/);
     assert.match(surface, /Review merge/);
     assert.match(surface, /Mark ready/);
