@@ -302,7 +302,9 @@ function LiveActivityFeed({
     el.scrollTop = el.scrollHeight;
   }, [content]);
 
-  if (!worker || !content.trim()) {
+  // Steps-only passes have no worker but do have streamed step output; render
+  // whatever content the tail found, from either source.
+  if (!content.trim()) {
     return (
       <div
         className="loom-hero__feed loom-hero__feed--empty spark-mono"
