@@ -1195,7 +1195,7 @@ function AutomationDetail({
 
       {/* Pipeline strip */}
       <div style={{ padding: "10px 16px 4px" }}>
-        <MiniFlow job={job} onOpenEditor={onEdit} />
+        <MiniFlow job={job} liveRun={liveRun} onOpenEditor={onEdit} />
       </div>
 
       {/* Status card only while idle — the hero above owns the live state. */}

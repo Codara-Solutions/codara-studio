@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import type { LoomNodeDef, LoomStepAction, ScheduledJob } from "@shared/types";
+import type { LoomNodeDef, LoomStepAction, RunState, ScheduledJob } from "@shared/types";
 import { triggerSummary } from "./presentation";
 import { graphForJob } from "./flow/model";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
@@ -32,13 +32,21 @@ interface Placed {
 
 export default function MiniFlow({
   job,
+  liveRun,
   onOpenEditor,
 }: {
   job: ScheduledJob;
+  liveRun?: RunState | null;
   onOpenEditor: () => void;
 }): React.ReactElement {
   const live = job.state.status === "running";
   const graph = useMemo(() => graphForJob(job), [job]);
+  // The live pass's per-node statuses. With them the electricity narrows to
+  // the wires feeding the node that is running RIGHT NOW, so the strip reads
+  // as "we are here"; without them (legacy records, run not fetched yet) every
+  // forward wire carries the current, as before.
+  const nodeStates = live ? liveRun?.loomPass?.nodeStates : undefined;
+  const statusOf = (id: string): string | undefined => nodeStates?.[id]?.status;
 
   const { placed, edges, cols, rows } = useMemo(() => {
     // Longest-path columns from the trigger; rows split nodes that share a col.
@@ -118,7 +126,18 @@ export default function MiniFlow({
           const x2 = b.x;
           const y2 = b.y + NODE_H / 2;
           const dx = Math.max(18, (x2 - x1) / 2);
-          const stroke = e.branch === "pass" ? "var(--ok)" : e.branch === "fail" ? "var(--danger)" : "var(--rule-strong)";
+          // A wire the flow has already crossed (its target left pending)
+          // keeps a settled tint, so the strip shows the path travelled.
+          const toStatus = statusOf(e.to);
+          const travelled = Boolean(toStatus && toStatus !== "pending" && toStatus !== "skipped");
+          const stroke =
+            e.branch === "pass"
+              ? "var(--ok)"
+              : e.branch === "fail"
+                ? "var(--danger)"
+                : travelled
+                  ? "color-mix(in oklch, var(--ok) 45%, var(--rule-strong))"
+                  : "var(--rule-strong)";
           const d = `M ${x1},${y1} C ${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
           return (
             <g key={i}>
@@ -130,9 +149,12 @@ export default function MiniFlow({
                 strokeDasharray={e.back ? "4 3" : undefined}
                 vectorEffect="non-scaling-stroke"
               />
-              {/* While the loom runs, its forward wires carry the house
-                  electricity — the same travelling dash as the LiveBoard. */}
-              {live && !e.back && (
+              {/* While the loom runs, the electricity rides only the wires
+                  INTO the node that is currently running (the trigger wire
+                  while the entry step runs, then each hand-off as flow
+                  advances) — the strip answers "which step are we in". When
+                  the pass has no per-node states every forward wire flows. */}
+              {live && !e.back && (nodeStates ? statusOf(e.to) === "running" : true) && (
                 <path
                   className="spark-wire-flow"
                   d={d}
@@ -148,7 +170,15 @@ export default function MiniFlow({
         })}
       </svg>
       {placed.map((p) => {
-        const liveChip = live && p.id !== "__trigger__" && graph.nodes.find((n) => n.id === p.id)?.kind === "worker";
+        // With per-node states the accent ring sits on the one node that is
+        // running right now (worker or step); without them, fall back to the
+        // old any-live-worker treatment.
+        const liveChip =
+          live &&
+          p.id !== "__trigger__" &&
+          (nodeStates
+            ? statusOf(p.id) === "running"
+            : graph.nodes.find((n) => n.id === p.id)?.kind === "worker");
         const pos = { x: PAD_X + p.col * COL_DX, y: PAD_Y + p.row * ROW_DY };
         const radius =
           p.kind === "trigger"
