@@ -798,6 +798,27 @@ export function unregisterOnFinishOf(sourceId: string, dependentId: string): voi
   onFinishWatchers.get(sourceId)?.delete(dependentId);
 }
 
+// ── onAutomationActivity watchers ───────────────────────────────────────────
+// Broad sibling of onFinishOf: a watcher fires when ANY automation's loop
+// reaches terminal (or one specific automation when scoped), filtered by
+// outcome. Fired at the same site as onFinishOf dependents, with the same
+// chain-based cycle guard; a watcher never fires for its own finalize.
+
+interface ActivityWatcher {
+  automationId?: string; // undefined = any automation
+  events: import("@shared/types").AutomationActivityEvent[];
+}
+
+const activityWatchers = new Map<string, ActivityWatcher>();
+
+export function registerActivityWatcher(watcherJobId: string, watcher: ActivityWatcher): void {
+  activityWatchers.set(watcherJobId, watcher);
+}
+
+export function unregisterActivityWatcher(watcherJobId: string): void {
+  activityWatchers.delete(watcherJobId);
+}
+
 // Record a structured agent continuation intent (the codara_request_next_iteration
 // MCP tool calls this; handoff fields arrive pre-validated by agent-socket).
 // Read once by onTerminal. The signal carries the calling worker's loom node id
@@ -1499,6 +1520,20 @@ async function finalize(
       if (chain.includes(depId)) continue; // cycle: A->B->A
       void startIteration(depId, { source: "trigger", chain: [...chain, depId] });
     }
+  }
+
+  // Fire onAutomationActivity watchers with the same guards. user-stop is
+  // excluded like the completion alert above: the user halting a loop by hand
+  // is their action, not automation activity worth reacting to.
+  if (reason === "user-stop") return;
+  const outcome: import("@shared/types").AutomationActivityEvent =
+    reason === "iteration-failed" || reason === "engine-missing" ? "failed" : "finished";
+  for (const [watcherId, watcher] of activityWatchers) {
+    if (watcherId === id) continue; // never self-fire
+    if (watcher.automationId !== undefined && watcher.automationId !== id) continue;
+    if (!watcher.events.includes(outcome)) continue;
+    if (chain.includes(watcherId)) continue; // cycle guard, same as onFinishOf
+    void startIteration(watcherId, { source: "trigger", chain: [...chain, watcherId] });
   }
 }
 

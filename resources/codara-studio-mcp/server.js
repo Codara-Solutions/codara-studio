@@ -741,12 +741,23 @@ const TRIGGER_SCHEMA = {
     "folder REQUIRES a `path` to watch. " +
     "onFinishOf REQUIRES an `automationId` that references an EXISTING automation (call codara_list_automations first). " +
     "manual only fires via codara_run_automation or the Hub. " +
-    "continuous re-fires immediately after each run finishes.",
+    "continuous re-fires immediately after each run finishes. " +
+    "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits — the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed — commit, pull, merge); optional `branch` limits firing to one branch, e.g. 'main'. " +
+    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome — ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
   required: ["kind"],
   properties: {
     kind: {
       type: "string",
-      enum: ["cron", "interval", "folder", "manual", "continuous", "onFinishOf"],
+      enum: [
+        "cron",
+        "interval",
+        "folder",
+        "manual",
+        "continuous",
+        "onFinishOf",
+        "git",
+        "onAutomationActivity",
+      ],
     },
     expr: { type: "string", description: "cron (REQUIRED): valid 5/6-field cron expression, e.g. '0 9 * * 1-5'." },
     tz: { type: "string", description: "cron only: optional IANA timezone, e.g. 'America/New_York'." },
@@ -754,12 +765,24 @@ const TRIGGER_SCHEMA = {
     path: { type: "string", description: "folder (REQUIRED): absolute folder path to watch." },
     events: {
       type: "array",
-      description: "folder only: which fs events fire the trigger.",
-      items: { type: "string", enum: ["add", "change", "unlink"] },
+      description:
+        "folder: which fs events fire (add|change|unlink). git (REQUIRED): remoteUpdated|localBranchMoved. onAutomationActivity (REQUIRED): finished|failed.",
+      items: {
+        type: "string",
+        enum: ["add", "change", "unlink", "remoteUpdated", "localBranchMoved", "finished", "failed"],
+      },
     },
     glob: { type: "string", description: "folder only: optional basename glob, e.g. '*.md'. Omit to match every file." },
     debounceMs: { type: "number", description: "folder only: coalesce a burst of events into one fire (default 400)." },
-    automationId: { type: "string", description: "onFinishOf (REQUIRED): id of an EXISTING automation to chain after." },
+    automationId: {
+      type: "string",
+      description:
+        "onFinishOf (REQUIRED) / onAutomationActivity (optional): id of an EXISTING automation. For onAutomationActivity, omit to watch ALL automations.",
+    },
+    branch: {
+      type: "string",
+      description: "git only: optional branch name (e.g. 'main') to scope firing; omit for any branch.",
+    },
   },
   additionalProperties: false,
 };

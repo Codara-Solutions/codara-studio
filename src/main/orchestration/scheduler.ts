@@ -586,6 +586,20 @@ function armJob(job: ScheduledJob): void {
         });
         break;
       }
+      case "git": {
+        armed.set(job.id, armGitTrigger(job, trigger));
+        break;
+      }
+      case "onAutomationActivity": {
+        // Register with the loop driver, which fires watchers at the same
+        // terminal site as onFinishOf dependents; disarm unregisters.
+        const watcher = { automationId: trigger.automationId, events: trigger.events };
+        void import("./automation-loop").then((m) => m.registerActivityWatcher(job.id, watcher));
+        armed.set(job.id, () => {
+          void import("./automation-loop").then((m) => m.unregisterActivityWatcher(job.id));
+        });
+        break;
+      }
     }
   } catch (err) {
     console.warn(`[scheduler] failed to arm job ${job.id}:`, err);
@@ -629,6 +643,107 @@ export function stopScheduler(): void {
   void import("./automation-loop")
     .then((m) => m.teardownAllLoops())
     .catch(() => {});
+}
+
+// ── Git triggers ─────────────────────────────────────────────────────────────
+// `remoteUpdated` rides the auto-fetch pass that already diffs remote refs
+// (git-events fanout — zero extra git processes). `localBranchMoved` is a
+// cheap rev-parse poll: two plumbing calls against the job's repo, no network.
+// Both keep per-arm baselines so arming never fires on pre-existing state.
+
+const GIT_TRIGGER_POLL_MS = 20_000;
+
+function armGitTrigger(
+  job: ScheduledJob,
+  trigger: Extract<AutomationTrigger, { kind: "git" }>,
+): () => void {
+  const cwd = job.input.cwd;
+  const wantsRemote = trigger.events.includes("remoteUpdated");
+  const wantsLocal = trigger.events.includes("localBranchMoved");
+  const branchFilter = trigger.branch?.trim() || undefined;
+  let disposed = false;
+
+  const rev = async (ref: string): Promise<string | null> => {
+    try {
+      const { runGit } = await import("../git-exec");
+      const res = await runGit(cwd, ["rev-parse", "--verify", "--quiet", ref], {
+        timeout: 8_000,
+        internal: true,
+      });
+      const sha = res.stdout.trim();
+      return /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const fire = (): void => {
+    if (disposed) return;
+    void startIterationViaDriver(job.id, { source: "trigger" });
+  };
+
+  const disposers: Array<() => void> = [];
+
+  if (wantsRemote) {
+    // Baseline the watched remote ref (branch-scoped) or rely on event
+    // delivery alone (unscoped: the auto-fetch pass itself proves movement).
+    let remoteBaseline: string | null | undefined;
+    const remoteRef = branchFilter ? `origin/${branchFilter}` : null;
+    if (remoteRef) void rev(remoteRef).then((sha) => (remoteBaseline = sha));
+
+    const matchesRepo = (cwds: string[]): boolean =>
+      cwds.some((c) => c === cwd || cwd.startsWith(`${c}/`) || c.startsWith(`${cwd}/`));
+
+    void import("../git-events").then((m) => {
+      if (disposed) return;
+      const off = m.onGitRemoteUpdated((cwds) => {
+        if (disposed || !matchesRepo(cwds)) return;
+        if (!remoteRef) {
+          fire();
+          return;
+        }
+        void rev(remoteRef).then((sha) => {
+          if (disposed || sha === null) return;
+          if (remoteBaseline !== undefined && sha !== remoteBaseline) fire();
+          remoteBaseline = sha;
+        });
+      });
+      disposers.push(off);
+    });
+  }
+
+  if (wantsLocal) {
+    let localBaseline: string | null | undefined;
+    const check = async (): Promise<void> => {
+      const sha = await rev("HEAD");
+      if (disposed || sha === null) return;
+      const moved = localBaseline !== undefined && sha !== localBaseline;
+      localBaseline = sha;
+      if (!moved) return;
+      if (branchFilter) {
+        try {
+          const { runGit } = await import("../git-exec");
+          const res = await runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"], {
+            timeout: 8_000,
+            internal: true,
+          });
+          if (res.stdout.trim() !== branchFilter) return;
+        } catch {
+          return;
+        }
+      }
+      fire();
+    };
+    void check(); // seed the baseline silently
+    const handle = setInterval(() => void check(), GIT_TRIGGER_POLL_MS);
+    handle.unref?.();
+    disposers.push(() => clearInterval(handle));
+  }
+
+  return () => {
+    disposed = true;
+    for (const dispose of disposers) dispose();
+  };
 }
 
 // ── Folder watching ──────────────────────────────────────────────────────────

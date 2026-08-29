@@ -816,6 +816,8 @@ export function broadcastGitRemoteUpdated(cwds: string[]): void {
     if (wc.isDestroyed()) continue;
     wc.send("git:remote-updated", payload);
   }
+  // Same pass also feeds the automation scheduler's `git` triggers.
+  void import("./git-events").then((m) => m.emitGitRemoteUpdated(cwds));
 }
 
 // ── Privileged-channel sender gating ────────────────────────────────────────

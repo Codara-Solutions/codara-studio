@@ -1,9 +1,11 @@
 import type {
   AgentEffortLevel,
+  AutomationActivityEvent,
   AutomationLoop,
   AutomationLoopKind,
   AutomationTrigger,
   FolderTriggerEvent,
+  GitTriggerEvent,
   GuardPredicate,
   LoomEdgeDef,
   LoomGraph,
@@ -37,6 +39,11 @@ export interface TriggerDraft {
   folderGlob: string;
   folderEvents: Record<FolderTriggerEvent, boolean>;
   chainSourceId: string;
+  gitEvents: Record<GitTriggerEvent, boolean>;
+  gitBranch: string;
+  activityEvents: Record<AutomationActivityEvent, boolean>;
+  // Empty string = watch ANY automation.
+  activitySourceId: string;
 }
 
 export interface LoopDraft {
@@ -107,6 +114,10 @@ export function emptyDraft(): LoomDraft {
       folderGlob: "",
       folderEvents: { add: true, change: true, unlink: false },
       chainSourceId: "",
+      gitEvents: { remoteUpdated: true, localBranchMoved: false },
+      gitBranch: "",
+      activityEvents: { finished: true, failed: true },
+      activitySourceId: "",
     },
     loop: {
       kind: "once",
@@ -145,6 +156,18 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
     };
   } else if (job.trigger.kind === "onFinishOf") {
     d.trigger.chainSourceId = job.trigger.automationId;
+  } else if (job.trigger.kind === "git") {
+    d.trigger.gitEvents = {
+      remoteUpdated: job.trigger.events.includes("remoteUpdated"),
+      localBranchMoved: job.trigger.events.includes("localBranchMoved"),
+    };
+    d.trigger.gitBranch = job.trigger.branch ?? "";
+  } else if (job.trigger.kind === "onAutomationActivity") {
+    d.trigger.activityEvents = {
+      finished: job.trigger.events.includes("finished"),
+      failed: job.trigger.events.includes("failed"),
+    };
+    d.trigger.activitySourceId = job.trigger.automationId ?? "";
   }
 
   // `stop` is contractually backfilled by the scheduler, but a malformed
@@ -204,6 +227,24 @@ export function buildTrigger(d: TriggerDraft): AutomationTrigger | null {
       const sourceId = d.chainSourceId.trim();
       if (!sourceId) return null;
       return { kind: "onFinishOf", automationId: sourceId };
+    }
+    case "git": {
+      const events = (["remoteUpdated", "localBranchMoved"] as GitTriggerEvent[]).filter(
+        (e) => d.gitEvents[e],
+      );
+      if (events.length === 0) return null;
+      const branch = d.gitBranch.trim();
+      return branch ? { kind: "git", events, branch } : { kind: "git", events };
+    }
+    case "onAutomationActivity": {
+      const events = (["finished", "failed"] as AutomationActivityEvent[]).filter(
+        (e) => d.activityEvents[e],
+      );
+      if (events.length === 0) return null;
+      const automationId = d.activitySourceId.trim();
+      return automationId
+        ? { kind: "onAutomationActivity", events, automationId }
+        : { kind: "onAutomationActivity", events };
     }
     default:
       return { kind: "manual" };
@@ -268,6 +309,12 @@ export function validateNode(
     if (t.kind === "onFinishOf") {
       if (ctx.chainableCount === 0) return "No other automation to chain after yet.";
       if (!t.chainSourceId.trim()) return "Pick the automation to chain after.";
+    }
+    if (t.kind === "git" && !t.gitEvents.remoteUpdated && !t.gitEvents.localBranchMoved) {
+      return "Git trigger needs at least one event.";
+    }
+    if (t.kind === "onAutomationActivity" && !t.activityEvents.finished && !t.activityEvents.failed) {
+      return "Automation-activity trigger needs at least one outcome.";
     }
     return null;
   }

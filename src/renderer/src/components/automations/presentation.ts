@@ -68,6 +68,16 @@ export function triggerSummary(trigger: AutomationTrigger): string {
       return "continuous";
     case "onFinishOf":
       return "after another loom";
+    case "git": {
+      const parts: string[] = [];
+      if (trigger.events.includes("remoteUpdated")) parts.push("push");
+      if (trigger.events.includes("localBranchMoved")) parts.push("pull/commit");
+      return `git ${parts.join(" + ") || "activity"}${trigger.branch ? ` on ${trigger.branch}` : ""}`;
+    }
+    case "onAutomationActivity": {
+      const what = trigger.events.join("/") || "activity";
+      return trigger.automationId ? `when a loom ${what}` : `when any loom ${what}`;
+    }
     default:
       return "trigger";
   }

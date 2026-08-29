@@ -4482,7 +4482,24 @@ export interface StartSearchResponse {
 //   continuous  — starts iteration 0 immediately at arm time (a forever loop,
 //                 bounded by its stop conditions).
 //   onFinishOf  — chains: starts when another automation's loop finalizes.
+//   git         — fires on repository activity in the workspace repo: the
+//                 tracked remote gaining commits (your push, or a teammate's
+//                 push landing via fetch) and/or the local checked-out branch
+//                 tip moving (commit, pull, merge).
+//   onAutomationActivity — fires when automations finish/fail: any automation
+//                 in the app, or one specific automation when scoped.
 export type FolderTriggerEvent = "add" | "change" | "unlink";
+
+// git trigger events:
+//   remoteUpdated    — the tracked remote's refs gained commits (a push from
+//                      this machine, or someone else's push discovered by
+//                      auto-fetch / a manual fetch).
+//   localBranchMoved — the checked-out branch's tip changed (commit, pull,
+//                      merge, reset).
+export type GitTriggerEvent = "remoteUpdated" | "localBranchMoved";
+
+// onAutomationActivity events map to the loop's terminal outcome.
+export type AutomationActivityEvent = "finished" | "failed";
 
 export type AutomationTrigger =
   | { kind: "cron"; expr: string; tz?: string }
@@ -4499,7 +4516,22 @@ export type AutomationTrigger =
     }
   | { kind: "manual" }
   | { kind: "continuous" }
-  | { kind: "onFinishOf"; automationId: string };
+  | { kind: "onFinishOf"; automationId: string }
+  | {
+      kind: "git";
+      events: GitTriggerEvent[];
+      // Only fire for this branch (e.g. "main"). Omitted = any branch. For
+      // remoteUpdated the tracked remote ref of this branch is compared; for
+      // localBranchMoved the checked-out branch name must match.
+      branch?: string;
+    }
+  | {
+      kind: "onAutomationActivity";
+      events: AutomationActivityEvent[];
+      // Scope to one automation. Omitted = ANY automation (the triggered
+      // automation itself is always excluded to prevent self-firing).
+      automationId?: string;
+    };
 
 // LOOP kinds — how an automation REPEATS once started:
 //   once        — a single iteration (legacy behaviour).

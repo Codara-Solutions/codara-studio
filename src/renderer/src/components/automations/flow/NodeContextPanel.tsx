@@ -38,6 +38,8 @@ const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
   { value: "folder", label: "Folder" },
   { value: "continuous", label: "Continuous" },
   { value: "onFinishOf", label: "After automation" },
+  { value: "git", label: "Git activity" },
+  { value: "onAutomationActivity", label: "Automation activity" },
 ];
 
 const FOLDER_EVENTS: FolderTriggerEvent[] = ["add", "change", "unlink"];
@@ -394,6 +396,80 @@ function TriggerForm({
             </select>
           )}
         </Field>
+      )}
+      {t.kind === "git" && (
+        <Group>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="spark-eyebrow">Events</span>
+            <Check
+              label="remote gained commits (a push)"
+              checked={t.gitEvents.remoteUpdated}
+              onToggle={() =>
+                set({ gitEvents: { ...t.gitEvents, remoteUpdated: !t.gitEvents.remoteUpdated } })
+              }
+            />
+            <Check
+              label="local branch moved (commit / pull)"
+              checked={t.gitEvents.localBranchMoved}
+              onToggle={() =>
+                set({
+                  gitEvents: { ...t.gitEvents, localBranchMoved: !t.gitEvents.localBranchMoved },
+                })
+              }
+            />
+          </div>
+          <Field label="Branch (optional — any branch when empty)">
+            <input
+              className="spark-input spark-mono"
+              value={t.gitBranch}
+              onChange={(e) => set({ gitBranch: e.target.value })}
+              placeholder="main"
+              style={{ maxWidth: 200 }}
+            />
+          </Field>
+          <Hint>
+            Watches this workspace's repository. Pushes are noticed by the background auto-fetch;
+            local moves are noticed within ~20 seconds.
+          </Hint>
+        </Group>
+      )}
+      {t.kind === "onAutomationActivity" && (
+        <Group>
+          <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="spark-eyebrow">When a loom</span>
+            <Check
+              label="finished"
+              checked={t.activityEvents.finished}
+              onToggle={() =>
+                set({
+                  activityEvents: { ...t.activityEvents, finished: !t.activityEvents.finished },
+                })
+              }
+            />
+            <Check
+              label="failed"
+              checked={t.activityEvents.failed}
+              onToggle={() =>
+                set({ activityEvents: { ...t.activityEvents, failed: !t.activityEvents.failed } })
+              }
+            />
+          </div>
+          <Field label="Which automation">
+            <select
+              className="spark-select"
+              value={t.activitySourceId}
+              onChange={(e) => set({ activitySourceId: e.target.value })}
+            >
+              <option value="">Any automation</option>
+              {chainableJobs.map((j) => (
+                <option key={j.id} value={j.id}>
+                  {j.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Hint>Never fires for this automation's own runs, and chains are cycle-guarded.</Hint>
+        </Group>
       )}
     </>
   );

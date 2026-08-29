@@ -4275,6 +4275,10 @@ function summarizeTrigger(t: AutomationTrigger): string {
       return "continuous";
     case "onFinishOf":
       return `onFinishOf(${t.automationId})`;
+    case "git":
+      return `git([${(t.events ?? []).join(",")}]${t.branch ? ` ${t.branch}` : ""})`;
+    case "onAutomationActivity":
+      return `onAutomationActivity([${(t.events ?? []).join(",")}]${t.automationId ? ` ${t.automationId}` : " any"})`;
     default:
       return "unknown";
   }
@@ -4540,7 +4544,18 @@ async function validateTriggerLoopWorker(opts: {
   loop?: AutomationLoop;
   worker?: LoomWorkerConfig;
 }): Promise<string | null> {
-  const TRIGGER_KINDS = new Set(["cron", "interval", "folder", "manual", "continuous", "onFinishOf"]);
+  const TRIGGER_KINDS = new Set([
+    "cron",
+    "interval",
+    "folder",
+    "manual",
+    "continuous",
+    "onFinishOf",
+    "git",
+    "onAutomationActivity",
+  ]);
+  const GIT_TRIGGER_EVENTS = new Set(["remoteUpdated", "localBranchMoved"]);
+  const ACTIVITY_TRIGGER_EVENTS = new Set(["finished", "failed"]);
   const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
   if (opts.trigger !== undefined) {
     const t = opts.trigger as AutomationTrigger & {
@@ -4549,9 +4564,11 @@ async function validateTriggerLoopWorker(opts: {
       everyMs?: unknown;
       path?: unknown;
       automationId?: unknown;
+      events?: unknown;
+      branch?: unknown;
     };
     if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
-      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf)`;
+      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf|git|onAutomationActivity)`;
     }
     // Per-kind required payload - the scheduler arms these directly, so a bad
     // payload becomes a hot loop / crash at arm time rather than a fixable error.
@@ -4586,6 +4603,35 @@ async function validateTriggerLoopWorker(opts: {
       const jobs = await listJobs();
       if (!jobs.some((j) => j.id === t.automationId)) {
         return `trigger.automationId '${t.automationId}' does not match any existing automation (call codara_list_automations to find a valid id)`;
+      }
+    } else if (t.kind === "git") {
+      if (
+        !Array.isArray(t.events) ||
+        t.events.length === 0 ||
+        !t.events.every((e) => typeof e === "string" && GIT_TRIGGER_EVENTS.has(e))
+      ) {
+        return "trigger kind 'git' requires a non-empty 'events' array of remoteUpdated|localBranchMoved";
+      }
+      if (t.branch !== undefined && (typeof t.branch !== "string" || t.branch.trim().length === 0)) {
+        return "trigger.branch must be a non-empty branch name when provided (omit it to fire for any branch)";
+      }
+    } else if (t.kind === "onAutomationActivity") {
+      if (
+        !Array.isArray(t.events) ||
+        t.events.length === 0 ||
+        !t.events.every((e) => typeof e === "string" && ACTIVITY_TRIGGER_EVENTS.has(e))
+      ) {
+        return "trigger kind 'onAutomationActivity' requires a non-empty 'events' array of finished|failed";
+      }
+      if (t.automationId !== undefined) {
+        if (typeof t.automationId !== "string" || t.automationId.trim().length === 0) {
+          return "trigger.automationId must be a non-empty automation id when provided (omit it to watch ALL automations)";
+        }
+        const { listJobs } = await getScheduler();
+        const jobs = await listJobs();
+        if (!jobs.some((j) => j.id === t.automationId)) {
+          return `trigger.automationId '${t.automationId}' does not match any existing automation (call codara_list_automations to find a valid id)`;
+        }
       }
     }
   }
