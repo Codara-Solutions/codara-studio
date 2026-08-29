@@ -564,11 +564,13 @@ export function trimTerminalScrollbackLines(value: string, maxLines: number): st
   return lines.slice(-limit).join("\n");
 }
 
-export type CommitMessageModel =
-  | "auto"
-  | "openrouter"
-  | "gpt-5.6-luna"
-  | "claude-sonnet-5";
+// "auto" routes to a cheap/fast model on the first usable subscription;
+// "openrouter" uses the shared inline-AI model; any other value is a native
+// model id from the Cora worker roster (claude-fable-5, gpt-5.6-sol, …) and
+// runs on the matching subscription. Storage validates ids against
+// ALLOWED_WORKER_MODELS so a stale/unknown id degrades to "auto".
+// `string & {}` keeps literal autocomplete while admitting roster ids.
+export type CommitMessageModel = "auto" | "openrouter" | (string & {});
 
 export const DEFAULT_COMMIT_MESSAGE_MODEL: CommitMessageModel = "auto";
 

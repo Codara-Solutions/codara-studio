@@ -394,7 +394,9 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
     await page.getByLabel("Inline edit and commit model").fill("test/settings-model");
     await clickAttached(page.getByLabel("Commit message model"));
-    await clickAttached(page.getByRole("option", { name: "Anthropic, claude-sonnet-5" }));
+    // A big-tier roster model under its vendor group header: proves the picker
+    // offers the full Cora worker roster with the Cora-style grouped layout.
+    await clickAttached(page.getByRole("option", { name: "Claude Fable 5" }));
     await clickButton(page, "Save");
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeHidden();
 
@@ -407,7 +409,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     expect(settings.defaultShellId).toBeTruthy();
     expect(settings.openRouterApiKey).toBe("test-openrouter-key");
     expect(settings.openRouterModel).toBe("test/settings-model");
-    expect(settings.commitMessageModel).toBe("claude-sonnet-5");
+    expect(settings.commitMessageModel).toBe("claude-fable-5");
 
     await expect
       .poll(async () => {

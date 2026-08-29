@@ -147,11 +147,44 @@ async function main() {
     assert.deepEqual(runner.resolvePiCommitRoute("auto", both), {
       provider: "openai-codex",
       model: "gpt-5.6-luna",
+      thinking: "off",
     });
     assert.deepEqual(runner.resolvePiCommitRoute("claude-sonnet-5", both), {
       provider: "anthropic",
       model: "claude-sonnet-5",
+      thinking: "low",
     });
+    // Any roster model routes by its id's family — the bigger tiers included.
+    assert.deepEqual(runner.resolvePiCommitRoute("claude-fable-5", both), {
+      provider: "anthropic",
+      model: "claude-fable-5",
+      thinking: "low",
+    });
+    assert.deepEqual(runner.resolvePiCommitRoute("gpt-5.6-sol", both), {
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      thinking: "low",
+    });
+    assert.equal(
+      runner.resolvePiCommitRoute("grok-4.6", both),
+      null,
+      "a model whose provider has no usable subscription must not route",
+    );
+    const xaiId = "33333333-3333-4333-8333-333333333333";
+    const withGrok = inspection(
+      [status(xaiId, "xai")],
+      { xai: xaiId },
+    );
+    assert.deepEqual(runner.resolvePiCommitRoute("grok-4.6", withGrok), {
+      provider: "xai",
+      model: "grok-4.6",
+      thinking: "low",
+    });
+    assert.deepEqual(
+      runner.resolvePiCommitRoute("auto", withGrok),
+      { provider: "xai", model: "grok-4.6", thinking: "off" },
+      "auto falls through to xAI when it is the only usable subscription",
+    );
 
     const anthropicOnly = inspection([
       status(anthropicId, "anthropic", { expired: true, canRefresh: true }),
@@ -159,6 +192,7 @@ async function main() {
     assert.deepEqual(runner.resolvePiCommitRoute("auto", anthropicOnly), {
       provider: "anthropic",
       model: "claude-sonnet-5",
+      thinking: "off",
     });
     assert.equal(
       runner.resolvePiCommitRoute("gpt-5.6-luna", anthropicOnly),
@@ -232,6 +266,7 @@ async function main() {
     assert.deepEqual(generated, {
       provider: "openai-codex",
       model: "gpt-5.6-luna",
+      thinking: "off",
       text: "feat: use sessionless Pi",
     });
     assert.equal(inspectCalls, 1, "availability inspection must run exactly once");
@@ -511,6 +546,19 @@ async function main() {
       storage.normalizeSettings({ commitMessageModel: "claude-sonnet-5" }).commitMessageModel,
       "claude-sonnet-5",
     );
+    // The full Cora worker roster is selectable, big tiers included.
+    assert.equal(
+      storage.normalizeSettings({ commitMessageModel: "claude-fable-5" }).commitMessageModel,
+      "claude-fable-5",
+    );
+    assert.equal(
+      storage.normalizeSettings({ commitMessageModel: "gpt-5.6-sol" }).commitMessageModel,
+      "gpt-5.6-sol",
+    );
+    assert.equal(
+      storage.normalizeSettings({ commitMessageModel: "grok-4.6" }).commitMessageModel,
+      "grok-4.6",
+    );
     assert.equal(
       storage.normalizeSettings({ commitMessageModel: "invalid" }).commitMessageModel,
       "auto",
@@ -602,9 +650,18 @@ async function main() {
       /<Label text="Commit message model">\s*<CustomSelect/,
     );
     assert.doesNotMatch(settingsSource, /aria-label="Git commit message model"/);
-    assert.match(settingsSource, /Automatic \(OpenAI first\)/);
-    assert.match(settingsSource, /gpt-5\.6-luna/);
-    assert.match(settingsSource, /claude-sonnet-5/);
+    assert.match(settingsSource, /Automatic \(fast model, OpenAI first\)/);
+    // The native options are derived from the shared worker roster rather than
+    // hardcoded, and render grouped under vendor headers like the Cora picker.
+    assert.match(settingsSource, /COMMIT_MESSAGE_NATIVE_MODELS/);
+    assert.match(settingsSource, /ALLOWED_WORKER_MODELS/);
+    assert.match(settingsSource, /friendlyModelLabel/);
+    assert.match(settingsSource, /group: model\.group/);
+    assert.doesNotMatch(
+      settingsSource,
+      /value: "gpt-5\.6-luna"/,
+      "commit picker must not hardcode model ids the roster already owns",
+    );
     assert.match(settingsSource, /Inline edit and commit model/);
     assert.match(settingsSource, /Models for Cora/);
     assert.match(settingsSource, /Check key and models/);
@@ -636,7 +693,7 @@ async function main() {
     );
     assert.ok(
       orchestrationSmokeSource.includes(
-        'expect(settings.commitMessageModel).toBe("claude-sonnet-5")',
+        'expect(settings.commitMessageModel).toBe("claude-fable-5")',
       ),
       "Settings smoke test must assert the persisted commit model",
     );

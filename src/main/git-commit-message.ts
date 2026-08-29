@@ -12,8 +12,13 @@ import { randomUUID } from "node:crypto";
 // usable or generation fails, and it stays fully
 // general — no repository-specific phrasing.
 
-const MAX_PROMPT_CHARS = 28_000;
-const MAX_DIFF_CHARS = 10_000;
+// Budgets. The prompt travels over stdin (not argv), so these are cost/latency
+// guards, not hard transport limits. The diff budget must comfortably fit a
+// several-hundred-line feature diff: a model that only sees half the change
+// writes a vague or lopsided message (observed: a 6-file feature summarized
+// by its smallest file because the rest was truncated away).
+const MAX_PROMPT_CHARS = 60_000;
+const MAX_DIFF_CHARS = 24_000;
 const MAX_UNTRACKED_FILES = 10;
 
 type Scope = "staged" | "all";
@@ -22,9 +27,9 @@ const SYSTEM_PROMPT = `You write concise, high-quality Git commit messages from 
 
 STYLE: The "RECENT COMMIT SUBJECTS" block is your style guide — match its convention exactly. If those subjects use conventional-commit prefixes (e.g. "feat:", "fix:", "refactor:"), use the same kind of prefix; if they are plain imperative ("Add X", "Fix Y"), do NOT invent a prefix. Mirror their capitalization and tone. When there are no prior subjects, default to an imperative subject ("Add X", "Fix Y", "Refactor Z").
 
-SUBJECT: One line, specific and concrete — name the actual capability, component, file, API, or bug the diff changes. Keep it under ~72 characters and with no trailing period. Avoid vague filler ("update", "changes", "various", "misc", "improvements", "enhance handling").
+SUBJECT: One line, specific and concrete — name the actual capability, component, file, API, or bug the diff changes. Keep it under ~72 characters and with no trailing period. Avoid vague filler ("update", "changes", "various", "misc", "improvements", "enhance handling"). Scope the prefix by the change's PRIMARY area (the layer or feature it is about), not merely the first file you notice.
 
-BODY: For a small, focused change, the subject line alone is best. If the diff spans several distinct areas or many files, write the subject, then ONE blank line, then 2-5 bullet points (each starting with "- ") naming the main groups of changes. Do not pad a trivial change with bullets.
+BODY: Match the body to the size of the change. A small, single-purpose diff (one or two files, one concern) is best served by the subject line alone. A diff that spans several files, distinct areas, or introduces new behavior REQUIRES a body: after the subject and ONE blank line, write 2-6 bullet points (each starting with "- ") that together account for every significant part of the diff — new files/modules by name, changed behavior, wiring (IPC/API/routing), UI changes, and test/doc updates. Name concrete identifiers (functions, components, settings) rather than paraphrasing them. When the diff reveals WHY the change works this way (a guarantee kept, an invariant enforced, a deliberate separation), state it — intent is the one thing a reader cannot recover from the diff. Never leave a multi-area diff with a bare subject, and never pad a trivial one with restated bullets.
 
 OUTPUT: Return only the raw commit message — no markdown code fences, no surrounding quotes, no "Commit message:" / "Here is" label, and no explanation. Never return an empty message.`;
 

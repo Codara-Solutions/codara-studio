@@ -2,9 +2,11 @@ import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useSt
 import {
   AGENT_FAMILIES,
   AGENT_FAMILY_IDS,
+  familyForModelId,
   familyForRuntime,
   runtimeForSubscription,
 } from "@shared/agent-families";
+import { ALLOWED_WORKER_MODELS } from "@shared/worker-model-roster";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type {
   AppSettings,
@@ -64,6 +66,57 @@ import {
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
 // inline here — there is no separate Settings BrowserWindow.
+
+// The commit-message picker offers every native model Cora workers may launch
+// on — the same roster as the Cora model picker — derived from the shared
+// table so a roster change reaches this picker without a second edit.
+// Rendered like the Cora picker: friendly names under uppercase vendor
+// headers (OPENAI / ANTHROPIC / XAI), vendors in family-table order.
+
+// "claude-fable-5" -> "Claude Fable 5", "gpt-5.6-sol" -> "GPT-5.6 Sol",
+// "grok-4.6" -> "Grok 4.6". Generic title-casing over the id's segments, with
+// the gpt prefix uppercased — no per-model table to drift out of date.
+function friendlyModelLabel(id: string): string {
+  return id
+    .split("-")
+    .map((part) =>
+      part === "gpt"
+        ? "GPT"
+        : /^\d/.test(part)
+          ? part
+          : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join(" ")
+    .replace(/^GPT (\d)/, "GPT-$1");
+}
+
+// Within a vendor group, order by tier like the Cora picker: premium /
+// flagship first, fast tiers last. Unrecognized ids sort after the known
+// lineup, still selectable.
+const COMMIT_MODEL_TIER_RANK: Array<{ match: RegExp; rank: number }> = [
+  { match: /fable/i, rank: 0 },
+  { match: /-sol$/i, rank: 0 },
+  { match: /opus/i, rank: 1 },
+  { match: /^grok-/i, rank: 1 },
+  { match: /-terra$/i, rank: 2 },
+  { match: /sonnet/i, rank: 2 },
+  { match: /-luna$/i, rank: 3 },
+  { match: /haiku/i, rank: 3 },
+];
+
+function commitModelRank(id: string): number {
+  return COMMIT_MODEL_TIER_RANK.find(({ match }) => match.test(id))?.rank ?? 9;
+}
+
+const COMMIT_MESSAGE_NATIVE_MODELS: { id: string; label: string; group: string }[] =
+  AGENT_FAMILY_IDS.flatMap((familyId) => {
+    const vendor = AGENT_FAMILIES[familyId].vendorLabel;
+    return ALLOWED_WORKER_MODELS.filter((id) => familyForModelId(id) === familyId)
+      .slice()
+      .sort((a, b) => commitModelRank(a) - commitModelRank(b) || a.localeCompare(b))
+      .map((id) => ({ id, label: friendlyModelLabel(id), group: vendor }));
+  });
+
 type SettingsTab =
   | "general"
   | "editor"
@@ -992,16 +1045,19 @@ function ApiSettings({
       <hr className="spark-divider" style={{ margin: "6px 0" }} />
       <SectionTitle
         title="Git commit messages"
-        detail="Automatic uses a subscription. OpenRouter uses the inline edit and commit model above."
+        detail="Automatic picks a fast model on your first usable subscription. Native models run on their own subscription. OpenRouter uses the inline edit and commit model above."
       />
       <Label text="Commit message model">
         <CustomSelect
           value={draft.commitMessageModel}
           options={[
-            { value: "auto", label: "Automatic (OpenAI first)" },
+            { value: "auto", label: "Automatic (fast model, OpenAI first)" },
             { value: "openrouter", label: `OpenRouter, ${draft.openRouterModel || "model above"}` },
-            { value: "gpt-5.6-luna", label: "OpenAI, gpt-5.6-luna" },
-            { value: "claude-sonnet-5", label: "Anthropic, claude-sonnet-5" },
+            ...COMMIT_MESSAGE_NATIVE_MODELS.map((model) => ({
+              value: model.id,
+              label: model.label,
+              group: model.group,
+            })),
           ]}
           onChange={(value) =>
             onChange({
@@ -4601,6 +4657,12 @@ function ThemeCard({
 interface CustomSelectOption {
   value: string;
   label: string;
+  /**
+   * Optional group heading. Consecutive options sharing a group render once
+   * under an uppercase header row (the Cora model-picker look); ungrouped
+   * options render flush at the top.
+   */
+  group?: string;
 }
 
 // A crisp 1.5px-stroke chevron at currentColor — replaces the Unicode "▾",
@@ -4732,18 +4794,41 @@ function CustomSelect({
             gap: 1,
           }}
         >
-          {options.map((opt) => (
-            <SelectOption
-              key={opt.value}
-              label={opt.label}
-              active={opt.value === value}
-              onClick={() => {
-                onChange(opt.value);
-                setOpen(false);
-                triggerRef.current?.focus();
-              }}
-            />
-          ))}
+          {options.map((opt, index) => {
+            const previous = index > 0 ? options[index - 1] : undefined;
+            const showHeader = Boolean(opt.group) && opt.group !== previous?.group;
+            return (
+              <React.Fragment key={opt.value}>
+                {showHeader && (
+                  <div
+                    role="presentation"
+                    style={{
+                      padding: "7px 9px 3px",
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 9,
+                      fontWeight: 600,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.08em",
+                      borderTop: "1px solid var(--rule)",
+                      marginTop: index > 0 ? 3 : 0,
+                    }}
+                  >
+                    {opt.group}
+                  </div>
+                )}
+                <SelectOption
+                  label={opt.label}
+                  active={opt.value === value}
+                  onClick={() => {
+                    onChange(opt.value);
+                    setOpen(false);
+                    triggerRef.current?.focus();
+                  }}
+                />
+              </React.Fragment>
+            );
+          })}
         </div>
       )}
     </div>

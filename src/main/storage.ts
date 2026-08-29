@@ -15,12 +15,23 @@ import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
-import { DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
+import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
 // Shared inexpensive utility model for editor inline AI and optional commit drafts.
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
+
+// Commit-message model: "auto" / "openrouter" are modes; anything else must be
+// a native model id on the Cora worker roster (the same catalog the Cora model
+// picker offers). Unknown or stale ids fall back to auto.
+function normalizeCommitMessageModel(value: unknown): AppSettings["commitMessageModel"] {
+  if (value === "auto" || value === "openrouter") return value;
+  if (typeof value === "string" && ALLOWED_WORKER_MODELS.includes(value.trim())) {
+    return value.trim();
+  }
+  return DEFAULT_COMMIT_MESSAGE_MODEL;
+}
 
 const EMPTY: AppState = {
   workspaces: [],
@@ -237,13 +248,10 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
         ? settings.openRouterVerifiedKeyHash.trim().toLowerCase()
         : "",
     // Existing settings files have no commitMessageModel. They migrate to auto
-    // without changing the preserved OpenRouter key or editor model.
-    commitMessageModel:
-      settings.commitMessageModel === "openrouter" ||
-      settings.commitMessageModel === "gpt-5.6-luna" ||
-      settings.commitMessageModel === "claude-sonnet-5"
-        ? settings.commitMessageModel
-        : DEFAULT_COMMIT_MESSAGE_MODEL,
+    // without changing the preserved OpenRouter key or editor model. Explicit
+    // selections are validated against the Cora worker roster so a removed or
+    // misspelled model id degrades to auto instead of failing generation.
+    commitMessageModel: normalizeCommitMessageModel(settings.commitMessageModel),
     coraWorkerModels:
       settings.coraWorkerModels === undefined
         ? [...DEFAULT_CORA_WORKER_MODELS]

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import type { CommitMessageModel, PiSubscriptionProvider } from "@shared/types";
+import { subscriptionForModelId } from "@shared/agent-families";
 import type {
   PiAccountAuthInspection,
   PiAccountRuntimeProfile,
@@ -18,7 +19,13 @@ export const PI_COMMIT_SYSTEM_PROMPT_LIMIT_CHARS = 4_096;
 
 export interface PiCommitRoute {
   provider: PiSubscriptionProvider;
-  model: "gpt-5.6-luna" | "claude-sonnet-5";
+  model: string;
+  /**
+   * Pi --thinking level. "off" on the auto path (a commit draft is a fast
+   * utility call); "low" when the user pinned a specific model — an explicit
+   * quality ask that stays well inside the generation timeout.
+   */
+  thinking: "off" | "low";
 }
 
 export interface PiCommitOneShotInput {
@@ -77,26 +84,42 @@ function usableProviders(
   return result;
 }
 
+// Cheap/fast commit-draft models per provider for the "auto" selection.
+// Auto is a utility path — the cheapest capable model wins; an explicit
+// model id from the picker overrides this entirely.
+const AUTO_COMMIT_MODEL: Record<PiSubscriptionProvider, string> = {
+  "openai-codex": "gpt-5.6-luna",
+  anthropic: "claude-sonnet-5",
+  xai: "grok-4.6",
+};
+
+// Auto preference order: OpenAI first (historical default), then Anthropic,
+// then xAI.
+const AUTO_PROVIDER_ORDER: readonly PiSubscriptionProvider[] = [
+  "openai-codex",
+  "anthropic",
+  "xai",
+];
+
 export function resolvePiCommitRoute(
   selection: CommitMessageModel,
   inspection: PiAccountAuthInspection,
 ): PiCommitRoute | null {
   const usable = usableProviders(inspection);
-  if (selection === "gpt-5.6-luna") {
-    return usable.has("openai-codex")
-      ? { provider: "openai-codex", model: selection }
+  if (selection !== "auto" && selection !== "openrouter") {
+    // Explicit model id (roster-validated by storage). Route it to its
+    // provider's subscription; an unusable provider returns null rather
+    // than silently switching providers.
+    const provider = subscriptionForModelId(selection);
+    if (!provider) return null;
+    return usable.has(provider)
+      ? { provider, model: selection, thinking: "low" }
       : null;
   }
-  if (selection === "claude-sonnet-5") {
-    return usable.has("anthropic")
-      ? { provider: "anthropic", model: selection }
-      : null;
-  }
-  if (usable.has("openai-codex")) {
-    return { provider: "openai-codex", model: "gpt-5.6-luna" };
-  }
-  if (usable.has("anthropic")) {
-    return { provider: "anthropic", model: "claude-sonnet-5" };
+  for (const provider of AUTO_PROVIDER_ORDER) {
+    if (usable.has(provider)) {
+      return { provider, model: AUTO_COMMIT_MODEL[provider], thinking: "off" };
+    }
   }
   return null;
 }
@@ -310,7 +333,7 @@ export async function runSessionlessPiCommitMessage(
       "--model",
       route.model,
       "--thinking",
-      "off",
+      route.thinking,
       "--system-prompt",
       input.systemPrompt,
     ];
