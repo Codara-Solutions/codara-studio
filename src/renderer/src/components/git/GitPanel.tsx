@@ -51,6 +51,8 @@ interface Props {
   git: SharedGitStatus;
   /** Opens a changed file's diff as a workbench tab (VS Code-style). */
   onOpenDiffTab: (file: GitFileChange) => void;
+  /** Opens a file's diff within a commit as a workbench tab (history rows). */
+  onOpenCommitDiffTab: (path: string, hash: string, options?: { pin?: boolean }) => void;
   /** The diff tab currently focused, if any — highlights its ChangeRow. */
   activeDiffTarget: { path: string; staged: boolean } | null;
 }
@@ -67,6 +69,7 @@ export default function GitPanel({
   onOpenGitHubQueueItem,
   git,
   onOpenDiffTab,
+  onOpenCommitDiffTab,
   activeDiffTarget,
 }: Props): React.ReactElement {
   // Status/log/loading/gitVersion live in the App-owned shared hook
@@ -444,6 +447,7 @@ export default function GitPanel({
                   onClose={closeCommitDetail}
                   onNewer={showNewerCommit}
                   onOlder={showOlderCommit}
+                  onOpenFileDiff={onOpenCommitDiffTab}
                 />
               )}
               {/* The list is hidden, never unmounted, while a commit is open.

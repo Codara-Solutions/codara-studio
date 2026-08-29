@@ -171,6 +171,7 @@ interface RailProps {
   // the explorer's changed-file decorations from one poll.
   git: SharedGitStatus;
   onOpenDiffTab: (file: GitFileChange) => void;
+  onOpenCommitDiffTab: (path: string, hash: string, options?: { pin?: boolean }) => void;
   activeDiffTarget: { path: string; staged: boolean } | null;
   // Explorer context-menu "Open Changes" for a changed file (absolute path).
   onOpenDiffForPath: (absolutePath: string) => void;
@@ -994,6 +995,7 @@ function WorkspaceRail(props: RailProps) {
             onOpenGitHubQueueItem={props.onOpenGitHubQueueItem}
             git={props.git}
             onOpenDiffTab={props.onOpenDiffTab}
+            onOpenCommitDiffTab={props.onOpenCommitDiffTab}
             activeDiffTarget={props.activeDiffTarget}
           />
         );

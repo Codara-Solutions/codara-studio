@@ -55,6 +55,7 @@ function DiffStack({
               cwd={cwd}
               path={t.path}
               staged={t.staged}
+              commitHash={t.commitHash}
               status={status}
               gitVersion={gitVersion}
               onOpenFile={onOpenFile}

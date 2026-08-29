@@ -1254,6 +1254,11 @@ export interface UseTabsApi {
   // (path, staged) — the same file can have a Working Tree tab and a Staged
   // tab open side by side, exactly like VS Code's separate diff editors.
   openDiffTab: (path: string, staged: boolean, options?: { focus?: boolean }) => TabId;
+  // Open (or focus) a file's diff within a specific commit — a read-only
+  // workbench tab keyed by (path, commitHash), opened from CommitDetail.
+  // Opens as a VS Code-style preview (next commit file replaces it) unless
+  // options.pin, which also promotes an existing preview to persistent.
+  openCommitDiffTab: (path: string, commitHash: string, options?: { pin?: boolean }) => TabId;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
@@ -1269,6 +1274,8 @@ export interface UseTabsApi {
   pruneDeletedRunTabsFromInactiveWorkspaces: (runId: string) => void;
   openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
   pinEditorTab: (id: TabId) => void;
+  // Promote a preview commit-diff tab to persistent (double-click its pill).
+  pinDiffTab: (id: TabId) => void;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
   closeEditorByPath: (path: string) => void;
   setActiveEditorPath: (path: string) => void;
@@ -3293,12 +3300,14 @@ export function useTabs(
   const openDiffTab = useCallback(
     (path: string, staged: boolean, options?: { focus?: boolean }): TabId => {
       const existingId = tabsRef.current.find(
-        (t): t is DiffTab => t.kind === "diff" && t.path === path && t.staged === staged,
+        (t): t is DiffTab =>
+          t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
       )?.id;
       const resultId = existingId ?? makeId("diff");
       setTabs((curr) => {
         const existing = curr.find(
-          (t): t is DiffTab => t.kind === "diff" && t.path === path && t.staged === staged,
+          (t): t is DiffTab =>
+            t.kind === "diff" && !t.commitHash && t.path === path && t.staged === staged,
         );
         if (existing) {
           if (options?.focus !== false) setActiveId(existing.id);
@@ -3315,6 +3324,72 @@ export function useTabs(
         return [...curr, tab];
       });
       return resultId;
+    },
+    [],
+  );
+
+  // Open (or focus) a file's diff within a specific commit, as a read-only
+  // workbench tab. VS Code preview semantics: the tab opens as a preview
+  // (italic label) and the next commit-file click REUSES it — path/hash swap
+  // in place — until it is pinned by a double-click (options.pin) on the row
+  // or the tab pill. Identity is (path, commitHash); an already-open pair is
+  // focused rather than duplicated. Same double-click race note as above.
+  const openCommitDiffTab = useCallback(
+    (path: string, commitHash: string, options?: { pin?: boolean }): TabId => {
+      let outId: TabId | null = null;
+      const title = `${basename(path)} @ ${commitHash.slice(0, 7)}`;
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t): t is DiffTab =>
+            t.kind === "diff" && t.path === path && t.commitHash === commitHash,
+        );
+        if (existing) {
+          outId = existing.id;
+          setActiveId(existing.id);
+          // A pin gesture on an already-open preview promotes it in place.
+          if (options?.pin && existing.preview) {
+            return curr.map((t) =>
+              t.id === existing.id && t.kind === "diff" ? { ...t, preview: false } : t,
+            );
+          }
+          return curr;
+        }
+        // Reuse the current preview commit-diff tab, if any: swap its payload
+        // instead of stacking a new pill per clicked file.
+        const reusable = curr.find(
+          (t): t is DiffTab => t.kind === "diff" && Boolean(t.preview),
+        );
+        if (reusable) {
+          outId = reusable.id;
+          setActiveId(reusable.id);
+          return curr.map((t) =>
+            t.id === reusable.id && t.kind === "diff"
+              ? {
+                  ...t,
+                  title,
+                  path,
+                  staged: false,
+                  commitHash,
+                  preview: !options?.pin,
+                }
+              : t,
+          );
+        }
+        const id = makeId("diff");
+        outId = id;
+        const tab: DiffTab = {
+          id,
+          kind: "diff",
+          title,
+          path,
+          staged: false,
+          commitHash,
+          preview: !options?.pin,
+        };
+        setActiveId(id);
+        return [...curr, tab];
+      });
+      return (outId ?? makeId("diff")) as TabId;
     },
     [],
   );
@@ -3778,6 +3853,17 @@ export function useTabs(
     );
   }, []);
 
+  // Promote a preview commit-diff tab to persistent (double-click on its pill).
+  const pinDiffTab = useCallback((id: TabId) => {
+    setTabs((curr) =>
+      curr.map((t) =>
+        t.id === id && t.kind === "diff" && t.preview
+          ? { ...t, preview: false }
+          : t,
+      ),
+    );
+  }, []);
+
   const setEditorEntry = useCallback((oldPath: string, entry: FsEntry) => {
     setTabs((curr) =>
       curr.map((t) =>
@@ -3907,6 +3993,7 @@ export function useTabs(
       openUsageTab,
       newWhiteboardTab,
       openDiffTab,
+      openCommitDiffTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       closePreviewTabsFor,
@@ -3914,6 +4001,7 @@ export function useTabs(
       pruneDeletedRunTabsFromInactiveWorkspaces,
       openEditorTab,
       pinEditorTab,
+      pinDiffTab,
       setEditorEntry,
       closeEditorByPath,
       setActiveEditorPath,

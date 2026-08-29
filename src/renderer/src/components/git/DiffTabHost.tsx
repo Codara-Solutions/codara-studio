@@ -7,6 +7,8 @@ interface Props {
   /** Repo-relative path (forward slashes) — the DiffTab identity. */
   path: string;
   staged: boolean;
+  /** Set = show this file's diff inside that commit (read-only). */
+  commitHash?: string;
   /** Live shared status — untracked/renamed/gone are derived per render. */
   status: GitStatus | null;
   /** Bumped after every app-side git mutation; triggers a diff refetch. */
@@ -17,15 +19,21 @@ interface Props {
 }
 
 // Hosts one diff tab: what used to be GitPanel's inline diff-loading state,
-// now per-tab so several diffs stay open at once (VS Code-style). The tab's
-// identity is only (path, staged) — everything else is looked up live in the
-// shared GitStatus, so a file that gets committed, discarded or renamed while
-// its tab is open degrades to DiffView's calm "No changes" state (plus a
-// rename note) instead of crashing or freezing stale content.
+// now per-tab so several diffs stay open at once (VS Code-style). Two modes:
+//
+// Working-tree mode — identity is (path, staged); everything else is looked
+// up live in the shared GitStatus, so a file that gets committed, discarded
+// or renamed while its tab is open degrades to DiffView's calm "No changes"
+// state (plus a rename note) instead of crashing or freezing stale content.
+//
+// Commit mode (commitHash set) — identity is (path, commitHash); the diff is
+// immutable history fetched once via git.commitFileDiff, rendered read-only
+// (no hunk staging; a commit's diff has no working/staged side to act on).
 export default function DiffTabHost({
   cwd,
   path,
   staged,
+  commitHash,
   status,
   gitVersion,
   onOpenFile,
@@ -36,25 +44,29 @@ export default function DiffTabHost({
   const [loading, setLoading] = useState(false);
 
   // Live lookup: is this (path, staged) still a change? A rename shows up as
-  // a change whose oldPath is our path.
+  // a change whose oldPath is our path. Commit tabs skip this — history is
+  // immutable, so there is nothing to reconcile against the working tree.
   const { change, renamedTo } = useMemo((): {
     change: GitFileChange | null;
     renamedTo: string | null;
   } => {
+    if (commitHash) return { change: null, renamedTo: null };
     const list = staged ? status?.staged : status?.unstaged;
     if (!list) return { change: null, renamedTo: null };
     const direct = list.find((f) => f.path === path) ?? null;
     if (direct) return { change: direct, renamedTo: null };
     const renamed = list.find((f) => f.oldPath === path) ?? null;
     return { change: null, renamedTo: renamed?.path ?? null };
-  }, [status, path, staged]);
+  }, [status, path, staged, commitHash]);
   const untracked = change?.untracked ?? false;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    window.spark.git
-      .diff(cwd, path, staged, untracked)
+    (commitHash
+      ? window.spark.git.commitFileDiff(cwd, commitHash, path)
+      : window.spark.git.diff(cwd, path, staged, untracked)
+    )
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -69,7 +81,8 @@ export default function DiffTabHost({
     };
     // gitVersion in deps so the open diff reloads after a partial stage /
     // unstage / discard (the working or staged side changed underneath it).
-  }, [cwd, path, staged, untracked, gitVersion]);
+    // Harmless for commit tabs: the refetch returns identical content.
+  }, [cwd, path, staged, untracked, gitVersion, commitHash]);
 
   const openFileInEditor = () => {
     const sep = cwd.includes("\\") ? "\\" : "/";
@@ -107,6 +120,7 @@ export default function DiffTabHost({
         path={path}
         staged={staged}
         untracked={untracked}
+        commitHash={commitHash}
         cwd={cwd}
         diff={diff}
         loading={loading}

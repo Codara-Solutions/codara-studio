@@ -79,6 +79,7 @@ interface Props {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  onPinDiffTab: (id: TabId) => void;
   // "Open in split" from a pill's context menu — the keyboard/menu route to
   // the same thing dragging a pill into the grid does. The host is resolved
   // downstream (useTabs.openTabInSplit): the strip knows which tab was picked,
@@ -143,6 +144,7 @@ function TabBar({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  onPinDiffTab,
   onOpenInSplit,
   pickerHints,
   closeOnMiddleClick,
@@ -804,6 +806,7 @@ function TabBar({
               onTerminalPaneDrop={onTerminalPaneDrop}
               onReorderDragStart={handleReorderDragStart}
               onPinEditorTab={onPinEditorTab}
+              onPinDiffTab={onPinDiffTab}
               onContextMenu={onTabContextMenu}
               closeOnMiddleClick={closeOnMiddleClick}
             />
@@ -954,6 +957,7 @@ interface TabItemProps {
   // Hands the gesture to the strip, which owns all reorder hit-testing.
   onReorderDragStart: (id: TabId, event: React.DragEvent) => void;
   onPinEditorTab: (id: TabId) => void;
+  onPinDiffTab: (id: TabId) => void;
   // Right-click. Only file-backed tab kinds report it (currently editors);
   // the parent owns the menu state so one menu serves the whole strip.
   onContextMenu: (id: TabId, x: number, y: number) => void;
@@ -975,12 +979,15 @@ const TabItem = React.memo(function TabItem({
   onTerminalPaneDrop,
   onReorderDragStart,
   onPinEditorTab,
+  onPinDiffTab,
   onContextMenu,
   closeOnMiddleClick,
 }: TabItemProps) {
   const [closeHover, setCloseHover] = useState(false);
   const [dropActive, setDropActive] = useState(false);
-  const isPreviewEditor = tab.kind === "editor" && Boolean(tab.preview);
+  const isPreviewEditor =
+    (tab.kind === "editor" && Boolean(tab.preview)) ||
+    (tab.kind === "diff" && Boolean(tab.preview));
   // Hover-activate timer: a terminal-pane drag that lingers over an
   // inactive tab flips the workbench to that tab so the user can drop on a
   // specific pane edge inside.
@@ -1098,6 +1105,7 @@ const TabItem = React.memo(function TabItem({
       onDoubleClick={(e) => {
         e.stopPropagation();
         if (tab.kind === "editor") onPinEditorTab(tab.id);
+        else if (tab.kind === "diff" && tab.preview) onPinDiffTab(tab.id);
       }}
       onAuxClick={(e) => {
         if (e.button === 1 && canClose && closeOnMiddleClick) {
@@ -1534,7 +1542,10 @@ function labelFor(t: Tab): string {
   if (t.kind === "terminal") return t.title || "terminals";
   if (t.kind === "automations") return t.title || "Automations";
   if (t.kind === "usage") return t.title || "Usage";
-  if (t.kind === "diff") return `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
+  if (t.kind === "diff") {
+    // Commit tabs already carry "name @ hash" in the title; don't re-suffix.
+    return t.commitHash ? t.title : `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
+  }
   return t.title;
 }
 
@@ -1550,7 +1561,11 @@ function titleFor(t: Tab): string {
   }
   if (t.kind === "automations") return t.title;
   if (t.kind === "usage") return t.title;
-  if (t.kind === "diff") return `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
+  if (t.kind === "diff") {
+    return t.commitHash
+      ? `${t.path} @ ${t.commitHash.slice(0, 7)} (Commit)`
+      : `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
+  }
   return t.title;
 }
 

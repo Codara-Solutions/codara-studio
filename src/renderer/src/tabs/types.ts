@@ -290,7 +290,18 @@ export interface DiffTab extends BaseTab {
   // Repo-relative path, forward-slash separated — matches GitFileChange.path.
   path: string;
   // true = diff of the index vs HEAD (staged); false = working tree vs index.
+  // Ignored when commitHash is set (a committed diff has no staged side).
   staged: boolean;
+  // When set, this tab shows the file's diff INSIDE that commit (read-only,
+  // fetched via git.commitFileDiff) instead of a working-tree/index diff.
+  // Identity becomes (path, commitHash). Persisted like any other field; a
+  // hash gone after a rebase simply loads as a diff error, same degradation
+  // contract as the working-tree case.
+  commitHash?: string;
+  // VS Code-style preview semantics for commit diff tabs: opening another
+  // commit file REPLACES this tab until it is pinned (double-click on the
+  // tab or on the history row). Mirrors EditorTab.preview.
+  preview?: boolean;
 }
 
 // Automations tabs host the workspace's scheduler + overnight-queue panel.

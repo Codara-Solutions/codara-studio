@@ -17,6 +17,10 @@ interface Props {
   cwd: string;
   untracked: boolean;
   onChanged: () => void;
+  // Set = this diff is a file inside a committed revision: render read-only
+  // (no hunk staging / discard — history has no working or staged side) and
+  // badge the header with the short hash instead of Staged/Working.
+  commitHash?: string;
 }
 
 // Per-line treatment. Adds / deletes get a faint tinted band the full width of
@@ -198,6 +202,7 @@ export default function DiffView({
   cwd,
   untracked,
   onChanged,
+  commitHash,
 }: Props): React.ReactElement {
   const { dir, name } = splitPath(path);
   // The in-flight op id (e.g. `hunk:3:stageHunk`) — disables every action and
@@ -227,8 +232,10 @@ export default function DiffView({
   const hunkCount = structure?.hunks.length ?? 0;
   // Untracked files have a synthetic all-added diff that isn't a real patch
   // (no file header) — stage/unstage the whole file via the change list, not
-  // per hunk. Conflicted files route through resolveConflict instead.
-  const canPartialStage = Boolean(structure) && !untracked && !conflicted && hunkCount > 0;
+  // per hunk. Conflicted files route through resolveConflict instead. Commit
+  // diffs are immutable history: nothing to stage, unstage, or discard.
+  const canPartialStage =
+    Boolean(structure) && !commitHash && !untracked && !conflicted && hunkCount > 0;
 
   const gutterWidth = useMemo(() => {
     let max = 0;
@@ -363,33 +370,46 @@ export default function DiffView({
             height: 16,
             padding: "0 6px",
             borderRadius: 999,
-            fontFamily: "var(--font-sans)",
+            fontFamily: commitHash ? "var(--font-mono)" : "var(--font-sans)",
             fontSize: 9,
-            letterSpacing: "0.1em",
+            letterSpacing: commitHash ? "0.02em" : "0.1em",
             fontWeight: 700,
-            textTransform: "uppercase",
-            color: conflicted ? "var(--danger)" : staged ? "var(--ok)" : "var(--muted)",
-            background: conflicted
-              ? "var(--danger-soft)"
-              : staged
-                ? "var(--ok-soft)"
-                : "color-mix(in oklab, var(--ink) 5%, transparent)",
-            border: conflicted
-              ? "1px solid color-mix(in oklch, var(--danger) 40%, transparent)"
-              : staged
-                ? "1px solid color-mix(in oklch, var(--ok) 40%, transparent)"
-                : "1px solid var(--rule-soft)",
+            textTransform: commitHash ? "none" : "uppercase",
+            color: commitHash
+              ? "var(--accent-text)"
+              : conflicted
+                ? "var(--danger)"
+                : staged
+                  ? "var(--ok)"
+                  : "var(--muted)",
+            background: commitHash
+              ? "color-mix(in oklab, var(--accent) 12%, transparent)"
+              : conflicted
+                ? "var(--danger-soft)"
+                : staged
+                  ? "var(--ok-soft)"
+                  : "color-mix(in oklab, var(--ink) 5%, transparent)",
+            border: commitHash
+              ? "1px solid color-mix(in oklch, var(--accent) 35%, transparent)"
+              : conflicted
+                ? "1px solid color-mix(in oklch, var(--danger) 40%, transparent)"
+                : staged
+                  ? "1px solid color-mix(in oklch, var(--ok) 40%, transparent)"
+                  : "1px solid var(--rule-soft)",
           }}
+          title={commitHash}
         >
-          {conflicted ? "Conflict" : staged ? "Staged" : "Working"}
+          {commitHash ? commitHash.slice(0, 7) : conflicted ? "Conflict" : staged ? "Staged" : "Working"}
         </span>
         <IconButton title="Open file in editor" onClick={onOpenFile} size={22}>
           <OpenFileIcon />
         </IconButton>
       </div>
 
-      {/* Conflict banner — resolve by keeping one side wholesale. */}
-      {conflicted && (
+      {/* Conflict banner — resolve by keeping one side wholesale. Historical
+          conflict markers inside a commit's diff are content, not a live
+          conflict, so the bar never shows for commit tabs. */}
+      {conflicted && !commitHash && (
         <ConflictBar
           busy={busy}
           onOurs={() => resolve("ours")}

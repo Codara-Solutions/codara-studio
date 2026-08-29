@@ -19,6 +19,9 @@ interface Props {
   onNewer: (() => void) | null;
   /** Step to the older commit in the history list — null at the oldest end. */
   onOlder: (() => void) | null;
+  /** Open a file's diff-in-commit as a workbench tab. Row click opens a
+   *  preview (replaced by the next click); double-click pins it. */
+  onOpenFileDiff: (path: string, hash: string, options?: { pin?: boolean }) => void;
 }
 
 // Per-line treatment for a diff line — mirrors DiffView's palette so a commit's
@@ -52,6 +55,7 @@ export default function CommitDetail({
   onClose,
   onNewer,
   onOlder,
+  onOpenFileDiff,
 }: Props): React.ReactElement {
   const [detail, setDetail] = useState<GitCommitDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -117,15 +121,6 @@ export default function CommitDetail({
   }, [files]);
 
   const allExpanded = files.length > 0 && expanded.size === files.length;
-
-  const toggleFile = useCallback((path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
 
   const toggleAll = useCallback(() => {
     setExpanded((prev) =>
@@ -230,7 +225,7 @@ export default function CommitDetail({
                     hash={hash}
                     file={file}
                     expanded={expanded.has(file.path)}
-                    onToggle={() => toggleFile(file.path)}
+                    onOpenTab={(pin) => onOpenFileDiff(file.path, hash, { pin })}
                   />
                 ))
               )}
@@ -420,20 +415,23 @@ function Dot(): React.ReactElement {
   return <span style={{ color: "var(--muted-2)", opacity: 0.7 }}>·</span>;
 }
 
-// One changed file: a clickable header (status glyph + name + dir + counts)
-// that drills down into the file's diff, fetched lazily on first expand.
+// One changed file: clicking the row opens the file's diff-in-commit as a
+// preview workbench tab (the next click replaces it); double-clicking pins
+// the tab. The header's Expand/Collapse-all toggle still drives the inline
+// peek below the row, fetched lazily on first expand — there is no per-row
+// chevron anymore.
 const FileEntry = React.memo(function FileEntry({
   cwd,
   hash,
   file,
   expanded,
-  onToggle,
+  onOpenTab,
 }: {
   cwd: string;
   hash: string;
   file: GitCommitFile;
   expanded: boolean;
-  onToggle: () => void;
+  onOpenTab: (pin: boolean) => void;
 }) {
   const [hover, setHover] = useState(false);
   const [diff, setDiff] = useState<GitDiff | null>(null);
@@ -467,10 +465,11 @@ const FileEntry = React.memo(function FileEntry({
   return (
     <div>
       <div
-        onClick={onToggle}
+        onClick={() => onOpenTab(false)}
+        onDoubleClick={() => onOpenTab(true)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        title={`${statusLabel(file.status)} — ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}`}
+        title={`Open diff in a tab (double-click to pin) — ${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}`}
         style={{
           display: "flex",
           alignItems: "center",
@@ -484,7 +483,6 @@ const FileEntry = React.memo(function FileEntry({
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
-        <Chevron open={expanded} />
         <span
           aria-hidden
           style={{
@@ -602,29 +600,6 @@ const FileEntry = React.memo(function FileEntry({
 // Build a compact "old/dir → new/name" hint for a rename, dimming shared parts.
 function renameHint(oldPath: string, newPath: string): string {
   return `${oldPath} → ${newPath}`;
-}
-
-function Chevron({ open }: { open: boolean }): React.ReactElement {
-  return (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 10 10"
-      fill="none"
-      stroke="var(--muted)"
-      strokeWidth={1.4}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-      style={{
-        flex: "0 0 auto",
-        transform: open ? "rotate(90deg)" : "none",
-        transition: "transform var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <path d="M3.5 2.5 6.5 5 3.5 7.5" />
-    </svg>
-  );
 }
 
 function DiffNote({

@@ -3880,6 +3880,15 @@ export default function App() {
     tabsRef.current.openDiffTab(file.path, file.staged);
   }, []);
 
+  // Open a file's diff within a commit as a workbench tab (history file row).
+  // Single click = preview tab (replaced by the next file); double = pinned.
+  const handleOpenCommitDiffTab = useCallback(
+    (path: string, hash: string, options?: { pin?: boolean }) => {
+      tabsRef.current.openCommitDiffTab(path, hash, options);
+    },
+    [],
+  );
+
   // Explorer "Open Changes": absolute path → repo-relative (forward slashes),
   // always the working-tree (unstaged) diff — matching VS Code's entry point.
   const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
@@ -3915,9 +3924,10 @@ export default function App() {
   }, [handleOpenDiffForPath, openFileByPath]);
 
   // Which diff tab is focused — highlights its ChangeRow in the git panel.
+  // Commit-scoped diff tabs have no working-tree row to highlight.
   const activeDiffTarget = useMemo(
     () =>
-      tabs.activeTab?.kind === "diff"
+      tabs.activeTab?.kind === "diff" && !tabs.activeTab.commitHash
         ? { path: tabs.activeTab.path, staged: tabs.activeTab.staged }
         : null,
     [tabs.activeTab],
@@ -5886,6 +5896,7 @@ export default function App() {
             onRunPlan={handleRunPlan}
             git={sharedGit}
             onOpenDiffTab={handleOpenDiffTab}
+            onOpenCommitDiffTab={handleOpenCommitDiffTab}
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
             onAddExternalFolder={addExternalFolder}
@@ -5952,6 +5963,7 @@ export default function App() {
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
               onReorderTab={tabs.reorderTab}
               onPinEditorTab={tabs.pinEditorTab}
+              onPinDiffTab={tabs.pinDiffTab}
               pickerHints={pickerHints}
               closeTabsOnMiddleClick={shortcutPreferences.closeTabsOnMiddleClick}
             />
@@ -6027,6 +6039,7 @@ export default function App() {
             onRunPlan={handleRunPlan}
             git={sharedGit}
             onOpenDiffTab={handleOpenDiffTab}
+            onOpenCommitDiffTab={handleOpenCommitDiffTab}
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
             onAddExternalFolder={addExternalFolder}
@@ -6186,6 +6199,7 @@ export default function App() {
 
       <StatusBar
         workspace={activeWorkspace}
+        gitStatus={sharedGit.status}
         defaultShell={defaultShell}
         platform={platform}
         workerCount={workerCount}
@@ -6522,6 +6536,7 @@ interface WorkspaceProps {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
   onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  onPinDiffTab: (id: TabId) => void;
   // Resolved "+" picker keybind hints, memoized in App so this stays
   // referentially stable across unrelated renders (keeps the memo intact).
   pickerHints: PickerHints;
@@ -6575,6 +6590,7 @@ const Workspace = React.memo(function Workspace({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  onPinDiffTab,
   pickerHints,
   closeTabsOnMiddleClick,
 }: WorkspaceProps) {
@@ -7242,6 +7258,7 @@ const Workspace = React.memo(function Workspace({
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
+        onPinDiffTab={onPinDiffTab}
         onOpenInSplit={handleOpenInSplit}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}

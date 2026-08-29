@@ -1,20 +1,79 @@
 import React from "react";
-import type { ShellInfo, Workspace } from "@shared/types";
+import type { GitStatus, ShellInfo, Workspace } from "@shared/types";
 
 interface Props {
   workspace: Workspace | null;
+  /** Shared git snapshot for the active workspace (App's useSharedGitStatus). */
+  gitStatus: GitStatus | null;
   defaultShell: ShellInfo | null;
   platform: string;
   workerCount: number;
 }
 
-// Memoized: App passes a memoized `workspace`, the `defaultShell`/`platform`
-// state values, and a memoized `workerCount`. So the status bar only
-// re-renders when one of those genuinely changes — not on every App re-render
-// driven by unrelated state (run polls, color drags, orchestration events).
-function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
-  const items = [
+// The same two-dot-fork branch glyph as Source Control's BranchIcon, drawn
+// inline (git-ui's svg() helper hardcodes its own size/stroke) at status-bar
+// scale and currentColor so it inherits the segment's ink.
+function BranchGlyph(): React.ReactElement {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.3}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ flex: "0 0 auto" }}
+    >
+      <circle cx="3.5" cy="3" r="1.6" />
+      <circle cx="3.5" cy="11" r="1.6" />
+      <circle cx="10.5" cy="4.5" r="1.6" />
+      <path d="M3.5 4.6v4.8" />
+      <path d="M10.5 6.1c0 2.4-2 3.3-4 3.6" />
+    </svg>
+  );
+}
+
+// Memoized: App passes a memoized `workspace`, the shared git snapshot, the
+// `defaultShell`/`platform` state values, and a memoized `workerCount`. So the
+// status bar only re-renders when one of those genuinely changes — not on
+// every App re-render driven by unrelated state (run polls, color drags,
+// orchestration events).
+function StatusBar({ workspace, gitStatus, defaultShell, platform, workerCount }: Props) {
+  // Branch of the active workspace's repo. Detached HEAD shows the short hash
+  // (GitStatus.branch already carries it) marked "detached"; a non-repo or
+  // still-loading workspace shows no branch segment at all rather than "—".
+  const branch = gitStatus?.isRepo ? gitStatus.branch : undefined;
+  const branchSuffix =
+    gitStatus?.detached && branch
+      ? " (detached)"
+      : gitStatus && (gitStatus.ahead > 0 || gitStatus.behind > 0)
+        ? ` ${gitStatus.ahead > 0 ? `↑${gitStatus.ahead}` : ""}${gitStatus.behind > 0 ? `↓${gitStatus.behind}` : ""}`
+        : "";
+
+  const items: {
+    l: string;
+    v: string;
+    mono: boolean;
+    icon?: React.ReactElement;
+    title?: string;
+  }[] = [
     { l: "WORKSPACE", v: workspace?.name ?? "—", mono: false },
+    ...(branch
+      ? [
+          {
+            l: "BRANCH",
+            v: `${branch}${branchSuffix}`,
+            mono: true,
+            icon: <BranchGlyph />,
+            title: gitStatus?.upstream
+              ? `${branch} — tracking ${gitStatus.upstream}`
+              : branch,
+          },
+        ]
+      : []),
     { l: "PATH", v: workspace?.cwd ?? "—", mono: true },
     { l: "SHELL", v: defaultShell?.label ?? "—", mono: true },
     { l: "OS", v: platform || "—", mono: true },
@@ -59,18 +118,20 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
             minWidth: 0,
           }}
         >
-          <span
-            style={{
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontWeight: 600,
-              fontSize: 9,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-            }}
-          >
-            {it.l}
-          </span>
+          {it.icon ?? (
+            <span
+              style={{
+                color: "var(--muted)",
+                fontFamily: "var(--font-sans)",
+                fontWeight: 600,
+                fontSize: 9,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+              }}
+            >
+              {it.l}
+            </span>
+          )}
           <span
             style={{
               color: "var(--ink-dim)",
@@ -83,7 +144,7 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
               textOverflow: "ellipsis",
               maxWidth: 360,
             }}
-            title={String(it.v)}
+            title={it.title ?? String(it.v)}
           >
             {it.v}
           </span>
