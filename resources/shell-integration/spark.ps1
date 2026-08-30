@@ -2,7 +2,7 @@
 #
 # Emits FinalTerm OSC 133 + VS Code OSC 633 boundary markers around each
 # prompt and command so the renderer can group output into per-command
-# blocks. Implemented from the public OSC 133 / 633 specs — see
+# blocks. Implemented from the public OSC 133 / 633 specs; see
 # https://code.visualstudio.com/docs/terminal/shell-integration for the
 # wire format.
 #
@@ -17,7 +17,7 @@
 # OSC = ESC ]   ST = BEL (0x07)
 
 # Worker sessions (Claude / Codex hosted in pwsh) set this var so the
-# integration is skipped — its OSC writes confuse Ink-based TUIs and the
+# integration is skipped: its OSC writes confuse Ink-based TUIs and the
 # PSReadLine key hook can desync the cursor before claude takes over.
 if ($env:SPARK_NO_SHELL_INTEGRATION -eq '1') { return }
 if ($env:SPARK_SHELL_INTEGRATION_LOADED -eq '1') { return }
@@ -167,8 +167,8 @@ function Global:Prompt {
     $out = ''
 
     # We emit C live (on Enter, see PSReadLine hook below). If a TUI ate the
-    # whole turn without ever yielding C — e.g. shell crash, Ctrl-C before
-    # exec — fall back to the retroactive E+C path so the block still closes.
+    # whole turn without ever yielding C (e.g. shell crash, Ctrl-C before
+    # exec), fall back to the retroactive E+C path so the block still closes.
     if ($Global:__SparkPromptStarted) {
         if (-not $Global:__SparkCommandRunning) {
             $hist = Get-History -Count 1
@@ -212,7 +212,7 @@ function Global:Prompt {
     return $out
 }
 
-# Hook Enter so OSC 633;C fires the moment the user submits — *before* the
+# Hook Enter so OSC 633;C fires the moment the user submits, *before* the
 # command starts producing output. Without this, claude/codex run for minutes
 # without the renderer knowing the pane is busy, because the next Prompt
 # (which emits C retroactively) only fires once the TUI exits.

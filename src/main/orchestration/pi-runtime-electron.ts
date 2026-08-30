@@ -121,7 +121,7 @@ async function openAiFastModeEnabled(): Promise<boolean> {
 
 /**
  * The fast mode a session for `provider` would actually launch with. Anthropic
- * is always false — it has no priority tier, and buildPiManagerLaunchPlan
+ * is always false: it has no priority tier, and buildPiManagerLaunchPlan
  * refuses to stamp the flag for it regardless of the setting. Callers that
  * compare session identity resolve this ONCE per turn and pass the same value
  * back into the launch options, so the identity check and the process env can

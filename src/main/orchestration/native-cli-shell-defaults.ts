@@ -17,7 +17,7 @@ import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
  * Two invariants:
  *
  *  - A PERSONAL default contributes nothing. The shell keeps its inherited
- *    environment byte-for-byte, exactly the pre-feature behavior — an unset
+ *    environment byte-for-byte, exactly the pre-feature behavior: an unset
  *    CLAUDE_CONFIG_DIR is not equivalent to an exported one, and a personal
  *    shell must also keep credential-override variables the profile builders
  *    would strip.

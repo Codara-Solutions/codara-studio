@@ -13,14 +13,14 @@
 }
 
 # Worker sessions (Claude / Codex hosted in zsh) set this var so the
-# integration is skipped — its OSC writes confuse Ink-based TUIs that take
+# integration is skipped: its OSC writes confuse Ink-based TUIs that take
 # over the alternate screen.
 if [[ "$SPARK_NO_SHELL_INTEGRATION" = "1" ]]; then
   return 0 2>/dev/null
 fi
 
 # Re-source guard within a single shell (e.g. user runs `source ~/.zshrc`).
-# This is NOT exported, so each nested zsh installs its own hooks — desired,
+# This is NOT exported, so each nested zsh installs its own hooks; desired,
 # since every interactive shell needs its own prompt integration.
 if [[ -z "$__SPARK_HOOKS_LOADED" ]]; then
   __SPARK_HOOKS_LOADED=1

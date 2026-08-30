@@ -331,7 +331,7 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     const status = statuses.get(profile.id);
     // The registry digest is authoritative; the credential read backfills
     // accounts connected before the registry recorded one. Only the hash
-    // crosses IPC — the account id it was taken from stays in this process.
+    // crosses IPC; the account id it was taken from stays in this process.
     const accountFingerprint = profile.identityFingerprint ?? status?.accountFingerprint;
     // The registry address was captured at connect time (Anthropic); the
     // credential read covers Codex, whose token carries its own claims.
@@ -413,8 +413,8 @@ function settlePendingPrompt(flow: ActiveFlow, error: Error): void {
  * The anonymous account digest and the account's email address to record for a
  * credential that has just been issued. Codex carries both inside the
  * credential, so they come straight out of it. Anthropic's credential is opaque
- * tokens, so its account uuid and address are read once here — the single
- * moment a fresh access token is in hand — from Anthropic's OAuth profile
+ * tokens, so its account uuid and address are read once here (the single
+ * moment a fresh access token is in hand) from Anthropic's OAuth profile
  * endpoint. A stored credential is never read for this and a refresh is never
  * triggered: outside connect, an account without a digest simply stays
  * unpaired, and one without an address simply shows none.
@@ -479,8 +479,8 @@ async function persistCredential(
       console.warn(`[accounts] ${target.profile.id} was connected but not made active: ${reason}`);
     });
   }
-  // A newly connected subscription must not read its limits — or its model
-  // catalog — through a cache populated while it was still disconnected.
+  // A newly connected subscription must not read its limits (or its model
+  // catalog) through a cache populated while it was still disconnected.
   const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
   invalidatePiSubscriptionUsageCache();
   const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
@@ -523,7 +523,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
   try {
     const oauth = await loadOAuth(provider);
     // Own the loopback callback so the browser's last page is Codara's, not
-    // Pi's. Only the OpenAI flow tolerates losing its own listener — see
+    // Pi's. Only the OpenAI flow tolerates losing its own listener; see
     // pi-oauth-callback-server.ts. A null result means the port was taken and
     // Pi runs the callback itself, exactly as before.
     if (provider === "openai-codex") callback = await startPiOAuthCallbackServer();
@@ -610,7 +610,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
         markLoginSignal();
         if (event.type === "auth_url" && event.url) {
           // Pi's authorize URL carries the state its callback expects. Learning
-          // it here — before the browser opens — lets Codara's listener reject
+          // it here, before the browser opens, lets Codara's listener reject
           // anything that is not this sign-in, exactly as Pi's own would.
           const state = oauthStateFromAuthUrl(event.url);
           if (state) callback?.expectState(state);

@@ -364,7 +364,7 @@ async function main() {
   );
   assert.equal(afterConfigStat.size, beforeConfigStat.size);
   // A signed-out profile is never read for identity, however readable its
-  // config — neither the digest nor the address appears.
+  // config: neither the digest nor the address appears.
   const signedOutClaude = (
     await new mod.NativeCliAccountService({
       claudeStore: new mod.ClaudeCliAccountProfileStore(claudeRoot, {
@@ -412,7 +412,7 @@ async function main() {
   // → { user_id, email, key }), not the Codex `{ tokens }` shape. The user_id
   // is the same uuid Pi hashes from the xAI access token's `sub`, so a Cora
   // connection and this sign-in pair as one card. The email is a plaintext
-  // field — xAI access tokens do not carry an `email` claim.
+  // field; xAI access tokens do not carry an `email` claim.
   const GROK_USER_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
   const GROK_EMAIL = "first.last@example.com";
   const EXPECTED_GROK_FINGERPRINT = crypto

@@ -8,7 +8,7 @@
 //
 // Design notes:
 //   * Credentials are read from Pi's own auth.json and never leave this module.
-//     Nothing here logs, returns, or embeds token material — only percentages,
+//     Nothing here logs, returns, or embeds token material, only percentages,
 //     labels, and reset times cross the IPC boundary.
 //   * An expired access token is refreshed through Pi's OWN oauth module and
 //     written back through Pi's OWN AuthStorage, so Codara never implements a
@@ -109,7 +109,7 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return isRecord(value) ? value : null;
 }
 
-/** "2d 4h" / "3h 12m" / "45m" — the coarsest useful precision, matching how
+/** "2d 4h" / "3h 12m" / "45m": the coarsest useful precision, matching how
  * both vendors' own CLIs phrase a reset countdown. */
 function formatDuration(seconds: number): string {
   const days = Math.floor(seconds / 86_400);
@@ -208,7 +208,7 @@ function accountIdFromAccessToken(access: string): string | null {
 
 /**
  * Refresh an expired credential through Pi's own OAuth module and auth store
- * (lock-safe — see refreshPiSubscriptionCredential). Returns the fresh access
+ * (lock-safe; see refreshPiSubscriptionCredential). Returns the fresh access
  * token, or null when the credential cannot be refreshed, in which case the
  * caller reports "reconnect needed" rather than firing a request that would
  * 401 anyway. Imported lazily so this module stays cheap to load.
@@ -820,7 +820,7 @@ export function inspectPiSubscriptionUsage(force = false): Promise<PiUsageOvervi
   })();
 }
 
-/** Drop the cache so the next read is live — used after a connect/disconnect. */
+/** Drop the cache so the next read is live; used after a connect/disconnect. */
 export function invalidatePiSubscriptionUsageCache(): void {
   profileCache.clear();
   profileInflight.clear();

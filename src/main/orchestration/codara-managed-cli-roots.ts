@@ -67,8 +67,8 @@ function isInside(child: string, parent: string): boolean {
 }
 
 /**
- * True when a path names something Codara manages — a managed account
- * directory or the Active pointer — whether directly or through a symlink.
+ * True when a path names something Codara manages (a managed account
+ * directory or the Active pointer), whether directly or through a symlink.
  */
 export function isCodaraManagedCliPath(
   candidate: string,

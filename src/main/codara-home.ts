@@ -15,12 +15,12 @@ import * as path from "node:path";
 // Codara stores its own user data ($HOME/.codarastudio by default) instead of
 // piggybacking on Electron's userData dir. Keeps run.json, events.jsonl,
 // spark-state.json, and spark-settings.json out of the Chromium-cache-filled
-// userData folder. Internal file names keep the legacy spark- prefix — they
+// userData folder. Internal file names keep the legacy spark- prefix; they
 // are an on-disk contract, renaming them buys nothing (see rebrand Phase C).
 const DEFAULT_DIR_NAME = ".codarastudio";
 // The home immediately before this one. Unlike the older legacy homes below
-// it is MOVED (renamed) into place wholesale on first boot, so everything —
-// worktrees, CLI roots, auth — carries over without a copy. A symlink is left
+// it is MOVED (renamed) into place wholesale on first boot, so everything
+// (worktrees, CLI roots, auth) carries over without a copy. A symlink is left
 // at the old path so absolute paths persisted elsewhere (git worktree
 // registrations, `~/.codarastudio/cli/active/env.sh` lines in shell rc files,
 // SPARK_HOME_DIR baked into Claude/Codex MCP configs until they self-heal)
@@ -30,11 +30,11 @@ const RENAMED_DIR_NAME = ".Codara";
 // "Spark Agent" before that). Their contents are copied into the current home
 // on first boot after the rename; the old dirs are left untouched as a
 // backstop. ".Codara" is listed here only for the case where the rename leg
-// could not run (both dirs already existed) — then it falls back to a copy.
+// could not run (both dirs already existed); then it falls back to a copy.
 const LEGACY_DIR_NAMES = [RENAMED_DIR_NAME, ".Cora", ".SparkAgent"];
 const MIGRATION_MARKER = ".migrated";
 // The per-home files/dirs worth carrying across a rename. Deliberately NOT
-// copied: worktrees/ (git registers their absolute paths in the source repos —
+// copied: worktrees/ (git registers their absolute paths in the source repos;
 // existing ones keep working from the old dir; new ones land here) and
 // sandbox/ (recreatable scratch).
 const MIGRATED_ENTRIES = [
@@ -93,18 +93,18 @@ export function ensureCodaraHomeSync(): void {
     }
   }
   // Test escape hatch (e2e specs): an isolated throwaway home must stay
-  // pristine — importing the machine's real legacy state (~/.SparkAgent runs,
+  // pristine; importing the machine's real legacy state (~/.SparkAgent runs,
   // run-queue) both defeats the isolation and can wedge boot replaying it.
   if (process.env.SPARK_SKIP_LEGACY_MIGRATION === "1") return;
   const marker = path.join(dir, MIGRATION_MARKER);
   if (existsSync(marker)) return;
 
-  // Marker is only written after a clean pass — a mid-loop copy failure
+  // Marker is only written after a clean pass; a mid-loop copy failure
   // leaves it absent so the next boot retries (migrateIfMissing skips
   // whatever already landed).
   let migrationFailed = false;
 
-  // Leg 1: prior home dirs (~/.codarastudio, ~/.Cora, then ~/.SparkAgent — the app
+  // Leg 1: prior home dirs (~/.codarastudio, ~/.Cora, then ~/.SparkAgent, the app
   // renames). ~/.codarastudio is normally a symlink to `dir` by now (see
   // renameLegacyHomeSync) and is skipped as such.
   // Whole-content copy so runs/, prefs, and settings survive; the newest

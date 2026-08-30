@@ -55,7 +55,7 @@ async function check(name, fn) {
     console.log(`PASS ${name}`);
   } catch (err) {
     failures += 1;
-    console.log(`FAIL ${name} — ${err.message}`);
+    console.log(`FAIL ${name}: ${err.message}`);
   }
 }
 
@@ -73,7 +73,7 @@ function walkSources(dir, out = []) {
 }
 
 const ENV_FILE = "env.sh";
-const GENERATED_ENV = `${NATIVE_CLI_ACTIVE_ENV_HEADER} — do not edit.\nexport CODEX_HOME='/tmp/x'\n`;
+const GENERATED_ENV = `${NATIVE_CLI_ACTIVE_ENV_HEADER}, do not edit.\nexport CODEX_HOME='/tmp/x'\n`;
 
 function makeHome(name) {
   const home = path.join(TMP, name);

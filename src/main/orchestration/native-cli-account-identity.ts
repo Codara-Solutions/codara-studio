@@ -8,7 +8,7 @@ import { join } from "node:path";
  *
  * Settings shows one card per account, so a Cora subscription connection and a
  * local CLI sign-in for the same human have to be recognisable as one account.
- * Pairing is done on an unsalted sha256 of the vendor account id — the same
+ * Pairing is done on an unsalted sha256 of the vendor account id, the same
  * digest Pi's account store records for its own connection (see
  * identityFingerprint in pi-account-auth-store.ts and the connect-time lookup
  * in anthropic-account-identity.ts). Equal digests mean the same vendor
@@ -17,7 +17,7 @@ import { join } from "node:path";
  * The email is the one deliberate exception to "no account identity crosses
  * IPC": a card that says only "Work" cannot tell the user which login it is, so
  * the address the provider itself displays is shown under the card name. It is
- * a local-window value only — the remote projections in
+ * a local-window value only; the remote projections in
  * src/main/remote-access strip it, so a paired phone never receives it.
  *
  * Codex CLI stores the ChatGPT account id it was issued (`tokens.account_id`),
@@ -31,8 +31,8 @@ import { join } from "node:path";
  *
  * Everything here is read-only. The credential and config files are opened for
  * reading, are never written, moved, refreshed, or copied, and only the
- * account-id and email fields are looked at. Any failure — missing file, wrong
- * permissions, unparseable JSON, API-key auth with no account id — yields
+ * account-id and email fields are looked at. Any failure (missing file, wrong
+ * permissions, unparseable JSON, API-key auth with no account id) yields
  * undefined rather than an error.
  */
 
@@ -78,8 +78,8 @@ function codexAccountIdFrom(parsed: unknown): string | undefined {
 
 /**
  * An address is only worth showing if it looks like the one the provider would
- * show. Anything else — a display name, an id, a padded blob, something with a
- * newline in it — is dropped rather than rendered.
+ * show. Anything else (a display name, an id, a padded blob, something with a
+ * newline in it) is dropped rather than rendered.
  */
 export function normalizeAccountEmail(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -233,7 +233,7 @@ export async function readCodexCliAccountFingerprint(
 
 /**
  * Grok Build's auth.json is keyed by `https://auth.x.ai::<client_id>`, with
- * `user_id`, `email`, and `key` (the access JWT) on that slot — not the
+ * `user_id`, `email`, and `key` (the access JWT) on that slot, not the
  * Codex-shaped `{ tokens: { account_id, access_token } }` this module first
  * looked for. A slot is any object that carries one of those identity fields.
  * Codex-shaped fixtures still parse because they themselves look like a slot.
@@ -335,7 +335,7 @@ export async function readGrokCliAccountIdentity(
  * The config files a Claude Code sign-in may have written its account metadata
  * into, most specific first. Claude Code prefers a legacy `.config.json` inside
  * its config directory when one exists, and otherwise writes `.claude.json`
- * into CLAUDE_CONFIG_DIR — or into the home directory when that variable is
+ * into CLAUDE_CONFIG_DIR, or into the home directory when that variable is
  * unset, which is the case for the personal profile.
  *
  * `homeDir` is passed in rather than read from the process so that a store

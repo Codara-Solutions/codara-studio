@@ -7,7 +7,7 @@
 // The failure this exists to catch is silent and total. Pi's Anthropic module
 // combines the caller's signal with its own deadline via
 // `AbortSignal.any([signal, AbortSignal.timeout(...)])`, which throws
-// ERR_INVALID_ARG_TYPE when the signal is undefined — before any request is
+// ERR_INVALID_ARG_TYPE when the signal is undefined, before any request is
 // made. Codara called `oauth.refresh(credential)` with no signal, so every
 // Claude refresh threw, the usage probe reported "session expired", and the
 // account router then dropped the account from rotation: no session could

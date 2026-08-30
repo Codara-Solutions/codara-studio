@@ -613,7 +613,7 @@ export class GrokCliAccountProfileStore {
    * behaves like logout+login in one home; auth.json stays per-account.
    *
    * Best-effort by design: resolution must never start failing because a
-   * symlink could not be made. A leased profile is skipped entirely — every
+   * symlink could not be made. A leased profile is skipped entirely: every
    * launch resolves BEFORE acquiring its lease, so the first spawn of a
    * profile always healed its directory, and migrating a real directory out
    * from under a live CLI would lose its writes. The per-profile mutation key

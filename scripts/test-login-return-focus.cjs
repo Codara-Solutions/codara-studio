@@ -19,7 +19,7 @@ const callbackServer = read("src/main/orchestration/pi-oauth-callback-server.ts"
 
 // The user is left in a browser at the end of every connect flow. Bringing the
 // window back is the whole point, and on macOS a window-level focus alone will
-// not raise a backgrounded app — the app-level steal has to be there too.
+// not raise a backgrounded app; the app-level steal has to be there too.
 assert.match(focus, /export function focusStudioWindow\(owner\?: WebContents \| null\): void/);
 assert.match(focus, /BrowserWindow\.getAllWindows\(\)/);
 assert.match(focus, /BrowserWindow\.fromWebContents\(owner\)/);
@@ -99,7 +99,7 @@ for (const source of [callbackPage, callbackServer]) {
 // ---------------------------------------------------------------------------
 
 // The redirect URI is registered against a fixed port, so Codara's listener is
-// the same URI Pi would have used — it does not invent a second one.
+// the same URI Pi would have used; it does not invent a second one.
 assert.match(callbackServer, /export const PI_OPENAI_CALLBACK_PORT = 1455;/);
 assert.match(callbackServer, /export const PI_OPENAI_CALLBACK_PATH = "\/auth\/callback";/);
 // Pi reads its callback host from this variable; disagreeing would leave both
@@ -116,7 +116,7 @@ assert.match(
 );
 assert.match(callbackServer, /handback\.searchParams\.set\("code", code\);/);
 assert.match(callbackServer, /handback\.searchParams\.set\("state", state\);/);
-// A rejected callback must not settle the wait — the real one may still land.
+// A rejected callback must not settle the wait; the real one may still land.
 assert.match(
   callbackServer,
   /if \(!expectedState[^\n]*\n[\s\S]{0,200}?respond\(res, 400[\s\S]{0,120}?return;/,

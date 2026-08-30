@@ -103,7 +103,7 @@ function normalizeKeybindings(value: unknown): AppPreferences["keybindings"] {
   return out;
 }
 
-// Liquid-glass tuning percentages: 0–200% of the design default. 200 is also
+// Liquid-glass tuning percentages: 0 to 200% of the design default. 200 is also
 // the ceiling the veil can take before color-mix percentages would exceed
 // 100% in styles.css.
 function normalizeGlassPct(value: unknown, fallback: number | undefined): number {
@@ -118,7 +118,7 @@ function normalizeAutosaveDelay(value: unknown): number {
   return Math.max(250, Math.min(10_000, Math.round(value)));
 }
 
-// Auto-fetch cadence in minutes, clamped 1–60 (the presets are 1/3/5/15 but
+// Auto-fetch cadence in minutes, clamped 1 to 60 (the presets are 1/3/5/15 but
 // a hand-edited file may hold any value in range).
 function normalizeAutoFetchInterval(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -146,7 +146,7 @@ function normalizeNotificationChannels(
 ): NotificationChannelsPref {
   const defaults = DEFAULT_NOTIFICATION_CHANNELS;
   // Legacy shape: `notifications: { enabled, sounds }`. If `enabled` is
-  // explicitly false, the user had alerts switched off — carry that into
+  // explicitly false, the user had alerts switched off; carry that into
   // all four new channels. If `sounds` is explicitly false, keep the
   // sound channel off but leave the rest on.
   let legacyEnabledAll: boolean | undefined;
@@ -285,7 +285,7 @@ function normalize(
   };
 }
 
-// Toast on-screen time: 0 (sticky) or 1s–60s.
+// Toast on-screen time: 0 (sticky) or 1s to 60s.
 function normalizeToastDuration(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_TOAST_DURATION_MS;
@@ -368,7 +368,7 @@ export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] 
   return value === undefined ? DEFAULT_PREFERENCES[key] : value;
 }
 
-// Synchronously read a single preference from the LIVE async cache — the same
+// Synchronously read a single preference from the LIVE async cache, the same
 // `cache` that loadPreferences() fills and setPreference() updates on every
 // toggle. Unlike getPreferenceSync (whose separate syncCache never invalidates
 // after the first read), this reflects in-session changes immediately. Returns

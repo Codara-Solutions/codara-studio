@@ -52,8 +52,8 @@ export interface PiAccountProfile {
   /**
    * The account's email address, captured while a login finished, so Settings
    * can say which login a card is. It is display metadata, never a routing or
-   * matching key — profiles are still identified by id and paired by
-   * identityFingerprint — and it is stripped from every remote projection.
+   * matching key (profiles are still identified by id and paired by
+   * identityFingerprint), and it is stripped from every remote projection.
    */
   accountEmail?: string;
   /**
@@ -119,7 +119,7 @@ export interface PiAccountProfileRegistryOptions {
 
 /**
  * Sanitized routing input. It contains no token, account id, email, provider
- * error body, or usage history—only the minimum signal needed for selection.
+ * error body, or usage history, only the minimum signal needed for selection.
  */
 export interface PiAccountSanitizedHeadroom {
   profileId: string;
@@ -800,7 +800,7 @@ export class PiAccountProfileRegistry {
 
   /**
    * Attach an account digest to a profile that was registered before its
-   * provider could report one — the Anthropic case, where the account uuid only
+   * provider could report one: the Anthropic case, where the account uuid only
    * becomes available while a login is finishing.
    *
    * It never overwrites and never fails a login: a profile that already carries
@@ -843,7 +843,7 @@ export class PiAccountProfileRegistry {
   /**
    * Record the address a login reported for this account, so the card can say
    * which login it is. Unlike the fingerprint this is not an identity claim, so
-   * a later login overwrites it — an account whose address changed upstream
+   * a later login overwrites it; an account whose address changed upstream
    * should show the new one. Writing the address it already has is a no-op.
    */
   async recordAccountEmail(

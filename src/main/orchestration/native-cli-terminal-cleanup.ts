@@ -19,13 +19,13 @@ import {
  *
  * Two responsibilities, both deliberately narrow:
  *
- *  1. cleanupNativeCliActivePointerArtifacts — delete the exact artifacts the
+ *  1. cleanupNativeCliActivePointerArtifacts: delete the exact artifacts the
  *     feature generated under <codara-home>/cli/active/ (two symlinks and one
  *     generated env.sh), then the emptied directory. Anything that is not
  *     recognizably ours is left in place and reported; nothing outside that
  *     one directory is ever touched.
  *
- *  2. detectNativeCliShellProfileLeftover — a READ-ONLY check for the marked
+ *  2. detectNativeCliShellProfileLeftover: a READ-ONLY check for the marked
  *     block the feature once appended to ~/.zshrc / ~/.bashrc. Codara no
  *     longer edits shell startup files, not even to undo its own edit; the
  *     detection only lets Settings tell the user the block is still there and
