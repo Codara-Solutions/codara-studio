@@ -136,6 +136,21 @@ class ShellDriver {
     this.child.stdin.write(`${line}\n`);
   }
 
+  // Run a shell mutation and WAIT for it to have executed. The scenarios
+  // rewrite the pointer right after mutating the environment; without this
+  // barrier a slow runner can apply the rewrite's follow (armed by the DEBUG
+  // trap or preexec of the mutation command itself) before the mutation runs,
+  // which then clobbers the followed value with the revision already
+  // consumed. The printf indirection keeps the marker out of any echo of the
+  // command line itself.
+  async sendAndSettle(line) {
+    this.syncSeq = (this.syncSeq ?? 0) + 1;
+    const id = this.syncSeq;
+    this.send(line);
+    this.send(`printf '@@settled%s@@\\n' ${id}`);
+    await this.waitFor(new RegExp(`@@settled${id}@@`));
+  }
+
   async waitFor(pattern) {
     const started = Date.now();
     for (;;) {
@@ -234,7 +249,7 @@ async function followScenario(shell) {
     writePointer({ claude: CLAUDE_A, grok: GROK_G });
     await expect(CLAUDE_A, GROK_G, "a switch between managed accounts follows");
 
-    driver.send(`export CLAUDE_CONFIG_DIR=${JSON.stringify(USER_OWN)}`);
+    await driver.sendAndSettle(`export CLAUDE_CONFIG_DIR=${JSON.stringify(USER_OWN)}`);
     writePointer({ claude: CLAUDE_C, grok: GROK_G });
     await expect(USER_OWN, GROK_G, "a user-set value outside the root is never touched");
 
@@ -259,7 +274,7 @@ async function followScenario(shell) {
     writePointer({ grok: GROK_G });
     await expect(USER_OWN, GROK_G, "the hook recovers once the file is back");
 
-    driver.send("unset CLAUDE_CONFIG_DIR");
+    await driver.sendAndSettle("unset CLAUDE_CONFIG_DIR");
     writePointer({ claude: CLAUDE_B, grok: GROK_G });
     await expect(CLAUDE_B, GROK_G, "an unset variable is followed again");
 
