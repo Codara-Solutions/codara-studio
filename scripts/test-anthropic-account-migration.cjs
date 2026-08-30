@@ -50,7 +50,8 @@ async function buildHarness() {
     entry,
     [
       `export * as accounts from ${JSON.stringify(orchestration("anthropic-accounts.ts"))};`,
-      `export * as migration from ${JSON.stringify(orchestration("anthropic-account-migration.ts"))};`,
+      `export * as migration from ${JSON.stringify(orchestration("unified-account-migration.ts"))};`,
+      `export * as liveSlot from ${JSON.stringify(orchestration("claude-live-slot-undo.ts"))};`,
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as claudeProfiles from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("claude-cli-profile-execution.ts"))};`,
@@ -307,8 +308,30 @@ async function main() {
     log: (message) => logs.push(message),
   });
   const deps = { service, piStore, claudeStore, backend, log: (message) => logs.push(message) };
+  // The unified runner restricted to Anthropic, with its provider entry
+  // lifted to the top so the assertions below read one provider's report.
+  const unifiedDeps = (d) => ({
+    providers: ["anthropic"],
+    ...(d.service ? { services: { anthropic: d.service } } : {}),
+    ...(d.piStore ? { piStore: d.piStore } : {}),
+    ...(d.claudeStore ? { claudeStore: d.claudeStore } : {}),
+    ...(d.backend ? { backend: d.backend } : {}),
+    ...(d.log ? { log: d.log } : {}),
+  });
+  const migrate = async (d) => {
+    const full = await H.migration.migrateUnifiedAccounts(unifiedDeps(d));
+    const entry = full.providers.anthropic;
+    return {
+      liveSlot: entry?.beforePairing ?? null,
+      clearedLinks: entry?.clearedLinks ?? [],
+      paired: entry?.paired ?? [],
+      accountOne: entry?.accountOne ?? null,
+      watchedPairs: entry?.watchedPairs ?? 0,
+      failedStep: full.failedStep?.replace(/^anthropic:/, "") ?? null,
+    };
+  };
 
-  const report = await H.migration.migrateAnthropicAccounts(deps);
+  const report = await migrate(deps);
   assert.equal(report.failedStep, null, JSON.stringify(report));
 
   // Live slot undone: the swapped account got its fresher token back, the
@@ -379,7 +402,7 @@ async function main() {
 
   // Rerun: nothing changes, the retired vault is swept.
   const before = fs.readFileSync(path.join(piRoot, "account-profiles.json"), "utf8");
-  const rerun = await H.migration.migrateAnthropicAccounts(deps);
+  const rerun = await migrate(deps);
   assert.equal(rerun.failedStep, null);
   assert.deepEqual(rerun.paired, []);
   assert.deepEqual(rerun.clearedLinks, []);
@@ -396,33 +419,33 @@ async function main() {
   await AuthStorage.create(fpAuth).modify("anthropic", async () => piCredential("stale", 0));
   await piStore.registry.setDefaultProfile("anthropic", null);
   await claudeStore.setDefaultProfile(CLI.byFingerprint);
-  const resumed = await H.migration.migrateAnthropicAccounts(deps);
+  const resumed = await migrate(deps);
   assert.equal(resumed.failedStep, null);
   assert.equal(readPi(rowByFingerprint.id).access, "fp-access-3");
   assert.equal((await piStore.registry.snapshot()).defaults.anthropic, rowByFingerprint.id);
   // No Cora default and Claude on personal: Account 1 becomes the default.
   await piStore.registry.setDefaultProfile("anthropic", null);
   await claudeStore.setDefaultProfile("personal");
-  await H.migration.migrateAnthropicAccounts(deps);
+  await migrate(deps);
   assert.equal((await piStore.registry.snapshot()).defaults.anthropic, accountOne.id);
   // An unlinked managed Claude default is left alone.
   await piStore.registry.setDefaultProfile("anthropic", null);
   await claudeStore.setDefaultProfile(CLI.lonely);
-  await H.migration.migrateAnthropicAccounts(deps);
+  await migrate(deps);
   assert.equal((await piStore.registry.snapshot()).defaults.anthropic, undefined);
   assert.equal((await claudeStore.snapshot()).defaultProfileId, CLI.lonely);
   pass("a crash after pairing resumes and default repair follows the documented rules");
 
   // The ready gate resolves even when a step fails, and installs the launch hooks.
-  H.migration.resetAnthropicAccountMigrationForTests();
+  H.migration.resetUnifiedAccountMigrationForTests();
   const failing = Object.create(service);
   failing.clearDanglingLinks = async () => {
     throw new Error("boom");
   };
-  await H.migration.startAnthropicAccountMigration({ ...deps, service: failing });
+  await H.migration.startUnifiedAccountMigration(unifiedDeps({ ...deps, service: failing }));
   await H.migration.unifiedAccountsReady();
   assert.ok(logs.some((line) => line.includes('step "anthropic:clear-dangling-links" failed')));
-  H.migration.resetAnthropicAccountMigrationForTests();
+  H.migration.resetUnifiedAccountMigrationForTests();
   pass("the ready gate resolves after a failed step");
 
   // undoLiveSlotSwap on its own: an unreadable ~/.claude defers the whole
@@ -471,7 +494,7 @@ async function main() {
       },
     };
     const deferredLogs = [];
-    const deferred = await H.migration.undoLiveSlotSwap({
+    const deferred = await H.liveSlot.undoLiveSlotSwap({
       claudeRootDir: root,
       personalConfigDir: personal,
       personalConfigDirEnv: null,
@@ -488,7 +511,7 @@ async function main() {
     assert.equal((await readIsolated(personal, null)).accessToken, "live-access-9", "~/.claude is untouched");
     assert.ok(deferredLogs.some((line) => line.includes("kept for the next launch")));
     // Next launch, Keychain readable: the restore completes.
-    const completed = await H.migration.undoLiveSlotSwap({
+    const completed = await H.liveSlot.undoLiveSlotSwap({
       claudeRootDir: root,
       personalConfigDir: personal,
       personalConfigDirEnv: null,
@@ -517,7 +540,7 @@ async function main() {
     privateFile(path.join(root, "personal", ".credentials.json"), claudeCredential("vaulted", 2));
     privateFile(path.join(personal, ".credentials.json"), claudeCredential("orphaned", 5));
     const staleLogs = [];
-    const stale = await H.migration.undoLiveSlotSwap({
+    const stale = await H.liveSlot.undoLiveSlotSwap({
       claudeRootDir: root,
       personalConfigDir: personal,
       personalConfigDirEnv: null,

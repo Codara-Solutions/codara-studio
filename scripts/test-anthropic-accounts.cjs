@@ -55,7 +55,6 @@ async function buildHarness() {
     entry,
     [
       `export * as accounts from ${JSON.stringify(orchestration("anthropic-accounts.ts"))};`,
-      `export * as migration from ${JSON.stringify(orchestration("anthropic-account-migration.ts"))};`,
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as claudeProfiles from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("claude-cli-profile-execution.ts"))};`,

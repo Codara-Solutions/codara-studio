@@ -375,9 +375,7 @@ async function main() {
       // The active account pointer derives the plain-shell selector from
       // the store default; it writes a data file, never launches.
       "src/main/orchestration/active-cli-env-pointer.ts",
-      "src/main/orchestration/anthropic-account-migration.ts",
       "src/main/orchestration/anthropic-accounts.ts",
-      "src/main/orchestration/anthropic-credential-mirror.ts",
       "src/main/orchestration/claude-live-slot-undo.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
