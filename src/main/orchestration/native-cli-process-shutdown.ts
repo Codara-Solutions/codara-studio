@@ -226,6 +226,28 @@ async function waitForTrees(
 }
 
 /**
+ * How many native CLI sessions started outside Codara are running: what a
+ * global account change would have to close. Nothing is signalled.
+ */
+export function countExternalNativeCliProcesses(
+  runtime: NativeCliAccountRuntime,
+  dependencies: Pick<NativeCliProcessShutdownDependencies, "platform" | "currentPid" | "listProcesses"> = {},
+): number {
+  const platform = dependencies.platform ?? process.platform;
+  const currentPid = dependencies.currentPid ?? process.pid;
+  const listProcesses =
+    dependencies.listProcesses ??
+    (platform === "win32" ? listWindowsProcesses : listPosixProcesses);
+  try {
+    return nativeCliRootProcesses(runtime, listProcesses(), currentPid).length;
+  } catch {
+    // A process listing that fails must not block the switch; the shutdown
+    // pass reports what it could not close.
+    return 0;
+  }
+}
+
+/**
  * Close native CLI sessions that were started outside Codara before a global
  * account change. POSIX gets a terminal-style HUP, then TERM, then a bounded
  * KILL fallback. On Windows we refuse to hard-terminate unknown external

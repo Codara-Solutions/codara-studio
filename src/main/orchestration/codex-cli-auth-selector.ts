@@ -98,6 +98,11 @@ async function writeSelection(
   }
 }
 
+/** The profile whose login sits in ~/.codex/auth.json right now, per the marker. */
+export async function readCodexCliSelection(rootDir: string): Promise<CodexCliProfileId | null> {
+  return readSelection(rootDir);
+}
+
 async function readSelection(rootDir: string): Promise<CodexCliProfileId | null> {
   const file = activeSelectionFile(rootDir);
   if (!(await safeRegularFile(file))) return null;
@@ -116,6 +121,18 @@ function storedAuthFile(
   return profileId === CODEX_CLI_PERSONAL_PROFILE_ID
     ? codexCliPersonalAuthFile(store.rootDir)
     : codexCliManagedProfilePaths(store.rootDir, profileId).authFile;
+}
+
+/**
+ * Serialize against every switch of the live slot. The credential mirror
+ * re-reads and writes the Codex side under this lock so a switch mid-debounce
+ * cannot land the previous account's token in the new live file.
+ */
+export function withCodexSelectionLock<T>(
+  rootDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withSelectionLock(rootDir, operation);
 }
 
 async function withSelectionLock<T>(rootDir: string, operation: () => Promise<T>): Promise<T> {
@@ -173,6 +190,16 @@ export async function ensureCodexCliAuthVault(
   return withSelectionLock(store.rootDir, () => ensureVaultUnlocked(store));
 }
 
+export interface ActivateCodexCliAccountOptions {
+  /**
+   * Let a signed-out profile take the live slot: the previous login is still
+   * saved to its vault slot, the live file is removed and the marker moves.
+   * Used by the delete hand-off, so an account can be deleted even when the
+   * only remaining account is signed out.
+   */
+  allowSignedOut?: boolean;
+}
+
 /**
  * Makes one saved account active in the single official ~/.codex state home.
  * Only auth.json moves. Config, sessions, skills, memory and databases never
@@ -181,15 +208,22 @@ export async function ensureCodexCliAuthVault(
 export async function activateCodexCliAccount(
   store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
   rawProfileId: string | null | undefined,
+  options: ActivateCodexCliAccountOptions = {},
 ): Promise<CodexCliProfileId> {
   return withSelectionLock(store.rootDir, async () => {
     const selected = normalizeCodexCliProfileId(rawProfileId);
     const previous = await ensureVaultUnlocked(store);
     const liveAuth = join(store.personalHomeDir, CODEX_CLI_AUTH_FILE);
+    const target = storedAuthFile(store, selected);
+    const targetSignedIn = await safeRegularFile(target);
+    if (!targetSignedIn && !options.allowSignedOut) {
+      throw new Error("Selected Codex account is not signed in");
+    }
     if (await safeRegularFile(liveAuth)) {
       await atomicCopy(liveAuth, storedAuthFile(store, previous));
     }
-    await atomicCopy(storedAuthFile(store, selected), liveAuth);
+    if (targetSignedIn) await atomicCopy(target, liveAuth);
+    else await removeCredential(liveAuth);
     await writeSelection(store.rootDir, selected);
     return previous;
   });

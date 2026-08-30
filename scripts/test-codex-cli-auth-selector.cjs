@@ -143,6 +143,33 @@ async function main() {
       false,
       "the live managed credential must not be copied into the personal backup",
     );
+    // Activating a signed-out slot is refused by default: the live login
+    // stays where it is and the marker does not move.
+    await assert.rejects(
+      () => T.activateCodexCliAccount(store, "personal"),
+      /not signed in/,
+    );
+    assert.equal(fs.readFileSync(live, "utf8"), "MANAGED_SECRET_2");
+    assert.equal(await T.ensureCodexCliAuthVault(store), PROFILE);
+    // The delete hand-off may activate a signed-out slot: the previous
+    // login is saved to its vault, the live file goes, the marker moves.
+    assert.equal(
+      await T.activateCodexCliAccount(store, "personal", { allowSignedOut: true }),
+      PROFILE,
+    );
+    assert.equal(fs.existsSync(live), false, "a signed-out slot leaves no live file");
+    assert.equal(fs.readFileSync(managed, "utf8"), "MANAGED_SECRET_2", "the previous login is saved");
+    assert.equal(await T.ensureCodexCliAuthVault(store), "personal");
+    assert.equal(await T.readCodexCliSelection(store.rootDir), "personal");
+    // The selection lock serializes a caller with a switch.
+    const order = [];
+    const held = T.withCodexSelectionLock(store.rootDir, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      order.push("lock");
+    });
+    const switching = T.activateCodexCliAccount(store, PROFILE).then(() => order.push("switch"));
+    await Promise.all([held, switching]);
+    assert.deepEqual(order, ["lock", "switch"]);
   } finally {
     fs.rmSync(reseedFixture, { recursive: true, force: true });
   }
