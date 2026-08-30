@@ -112,6 +112,40 @@ async function main() {
     "a wrapper and its native child are one CLI session",
   );
 
+  // A codex running inside a Studio pane is a descendant of Studio (pane
+  // shell under Studio, codex under the shell). The lease table counts it
+  // and the pty layer closes it; the external count must not count it
+  // again, or one Studio pane reads as two sessions.
+  const studioRows = [
+    ...processRows,
+    { pid: 500, parentPid: 999, startedAt: "D", command: "/bin/zsh -il" },
+    { pid: 501, parentPid: 500, startedAt: "E", command: "node /opt/homebrew/bin/codex" },
+    { pid: 502, parentPid: 501, startedAt: "F", command: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex" },
+    { pid: 600, parentPid: 999, startedAt: "G", command: "codex --yolo" },
+  ];
+  assert.deepEqual(
+    shutdown.nativeCliRootProcesses("codex", studioRows, 999).map((entry) => entry.pid),
+    [101],
+    "Studio's own process tree is never an external session",
+  );
+  assert.equal(
+    await shutdown.countExternalNativeCliProcesses("codex", {
+      currentPid: 999,
+      listProcessesAsync: async () => studioRows,
+    }),
+    1,
+  );
+  assert.equal(
+    await shutdown.countExternalNativeCliProcesses("codex", {
+      currentPid: 999,
+      listProcesses: () => {
+        throw new Error("ps failed");
+      },
+    }),
+    0,
+    "a failed listing never blocks the switch",
+  );
+
   const alive = new Set([101, 102]);
   const signals = [];
   const result = await shutdown.shutdownExternalNativeCliProcesses("codex", {

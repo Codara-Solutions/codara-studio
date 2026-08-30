@@ -80,7 +80,7 @@ export interface CodexAccountAdapterOptions {
   /** Test seam for the refresh grant. */
   fetchImpl?: CodexRefreshFetch;
   /** Test seam for the count of codex processes outside Studio. */
-  externalSessionCount?: () => number;
+  externalSessionCount?: () => number | Promise<number>;
   /** Test seam for the last_refresh stamp. */
   now?: () => Date;
   log?: (message: string) => void;
@@ -314,7 +314,7 @@ export function createCodexAccountAdapter(
       async beforeSwitch(target: string, context: SwitchContext) {
         const current = resolveStore();
         if ((await activeId(current.rootDir)) === target) return { closedSessionCount: 0 };
-        const count = (await context.liveSessionCount()) + externalSessionCount();
+        const count = (await context.liveSessionCount()) + (await externalSessionCount());
         if (count === 0) return { closedSessionCount: 0 };
         if (!context.closeSessions || !context.sessionShutdown) {
           throw new UnifiedAccountSessionsError(count, "switch");

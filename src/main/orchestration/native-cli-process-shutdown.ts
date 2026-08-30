@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import {
   captureOwnedProcessTree,
   isOwnedProcessTreeAlive,
@@ -27,6 +28,8 @@ export interface NativeCliProcessShutdownDependencies {
   platform?: NodeJS.Platform;
   currentPid?: number;
   listProcesses?: () => readonly NativeCliProcessSnapshot[];
+  /** The count runs off the main thread; a sync listing is accepted too. */
+  listProcessesAsync?: () => Promise<readonly NativeCliProcessSnapshot[]> | readonly NativeCliProcessSnapshot[];
   captureTree?: (pid: number) => OwnedProcessTree | null;
   signalTree?: (tree: OwnedProcessTree | null, signal: NodeJS.Signals) => number;
   treeAlive?: (tree: OwnedProcessTree | null) => boolean;
@@ -59,44 +62,49 @@ export function parseNativeCliProcessList(output: string): NativeCliProcessSnaps
   return processes;
 }
 
+const POSIX_LIST_COMMAND = ["ps", ["-axo", "pid=,ppid=,lstart=,command="]] as const;
+const WINDOWS_LIST_COMMAND = [
+  "powershell.exe",
+  [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    [
+      "Get-CimInstance Win32_Process",
+      "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine",
+      "ConvertTo-Json -Compress",
+    ].join(" | "),
+  ],
+] as const;
+const execFileAsync = promisify(execFile);
+
 function listPosixProcesses(): NativeCliProcessSnapshot[] {
-  const result = spawnSync(
-    "ps",
-    ["-axo", "pid=,ppid=,lstart=,command="],
-    {
-      encoding: "utf8",
-      timeout: PROCESS_LIST_TIMEOUT_MS,
-      maxBuffer: PROCESS_LIST_MAX_BYTES,
-      windowsHide: true,
-    },
-  );
+  const result = spawnSync(POSIX_LIST_COMMAND[0], [...POSIX_LIST_COMMAND[1]], {
+    encoding: "utf8",
+    timeout: PROCESS_LIST_TIMEOUT_MS,
+    maxBuffer: PROCESS_LIST_MAX_BYTES,
+    windowsHide: true,
+  });
   if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
     throw new Error("Could not inspect running native CLI sessions");
   }
   return parseNativeCliProcessList(result.stdout);
 }
 
-function listWindowsProcesses(): NativeCliProcessSnapshot[] {
-  const script = [
-    "Get-CimInstance Win32_Process",
-    "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine",
-    "ConvertTo-Json -Compress",
-  ].join(" | ");
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      encoding: "utf8",
-      timeout: PROCESS_LIST_TIMEOUT_MS,
-      maxBuffer: PROCESS_LIST_MAX_BYTES,
-      windowsHide: true,
-    },
-  );
-  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
-    throw new Error("Could not inspect running native CLI sessions");
-  }
+async function listPosixProcessesAsync(): Promise<NativeCliProcessSnapshot[]> {
+  const { stdout } = await execFileAsync(POSIX_LIST_COMMAND[0], [...POSIX_LIST_COMMAND[1]], {
+    encoding: "utf8",
+    timeout: PROCESS_LIST_TIMEOUT_MS,
+    maxBuffer: PROCESS_LIST_MAX_BYTES,
+    windowsHide: true,
+  });
+  return parseNativeCliProcessList(stdout);
+}
+
+function parseWindowsProcessList(output: string): NativeCliProcessSnapshot[] {
   try {
-    const parsed = JSON.parse(result.stdout) as unknown;
+    const parsed = JSON.parse(output) as unknown;
     const rows = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
     return rows.flatMap((row): NativeCliProcessSnapshot[] => {
       if (!row || typeof row !== "object") return [];
@@ -123,6 +131,29 @@ function listWindowsProcesses(): NativeCliProcessSnapshot[] {
   } catch {
     throw new Error("Could not inspect running native CLI sessions");
   }
+}
+
+function listWindowsProcesses(): NativeCliProcessSnapshot[] {
+  const result = spawnSync(WINDOWS_LIST_COMMAND[0], [...WINDOWS_LIST_COMMAND[1]], {
+    encoding: "utf8",
+    timeout: PROCESS_LIST_TIMEOUT_MS,
+    maxBuffer: PROCESS_LIST_MAX_BYTES,
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
+    throw new Error("Could not inspect running native CLI sessions");
+  }
+  return parseWindowsProcessList(result.stdout);
+}
+
+async function listWindowsProcessesAsync(): Promise<NativeCliProcessSnapshot[]> {
+  const { stdout } = await execFileAsync(WINDOWS_LIST_COMMAND[0], [...WINDOWS_LIST_COMMAND[1]], {
+    encoding: "utf8",
+    timeout: PROCESS_LIST_TIMEOUT_MS,
+    maxBuffer: PROCESS_LIST_MAX_BYTES,
+    windowsHide: true,
+  });
+  return parseWindowsProcessList(stdout);
 }
 
 function firstCommandToken(command: string): string {
@@ -200,14 +231,46 @@ function ancestorPids(
   return ancestors;
 }
 
+function descendantPids(
+  processes: readonly NativeCliProcessSnapshot[],
+  rootPid: number,
+): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const entry of processes) {
+    const siblings = children.get(entry.parentPid) ?? [];
+    siblings.push(entry.pid);
+    children.set(entry.parentPid, siblings);
+  }
+  const descendants = new Set<number>();
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const cursor = queue.pop()!;
+    for (const child of children.get(cursor) ?? []) {
+      if (descendants.has(child)) continue;
+      descendants.add(child);
+      queue.push(child);
+    }
+  }
+  return descendants;
+}
+
+/**
+ * The native CLI sessions started outside Codara: one root per wrapper
+ * chain. Codara's own process tree is excluded, so a CLI running inside a
+ * Studio pane (a child of the pane's shell, itself a child of Studio) is
+ * counted by the lease table and closed by the pty layer, never here.
+ */
 export function nativeCliRootProcesses(
   runtime: NativeCliAccountRuntime,
   processes: readonly NativeCliProcessSnapshot[],
   currentPid: number = process.pid,
 ): NativeCliProcessSnapshot[] {
+  const owned = descendantPids(processes, currentPid);
   const candidates = processes.filter(
     (entry) =>
-      entry.pid !== currentPid && commandRunsNativeCli(runtime, entry.command),
+      entry.pid !== currentPid &&
+      !owned.has(entry.pid) &&
+      commandRunsNativeCli(runtime, entry.command),
   );
   const candidatePids = new Set(candidates.map((entry) => entry.pid));
   return candidates.filter((entry) => !candidatePids.has(entry.parentPid));
@@ -227,19 +290,25 @@ async function waitForTrees(
 
 /**
  * How many native CLI sessions started outside Codara are running: what a
- * global account change would have to close. Nothing is signalled.
+ * global account change would have to close. Nothing is signalled, and the
+ * listing runs off the main thread: a slow `ps` delays the switch, never
+ * the renderer.
  */
-export function countExternalNativeCliProcesses(
+export async function countExternalNativeCliProcesses(
   runtime: NativeCliAccountRuntime,
-  dependencies: Pick<NativeCliProcessShutdownDependencies, "platform" | "currentPid" | "listProcesses"> = {},
-): number {
+  dependencies: Pick<
+    NativeCliProcessShutdownDependencies,
+    "platform" | "currentPid" | "listProcesses" | "listProcessesAsync"
+  > = {},
+): Promise<number> {
   const platform = dependencies.platform ?? process.platform;
   const currentPid = dependencies.currentPid ?? process.pid;
   const listProcesses =
+    dependencies.listProcessesAsync ??
     dependencies.listProcesses ??
-    (platform === "win32" ? listWindowsProcesses : listPosixProcesses);
+    (platform === "win32" ? listWindowsProcessesAsync : listPosixProcessesAsync);
   try {
-    return nativeCliRootProcesses(runtime, listProcesses(), currentPid).length;
+    return nativeCliRootProcesses(runtime, await listProcesses(), currentPid).length;
   } catch {
     // A process listing that fails must not block the switch; the shutdown
     // pass reports what it could not close.
