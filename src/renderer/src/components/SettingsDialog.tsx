@@ -2845,7 +2845,12 @@ function AccountsSettings() {
         <AccountAddPicker providers={providerViews} actions={accountActions} />
       </div>
       <div style={{ display: "grid", gap: 10 }}>
-        {overview?.profiles || cliInspection ? (
+        {/* Wait for BOTH stores before showing any card: rendering the Cora
+            side alone made the CLI-only cards pop in a beat later, which read
+            as accounts appearing out of nowhere. */}
+        {loading || cliLoading ? (
+          <span style={{ fontSize: 11.5, color: "var(--muted-2)" }}>Loading accounts…</span>
+        ) : overview?.profiles || cliInspection ? (
           <AccountCards providers={providerViews} actions={accountActions} />
         ) : null}
         {overview && !overview.profiles

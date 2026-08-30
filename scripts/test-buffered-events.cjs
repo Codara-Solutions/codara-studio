@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
 
-const ROOT = "/Users/etienne/Documents/Projects/Codara/codara-studio";
+const ROOT = path.resolve(__dirname, "..");
 const EVENT_LOG = path.join(ROOT, "src", "main", "orchestration", "event-log.ts");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "cora-buffered-events-"));

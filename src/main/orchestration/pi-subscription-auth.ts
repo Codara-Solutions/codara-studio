@@ -474,6 +474,26 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
   const { provider, requestId } = flow;
   const meta = PROVIDER_META[provider];
   let callback: PiOAuthCallbackServer | null = null;
+  // Stall watchdog: a login that produces neither a sign-in URL nor a prompt
+  // is stuck (a held callback port, a silently wedged Pi runtime) and used to
+  // strand the Settings card on "Opening your browser…" forever with only
+  // Cancel. If Pi shows no sign of life in time, fail the flow with a real
+  // message instead.
+  let sawLoginSignal = false;
+  const markLoginSignal = (): void => {
+    sawLoginSignal = true;
+  };
+  const stallWatchdog = setTimeout(() => {
+    if (sawLoginSignal || flow.abort.signal.aborted) return;
+    send(owner, {
+      type: "failed",
+      requestId,
+      provider,
+      message:
+        "The sign-in stalled before producing a login URL. Another app (or a second Codara Studio) may be holding the sign-in port. Close other instances and try again.",
+    });
+    flow.abort.abort();
+  }, 45_000);
   try {
     const oauth = await loadOAuth(provider);
     // Own the loopback callback so the browser's last page is Codara's, not
@@ -484,6 +504,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     const credential = await oauth.login({
       signal: flow.abort.signal,
       prompt: async (prompt) => {
+        markLoginSignal();
         if (flow.abort.signal.aborted) throw new Error("Login cancelled");
         // Browser login is the smooth default. Device-code login remains
         // available as an explicit choice if a future provider needs it, but a
@@ -560,6 +581,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
         throw settled.error;
       },
       notify: (event) => {
+        markLoginSignal();
         if (event.type === "auth_url" && event.url) {
           // Pi's authorize URL carries the state its callback expects. Learning
           // it here — before the browser opens — lets Codara's listener reject
@@ -620,6 +642,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     // happened out in the browser and needs the window pulled back.
     if (!cancelled) owner.focus?.();
   } finally {
+    clearTimeout(stallWatchdog);
     callback?.close();
     settlePendingPrompt(flow, new Error("Login finished"));
     activeFlows.delete(requestId);
