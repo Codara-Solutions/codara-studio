@@ -2216,7 +2216,7 @@ function WorkspaceRow({
             )}
           </button>
         )}
-        <StatusDot tone={tone} />
+        <StatusDot tone={tone} workingRingShown={working} />
         {editing && !folderColorManaged && (
           <input
             ref={colorRef}
@@ -2586,8 +2586,14 @@ function RowMenuItem({
 // settled tone (done-and-acknowledged, failed, cancelled, idle) draws no dot
 // even if a caller hands one down. App's rollup already filters those out;
 // this repeats the rule at the paint site so neither layer can regress alone.
-function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
+function StatusDot(props: { tone?: ChatStatusTone | null; workingRingShown?: boolean }) {
+  const { tone, workingRingShown = false } = props;
   if (!toneWantsAttention(tone)) return null;
+  // The working ring already says "live" in this row's own color, and it
+  // overflows toward this dot's slot; showing both crowds the cluster with
+  // two motion signals for one fact. Blocked and done-unseen still land:
+  // they carry information the ring does not.
+  if (workingRingShown && tone === "live") return null;
   const color = statusToneColor(tone);
   return (
     <span
@@ -2607,6 +2613,12 @@ function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
 
 // Branch glyph shown in place of the color dot on copy-branch workspace rows,
 // tinted with the inherited (parent) color so the row reads as a branch of it.
+//
+// Geometry note: the glyph is positioned absolutely, exactly like the working
+// ring, never via grid centering. A 13px item in this 8px track is start-
+// aligned by grid overflow alignment, which put the glyph 2.5px right of the
+// ring's center and made the working state look like two colliding icons.
+// Absolute centering keeps both on one axis in every state.
 function BranchGlyph({
   color,
   active,
@@ -2626,8 +2638,7 @@ function BranchGlyph({
         // over the slot and overflows it symmetrically (visible overflow), so
         // it reads clearly without widening the row's text origin.
         flex: "0 0 8px",
-        display: "grid",
-        placeItems: "center",
+        display: "inline-block",
         width: 8,
         height: 13,
         overflow: "visible",
@@ -2647,41 +2658,40 @@ function BranchGlyph({
             // A ring must be SQUARE to rotate cleanly — inset on this 8×13
             // slot would spin a wobbling ellipse. Centered via margins, not
             // transform: spark-spin animates `transform`, so a translate here
-            // would be overwritten on the animation's first frame.
+            // would be overwritten on the animation's first frame. 20px outer
+            // with a 1.5px stroke leaves a ~8px clear core radius, just past
+            // the glyph's ~7px corner-circle reach: the full-size glyph sits
+            // inside with clear water, the softened comet orbits it.
             position: "absolute",
             left: "50%",
             top: "50%",
-            width: 18,
-            height: 18,
-            marginLeft: -9,
-            marginTop: -9,
+            width: 20,
+            height: 20,
+            marginLeft: -10,
+            marginTop: -10,
             borderRadius: 999,
-            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${color} 35%, transparent) 120deg, ${color} 330deg, transparent 330deg 360deg)`,
+            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${color} 30%, transparent) 120deg, color-mix(in oklab, ${color} 80%, transparent) 330deg, transparent 330deg 360deg)`,
             WebkitMask:
-              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+              "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
+            mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
           }}
         />
       )}
-      {/* While working, the glyph recedes — smaller and softer, the same
-          hollowing the plain color dot does — so the comet ring orbits it
-          with clear water instead of crossing its arms. Scale via CSS so
-          the 8px advance and the ring geometry never change. */}
       <svg
         width="13"
         height="13"
         viewBox="0 0 24 24"
         fill="none"
-        stroke={working ? `color-mix(in oklab, ${color} 55%, transparent)` : color}
+        stroke={color}
         strokeWidth="2.4"
         strokeLinecap="round"
         strokeLinejoin="round"
         style={{
-          flex: "0 0 auto",
-          transform: working ? "scale(0.66)" : "none",
-          transformOrigin: "50% 50%",
-          transition:
-            "transform var(--motion-fast) var(--ease-out), stroke var(--motion-fast) var(--ease-out)",
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          marginLeft: -6.5,
+          marginTop: -6.5,
         }}
       >
         <line x1="6" x2="6" y1="3" y2="15" />
