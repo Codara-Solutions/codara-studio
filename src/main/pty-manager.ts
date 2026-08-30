@@ -1313,10 +1313,20 @@ function doSpawn(
     env.SPARK_HOOK_TOKEN = hookEnv.SPARK_HOOK_TOKEN;
     env.SPARK_PANE_ID = hookEnv.SPARK_PANE_ID;
   }
-  // Keep hook scripts and MCP children agreeing with the app about where the
-  // home dir lives (hooks fall back to ~/.codarastudio when unset; an app running
-  // under any override would otherwise write markers the app never sees).
-  if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = codaraHome();
+  // Keep hook scripts and MCP children agreeing with THIS app about where
+  // the home dir lives (hooks fall back to ~/.codarastudio when unset). An
+  // inherited value is replaced, not kept: Studio launched from a Codara pane
+  // of another instance would otherwise hand its panes the outer app's
+  // pointer and roots. The follow flag is per pane and only a plain user
+  // shell gets it (below); an inherited one must not reach a frozen native
+  // pane, whose prompt hook would otherwise move CLAUDE_CONFIG_DIR away
+  // from the profile its lease names once the TUI exits.
+  if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_HOME_DIR")) {
+    env.SPARK_HOME_DIR = codaraHome();
+  }
+  if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_FOLLOW_ACTIVE_ACCOUNT")) {
+    delete env.SPARK_FOLLOW_ACTIVE_ACCOUNT;
+  }
 
   // Agent-socket handshake. Every pty we spawn — user panes and worker panes
   // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI

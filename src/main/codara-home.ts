@@ -61,6 +61,12 @@ export function defaultCodaraHome(): string {
   return path.join(os.homedir(), DEFAULT_DIR_NAME);
 }
 
+// The override is normalized the same way codaraHomeDir() in
+// codara-managed-cli-roots.ts normalizes it: the value exported to panes as
+// SPARK_HOME_DIR and the managed roots the shell hooks compare against by
+// exact prefix must be the same bytes, or a trailing slash or a relative
+// segment in a dev launch makes every shell treat the selector as user-owned
+// and follow nothing.
 export function codaraHome(): string {
   if (homeDirCached !== null) return homeDirCached;
   const override =
@@ -68,7 +74,7 @@ export function codaraHome(): string {
     process.env.SPARK_HOME_DIR ??
     process.env.SPARK_USER_DATA_DIR;
   homeDirCached = override && override.trim()
-    ? override
+    ? path.resolve(override.trim())
     : defaultCodaraHome();
   return homeDirCached;
 }

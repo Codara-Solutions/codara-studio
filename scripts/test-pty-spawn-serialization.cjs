@@ -470,7 +470,11 @@ async function main() {
     delete process.env.OPENAI_API_KEY;
 
     // Native Claude has the same lifecycle contract, but selects an exact
-    // CLAUDE_CONFIG_DIR and strips every ambient auth/host-bypass seam.
+    // CLAUDE_CONFIG_DIR and strips every ambient auth/host-bypass seam. An
+    // inherited follow flag (Studio launched from a Codara pane) must not
+    // reach a frozen pane, and the home pointer is always this app's.
+    process.env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
+    process.env.SPARK_HOME_DIR = "/outer/app/home";
     process.env.ANTHROPIC_API_KEY = "must-not-leak";
     process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = "/wrong/securestorage";
     process.env.CLAUDE_CODE_HOST_CREDS_FILE = "/wrong/host-creds";
@@ -488,6 +492,24 @@ async function main() {
       undefined,
     );
     assert.equal(firstClaudeSpawn.options.env.CLAUDE_CODE_HOST_CREDS_FILE, undefined);
+    assert.equal(
+      firstClaudeSpawn.options.env.SPARK_FOLLOW_ACTIVE_ACCOUNT,
+      undefined,
+      "an inherited follow flag never reaches a frozen native pane",
+    );
+    assert.equal(
+      firstClaudeSpawn.options.env.SPARK_HOME_DIR,
+      "/tmp/codara-pty-test",
+      "the pane carries this app's home, not an inherited one",
+    );
+    const plainShell = await pty.spawn(localOptions("plain-follow"));
+    const plainSpawn = controller.localSpawnCalls.at(-1);
+    assert.equal(plainSpawn.pid, plainShell.pid);
+    assert.equal(plainSpawn.options.env.SPARK_FOLLOW_ACTIVE_ACCOUNT, "1", "a plain user shell follows");
+    assert.equal(plainSpawn.options.env.SPARK_HOME_DIR, "/tmp/codara-pty-test");
+    pty.killImmediate("plain-follow");
+    delete process.env.SPARK_FOLLOW_ACTIVE_ACCOUNT;
+    delete process.env.SPARK_HOME_DIR;
     assert.equal(
       controller.activeProfileLeases.get("terminal:claude-frozen"),
       firstClaudeProfile,

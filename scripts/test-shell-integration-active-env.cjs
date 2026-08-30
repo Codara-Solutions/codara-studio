@@ -405,7 +405,13 @@ function sourcePins() {
   );
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(pty.includes('env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"'), "pty-manager exports the flag");
+  assert.ok(pty.includes("delete env.SPARK_FOLLOW_ACTIVE_ACCOUNT"), "pty-manager strips an inherited flag");
   assert.ok(pty.includes("env.SPARK_HOME_DIR = codaraHome()"), "pty-manager exports the home the hook reads");
+  // The hooks compare byte-exact prefixes against $SPARK_HOME_DIR, and the
+  // pointer values are built from the resolved home: main must export a
+  // resolved value or a trailing slash in an override breaks the follow.
+  const home = fs.readFileSync(path.join(ROOT, "src", "main", "codara-home.ts"), "utf8");
+  assert.ok(home.includes("path.resolve(override.trim())"), "codaraHome() normalizes the override like the managed roots do");
   pass("source pins: the three hooks keep the contract");
 }
 
