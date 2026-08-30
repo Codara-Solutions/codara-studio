@@ -25,9 +25,15 @@ assert(renderer, "electron.vite.config.ts must define a renderer config");
 
 const warnings = [];
 const previousOnWarn = renderer.build?.rollupOptions?.onwarn;
+// Production mode on purpose: the dev JSX runtime (jsxDEV) embeds every
+// element's absolute source path, so a dev-mode analysis build measured a
+// number that grew with the length of the checkout path and disagreed
+// between machines. Users download the production closure; measure that.
+process.env.NODE_ENV = "production";
 const result = await viteBuild({
   ...renderer,
   configFile: false,
+  mode: "production",
   logLevel: "silent",
   build: {
     ...renderer.build,
