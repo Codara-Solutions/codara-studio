@@ -129,6 +129,37 @@ async function main() {
     await G.finalizeGrokCliLogout(store, "personal");
     assert.equal(fs.existsSync(live), false);
     assert.equal(fs.existsSync(G.grokCliPersonalAuthFile(store.rootDir)), false);
+
+    // Sign-out followed by a fresh `codex login` in a terminal: the personal
+    // backup is gone while the marker still names personal. The vault must
+    // re-seed from the live login instead of failing every inspect.
+    writePrivate(T.codexCliPersonalAuthFile(store.rootDir), "OLD_PERSONAL");
+    writePrivate(live, "OLD_PERSONAL");
+    await T.activateCodexCliAccount(store, "personal");
+    fs.rmSync(T.codexCliPersonalAuthFile(store.rootDir));
+    writePrivate(live, "FRESH_LOGIN");
+    assert.equal(await T.ensureCodexCliAuthVault(store), "personal");
+    assert.equal(
+      fs.readFileSync(T.codexCliPersonalAuthFile(store.rootDir), "utf8"),
+      "FRESH_LOGIN",
+      "a missing personal backup re-seeds from the live login",
+    );
+    // Signed out everywhere is a state, never an error.
+    fs.rmSync(T.codexCliPersonalAuthFile(store.rootDir));
+    fs.rmSync(live);
+    assert.equal(await T.ensureCodexCliAuthVault(store), "personal");
+    assert.equal(fs.existsSync(T.codexCliPersonalAuthFile(store.rootDir)), false);
+    // A managed account owning the live slot is never mistaken for personal.
+    writePrivate(live, "PERSONAL_AGAIN");
+    writePrivate(managed, "MANAGED_SECRET_2");
+    await T.activateCodexCliAccount(store, PROFILE);
+    fs.rmSync(T.codexCliPersonalAuthFile(store.rootDir));
+    assert.equal(await T.ensureCodexCliAuthVault(store), PROFILE);
+    assert.equal(
+      fs.existsSync(T.codexCliPersonalAuthFile(store.rootDir)),
+      false,
+      "the live managed credential must not be copied into the personal backup",
+    );
   } finally {
     fs.rmSync(grokFixture, { recursive: true, force: true });
   }

@@ -143,10 +143,19 @@ async function ensureVaultUnlocked(
   const personalAuth = codexCliPersonalAuthFile(rootDir);
   const marker = await readSelection(rootDir);
   if (!(await safeRegularFile(personalAuth))) {
-    if (marker !== null) {
-      throw new Error("Personal Codex credential backup is missing");
+    // The personal backup is missing. When the personal slot is (or is about
+    // to become) the active one, the live ~/.codex/auth.json IS the personal
+    // credential: first run, or a sign-out followed by a fresh `codex login`
+    // in a terminal. Re-seed from it when present; absent means signed out,
+    // which is a state, never an error (an inspect must not fail on it).
+    // When a managed account owns the live slot, the backup is legitimately
+    // absent and the live file must not be mistaken for the personal login.
+    if (marker === null || marker === CODEX_CLI_PERSONAL_PROFILE_ID) {
+      const livePersonalAuth = join(store.personalHomeDir, CODEX_CLI_AUTH_FILE);
+      if (await safeRegularFile(livePersonalAuth)) {
+        await atomicCopy(livePersonalAuth, personalAuth);
+      }
     }
-    await atomicCopy(join(store.personalHomeDir, CODEX_CLI_AUTH_FILE), personalAuth);
   }
   const selected = marker ?? CODEX_CLI_PERSONAL_PROFILE_ID;
   if (marker === null) await writeSelection(rootDir, selected);
