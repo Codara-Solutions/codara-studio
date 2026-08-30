@@ -253,5 +253,7 @@ export function quitAndInstall(): void {
     console.log("[auto-updater] quitAndInstall ignored in dev");
     return;
   }
-  autoUpdater.quitAndInstall();
+  // Silent install, relaunch when done: the whole update is one click — the
+  // app closes, applies the new version, and reopens itself.
+  autoUpdater.quitAndInstall(true, true);
 }

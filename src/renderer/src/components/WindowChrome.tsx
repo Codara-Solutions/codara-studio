@@ -3,6 +3,7 @@ import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import SystemMeters from "./SystemMeters";
 import { CodaraMark } from "./BrandMarks";
+import UpdateChip from "./UpdateChip";
 import UsageMeters from "./UsageMeters";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -326,6 +327,7 @@ function WindowChrome({
           alignItems: "stretch",
         }}
       >
+        <UpdateChip />
         <SystemMeters />
         <UsageMeters onOpenUsage={onOpenUsage} />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />

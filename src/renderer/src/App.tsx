@@ -40,7 +40,6 @@ import {
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
-import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
@@ -5824,7 +5823,6 @@ export default function App() {
           WindowChrome without disturbing the existing flex layout. Renders
           nothing in the resting state, so it's a no-op outside of the
           packaged-app update lifecycle. */}
-      <UpdateBanner />
       <WindowChrome
         platform={platform}
         leftOn={leftPanelVisible}

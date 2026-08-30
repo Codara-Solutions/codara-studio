@@ -4,7 +4,13 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // electron-updater is BUNDLED (not externalized): electron-builder's
+    // module collector mis-walks this hoisted npm tree and shipped an asar
+    // missing half of electron-updater's dependency closure (debug, js-yaml,
+    // sax, ...), which broke every update check in the packaged app with
+    // "Cannot find module 'debug'". Bundling it into the main chunk removes
+    // the runtime dependency on asar node_modules resolution entirely.
+    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] })],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),
