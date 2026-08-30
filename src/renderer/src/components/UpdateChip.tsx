@@ -261,9 +261,7 @@ export default function UpdateChip(): React.ReactElement | null {
         <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
           <DownloadGlyph color={tone} />
           <span style={{ fontWeight: 600 }}>
-            {error
-              ? "Update problem"
-              : `Codara Studio v${state.kind === "idle" ? "" : state.version}`}
+            {state.kind === "error" ? "Update problem" : `Codara Studio v${state.version}`}
           </span>
         </div>
         {state.kind === "downloading" && (
