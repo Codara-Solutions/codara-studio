@@ -729,8 +729,17 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       // The row was already the Cora default while it had no half, so the
       // CLI rested on Account 1. The half created now must take the CLI
       // default with it, or new terminals keep launching on Account 1 until
-      // the next launch repairs the defaults.
-      await this.useAccountLocked(linked.id, {});
+      // the next launch repairs the defaults. The half is whole either way;
+      // a CLI that must close sessions first (Codex) stays where it is
+      // until the user presses Use.
+      try {
+        await this.useAccountLocked(linked.id, {});
+      } catch (error) {
+        if (!(error instanceof UnifiedAccountSessionsError)) throw error;
+        this.log(
+          `[accounts] the ${this.adapter.labels.cliLabel} half of ${linked.id} was written, but ${this.adapter.labels.cliLabel} stays on its previous profile until its sessions close: ${error.message}`,
+        );
+      }
     }
     return cliProfileId;
   }
@@ -802,7 +811,12 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     }
     if (this.adapter.switchSideEffects) {
       try {
-        await this.adapter.switchSideEffects.afterDefault(target);
+        // A row without a CLI half rests the CLI on the personal slot, which
+        // may well be signed out (a user who only ever used Studio-managed
+        // logins has no personal login); the Cora half is what is active.
+        await this.adapter.switchSideEffects.afterDefault(target, {
+          allowSignedOut: !profile.cliProfileId,
+        });
       } catch (error) {
         await this.store.setDefaultProfile(previousCliDefault).catch(() => undefined);
         await this.piStore.registry
@@ -940,20 +954,25 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   private async removeCliHalf(cliProfileId: string): Promise<void> {
     const location = this.adapter.locate(cliProfileId);
     const cli = await this.store.snapshot();
-    if (cli.defaultProfileId === cliProfileId) {
+    const live = await this.adapter.activeCliProfileId?.().catch(() => undefined);
+    const holdsDefault = cli.defaultProfileId === cliProfileId;
+    if (holdsDefault || live === cliProfileId) {
       // The CLI default can lag the Cora default (a rolled-back switch, a
-      // repair that could only log). A half still holding it moves to the
-      // active row's half, or to personal, so the store never refuses the
-      // delete for it.
+      // repair that could only log), and a live selection (the Codex
+      // marker) can lag the CLI default. A half still holding either moves
+      // to the active row's half, or to personal, before its slot goes, so
+      // the store never refuses the delete for it and no terminal is left
+      // on a marker naming a profile that no longer exists.
       const snapshot = await this.piStore.registry.snapshot();
       const active = snapshot.profiles.find(
         (profile) => profile.id === snapshot.defaults[this.provider],
       );
-      const next =
-        active?.cliProfileId && active.cliProfileId !== cliProfileId
+      const next = !holdsDefault
+        ? cli.defaultProfileId
+        : active?.cliProfileId && active.cliProfileId !== cliProfileId
           ? active.cliProfileId
           : this.personalId;
-      await this.store.setDefaultProfile(next);
+      if (holdsDefault) await this.store.setDefaultProfile(next);
       await this.adapter.switchSideEffects
         ?.afterDefault(next, { allowSignedOut: true })
         .catch(() => undefined);
@@ -1028,11 +1047,29 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       // not have switched Cora and the CLI to another account.
       if (cliProfileId) {
         this.sweepLeases();
-        if (this.leases.isLeased(cliProfileId) && (!closeSessions || !this.sessionsHook)) {
-          throw new UnifiedAccountSessionsError(this.leases.owners(cliProfileId).length);
+        const owners = this.leases.owners(cliProfileId);
+        const terminals = this.liveSessionCount(cliProfileId);
+        if (owners.length > terminals) {
+          // Only terminals can be closed on the user's behalf; another
+          // owner (a worker run) keeps the CLI half, and the Pi half must
+          // not go while the CLI half cannot.
+          throw new Error(
+            `${this.adapter.labels.cliLabel} is still using this account for a running task. Wait for it to finish, then delete the account.`,
+          );
+        }
+        if (terminals > 0 && (!closeSessions || !this.sessionsHook)) {
+          throw new UnifiedAccountSessionsError(terminals);
         }
       }
-      await this.handOffDefault(profile.id, closeSessions);
+      try {
+        await this.handOffDefault(profile.id, closeSessions);
+      } catch (error) {
+        // The hand-off switches the CLI; its refusal is worded for a switch.
+        if (error instanceof UnifiedAccountSessionsError) {
+          throw new UnifiedAccountSessionsError(error.sessionCount, "delete");
+        }
+        throw error;
+      }
       const guard = options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {};
       let closedSessionCount = 0;
       if (!cliProfileId) {

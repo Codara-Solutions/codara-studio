@@ -463,16 +463,20 @@ async function persistCredential(
   if (canonical) {
     await service.ensureCliHalf(target.profile.id, canonical, identity).catch((cliError) => {
       console.warn(
-        `[accounts] ${service.adapter.labels.cliLabel} half for ${target.profile.id} was not written: ${safeAuthError(cliError)}`,
+        `[accounts] ${service.adapter.labels.cliLabel} half for ${target.profile.id} could not be written (the account is signed in to Cora; the card offers Share): ${safeAuthError(cliError)}`,
       );
     });
   }
   if (flow.makeDefault) {
-    // A Codex switch may have to close sessions the user has not agreed to
-    // close; the login is complete either way and the card offers Use.
-    await service.useAccount(target.profile.id).catch((error) => {
-      if (!(error instanceof UnifiedAccountSessionsError)) throw error;
-      console.warn(`[accounts] ${target.profile.id} was connected but not made active: ${error.message}`);
+    // The credential is stored and the row registered; making the account
+    // active is a separate step that may be refused (a Codex switch has to
+    // close sessions the user has not agreed to close) or fail (the CLI
+    // slot cannot be activated). Neither undoes the sign-in; the card
+    // offers Use.
+    await service.useAccount(target.profile.id).catch((error: unknown) => {
+      const reason =
+        error instanceof UnifiedAccountSessionsError ? error.message : safeAuthError(error);
+      console.warn(`[accounts] ${target.profile.id} was connected but not made active: ${reason}`);
     });
   }
   // A newly connected subscription must not read its limits — or its model
