@@ -145,6 +145,8 @@ const stubPlugin = {
         export async function inspectPiAccountProfileAuthStore() {
           return globalThis.__profileUsageInspection;
         }
+        export function defaultPiAccountAuthStore() { throw new Error("not used"); }
+        export function piAccountProfilePaths() { throw new Error("not used"); }
         export async function resolvePiAccountRuntimeProfile(input) {
           const profile = globalThis.__profileUsageInspection.snapshot.profiles
             .find((entry) => entry.id === input.preferredAccountProfileId);

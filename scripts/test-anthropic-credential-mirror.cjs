@@ -50,7 +50,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitFor(predicate, timeoutMs = 4000) {
+async function waitFor(predicate, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -442,6 +442,9 @@ async function main() {
     assert.equal(readPi(pair).access, "claude-access-20");
 
     mirror.rearm();
+    // Fresh fs.watch handles on macOS can miss a write issued in the same
+    // tick they were created; give them a moment before the next rotation.
+    await sleep(150);
     writePi(pair, pi(30));
     await waitFor(async () => (await readClaude(pair)).accessToken === "pi-access-30");
     mirror.unwatch(CORA_ID);

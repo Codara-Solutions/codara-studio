@@ -250,19 +250,30 @@ async function removeCredentialFile(path: string): Promise<void> {
   await fs.unlink(path);
 }
 
+/**
+ * Test and CI seam: with CODARA_DISABLE_KEYCHAIN=1 the default backend never
+ * spawns /usr/bin/security, so a suite pointed at temporary directories can
+ * exercise the production backend without touching the user's Keychain.
+ */
+function keychainDisabled(): boolean {
+  return process.env.CODARA_DISABLE_KEYCHAIN === "1";
+}
+
 export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
   async read(configDir, configDirEnv) {
-    const fromKeychain = await readKeychainCredential(
-      claudeCliKeychainService(configDirEnv),
-    );
+    const fromKeychain = keychainDisabled()
+      ? null
+      : await readKeychainCredential(claudeCliKeychainService(configDirEnv));
     return fromKeychain ?? readCredentialFile(claudeCredentialFile(configDir));
   },
   async write(configDir, configDirEnv, credential) {
     await atomicWriteCredential(claudeCredentialFile(configDir), credential);
+    if (keychainDisabled()) return;
     await writeKeychainCredential(claudeCliKeychainService(configDirEnv), credential);
   },
   async clear(configDir, configDirEnv) {
     await removeCredentialFile(claudeCredentialFile(configDir));
+    if (keychainDisabled()) return;
     await deleteKeychainCredential(claudeCliKeychainService(configDirEnv));
   },
 };

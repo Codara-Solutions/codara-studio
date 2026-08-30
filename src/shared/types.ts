@@ -684,6 +684,16 @@ export interface PiSubscriptionProfileConnection {
    * a connection made before that existed shows none until it is reconnected.
    */
   email?: string;
+  /**
+   * Opaque id of the Claude Code half of this Anthropic account: "personal"
+   * for the user's own claude login (Account 1), a managed profile id
+   * otherwise. Absent when the account has no terminal half yet.
+   */
+  cliProfileId?: string;
+  /** Account 1: the row for the user's own claude login, never deleted from here. */
+  builtIn?: true;
+  /** Token-blind status of the Claude Code half; absent when there is none. */
+  terminal?: { connected: boolean; expired: boolean; canRefresh: boolean };
 }
 
 /** Sanitized renderer→main requests for local account-profile management. */
@@ -709,7 +719,15 @@ export interface PiSubscriptionMakeDefaultInput {
 
 export interface PiSubscriptionDeleteAccountInput {
   profileId: string;
+  /** Close the terminals still running on this account before deleting it. */
+  closeSessions?: boolean;
 }
+
+/** Give a half account its other half: a Cora row gets a Claude Code
+ * profile, or a terminal-only Claude Code profile gets a Cora row. */
+export type PiSubscriptionShareLoginInput =
+  | { coraProfileId: string }
+  | { cliProfileId: string };
 
 /** Login flow handle. targetProfileId is an opaque local UUID, never an
  * upstream identity, credential, email, or filesystem path. */

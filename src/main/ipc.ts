@@ -105,6 +105,7 @@ import {
   PI_ACCOUNT_IN_USE_MESSAGE,
 } from "./orchestration/pi-account-run-guard";
 import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
+import { anthropicAccounts } from "./orchestration/anthropic-accounts";
 import { focusStudioWindow } from "./window-focus";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
@@ -884,6 +885,18 @@ export function registerIpc(): void {
       closedSessionCount:
         studio.closedSessionCount + external.closedProcessCount,
     };
+  });
+  // The unified Anthropic account service closes only the terminals of the
+  // account being deleted, and only after the user confirmed it; the pty
+  // layer owns the session table, so it is handed in here.
+  anthropicAccounts.setTerminalSessions({
+    liveOwnerIds: () => pty.liveSessionOwnerIds(),
+    disposeProfileSessions: (profileId) =>
+      pty.disposeNativeClaudeProfileSessions(profileId),
+  });
+  anthropicAccounts.setBroadcast(() => {
+    broadcastPiSubscriptionChanged("anthropic");
+    broadcastNativeCliAccountsChanged();
   });
 
   handle("state:load", async (): Promise<AppState> => {

@@ -3,6 +3,9 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, shell, type WebContents } from "electron";
+import { anthropicAccounts } from "./anthropic-accounts";
+import { anthropicCredentialMirror, canonicalFromPi } from "./anthropic-credential-mirror";
+import { loadPiAuthStorage } from "./pi-auth-storage";
 import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
@@ -29,7 +32,10 @@ import {
   type PiAccountProfileOwnershipGuard,
   PiOAuthLoginGate,
 } from "./pi-account-auth-store";
-import { readAnthropicAccountIdentity } from "./anthropic-account-identity";
+import {
+  readAnthropicAccountProfile,
+  type AnthropicAccountProfile,
+} from "./anthropic-account-identity";
 import {
   startPiOAuthCallbackServer,
   type PiOAuthCallbackServer,
@@ -72,18 +78,10 @@ interface OAuthAuth {
   }): Promise<OAuthCredential>;
   /** Exchange the refresh token for a fresh credential. Network call; throws on
    * failure. Pi's own runtime calls this under the auth-store lock, and so must
-   * we — see refreshPiSubscriptionCredential. The signal is deliberately NOT
+   * we do; see refreshPiSubscriptionProfileCredential. The signal is deliberately NOT
    * optional here: Anthropic's module feeds it straight to AbortSignal.any,
    * which rejects undefined, so the type keeps that mistake from returning. */
   refresh?(credential: OAuthCredential, signal: AbortSignal): Promise<OAuthCredential>;
-}
-
-interface AuthStorageInstance {
-  modify(
-    provider: string,
-    fn: (current: unknown) => Promise<OAuthCredential | undefined>,
-  ): Promise<unknown>;
-  delete(provider: string): Promise<void>;
 }
 
 interface ActiveFlow {
@@ -223,6 +221,9 @@ function broadcastSubscriptionsChanged(provider: PiSubscriptionProvider): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("pi-subscriptions:event", event);
   }
+  // An account mutation may have created or removed a credential directory;
+  // re-create the watchers so the mirror sees the new layout.
+  if (provider === "anthropic") anthropicCredentialMirror.rearm();
 }
 
 /** Re-read account metadata after a rename/default mutation and wake every UI. */
@@ -274,15 +275,7 @@ async function loadOAuth(provider: PiSubscriptionProvider): Promise<OAuthAuth> {
   return oauth;
 }
 
-async function loadAuthStorage(): Promise<{ create(path: string): AuthStorageInstance }> {
-  const runtime = await resolveCodaraPiRuntime();
-  const modulePath = join(runtime.packageRoot, "dist", "core", "auth-storage.js");
-  const loaded = await import(/* @vite-ignore */ pathToFileURL(modulePath).href) as {
-    AuthStorage?: { create(path: string): AuthStorageInstance };
-  };
-  if (!loaded.AuthStorage?.create) throw new Error("Pinned Pi auth storage is unavailable");
-  return loaded.AuthStorage;
-}
+const loadAuthStorage = loadPiAuthStorage;
 
 function disconnectedConnection(provider: PiSubscriptionProvider): PiSubscriptionConnection {
   const meta = PROVIDER_META[provider];
@@ -321,11 +314,12 @@ function compatibilityConnection(
 }
 
 export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> {
-  const [runtimeResult, inspection] = await Promise.all([
+  const [runtimeResult, inspection, terminals] = await Promise.all([
     resolveCodaraPiRuntime()
       .then((runtime) => ({ installed: true as const, version: runtime.version, error: undefined }))
       .catch((error) => ({ installed: false as const, version: null, error: safeAuthError(error) })),
     inspectPiAccountProfileAuthStore(),
+    anthropicAccounts.terminalStatuses().catch(() => new Map<string, never>()),
   ]);
   const statuses = new Map(inspection.statuses.map((status) => [status.profileId, status]));
   const profiles: PiSubscriptionProfileConnection[] = inspection.snapshot.profiles.map((profile) => {
@@ -337,6 +331,10 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     // The registry address was captured at connect time (Anthropic); the
     // credential read covers Codex, whose token carries its own claims.
     const email = profile.accountEmail ?? status?.accountEmail;
+    // The Claude Code half is projected as status only: which id it is, and
+    // whether it is signed in. Its directory and tokens stay in main.
+    const cliProfileId = profile.provider === "anthropic" ? profile.cliProfileId : undefined;
+    const terminal = cliProfileId ? terminals.get(cliProfileId) : undefined;
     return {
       id: profile.id,
       provider: profile.provider,
@@ -349,6 +347,9 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       ...(status?.error ? { error: status.error } : {}),
       ...(accountFingerprint ? { accountFingerprint } : {}),
       ...(email ? { email } : {}),
+      ...(cliProfileId ? { cliProfileId } : {}),
+      ...(cliProfileId === "personal" ? { builtIn: true as const } : {}),
+      ...(terminal ? { terminal } : {}),
     };
   });
   const connections = PI_SUBSCRIPTION_PROVIDERS.map((provider) =>
@@ -416,12 +417,12 @@ function settlePendingPrompt(flow: ActiveFlow, error: Error): void {
 async function connectTimeIdentity(
   provider: PiSubscriptionProvider,
   credential: OAuthCredential,
-): Promise<{ fingerprint?: string; email?: string }> {
+): Promise<AnthropicAccountProfile> {
   const fingerprint = piAccountCredentialIdentityFingerprint(provider, credential);
   const email = piAccountCredentialAccountEmail(provider, credential);
   if (fingerprint || email) return { ...(fingerprint ? { fingerprint } : {}), ...(email ? { email } : {}) };
   if (provider !== "anthropic" || !nonEmptyString(credential.access)) return {};
-  return readAnthropicAccountIdentity(credential.access);
+  return readAnthropicAccountProfile(credential.access);
 }
 
 async function persistCredential(
@@ -442,15 +443,32 @@ async function persistCredential(
     const AuthStorage = await loadAuthStorage();
     await AuthStorage.create(target.authFile).modify(flow.provider, async () => credential);
     if (process.platform !== "win32") await chmod(target.authFile, 0o600);
-    if (flow.makeDefault) {
-      await setDefaultPiAccountProfile(flow.provider, target.profile.id);
-    }
   } catch (error) {
     // A failed first write must not leave a metadata row that looks usable.
     if (target.created) {
       await deletePiAccountCredentialProfile(target.profile.id).catch(() => undefined);
     }
     throw error;
+  }
+  if (flow.provider === "anthropic") {
+    // One sign-in serves both halves: the Claude Code side is written from the
+    // credential just received. Its failure is not the sign-in's failure; the
+    // card then offers Share instead.
+    const canonical = canonicalFromPi(credential);
+    if (canonical) {
+      await anthropicAccounts
+        .ensureCliHalf(target.profile.id, canonical, identity)
+        .catch((cliError) => {
+          console.warn(
+            `[accounts] Claude Code half for ${target.profile.id} was not written: ${safeAuthError(cliError)}`,
+          );
+        });
+    }
+    if (flow.makeDefault) {
+      await anthropicAccounts.useAnthropicAccount(target.profile.id);
+    }
+  } else if (flow.makeDefault) {
+    await setDefaultPiAccountProfile(flow.provider, target.profile.id);
   }
   // A newly connected subscription must not read its limits — or its model
   // catalog — through a cache populated while it was still disconnected.
@@ -819,37 +837,47 @@ export async function refreshPiSubscriptionProfileCredential(
   });
   const AuthStorage = await loadAuthStorage();
   const storage = AuthStorage.create(paths.authFile);
-  let access: string | null = null;
-  await storage.modify(provider, async (current) => {
-    if (!isRecord(current) || current.type !== "oauth") return undefined;
-    const credential = current as unknown as OAuthCredential;
-    // A minute of headroom: a token expiring as we speak is not worth a request.
-    if (typeof credential.expires === "number" && credential.expires > Date.now() + 60_000) {
-      access = nonEmptyString(credential.access) ? credential.access : null;
-      return undefined;
-    }
-    if (!nonEmptyString(credential.refresh)) return undefined;
-    // The signal is REQUIRED, not optional. Pi's Anthropic module combines it
-    // with its own deadline through AbortSignal.any([signal, ...]), which
-    // throws ERR_INVALID_ARG_TYPE on undefined before it ever reaches the
-    // network — so omitting it failed every Claude refresh, which then read as
-    // "session expired" and locked the account out of routing entirely.
-    const next = await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
-    access = nonEmptyString(next.access) ? next.access : null;
-    return next;
-  });
-  if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
-  return access;
-}
-
-/** Compatibility refresh: target the provider's validated default profile. */
-export async function refreshPiSubscriptionCredential(
-  rawProvider: unknown,
-): Promise<string | null> {
-  const provider = providerFrom(rawProvider);
-  const resolved = await resolvePiAccountRuntimeProfile({ provider });
-  if (!resolved.accountProfileId) return null;
-  return refreshPiSubscriptionProfileCredential(resolved.accountProfileId, provider);
+  const attempt = async (): Promise<{ access: string | null; refreshed: boolean }> => {
+    let access: string | null = null;
+    let refreshed = false;
+    await storage.modify(provider, async (current) => {
+      if (!isRecord(current) || current.type !== "oauth") return undefined;
+      const credential = current as unknown as OAuthCredential;
+      // A minute of headroom: a token expiring as we speak is not worth a request.
+      if (typeof credential.expires === "number" && credential.expires > Date.now() + 60_000) {
+        access = nonEmptyString(credential.access) ? credential.access : null;
+        return undefined;
+      }
+      if (!nonEmptyString(credential.refresh)) return undefined;
+      // The signal is REQUIRED, not optional. Pi's Anthropic module combines it
+      // with its own deadline through AbortSignal.any([signal, ...]), which
+      // throws ERR_INVALID_ARG_TYPE on undefined before it ever reaches the
+      // network, so omitting it failed every Claude refresh, which then read as
+      // "session expired" and locked the account out of routing entirely.
+      const next = await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
+      access = nonEmptyString(next.access) ? next.access : null;
+      refreshed = true;
+      return next;
+    });
+    if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
+    return { access, refreshed };
+  };
+  let outcome: { access: string | null; refreshed: boolean };
+  try {
+    outcome = await attempt();
+  } catch (error) {
+    if (provider !== "anthropic") throw error;
+    // The refresh token Cora holds may have been rotated by Claude Code on
+    // the same account. If the terminal copy is fresher, take it and try once
+    // more before giving up.
+    const repaired = await anthropicAccounts.reconcileProfile(profileId).catch(() => null);
+    if (repaired?.wrote !== "pi") throw error;
+    outcome = await attempt();
+  }
+  if (provider === "anthropic" && outcome.refreshed) {
+    await anthropicAccounts.reconcileProfile(profileId).catch(() => null);
+  }
+  return outcome.access;
 }
 
 export async function deletePiSubscriptionProfile(

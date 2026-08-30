@@ -1,0 +1,274 @@
+import { randomBytes } from "node:crypto";
+import { promises as fs } from "node:fs";
+import { join, resolve } from "node:path";
+import { anthropicAccounts, type AnthropicAccountService } from "./anthropic-accounts";
+import {
+  claudeCliManagedProfileConfigDir,
+  isClaudeCliManagedProfileId,
+  type ClaudeCliAccountProfileStore,
+} from "./claude-cli-account-profiles";
+import {
+  defaultClaudeCliCredentialBackend,
+  type ClaudeCliCredentialBackend,
+} from "./claude-cli-credentials";
+import {
+  nativeClaudeProfileStore,
+  setNativeClaudeProfileResolutionHooks,
+} from "./native-claude-profile-runtime";
+import { defaultPiAccountAuthStore, type PiAccountAuthStore } from "./pi-account-auth-store";
+
+/**
+ * The idempotent startup pass that turns whatever an earlier Studio left on
+ * disk into the unified two-halves model, run at every launch behind a ready
+ * gate that every account IPC and socket handler awaits. Each sub-step
+ * re-derives its state from disk, so a crash at any point is finished by the
+ * next launch and no marker file is needed. A failed pass logs and still
+ * resolves the gate: the app must never block on account housekeeping.
+ *
+ * Ordered sub-steps:
+ *  1. Legacy fold: PiAccountAuthStore.inspect() folds pi-agent/auth.json
+ *     into a row (Codex and xAI still rely on this).
+ *  2. Undo the live-slot swap the retired selector performed on ~/.claude.
+ *  3. Clear links that name a managed profile which no longer exists.
+ *  4. Pair unlinked rows with unlinked managed profiles.
+ *  5. Create or pair the Account 1 row when ~/.claude holds a credential.
+ *  6. Repair the defaults so Claude Code follows the Cora default.
+ *  7. Arm the mirror over every pair and reconcile each once.
+ */
+
+const ACTIVE_AUTH_FILE = "active-auth.json";
+const PERSONAL_VAULT_DIRECTORY = "personal";
+const RETIRED_VAULT_PATTERN = /^\.personal\.retired-[0-9a-f]+$/;
+
+export interface UndoLiveSlotSwapInput {
+  claudeRootDir: string;
+  personalConfigDir: string;
+  personalConfigDirEnv: string | null;
+  backend?: ClaudeCliCredentialBackend;
+  log?: (message: string) => void;
+}
+
+export interface UndoLiveSlotSwapResult {
+  /** The managed profile whose credential was moved out of ~/.claude, if any. */
+  restoredFrom: string | null;
+  /** True when the vaulted personal credential was written back to ~/.claude. */
+  personalRestored: boolean;
+  retiredVaultDir: string | null;
+  removedRetiredDirs: string[];
+}
+
+async function lstatOrNull(path: string): Promise<import("node:fs").Stats | null> {
+  return fs.lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+}
+
+async function readSelection(rootDir: string): Promise<string | null> {
+  const file = join(rootDir, ACTIVE_AUTH_FILE);
+  const stats = await lstatOrNull(file);
+  if (!stats || stats.isSymbolicLink() || !stats.isFile()) return null;
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as { profileId?: unknown };
+    return typeof parsed.profileId === "string" ? parsed.profileId : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The retired selector swapped a managed account's credential INTO ~/.claude
+ * and vaulted the personal login under claude-cli/personal. If that swap is
+ * still in effect, ~/.claude holds the managed account's freshest token:
+ * give it back to that account's own directory, put the personal login back,
+ * then retire the vault and the selection marker. When the marker is absent
+ * or names personal, only the cleanup runs.
+ */
+export async function undoLiveSlotSwap(
+  input: UndoLiveSlotSwapInput,
+): Promise<UndoLiveSlotSwapResult> {
+  const backend = input.backend ?? defaultClaudeCliCredentialBackend;
+  const rootDir = resolve(input.claudeRootDir);
+  const vaultDir = join(rootDir, PERSONAL_VAULT_DIRECTORY);
+  const result: UndoLiveSlotSwapResult = {
+    restoredFrom: null,
+    personalRestored: false,
+    retiredVaultDir: null,
+    removedRetiredDirs: [],
+  };
+
+  // Retired vaults from an earlier launch are removed now; the one retired
+  // below is removed by the next launch, so a crash mid-pass keeps its bytes.
+  const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!RETIRED_VAULT_PATTERN.test(entry.name) || !entry.isDirectory()) continue;
+    await fs.rm(join(rootDir, entry.name), { recursive: true, force: true }).catch(() => undefined);
+    result.removedRetiredDirs.push(entry.name);
+  }
+
+  const selected = await readSelection(rootDir);
+  const vaultExists = (await lstatOrNull(vaultDir))?.isDirectory() === true;
+  if (selected && isClaudeCliManagedProfileId(selected)) {
+    const live = await backend
+      .read(input.personalConfigDir, input.personalConfigDirEnv)
+      .catch(() => null);
+    if (live) {
+      const managedDir = claudeCliManagedProfileConfigDir(rootDir, selected);
+      await backend.write(managedDir, managedDir, live);
+      result.restoredFrom = selected;
+    }
+    if (vaultExists) {
+      const vaulted = await backend.read(vaultDir, vaultDir).catch(() => null);
+      if (vaulted) {
+        await backend.write(input.personalConfigDir, input.personalConfigDirEnv, vaulted);
+        const verified = await backend
+          .read(input.personalConfigDir, input.personalConfigDirEnv)
+          .catch(() => null);
+        if (verified !== vaulted) {
+          throw new Error("The personal Claude login could not be restored to ~/.claude");
+        }
+        result.personalRestored = true;
+      } else if (live) {
+        input.log?.(
+          "[accounts] the personal Claude login vault is empty; ~/.claude keeps the credential it holds",
+        );
+      }
+    }
+  }
+
+  await fs.rm(join(rootDir, ACTIVE_AUTH_FILE), { force: true }).catch(() => undefined);
+  if (vaultExists) {
+    const retired = join(rootDir, `.personal.retired-${randomBytes(6).toString("hex")}`);
+    await fs.rename(vaultDir, retired);
+    result.retiredVaultDir = retired;
+    await backend.clear?.(vaultDir, vaultDir).catch(() => undefined);
+  }
+  return result;
+}
+
+export interface AnthropicAccountMigrationDeps {
+  service?: AnthropicAccountService;
+  piStore?: PiAccountAuthStore;
+  claudeStore?: ClaudeCliAccountProfileStore;
+  backend?: ClaudeCliCredentialBackend;
+  log?: (message: string) => void;
+}
+
+export interface AnthropicAccountMigrationReport {
+  liveSlot: UndoLiveSlotSwapResult | null;
+  clearedLinks: string[];
+  paired: Array<{ coraProfileId: string; cliProfileId: string; by: "fingerprint" | "email" }>;
+  accountOne: string | null;
+  watchedPairs: number;
+  failedStep: string | null;
+}
+
+/** Runs every sub-step in order; a failing step is logged and the rest still run. */
+export async function migrateAnthropicAccounts(
+  deps: AnthropicAccountMigrationDeps = {},
+): Promise<AnthropicAccountMigrationReport> {
+  const service = deps.service ?? anthropicAccounts;
+  const piStore = deps.piStore ?? defaultPiAccountAuthStore();
+  const claudeStore = deps.claudeStore ?? nativeClaudeProfileStore;
+  const log = deps.log ?? ((message: string) => console.warn(message));
+  const report: AnthropicAccountMigrationReport = {
+    liveSlot: null,
+    clearedLinks: [],
+    paired: [],
+    accountOne: null,
+    watchedPairs: 0,
+    failedStep: null,
+  };
+  const step = async (name: string, run: () => Promise<void>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      report.failedStep ??= name;
+      log(
+        `[accounts] migration step "${name}" failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
+
+  await step("legacy-fold", async () => {
+    await piStore.inspect();
+  });
+  await step("undo-live-slot", async () => {
+    report.liveSlot = await undoLiveSlotSwap({
+      claudeRootDir: claudeStore.rootDir,
+      personalConfigDir: claudeStore.personalConfigDir,
+      personalConfigDirEnv: claudeStore.personalConfigDirEnv,
+      ...(deps.backend ? { backend: deps.backend } : {}),
+      log,
+    });
+    if (report.liveSlot.restoredFrom || report.liveSlot.retiredVaultDir) {
+      log(
+        `[accounts] retired the Claude login vault${
+          report.liveSlot.restoredFrom ? ` and returned ~/.claude to the personal login` : ""
+        }`,
+      );
+    }
+  });
+  await step("clear-dangling-links", async () => {
+    report.clearedLinks = await service.clearDanglingLinks();
+  });
+  await step("pair-halves", async () => {
+    report.paired = await service.pairHalves();
+  });
+  await step("account-one", async () => {
+    report.accountOne = (await service.ensureAccountOne())?.id ?? null;
+  });
+  await step("repair-defaults", async () => {
+    await service.repairDefaults();
+  });
+  await step("start-mirror", async () => {
+    report.watchedPairs = (await service.startMirror()).length;
+  });
+  return report;
+}
+
+let readyPromise: Promise<void> | null = null;
+
+/**
+ * Kick off the pass once per process. Every account handler awaits
+ * unifiedAccountsReady(), so no caller observes a half-migrated store; the
+ * promise resolves even when the pass failed.
+ */
+export function startAnthropicAccountMigration(
+  deps: AnthropicAccountMigrationDeps = {},
+): Promise<void> {
+  if (readyPromise) return readyPromise;
+  const service = deps.service ?? anthropicAccounts;
+  // Every Claude terminal launch waits for this pass and starts on a freshly
+  // reconciled credential pair.
+  setNativeClaudeProfileResolutionHooks({
+    ready: () => unifiedAccountsReady(),
+    beforeNewProfile: async () => {
+      await service.reconcileDefault();
+    },
+    beforeFrozenProfile: async (profileId) => {
+      await service.reconcileCliProfile(profileId);
+    },
+  });
+  readyPromise = migrateAnthropicAccounts(deps).then(
+    () => undefined,
+    (error) => {
+      (deps.log ?? console.warn)(
+        `[accounts] migration pass failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  );
+  return readyPromise;
+}
+
+export function unifiedAccountsReady(): Promise<void> {
+  return readyPromise ?? Promise.resolve();
+}
+
+/** Test seam: forget the process-wide gate so a suite can run the pass again. */
+export function resetAnthropicAccountMigrationForTests(): void {
+  readyPromise = null;
+  setNativeClaudeProfileResolutionHooks(null);
+}

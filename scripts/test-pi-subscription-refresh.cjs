@@ -32,6 +32,12 @@ const PI_PACKAGE_ROOT = path.join(ROOT, "node_modules", "@earendil-works", "pi-c
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-refresh-"));
 const OUTFILE = path.join(TMP, "subscription-auth.cjs");
 const PROFILE_ID = "55555555-5555-4555-8555-555555555555";
+const CLI_ID = "66666666-6666-4666-8666-666666666666";
+// The unified account service resolves its stores from the Codara home; keep
+// every directory it may touch inside this fixture and away from the Keychain.
+process.env.CODARA_HOME_DIR = path.join(TMP, "codara-home");
+process.env.CODARA_DISABLE_KEYCHAIN = "1";
+delete process.env.CLAUDE_CONFIG_DIR;
 
 let failures = 0;
 function check(name, fn) {
@@ -61,7 +67,12 @@ fs.writeFileSync(
   { mode: 0o600 },
 );
 
-globalThis.__refreshHarness = { authFile, packageRoot: PI_PACKAGE_ROOT, profileId: PROFILE_ID };
+globalThis.__refreshHarness = {
+  authFile,
+  packageRoot: PI_PACKAGE_ROOT,
+  profileId: PROFILE_ID,
+  cliProfileId: CLI_ID,
+};
 
 const stubPlugin = {
   name: "subscription-refresh-harness",
@@ -123,6 +134,35 @@ const stubPlugin = {
         };
       }
       export async function deletePiAccountCredentialProfile() {}
+      // Enough registry for the repair path: one anthropic row whose Claude
+      // Code half is the managed profile the harness writes below.
+      export function defaultPiAccountAuthStore() {
+        return {
+          rootDir: globalThis.__refreshHarness.authFile,
+          registry: {
+            async getProfile(id) {
+              if (id !== globalThis.__refreshHarness.profileId) return null;
+              return {
+                id,
+                provider: "anthropic",
+                label: "Claude",
+                createdAt: "2026-08-01T00:00:00.000Z",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                cliProfileId: globalThis.__refreshHarness.cliProfileId,
+              };
+            },
+            async profileForCliProfileId() { return undefined; },
+            async snapshot() { return { version: 1, profiles: [], defaults: {} }; },
+          },
+        };
+      }
+      export function piAccountProfilePaths(_root, id) {
+        return {
+          configDir: path.dirname(globalThis.__refreshHarness.authFile),
+          authFile: globalThis.__refreshHarness.authFile,
+        };
+      }
+      import path from "node:path";
       export function piAccountCredentialAccountEmail() { return undefined; }
       export function piAccountCredentialIdentityFingerprint() { return undefined; }
       export async function preparePiAccountCredentialTarget() { return {}; }
@@ -139,6 +179,7 @@ const stubPlugin = {
     `);
     stub(/anthropic-account-identity$/, "identity", `
       export async function readAnthropicAccountIdentity() { return null; }
+      export async function readAnthropicAccountProfile() { return {}; }
     `);
     stub(/pi-oauth-callback-server$/, "callback-server", `
       export async function startPiOAuthCallbackServer() { throw new Error("unused"); }
@@ -208,6 +249,90 @@ async function main() {
   check("the auth file stays owner-only", () => {
     if (process.platform === "win32") return;
     assert.strictEqual(fs.statSync(authFile).mode & 0o077, 0);
+  });
+
+  // The repair path. Claude Code refreshed this account in a terminal and
+  // rotated the refresh token, so Cora's copy is dead: Anthropic rejects it.
+  // The unified service then takes the fresher terminal copy and the refresh
+  // is retried once with it, after which both files hold the new token.
+  const claudeDir = path.join(
+    process.env.CODARA_HOME_DIR,
+    "claude-cli",
+    "accounts",
+    CLI_ID,
+  );
+  fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(claudeDir, 0o700);
+  const claudeFile = path.join(claudeDir, ".credentials.json");
+  const now = Date.now();
+  fs.writeFileSync(
+    authFile,
+    JSON.stringify({
+      anthropic: {
+        type: "oauth",
+        access: "dead-access",
+        refresh: "dead-refresh",
+        expires: now - 60_000,
+      },
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    claudeFile,
+    JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "terminal-access",
+        refreshToken: "terminal-refresh",
+        // Raw expiry: fresher than Cora's (Pi stores raw minus five minutes),
+        // and still lapsed, so the retry really has to refresh.
+        expiresAt: now + 250_000,
+        scopes: ["user:inference"],
+        subscriptionType: "max",
+      },
+    }),
+    { mode: 0o600 },
+  );
+  fs.chmodSync(claudeFile, 0o600);
+  const grants = [];
+  globalThis.fetch = async (url, options) => {
+    const body = String(options && options.body);
+    const dead = body.includes("dead-refresh");
+    grants.push(dead ? "dead" : "terminal");
+    if (dead) {
+      return new Response(JSON.stringify({ error: "invalid_grant" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        access_token: "repaired-access-token",
+        refresh_token: "repaired-refresh-token",
+        expires_in: 3600,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  let repairedAccess;
+  let repairThrown = null;
+  try {
+    repairedAccess = await refreshPiSubscriptionProfileCredential(PROFILE_ID, "anthropic");
+  } catch (error) {
+    repairThrown = error;
+  }
+  check("a rejected refresh token is repaired from the fresher terminal copy and retried once", () => {
+    assert.strictEqual(repairThrown, null, repairThrown && repairThrown.message);
+    assert.strictEqual(repairedAccess, "repaired-access-token");
+    assert.deepStrictEqual(grants, ["dead", "terminal"]);
+  });
+  check("both files converge on the repaired token", () => {
+    const stored = JSON.parse(fs.readFileSync(authFile, "utf8")).anthropic;
+    assert.strictEqual(stored.refresh, "repaired-refresh-token");
+    const terminal = JSON.parse(fs.readFileSync(claudeFile, "utf8")).claudeAiOauth;
+    assert.strictEqual(terminal.accessToken, "repaired-access-token");
+    assert.strictEqual(terminal.refreshToken, "repaired-refresh-token");
+    assert.strictEqual(terminal.subscriptionType, "max", "Claude-only fields survive the mirror");
+    assert.strictEqual(fs.statSync(claudeFile).mode & 0o077, 0);
   });
 
   console.log(

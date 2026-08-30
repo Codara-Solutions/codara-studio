@@ -432,6 +432,12 @@ async function usableAccessToken(
   profileId: string,
   provider: PiSubscriptionProvider,
 ): Promise<{ credential: StoredCredential; access: string } | null> {
+  if (provider === "anthropic") {
+    // Cheap, and it catches a Keychain-only rotation by Claude Code before the
+    // probe would report a needless "session expired".
+    const { anthropicAccounts } = await import("./anthropic-accounts");
+    await anthropicAccounts.reconcileProfile(profileId).catch(() => null);
+  }
   const selected = await resolvePiAccountRuntimeProfile({
     provider,
     preferredAccountProfileId: profileId,

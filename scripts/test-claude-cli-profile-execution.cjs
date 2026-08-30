@@ -368,6 +368,11 @@ async function main() {
   assert.deepEqual(
     externalReferences.map((file) => path.relative(ROOT, file)).sort(),
     [
+      // The unified Anthropic account service, its startup pass and the
+      // credential mirror own the two halves of an account; they read the
+      // store's directories and never launch anything.
+      "src/main/orchestration/anthropic-account-migration.ts",
+      "src/main/orchestration/anthropic-accounts.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
       // Type-only import of the execution-profile shape; resolution still

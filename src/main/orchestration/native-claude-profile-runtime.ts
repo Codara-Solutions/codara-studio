@@ -20,6 +20,27 @@ import {
  * more, so resolving a profile never touches another account's credential.
  */
 export const nativeClaudeProfileLeases = defaultClaudeCliProfileLeases();
+
+/**
+ * Installed by the unified account service once it is loaded: every launch
+ * waits for the startup migration and reconciles the launching account's
+ * credential pair first. Injected rather than imported so this launch-path
+ * module never pulls the account service, the registry and the Pi runtime
+ * into every surface that resolves a profile.
+ */
+export interface NativeClaudeProfileResolutionHooks {
+  ready(): Promise<void>;
+  beforeNewProfile(): Promise<void>;
+  beforeFrozenProfile(profileId: ClaudeCliProfileId): Promise<void>;
+}
+
+let resolutionHooks: NativeClaudeProfileResolutionHooks | null = null;
+
+export function setNativeClaudeProfileResolutionHooks(
+  hooks: NativeClaudeProfileResolutionHooks | null,
+): void {
+  resolutionHooks = hooks;
+}
 export const nativeClaudeProfileStore = new ClaudeCliAccountProfileStore(
   undefined,
   {
@@ -28,10 +49,17 @@ export const nativeClaudeProfileStore = new ClaudeCliAccountProfileStore(
   },
 );
 
-/** The account a brand-new Claude terminal launches with: the stored default. */
+/**
+ * The account a brand-new Claude terminal launches with: the unified default,
+ * after the account migration has settled and the default's credential pair
+ * has been reconciled so the terminal starts on the freshest token.
+ */
 export async function resolveNewNativeClaudeProfile(
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<ClaudeCliExecutionProfile> {
+  const hooks = resolutionHooks;
+  await hooks?.ready();
+  await hooks?.beforeNewProfile().catch(() => undefined);
   return resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
     useDefault: true,
     baseEnv,
@@ -46,11 +74,15 @@ export async function resolveFrozenNativeClaudeProfile(
   nativeClaudeProfileId: string | null | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<ClaudeCliExecutionProfile> {
+  const hooks = resolutionHooks;
+  await hooks?.ready();
   try {
-    return await resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
+    const frozen = await resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
       profileId: nativeClaudeProfileId,
       baseEnv,
     });
+    await hooks?.beforeFrozenProfile(frozen.profileId).catch(() => undefined);
+    return frozen;
   } catch (error) {
     if (error instanceof ClaudeCliAccountProfileNotFoundError) {
       return resolveNewNativeClaudeProfile(baseEnv);

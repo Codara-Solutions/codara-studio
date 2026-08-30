@@ -53,6 +53,8 @@ import {
   cleanupNativeCliActivePointerArtifacts,
   cleanupRetiredCodexHomeEnvironment,
 } from "./orchestration/native-cli-terminal-cleanup";
+import { startAnthropicAccountMigration } from "./orchestration/anthropic-account-migration";
+import { anthropicCredentialMirror } from "./orchestration/anthropic-credential-mirror";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -1049,6 +1051,11 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  // Unified Anthropic accounts: fold whatever an earlier build left on disk
+  // into the two-halves model and start the credential mirror. Every account
+  // handler registered above awaits this pass, so it must start before any
+  // of them can run, which is why it follows registerIpc() synchronously.
+  void startAnthropicAccountMigration();
   // One-time tidy-up after the retired "Active account in your terminal"
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and
@@ -1179,6 +1186,9 @@ app.whenReady().then(async () => {
     // Restart the terminal-agent quiet windows before the 1s sweep can read
     // the sleep gap as "the agent went silent → finished".
     noteHostResume();
+    // fs.watch handles do not always survive a sleep; re-create the credential
+    // watchers so a token rotated while asleep is noticed.
+    anthropicCredentialMirror.rearm();
     if (resumeTimer) return; // coalesce duplicate resume events
     resumeTimer = setTimeout(() => {
       resumeTimer = null;

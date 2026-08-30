@@ -174,6 +174,15 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   const releaseClaude = session.releaseNativeClaudeProfileLease;
   session.releaseNativeClaudeProfileLease = undefined;
   releaseClaude?.();
+  if (releaseClaude && session.nativeClaudeProfileId) {
+    // A terminal exit is the moment Claude Code most likely rotated the
+    // account's token; fold it back into Cora's copy now rather than at the
+    // next poll. Best effort and off the teardown path.
+    const cliProfileId = session.nativeClaudeProfileId;
+    void import("./orchestration/anthropic-accounts")
+      .then(({ anthropicAccounts }) => anthropicAccounts.reconcileCliProfile(cliProfileId))
+      .catch(() => undefined);
+  }
   const releaseGrok = session.releaseNativeGrokProfileLease;
   session.releaseNativeGrokProfileLease = undefined;
   releaseGrok?.();
@@ -2413,6 +2422,26 @@ async function disposeSessionsGraceful(
       /* ignore */
     }
   }
+}
+
+/** Lease owner ids of every live Studio PTY, for sweeping stale account leases. */
+export function liveSessionOwnerIds(): Set<string> {
+  return new Set([...sessions.keys()].map((id) => `terminal:${id}`));
+}
+
+/**
+ * Close only the Studio PTYs running on one Claude Code account, when the
+ * user confirmed that deleting the account may close them.
+ */
+export async function disposeNativeClaudeProfileSessions(
+  profileId: string,
+  maxWaitMs = 1500,
+): Promise<NativeCliRuntimeDisposeResult> {
+  const ids = [...sessions.entries()]
+    .filter(([, session]) => session.nativeClaudeProfileId === profileId)
+    .map(([id]) => id);
+  await disposeSessionsGraceful(ids, maxWaitMs);
+  return { closedSessionCount: ids.length };
 }
 
 /**
