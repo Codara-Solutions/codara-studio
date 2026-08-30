@@ -1547,11 +1547,13 @@ async function handleSubscriptionAccounts(
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   await pruneCliSubscriptionAuthSessions();
-  const [auth, { unifiedAccountsReady }, { anthropicAccounts }] = await Promise.all([
-    import("./orchestration/pi-subscription-auth"),
-    import("./orchestration/anthropic-account-migration"),
-    import("./orchestration/anthropic-accounts"),
-  ]);
+  const [auth, { unifiedAccountsReady }, { unifiedAccountsFor }, { UnifiedAccountSessionsError }] =
+    await Promise.all([
+      import("./orchestration/pi-subscription-auth"),
+      import("./orchestration/unified-account-migration"),
+      import("./orchestration/unified-account-registry"),
+      import("./orchestration/unified-account-errors"),
+    ]);
   await unifiedAccountsReady();
 
   if (method === "accounts.login.start") {
@@ -1639,14 +1641,20 @@ async function handleSubscriptionAccounts(
     if (!isPiSubscriptionProvider(provider)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
     }
-    // An Anthropic account switches both halves at once; Codex and xAI only
-    // have the Cora half here.
-    if (provider === "anthropic") {
-      await anthropicAccounts.useAnthropicAccount(profileId);
-      broadcastNativeCliAccountsChangedFromSocket();
-    } else {
-      await auth.setDefaultPiAccountProfile(provider, profileId);
+    // One switch for both halves. A Codex switch that would close sessions
+    // refuses with their count until the caller repeats it with
+    // closeSessions; the count travels in the error message.
+    try {
+      await unifiedAccountsFor(provider).useAccount(profileId, {
+        closeSessions: params.closeSessions === true,
+      });
+    } catch (error) {
+      if (error instanceof UnifiedAccountSessionsError) {
+        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
+      }
+      throw error;
     }
+    broadcastNativeCliAccountsChangedFromSocket();
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(provider);
     return successResponse(id, {
       account: overview.profiles?.find((profile) => profile.id === profileId) ?? null,
@@ -1662,16 +1670,20 @@ async function handleSubscriptionAccounts(
     const current = (await auth.inspectPiSubscriptions()).profiles?.find(
       (profile) => profile.id === profileId,
     );
-    if (current?.provider === "anthropic") {
-      await anthropicAccounts.deleteAnthropicAccount(profileId, {
+    if (!current) return errorResponse(id, ERR_INVALID_PARAMS, "account not found");
+    try {
+      await unifiedAccountsFor(current.provider).deleteAccount(profileId, {
         closeSessions: params.closeSessions === true,
         ownershipGuard,
       });
-      broadcastNativeCliAccountsChangedFromSocket();
-      const overview = await auth.refreshPiSubscriptionsAfterMetadataChange("anthropic");
-      return successResponse(id, { removed: profileId, overview });
+    } catch (error) {
+      if (error instanceof UnifiedAccountSessionsError) {
+        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
+      }
+      throw error;
     }
-    const overview = await auth.deletePiSubscriptionProfile(profileId, { ownershipGuard });
+    broadcastNativeCliAccountsChangedFromSocket();
+    const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(current.provider);
     return successResponse(id, { removed: profileId, overview });
   }
 
@@ -1692,43 +1704,20 @@ function nativeRuntimeParam(params: Record<string, unknown>): "claude" | "codex"
   return runtime;
 }
 
-async function openNativeCliAccountLogin(
-  runtime: "claude" | "codex" | "grok",
-  profileId: string,
-  label: string,
-  options: { removeOnFailure: boolean; activateOnSuccess: boolean },
-): Promise<{ tabId: string; paneId: string; profileId: string }> {
-  const { nativeCliAccounts } = await import("./orchestration/native-cli-accounts");
-  const prepared = await nativeCliAccounts.prepareLogin({
-    runtime,
-    profileId,
-    ...(options.removeOnFailure
-      ? { removeProfileOnMismatch: true, removeProfileOnFailure: true }
-      : {}),
-    ...(options.activateOnSuccess ? { activateOnSuccess: true } : {}),
-  });
-  try {
-    const terminal = await requestTerminalOp<{ tabId: string; paneId: string }>("create", {
-      nativeCliLoginToken: prepared.launchToken,
-      title: `${runtime === "claude" ? "Claude Code" : runtime === "codex" ? "Codex CLI" : "Grok Build"} sign-in · ${label}`,
-    });
-    return { ...terminal, profileId };
-  } catch (error) {
-    await nativeCliAccounts.cancelPreparedLogin(prepared.launchToken).catch(() => false);
-    throw error;
-  }
-}
-
 async function handleNativeAccounts(
   method: string,
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const [{ nativeCliAccounts, NativeCliAccountError }, { unifiedAccountsReady }] =
-    await Promise.all([
-      import("./orchestration/native-cli-accounts"),
-      import("./orchestration/anthropic-account-migration"),
-    ]);
+  const [
+    { nativeCliAccounts, NativeCliAccountError },
+    { unifiedAccountsReady },
+    { providerForRuntime, unifiedAccountsFor },
+  ] = await Promise.all([
+    import("./orchestration/native-cli-accounts"),
+    import("./orchestration/unified-account-migration"),
+    import("./orchestration/unified-account-registry"),
+  ]);
   await unifiedAccountsReady();
   if (method === "nativeAccounts.list") {
     const runtimeValue = stringParam(params, "runtime");
@@ -1757,13 +1746,12 @@ async function handleNativeAccounts(
 
   const runtime = nativeRuntimeParam(params);
   if (
-    runtime === "claude" &&
-    (method === "nativeAccounts.add" ||
-      method === "nativeAccounts.login" ||
-      method === "nativeAccounts.use" ||
-      method === "nativeAccounts.logout")
+    method === "nativeAccounts.add" ||
+    method === "nativeAccounts.login" ||
+    method === "nativeAccounts.use" ||
+    method === "nativeAccounts.logout"
   ) {
-    // Claude Code is one half of an Anthropic account: sign in once with
+    // A CLI profile is one half of an account: sign in once with
     // accounts.login.start and switch with accounts.use; both halves follow.
     const unified = new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", { runtime });
     return errorResponse(
@@ -1772,37 +1760,9 @@ async function handleNativeAccounts(
       `${unified.message}. Use accounts.login.start to sign in and accounts.use to switch.`,
     );
   }
-  if (method === "nativeAccounts.add") {
-    const label = stringParam(params, "label");
-    if (!label) return errorResponse(id, ERR_INVALID_PARAMS, "label is required");
-    const created = await nativeCliAccounts.create({ runtime, label });
-    broadcastNativeCliAccountsChangedFromSocket();
-    const terminal = await openNativeCliAccountLogin(runtime, created.profile.id, created.profile.label, {
-      removeOnFailure: true,
-      activateOnSuccess: true,
-    });
-    return successResponse(id, { profile: created.profile, terminal });
-  }
 
   const profileId = stringParam(params, "profileId");
   if (!profileId) return errorResponse(id, ERR_INVALID_PARAMS, "profileId is required");
-
-  if (method === "nativeAccounts.login") {
-    const inspection = await nativeCliAccounts.inspect(runtime);
-    const profile = inspection.runtimes[0]?.profiles.find((entry) => entry.id === profileId);
-    if (!profile) throw new Error(`Native ${runtime} account not found: ${profileId}`);
-    const terminal = await openNativeCliAccountLogin(runtime, profileId, profile.label, {
-      removeOnFailure: false,
-      activateOnSuccess: params.makeDefault === true,
-    });
-    return successResponse(id, { profile, terminal });
-  }
-
-  if (method === "nativeAccounts.use") {
-    const result = await nativeCliAccounts.setDefault({ runtime, profileId });
-    broadcastNativeCliAccountsChangedFromSocket();
-    return successResponse(id, result);
-  }
 
   if (method === "nativeAccounts.rename") {
     const label = stringParam(params, "label");
@@ -1812,22 +1772,14 @@ async function handleNativeAccounts(
     return successResponse(id, result);
   }
 
-  if (method === "nativeAccounts.logout") {
-    await nativeCliAccounts.logout({ runtime, profileId });
-    broadcastNativeCliAccountsChangedFromSocket();
-    return successResponse(id, await nativeCliAccounts.inspect(runtime));
-  }
-
   if (method === "nativeAccounts.remove") {
-    if (runtime === "claude") {
-      const { anthropicAccounts } = await import("./orchestration/anthropic-accounts");
-      const { deleted } = await anthropicAccounts.deleteTerminalOnlyProfile(profileId);
-      broadcastNativeCliAccountsChangedFromSocket();
-      return successResponse(id, { runtime, profileId, deleted });
-    }
-    const result = await nativeCliAccounts.delete({ runtime, profileId });
+    // Only a terminal-only half (a managed profile no account links) can be
+    // removed here; a paired one goes with accounts.remove.
+    const { deleted } = await unifiedAccountsFor(providerForRuntime(runtime)).deleteTerminalOnlyProfile(
+      profileId,
+    );
     broadcastNativeCliAccountsChangedFromSocket();
-    return successResponse(id, result);
+    return successResponse(id, { runtime, profileId, deleted });
   }
 
   return errorResponse(id, ERR_METHOD_NOT_FOUND, `unknown method: ${method}`);

@@ -1,8 +1,8 @@
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { CliRuntime } from "./account-adapters/account-adapter";
+import { claudeAccountAdapter } from "./account-adapters/claude-account-adapter";
 import { codexAccountAdapter } from "./account-adapters/codex-account-adapter";
 import { grokAccountAdapter } from "./account-adapters/grok-account-adapter";
-import { anthropicAccounts } from "./anthropic-accounts";
 import { UnifiedAccountService, type UnifiedTerminalStatus } from "./unified-accounts";
 
 /**
@@ -14,9 +14,9 @@ import { UnifiedAccountService, type UnifiedTerminalStatus } from "./unified-acc
 
 const log = (message: string): void => console.warn(message);
 
+export const anthropicAccounts = new UnifiedAccountService(claudeAccountAdapter, { log });
 export const codexAccounts = new UnifiedAccountService(codexAccountAdapter, { log });
 export const grokAccounts = new UnifiedAccountService(grokAccountAdapter, { log });
-export { anthropicAccounts };
 
 const services: Record<PiSubscriptionProvider, UnifiedAccountService> = {
   anthropic: anthropicAccounts as unknown as UnifiedAccountService,

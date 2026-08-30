@@ -50,14 +50,14 @@ assert.doesNotMatch(
 );
 assert.match(ipc, /startPiSubscriptionProfileLogin/);
 assert.match(ipc, /renamePiAccountProfile/);
-assert.match(ipc, /setDefaultPiAccountProfile/);
-assert.match(ipc, /deletePiSubscriptionProfile/);
-// Anthropic mutations go through the unified service: one switch for both
-// halves, one delete that hands off and closes only that account's terminals.
-assert.match(ipc, /anthropicAccounts\.useAnthropicAccount\(profileId\)/);
-assert.match(ipc, /anthropicAccounts\.deleteAnthropicAccount\(profileId, \{/);
+// Every provider's mutations go through its unified service: one switch for
+// both halves, one delete that hands off and closes only that account's
+// terminals, one share in either direction.
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{/);
+assert.match(ipc, /unifiedAccountsFor\(target\.provider\)\.deleteAccount\(profileId, \{/);
 assert.match(ipc, /closeSessions: input\?\.closeSessions === true/);
-assert.match(ipc, /anthropicAccounts\.shareLogin\(\{/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.shareLogin\(\{/);
+assert.doesNotMatch(ipc, /setDefaultPiAccountProfile|deletePiSubscriptionProfile|useAnthropicAccount|deleteAnthropicAccount/);
 assert.match(ipc, /ownershipGuard:\s*async \(profile\)/);
 assert.match(ipc, /const \{ listRuns \} = await getRunStore\(\)/);
 assert.match(ipc, /assertPiAccountProfileIsNotActiveInRuns\(runs, profileId\)/);
@@ -369,7 +369,10 @@ for (const forbiddenField of [
     `${forbiddenField} must not cross the account IPC contract`,
   );
 }
-assert.match(shared, /export type PiSubscriptionShareLoginInput =\s*\| \{ coraProfileId: string \}\s*\| \{ cliProfileId: string \};/);
+assert.match(
+  shared,
+  /export type PiSubscriptionShareLoginInput =\s*\| \{ coraProfileId: string \}\s*\| \{ cliProfileId: string; provider\?: PiSubscriptionProvider \};/,
+);
 assert.match(shared, /closeSessions\?: boolean;/);
 
 const dtoStart = shared.indexOf("export interface PiSubscriptionAddAccountInput");
@@ -397,7 +400,8 @@ const piAuth = read("src/main/orchestration/pi-subscription-auth.ts");
 assert.match(piAuth, /\.\.\.\(cliProfileId \? \{ cliProfileId \} : \{\}\)/);
 assert.match(piAuth, /\.\.\.\(cliProfileId === "personal" \? \{ builtIn: true as const \} : \{\}\)/);
 assert.match(piAuth, /\.\.\.\(terminal \? \{ terminal \} : \{\}\)/);
-assert.match(piAuth, /anthropicAccounts\.terminalStatuses\(\)/);
+assert.match(piAuth, /terminalStatusesByProvider\(\)/);
+assert.match(piAuth, /terminals\.get\(profile\.provider\)\?\.get\(cliProfileId\)/);
 assert.match(piAuth, /profile\.accountEmail \?\? status\?\.accountEmail/);
 assert.match(piAuth, /\.\.\.\(email \? \{ email \} : \{\}\)/);
 assert.doesNotMatch(settings, /accessToken|refreshToken|CLAUDE_CONFIG_DIR|\.credentials\.json|Keychain/);

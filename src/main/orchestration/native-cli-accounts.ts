@@ -1,9 +1,3 @@
-import {
-  execFile,
-  type ExecFileException,
-  type ExecFileOptions,
-} from "node:child_process";
-import { randomBytes } from "node:crypto";
 import { dirname } from "node:path";
 import {
   claudeCliManagedProfileConfigDir,
@@ -16,7 +10,6 @@ import {
   ClaudeCliDefaultProfileDeletionError,
   normalizeClaudeCliProfileId,
   type ClaudeCliProfileConnection,
-  type ClaudeCliProfileId,
 } from "./claude-cli-account-profiles";
 import { ClaudeCliProfileLeaseRegistry } from "./claude-cli-profile-execution";
 import {
@@ -30,12 +23,9 @@ import {
   CodexCliDefaultProfileDeletionError,
   normalizeCodexCliProfileId,
   type CodexCliProfileConnection,
-  type CodexCliProfileId,
 } from "./codex-cli-account-profiles";
-import {
-  CodexCliProfileLeaseRegistry,
-  resolveCodexCliExecutionProfile,
-} from "./codex-cli-profile-execution";
+import { codexCliPersonalAuthFile, readCodexCliSelection } from "./codex-cli-auth-selector";
+import { CodexCliProfileLeaseRegistry } from "./codex-cli-profile-execution";
 import {
   GROK_CLI_PERSONAL_PROFILE_ID,
   grokCliManagedProfilePaths,
@@ -47,12 +37,8 @@ import {
   GrokCliDefaultProfileDeletionError,
   normalizeGrokCliProfileId,
   type GrokCliProfileConnection,
-  type GrokCliProfileId,
 } from "./grok-cli-account-profiles";
-import {
-  GrokCliProfileLeaseRegistry,
-  resolveGrokCliExecutionProfile,
-} from "./grok-cli-profile-execution";
+import { GrokCliProfileLeaseRegistry } from "./grok-cli-profile-execution";
 import {
   readClaudeCliAccountIdentity,
   readCodexCliAccountIdentity,
@@ -72,11 +58,14 @@ import {
   nativeGrokProfileStore,
 } from "./native-grok-profile-runtime";
 import { isAgentRuntimeKind } from "../../shared/agent-families";
-import {
-  activateCodexCliAccount,
-  ensureCodexCliAuthVault,
-  finalizeCodexCliLogout,
-} from "./codex-cli-auth-selector";
+
+/**
+ * The token-blind view of the three native CLI profile stores, plus rename.
+ * Every other mutation of a CLI profile (create, sign in, switch, sign out,
+ * delete) belongs to the unified account service of its provider: one
+ * sign-in serves Cora and the CLI together, and this facade refuses them
+ * with one typed code so a caller learns where to go.
+ */
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
@@ -89,7 +78,7 @@ export type NativeCliAccountConnectionStatus =
 /**
  * Renderer-safe projection. It intentionally has no credential, filesystem
  * path, child environment, or raw process output. Provider identity appears as
- * accountFingerprint — a one-way digest, never the id it came from — and as the
+ * accountFingerprint (a one-way digest, never the id it came from) and as the
  * account's email, which the Settings card shows so one login is tellable from
  * another. The email is for this machine's own window only: the remote
  * projection in remote-access/native-cli-account-projection.ts drops it, so it
@@ -136,20 +125,6 @@ export interface NativeCliAccountProfileInput {
   profileId: string;
 }
 
-export interface NativeCliAccountLoginInput
-  extends NativeCliAccountProfileInput {
-  expectedAccountFingerprint?: string;
-  expectedEmail?: string;
-  removeProfileOnMismatch?: boolean;
-  removeProfileOnFailure?: boolean;
-  activateOnSuccess?: boolean;
-}
-
-export interface NativeCliAccountCreateInput {
-  runtime: NativeCliAccountRuntime;
-  label: string;
-}
-
 export interface NativeCliAccountRenameInput
   extends NativeCliAccountProfileInput {
   label: string;
@@ -167,72 +142,6 @@ export interface NativeCliAccountDeleteResult {
   profileId: string;
   deleted: boolean;
 }
-
-/**
- * The only login preparation value safe to cross IPC. The token is random,
- * one-time, short-lived, and has no executable, arguments, environment, or
- * selected-home path embedded in it.
- */
-export interface NativeCliAccountLoginPreparation {
-  runtime: NativeCliAccountRuntime;
-  profileId: string;
-  launchToken: string;
-  expiresAt: number;
-}
-
-/**
- * Main-process-only launch specification. Future IPC wiring must pass only a
- * NativeCliAccountLoginPreparation to the renderer and consume this object in
- * the main process when creating the Studio terminal.
- */
-export interface NativeCliAccountLoginLaunchSpec {
-  runtime: NativeCliAccountRuntime;
-  profileId: string;
-  executable: string;
-  args: readonly string[];
-  env: NodeJS.ProcessEnv;
-  shell: false;
-}
-
-export interface NativeCliAccountProcessResult {
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  timedOut: boolean;
-  spawnFailed: boolean;
-}
-
-export type NativeCliAccountLoginLauncher = (
-  spec: Readonly<NativeCliAccountLoginLaunchSpec>,
-) =>
-  | NativeCliAccountProcessResult
-  | Promise<NativeCliAccountProcessResult>;
-
-export interface NativeCliAccountProcessRequest {
-  /** Main-process-only. Never expose the selected environment through IPC. */
-  runtime: NativeCliAccountRuntime;
-  executable: string;
-  args: readonly string[];
-  env: NodeJS.ProcessEnv;
-  shell: false;
-  timeoutMs: number;
-  maxBufferBytes: number;
-}
-
-export type NativeCliAccountProcessRunner = (
-  request: Readonly<NativeCliAccountProcessRequest>,
-) =>
-  | NativeCliAccountProcessResult
-  | Promise<NativeCliAccountProcessResult>;
-
-export interface NativeCliAccountSessionShutdownResult {
-  closedSessionCount: number;
-}
-
-export type NativeCliAccountSessionShutdown = (
-  runtime: NativeCliAccountRuntime,
-) =>
-  | NativeCliAccountSessionShutdownResult
-  | Promise<NativeCliAccountSessionShutdownResult>;
 
 /**
  * Read-only account-identity probe. It receives a main-process-only credential
@@ -264,18 +173,6 @@ export type NativeCliAccountErrorCode =
   | "NATIVE_CLI_ACCOUNT_PERSONAL"
   | "NATIVE_CLI_ACCOUNT_STORE_UNSAFE"
   | "NATIVE_CLI_ACCOUNT_STORE_CORRUPT"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_SPAWN_FAILED"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_TIMEOUT"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_FAILED"
-  | "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH"
-  | "NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED"
-  | "NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT"
-  | "NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL"
-  | "NATIVE_CLI_ACCOUNT_LOGOUT_FAILED"
-  | "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED"
   | "NATIVE_CLI_ACCOUNT_UNIFIED"
   | "NATIVE_CLI_ACCOUNT_OPERATION_FAILED";
 
@@ -292,28 +189,8 @@ const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
     "The personal native CLI account cannot be removed or renamed",
   NATIVE_CLI_ACCOUNT_STORE_UNSAFE: "Native CLI account store is unsafe",
   NATIVE_CLI_ACCOUNT_STORE_CORRUPT: "Native CLI account store is corrupt",
-  NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID:
-    "Native CLI account login preparation is invalid or already used",
-  NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED:
-    "Native CLI account login preparation has expired",
-  NATIVE_CLI_ACCOUNT_LOGIN_SPAWN_FAILED:
-    "Could not start the native CLI account login",
-  NATIVE_CLI_ACCOUNT_LOGIN_TIMEOUT: "Native CLI account login timed out",
-  NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL:
-    "Native CLI account login ended unexpectedly",
-  NATIVE_CLI_ACCOUNT_LOGIN_FAILED: "Native CLI account login failed",
-  NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH:
-    "The CLI signed in to a different account than the selected Cora account. The extra sign-in was removed; try again and choose the account shown in Settings.",
-  NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED:
-    "Could not start the native CLI account logout",
-  NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT: "Native CLI account logout timed out",
-  NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL:
-    "Native CLI account logout ended unexpectedly",
-  NATIVE_CLI_ACCOUNT_LOGOUT_FAILED: "Native CLI account logout failed",
-  NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED:
-    "Could not safely close every running CLI session; the account was not changed",
   NATIVE_CLI_ACCOUNT_UNIFIED:
-    "Claude accounts are managed from the Anthropic card: one sign-in serves Cora and Claude Code together",
+    "CLI accounts are managed from their account card: one sign-in serves Cora and the CLI together",
   NATIVE_CLI_ACCOUNT_OPERATION_FAILED: "Native CLI account operation failed",
 };
 
@@ -337,51 +214,6 @@ export class NativeCliAccountError extends Error {
   }
 }
 
-export const NATIVE_CLI_ACCOUNT_PROCESS_TIMEOUT_MS = 10_000;
-export const NATIVE_CLI_ACCOUNT_PROCESS_MAX_BUFFER_BYTES = 16 * 1024;
-export const NATIVE_CLI_ACCOUNT_LOGIN_PLAN_TTL_MS = 60_000;
-// Codara's Codex profiles are owner-only auth-file vaults. Scope this official
-// Codex setting to login/logout subprocesses instead of editing config.toml;
-// otherwise `auto` may choose one OS-keyring entry that cannot represent
-// multiple accounts and a successful browser login leaves no profile auth.json.
-const CODEX_FILE_AUTH_OVERRIDE = 'cli_auth_credentials_store="file"';
-
-interface PendingLoginPlan {
-  runtime: NativeCliAccountRuntime;
-  profileId: string;
-  launchToken: string;
-  expiresAt: number;
-  state: "prepared" | "launching";
-  expectedAccountFingerprint?: string;
-  expectedEmail?: string;
-  removeProfileOnMismatch: boolean;
-  removeProfileOnFailure: boolean;
-  activateOnSuccess: boolean;
-  releaseGuard: () => void;
-  guardDone: Promise<void>;
-  expiryTimer: NodeJS.Timeout;
-}
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolvePromise!: (value: T | PromiseLike<T>) => void;
-  let rejectPromise!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolve, reject) => {
-    resolvePromise = resolve;
-    rejectPromise = reject;
-  });
-  return {
-    promise,
-    resolve: resolvePromise,
-    reject: rejectPromise,
-  };
-}
-
 function normalizeRuntime(value: unknown): NativeCliAccountRuntime {
   if (isAgentRuntimeKind(value)) return value;
   throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_INVALID_RUNTIME");
@@ -396,12 +228,12 @@ function isPersonalProfile(
   return profileId === CODEX_CLI_PERSONAL_PROFILE_ID;
 }
 
-function connectionStatus(
-  connection:
-    | ClaudeCliProfileConnection
-    | CodexCliProfileConnection
-    | GrokCliProfileConnection,
-): NativeCliAccountConnectionStatus {
+type AnyConnection =
+  | ClaudeCliProfileConnection
+  | CodexCliProfileConnection
+  | GrokCliProfileConnection;
+
+function connectionStatus(connection: AnyConnection): NativeCliAccountConnectionStatus {
   if (connection.connected) return "connected";
   if (connection.error === "Sign in required") return "sign_in_required";
   if (
@@ -415,11 +247,7 @@ function connectionStatus(
 
 function sanitizeConnection(
   runtime: NativeCliAccountRuntime,
-  connection:
-    | ClaudeCliProfileConnection
-    | CodexCliProfileConnection
-    | GrokCliProfileConnection,
-  reservedByLogin: boolean,
+  connection: AnyConnection,
   identity: NativeCliAccountIdentity | undefined,
 ): NativeCliAccountProfile {
   return {
@@ -429,76 +257,11 @@ function sanitizeConnection(
     managed: connection.managed,
     isDefault: connection.isDefault,
     connected: connection.connected,
-    inUse: connection.inUse || reservedByLogin,
+    inUse: connection.inUse,
     status: connectionStatus(connection),
     ...(identity?.fingerprint ? { accountFingerprint: identity.fingerprint } : {}),
     ...(identity?.email ? { email: identity.email } : {}),
   };
-}
-
-function processResultFromError(
-  error: ExecFileException | null,
-): NativeCliAccountProcessResult {
-  if (!error) {
-    return {
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-      spawnFailed: false,
-    };
-  }
-  const signal =
-    typeof error.signal === "string"
-      ? (error.signal as NodeJS.Signals)
-      : null;
-  const errorCode = error.code;
-  const timedOut = error.killed === true && signal !== null;
-  const spawnFailed =
-    typeof errorCode === "string" &&
-    errorCode !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
-  return {
-    exitCode: typeof errorCode === "number" ? errorCode : null,
-    signal,
-    timedOut,
-    spawnFailed,
-  };
-}
-
-/**
- * Production runner for non-interactive account commands. `execFile` receives
- * an argument vector directly; shell expansion is explicitly disabled.
- * stdout/stderr are bounded by maxBuffer and deliberately discarded.
- */
-export function runNativeCliAccountProcess(
-  request: Readonly<NativeCliAccountProcessRequest>,
-): Promise<NativeCliAccountProcessResult> {
-  return new Promise((resolve) => {
-    const options: ExecFileOptions = {
-      env: { ...request.env },
-      windowsHide: true,
-      timeout: request.timeoutMs,
-      maxBuffer: request.maxBufferBytes,
-      killSignal: "SIGTERM",
-      shell: false,
-    };
-    try {
-      execFile(
-        request.executable,
-        [...request.args],
-        options,
-        (error, _stdout, _stderr) => {
-          resolve(processResultFromError(error));
-        },
-      );
-    } catch {
-      resolve({
-        exitCode: null,
-        signal: null,
-        timedOut: false,
-        spawnFailed: true,
-      });
-    }
-  });
 }
 
 export interface NativeCliAccountServiceOptions {
@@ -508,64 +271,25 @@ export interface NativeCliAccountServiceOptions {
   claudeLeases?: ClaudeCliProfileLeaseRegistry;
   codexLeases?: CodexCliProfileLeaseRegistry;
   grokLeases?: GrokCliProfileLeaseRegistry;
-  claudeExecutable?: string;
-  codexExecutable?: string;
-  grokExecutable?: string;
-  baseEnv?: () => NodeJS.ProcessEnv;
-  processRunner?: NativeCliAccountProcessRunner;
   /** Test seam. Production reads the Codex credential's account id and email. */
   codexIdentityReader?: NativeCliAccountIdentityReader;
   /** Test seam. Production reads the Grok Build credential's account id and email. */
   grokIdentityReader?: NativeCliAccountIdentityReader;
   /** Test seam. Production reads the Claude Code config's account uuid and email. */
   claudeIdentityReader?: ClaudeCliAccountIdentityReader;
-  processTimeoutMs?: number;
-  processMaxBufferBytes?: number;
-  loginPlanTtlMs?: number;
-  tokenFactory?: () => string;
-  now?: () => number;
-  /** Test seam. Production swaps only auth.json in the one shared Codex home. */
-  codexAuthSelector?: (profileId: string) => Promise<unknown>;
-  /** Test seam for the one-time migration of the historical personal login. */
-  codexAuthVaultInitializer?: () => Promise<unknown>;
-  /** Test seam for removing a logged-out credential from the live slot. */
-  codexAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
-  /** Close every live session for a runtime before its account changes. */
-  sessionShutdown?: NativeCliAccountSessionShutdown;
 }
 
 export class NativeCliAccountService {
   private readonly claudeStore: ClaudeCliAccountProfileStore;
   private readonly codexStore: CodexCliAccountProfileStore;
   private readonly grokStore: GrokCliAccountProfileStore;
-  private readonly claudeLeases: ClaudeCliProfileLeaseRegistry;
-  private readonly codexLeases: CodexCliProfileLeaseRegistry;
-  private readonly grokLeases: GrokCliProfileLeaseRegistry;
-  private readonly claudeExecutable: string;
-  private readonly codexExecutable: string;
-  private readonly grokExecutable: string;
-  private readonly baseEnv: () => NodeJS.ProcessEnv;
-  private readonly processRunner: NativeCliAccountProcessRunner;
   private readonly codexIdentityReader: NativeCliAccountIdentityReader;
   private readonly grokIdentityReader: NativeCliAccountIdentityReader;
   private readonly claudeIdentityReader: ClaudeCliAccountIdentityReader;
-  private readonly processTimeoutMs: number;
-  private readonly processMaxBufferBytes: number;
-  private readonly loginPlanTtlMs: number;
-  private readonly tokenFactory: () => string;
-  private readonly now: () => number;
-  private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
-  private readonly codexAuthVaultInitializer: () => Promise<unknown>;
-  private readonly codexAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
-  private sessionShutdown: NativeCliAccountSessionShutdown;
-  private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
-  private readonly expiredLoginTokens = new Map<string, number>();
-  private readonly mutationTails = new Map<
-    NativeCliAccountRuntime,
-    Promise<void>
-  >();
 
   constructor(options: NativeCliAccountServiceOptions = {}) {
+    // A custom store carries its own lease registry (the store consults it
+    // for inUse); the pair must be supplied together so they cannot drift.
     if (
       (options.claudeStore && !options.claudeLeases) ||
       (!options.claudeStore && options.claudeLeases)
@@ -590,88 +314,15 @@ export class NativeCliAccountService {
         "Custom native Grok store and lease registry must be supplied together",
       );
     }
+    void nativeClaudeProfileLeases;
+    void nativeCodexProfileLeases;
+    void nativeGrokProfileLeases;
     this.claudeStore = options.claudeStore ?? nativeClaudeProfileStore;
     this.codexStore = options.codexStore ?? nativeCodexProfileStore;
     this.grokStore = options.grokStore ?? nativeGrokProfileStore;
-    this.claudeLeases = options.claudeLeases ?? nativeClaudeProfileLeases;
-    this.codexLeases = options.codexLeases ?? nativeCodexProfileLeases;
-    this.grokLeases = options.grokLeases ?? nativeGrokProfileLeases;
-    this.claudeExecutable =
-      options.claudeExecutable?.trim() || "claude";
-    this.codexExecutable = options.codexExecutable?.trim() || "codex";
-    this.grokExecutable = options.grokExecutable?.trim() || "grok";
-    this.baseEnv = options.baseEnv ?? (() => process.env);
-    this.processRunner = options.processRunner ?? runNativeCliAccountProcess;
-    this.codexIdentityReader =
-      options.codexIdentityReader ?? readCodexCliAccountIdentity;
-    this.codexAuthSelector =
-      options.codexAuthSelector ??
-      (options.codexStore
-        ? async () => undefined
-        : (profileId) => activateCodexCliAccount(this.codexStore, profileId));
-    this.codexAuthVaultInitializer =
-      options.codexAuthVaultInitializer ??
-      (options.codexStore
-        ? async () => undefined
-        : async () => {
-            const active = await ensureCodexCliAuthVault(this.codexStore);
-            const { defaultProfileId } = await this.codexStore.snapshot();
-            if (active !== defaultProfileId) {
-              await activateCodexCliAccount(this.codexStore, defaultProfileId);
-            }
-          });
-    this.codexAuthLogoutFinalizer =
-      options.codexAuthLogoutFinalizer ??
-      (options.codexStore
-        ? async () => undefined
-        : (profileId) => finalizeCodexCliLogout(this.codexStore, profileId));
-    this.sessionShutdown =
-      options.sessionShutdown ?? (async () => ({ closedSessionCount: 0 }));
-    this.grokIdentityReader =
-      options.grokIdentityReader ?? readGrokCliAccountIdentity;
-    this.claudeIdentityReader =
-      options.claudeIdentityReader ?? readClaudeCliAccountIdentity;
-    this.processTimeoutMs =
-      options.processTimeoutMs ?? NATIVE_CLI_ACCOUNT_PROCESS_TIMEOUT_MS;
-    this.processMaxBufferBytes =
-      options.processMaxBufferBytes ??
-      NATIVE_CLI_ACCOUNT_PROCESS_MAX_BUFFER_BYTES;
-    this.loginPlanTtlMs =
-      options.loginPlanTtlMs ?? NATIVE_CLI_ACCOUNT_LOGIN_PLAN_TTL_MS;
-    this.tokenFactory =
-      options.tokenFactory ?? (() => randomBytes(32).toString("base64url"));
-    this.now = options.now ?? Date.now;
-
-    if (
-      !Number.isSafeInteger(this.processTimeoutMs) ||
-      this.processTimeoutMs < 1
-    ) {
-      throw new TypeError("Native CLI process timeout must be a positive integer");
-    }
-    if (
-      !Number.isSafeInteger(this.processMaxBufferBytes) ||
-      this.processMaxBufferBytes < 1
-    ) {
-      throw new TypeError(
-        "Native CLI process output bound must be a positive integer",
-      );
-    }
-    if (
-      !Number.isSafeInteger(this.loginPlanTtlMs) ||
-      this.loginPlanTtlMs < 1
-    ) {
-      throw new TypeError(
-        "Native CLI account login plan TTL must be a positive integer",
-      );
-    }
-  }
-
-  /** Main-process wiring seam; never exposed through IPC or the preload. */
-  setSessionShutdown(shutdown: NativeCliAccountSessionShutdown): void {
-    if (typeof shutdown !== "function") {
-      throw new TypeError("Native CLI session shutdown must be a function");
-    }
-    this.sessionShutdown = shutdown;
+    this.codexIdentityReader = options.codexIdentityReader ?? readCodexCliAccountIdentity;
+    this.grokIdentityReader = options.grokIdentityReader ?? readGrokCliAccountIdentity;
+    this.claudeIdentityReader = options.claudeIdentityReader ?? readClaudeCliAccountIdentity;
   }
 
   private normalizeProfileId(
@@ -683,27 +334,14 @@ export class NativeCliAccountService {
       if (runtime === "grok") return normalizeGrokCliProfileId(value);
       return normalizeCodexCliProfileId(value);
     } catch {
-      throw new NativeCliAccountError(
-        "NATIVE_CLI_ACCOUNT_NOT_FOUND",
-        { runtime },
-      );
+      throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_NOT_FOUND", { runtime });
     }
-  }
-
-  private isReservedByLogin(
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-  ): boolean {
-    for (const plan of this.pendingLoginPlans.values()) {
-      if (plan.runtime === runtime && plan.profileId === profileId) return true;
-    }
-    return false;
   }
 
   /**
-   * Account identities for connected Claude Code sign-ins, keyed by profile id.
-   * The config path stays inside this method; only the digest and email leave
-   * it.
+   * Account identities for connected Claude sign-ins, keyed by profile id.
+   * The config path stays inside this method; only the digest and email
+   * leave it.
    */
   private async claudeAccountIdentities(
     profiles: readonly ClaudeCliProfileConnection[],
@@ -743,29 +381,32 @@ export class NativeCliAccountService {
   }
 
   /**
-   * Account identities for connected Codex sign-ins, keyed by profile id. The
-   * credential path stays inside this method; only the digest and email leave
-   * it.
+   * Account identities for connected Codex sign-ins, keyed by profile id.
+   * The slot that answers for a profile depends on the marker: the live
+   * ~/.codex/auth.json while the profile is active, its vault slot otherwise.
    */
   private async codexAccountIdentities(
     profiles: readonly CodexCliProfileConnection[],
   ): Promise<Map<string, NativeCliAccountIdentity>> {
     const identities = new Map<string, NativeCliAccountIdentity>();
+    const active =
+      (await readCodexCliSelection(this.codexStore.rootDir).catch(() => null)) ??
+      CODEX_CLI_PERSONAL_PROFILE_ID;
     await Promise.all(
       profiles.map(async (profile) => {
         if (!profile.connected) return;
         let authFile: string;
         try {
-          authFile = profile.managed
-            ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id)
-                .authFile
-            : this.codexStore.personalAuthFile;
+          authFile =
+            profile.id === active
+              ? this.codexStore.personalAuthFile
+              : profile.managed
+                ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id).authFile
+                : codexCliPersonalAuthFile(this.codexStore.rootDir);
         } catch {
           return;
         }
-        const identity = await this.codexIdentityReader(authFile).catch(
-          () => undefined,
-        );
+        const identity = await this.codexIdentityReader(authFile).catch(() => undefined);
         if (identity?.fingerprint || identity?.email) {
           identities.set(profile.id, identity);
         }
@@ -784,15 +425,12 @@ export class NativeCliAccountService {
         let authFile: string;
         try {
           authFile = profile.managed
-            ? grokCliManagedProfilePaths(this.grokStore.rootDir, profile.id)
-                .authFile
+            ? grokCliManagedProfilePaths(this.grokStore.rootDir, profile.id).authFile
             : this.grokStore.personalAuthFile;
         } catch {
           return;
         }
-        const identity = await this.grokIdentityReader(authFile).catch(
-          () => undefined,
-        );
+        const identity = await this.grokIdentityReader(authFile).catch(() => undefined);
         if (identity?.fingerprint || identity?.email) {
           identities.set(profile.id, identity);
         }
@@ -807,24 +445,16 @@ export class NativeCliAccountService {
     try {
       if (runtime === "claude") {
         const inspection = await this.claudeStore.inspect();
-        const identities = await this.claudeAccountIdentities(
-          inspection.profiles,
-        );
+        const identities = await this.claudeAccountIdentities(inspection.profiles);
         return {
           runtime,
           defaultProfileId: inspection.defaultProfileId,
           profiles: inspection.profiles.map((profile) =>
-            sanitizeConnection(
-              runtime,
-              profile,
-              this.isReservedByLogin(runtime, profile.id),
-              identities.get(profile.id),
-            ),
+            sanitizeConnection(runtime, profile, identities.get(profile.id)),
           ),
         };
       }
       const store = runtime === "grok" ? this.grokStore : this.codexStore;
-      if (runtime === "codex") await this.codexAuthVaultInitializer();
       const inspection = await store.inspect();
       const identities =
         runtime === "grok"
@@ -834,12 +464,7 @@ export class NativeCliAccountService {
         runtime,
         defaultProfileId: inspection.defaultProfileId,
         profiles: inspection.profiles.map((profile) =>
-          sanitizeConnection(
-            runtime,
-            profile,
-            this.isReservedByLogin(runtime, profile.id),
-            identities.get(profile.id),
-          ),
+          sanitizeConnection(runtime, profile, identities.get(profile.id)),
         ),
       };
     } catch (error) {
@@ -876,140 +501,6 @@ export class NativeCliAccountService {
     return { runtimes: [claude, codex, grok] };
   }
 
-  private async requireProfile(
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-  ): Promise<{
-    inspection: NativeCliAccountRuntimeInspection;
-    profile: NativeCliAccountProfile;
-  }> {
-    const inspection = await this.inspectRuntime(runtime);
-    const profile = inspection.profiles.find((entry) => entry.id === profileId);
-    if (!profile) {
-      throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_NOT_FOUND", {
-        runtime,
-        profileId,
-      });
-    }
-    return { inspection, profile };
-  }
-
-  private async withRuntimeMutation<T>(
-    runtime: NativeCliAccountRuntime,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const previous = this.mutationTails.get(runtime) ?? Promise.resolve();
-    const release = deferred<void>();
-    const tail = previous.catch(() => undefined).then(() => release.promise);
-    this.mutationTails.set(runtime, tail);
-    await previous.catch(() => undefined);
-    try {
-      return await operation();
-    } finally {
-      release.resolve();
-      if (this.mutationTails.get(runtime) === tail) {
-        this.mutationTails.delete(runtime);
-      }
-    }
-  }
-
-  private async runWhileUnleased<T>(
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    try {
-      if (runtime === "claude") {
-        return await this.claudeLeases.runWhileUnleased(
-          profileId as ClaudeCliProfileId,
-          operation,
-        );
-      }
-      if (runtime === "grok") {
-        return await this.grokLeases.runWhileUnleased(
-          profileId as GrokCliProfileId,
-          operation,
-        );
-      }
-      return await this.codexLeases.runWhileUnleased(
-        profileId as CodexCliProfileId,
-        operation,
-      );
-    } catch (error) {
-      throw this.sanitizeStoreError(runtime, profileId, error);
-    }
-  }
-
-  private executableFor(runtime: NativeCliAccountRuntime): string {
-    if (runtime === "claude") return this.claudeExecutable;
-    if (runtime === "grok") return this.grokExecutable;
-    return this.codexExecutable;
-  }
-
-  /**
-   * Claude Code never signs in, signs out, switches or is created through this
-   * facade any more: one browser sign-in through the Anthropic card writes
-   * both halves, and the unified account service owns every mutation.
-   */
-  private assertNotUnified(
-    runtime: NativeCliAccountRuntime,
-    profileId?: string,
-  ): void {
-    if (runtime !== "claude") return;
-    throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
-      runtime,
-      ...(profileId ? { profileId } : {}),
-    });
-  }
-
-  private loginArgs(runtime: NativeCliAccountRuntime): readonly string[] {
-    return runtime === "codex"
-      ? ["login", "--config", CODEX_FILE_AUTH_OVERRIDE]
-      : ["login"];
-  }
-
-  private logoutArgs(runtime: NativeCliAccountRuntime): readonly string[] {
-    if (runtime === "codex") {
-      return ["logout", "--config", CODEX_FILE_AUTH_OVERRIDE];
-    }
-    return ["logout"];
-  }
-
-  private async executionEnvironment(
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-    requireConnected: boolean,
-  ): Promise<NodeJS.ProcessEnv> {
-    this.assertNotUnified(runtime, profileId);
-    try {
-      const baseEnv = { ...this.baseEnv() };
-      if (runtime === "grok") {
-        return (
-          await resolveGrokCliExecutionProfile(this.grokStore, {
-            profileId,
-            requireConnected,
-            baseEnv,
-          })
-        ).env;
-      }
-      return (
-        await resolveCodexCliExecutionProfile(this.codexStore, {
-          profileId,
-          requireConnected,
-          baseEnv,
-        })
-      ).env;
-    } catch (error) {
-      if (/not connected/i.test(error instanceof Error ? error.message : "")) {
-        throw new NativeCliAccountError(
-          "NATIVE_CLI_ACCOUNT_NOT_CONNECTED",
-          { runtime, profileId },
-        );
-      }
-      throw this.sanitizeStoreError(runtime, profileId, error);
-    }
-  }
-
   private profileFromInspection(
     inspection: NativeCliAccountRuntimeInspection,
     profileId: string,
@@ -1024,25 +515,15 @@ export class NativeCliAccountService {
     return profile;
   }
 
-  async create(
-    input: NativeCliAccountCreateInput,
-  ): Promise<NativeCliAccountMutationResult> {
-    const runtime = normalizeRuntime(input.runtime);
-    this.assertNotUnified(runtime);
-    return this.withRuntimeMutation(runtime, async () => {
-      try {
-        const created =
-          runtime === "grok"
-            ? await this.grokStore.createProfile({ label: input.label })
-            : await this.codexStore.createProfile({ label: input.label });
-        const inspection = await this.inspectRuntime(runtime);
-        return {
-          profile: this.profileFromInspection(inspection, created.profile.id),
-          inspection,
-        };
-      } catch (error) {
-        throw this.sanitizeStoreError(runtime, undefined, error);
-      }
+  /**
+   * Every mutation but rename belongs to the unified account service of the
+   * CLI's provider: one sign-in through the account card writes both halves,
+   * and the service owns switching, sharing and deletion.
+   */
+  assertNotUnified(runtime: NativeCliAccountRuntime, profileId?: string): never {
+    throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
+      runtime,
+      ...(profileId ? { profileId } : {}),
     });
   }
 
@@ -1057,542 +538,22 @@ export class NativeCliAccountService {
         profileId,
       });
     }
-    return this.withRuntimeMutation(runtime, async () => {
-      try {
-        if (runtime === "claude") {
-          await this.claudeStore.renameProfile(profileId, input.label);
-        } else if (runtime === "grok") {
-          await this.grokStore.renameProfile(profileId, input.label);
-        } else {
-          await this.codexStore.renameProfile(profileId, input.label);
-        }
-        const inspection = await this.inspectRuntime(runtime);
-        return {
-          profile: this.profileFromInspection(inspection, profileId),
-          inspection,
-        };
-      } catch (error) {
-        throw this.sanitizeStoreError(runtime, profileId, error);
-      }
-    });
-  }
-
-  async setDefault(
-    input: NativeCliAccountProfileInput,
-  ): Promise<NativeCliAccountMutationResult> {
-    const runtime = normalizeRuntime(input.runtime);
-    const profileId = this.normalizeProfileId(runtime, input.profileId);
-    this.assertNotUnified(runtime, profileId);
-    return this.withRuntimeMutation(runtime, async () => {
-      const before = await this.requireProfile(runtime, profileId);
-      if (before.profile.managed && !before.profile.connected) {
-        throw new NativeCliAccountError(
-          "NATIVE_CLI_ACCOUNT_NOT_CONNECTED",
-          { runtime, profileId },
-        );
-      }
-      if (before.inspection.defaultProfileId === profileId) {
-        try {
-          if (runtime === "codex") await this.codexAuthSelector(profileId);
-        } catch (error) {
-          throw this.sanitizeStoreError(runtime, profileId, error);
-        }
-        return {
-          profile: before.profile,
-          inspection: before.inspection,
-          closedSessionCount: 0,
-        };
-      }
-      let closedSessionCount = 0;
-      try {
-        const shutdown = await this.sessionShutdown(runtime);
-        if (
-          !Number.isSafeInteger(shutdown.closedSessionCount) ||
-          shutdown.closedSessionCount < 0
-        ) {
-          throw new TypeError("Native CLI session shutdown returned an invalid count");
-        }
-        closedSessionCount = shutdown.closedSessionCount;
-      } catch {
-        throw new NativeCliAccountError(
-          "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED",
-          { runtime, profileId },
-        );
-      }
-      try {
-        const previousProfileId = before.inspection.defaultProfileId;
-        if (runtime === "grok") {
-          // A managed Grok account runs in its own GROK_HOME; the default
-          // only decides where the next terminal starts.
-          await this.grokStore.setDefaultProfile(profileId);
-        } else {
-          await this.codexStore.setDefaultProfile(profileId);
-          try {
-            await this.codexAuthSelector(profileId);
-          } catch (error) {
-            await this.codexStore
-              .setDefaultProfile(previousProfileId)
-              .catch(() => undefined);
-            await this.codexAuthSelector(previousProfileId).catch(
-              () => undefined,
-            );
-            throw error;
-          }
-        }
-        const inspection = await this.inspectRuntime(runtime);
-        return {
-          profile: this.profileFromInspection(inspection, profileId),
-          inspection,
-          closedSessionCount,
-        };
-      } catch (error) {
-        throw this.sanitizeStoreError(runtime, profileId, error);
-      }
-    });
-  }
-
-  private allocateLoginToken(): string {
-    for (let attempt = 0; attempt < 32; attempt += 1) {
-      const token = this.tokenFactory();
-      if (
-        typeof token !== "string" ||
-        token.length < 24 ||
-        token.length > 256 ||
-        /[\u0000-\u0020\u007f]/.test(token)
-      ) {
-        throw new TypeError(
-          "Native CLI account login token must be an opaque bounded value",
-        );
-      }
-      if (
-        !this.pendingLoginPlans.has(token) &&
-        !this.expiredLoginTokens.has(token)
-      ) {
-        return token;
-      }
-    }
-    throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_OPERATION_FAILED");
-  }
-
-  private rememberExpiredToken(token: string): void {
-    this.expiredLoginTokens.set(token, this.now());
-    while (this.expiredLoginTokens.size > 128) {
-      const oldest = this.expiredLoginTokens.keys().next().value as
-        | string
-        | undefined;
-      if (!oldest) break;
-      this.expiredLoginTokens.delete(oldest);
-    }
-  }
-
-  private async removeEmptyFailedLoginProfile(
-    plan: PendingLoginPlan,
-  ): Promise<void> {
-    if (!plan.removeProfileOnFailure) return;
     try {
-      const inspection = await this.inspectRuntime(plan.runtime);
-      const profile = inspection.profiles.find(
-        (entry) => entry.id === plan.profileId,
-      );
-      // A browser login can finish just as its terminal is closed. Never
-      // remove credentials that actually landed; cleanup is only for the
-      // still-empty slot created for this attempt.
-      if (profile && !profile.connected) {
-        await this.delete({
-          runtime: plan.runtime,
-          profileId: plan.profileId,
-        });
+      if (runtime === "claude") {
+        await this.claudeStore.renameProfile(profileId, input.label);
+      } else if (runtime === "grok") {
+        await this.grokStore.renameProfile(profileId, input.label);
+      } else {
+        await this.codexStore.renameProfile(profileId, input.label);
       }
-    } catch {
-      // Cleanup is deliberately best-effort. A remaining empty slot is visible
-      // and recoverable; deleting the wrong profile is not.
-    }
-  }
-
-  private expireLoginPlan(plan: PendingLoginPlan): void {
-    if (this.pendingLoginPlans.get(plan.launchToken) !== plan) return;
-    this.pendingLoginPlans.delete(plan.launchToken);
-    this.rememberExpiredToken(plan.launchToken);
-    clearTimeout(plan.expiryTimer);
-    plan.releaseGuard();
-    void plan.guardDone
-      .catch(() => undefined)
-      .then(() => this.removeEmptyFailedLoginProfile(plan));
-  }
-
-  async prepareLogin(
-    input: NativeCliAccountLoginInput,
-  ): Promise<NativeCliAccountLoginPreparation> {
-    const runtime = normalizeRuntime(input.runtime);
-    const profileId = this.normalizeProfileId(runtime, input.profileId);
-    this.assertNotUnified(runtime, profileId);
-    const expectedAccountFingerprint = input.expectedAccountFingerprint;
-    if (
-      expectedAccountFingerprint !== undefined &&
-      !/^[0-9a-f]{64}$/.test(expectedAccountFingerprint)
-    ) {
-      throw new TypeError("Expected native CLI account fingerprint is invalid");
-    }
-    const expectedEmail = input.expectedEmail?.trim().toLowerCase();
-    if (
-      expectedEmail !== undefined &&
-      (!expectedEmail ||
-        expectedEmail.length > 320 ||
-        /[\u0000-\u001f\u007f]/.test(expectedEmail))
-    ) {
-      throw new TypeError("Expected native CLI account email is invalid");
-    }
-    const removeProfileOnMismatch = input.removeProfileOnMismatch === true;
-    const removeProfileOnFailure = input.removeProfileOnFailure === true;
-    const activateOnSuccess = input.activateOnSuccess === true;
-    const { profile } = await this.requireProfile(runtime, profileId);
-    if (
-      (removeProfileOnMismatch || removeProfileOnFailure) &&
-      (!profile.managed || profile.isDefault || profile.connected)
-    ) {
-      throw new TypeError(
-        "Only a new signed-out managed CLI account can be removed after an unsuccessful login",
-      );
-    }
-    const launchToken = this.allocateLoginToken();
-    const expiresAt = this.now() + this.loginPlanTtlMs;
-    const guardEntered = deferred<void>();
-    const guardRelease = deferred<void>();
-    const guardDone = this.runWhileUnleased(runtime, profileId, async () => {
-      try {
-        // Resolve again after acquiring exclusivity so a delete between the
-        // initial validation and the guard cannot create a stale plan.
-        await this.executionEnvironment(runtime, profileId, false);
-        guardEntered.resolve();
-        await guardRelease.promise;
-      } catch (error) {
-        guardEntered.reject(error);
-        throw error;
-      }
-    });
-    void guardDone.catch((error) => guardEntered.reject(error));
-    try {
-      await guardEntered.promise;
+      const inspection = await this.inspectRuntime(runtime);
+      return {
+        profile: this.profileFromInspection(inspection, profileId),
+        inspection,
+      };
     } catch (error) {
-      await guardDone.catch(() => undefined);
       throw this.sanitizeStoreError(runtime, profileId, error);
     }
-
-    let released = false;
-    const releaseGuard = () => {
-      if (released) return;
-      released = true;
-      guardRelease.resolve();
-    };
-    const plan = {
-      runtime,
-      profileId,
-      launchToken,
-      expiresAt,
-      state: "prepared" as const,
-      ...(expectedAccountFingerprint ? { expectedAccountFingerprint } : {}),
-      ...(expectedEmail ? { expectedEmail } : {}),
-      removeProfileOnMismatch,
-      removeProfileOnFailure,
-      activateOnSuccess,
-      releaseGuard,
-      guardDone,
-      expiryTimer: undefined as unknown as NodeJS.Timeout,
-    };
-    plan.expiryTimer = setTimeout(
-      () => this.expireLoginPlan(plan),
-      this.loginPlanTtlMs,
-    );
-    plan.expiryTimer.unref?.();
-    this.pendingLoginPlans.set(launchToken, plan);
-    return { runtime, profileId, launchToken, expiresAt };
-  }
-
-  async cancelPreparedLogin(launchToken: string): Promise<boolean> {
-    const plan = this.pendingLoginPlans.get(launchToken);
-    if (!plan || plan.state !== "prepared") return false;
-    this.pendingLoginPlans.delete(launchToken);
-    clearTimeout(plan.expiryTimer);
-    plan.releaseGuard();
-    await plan.guardDone.catch(() => undefined);
-    await this.removeEmptyFailedLoginProfile(plan);
-    return true;
-  }
-
-  async launchPreparedLogin(
-    launchToken: string,
-    launcher: NativeCliAccountLoginLauncher,
-  ): Promise<{ runtime: NativeCliAccountRuntime; profileId: string }> {
-    const plan = this.pendingLoginPlans.get(launchToken);
-    if (!plan) {
-      throw new NativeCliAccountError(
-        this.expiredLoginTokens.has(launchToken)
-          ? "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED"
-          : "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
-      );
-    }
-    if (plan.expiresAt <= this.now()) {
-      this.expireLoginPlan(plan);
-      await plan.guardDone.catch(() => undefined);
-      throw new NativeCliAccountError(
-        "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED",
-        { runtime: plan.runtime, profileId: plan.profileId },
-      );
-    }
-    if (plan.state !== "prepared" || typeof launcher !== "function") {
-      throw new NativeCliAccountError(
-        "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
-        { runtime: plan.runtime, profileId: plan.profileId },
-      );
-    }
-    plan.state = "launching";
-    clearTimeout(plan.expiryTimer);
-    let failure: unknown;
-    let accountMismatch = false;
-    try {
-      const env = await this.executionEnvironment(
-        plan.runtime,
-        plan.profileId,
-        false,
-      );
-      let result: NativeCliAccountProcessResult;
-      try {
-        result = await launcher({
-          runtime: plan.runtime,
-          profileId: plan.profileId,
-          executable: this.executableFor(plan.runtime),
-          args: this.loginArgs(plan.runtime),
-          env,
-          shell: false,
-        });
-      } catch {
-        throw new NativeCliAccountError(
-          "NATIVE_CLI_ACCOUNT_LOGIN_SPAWN_FAILED",
-          { runtime: plan.runtime, profileId: plan.profileId },
-        );
-      }
-      this.assertProcessSucceeded("login", plan.runtime, plan.profileId, result);
-      if (plan.expectedAccountFingerprint || plan.expectedEmail) {
-        const inspection = await this.inspectRuntime(plan.runtime);
-        const signedIn = this.profileFromInspection(inspection, plan.profileId);
-        accountMismatch = plan.expectedAccountFingerprint
-          ? signedIn.accountFingerprint !== plan.expectedAccountFingerprint
-          : signedIn.email?.trim().toLowerCase() !== plan.expectedEmail;
-      }
-    } catch (error) {
-      failure = error;
-    } finally {
-      this.pendingLoginPlans.delete(launchToken);
-      plan.releaseGuard();
-      await plan.guardDone.catch(() => undefined);
-    }
-    if (accountMismatch) {
-      try {
-        if (plan.removeProfileOnMismatch) {
-          await this.delete({ runtime: plan.runtime, profileId: plan.profileId });
-        } else {
-          await this.logout({ runtime: plan.runtime, profileId: plan.profileId });
-        }
-      } catch {
-        // Keep the useful identity error if the CLI already cleared its auth
-        // or another safe cleanup guard won the race.
-      }
-      throw new NativeCliAccountError(
-        "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH",
-        { runtime: plan.runtime, profileId: plan.profileId },
-      );
-    }
-    if (failure) {
-      await this.removeEmptyFailedLoginProfile(plan);
-      throw failure;
-    }
-    if (plan.activateOnSuccess) {
-      await this.setDefault({
-        runtime: plan.runtime,
-        profileId: plan.profileId,
-      });
-    }
-    return { runtime: plan.runtime, profileId: plan.profileId };
-  }
-
-  private assertProcessSucceeded(
-    operation: "login" | "logout",
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-    result: NativeCliAccountProcessResult,
-  ): void {
-    const prefix = operation === "login" ? "LOGIN" : "LOGOUT";
-    if (result.timedOut) {
-      throw new NativeCliAccountError(
-        `NATIVE_CLI_ACCOUNT_${prefix}_TIMEOUT`,
-        { runtime, profileId },
-      );
-    }
-    if (result.spawnFailed) {
-      throw new NativeCliAccountError(
-        `NATIVE_CLI_ACCOUNT_${prefix}_SPAWN_FAILED`,
-        { runtime, profileId },
-      );
-    }
-    if (result.signal) {
-      throw new NativeCliAccountError(
-        `NATIVE_CLI_ACCOUNT_${prefix}_SIGNAL`,
-        { runtime, profileId },
-      );
-    }
-    if (result.exitCode !== 0) {
-      throw new NativeCliAccountError(
-        `NATIVE_CLI_ACCOUNT_${prefix}_FAILED`,
-        { runtime, profileId },
-      );
-    }
-  }
-
-  private async logoutInternal(
-    runtime: NativeCliAccountRuntime,
-    profileId: string,
-  ): Promise<void> {
-    const { profile } = await this.requireProfile(runtime, profileId);
-    if (profile.inUse) {
-      throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_ACTIVE", {
-        runtime,
-        profileId,
-      });
-    }
-    if (!profile.connected) {
-      throw new NativeCliAccountError(
-        "NATIVE_CLI_ACCOUNT_NOT_CONNECTED",
-        { runtime, profileId },
-      );
-    }
-    await this.runWhileUnleased(runtime, profileId, async () => {
-      const env = await this.executionEnvironment(runtime, profileId, true);
-      let result: NativeCliAccountProcessResult;
-      try {
-        result = await this.processRunner({
-          runtime,
-          executable: this.executableFor(runtime),
-          args: this.logoutArgs(runtime),
-          env,
-          shell: false,
-          timeoutMs: this.processTimeoutMs,
-          maxBufferBytes: this.processMaxBufferBytes,
-        });
-      } catch {
-        throw new NativeCliAccountError(
-          "NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED",
-          { runtime, profileId },
-        );
-      }
-      this.assertProcessSucceeded("logout", runtime, profileId, result);
-      // `grok logout` ran against the profile's own GROK_HOME and cleared
-      // it; only the Codex vault has a live slot to finalize.
-      if (runtime === "codex") await this.codexAuthLogoutFinalizer(profileId);
-    });
-  }
-
-  async logout(input: NativeCliAccountProfileInput): Promise<{
-    runtime: NativeCliAccountRuntime;
-    profileId: string;
-  }> {
-    const runtime = normalizeRuntime(input.runtime);
-    const profileId = this.normalizeProfileId(runtime, input.profileId);
-    this.assertNotUnified(runtime, profileId);
-    return this.withRuntimeMutation(runtime, async () => {
-      await this.logoutInternal(runtime, profileId);
-      return { runtime, profileId };
-    });
-  }
-
-  async delete(
-    input: NativeCliAccountProfileInput,
-  ): Promise<NativeCliAccountDeleteResult> {
-    const runtime = normalizeRuntime(input.runtime);
-    const profileId = this.normalizeProfileId(runtime, input.profileId);
-    if (isPersonalProfile(runtime, profileId)) {
-      throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_PERSONAL", {
-        runtime,
-        profileId,
-      });
-    }
-    this.assertNotUnified(runtime, profileId);
-    // Deleting the current default or in-use account is a legitimate ask,
-    // not an error: hand the runtime back to the personal account (which
-    // always exists and can never be deleted) through the full guarded
-    // switch — it closes the runtime's running sessions first — then delete.
-    // Runs BEFORE the mutation below (the runtime mutex is non-reentrant),
-    // and the store's delete still re-checks isDefault/inUse, so a
-    // concurrent re-default or fresh session between the two steps degrades
-    // to the old error, never to an unguarded delete.
-    {
-      const { profile, inspection } = await this.requireProfile(runtime, profileId);
-      if (profile.isDefault || profile.inUse) {
-        const personalId =
-          runtime === "grok"
-            ? GROK_CLI_PERSONAL_PROFILE_ID
-            : CODEX_CLI_PERSONAL_PROFILE_ID;
-        if (inspection.defaultProfileId !== personalId) {
-          await this.setDefault({ runtime, profileId: personalId });
-        } else {
-          // Personal is already default, but this profile's sessions are
-          // still running (started while it was active). Close them the same
-          // way a switch would, releasing its in-use lease.
-          await this.sessionShutdown(runtime);
-        }
-      }
-    }
-    return this.withRuntimeMutation(runtime, async () => {
-      const { profile } = await this.requireProfile(runtime, profileId);
-      if (profile.isDefault) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_DEFAULT", {
-          runtime,
-          profileId,
-        });
-      }
-      if (profile.inUse) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_ACTIVE", {
-          runtime,
-          profileId,
-        });
-      }
-
-      // Ask the CLI to clear any provider-side/local auth state before its
-      // isolated directory is removed. Process failures are deliberately best
-      // effort: deletion remains safe and exact because the store performs its
-      // own atomic lease/default/symlink checks immediately afterward.
-      if (profile.connected) {
-        try {
-          await this.logoutInternal(runtime, profileId);
-        } catch (error) {
-          if (
-            error instanceof NativeCliAccountError &&
-            error.code === "NATIVE_CLI_ACCOUNT_ACTIVE"
-          ) {
-            throw error;
-          }
-          if (
-            error instanceof NativeCliAccountError &&
-            (error.code === "NATIVE_CLI_ACCOUNT_STORE_UNSAFE" ||
-              error.code === "NATIVE_CLI_ACCOUNT_STORE_CORRUPT" ||
-              error.code === "NATIVE_CLI_ACCOUNT_NOT_FOUND")
-          ) {
-            throw error;
-          }
-          // Spawn, timeout, signal, non-zero, and a concurrent sign-out are
-          // non-destructive failures. Continue to the store's guarded delete.
-        }
-      }
-
-      try {
-        const result =
-          runtime === "grok"
-            ? await this.grokStore.deleteProfile(profileId)
-            : await this.codexStore.deleteProfile(profileId);
-        return { runtime, profileId, deleted: result.deleted };
-      } catch (error) {
-        throw this.sanitizeStoreError(runtime, profileId, error);
-      }
-    });
   }
 
   private sanitizeStoreError(
@@ -1666,7 +627,7 @@ export class NativeCliAccountService {
 }
 
 /**
- * Process-wide façade. Constructing it performs no filesystem or child-process
+ * Process-wide facade. Constructing it performs no filesystem or child-process
  * work; callers opt into operations explicitly.
  */
 export const nativeCliAccounts = new NativeCliAccountService();

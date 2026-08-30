@@ -721,6 +721,12 @@ export interface PiSubscriptionRenameAccountInput {
 export interface PiSubscriptionMakeDefaultInput {
   provider: PiSubscriptionProvider;
   profileId: string;
+  /**
+   * Codex keeps one sign-in for every terminal, so switching it closes the
+   * running Codex sessions; the switch refuses with their count until the
+   * caller agrees. Anthropic and Grok switches close nothing.
+   */
+  closeSessions?: boolean;
 }
 
 export interface PiSubscriptionDeleteAccountInput {
@@ -729,11 +735,12 @@ export interface PiSubscriptionDeleteAccountInput {
   closeSessions?: boolean;
 }
 
-/** Give a half account its other half: a Cora row gets a Claude Code
- * profile, or a terminal-only Claude Code profile gets a Cora row. */
+/** Give a half account its other half: a Cora row gets a CLI profile, or a
+ * terminal-only CLI profile gets a Cora row. A CLI profile id is only unique
+ * within its provider; anthropic is assumed when none is given. */
 export type PiSubscriptionShareLoginInput =
   | { coraProfileId: string }
-  | { cliProfileId: string };
+  | { cliProfileId: string; provider?: PiSubscriptionProvider };
 
 /** Login flow handle. targetProfileId is an opaque local UUID, never an
  * upstream identity, credential, email, or filesystem path. */

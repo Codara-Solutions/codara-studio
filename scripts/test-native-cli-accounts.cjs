@@ -176,31 +176,6 @@ async function main() {
         : { connected: false, reason: "missing" },
   });
 
-  const processRequests = [];
-  const sessionShutdownCalls = [];
-  let sessionShutdownBehavior = async (runtime) => {
-    sessionShutdownCalls.push(runtime);
-    return { closedSessionCount: 2 };
-  };
-  let processBehavior = async () => successResult();
-  let tokenIndex = 0;
-  const baseEnv = {
-    PATH: process.env.PATH,
-    SAFE_VALUE: "preserved",
-    CLAUDE_CONFIG_DIR: "/wrong/claude",
-    CODEX_HOME: "/wrong/codex",
-    GROK_HOME: "/wrong/grok",
-    xai_api_key: "SECRET",
-    anthropic_api_key: "SECRET",
-    Anthropic_Auth_Token: "SECRET",
-    cLaUdE_cOdE_oAuTh_ToKeN: "SECRET",
-    Claude_SecureStorage_Config_Dir: "/wrong/secure",
-    openai_api_key: "SECRET",
-    CoDeX_ApI_KeY: "SECRET",
-    codex_access_token: "SECRET",
-    Azure_OpenAI_Api_Key: "SECRET",
-    OpenRouter_Api_Key: "SECRET",
-  };
   const service = new mod.NativeCliAccountService({
     claudeStore,
     claudeLeases,
@@ -208,19 +183,6 @@ async function main() {
     codexLeases,
     grokStore,
     grokLeases,
-    claudeExecutable: "/opt/codara/bin/claude",
-    codexExecutable: "/opt/codara/bin/codex",
-    grokExecutable: "/opt/codara/bin/grok",
-    baseEnv: () => ({ ...baseEnv }),
-    processTimeoutMs: 3210,
-    processMaxBufferBytes: 4321,
-    processRunner: async (request) => {
-      processRequests.push(request);
-      return processBehavior(request);
-    },
-    sessionShutdown: (runtime) => sessionShutdownBehavior(runtime),
-    tokenFactory: () =>
-      `opaque-login-token-${String(++tokenIndex).padStart(12, "0")}`,
   });
 
   assert.throws(
@@ -275,54 +237,6 @@ async function main() {
       },
     ],
   );
-  const workGrok = await service.create({ runtime: "grok", label: "Work" });
-  grokConnected.add(path.join(grokRoot, "accounts", workGrok.profile.id));
-  const switched = await service.setDefault({
-    runtime: "grok",
-    profileId: workGrok.profile.id,
-  });
-  assert.equal(switched.profile.isDefault, true);
-  assert.equal(switched.profile.id, workGrok.profile.id);
-  assert.equal(switched.closedSessionCount, 2);
-  assert.deepEqual(sessionShutdownCalls, ["grok"]);
-  const afterSwitch = (await service.inspect("grok")).runtimes[0];
-  const defaults = afterSwitch.profiles.filter((profile) => profile.isDefault);
-  assert.equal(defaults.length, 1);
-  assert.equal(defaults[0].id, workGrok.profile.id);
-  assert.equal(
-    afterSwitch.profiles.find((profile) => profile.id === "personal").isDefault,
-    false,
-  );
-  await service.setDefault({ runtime: "grok", profileId: "personal" });
-  assert.equal(
-    (await service.inspect("grok")).runtimes[0].defaultProfileId,
-    "personal",
-  );
-
-  // A switch is fail-closed: every session shutdown must finish before the
-  // selected account changes, and a shutdown failure leaves the old default.
-  sessionShutdownBehavior = async (runtime) => {
-    sessionShutdownCalls.push(runtime);
-    throw new Error("synthetic close failure");
-  };
-  await expectCode(
-    () =>
-      service.setDefault({
-        runtime: "grok",
-        profileId: workGrok.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED",
-  );
-  assert.equal(
-    (await service.inspect("grok")).runtimes[0].defaultProfileId,
-    "personal",
-    "failed shutdown must not change the selected account",
-  );
-  sessionShutdownBehavior = async (runtime) => {
-    sessionShutdownCalls.push(runtime);
-    return { closedSessionCount: 2 };
-  };
-
   const initialJson = JSON.stringify(initial);
   for (const forbidden of [
     claudeRoot,
@@ -621,29 +535,29 @@ async function main() {
 
   fs.rmSync(personalCodexAuth, { force: true });
 
-  // Claude Code is one half of an Anthropic account now: every mutation that
+  // Every CLI profile is one half of an account now: every mutation that
   // used to go through this facade is refused with one typed code, so a
-  // caller learns to use the Anthropic card (accounts.login.start /
+  // caller learns to use the account card (accounts.login.start /
   // accounts.use on the socket). Inspection and rename still work.
-  for (const [operation, input] of [
-    ["create", { runtime: "claude", label: "Work Claude" }],
-    ["setDefault", { runtime: "claude", profileId: "personal" }],
-    ["prepareLogin", { runtime: "claude", profileId: "personal" }],
-    ["logout", { runtime: "claude", profileId: "personal" }],
-  ]) {
-    await expectCode(() => service[operation](input), "NATIVE_CLI_ACCOUNT_UNIFIED");
+  for (const runtime of ["claude", "codex", "grok"]) {
+    await expectCode(
+      async () => service.assertNotUnified(runtime, "personal"),
+      "NATIVE_CLI_ACCOUNT_UNIFIED",
+    );
+    for (const gone of ["create", "setDefault", "prepareLogin", "logout", "delete", "launchPreparedLogin", "cancelPreparedLogin", "setSessionShutdown"]) {
+      assert.equal(typeof service[gone], "undefined", `${gone} must not exist on the facade`);
+    }
   }
-  const claudeCreated = await claudeStore.createProfile({ label: " Work Claude " });
-  assert.equal(claudeCreated.profile.id, IDS[0]);
-  await expectCode(
-    () => service.delete({ runtime: "claude", profileId: claudeCreated.profile.id }),
+  const unified = await expectCode(
+    async () => service.assertNotUnified("codex", "personal"),
     "NATIVE_CLI_ACCOUNT_UNIFIED",
   );
-  await expectCode(
-    () => service.delete({ runtime: "claude", profileId: "personal" }),
-    "NATIVE_CLI_ACCOUNT_PERSONAL",
-  );
-  let claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
+  assert.equal(unified.runtime, "codex");
+  assert.equal(unified.profileId, "personal");
+  assert.match(unified.message, /one sign-in serves Cora and the CLI together/);
+  const claudeCreated = await claudeStore.createProfile({ label: " Work Claude " });
+  assert.equal(claudeCreated.profile.id, IDS[0]);
+  const claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
   claudeConnected.add(claudeManagedDir);
   const renamedClaude = await service.rename({
     runtime: "claude",
@@ -653,584 +567,39 @@ async function main() {
   assert.equal(renamedClaude.profile.label, "Claude Primary");
   assert.equal(renamedClaude.profile.status, "connected");
   assert.equal(JSON.stringify(renamedClaude).includes(claudeRoot), false);
-  assert.equal(
-    sessionShutdownCalls.includes("claude"),
-    false,
-    "nothing about a Claude account closes sessions through this facade",
-  );
-
-  let codexCreated = await service.create({
-    runtime: "codex",
-    label: " Work Codex ",
-  });
+  const codexCreated = await codexStore.createProfile({ label: " Work Codex " });
   assert.equal(codexCreated.profile.id, IDS[4]);
-  assert.equal(codexCreated.profile.runtime, "codex");
-  assert.equal(codexCreated.profile.status, "sign_in_required");
-  assert.equal(JSON.stringify(codexCreated).includes(codexRoot), false);
-
-  await expectCode(
-    () =>
-      service.setDefault({
-        runtime: "codex",
-        profileId: codexCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_NOT_CONNECTED",
-  );
-  await expectCode(
-    () =>
-      service.rename({
-        runtime: "claude",
-        profileId: "personal",
-        label: "No",
-      }),
-    "NATIVE_CLI_ACCOUNT_PERSONAL",
-  );
-  await expectCode(
-    () => service.delete({ runtime: "codex", profileId: "personal" }),
-    "NATIVE_CLI_ACCOUNT_PERSONAL",
-  );
-
-  let codexManagedHome = path.join(
-    codexRoot,
-    "accounts",
-    codexCreated.profile.id,
-  );
-  codexConnected.add(codexManagedHome);
-  await service.rename({
+  const renamedCodex = await service.rename({
     runtime: "codex",
     profileId: codexCreated.profile.id,
     label: "Codex Primary",
   });
-  let codexDefaultObservedDuringShutdown = null;
-  sessionShutdownBehavior = async (runtime) => {
-    sessionShutdownCalls.push(runtime);
-    if (runtime === "codex") {
-      codexDefaultObservedDuringShutdown = (
-        await codexStore.snapshot()
-      ).defaultProfileId;
-    }
-    return { closedSessionCount: 2 };
-  };
-  await service.setDefault({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
+  assert.equal(renamedCodex.profile.label, "Codex Primary");
+  assert.equal(renamedCodex.profile.status, "sign_in_required");
+  assert.equal(renamedCodex.profile.managed, true);
+  const grokCreated = await grokStore.createProfile({ label: "Work Grok" });
+  const renamedGrok = await service.rename({
+    runtime: "grok",
+    profileId: grokCreated.profile.id,
+    label: "Grok Primary",
   });
-  assert.equal(
-    codexDefaultObservedDuringShutdown,
-    "personal",
-    "runtime shutdown must settle before the Codex default/auth selection changes",
-  );
-
-  // Deleting the current default (not in use) is allowed: the service hands
-  // the default back to the personal profile through the full guarded switch,
-  // then deletes. The profile is re-created below so the rest of the suite
-  // keeps the exact pre-delete state (connected, "Codex Primary").
-  const defaultDelete = await service.delete({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  assert.equal(defaultDelete.deleted, true);
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].defaultProfileId,
-    "personal",
-    "deleting the default must hand the default to the personal profile",
-  );
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].profiles.some(
-      (profile) => profile.id === codexCreated.profile.id,
-    ),
-    false,
-    "the deleted default must be gone",
-  );
-  codexCreated = await service.create({
-    runtime: "codex",
-    label: "Codex Work",
-  });
-  codexManagedHome = path.join(codexRoot, "accounts", codexCreated.profile.id);
-  codexConnected.add(codexManagedHome);
-  await service.rename({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-    label: "Codex Primary",
-  });
-
-  // Login preparation is path-free and reserves the selected profile until
-  // the main-owned terminal launcher finishes.
-  await service.setDefault({ runtime: "codex", profileId: "personal" });
-  const preparation = await service.prepareLogin({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-    activateOnSuccess: true,
-  });
-  assert.deepEqual(Object.keys(preparation).sort(), [
-    "expiresAt",
-    "launchToken",
-    "profileId",
-    "runtime",
-  ]);
-  const preparationJson = JSON.stringify(preparation);
-  assert.equal(preparationJson.includes(codexManagedHome), false);
-  assert.equal(preparationJson.includes("codex login"), false);
-  assert.equal(preparationJson.includes("CODEX_HOME"), false);
-  assert.equal(
-    (
-      await service.inspect("codex")
-    ).runtimes[0].profiles.find(
-      (profile) => profile.id === codexCreated.profile.id,
-    ).inUse,
-    true,
-  );
-  assert.throws(
-    () =>
-      codexLeases.acquire(
-        codexCreated.profile.id,
-        "terminal:late-during-login",
-      ),
-    /being deleted/i,
-  );
-  await expectCode(
-    () =>
-      service.logout({
-        runtime: "codex",
-        profileId: codexCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_ACTIVE",
-  );
-  await expectCode(
-    () =>
-      service.delete({
-        runtime: "codex",
-        profileId: codexCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_ACTIVE",
-  );
-
-  let loginSpec;
-  await service.launchPreparedLogin(preparation.launchToken, async (spec) => {
-    loginSpec = spec;
-    assert.equal(
-      (
-        await service.inspect("codex")
-      ).runtimes[0].profiles.find(
-        (profile) => profile.id === codexCreated.profile.id,
-      ).inUse,
-      true,
-    );
-    return successResult();
-  });
-  assert.equal(loginSpec.executable, "/opt/codara/bin/codex");
-  assert.deepEqual(loginSpec.args, [
-    "login",
-    "--config",
-    'cli_auth_credentials_store="file"',
-  ]);
-  assert.equal(loginSpec.shell, false);
-  assertSanitizedEnv(loginSpec.env, "codex", codexManagedHome);
-  assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].defaultProfileId,
-    codexCreated.profile.id,
-    "a Cora-card login must switch the CLI account in the same operation",
-  );
-  await service.setDefault({ runtime: "codex", profileId: "personal" });
-  await expectCode(
-    () => service.launchPreparedLogin(preparation.launchToken, async () => successResult()),
-    "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
-  );
-
-  // A Cora-card login is account-bound. The browser can reuse another active
-  // session, so the account id is verified after login and only the
-  // temporary managed slot is removed when the wrong account comes back.
-  const mismatchCreated = await service.create({
-    runtime: "codex",
-    label: "Expected account",
-  });
-  const mismatchHome = path.join(
-    codexRoot,
-    "accounts",
-    mismatchCreated.profile.id,
-  );
-  const EXPECTED_OTHER_FINGERPRINT = crypto
-    .createHash("sha256")
-    .update("acct_expected-other-account")
-    .digest("hex");
-  const mismatchPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: mismatchCreated.profile.id,
-    expectedAccountFingerprint: EXPECTED_OTHER_FINGERPRINT,
-    removeProfileOnMismatch: true,
-  });
-  await expectCode(
-    () =>
-      service.launchPreparedLogin(mismatchPlan.launchToken, async () => {
-        privateFile(
-          path.join(mismatchHome, "auth.json"),
-          JSON.stringify({
-            tokens: {
-              account_id: CHATGPT_ACCOUNT_ID,
-              access_token: "SECRET",
-            },
-          }),
-        );
-        codexConnected.add(mismatchHome);
-        return successResult();
-      }),
-    "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH",
-  );
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].profiles.some(
-      (profile) => profile.id === mismatchCreated.profile.id,
-    ),
-    false,
-    "a mismatched browser login must not leave a third account card",
-  );
-  assert.equal(fs.existsSync(mismatchHome), false);
-
-  // Closing or failing the browser terminal must also remove a slot created
-  // solely for that attempt. Otherwise every retry becomes another empty card.
-  const failedCreated = await service.create({
-    runtime: "codex",
-    label: "Retry account",
-  });
-  const failedHome = path.join(
-    codexRoot,
-    "accounts",
-    failedCreated.profile.id,
-  );
-  const failedPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: failedCreated.profile.id,
-    removeProfileOnFailure: true,
-  });
-  await expectCode(
-    () =>
-      service.launchPreparedLogin(failedPlan.launchToken, async () => ({
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        spawnFailed: false,
-      })),
-    "NATIVE_CLI_ACCOUNT_LOGIN_FAILED",
-  );
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].profiles.some(
-      (profile) => profile.id === failedCreated.profile.id,
-    ),
-    false,
-    "a failed new login must not leave an empty account card",
-  );
-  assert.equal(fs.existsSync(failedHome), false);
-
-  const cancelledCreated = await service.create({
-    runtime: "codex",
-    label: "Cancelled account",
-  });
-  const cancelledHome = path.join(
-    codexRoot,
-    "accounts",
-    cancelledCreated.profile.id,
-  );
-  const cancelledPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: cancelledCreated.profile.id,
-    removeProfileOnFailure: true,
-  });
-  assert.equal(
-    await service.cancelPreparedLogin(cancelledPlan.launchToken),
-    true,
-  );
-  assert.equal(
-    (await service.inspect("codex")).runtimes[0].profiles.some(
-      (profile) => profile.id === cancelledCreated.profile.id,
-    ),
-    false,
-    "cancelling before the login terminal opens must not leave an empty card",
-  );
-  assert.equal(fs.existsSync(cancelledHome), false);
-
-  const codexSuccessPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  let codexLoginSpec;
-  await service.launchPreparedLogin(
-    codexSuccessPlan.launchToken,
-    async (spec) => {
-      codexLoginSpec = spec;
-      return successResult();
-    },
-  );
-  assert.equal(codexLoginSpec.executable, "/opt/codara/bin/codex");
-  assert.deepEqual(codexLoginSpec.args, [
-    "login",
-    "--config",
-    'cli_auth_credentials_store="file"',
-  ]);
-  assert.equal(codexLoginSpec.shell, false);
-  assertSanitizedEnv(codexLoginSpec.env, "codex", codexManagedHome);
-
-  // Main-owned launcher failures are typed, output-free, and always release
-  // the exclusive login reservation.
-  for (const [result, code] of [
-    [
-      {
-        exitCode: null,
-        signal: null,
-        timedOut: false,
-        spawnFailed: true,
-      },
-      "NATIVE_CLI_ACCOUNT_LOGIN_SPAWN_FAILED",
-    ],
-    [
-      {
-        exitCode: null,
-        signal: "SIGTERM",
-        timedOut: true,
-        spawnFailed: false,
-      },
-      "NATIVE_CLI_ACCOUNT_LOGIN_TIMEOUT",
-    ],
-    [
-      {
-        exitCode: null,
-        signal: "SIGTERM",
-        timedOut: false,
-        spawnFailed: false,
-      },
-      "NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL",
-    ],
-    [
-      {
-        exitCode: 7,
-        signal: null,
-        timedOut: false,
-        spawnFailed: false,
-      },
-      "NATIVE_CLI_ACCOUNT_LOGIN_FAILED",
-    ],
-  ]) {
-    const plan = await service.prepareLogin({
-      runtime: "codex",
-      profileId: codexCreated.profile.id,
-    });
+  assert.equal(renamedGrok.profile.label, "Grok Primary");
+  assert.equal(JSON.stringify(renamedGrok).includes(grokRoot), false);
+  for (const runtime of ["claude", "codex", "grok"]) {
     await expectCode(
-      () => service.launchPreparedLogin(plan.launchToken, async () => result),
-      code,
+      () => service.rename({ runtime, profileId: "personal", label: "No" }),
+      "NATIVE_CLI_ACCOUNT_PERSONAL",
     );
-    assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
   }
-  const thrownPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
   await expectCode(
-    () =>
-      service.launchPreparedLogin(thrownPlan.launchToken, async () => {
-        throw new Error(`SECRET ${codexManagedHome}`);
-      }),
-    "NATIVE_CLI_ACCOUNT_LOGIN_SPAWN_FAILED",
-  );
-
-  const cancelPlan = await service.prepareLogin({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  assert.equal(await service.cancelPreparedLogin(cancelPlan.launchToken), true);
-  assert.equal(await service.cancelPreparedLogin(cancelPlan.launchToken), false);
-  assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
-
-  let fakeNow = 1000;
-  const expiryService = new mod.NativeCliAccountService({
-    claudeStore,
-    claudeLeases,
-    codexStore,
-    codexLeases,
-    now: () => fakeNow,
-    loginPlanTtlMs: 60_000,
-    tokenFactory: () => "opaque-expiring-login-token-00000001",
-  });
-  const expiryPlan = await expiryService.prepareLogin({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  fakeNow = expiryPlan.expiresAt;
-  await expectCode(
-    () =>
-      expiryService.launchPreparedLogin(
-        expiryPlan.launchToken,
-        async () => successResult(),
-      ),
-    "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED",
-  );
-  assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
-
-  // Logout uses an exact argv with shell disabled, bounded discarded output,
-  // and the selected case-insensitively sanitized profile environment.
-  await service.logout({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  const codexLogout = processRequests.at(-1);
-  assert.equal(codexLogout.timeoutMs, 3210);
-  assert.equal(codexLogout.maxBufferBytes, 4321);
-  assert.equal(codexLogout.executable, "/opt/codara/bin/codex");
-  assert.deepEqual(codexLogout.args, [
-    "logout",
-    "--config",
-    'cli_auth_credentials_store="file"',
-  ]);
-  assert.equal(codexLogout.shell, false);
-  assertSanitizedEnv(codexLogout.env, "codex", codexManagedHome);
-
-  codexConnected.add(codexManagedHome);
-  for (const [behavior, code] of [
-    [
-      async () => {
-        throw new Error(`SECRET ${codexManagedHome}`);
-      },
-      "NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED",
-    ],
-    [
-      async () => ({
-        exitCode: null,
-        signal: "SIGTERM",
-        timedOut: true,
-        spawnFailed: false,
-      }),
-      "NATIVE_CLI_ACCOUNT_LOGOUT_TIMEOUT",
-    ],
-    [
-      async () => ({
-        exitCode: null,
-        signal: "SIGTERM",
-        timedOut: false,
-        spawnFailed: false,
-      }),
-      "NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL",
-    ],
-    [
-      async () => ({
-        exitCode: 9,
-        signal: null,
-        timedOut: false,
-        spawnFailed: false,
-      }),
-      "NATIVE_CLI_ACCOUNT_LOGOUT_FAILED",
-    ],
-  ]) {
-    processBehavior = behavior;
-    await expectCode(
-      () =>
-        service.logout({
-          runtime: "codex",
-          profileId: codexCreated.profile.id,
-        }),
-      code,
-    );
-    assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
-  }
-  processBehavior = async () => successResult();
-
-  // Active leases fail before logout/delete process invocation. In production
-  // the account-switch callback closes the runtime and releases its leases;
-  // this injected test callback reports that boundary without touching the
-  // synthetic lease registry.
-  await service.setDefault({ runtime: "codex", profileId: "personal" });
-  const releaseActive = codexLeases.acquire(
-    codexCreated.profile.id,
-    "manager:active-run",
-  );
-  const beforeActive = processRequests.length;
-  await expectCode(
-    () =>
-      service.logout({
-        runtime: "codex",
-        profileId: codexCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_ACTIVE",
-  );
-  await expectCode(
-    () =>
-      service.delete({
-        runtime: "codex",
-        profileId: codexCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_ACTIVE",
-  );
-  await service.setDefault({
-    runtime: "codex",
-    profileId: codexCreated.profile.id,
-  });
-  assert.equal(processRequests.length, beforeActive);
-  releaseActive();
-  await service.setDefault({ runtime: "codex", profileId: "personal" });
-
-  // Delete asks the CLI to log out first, but process failures are best effort
-  // and cannot strand or broaden the exact isolated-directory deletion.
-  const disposable = await service.create({
-    runtime: "codex",
-    label: "Best effort delete",
-  });
-  const disposableHome = path.join(
-    codexRoot,
-    "accounts",
-    disposable.profile.id,
-  );
-  codexConnected.add(disposableHome);
-  const beforeBestEffort = processRequests.length;
-  processBehavior = async () => ({
-    exitCode: 23,
-    signal: null,
-    timedOut: false,
-    spawnFailed: false,
-  });
-  const bestEffortDelete = await service.delete({
-    runtime: "codex",
-    profileId: disposable.profile.id,
-  });
-  assert.equal(bestEffortDelete.deleted, true);
-  assert.equal(processRequests.length, beforeBestEffort + 1);
-  assert.equal(fs.existsSync(disposableHome), false);
-  processBehavior = async () => successResult();
-
-  // The façade serializes default mutation behind an in-progress deletion.
-  // The queued default change therefore observes a deleted profile rather than
-  // turning the target into a logged-out undeletable default mid-operation.
-  const raced = await service.create({
-    runtime: "codex",
-    label: "Delete/default race",
-  });
-  const racedHome = path.join(codexRoot, "accounts", raced.profile.id);
-  codexConnected.add(racedHome);
-  let enterRunner;
-  let releaseRunner;
-  const runnerEntered = new Promise((resolve) => {
-    enterRunner = resolve;
-  });
-  const runnerReleased = new Promise((resolve) => {
-    releaseRunner = resolve;
-  });
-  processBehavior = async () => {
-    enterRunner();
-    await runnerReleased;
-    return successResult();
-  };
-  const deleting = service.delete({
-    runtime: "codex",
-    profileId: raced.profile.id,
-  });
-  await runnerEntered;
-  const racingDefault = service.setDefault({
-    runtime: "codex",
-    profileId: raced.profile.id,
-  });
-  releaseRunner();
-  assert.equal((await deleting).deleted, true);
-  await expectCode(
-    () => racingDefault,
+    () => service.rename({ runtime: "codex", profileId: IDS[9] ?? "cccccccc-cccc-4ccc-8ccc-cccccccccccc", label: "Missing" }),
     "NATIVE_CLI_ACCOUNT_NOT_FOUND",
   );
-  processBehavior = async () => successResult();
+  await expectCode(
+    () => service.rename({ runtime: "codex", profileId: "not a profile id", label: "Missing" }),
+    "NATIVE_CLI_ACCOUNT_NOT_FOUND",
+  );
+
 
   // Corrupt and symlinked stores become stable typed failures without leaking
   // the injected registry bytes or filesystem locations.
@@ -1281,76 +650,15 @@ async function main() {
   );
   assert.equal(linkedError.message.includes(linkedRoot), false);
 
-  // Exercise the production execFile runner itself: spawn errors, timeouts,
-  // signals, and max-buffer termination yield data-only outcomes with no
-  // captured stdout/stderr.
-  const baseProcessRequest = {
-    runtime: "codex",
-    args: [],
-    env: { PATH: process.env.PATH },
-    shell: false,
-    timeoutMs: 1000,
-    maxBufferBytes: 1024,
-  };
-  const missing = await mod.runNativeCliAccountProcess({
-    ...baseProcessRequest,
-    executable: path.join(TMP, "missing-executable"),
-  });
-  assert.equal(missing.spawnFailed, true);
-  assert.equal(JSON.stringify(missing).includes(TMP), false);
-
-  const timeoutScript = path.join(TMP, "timeout-child.cjs");
-  fs.writeFileSync(timeoutScript, "setTimeout(() => {}, 10_000);");
-  const timedOut = await mod.runNativeCliAccountProcess({
-    ...baseProcessRequest,
-    executable: process.execPath,
-    args: [timeoutScript],
-    timeoutMs: 25,
-  });
-  assert.equal(timedOut.timedOut, true);
-  assert.equal(timedOut.signal, "SIGTERM");
-
-  const signalScript = path.join(TMP, "signal-child.cjs");
-  fs.writeFileSync(signalScript, 'process.kill(process.pid, "SIGTERM");');
-  const signaled = await mod.runNativeCliAccountProcess({
-    ...baseProcessRequest,
-    executable: process.execPath,
-    args: [signalScript],
-  });
-  assert.equal(signaled.timedOut, false);
-  assert.equal(signaled.signal, "SIGTERM");
-
-  const noisyScript = path.join(TMP, "noisy-child.cjs");
-  fs.writeFileSync(
-    noisyScript,
-    'process.stdout.write("SECRET_OUTPUT".repeat(10000));',
-  );
-  const noisy = await mod.runNativeCliAccountProcess({
-    ...baseProcessRequest,
-    executable: process.execPath,
-    args: [noisyScript],
-    maxBufferBytes: 64,
-  });
-  assert.notEqual(noisy.exitCode, 0);
-  assert.equal(JSON.stringify(noisy).includes("SECRET_OUTPUT"), false);
-
   const serviceSource = fs.readFileSync(
-    path.join(
-      ROOT,
-      "src",
-      "main",
-      "orchestration",
-      "native-cli-accounts.ts",
-    ),
+    path.join(ROOT, "src", "main", "orchestration", "native-cli-accounts.ts"),
     "utf8",
   );
-  assert.equal(/\bexec\s*\(/.test(serviceSource), false);
-  assert.equal(/shell:\s*true/.test(serviceSource), false);
-  assert.match(serviceSource, /execFile\(/);
-  assert.match(serviceSource, /maxBuffer:\s*request\.maxBufferBytes/);
+  assert.doesNotMatch(serviceSource, /execFile|child_process|spawn\(/);
+  assert.doesNotMatch(serviceSource, /prepareLogin|logout|setDefault|sessionShutdown/);
 
   console.log(
-    "PASS native CLI account facade: sanitized unified DTOs, hash-only Codex and Claude account fingerprints from read-only credential and config access, Claude mutations refused in favour of the unified Anthropic account, opaque exclusive login plans, exact bounded CLI processes, typed failures, race safety, and guarded deletion",
+    "PASS native CLI account facade: sanitized unified DTOs, hash-only Codex, Claude and Grok account fingerprints from read-only credential and config access, every mutation but rename refused in favour of the unified account services, and typed store failures",
   );
 }
 

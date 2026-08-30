@@ -20,9 +20,9 @@ import {
 } from "./unified-accounts";
 
 /**
- * The Anthropic instance of the unified account service, plus the names the
- * callers wired before the service went provider-neutral. The Claude adapter
- * is built from the same seams the old service took directly.
+ * The Anthropic names of the unified account service, kept for the suites
+ * that build the service from the Claude seams directly. The production
+ * instance lives in the registry with its two siblings.
  */
 
 export type {
@@ -94,6 +94,4 @@ export class AnthropicAccountService extends UnifiedAccountService<
   }
 }
 
-export const anthropicAccounts = new AnthropicAccountService({
-  log: (message) => console.warn(message),
-});
+export { anthropicAccounts } from "./unified-account-registry";

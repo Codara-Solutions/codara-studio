@@ -96,23 +96,26 @@ for (const forbidden of [
   );
 }
 
-// Main owns the launch specification for the Codex and Grok browser logins.
-// Renderer pty.spawn can supply only the opaque token; the branch resolves
-// executable/args/env inside main.
-assert.match(ipc, /nativeCliAccounts\s*\.launchPreparedLogin\(launchToken/);
-assert.match(ipc, /pty\.spawnExactExecutable\(\{/);
-assert.match(ipc, /executable:\s*spec\.executable/);
-assert.match(ipc, /args:\s*spec\.args/);
-assert.match(ipc, /env:\s*spec\.env/);
-assert.match(ipc, /const exit = await launched\.exit/);
+// CLI sign-ins no longer run in a Studio terminal: one browser sign-in
+// through the account card writes both halves, so a login token reaching
+// pty.spawn is refused and main never resolves an executable for it.
 assert.match(
   ipc,
-  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*return spawnPreparedNativeCliLogin/,
+  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*throw new NativeCliAccountError\("NATIVE_CLI_ACCOUNT_UNIFIED"\)/,
 );
+assert.doesNotMatch(ipc, /launchPreparedLogin|spawnPreparedNativeCliLogin|spawnExactExecutable\(\{/);
 assert.doesNotMatch(
   preloadAccountApi,
   /launchPreparedLogin|spawnExactExecutable|spec\.(?:executable|args|env)/,
 );
+// The set-default, delete, create and login channels dispatch through the
+// unified services (or refuse) for every runtime.
+assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const accounts = unifiedAccountsFor\(provider\);/);
+assert.match(ipc, /await accounts\.useAccount\(row\.id\)/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
+assert.match(ipc, /"native-cli-accounts:create",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
+assert.match(ipc, /"native-cli-accounts:prepare-login",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
+assert.match(ipc, /"native-cli-accounts:logout",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
 
 // Exact means exact: pty-manager copies the selected environment instead of
 // process.env, and every Studio/env enrichment is inside the non-exact branch.
@@ -454,20 +457,27 @@ assert.match(settingsView, /const \[cliSwitchArmed, setCliSwitchArmed\] = useSta
 // The one-account card has none of the two-role machinery.
 assert.doesNotMatch(anthropicCard, /AccountRoleRow|cliSwitchArmed|Confirm & close|Remove from Cora/);
 
-// The main process owns the Codex and Grok shutdown boundary. Codara PTYs get
-// a graceful close first, external terminals are then quiesced, and the
-// account service does not mutate the selected account until that callback
-// resolves. Claude never enters this path: its switch is the unified account
-// service, and native-cli-accounts refuses a Claude default change.
-assert.match(ipc, /nativeCliAccounts\.setSessionShutdown\(async \(runtime\) =>/);
-assert.match(ipc, /pty\.disposeNativeCliRuntimeGraceful\(runtime\)/);
-assert.match(ipc, /shutdownExternalNativeCliProcesses\(runtime\)/);
-assert.match(ipc, /anthropicAccounts\.useAnthropicAccount\(row\.id\)/);
-assert.match(ipc, /anthropicAccounts\.deleteTerminalOnlyProfile\(/);
+// The main process owns the Codex shutdown boundary, and only Codex has
+// one: Codara PTYs get a graceful close first, external codex processes are
+// then quiesced, and the service does not move the live slot until that
+// callback resolves. Claude and Grok switches close nothing; each service
+// closes only the panes of the account being deleted.
+assert.match(ipc, /codexAccounts\.setSessionShutdown\(closeEveryCodexSession\)/);
+assert.match(ipc, /pty\.disposeNativeCliRuntimeGraceful\("codex"\)/);
+assert.match(ipc, /shutdownExternalNativeCliProcesses\("codex"\)/);
+assert.doesNotMatch(ipc, /grokAccounts\.setSessionShutdown|anthropicAccounts\.setSessionShutdown/);
+assert.match(ipc, /anthropicAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeClaudeProfileSessions\(profileId\)/);
+assert.match(ipc, /grokAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeGrokProfileSessions\(profileId\)/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: input\?\.closeSessions === true/);
+assert.match(ipc, /unifiedAccountsFor\(target\.provider\)\.deleteAccount\(profileId, \{/);
 const nativeAccounts = read("src/main/orchestration/native-cli-accounts.ts");
 assert.match(nativeAccounts, /NATIVE_CLI_ACCOUNT_UNIFIED/);
-assert.match(nativeAccounts, /const shutdown = await this\.sessionShutdown\(runtime\)/);
+assert.doesNotMatch(nativeAccounts, /sessionShutdown|prepareLogin|execFile/);
+const socket = read("src/main/agent-socket.ts");
+assert.match(socket, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: params\.closeSessions === true/);
+assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(profileId, \{/);
+assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 
 console.log(
-  "PASS native CLI account IPC is sanitized, login PTY is one-shot/exact/exit-owned, transient tokens are not persisted, Anthropic switches go through the unified account service, and Codex and Grok keep fingerprint-paired two-facet cards",
+  "PASS native CLI account IPC is sanitized, login tokens are refused in main, every provider switches and deletes through the unified account services, and Codex and Grok keep fingerprint-paired two-facet cards until the one card lands",
 );
