@@ -1611,6 +1611,25 @@ export class NativeCliAccountService {
         profileId,
       });
     }
+    // Deleting the current default is a legitimate ask, not an error: hand
+    // the default back to the personal account (which always exists and can
+    // never be deleted) through the full guarded switch, then delete. Runs
+    // BEFORE the mutation below — the runtime mutex is non-reentrant — and
+    // the store's own delete still re-checks isDefault, so a concurrent
+    // re-default between the two steps degrades to the old error, never to
+    // an unguarded delete.
+    {
+      const { profile } = await this.requireProfile(runtime, profileId);
+      if (profile.isDefault && !profile.inUse) {
+        const personalId =
+          runtime === "claude"
+            ? CLAUDE_CLI_PERSONAL_PROFILE_ID
+            : runtime === "grok"
+              ? GROK_CLI_PERSONAL_PROFILE_ID
+              : CODEX_CLI_PERSONAL_PROFILE_ID;
+        await this.setDefault({ runtime, profileId: personalId });
+      }
+    }
     return this.withRuntimeMutation(runtime, async () => {
       const { profile } = await this.requireProfile(runtime, profileId);
       if (profile.isDefault) {
