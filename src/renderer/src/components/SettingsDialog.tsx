@@ -1986,6 +1986,9 @@ function AccountsSettings() {
   const { preferences, setPreference } = usePreferences();
   const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  // True once the first status read settled either way: a store that failed
+  // has answered too, and the cards the CLI side can still build must show.
+  const [overviewSettled, setOverviewSettled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [login, setLogin] = useState<PiLoginView | null>(null);
   const [promptValue, setPromptValue] = useState("");
@@ -2022,11 +2025,17 @@ function AccountsSettings() {
   const refresh = () => {
     setLoading(true);
     setError(null);
+    // A refusal's session count is only right until the next read; the
+    // overview carries the live count from then on.
+    setCloseSessionsPrompt(null);
     void window.spark.piSubscriptions
       .status()
       .then(setOverview)
-      .catch((err) => setError((err as Error).message))
-      .finally(() => setLoading(false));
+      .catch((err) => setError(ipcErrorMessage(err)))
+      .finally(() => {
+        setLoading(false);
+        setOverviewSettled(true);
+      });
   };
 
   useEffect(() => {
@@ -2158,7 +2167,7 @@ function AccountsSettings() {
         requestId: "failed-to-start",
         provider,
         status: "failed",
-        message: (err as Error).message,
+        message: ipcErrorMessage(err),
       });
     });
   };
@@ -2407,6 +2416,12 @@ function AccountsSettings() {
         );
         const rows = piProfiles.map<AnthropicAccountCardView>((profile) => {
           const usage = usageByProfile.get(profile.id);
+          // The count main refused with is right until the next read; after
+          // that the overview's live count keeps the armed Delete honest.
+          const closeSessionsCount =
+            closeSessionsPrompt?.profileId === profile.id
+              ? closeSessionsPrompt.count
+              : (profile.terminal?.liveSessions ?? 0);
           return {
             key: `anthropic:${profile.id}`,
             label: profile.label,
@@ -2427,9 +2442,7 @@ function AccountsSettings() {
             },
             ...(profile.terminal ? { terminal: profile.terminal } : {}),
             busy: accountMutationId === profile.id,
-            ...(closeSessionsPrompt?.profileId === profile.id
-              ? { closeSessionsCount: closeSessionsPrompt.count }
-              : {}),
+            ...(closeSessionsCount > 0 ? { closeSessionsCount } : {}),
           };
         });
         // Account 1 first: it is the user's own claude login and the account
@@ -2446,7 +2459,10 @@ function AccountsSettings() {
             cliProfileId: profile.id,
             builtIn: false,
             active: false,
-            terminal: { connected: profile.status === "connected" },
+            terminal: {
+              connected: profile.status === "connected",
+              ...(profile.status === "unsafe" ? { unsafe: true } : {}),
+            },
             cliDefault: profile.isDefault,
             busy: accountMutationId === profile.id,
           }));
@@ -2468,16 +2484,19 @@ function AccountsSettings() {
               ]
             : [];
         const anthropicCards = [...accountOneSlot, ...rows, ...terminalOnly];
-        const count = anthropicCards.length;
+        // The signed-out Account 1 slot is an instruction, not an account.
+        const count = anthropicCards.filter(
+          (card) => card.coraProfileId || card.terminal?.connected,
+        ).length;
         return {
           provider: descriptor.provider,
           label: descriptor.label,
           cliLabel: descriptor.cliLabel,
           detail:
-            "One sign-in per account. Use this account switches Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
+            "One sign-in per account. Switching an account moves Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
           cards: [],
           anthropicCards,
-          footer: `${count} ${count === 1 ? "account" : "accounts"}`,
+          ...(count > 0 ? { footer: `${count} ${count === 1 ? "account" : "accounts"}` } : {}),
           coraDisabled,
           coraBusy,
           cliDisabled: true,
@@ -2973,9 +2992,10 @@ function AccountsSettings() {
 
   // Every store answers before any card shows. Rendering the Cora rows alone
   // made the terminal-only cards pop in a beat later, which read as accounts
-  // appearing out of nowhere. A store that failed has answered too.
+  // appearing out of nowhere. A store that failed has answered too: the
+  // cards the other side can still build show above its error line.
   const accountsReady =
-    overview !== null && (cliInspection !== null || cliError !== null);
+    (overview !== null || overviewSettled) && (cliInspection !== null || cliError !== null);
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
@@ -3300,12 +3320,17 @@ type NativeCliSettingsBusy = {
   action: NativeCliAccountBusyAction;
 };
 
-/** Electron wraps a main-process throw as "Error invoking remote method 'x': Error: msg". */
+/**
+ * Electron wraps a main-process throw as "Error invoking remote method 'x':
+ * <name>: msg", where the name is whatever class the error carried
+ * (AnthropicAccountNotConnectedError, TypeError). Only the message is for
+ * the user.
+ */
 function ipcErrorMessage(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   return raw
     .replace(/^Error invoking remote method '[^']*':\s*/, "")
-    .replace(/^Error:\s*/, "");
+    .replace(/^[A-Za-z]*Error:\s*/, "");
 }
 
 /**

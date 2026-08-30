@@ -506,7 +506,9 @@ export function AccountAddPicker({
                 {!selectedView
                   ? "Choose an agent"
                   : destination
-                    ? `Name this ${selectedFamily?.displayName} account`
+                    ? oneSignIn(selectedView)
+                      ? `Sign in to ${selectedFamily?.displayName}`
+                      : `Name this ${selectedFamily?.displayName} account`
                     : `Add ${selectedFamily?.displayName}`}
               </span>
               <span

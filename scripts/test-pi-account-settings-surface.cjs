@@ -125,10 +125,29 @@ assert.doesNotMatch(anthropicBranch, /nativeCliAccountLabels/);
 // The section copy says what the unified account does.
 assert.ok(
   settings.includes(
-    "One sign-in per account. Use this account switches Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
+    "One sign-in per account. Switching an account moves Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
   ),
 );
-assert.match(settings, /footer: `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}`/);
+// The footer counts accounts, not the signed-out Account 1 instruction slot,
+// and is omitted when there are none.
+assert.match(settings, /card\.coraProfileId \|\| card\.terminal\?\.connected/);
+assert.match(settings, /\.\.\.\(count > 0 \? \{ footer: `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}` \} : \{\}\)/);
+// The cards gate opens once the overview settled either way, so a failed
+// status read still shows what the CLI side can build.
+assert.match(settings, /\(overview !== null \|\| overviewSettled\) && \(cliInspection !== null \|\| cliError !== null\)/);
+assert.match(settings, /setOverviewSettled\(true\)/);
+// Every error class name is stripped before a message reaches the panel.
+assert.match(settings, /\.replace\(\/\^\[A-Za-z\]\*Error:\\s\*\/, ""\)/);
+// The armed Delete derives its count from the live overview after a refusal.
+assert.match(settings, /profile\.terminal\?\.liveSessions \?\? 0/);
+assert.match(settings, /setCloseSessionsPrompt\(null\);\n    void window\.spark\.piSubscriptions\n      \.status\(\)/);
+// A dead-end terminal-only profile says what to do; Account 1 always carries its hint.
+assert.ok(anthropicCard.includes("Not signed in to Claude Code. Delete it and add the account again."));
+assert.ok(anthropicCard.includes("Claude Code cannot use this profile's folder. Delete it and add the account again."));
+assert.match(anthropicCard, /terminalUsable\(card\)\n\s*\? "Found your claude login\. Cora is linking it now\."/);
+assert.match(anthropicCard, /card\.cora\?\.error && state !== "account-one-signed-out"/);
+// The Anthropic picker step is the sign-in, not a naming step.
+assert.match(cards, /oneSignIn\(selectedView\)\n\s*\? `Sign in to \$\{selectedFamily\?\.displayName\}`/);
 
 // One Use action switches both halves through the Pi make-default channel.
 // Never nativeCliAccounts.setDefault for Claude.
@@ -151,14 +170,14 @@ assert.equal(
 assert.match(settings, /function liveTerminalCount\(message: string\): number \| null/);
 assert.match(settings, /terminal sessions\? \(\?:is\|are\) using this account/);
 assert.match(settings, /setCloseSessionsPrompt\(\{ profileId, count \}\)/);
-assert.match(settings, /closeSessionsCount: closeSessionsPrompt\.count/);
+assert.match(settings, /\? closeSessionsPrompt\.count\n\s*: \(profile\.terminal\?\.liveSessions \?\? 0\)/);
 assert.match(settings, /function ipcErrorMessage\(err: unknown\): string/);
 
 // No pop-in: every store answers before any card shows.
 assert.match(settings, /const accountsReady =/);
 assert.match(
   settings,
-  /overview !== null && \(cliInspection !== null \|\| cliError !== null\)/,
+  /\(overview !== null \|\| overviewSettled\) && \(cliInspection !== null \|\| cliError !== null\)/,
 );
 assert.doesNotMatch(settings, /loading \|\| cliLoading/);
 assert.match(settings, /\{!accountsReady \? \(/);
@@ -256,7 +275,7 @@ for (const [name, source] of [
   ["AccountCardPrimitives.tsx", primitives],
   ["AccountCards.tsx", cards],
 ]) {
-  assert.doesNotMatch(source, /[–—]/, `${name} must not contain dashes`);
+  assert.doesNotMatch(source, /[\u2013\u2014]/, `${name} must not contain dashes`);
 }
 for (const jargon of ["OAuth", "credential", 'profile"', "managed account"]) {
   for (const source of [cards, anthropicCard]) {
@@ -271,7 +290,7 @@ const anthropicSection = settings.slice(
   settings.indexOf("function AccountsSettings()"),
   settings.indexOf("function AgentsSettings()"),
 );
-assert.doesNotMatch(anthropicSection, /[–—]/, "the Accounts section must not contain dashes");
+assert.doesNotMatch(anthropicSection, /[\u2013\u2014]/, "the Accounts section must not contain dashes");
 
 // ---------------------------------------------------------------------------
 // Menus portal through AnchoredMenu (the Settings scroll pane clips in-place
@@ -331,7 +350,10 @@ const connectionDto = shared.slice(connectionDtoStart, connectionDtoEnd);
 assert.match(connectionDto, /^\s*email\?: string;/m);
 assert.match(connectionDto, /^\s*cliProfileId\?: string;/m);
 assert.match(connectionDto, /^\s*builtIn\?: true;/m);
-assert.match(connectionDto, /^\s*terminal\?: \{ connected: boolean; expired: boolean; canRefresh: boolean \};/m);
+assert.match(
+  connectionDto,
+  /^\s*terminal\?: \{\s*connected: boolean;\s*expired: boolean;\s*canRefresh: boolean;\s*(?:\/\*\*[^*]*\*\/\s*)?liveSessions\?: number;\s*\};/m,
+);
 for (const forbiddenField of [
   "accessToken",
   "refreshToken",

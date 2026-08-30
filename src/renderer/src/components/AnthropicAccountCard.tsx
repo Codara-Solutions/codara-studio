@@ -58,6 +58,8 @@ export interface AnthropicAccountCardView {
     connected: boolean;
     expired?: boolean;
     canRefresh?: boolean;
+    /** Claude Code refuses the profile's folder (permissions); not a sign-out. */
+    unsafe?: boolean;
   };
   /** A terminal-only half that Claude Code is currently set to. */
   cliDefault?: boolean;
@@ -106,11 +108,23 @@ export function anthropicAccountState(
 export const ACCOUNT_ONE_SIGNED_OUT_HINT =
   "Run claude login in a terminal to use this account.";
 
+/** Usable the way Cora counts it: present, and not expired without a way back. */
+function terminalUsable(card: AnthropicAccountCardView): boolean {
+  return (
+    Boolean(card.terminal?.connected) &&
+    !(card.terminal?.expired && !card.terminal.canRefresh)
+  );
+}
+
 function connectionState(
   card: AnthropicAccountCardView,
   state: AnthropicAccountState,
 ): ConnectionState {
-  if (card.cora?.error) return { ok: false, text: card.cora.error, danger: true };
+  // Account 1 always says what to do; a raw store error on its own would
+  // hide the one instruction that helps.
+  if (card.cora?.error && state !== "account-one-signed-out") {
+    return { ok: false, text: card.cora.error, danger: true };
+  }
   switch (state) {
     case "needs-reconnect":
       return {
@@ -124,8 +138,20 @@ function connectionState(
         text: "Signed in to Cora only. Share it so Claude Code can use it too.",
       };
     case "terminal-only":
+      // Nothing on this branch signs a managed profile in again; the only
+      // way forward is a fresh add, so the line says so.
+      if (card.terminal?.unsafe) {
+        return {
+          ok: false,
+          text: "Claude Code cannot use this profile's folder. Delete it and add the account again.",
+          danger: true,
+        };
+      }
       if (!card.terminal?.connected) {
-        return { ok: false, text: "Not signed in to Claude Code." };
+        return {
+          ok: false,
+          text: "Not signed in to Claude Code. Delete it and add the account again.",
+        };
       }
       return {
         ok: false,
@@ -136,9 +162,11 @@ function connectionState(
     case "account-one-signed-out":
       return {
         ok: false,
-        text: card.terminal?.connected
+        text: terminalUsable(card)
           ? "Found your claude login. Cora is linking it now."
-          : ACCOUNT_ONE_SIGNED_OUT_HINT,
+          : card.cora?.error
+            ? `${card.cora.error} ${ACCOUNT_ONE_SIGNED_OUT_HINT}`
+            : ACCOUNT_ONE_SIGNED_OUT_HINT,
       };
     case "active":
     case "signed-in":

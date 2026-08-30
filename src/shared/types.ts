@@ -693,7 +693,13 @@ export interface PiSubscriptionProfileConnection {
   /** Account 1: the row for the user's own claude login, never deleted from here. */
   builtIn?: true;
   /** Token-blind status of the Claude Code half; absent when there is none. */
-  terminal?: { connected: boolean; expired: boolean; canRefresh: boolean };
+  terminal?: {
+    connected: boolean;
+    expired: boolean;
+    canRefresh: boolean;
+    /** Studio terminals running on this half right now; a delete closes them first. */
+    liveSessions?: number;
+  };
 }
 
 /** Sanitized renderer→main requests for local account-profile management. */
