@@ -1242,9 +1242,22 @@ export function registerIpc(): void {
         (profile) => profile.provider === provider && profile.isDefault,
       ) ??
       overview.profiles?.find((profile) => profile.provider === provider);
-    return target
-      ? deletePiAccountProfileWithRunGuard(target.id)
-      : overview;
+    if (!target) return overview;
+    if (provider !== "anthropic") return deletePiAccountProfileWithRunGuard(target.id);
+    // An Anthropic row is one half of an account: the unified delete hands
+    // the defaults off and removes the Claude Code half with it. Account 1 is
+    // the user's own claude login and is never deleted from here.
+    if (target.builtIn) {
+      throw new Error("Account 1 is your own claude login. Run claude logout in a terminal to sign it out.");
+    }
+    await anthropicAccounts.deleteAnthropicAccount(target.id, {
+      ownershipGuard: async (profile) => {
+        await assertPiAccountProfileIsNotActive(profile.id);
+        return false;
+      },
+    });
+    broadcastNativeCliAccountsChanged();
+    return inspectAfterPiAccountMetadataChange("anthropic");
   });
   handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();

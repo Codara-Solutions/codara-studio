@@ -638,11 +638,17 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     if (flow.abort.signal.aborted) throw new Error("Login cancelled");
     const profileId = await persistCredential(flow, credential);
     flow.targetProfileId = profileId;
+    // One Anthropic sign-in wrote both halves, and the picker promised as
+    // much; the completion line says the same thing.
+    const completedMessage =
+      provider === "anthropic"
+        ? `${familyForSubscription(provider).displayName} is signed in to Cora and Claude Code.`
+        : `${meta.label} is connected to Cora.`;
     send(owner, {
       type: "completed",
       requestId,
       provider,
-      message: `${meta.label} is connected to Cora.`,
+      message: completedMessage,
       overview: await inspectPiSubscriptions(),
     });
     // The user finished in the browser; bring them back to the Settings window
