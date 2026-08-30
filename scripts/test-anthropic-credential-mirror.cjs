@@ -404,10 +404,15 @@ async function main() {
     assert.equal(mirror.pairForCliProfile(CLI_ID).coraProfileId, CORA_ID);
     const initial = await mirror.reconcileNow(CORA_ID);
     assert.equal(initial.verdict, "equal");
+    // Fresh fs.watch handles on macOS can miss a write issued right after
+    // they were created; give them a moment before the first rotation.
+    await sleep(150);
 
     writeClaude(pair, claude(4));
-    await waitFor(() => readPi(pair).access === "claude-access-4");
-    assert.equal(changes.length, 1);
+    // The change event follows the write, so wait for it rather than for the
+    // file, which is visible a tick earlier.
+    await waitFor(() => changes.length === 1);
+    assert.equal(readPi(pair).access, "claude-access-4");
     assert.deepEqual(changes[0], { coraProfileId: CORA_ID, cliProfileId: CLI_ID, wrote: "pi" });
     await sleep(200);
     assert.equal(changes.length, 1, "the mirror's own write must not trigger another write");
@@ -416,7 +421,8 @@ async function main() {
     assert.equal((await mirror.reconcileNow(CORA_ID)).wrote, null);
 
     writePi(pair, pi(6));
-    await waitFor(async () => (await readClaude(pair)).accessToken === "pi-access-6");
+    await waitFor(() => changes.length === 2);
+    assert.equal((await readClaude(pair)).accessToken, "pi-access-6");
     assert.equal(changes.at(-1).wrote, "claude");
     await sleep(200);
     assert.equal(changes.length, 2);
