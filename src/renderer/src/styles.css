@@ -2324,7 +2324,7 @@ a { color: inherit; }
   max-width: 150px;
 }
 .composer-profile-glyph {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 10px;
 }
 .composer-profile-label {
@@ -2365,7 +2365,7 @@ a { color: inherit; }
 .composer-profile-mark {
   width: 12px;
   flex: 0 0 auto;
-  color: var(--accent);
+  color: var(--accent-text);
   text-align: center;
 }
 .composer-profile-copy {
@@ -4918,7 +4918,7 @@ a { color: inherit; }
 }
 
 .spark-board-card__nextup {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -5284,7 +5284,7 @@ a { color: inherit; }
 
 .spark-board-form__queue {
   height: 30px;
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in oklch, var(--accent) 35%, var(--rule));
 }
 
@@ -5445,7 +5445,7 @@ a { color: inherit; }
 }
 
 .spark-board-form__drop--busy {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in oklch, var(--accent) 45%, transparent);
 }
 
