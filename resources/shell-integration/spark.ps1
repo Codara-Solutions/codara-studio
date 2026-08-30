@@ -115,13 +115,18 @@ function Global:__Spark-FollowActiveAccount {
         $sparkHome = $env:SPARK_HOME_DIR
         if (-not $sparkHome) { $sparkHome = Join-Path $HOME '.codarastudio' }
         $file = Join-Path (Join-Path $sparkHome 'shell') 'active-cli-env'
-        $header = Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue
+        # .NET reads, not Get-Content: a cmdlet that fails on a missing
+        # pointer appends to $Error on every prompt, and one file read is
+        # the whole per-prompt cost.
+        if (-not [System.IO.File]::Exists($file)) { return }
+        $reader = [System.IO.File]::OpenText($file)
+        try { $header = $reader.ReadLine() } finally { $reader.Dispose() }
         if (-not $header) { return }
         $parts = ([string]$header) -split ' '
         if ($parts.Length -lt 3 -or $parts[0] -ne 'codara-active-cli-env' -or -not $parts[2]) { return }
         $rev = $parts[2]
         if ($rev -eq $Global:__SparkActiveEnvRev) { return }
-        $lines = Get-Content -LiteralPath $file -ErrorAction SilentlyContinue
+        $lines = [System.IO.File]::ReadAllLines($file)
         if ($null -eq $lines) { return }
         $sep = [System.IO.Path]::DirectorySeparatorChar
         # Windows paths compare case-insensitively; elsewhere the prefix
