@@ -26,7 +26,14 @@ interface UpdaterEvent {
 
 type ChipState =
   | { kind: "idle" }
-  | { kind: "downloading"; percent: number; version: string }
+  | {
+      kind: "downloading";
+      percent: number;
+      version: string;
+      transferred: number;
+      total: number;
+      bytesPerSecond: number;
+    }
   | { kind: "ready"; version: string }
   | { kind: "error"; message: string };
 
@@ -41,15 +48,27 @@ function reduceEvent(state: ChipState, event: UpdaterEvent): ChipState {
   switch (event.kind) {
     case "update-available": {
       const p = event.payload as { version?: unknown } | undefined;
-      return { kind: "downloading", percent: 0, version: asString(p?.version, "?") };
+      return {
+        kind: "downloading",
+        percent: 0,
+        version: asString(p?.version, "?"),
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+      };
     }
     case "download-progress": {
-      const p = event.payload as { percent?: unknown } | undefined;
+      const p = event.payload as
+        | { percent?: unknown; transferred?: unknown; total?: unknown; bytesPerSecond?: unknown }
+        | undefined;
       const version = state.kind === "downloading" ? state.version : "?";
       return {
         kind: "downloading",
         percent: Math.max(0, Math.min(100, asNumber(p?.percent, 0))),
         version,
+        transferred: asNumber(p?.transferred, 0),
+        total: asNumber(p?.total, 0),
+        bytesPerSecond: asNumber(p?.bytesPerSecond, 0),
       };
     }
     case "update-downloaded": {
@@ -81,9 +100,21 @@ function DownloadGlyph({ color }: { color: string }): React.ReactElement {
   );
 }
 
+function fmtMB(bytes: number): string {
+  return (bytes / 1048576).toFixed(1);
+}
+
 export default function UpdateChip(): React.ReactElement | null {
   const [state, setState] = useState<ChipState>({ kind: "idle" });
   const [hover, setHover] = useState(false);
+  // Details popover, toggled by clicking the chip while the download runs.
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = (): void => setOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
 
   useEffect(() => {
     if (!window.spark?.updater) return undefined;
@@ -104,22 +135,31 @@ export default function UpdateChip(): React.ReactElement | null {
       : `Downloading update v${state.version}… ${state.percent.toFixed(0)}%`;
   const tone = error ? "var(--danger)" : "var(--accent)";
 
-  const handleClick = (): void => {
-    if (!ready) return;
+  const install = (): void => {
     // Silent install + relaunch: the app quits, the update applies, and the
     // new version opens itself. Nothing else for the user to do.
     void window.spark.updater.quitAndInstall().catch(() => {
       /* a main-side failure comes back as an updater error event */
     });
   };
+  const handleClick = (): void => {
+    if (ready) {
+      install();
+      return;
+    }
+    // Mid-download (or error): the click opens the details popover instead.
+    setOpen((v) => !v);
+  };
 
   return (
+    <>
     <button
       type="button"
       data-window-control
       title={title}
       aria-label={title}
       onClick={handleClick}
+      onMouseDown={(e) => e.stopPropagation()}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={
@@ -194,5 +234,99 @@ export default function UpdateChip(): React.ReactElement | null {
         />
       )}
     </button>
+    {/* Details popover: anchored above the status bar's bottom-right corner. */}
+    {open && (
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        className="spark-fade-in"
+        style={{
+          position: "fixed",
+          right: 8,
+          bottom: 30,
+          zIndex: 900,
+          width: 260,
+          padding: "10px 12px",
+          borderRadius: "var(--radius-surface)",
+          border: "1px solid var(--rule)",
+          background: "var(--panel)",
+          boxShadow: "var(--shadow-1)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          fontFamily: "var(--font-sans)",
+          fontSize: 11.5,
+          color: "var(--ink)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <DownloadGlyph color={tone} />
+          <span style={{ fontWeight: 600 }}>
+            {error
+              ? "Update problem"
+              : `Codara Studio v${state.kind === "idle" ? "" : state.version}`}
+          </span>
+        </div>
+        {state.kind === "downloading" && (
+          <>
+            <div
+              style={{
+                height: 4,
+                borderRadius: 999,
+                background: "var(--rule-soft)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${state.percent}%`,
+                  height: "100%",
+                  background: "var(--accent)",
+                  borderRadius: 999,
+                  transition: "width var(--motion-fast) var(--ease-out)",
+                }}
+              />
+            </div>
+            <div
+              className="spark-mono spark-num"
+              style={{ fontSize: 10, color: "var(--muted)", display: "flex", gap: 10 }}
+            >
+              <span>{state.percent.toFixed(0)}%</span>
+              {state.total > 0 && (
+                <span>
+                  {fmtMB(state.transferred)} / {fmtMB(state.total)} MB
+                </span>
+              )}
+              {state.bytesPerSecond > 0 && <span>{fmtMB(state.bytesPerSecond)} MB/s</span>}
+            </div>
+            <span style={{ fontSize: 10.5, color: "var(--muted-2)" }}>
+              Downloading in the background. You can keep working; the chip
+              lights up when it is ready to install.
+            </span>
+          </>
+        )}
+        {ready && (
+          <>
+            <span style={{ fontSize: 10.5, color: "var(--muted)" }}>
+              Downloaded and ready. Installing restarts the app; it reopens by
+              itself on the new version.
+            </span>
+            <button
+              type="button"
+              className="spark-btn is-primary"
+              style={{ height: 24, fontSize: 11, alignSelf: "flex-start" }}
+              onClick={install}
+            >
+              Restart and install
+            </button>
+          </>
+        )}
+        {error && (
+          <span style={{ fontSize: 10.5, color: "var(--danger)", whiteSpace: "pre-wrap" }}>
+            {state.kind === "error" ? state.message : ""}
+          </span>
+        )}
+      </div>
+    )}
+    </>
   );
 }
