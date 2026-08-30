@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { anthropicAccounts, type AnthropicAccountService } from "./anthropic-accounts";
 import {
   claudeCliManagedProfileConfigDir,
   isClaudeCliManagedProfileId,
+  writeManagedClaudeIdentity,
   type ClaudeCliAccountProfileStore,
 } from "./claude-cli-account-profiles";
 import {
@@ -44,6 +45,10 @@ export interface UndoLiveSlotSwapInput {
   claudeRootDir: string;
   personalConfigDir: string;
   personalConfigDirEnv: string | null;
+  /** Where ~/.claude.json lives when CLAUDE_CONFIG_DIR is unset; defaults to the parent of personalConfigDir. */
+  homeDir?: string;
+  /** Whether the managed profile the marker names still exists in the registry. */
+  managedProfileExists?: (profileId: string) => Promise<boolean>;
   backend?: ClaudeCliCredentialBackend;
   log?: (message: string) => void;
 }
@@ -53,8 +58,12 @@ export interface UndoLiveSlotSwapResult {
   restoredFrom: string | null;
   /** True when the vaulted personal credential was written back to ~/.claude. */
   personalRestored: boolean;
+  /** True when the personal identity was written back into ~/.claude.json. */
+  identityRestored: boolean;
   retiredVaultDir: string | null;
   removedRetiredDirs: string[];
+  /** Set when ~/.claude could not be read: the marker and vault stay for the next launch. */
+  deferred: string | null;
 }
 
 async function lstatOrNull(path: string): Promise<import("node:fs").Stats | null> {
@@ -76,6 +85,57 @@ async function readSelection(rootDir: string): Promise<string | null> {
   }
 }
 
+async function readVaultedOauthAccount(
+  vaultDir: string,
+): Promise<{ accountUuid: string; emailAddress?: string; organizationUuid?: string } | null> {
+  try {
+    const file = join(vaultDir, ".claude.json");
+    const stats = await fs.lstat(file);
+    if (stats.isSymbolicLink() || !stats.isFile()) return null;
+    const parsed = JSON.parse(await fs.readFile(file, "utf8")) as { oauthAccount?: unknown };
+    const account = parsed.oauthAccount;
+    if (!account || typeof account !== "object" || Array.isArray(account)) return null;
+    const record = account as Record<string, unknown>;
+    if (typeof record.accountUuid !== "string" || !record.accountUuid.trim()) return null;
+    return {
+      accountUuid: record.accountUuid,
+      ...(typeof record.emailAddress === "string" ? { emailAddress: record.emailAddress } : {}),
+      ...(typeof record.organizationUuid === "string"
+        ? { organizationUuid: record.organizationUuid }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The selector swapped only the credential; ~/.claude.json kept naming
+ * whichever login last ran against ~/.claude, and the personal identity was
+ * vaulted beside the credential. Put it back with the credential, or Account
+ * 1 pairs on the managed account's identity.
+ */
+async function restorePersonalIdentity(
+  input: UndoLiveSlotSwapInput,
+  vaultDir: string,
+): Promise<boolean> {
+  const identity = await readVaultedOauthAccount(vaultDir);
+  if (!identity) return false;
+  const identityDir =
+    input.personalConfigDirEnv ?? input.homeDir ?? dirname(resolve(input.personalConfigDir));
+  try {
+    await writeManagedClaudeIdentity(identityDir, identity);
+    return true;
+  } catch (error) {
+    input.log?.(
+      `[accounts] the personal Claude identity could not be restored: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+}
+
 /**
  * The retired selector swapped a managed account's credential INTO ~/.claude
  * and vaulted the personal login under claude-cli/personal. If that swap is
@@ -93,8 +153,10 @@ export async function undoLiveSlotSwap(
   const result: UndoLiveSlotSwapResult = {
     restoredFrom: null,
     personalRestored: false,
+    identityRestored: false,
     retiredVaultDir: null,
     removedRetiredDirs: [],
+    deferred: null,
   };
 
   // Retired vaults from an earlier launch are removed now; the one retired
@@ -109,13 +171,36 @@ export async function undoLiveSlotSwap(
   const selected = await readSelection(rootDir);
   const vaultExists = (await lstatOrNull(vaultDir))?.isDirectory() === true;
   if (selected && isClaudeCliManagedProfileId(selected)) {
-    const live = await backend
-      .read(input.personalConfigDir, input.personalConfigDirEnv)
-      .catch(() => null);
+    // ~/.claude holds the managed account's freshest token, possibly the only
+    // refresh token still valid after a rotation. "Absent" and "unreadable"
+    // (a locked Keychain, a `security` timeout) must not be confused: on a
+    // read failure nothing is written and the marker stays, so the next
+    // launch repeats the restore instead of signing the account out for good.
+    let live: string | null;
+    try {
+      live = await backend.read(input.personalConfigDir, input.personalConfigDirEnv);
+    } catch (error) {
+      result.deferred = error instanceof Error ? error.message : String(error);
+      input.log?.(
+        `[accounts] ~/.claude could not be read; the login vault is kept for the next launch: ${result.deferred}`,
+      );
+      return result;
+    }
     if (live) {
-      const managedDir = claudeCliManagedProfileConfigDir(rootDir, selected);
-      await backend.write(managedDir, managedDir, live);
-      result.restoredFrom = selected;
+      const exists = input.managedProfileExists
+        ? await input.managedProfileExists(selected)
+        : true;
+      if (exists) {
+        const managedDir = claudeCliManagedProfileConfigDir(rootDir, selected);
+        await backend.write(managedDir, managedDir, live);
+        result.restoredFrom = selected;
+      } else {
+        // A stale marker (a crash between the delete and the marker rewrite)
+        // must not conjure a directory no registry row will ever reference.
+        input.log?.(
+          `[accounts] the login vault marker names a Claude Code profile that no longer exists (${selected}); its token is not copied anywhere`,
+        );
+      }
     }
     if (vaultExists) {
       const vaulted = await backend.read(vaultDir, vaultDir).catch(() => null);
@@ -128,6 +213,7 @@ export async function undoLiveSlotSwap(
           throw new Error("The personal Claude login could not be restored to ~/.claude");
         }
         result.personalRestored = true;
+        result.identityRestored = await restorePersonalIdentity(input, vaultDir);
       } else if (live) {
         input.log?.(
           "[accounts] the personal Claude login vault is empty; ~/.claude keeps the credential it holds",
@@ -200,6 +286,8 @@ export async function migrateAnthropicAccounts(
       claudeRootDir: claudeStore.rootDir,
       personalConfigDir: claudeStore.personalConfigDir,
       personalConfigDirEnv: claudeStore.personalConfigDirEnv,
+      managedProfileExists: async (profileId) =>
+        (await claudeStore.snapshot()).profiles.some((profile) => profile.id === profileId),
       ...(deps.backend ? { backend: deps.backend } : {}),
       log,
     });

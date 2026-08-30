@@ -223,9 +223,10 @@ async function main() {
   privateFile(path.join(managedDir(CLI.mismatch), ".credentials.json"), claudeCredential("mismatch", 1));
   privateFile(path.join(managedDir(CLI.mismatch), ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: UUID.mismatchCli, emailAddress: "shared@example.com" } }));
   privateFile(path.join(managedDir(CLI.lonely), ".credentials.json"), claudeCredential("lonely", 1));
-  // The personal login's identity, where Claude Code keeps it when
-  // CLAUDE_CONFIG_DIR is unset.
-  privateFile(path.join(HOME, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: UUID.personal, emailAddress: "me@example.com" } }));
+  // ~/.claude.json, where Claude Code keeps the identity when
+  // CLAUDE_CONFIG_DIR is unset. The selector swapped only the credential, so
+  // the file still names the managed account that last ran against ~/.claude.
+  privateFile(path.join(HOME, ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true, oauthAccount: { accountUuid: UUID.swapped, emailAddress: "swapped@example.com" } }));
   // A retired vault from a previous (crashed) launch is swept.
   privateFile(path.join(claudeRoot, ".personal.retired-deadbeef", ".credentials.json"), claudeCredential("old", 1));
 
@@ -321,6 +322,13 @@ async function main() {
   assert.ok(fs.existsSync(report.liveSlot.retiredVaultDir));
   assert.equal((await readSlot(personalDir, null)).accessToken, "personal-access-4");
   assert.equal((await readSlot(managedDir(CLI.swapped), managedDir(CLI.swapped))).accessToken, "swapped-access-9");
+  // The personal identity came back with the credential, and the rest of
+  // ~/.claude.json survived the merge.
+  assert.equal(report.liveSlot.identityRestored, true);
+  const homeConfig = JSON.parse(fs.readFileSync(path.join(HOME, ".claude.json"), "utf8"));
+  assert.equal(homeConfig.oauthAccount.accountUuid, UUID.personal);
+  assert.equal(homeConfig.oauthAccount.emailAddress, "me@example.com");
+  assert.equal(homeConfig.hasCompletedOnboarding, true);
   pass("the live-slot swap is undone and the fresher token stays with its account");
 
   // Pairing: fingerprint, then email when a fingerprint verdict is impossible,
@@ -417,6 +425,116 @@ async function main() {
   assert.ok(logs.some((line) => line.includes('step "clear-dangling-links" failed')));
   H.migration.resetAnthropicAccountMigrationForTests();
   pass("the ready gate resolves after a failed step");
+
+  // undoLiveSlotSwap on its own: an unreadable ~/.claude defers the whole
+  // restore (marker and vault kept, nothing written), and a stale marker
+  // naming a profile the registry no longer has copies its token nowhere.
+  // Each case gets its own Keychain map: the personal slot's base service is
+  // one item per Keychain, and the fixture above already holds it.
+  const isolatedBackend = () => {
+    const items = new Map();
+    const isolated = {
+      async read(configDir, configDirEnv) {
+        return (
+          items.get(H.credentials.claudeCliKeychainService(configDirEnv)) ??
+          H.credentials.readCredentialFile(H.credentials.claudeCredentialFile(configDir))
+        );
+      },
+      async write(configDir, configDirEnv, credential) {
+        await H.credentials.atomicWriteCredential(
+          H.credentials.claudeCredentialFile(configDir),
+          credential,
+        );
+        items.set(H.credentials.claudeCliKeychainService(configDirEnv), credential);
+      },
+      async clear(configDir, configDirEnv) {
+        items.delete(H.credentials.claudeCliKeychainService(configDirEnv));
+        fs.rmSync(H.credentials.claudeCredentialFile(configDir), { force: true });
+      },
+    };
+    return { items, isolated };
+  };
+  {
+    const { isolated } = isolatedBackend();
+    const readIsolated = async (configDir, configDirEnv) =>
+      H.credentials.parseClaudeCredentialRecord(await isolated.read(configDir, configDirEnv));
+    const root = path.join(TMP, "undo-deferred");
+    const personal = path.join(TMP, "undo-deferred-home", ".claude");
+    privateDir(personal);
+    privateFile(path.join(root, "active-auth.json"), JSON.stringify({ version: 1, profileId: CLI.swapped }));
+    privateFile(path.join(root, "personal", ".credentials.json"), claudeCredential("vaulted", 1));
+    privateFile(path.join(personal, ".credentials.json"), claudeCredential("live", 9));
+    const locked = {
+      ...isolated,
+      async read(configDir, configDirEnv) {
+        if (configDir === personal) throw new Error("Claude Code credential could not be read from Keychain");
+        return isolated.read(configDir, configDirEnv);
+      },
+    };
+    const deferredLogs = [];
+    const deferred = await H.migration.undoLiveSlotSwap({
+      claudeRootDir: root,
+      personalConfigDir: personal,
+      personalConfigDirEnv: null,
+      backend: locked,
+      managedProfileExists: async () => true,
+      log: (message) => deferredLogs.push(message),
+    });
+    assert.match(deferred.deferred, /Keychain/);
+    assert.equal(deferred.restoredFrom, null);
+    assert.equal(deferred.personalRestored, false);
+    assert.ok(fs.existsSync(path.join(root, "active-auth.json")), "the marker stays for the next launch");
+    assert.ok(fs.existsSync(path.join(root, "personal", ".credentials.json")), "the vault stays too");
+    assert.equal(fs.existsSync(managedDir(CLI.swapped).replace(claudeRoot, root)), false);
+    assert.equal((await readIsolated(personal, null)).accessToken, "live-access-9", "~/.claude is untouched");
+    assert.ok(deferredLogs.some((line) => line.includes("kept for the next launch")));
+    // Next launch, Keychain readable: the restore completes.
+    const completed = await H.migration.undoLiveSlotSwap({
+      claudeRootDir: root,
+      personalConfigDir: personal,
+      personalConfigDirEnv: null,
+      backend: isolated,
+      managedProfileExists: async () => true,
+    });
+    assert.equal(completed.restoredFrom, CLI.swapped);
+    assert.equal(completed.personalRestored, true);
+    assert.equal(fs.existsSync(path.join(root, "active-auth.json")), false);
+    assert.equal((await readIsolated(personal, null)).accessToken, "vaulted-access-1");
+    assert.equal(
+      (await readIsolated(path.join(root, "accounts", CLI.swapped), path.join(root, "accounts", CLI.swapped))).accessToken,
+      "live-access-9",
+      "the fresher token went back to its own directory",
+    );
+    pass("an unreadable ~/.claude defers the live-slot restore instead of losing the token");
+  }
+  {
+    const { items, isolated } = isolatedBackend();
+    const readIsolated = async (configDir, configDirEnv) =>
+      H.credentials.parseClaudeCredentialRecord(await isolated.read(configDir, configDirEnv));
+    const root = path.join(TMP, "undo-stale");
+    const personal = path.join(TMP, "undo-stale-home", ".claude");
+    privateDir(personal);
+    privateFile(path.join(root, "active-auth.json"), JSON.stringify({ version: 1, profileId: CLI.gone }));
+    privateFile(path.join(root, "personal", ".credentials.json"), claudeCredential("vaulted", 2));
+    privateFile(path.join(personal, ".credentials.json"), claudeCredential("orphaned", 5));
+    const staleLogs = [];
+    const stale = await H.migration.undoLiveSlotSwap({
+      claudeRootDir: root,
+      personalConfigDir: personal,
+      personalConfigDirEnv: null,
+      backend: isolated,
+      managedProfileExists: async (id) => id !== CLI.gone,
+      log: (message) => staleLogs.push(message),
+    });
+    assert.equal(stale.restoredFrom, null);
+    assert.equal(stale.personalRestored, true);
+    assert.equal(fs.existsSync(path.join(root, "accounts", CLI.gone)), false, "no orphan directory is conjured");
+    assert.equal(items.has(H.credentials.claudeCliKeychainService(path.join(root, "accounts", CLI.gone))), false);
+    assert.equal(fs.existsSync(path.join(root, "active-auth.json")), false);
+    assert.equal((await readIsolated(personal, null)).accessToken, "vaulted-access-2");
+    assert.ok(staleLogs.some((line) => line.includes("no longer exists")));
+    pass("a stale marker naming a deleted profile copies its token nowhere");
+  }
 
   // No file with group/other bits anywhere under the Codara home.
   const offending = [];
