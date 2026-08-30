@@ -81,11 +81,6 @@ import {
   finalizeCodexCliLogout,
 } from "./codex-cli-auth-selector";
 import {
-  activateClaudeCliAccount,
-  ensureClaudeCliAuthVault,
-  finalizeClaudeCliLogout,
-} from "./claude-cli-auth-selector";
-import {
   activateGrokCliAccount,
   ensureGrokCliAuthVault,
   finalizeGrokCliLogout,
@@ -538,16 +533,11 @@ export interface NativeCliAccountServiceOptions {
   codexAuthSelector?: (profileId: string) => Promise<unknown>;
   /** Test seam for the one-time migration of the historical personal login. */
   codexAuthVaultInitializer?: () => Promise<unknown>;
-  /** Test seam. Production swaps Claude OAuth credentials in the official slot. */
-  claudeAuthSelector?: (profileId: string) => Promise<unknown>;
-  /** Test seam for preserving the historical Claude Code login. */
-  claudeAuthVaultInitializer?: () => Promise<unknown>;
   /** Test seam. Production swaps only auth.json in the official Grok home. */
   grokAuthSelector?: (profileId: string) => Promise<unknown>;
   /** Test seam for preserving the historical Grok login. */
   grokAuthVaultInitializer?: () => Promise<unknown>;
   /** Test seams for removing a logged-out credential from the live slot. */
-  claudeAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
   codexAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
   grokAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
   /** Close every live session for a runtime before its account changes. */
@@ -576,11 +566,8 @@ export class NativeCliAccountService {
   private readonly now: () => number;
   private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
   private readonly codexAuthVaultInitializer: () => Promise<unknown>;
-  private readonly claudeAuthSelector: (profileId: string) => Promise<unknown>;
-  private readonly claudeAuthVaultInitializer: () => Promise<unknown>;
   private readonly grokAuthSelector: (profileId: string) => Promise<unknown>;
   private readonly grokAuthVaultInitializer: () => Promise<unknown>;
-  private readonly claudeAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
   private readonly codexAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
   private readonly grokAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
   private sessionShutdown: NativeCliAccountSessionShutdown;
@@ -646,22 +633,6 @@ export class NativeCliAccountService {
               await activateCodexCliAccount(this.codexStore, defaultProfileId);
             }
           });
-    this.claudeAuthSelector =
-      options.claudeAuthSelector ??
-      (options.claudeStore
-        ? async () => undefined
-        : (profileId) => activateClaudeCliAccount(this.claudeStore, profileId));
-    this.claudeAuthVaultInitializer =
-      options.claudeAuthVaultInitializer ??
-      (options.claudeStore
-        ? async () => undefined
-        : async () => {
-            const active = await ensureClaudeCliAuthVault(this.claudeStore);
-            const { defaultProfileId } = await this.claudeStore.snapshot();
-            if (active !== defaultProfileId) {
-              await activateClaudeCliAccount(this.claudeStore, defaultProfileId);
-            }
-          });
     this.grokAuthSelector =
       options.grokAuthSelector ??
       (options.grokStore
@@ -678,11 +649,6 @@ export class NativeCliAccountService {
               await activateGrokCliAccount(this.grokStore, defaultProfileId);
             }
           });
-    this.claudeAuthLogoutFinalizer =
-      options.claudeAuthLogoutFinalizer ??
-      (options.claudeStore
-        ? async () => undefined
-        : (profileId) => finalizeClaudeCliLogout(this.claudeStore, profileId));
     this.codexAuthLogoutFinalizer =
       options.codexAuthLogoutFinalizer ??
       (options.codexStore
@@ -785,10 +751,10 @@ export class NativeCliAccountService {
         try {
           configDir = profile.managed
             ? claudeCliManagedProfileConfigDir(this.claudeStore.rootDir, profile.id)
-            : this.claudeStore.personalProfileConfigDir;
+            : this.claudeStore.personalConfigDir;
           configDirEnv = profile.managed
             ? configDir
-            : this.claudeStore.personalProfileConfigDirEnv;
+            : this.claudeStore.personalConfigDirEnv;
         } catch {
           return;
         }
@@ -874,7 +840,6 @@ export class NativeCliAccountService {
   ): Promise<NativeCliAccountRuntimeInspection> {
     try {
       if (runtime === "claude") {
-        await this.claudeAuthVaultInitializer();
         const inspection = await this.claudeStore.inspect();
         const identities = await this.claudeAccountIdentities(
           inspection.profiles,
@@ -1163,9 +1128,8 @@ export class NativeCliAccountService {
       }
       if (before.inspection.defaultProfileId === profileId) {
         try {
-          if (runtime === "claude") await this.claudeAuthSelector(profileId);
-          else if (runtime === "grok") await this.grokAuthSelector(profileId);
-          else await this.codexAuthSelector(profileId);
+          if (runtime === "grok") await this.grokAuthSelector(profileId);
+          else if (runtime === "codex") await this.codexAuthSelector(profileId);
         } catch (error) {
           throw this.sanitizeStoreError(runtime, profileId, error);
         }
@@ -1195,17 +1159,6 @@ export class NativeCliAccountService {
         const previousProfileId = before.inspection.defaultProfileId;
         if (runtime === "claude") {
           await this.claudeStore.setDefaultProfile(profileId);
-          try {
-            await this.claudeAuthSelector(profileId);
-          } catch (error) {
-            await this.claudeStore
-              .setDefaultProfile(previousProfileId)
-              .catch(() => undefined);
-            await this.claudeAuthSelector(previousProfileId).catch(
-              () => undefined,
-            );
-            throw error;
-          }
         } else if (runtime === "grok") {
           await this.grokStore.setDefaultProfile(profileId);
           try {
@@ -1578,9 +1531,7 @@ export class NativeCliAccountService {
         );
       }
       this.assertProcessSucceeded("logout", runtime, profileId, result);
-      if (runtime === "claude") {
-        await this.claudeAuthLogoutFinalizer(profileId);
-      } else if (runtime === "grok") {
+      if (runtime === "grok") {
         await this.grokAuthLogoutFinalizer(profileId);
       } else {
         await this.codexAuthLogoutFinalizer(profileId);

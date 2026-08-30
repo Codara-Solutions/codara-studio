@@ -133,67 +133,6 @@ async function main() {
     fs.rmSync(grokFixture, { recursive: true, force: true });
   }
 
-  const C = await loadContract(source("claude-cli-auth-selector.ts"));
-  const claudeFixture = fs.mkdtempSync(
-    path.join(os.tmpdir(), "codara-claude-auth-test-"),
-  );
-  try {
-    const store = {
-      rootDir: path.join(claudeFixture, ".codarastudio", "claude-cli"),
-      personalConfigDir: path.join(claudeFixture, ".claude"),
-      personalConfigDirEnv: null,
-    };
-    const managedDir = path.join(store.rootDir, "accounts", PROFILE);
-    const credential = (name) =>
-      JSON.stringify({
-        claudeAiOauth: {
-          accessToken: `${name}_ACCESS`,
-          refreshToken: `${name}_REFRESH`,
-        },
-      });
-    const slots = new Map([
-      ["personal", credential("CLAUDE_PERSONAL")],
-      [managedDir, credential("CLAUDE_MANAGED")],
-    ]);
-    const backend = {
-      async read(_configDir, configDirEnv) {
-        return slots.get(configDirEnv || "personal") || null;
-      },
-      async write(_configDir, configDirEnv, value) {
-        slots.set(configDirEnv || "personal", value);
-      },
-      async clear(_configDir, configDirEnv) {
-        slots.delete(configDirEnv || "personal");
-      },
-    };
-
-    assert.equal(await C.ensureClaudeCliAuthVault(store, backend), "personal");
-    assert.equal(
-      await C.activateClaudeCliAccount(store, PROFILE, backend),
-      "personal",
-    );
-    assert.equal(
-      slots.get("personal"),
-      credential("CLAUDE_MANAGED"),
-      "the selected Claude credential becomes the one official live login",
-    );
-    slots.set("personal", credential("CLAUDE_MANAGED_REFRESHED"));
-    assert.equal(
-      await C.activateClaudeCliAccount(store, "personal", backend),
-      PROFILE,
-    );
-    assert.equal(
-      slots.get(managedDir),
-      credential("CLAUDE_MANAGED_REFRESHED"),
-      "a refreshed live credential is saved back into its account slot",
-    );
-    assert.equal(slots.get("personal"), credential("CLAUDE_PERSONAL"));
-    await C.finalizeClaudeCliLogout(store, "personal", backend);
-    assert.equal(slots.has("personal"), false);
-  } finally {
-    fs.rmSync(claudeFixture, { recursive: true, force: true });
-  }
-
   console.log("Native CLI auth-only selector contracts passed");
 }
 

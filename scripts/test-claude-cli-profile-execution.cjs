@@ -320,6 +320,21 @@ async function main() {
     /not connected/i,
   );
 
+  // Sweeping releases only terminal-owned leases whose pane is gone; Cora run
+  // owners are outside the prefix and survive even when absent from the set.
+  const releaseSwept = leases.acquire(PROFILE_ID, "terminal:pane-gone");
+  leases.acquire(OTHER_ID, "terminal:pane-live");
+  leases.acquire(PROFILE_ID, "manager:run-2");
+  assert.deepEqual(
+    leases.sweep(new Set(["terminal:pane-live"])),
+    ["terminal:pane-gone"],
+  );
+  assert.deepEqual(leases.owners(PROFILE_ID), ["manager:run-2"]);
+  assert.equal(leases.isLeased(OTHER_ID), true);
+  releaseSwept();
+  assert.deepEqual(leases.owners(PROFILE_ID), ["manager:run-2"], "a swept release is a no-op");
+  leases.clear();
+
   leases.acquire("personal", "legacy-session");
   assert.equal(leases.isLeased("personal"), true);
   leases.clear();

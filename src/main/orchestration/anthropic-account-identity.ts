@@ -53,6 +53,24 @@ function accountUuidFrom(parsed: unknown): string | undefined {
   return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
 }
 
+function organizationUuidFrom(parsed: unknown): string | undefined {
+  if (!isRecord(parsed)) return undefined;
+  const organization = parsed.organization;
+  const raw = isRecord(organization) ? organization.uuid : undefined;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
+}
+
+/**
+ * Main-process-only superset of the identity: the raw account uuid (lowercased)
+ * and organization uuid, which the unified account service writes into a
+ * managed CLAUDE_CONFIG_DIR's .claude.json as Claude Code's own `oauthAccount`
+ * block. Neither uuid ever crosses IPC.
+ */
+export interface AnthropicAccountProfile extends NativeCliAccountIdentity {
+  accountUuid?: string;
+  organizationUuid?: string;
+}
+
 /**
  * Anthropic reports the address as `account.email_address`; older responses
  * have used `account.email`, so both spellings are accepted.
@@ -77,6 +95,18 @@ export async function readAnthropicAccountIdentity(
   accessToken: string,
   options: { fetchImpl?: FetchLike; timeoutMs?: number } = {},
 ): Promise<NativeCliAccountIdentity> {
+  const profile = await readAnthropicAccountProfile(accessToken, options);
+  return {
+    ...(profile.fingerprint ? { fingerprint: profile.fingerprint } : {}),
+    ...(profile.email ? { email: profile.email } : {}),
+  };
+}
+
+/** The identity plus the raw uuids, for main-process consumers only. */
+export async function readAnthropicAccountProfile(
+  accessToken: string,
+  options: { fetchImpl?: FetchLike; timeoutMs?: number } = {},
+): Promise<AnthropicAccountProfile> {
   if (typeof accessToken !== "string" || accessToken.trim().length === 0) {
     return {};
   }
@@ -100,11 +130,16 @@ export async function readAnthropicAccountIdentity(
     if (body.length > PROFILE_MAX_BYTES) return {};
     const parsed = JSON.parse(body) as unknown;
     const accountUuid = accountUuidFrom(parsed);
+    const organizationUuid = organizationUuidFrom(parsed);
     const email = accountEmailFrom(parsed);
     return {
       ...(accountUuid
-        ? { fingerprint: anthropicAccountFingerprint(accountUuid) }
+        ? {
+            fingerprint: anthropicAccountFingerprint(accountUuid),
+            accountUuid: accountUuid.trim().toLowerCase(),
+          }
         : {}),
+      ...(organizationUuid ? { organizationUuid } : {}),
       ...(email ? { email } : {}),
     };
   } catch {

@@ -148,6 +148,8 @@ async function main() {
         managed: false,
         isDefault: true,
         connected: true,
+        expired: false,
+        canRefresh: false,
         inUse: false,
       },
     ],
@@ -745,6 +747,165 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
     );
   }
 
+  // The production checker is a token-blind read of the credential slot: a
+  // refresh token means connected, the raw expiry rides along so a lapsed
+  // access token reads as "refreshing" rather than "signed out", and a managed
+  // profile never spawns `claude`. The Keychain half is stubbed by a backend.
+  {
+    const slots = new Map();
+    const backend = {
+      async read(configDir) {
+        return slots.get(configDir) ?? null;
+      },
+      async write(configDir, _env, credential) {
+        slots.set(configDir, credential);
+      },
+    };
+    const managedDir = path.join(TMP, "credential-checker", IDS[1]);
+    privateDir(managedDir);
+    const probe = (configDir, managed) => ({
+      profileId: managed ? IDS[1] : "personal",
+      managed,
+      configDir,
+      configDirEnv: managed ? configDir : null,
+    });
+    let fallbackCalls = 0;
+    const options = {
+      backend,
+      personalFallback: () => {
+        fallbackCalls += 1;
+        return { connected: true };
+      },
+    };
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe(managedDir, true), options),
+      { connected: false, reason: "missing" },
+    );
+    slots.set(
+      managedDir,
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "MUST_NOT_LEAK",
+          refreshToken: "MUST_NOT_LEAK_REFRESH",
+          expiresAt: 1_800_000_000_000,
+          scopes: ["user:inference"],
+        },
+      }),
+    );
+    const connected = await mod.claudeCredentialAuthChecker(probe(managedDir, true), options);
+    assert.deepEqual(connected, {
+      connected: true,
+      expiresAt: 1_800_000_000_000,
+      canRefresh: true,
+    });
+    assert.equal(JSON.stringify(connected).includes("MUST_NOT_LEAK"), false);
+    slots.set(
+      managedDir,
+      JSON.stringify({ claudeAiOauth: { accessToken: "only-access", expiresAt: 1 } }),
+    );
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe(managedDir, true), options),
+      { connected: true, expiresAt: 1, canRefresh: false },
+    );
+    slots.set(managedDir, "not json at all");
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe(managedDir, true), options),
+      { connected: false, reason: "unavailable" },
+    );
+    assert.equal(fallbackCalls, 0, "a managed profile never consults the fallback");
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(
+        probe(path.join(TMP, "credential-checker", "absent"), true),
+        options,
+      ),
+      { connected: false, reason: "missing" },
+    );
+    // Personal with an empty slot asks the fallback once and caches the verdict.
+    const personalDir = path.join(TMP, "credential-checker", "personal");
+    privateDir(personalDir);
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe(personalDir, false), options),
+      { connected: true },
+    );
+    await mod.claudeCredentialAuthChecker(probe(personalDir, false), options);
+    assert.equal(fallbackCalls, 1);
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe(personalDir, false), {
+        backend,
+        personalFallback: null,
+      }),
+      { connected: false, reason: "missing" },
+    );
+    // A store built on the credential checker reports expiry per card.
+    const expiryStore = new mod.ClaudeCliAccountProfileStore(
+      path.join(TMP, "credential-checker", "store"),
+      {
+        personalConfigDir: personalDir,
+        personalConfigDirEnv: null,
+        idFactory: () => IDS[2],
+        now: () => new Date(2_000_000_000_000),
+        authChecker: (input) =>
+          mod.claudeCredentialAuthChecker(input, { backend, personalFallback: null }),
+      },
+    );
+    const lapsed = await expiryStore.createProfile({ label: "Lapsed" });
+    const lapsedDir = mod.claudeCliManagedProfileConfigDir(expiryStore.rootDir, lapsed.profile.id);
+    slots.set(
+      lapsedDir,
+      JSON.stringify({
+        claudeAiOauth: { accessToken: "a", refreshToken: "r", expiresAt: 1_999_999_999_000 },
+      }),
+    );
+    const lapsedRow = (await expiryStore.inspect()).profiles.find((row) => row.id === lapsed.profile.id);
+    assert.equal(lapsedRow.connected, true);
+    assert.equal(lapsedRow.expired, true);
+    assert.equal(lapsedRow.canRefresh, true);
+  }
+
+  // Codara records the account behind a managed directory the way Claude Code
+  // does after its own login, merging into the seeded .claude.json.
+  {
+    const identityDir = path.join(TMP, "identity", IDS[3]);
+    privateDir(identityDir);
+    fs.writeFileSync(
+      path.join(identityDir, ".claude.json"),
+      JSON.stringify({ hasCompletedOnboarding: true, numStartups: 3 }),
+      { mode: 0o600 },
+    );
+    await mod.writeManagedClaudeIdentity(identityDir, {
+      accountUuid: "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+      emailAddress: "someone@example.com",
+      organizationUuid: "org-1",
+    });
+    const written = JSON.parse(fs.readFileSync(path.join(identityDir, ".claude.json"), "utf8"));
+    assert.deepEqual(written, {
+      hasCompletedOnboarding: true,
+      numStartups: 3,
+      oauthAccount: {
+        accountUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        emailAddress: "someone@example.com",
+        organizationUuid: "org-1",
+      },
+    });
+    if (process.platform !== "win32") {
+      assert.equal(mode(path.join(identityDir, ".claude.json")), 0o600);
+    }
+    await mod.writeManagedClaudeIdentity(identityDir, { accountUuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" });
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(identityDir, ".claude.json"), "utf8")).oauthAccount.emailAddress,
+      "someone@example.com",
+      "a rewrite without an address keeps the one already recorded",
+    );
+    const freshDir = path.join(TMP, "identity", IDS[4]);
+    privateDir(freshDir);
+    await mod.writeManagedClaudeIdentity(freshDir, { accountUuid: "x" });
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(path.join(freshDir, ".claude.json"), "utf8")),
+      { oauthAccount: { accountUuid: "x" } },
+    );
+    await rejects(() => mod.writeManagedClaudeIdentity(freshDir, { accountUuid: " " }), /account uuid/i);
+  }
+
   const source = fs.readFileSync(
     path.join(
       ROOT,
@@ -763,7 +924,7 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
   assert.equal(/auth\\.json|\bfs\./i.test(checkerSource), false);
 
   console.log(
-    "PASS native Claude account store: private metadata, CLI-only token-blind auth, path safety, defaults, staged deletion recovery, allowlisted first-run seeding, and leak-free projection",
+    "PASS native Claude account store: private metadata, token-blind credential status, path safety, defaults, staged deletion recovery, allowlisted first-run seeding, managed identity, and leak-free projection",
   );
 }
 

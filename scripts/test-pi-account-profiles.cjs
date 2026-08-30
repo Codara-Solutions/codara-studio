@@ -69,6 +69,7 @@ async function main() {
   const {
     PI_ACCOUNT_PROFILES_FILE,
     PiAccountProfileRegistry,
+    nextDefaultAfterDeletion,
     rankPiAccountCandidates,
     selectPiAccountCandidate,
   } = require(outfile);
@@ -406,6 +407,163 @@ async function main() {
       ),
     "TypeError",
   );
+
+  // The Claude Code link column: an anthropic row may name its terminal half
+  // ("personal" for the user's own ~/.claude, a managed profile id otherwise).
+  // The link is followed, never inferred, so the file must refuse every shape
+  // that would let the credential mirror copy tokens between two accounts.
+  const CLI_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const CLI_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const linkRoot = path.join(TMP, "links");
+  const linkIds = sequence([IDS.a, IDS.b, IDS.c, IDS.d]);
+  const links = new PiAccountProfileRegistry(linkRoot, {
+    idFactory: linkIds,
+    now: () => new Date("2026-08-30T08:00:00.000Z"),
+  });
+  const linkedAtRegister = await links.registerProfile({
+    provider: "anthropic",
+    label: "Account 1",
+    cliProfileId: "personal",
+  });
+  check(
+    "a link given at registration round-trips through the file",
+    linkedAtRegister.profile.cliProfileId === "personal" &&
+      (await links.getProfile(IDS.a))?.cliProfileId === "personal" &&
+      (await links.accountOneProfile())?.id === IDS.a,
+  );
+  const unlinked = await links.registerProfile({ provider: "anthropic", label: "Work" });
+  const recorded = await links.recordCliProfileId(unlinked.profile.id, CLI_A);
+  check(
+    "recordCliProfileId pairs a row and profileForCliProfileId finds it",
+    recorded.cliProfileId === CLI_A &&
+      (await links.profileForCliProfileId(CLI_A))?.id === IDS.b &&
+      (await links.profileForCliProfileId(CLI_B)) === undefined,
+  );
+  check(
+    "recording the same link again is a no-op",
+    (await links.recordCliProfileId(IDS.b, CLI_A)).updatedAt === recorded.updatedAt,
+  );
+  const third = await links.registerProfile({ provider: "anthropic", label: "Third" });
+  await expectThrows(
+    "a link held by another row cannot be recorded on a second one",
+    () => links.recordCliProfileId(third.profile.id, CLI_A),
+    "PiAccountProfileLinkCollisionError",
+  );
+  await expectThrows(
+    "a second personal link is refused",
+    () => links.recordCliProfileId(third.profile.id, "personal"),
+    "PiAccountProfileLinkCollisionError",
+  );
+  await expectThrows(
+    "registering with a link another row holds is refused",
+    () =>
+      links.registerProfile({
+        provider: "anthropic",
+        label: "Duplicate link",
+        cliProfileId: CLI_A,
+      }),
+    "PiAccountProfileLinkCollisionError",
+  );
+  await expectThrows(
+    "a malformed link is a TypeError",
+    () => links.recordCliProfileId(third.profile.id, "Personal"),
+    "TypeError",
+  );
+  const codexRow = await links.registerProfile({ provider: "openai-codex", label: "Codex" });
+  await expectThrows(
+    "only anthropic rows may link a Claude Code profile",
+    () => links.recordCliProfileId(codexRow.profile.id, CLI_B),
+    "TypeError",
+  );
+  await expectThrows(
+    "registering a non-anthropic row with a link is refused",
+    () => links.registerProfile({ provider: "xai", label: "Grok", cliProfileId: CLI_B }),
+    "TypeError",
+  );
+  const cleared = await links.recordCliProfileId(IDS.b, null);
+  check(
+    "null clears a link and leaves the rest of the row intact",
+    cleared.cliProfileId === undefined &&
+      cleared.label === "Work" &&
+      !("cliProfileId" in JSON.parse(fs.readFileSync(links.filePath, "utf8")).profiles[1]),
+    JSON.stringify(cleared),
+  );
+  const persistedLinks = JSON.parse(fs.readFileSync(links.filePath, "utf8"));
+  check(
+    "the persisted link column carries only the allowed values",
+    persistedLinks.profiles.every(
+      (profile) =>
+        profile.cliProfileId === undefined ||
+        profile.cliProfileId === "personal" ||
+        /^[0-9a-f-]{36}$/.test(profile.cliProfileId),
+    ),
+  );
+
+  // Deleting the Anthropic default lands on Account 1 even when an older row
+  // exists; other providers keep the oldest-row rule.
+  await links.recordCliProfileId(IDS.b, CLI_A);
+  await links.setDefaultProfile("anthropic", IDS.c);
+  const promoted = await links.deleteProfile(IDS.c);
+  check(
+    "deleting the anthropic default promotes the Account 1 row over older rows",
+    promoted.snapshot.defaults.anthropic === IDS.a,
+    JSON.stringify(promoted.snapshot.defaults),
+  );
+  check(
+    "nextDefaultAfterDeletion falls back to the oldest row without an Account 1",
+    nextDefaultAfterDeletion(
+      [
+        { id: IDS.c, provider: "anthropic", label: "c", createdAt: "2026-01-02T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" },
+        { id: IDS.d, provider: "anthropic", label: "d", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      "anthropic",
+    ) === IDS.d,
+  );
+
+  for (const [name, profiles, expectedName] of [
+    [
+      "two rows sharing one link are a corrupt registry",
+      [
+        { id: IDS.e, provider: "anthropic", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: CLI_B },
+        { id: IDS.f, provider: "anthropic", label: "Two", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: CLI_B },
+      ],
+      "PiAccountProfilesCorruptError",
+    ],
+    [
+      "two personal links are a corrupt registry",
+      [
+        { id: IDS.e, provider: "anthropic", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+        { id: IDS.f, provider: "anthropic", label: "Two", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+      ],
+      "PiAccountProfilesCorruptError",
+    ],
+    [
+      "a link on a non-anthropic row is a corrupt registry",
+      [
+        { id: IDS.e, provider: "openai-codex", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: CLI_B },
+      ],
+      "PiAccountProfilesCorruptError",
+    ],
+    [
+      "an uppercase link is a corrupt registry",
+      [
+        { id: IDS.e, provider: "anthropic", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: CLI_B.toUpperCase() },
+      ],
+      "PiAccountProfilesCorruptError",
+    ],
+  ]) {
+    const corruptLinkRoot = path.join(TMP, `corrupt-link-${IDS.e}-${name.length}`);
+    fs.mkdirSync(corruptLinkRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(corruptLinkRoot, PI_ACCOUNT_PROFILES_FILE),
+      JSON.stringify({ version: 1, profiles, defaults: {} }),
+    );
+    await expectThrows(
+      name,
+      () => new PiAccountProfileRegistry(corruptLinkRoot).snapshot(),
+      expectedName,
+    );
+  }
 
   fs.rmSync(TMP, { recursive: true, force: true });
   if (failures > 0) {

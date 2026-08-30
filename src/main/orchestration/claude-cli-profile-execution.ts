@@ -148,6 +148,25 @@ export class ClaudeCliProfileLeaseRegistry {
     return this.ownerToProfile.get(ownerId)?.profileId ?? null;
   }
 
+  /**
+   * Release every lease whose owner carries `ownerPrefix` but is not in the
+   * live set. A terminal that died without reaching its exit handler would
+   * otherwise pin its account forever; owners outside the prefix (Cora runs)
+   * are never touched because their liveness is tracked elsewhere.
+   */
+  sweep(liveOwnerIds: ReadonlySet<string>, ownerPrefix = "terminal:"): string[] {
+    const released: string[] = [];
+    for (const [owner, lease] of [...this.ownerToProfile.entries()]) {
+      if (!owner.startsWith(ownerPrefix) || liveOwnerIds.has(owner)) continue;
+      this.ownerToProfile.delete(owner);
+      const owners = this.profileToOwners.get(lease.profileId);
+      owners?.delete(owner);
+      if (owners?.size === 0) this.profileToOwners.delete(lease.profileId);
+      released.push(owner);
+    }
+    return released.sort();
+  }
+
   async runWhileUnleased<T>(
     rawProfileId: ClaudeCliProfileId,
     operation: () => Promise<T>,
