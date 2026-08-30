@@ -12,10 +12,96 @@
   unset _spark_user_zdotdir
 }
 
-# Worker sessions (Claude / Codex hosted in zsh) set this var so the
-# integration is skipped: its OSC writes confuse Ink-based TUIs that take
-# over the alternate screen.
+# Follow the Active account. A plain user pane carries
+# SPARK_FOLLOW_ACTIVE_ACCOUNT=1 and main rewrites
+# $SPARK_HOME_DIR/shell/active-cli-env on every account switch. The file is
+# data, never sourced or evaluated: only CLAUDE_CONFIG_DIR and GROK_HOME lines
+# whose value sits under this Codara home's managed accounts root are
+# honored, and a variable is only ever written when it is unset or itself
+# inside that root (a value the user exported elsewhere is never touched).
+# Cost per prompt is one builtin read of the header line: no fork, no stat,
+# and an unchanged revision returns before anything else is parsed. Every
+# failure (missing file, unreadable, bad header) is silent and leaves the
+# environment alone. Builtins only, no subshell.
+#
+# Runs from precmd AND preexec. precmd alone is too late for the common
+# case: the prompt is already drawn when the user switches accounts in
+# Settings, so a `claude` typed next would still start under the old
+# selector and only the command after it would follow. preexec runs in the
+# shell right before the fork, so the switch lands on that very command.
+_spark_follow_active_account() {
+  emulate -L zsh
+  [[ "$SPARK_FOLLOW_ACTIVE_ACCOUNT" = "1" ]] || return 0
+  local spark_home="${SPARK_HOME_DIR:-$HOME/.codarastudio}"
+  local file="$spark_home/shell/active-cli-env"
+  local word version rev
+  { IFS=' ' read -r word version rev < "$file"; } 2>/dev/null || return 0
+  [[ "$word" = "codara-active-cli-env" ]] || return 0
+  [[ -n "$rev" ]] || return 0
+  [[ "$rev" = "$__SPARK_ACTIVE_ENV_REV" ]] && return 0
+  local claude_root="$spark_home/claude-cli/accounts/"
+  local grok_root="$spark_home/grok-cli/accounts/"
+  local line value claude="" grok=""
+  {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        CLAUDE_CONFIG_DIR=*|GROK_HOME=*) ;;
+        *) continue ;;
+      esac
+      value="${line#*=}"
+      case "$value" in
+        *[[:cntrl:]]*|*"/../"*|*"/..") continue ;;
+      esac
+      case "$line" in
+        CLAUDE_CONFIG_DIR=*)
+          case "$value" in "$claude_root"?*) claude="$value" ;; esac ;;
+        GROK_HOME=*)
+          case "$value" in "$grok_root"?*) grok="$value" ;; esac ;;
+      esac
+    done < "$file"
+  } 2>/dev/null || return 0
+  _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude"
+  _spark_follow_var GROK_HOME "$grok_root" "$grok"
+  __SPARK_ACTIVE_ENV_REV="$rev"
+}
+
+# Write one selector: only when the current value is unset, empty, or
+# already under the managed root (the spawn-time selector and a previous
+# hook write both look like that). An empty target means "personal", so
+# the variable is unset rather than exported empty.
+_spark_follow_var() {
+  emulate -L zsh
+  local name="$1" root="$2" target="$3" current
+  current="${(P)name}"
+  if [[ -n "$current" ]]; then
+    case "$current" in
+      "$root"*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  if [[ -n "$target" ]]; then
+    [[ "$current" = "$target" ]] || export "$name=$target"
+  elif [[ -n "$current" ]]; then
+    unset "$name"
+  fi
+}
+
+# Worker and agent sessions (Claude / Codex hosted in zsh) set this var so
+# the prompt integration is skipped: its OSC writes confuse Ink-based TUIs
+# that take over the alternate screen. The account-follow hook writes
+# nothing to the terminal, so a pane that carries the follow flag still
+# installs it: an agent pane's shell (the one left after `claude` exits)
+# follows the Active account exactly like a plain pane.
 if [[ "$SPARK_NO_SHELL_INTEGRATION" = "1" ]]; then
+  if [[ -z "$__SPARK_HOOKS_LOADED" && "$SPARK_FOLLOW_ACTIVE_ACCOUNT" = "1" ]]; then
+    __SPARK_HOOKS_LOADED=1
+    autoload -Uz add-zsh-hook 2>/dev/null
+    if (( $+functions[add-zsh-hook] )); then
+      add-zsh-hook precmd _spark_follow_active_account
+      add-zsh-hook preexec _spark_follow_active_account
+    fi
+    _spark_follow_active_account
+  fi
   return 0 2>/dev/null
 fi
 
@@ -40,80 +126,6 @@ if [[ -z "$__SPARK_HOOKS_LOADED" ]]; then
         *) printf '%%%02X' "'$byte" ;;
       esac
     done
-  }
-
-  # Follow the Active account. A plain user pane carries
-  # SPARK_FOLLOW_ACTIVE_ACCOUNT=1 and main rewrites
-  # $SPARK_HOME_DIR/shell/active-cli-env on every account switch. The file is
-  # data, never sourced or evaluated: only CLAUDE_CONFIG_DIR and GROK_HOME lines
-  # whose value sits under this Codara home's managed accounts root are
-  # honored, and a variable is only ever written when it is unset or itself
-  # inside that root (a value the user exported elsewhere is never touched).
-  # Cost per prompt is one builtin read of the header line: no fork, no stat,
-  # and an unchanged revision returns before anything else is parsed. Every
-  # failure (missing file, unreadable, bad header) is silent and leaves the
-  # environment alone. Builtins only, no subshell.
-  #
-  # Runs from precmd AND preexec. precmd alone is too late for the common
-  # case: the prompt is already drawn when the user switches accounts in
-  # Settings, so a `claude` typed next would still start under the old
-  # selector and only the command after it would follow. preexec runs in the
-  # shell right before the fork, so the switch lands on that very command.
-  _spark_follow_active_account() {
-    emulate -L zsh
-    [[ "$SPARK_FOLLOW_ACTIVE_ACCOUNT" = "1" ]] || return 0
-    local spark_home="${SPARK_HOME_DIR:-$HOME/.codarastudio}"
-    local file="$spark_home/shell/active-cli-env"
-    local word version rev
-    { IFS=' ' read -r word version rev < "$file"; } 2>/dev/null || return 0
-    [[ "$word" = "codara-active-cli-env" ]] || return 0
-    [[ -n "$rev" ]] || return 0
-    [[ "$rev" = "$__SPARK_ACTIVE_ENV_REV" ]] && return 0
-    local claude_root="$spark_home/claude-cli/accounts/"
-    local grok_root="$spark_home/grok-cli/accounts/"
-    local line value claude="" grok=""
-    {
-      while IFS= read -r line || [[ -n "$line" ]]; do
-        case "$line" in
-          CLAUDE_CONFIG_DIR=*|GROK_HOME=*) ;;
-          *) continue ;;
-        esac
-        value="${line#*=}"
-        case "$value" in
-          *[[:cntrl:]]*|*"/../"*|*"/..") continue ;;
-        esac
-        case "$line" in
-          CLAUDE_CONFIG_DIR=*)
-            case "$value" in "$claude_root"?*) claude="$value" ;; esac ;;
-          GROK_HOME=*)
-            case "$value" in "$grok_root"?*) grok="$value" ;; esac ;;
-        esac
-      done < "$file"
-    } 2>/dev/null || return 0
-    _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude"
-    _spark_follow_var GROK_HOME "$grok_root" "$grok"
-    __SPARK_ACTIVE_ENV_REV="$rev"
-  }
-
-  # Write one selector: only when the current value is unset, empty, or
-  # already under the managed root (the spawn-time selector and a previous
-  # hook write both look like that). An empty target means "personal", so
-  # the variable is unset rather than exported empty.
-  _spark_follow_var() {
-    emulate -L zsh
-    local name="$1" root="$2" target="$3" current
-    current="${(P)name}"
-    if [[ -n "$current" ]]; then
-      case "$current" in
-        "$root"*) ;;
-        *) return 0 ;;
-      esac
-    fi
-    if [[ -n "$target" ]]; then
-      [[ "$current" = "$target" ]] || export "$name=$target"
-    elif [[ -n "$current" ]]; then
-      unset "$name"
-    fi
   }
 
   _spark_precmd() {

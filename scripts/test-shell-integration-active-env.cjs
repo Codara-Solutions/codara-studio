@@ -294,8 +294,11 @@ async function noFlagScenario(shell) {
   pass(`${shell.label}: a shell without SPARK_FOLLOW_ACTIVE_ACCOUNT never changes`);
 }
 
-async function noIntegrationScenario(shell) {
-  writePointer({});
+// Agent panes: SPARK_NO_SHELL_INTEGRATION=1 skips every OSC emitter, but a
+// pane that carries the follow flag still follows the pointer (the shell
+// left behind after `claude` exits is where the user types the next one).
+async function followOnlyScenario(shell) {
+  writePointer({ claude: CLAUDE_A });
   const driver = new ShellDriver(
     shell.exe,
     shell.args,
@@ -307,16 +310,44 @@ async function noIntegrationScenario(shell) {
     }),
   );
   try {
-    driver.send(
-      "printf '@@hook:%s@@\\n' \"$(command -v _spark_follow_active_account >/dev/null 2>&1 && echo present || echo missing)\"",
-    );
-    const hook = await driver.waitFor(/@@hook:(present|missing)@@/);
-    assert.equal(hook[1], "missing", `${shell.label}: SPARK_NO_SHELL_INTEGRATION=1 must install no hook`);
-    assert.deepEqual(await driver.probe("i1"), { claude: CLAUDE_A, grok: "unset" });
+    assert.deepEqual(await driver.probe("f1"), { claude: CLAUDE_A, grok: "unset" });
+    writePointer({});
+    assert.deepEqual(await driver.probe("f2"), { claude: "unset", grok: "unset" }, `${shell.label}: agent pane follows to personal`);
+    writePointer({ claude: CLAUDE_B, grok: GROK_G });
+    assert.deepEqual(await driver.probe("f3"), { claude: CLAUDE_B, grok: GROK_G }, `${shell.label}: agent pane follows a managed switch`);
   } finally {
     await driver.close();
   }
-  pass(`${shell.label}: SPARK_NO_SHELL_INTEGRATION=1 installs nothing`);
+  assert.ok(
+    !/\x1b\]133|\x1b\]7;|\x1b\]633/.test(driver.output),
+    `${shell.label}: no OSC marker may be emitted with integration off:\n${driver.output}`,
+  );
+  pass(`${shell.label}: SPARK_NO_SHELL_INTEGRATION=1 with the follow flag follows without emitting markers`);
+}
+
+async function noIntegrationScenario(shell) {
+  writePointer({});
+  const driver = new ShellDriver(
+    shell.exe,
+    shell.args,
+    baseEnv({
+      ...shell.env,
+      SPARK_NO_SHELL_INTEGRATION: "1",
+      CLAUDE_CONFIG_DIR: CLAUDE_A,
+    }),
+  );
+  try {
+    assert.deepEqual(await driver.probe("i1"), { claude: CLAUDE_A, grok: "unset" });
+    writePointer({ claude: CLAUDE_B });
+    assert.deepEqual(await driver.probe("i2"), { claude: CLAUDE_A, grok: "unset" }, `${shell.label}: a worker pane never follows`);
+  } finally {
+    await driver.close();
+  }
+  assert.ok(
+    !/\x1b\]133|\x1b\]7;|\x1b\]633/.test(driver.output),
+    `${shell.label}: no OSC marker may be emitted with integration off:\n${driver.output}`,
+  );
+  pass(`${shell.label}: SPARK_NO_SHELL_INTEGRATION=1 without the flag installs no integration and never follows`);
 }
 
 // PowerShell: the hook lives in Global:Prompt; a driver script dot-sources the
@@ -435,6 +466,8 @@ function sourcePins() {
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(pty.includes('env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"'), "pty-manager exports the flag");
   assert.ok(pty.includes("delete env.SPARK_FOLLOW_ACTIVE_ACCOUNT"), "pty-manager strips an inherited flag");
+  assert.ok(pty.includes("agentShellFollowsActiveAccount: true"), "pty-manager flags user agent panes to follow once the agent exits");
+  assert.ok(pty.includes("`--rcfile ${shQuote(rcfile)} -i`"), "a bash agent pane's post-agent shell loads the bundled rcfile");
   assert.ok(pty.includes("env.SPARK_HOME_DIR = codaraHome()"), "pty-manager exports the home the hook reads");
   // The hooks compare byte-exact prefixes against $SPARK_HOME_DIR, and the
   // pointer values are built from the resolved home: main must export a
@@ -450,6 +483,7 @@ async function main() {
   for (const shell of SHELLS) {
     await followScenario(shell);
     await noFlagScenario(shell);
+    await followOnlyScenario(shell);
     await noIntegrationScenario(shell);
   }
   const pwsh = spawnSync(process.platform === "win32" ? "where" : "which", ["pwsh"], { encoding: "utf8" });

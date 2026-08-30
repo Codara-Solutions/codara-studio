@@ -465,6 +465,17 @@ export interface SpawnOptions {
    */
   plainShellFollowsActiveAccount?: boolean;
   /**
+   * A user-launched agent pane (a Claude/Codex/Grok autorun, a restore, or a
+   * frozen account picked for this pane) also exports
+   * SPARK_FOLLOW_ACTIVE_ACCOUNT=1. The agent itself still runs under the
+   * frozen selector: the startup form is `<agent>; exec <shell> -i`, and the
+   * hooks only exist in the interactive shell that replaces it once the agent
+   * exits. From then on the pane follows the Active account like a plain
+   * shell, so a hand-typed `claude` after a switch lands on the new account.
+   * Cora workers (SPARK_RUN_ID) never carry it. Set by spawn() itself.
+   */
+  agentShellFollowsActiveAccount?: boolean;
+  /**
    * Main-process-only exact child environment. When present, pty-manager does
    * not inherit, enrich, or append Studio/provider variables. Renderer IPC
    * deliberately never forwards this field.
@@ -929,6 +940,17 @@ async function spawnWithSessionLock(
         : {}),
       ...(selectors?.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
     };
+  } else if (
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR") &&
+    !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "GROK_HOME") &&
+    (parsedStartup !== null ||
+      !!opts.startupCommand ||
+      opts.nativeClaudeProfileId !== undefined ||
+      opts.nativeGrokProfileId !== undefined)
+  ) {
+    // A user's agent pane: frozen for the agent, following once it exits.
+    preparedOpts = { ...preparedOpts, agentShellFollowsActiveAccount: true };
   }
   const noShellIntegration =
     preparedOpts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
@@ -1213,8 +1235,15 @@ function withStartupCommand(
         : noShellIntegration
           ? ["-f", "-ic"]
           : ["-ic"];
+    // The interactive shell that replaces the agent must load the bundled
+    // rcfile too: bash only reads --rcfile from its own argv, so without it
+    // the post-agent shell would fall back to ~/.bashrc and never install
+    // the account-follow hook. zsh finds its rc through ZDOTDIR on its own.
+    const rcIndex = shell.family === "bash" ? shell.args.indexOf("--rcfile") : -1;
+    const rcfile = rcIndex >= 0 ? shell.args[rcIndex + 1] : undefined;
+    const execArgs = rcfile ? `--rcfile ${shQuote(rcfile)} -i` : "-i";
     return {
-      shell: { ...shell, args: [...startupArgs, `${startup}; exec ${exe} -i`] },
+      shell: { ...shell, args: [...startupArgs, `${startup}; exec ${exe} ${execArgs}`] },
       handled: true,
       skipsProfile: noShellIntegration,
     };
@@ -1419,7 +1448,9 @@ function doSpawn(
       if (typeof value === "string") env[key] = value;
     }
   }
-  if (opts.plainShellFollowsActiveAccount) env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
+  if (opts.plainShellFollowsActiveAccount || opts.agentShellFollowsActiveAccount) {
+    env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
+  }
   }
 
   const cwd =

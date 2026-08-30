@@ -511,9 +511,19 @@ async function main() {
     assert.equal(firstClaudeSpawn.options.env.CLAUDE_CODE_HOST_CREDS_FILE, undefined);
     assert.equal(
       firstClaudeSpawn.options.env.SPARK_FOLLOW_ACTIVE_ACCOUNT,
-      undefined,
-      "an inherited follow flag never reaches a frozen native pane",
+      "1",
+      "a user's frozen agent pane follows the Active account once the agent exits",
     );
+    await pty.spawn({
+      ...localClaudeOptions("claude-worker", "10000000-0000-4000-8000-0000000000ff"),
+      env: { SPARK_RUN_ID: "run-1", SPARK_NO_SHELL_INTEGRATION: "1" },
+    });
+    assert.equal(
+      controller.localSpawnCalls.at(-1).options.env.SPARK_FOLLOW_ACTIVE_ACCOUNT,
+      undefined,
+      "a Cora worker pane never follows",
+    );
+    pty.killImmediate("claude-worker");
     assert.equal(
       firstClaudeSpawn.options.env.SPARK_HOME_DIR,
       "/tmp/codara-pty-test",
