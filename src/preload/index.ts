@@ -135,7 +135,6 @@ import type {
   PiSubscriptionReconnectAccountInput,
   PiSubscriptionRenameAccountInput,
   PiUsageOverview,
-  PiSubscriptionProvider,
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
@@ -317,10 +316,6 @@ const api = {
   },
   piSubscriptions: {
     status: (): Promise<PiSubscriptionOverview> => ipcRenderer.invoke("pi-subscriptions:status"),
-    connect: (
-      provider: PiSubscriptionProvider,
-    ): Promise<PiSubscriptionProfileLoginRequest> =>
-      ipcRenderer.invoke("pi-subscriptions:connect", { provider }),
     addAccount: (
       input: PiSubscriptionAddAccountInput,
     ): Promise<PiSubscriptionProfileLoginRequest> =>
@@ -351,8 +346,6 @@ const api = {
       ipcRenderer.invoke("pi-subscriptions:respond", input),
     cancel: (requestId: string): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:cancel", { requestId }),
-    disconnect: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
-      ipcRenderer.invoke("pi-subscriptions:disconnect", { provider }),
     onEvent: (handler: (event: PiSubscriptionAuthEvent) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, authEvent: PiSubscriptionAuthEvent) =>
         handler(authEvent);

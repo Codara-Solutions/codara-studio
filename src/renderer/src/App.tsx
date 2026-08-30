@@ -840,10 +840,12 @@ export default function App() {
     [],
   );
 
-  // Choosing a different CLI account cannot mutate a process that is already
-  // running. Settings therefore opens one fresh, explicitly selected session
-  // after changing the default, which makes the click take effect visibly and
-  // leaves any in-progress terminal untouched.
+  // Choosing a different Codex or Grok CLI account cannot mutate a process
+  // that is already running. Settings therefore opens one fresh, explicitly
+  // selected session after changing the default, which makes the click take
+  // effect visibly and leaves any in-progress terminal untouched. Claude is
+  // not dispatched here: switching an Anthropic account closes nothing, new
+  // terminals simply pick it up.
   useEffect(() => {
     const handleNativeCliAccount = (rawEvent: Event) => {
       const event = rawEvent as CustomEvent<{
@@ -854,27 +856,21 @@ export default function App() {
       const runtime = event.detail?.runtime;
       const profileId = event.detail?.profileId;
       if (
-        (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") ||
+        (runtime !== "codex" && runtime !== "grok") ||
         typeof profileId !== "string" ||
         !activeWorkspace?.cwd
       ) {
         return;
       }
       const command =
-        runtime === "claude"
-          ? CLAUDE_LAUNCH_COMMAND
-          : runtime === "grok"
-            ? GROK_LAUNCH_COMMAND
-            : CODEX_LAUNCH_COMMAND;
+        runtime === "grok" ? GROK_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
       newTerminalTab(activeWorkspace.cwd, command, {
         focus: true,
         manualAgentRuntime: runtime,
         color: workerTabBrandColor(runtime),
         ...(runtime === "codex"
           ? { nativeCodexProfileId: profileId }
-          : runtime === "grok"
-            ? { nativeGrokProfileId: profileId }
-            : { nativeClaudeProfileId: profileId }),
+          : { nativeGrokProfileId: profileId }),
       });
       setSettingsOpen(false);
       event.preventDefault();

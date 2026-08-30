@@ -1,9 +1,9 @@
-// Subscription usage limits for the connected Cora subscriptions.
+// Subscription usage limits for the connected Cora accounts.
 //
-// The point of this panel is to answer "how much of my quota is left, and when
-// does it come back" before a run dies rather than after. It deliberately shows
-// a card per provider — including ones that are not connected — so the absence
-// of a card never has to be interpreted.
+// The point of these blocks is to answer "how much of my quota is left, and
+// when does it come back" before a run dies rather than after. The Accounts
+// section renders one inside each account's card and the title bar draws its
+// pills from the same hook, so the two never disagree.
 
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -100,12 +100,12 @@ function UsageBar({
 
 /**
  * The limit report for one account, without any card chrome: the Accounts
- * section renders this inside the account's own card, so the usage panel must
+ * section renders this inside the account's own card, so the usage block must
  * not draw a competing border or its own accent ring.
  *
- * `compact` is that in-card density — smaller labels, hairline bars, and the
- * three windows drawn tight enough to read as one block. The standalone panel
- * below has a whole card to itself and keeps the roomier scale.
+ * `compact` is that in-card density: smaller labels, hairline bars, and the
+ * three windows drawn tight enough to read as one block. The title bar
+ * popover keeps the roomier scale.
  */
 export function UsageEntryBody({
   usage,
@@ -116,7 +116,7 @@ export function UsageEntryBody({
 }) {
   const connected = usage.status === "ok";
   const temporarilyThrottled = usage.message?.startsWith("Claude temporarily throttled") === true;
-  // A connected account with no windows is not broken — SuperGrok publishes
+  // A connected account with no windows is not broken: SuperGrok publishes
   // no client-readable quota. Render nothing rather than a red empty report.
   if (connected && usage.windows.length === 0 && !usage.limitReached) {
     return null;
@@ -151,7 +151,7 @@ export function UsageEntryBody({
           }}
         >
           {usage.status === "not_connected"
-            ? "Not connected — reconnect this account to see its limits."
+            ? "Not connected. Reconnect this account to see its limits."
             : usage.message || "Could not read usage limits."}
         </span>
       )}
@@ -167,8 +167,8 @@ export function UsageEntryBody({
           }}
         >
           {usage.generalLimitReached
-            ? "General limit reached — normal agent requests will be refused until this resets."
-            : "A model or feature limit is reached — check the scoped window above."}
+            ? "General limit reached. Normal agent requests will be refused until this resets."
+            : "A model or feature limit is reached. Check the scoped window above."}
         </span>
       ) : null}
     </div>
@@ -209,115 +209,4 @@ export function useSubscriptionUsage() {
   }, [load]);
 
   return { overview, loading, error, load };
-}
-
-function ProviderCard({ usage }: { usage: UsageEntry }) {
-  const connected = usage.status === "ok";
-  // The account this provider is currently running on. Selection owns the
-  // card edge and nothing else does: health is reported inside the card, by
-  // the usage bars and the limit message. An account in trouble keeps a plain
-  // border, so a red edge never competes with the accent ring for "which
-  // account am I on".
-  const active = "isDefault" in usage && usage.isDefault === true;
-  return (
-    <div
-      style={{
-        display: "grid",
-        gap: 8,
-        padding: "9px 10px",
-        borderRadius: "var(--radius-control, 5px)",
-        border: `1px solid ${active ? "var(--accent-edge)" : "var(--rule-soft)"}`,
-        boxShadow: active ? "0 0 0 3px var(--accent-soft)" : undefined,
-        background: active
-          ? "color-mix(in oklab, var(--accent) 4%, transparent)"
-          : "color-mix(in oklab, var(--ink) 3%, transparent)",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
-          {usage.label}
-        </span>
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
-          {active
-            ? usage.plan
-              ? `active · ${usage.plan}`
-              : "active"
-            : usage.plan
-              ? usage.plan
-              : connected
-                ? "connected"
-                : ""}
-        </span>
-      </div>
-
-      <UsageEntryBody usage={usage} />
-    </div>
-  );
-}
-
-export default function SubscriptionUsage() {
-  const { overview, loading, error, load } = useSubscriptionUsage();
-
-  const usageEntries: UsageEntry[] =
-    overview?.profiles && overview.profiles.length > 0
-      ? [...overview.profiles]
-      : [...(overview?.providers ?? [])];
-  usageEntries.sort(
-    (left, right) =>
-      (left.provider === "anthropic" ? 0 : 1) -
-      (right.provider === "anthropic" ? 0 : 1),
-  );
-  const anyConnected = usageEntries.some((entry) => entry.status !== "not_connected");
-
-  return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <span
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            letterSpacing: "0.04em",
-            textTransform: "uppercase",
-          }}
-        >
-          Usage limits
-        </span>
-        <button
-          type="button"
-          className="spark-btn"
-          onClick={() => load(true)}
-          disabled={loading}
-          style={{ fontSize: 11, padding: "2px 8px" }}
-        >
-          {loading ? "Checking…" : "Refresh"}
-        </button>
-      </div>
-
-      {overview ? (
-        <div style={{ display: "grid", gap: 8 }}>
-          {usageEntries.map((entry) => (
-            <ProviderCard
-              key={"profileId" in entry ? entry.profileId : entry.provider}
-              usage={entry}
-            />
-          ))}
-        </div>
-      ) : loading ? (
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
-          Reading subscription limits…
-        </span>
-      ) : null}
-
-      {error ? (
-        <span style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 11 }}>{error}</span>
-      ) : null}
-
-      {overview && !anyConnected ? null : (
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
-          Read live from each provider with your connected subscription · Claude cached for 15 minutes
-        </span>
-      )}
-    </div>
-  );
 }

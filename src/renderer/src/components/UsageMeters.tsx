@@ -550,10 +550,10 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
   // Multi-account Settings owns the complete roster. The title bar is the
   // glanceable "what is selected" surface, so it shows exactly one default
   // account per provider rather than every connected spare subscription.
+  // isDefault is the one active flag: for Anthropic it names the account
+  // both Cora and Claude Code are running on.
   const usageEntries: UsageEntry[] =
-    overview?.profiles && overview.profiles.length > 0
-      ? overview.profiles.filter((profile) => profile.isDefault)
-      : overview?.providers ?? [];
+    overview?.profiles?.filter((profile) => profile.isDefault) ?? [];
   const connected = usageEntries
     .filter(
       (entry) =>

@@ -7,6 +7,23 @@ import {
 import type { PiSubscriptionProvider } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
+import {
+  ActionButton,
+  BUTTON_STYLE,
+  CardOverflowMenu,
+  ConnectionLine,
+  INPUT_STYLE,
+  PRIMARY_BUTTON_STYLE,
+  RenameForm,
+  SETTINGS_MENU_Z,
+  UsingChip,
+  type CardAction,
+  type ConnectionState,
+} from "./AccountCardPrimitives";
+import AnthropicAccountCard, {
+  type AnthropicAccountActions,
+  type AnthropicAccountCardView,
+} from "./AnthropicAccountCard";
 import { CodaraMark, RuntimeMark } from "./BrandMarks";
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
@@ -29,13 +46,15 @@ export type NativeCliAccountBusyAction =
   | "deleting";
 
 /**
- * One account card can carry two sign-ins: the one Cora uses and the one the
- * command-line tool uses. They are merged into a single card when the main
- * process reports the same anonymous account fingerprint for both — see the
- * pairing note in SettingsDialog. Ids on both facets are opaque routing values;
- * this component only hands them back through callbacks and never renders them.
- * The two sign-ins stay stored apart, so each facet keeps its own active state
- * and its own actions.
+ * The Codex and Grok card carries two sign-ins: the one Cora uses and the one
+ * the command-line tool uses. They are merged into a single card when the
+ * main process reports the same anonymous account fingerprint for both (see
+ * the pairing note in SettingsDialog). Ids on both facets are opaque routing
+ * values; this component only hands them back through callbacks and never
+ * renders them. The two sign-ins stay stored apart, so each facet keeps its
+ * own active state and its own actions. Anthropic accounts are one sign-in
+ * with two halves paired in the main process; they render through
+ * AnthropicAccountCard instead.
  */
 export interface AccountCoraFacet {
   profileId: string;
@@ -90,7 +109,12 @@ export interface AccountProviderView {
   cliLabel: string;
   /** Short plain-language summary shown under the provider name. */
   detail: string;
+  /** Two-role cards (Codex, Grok). Empty for Anthropic. */
   cards: AccountCardView[];
+  /** One-account cards (Anthropic). Absent for the other providers. */
+  anthropicCards?: AnthropicAccountCardView[];
+  /** Muted line under the cards, e.g. the account count. */
+  footer?: string;
   /** Cora actions are unavailable until the Pi runtime is installed. */
   coraDisabled: boolean;
   /** A Cora browser login or account mutation is in flight. */
@@ -110,7 +134,7 @@ type AddAccountDestination = "cora" | "cli";
 
 export interface AccountActions {
   /** Connect a card that only has a CLI sign-in to Cora (same login flow as
-   *  "Add account → Connect to Cora", seeded with the card's name). */
+   *  "Add account" then "Connect to Cora", seeded with the card's name). */
   onCoraConnect: (card: AccountCardView) => void;
   /**
    * Sign this account in to the command-line tool from a Cora-only card.
@@ -135,82 +159,8 @@ export interface AccountActions {
   onCliRename: (card: AccountCardView, label: string) => Promise<boolean>;
   onCliUse: (card: AccountCardView) => void;
   onCliDelete: (card: AccountCardView) => void;
-}
-
-const INPUT_STYLE: React.CSSProperties = {
-  minWidth: 0,
-  width: "100%",
-  height: 30,
-  borderRadius: "var(--radius-control, 5px)",
-  border: "1px solid var(--rule-strong)",
-  background: "color-mix(in oklab, var(--bg) 68%, transparent)",
-  color: "var(--ink)",
-  padding: "0 9px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  outline: "none",
-};
-
-const BUTTON_STYLE: React.CSSProperties = {
-  minHeight: 27,
-  borderRadius: "var(--radius-control, 5px)",
-  border: "1px solid var(--rule-strong)",
-  background: "color-mix(in oklab, var(--ink) 4%, transparent)",
-  color: "var(--ink)",
-  padding: "4px 8px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
-  ...BUTTON_STYLE,
-  border: "1px solid var(--accent-edge)",
-  background: "var(--accent-soft)",
-  color: "var(--accent-text)",
-};
-
-/**
- * Card-scale controls. A column of account cards is the dense part of this
- * panel, so the buttons inside a card — the ≤2 next steps and the "···"
- * trigger — run one step below the form-scale buttons the Add-account row and
- * the rename forms use. `height` has to be set and not just `minHeight`:
- * .spark-btn pins its own 26px, which a smaller minimum alone cannot undo.
- */
-const COMPACT_BUTTON_STYLE: React.CSSProperties = {
-  ...BUTTON_STYLE,
-  height: 21,
-  minHeight: 21,
-  padding: "0 7px",
-  fontSize: 10.5,
-};
-
-const COMPACT_PRIMARY_BUTTON_STYLE: React.CSSProperties = {
-  ...COMPACT_BUTTON_STYLE,
-  border: "1px solid var(--accent-edge)",
-  background: "var(--accent-soft)",
-  color: "var(--accent-text)",
-};
-
-/**
- * Use-for-Cora and use-for-CLI live on their own role rows, always visible
- * when that side is not already selected. Everything else — rename, reconnect,
- * sign out, delete — waits behind the "···" menu. A fully connected active
- * card shows Using on both rows and no buttons.
- */
-
-/**
- * One entry in the card's action model. `run` may return false to keep the
- * overflow menu open — that is how Delete keeps its two-step arming inside
- * the menu instead of firing on the first click.
- */
-interface CardAction {
-  id: string;
-  label: string;
-  disabled: boolean;
-  danger?: boolean;
-  run: () => void | boolean;
+  /** The one-account Anthropic card's actions. */
+  anthropic: AnthropicAccountActions;
 }
 
 /**
@@ -219,12 +169,12 @@ interface CardAction {
  * terminal sign-in's credential is never used to ask for them.
  */
 export const CLI_ONLY_USAGE_HINT =
-  "Usage limits show once this account is connected to Cora — they cover everything the account does, including the terminal.";
+  "Usage limits show once this account is connected to Cora. They cover everything the account does, including the terminal.";
 
 /**
  * Said before the user runs into it, not after. A managed account directory is
  * created already past the CLI's first-run wizard, so the terminal opens
- * straight into a working prompt — with no sign-in behind it until this account
+ * straight into a working prompt, with no sign-in behind it until this account
  * has been signed in once, and the terminal cannot be switched to it before
  * then. "Sign in to <tool>" leads the action ladder in exactly this state, so
  * the hint points at a button that is always visible when it is shown.
@@ -234,7 +184,7 @@ export function cliSignInHint(
   cliLabel: string,
 ): string | null {
   if (!facet || facet.busyAction || facet.authState !== "signed-out") return null;
-  return `This account isn't signed in to ${cliLabel} yet — use "Sign in to ${cliLabel}" below, or run ${facet.runtime} in a terminal once.`;
+  return `This account isn't signed in to ${cliLabel} yet. Use "Sign in to ${cliLabel}" below, or run ${facet.runtime} in a terminal once.`;
 }
 
 function busyLabel(action: NativeCliAccountBusyAction): string {
@@ -254,12 +204,6 @@ function busyLabel(action: NativeCliAccountBusyAction): string {
     case "deleting":
       return "Deleting…";
   }
-}
-
-interface ConnectionState {
-  ok: boolean;
-  text: string;
-  danger?: boolean;
 }
 
 function coraConnectionState(facet: AccountCoraFacet | undefined): ConnectionState {
@@ -303,79 +247,6 @@ function cliConnectionState(
     case "error":
       return { ok: false, text: `The ${cliLabel} sign-in needs attention`, danger: true };
   }
-}
-
-function ActionButton({
-  children,
-  disabled,
-  primary = false,
-  compact = false,
-  tone,
-  onClick,
-}: {
-  children: React.ReactNode;
-  disabled?: boolean;
-  primary?: boolean;
-  /** Card-scale rather than form-scale — see COMPACT_BUTTON_STYLE. */
-  compact?: boolean;
-  /** Agent brand colour; when set, the button follows the family instead of the workspace accent. */
-  tone?: string;
-  onClick: () => void;
-}) {
-  const base = compact
-    ? primary
-      ? COMPACT_PRIMARY_BUTTON_STYLE
-      : COMPACT_BUTTON_STYLE
-    : primary
-      ? PRIMARY_BUTTON_STYLE
-      : BUTTON_STYLE;
-  const tinted = tone
-    ? {
-        ...base,
-        ...(primary
-          ? {
-              border: `1px solid color-mix(in oklch, ${tone} 40%, transparent)`,
-              background: `color-mix(in oklch, ${tone} 16%, transparent)`,
-              color: tone,
-            }
-          : {}),
-      }
-    : base;
-  return (
-    <button
-      type="button"
-      className="spark-btn"
-      disabled={disabled}
-      onClick={onClick}
-      style={{
-        ...tinted,
-        ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function UsingChip({ label, color }: { label: string; color: string }) {
-  return (
-    <span
-      style={{
-        color,
-        border: `1px solid color-mix(in oklch, ${color} 55%, transparent)`,
-        background: `color-mix(in oklch, ${color} 18%, var(--panel-2))`,
-        borderRadius: 99,
-        padding: "2px 8px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 10,
-        fontWeight: 650,
-        lineHeight: 1.3,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {label}
-    </span>
-  );
 }
 
 /**
@@ -480,111 +351,6 @@ function AccountRoleRow({
   );
 }
 
-/**
- * Why these menus portal (AnchoredMenu) instead of hanging position:absolute
- * off their trigger: the Accounts panel lives inside the Settings dialog's
- * scrolling content pane, and `overflow: auto` clips everything in its
- * subtree. A card's right-aligned menu reaches left of its narrow trigger, so
- * the clipped half painted nothing and its clicks fell through to the nav
- * column beside the pane — menu items that plain did not work. Portalling to
- * <body> also moves the menu out from under .settings-dialog-surface, whose
- * backdrop-filter + contain:paint make it a backdrop root: in there .spark-menu
- * is swapped to a preblended 78%-alpha face (styles.css), which over dense
- * card text read as a ghost box. At <body> the menu is real glass again,
- * frosting the dialog beneath it exactly as the composer menus do. z 120
- * clears the dialog wrapper's z 100.
- */
-const SETTINGS_MENU_Z = 120;
-
-/**
- * The card's "···" menu, on the same shared .spark-menu surface the
- * Add-account chooser uses. Groups render with a hairline between them, which
- * is how the destructive block (Sign out, Delete) stays at the bottom and
- * apart. Closing the menu in any way tells the caller, so a half-armed Delete
- * disarms rather than surviving to the next open.
- */
-function CardOverflowMenu({
-  label,
-  groups,
-  onClose,
-}: {
-  label: string;
-  groups: ReadonlyArray<ReadonlyArray<CardAction>>;
-  onClose: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const close = () => {
-    setOpen(false);
-    onClose();
-  };
-
-  const visibleGroups = groups.filter((group) => group.length > 0);
-
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="spark-btn"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        onClick={() => (open ? close() : setOpen(true))}
-        style={{ ...COMPACT_BUTTON_STYLE, padding: "0 8px", letterSpacing: 1 }}
-      >
-        ···
-      </button>
-      <AnchoredMenu
-        anchorRef={triggerRef}
-        open={open}
-        onClose={close}
-        className="spark-menu"
-        role="menu"
-        ariaLabel={label}
-        placement="below"
-        align="end"
-        zIndex={SETTINGS_MENU_Z}
-      >
-        <div style={{ minWidth: 208, display: "grid", gap: 2 }}>
-          {visibleGroups.map((group, groupIndex) => (
-            <React.Fragment key={groupIndex}>
-              {groupIndex > 0 ? (
-                <div
-                  aria-hidden
-                  style={{ borderTop: "1px solid var(--rule-soft)", margin: "2px 0" }}
-                />
-              ) : null}
-              {group.map((action) => (
-                <button
-                  key={action.id}
-                  type="button"
-                  role="menuitem"
-                  className="spark-menu-item"
-                  disabled={action.disabled}
-                  onClick={() => {
-                    // A false return means the item changed state (armed a
-                    // delete) and wants a second look before the menu goes.
-                    if (action.run() === false) return;
-                    close();
-                  }}
-                  style={{
-                    textAlign: "left",
-                    whiteSpace: "nowrap",
-                    ...(action.danger ? { color: "var(--danger)" } : {}),
-                  }}
-                >
-                  {action.label}
-                </button>
-              ))}
-            </React.Fragment>
-          ))}
-        </div>
-      </AnchoredMenu>
-    </>
-  );
-}
-
 export function AccountAddPicker({
   providers,
   actions,
@@ -607,9 +373,14 @@ export function AccountAddPicker({
   const selectedFamily = selectedRuntime
     ? familyForRuntime(selectedRuntime)
     : null;
+  // An Anthropic account is one browser sign-in that writes both halves, so
+  // the picker has no destination step for it and only the Cora side gates it.
+  const oneSignIn = (view: AccountProviderView) => view.provider === "anthropic";
   const providerDisabled = (view: AccountProviderView) =>
-    (view.coraDisabled || view.coraBusy) &&
-    (view.cliDisabled || view.cliLoading);
+    oneSignIn(view)
+      ? view.coraDisabled || view.coraBusy
+      : (view.coraDisabled || view.coraBusy) &&
+        (view.cliDisabled || view.cliLoading);
   const disabled = providers.every(providerDisabled);
 
   const clearActiveForm = () => {
@@ -634,9 +405,18 @@ export function AccountAddPicker({
     if (destination) {
       clearActiveForm();
       setDestination(null);
+      if (selectedView && oneSignIn(selectedView)) setSelectedProvider(null);
       return;
     }
     setSelectedProvider(null);
+  };
+
+  const choose = (view: AccountProviderView) => {
+    setSelectedProvider(view.provider);
+    if (oneSignIn(view)) {
+      setDestination("cora");
+      actions.onBeginAddCora(view.provider);
+    }
   };
 
   useEffect(() => {
@@ -742,7 +522,9 @@ export function AccountAddPicker({
                   : destination
                     ? destination === "cli"
                       ? "Name it now; the sign-in terminal opens next."
-                      : "A clear name makes switching accounts easy later."
+                      : oneSignIn(selectedView)
+                        ? "Sign in once in your browser. Cora and Claude Code both use it."
+                        : "A clear name makes switching accounts easy later."
                     : "Choose where this sign-in should be used."}
               </span>
             </div>
@@ -782,7 +564,7 @@ export function AccountAddPicker({
                     aria-selected="false"
                     className="spark-menu-item"
                     disabled={unavailable}
-                    onClick={() => setSelectedProvider(view.provider)}
+                    onClick={() => choose(view)}
                     style={{
                       display: "grid",
                       gridTemplateColumns: "38px minmax(0, 1fr) auto",
@@ -826,7 +608,7 @@ export function AccountAddPicker({
                           lineHeight: 1.35,
                         }}
                       >
-                        {view.label} · Cora or {view.cliLabel}
+                        {view.label} · {oneSignIn(view) ? "Cora and" : "Cora or"} {view.cliLabel}
                       </span>
                     </span>
                     <span aria-hidden style={{ color: brand, fontSize: 18 }}>›</span>
@@ -983,7 +765,11 @@ export function AccountAddPicker({
                         !selectedView.addCliLabel.trim()
                   }
                 >
-                  {destination === "cora" ? "Connect" : "Continue"}
+                  {destination === "cora"
+                    ? oneSignIn(selectedView)
+                      ? "Sign in"
+                      : "Connect"
+                    : "Continue"}
                 </button>
               </div>
             </form>
@@ -991,116 +777,6 @@ export function AccountAddPicker({
         </div>
       </AnchoredMenu>
     </>
-  );
-}
-
-/**
- * One sign-in's state, as an inline mark-plus-sentence pair rather than a row
- * of its own. The two lines a card carries sit side by side in a wrapping row,
- * so a healthy card spends one line on both — and a long state ("…is not
- * installed on this Mac", an error) still wraps to its own line and stays
- * readable at full length. The wording is what tells the two sides apart, so
- * it is never shortened here.
- */
-function ConnectionLine({ state }: { state: ConnectionState }) {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "baseline",
-        gap: 4,
-        minWidth: 0,
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          flex: "0 0 auto",
-          color: state.ok
-            ? "var(--accent)"
-            : state.danger
-              ? "var(--danger)"
-              : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          lineHeight: 1.35,
-        }}
-      >
-        {state.ok ? "✓" : "–"}
-      </span>
-      <span
-        style={{
-          minWidth: 0,
-          color: state.danger
-            ? "var(--danger)"
-            : state.ok
-              ? "var(--ink)"
-              : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          lineHeight: 1.35,
-        }}
-      >
-        {state.text}
-      </span>
-    </span>
-  );
-}
-
-function RenameForm({
-  ariaLabel,
-  initial,
-  busy,
-  onSave,
-  onCancel,
-}: {
-  ariaLabel: string;
-  initial: string;
-  busy: boolean;
-  onSave: (label: string) => Promise<boolean>;
-  onCancel: () => void;
-}) {
-  const [label, setLabel] = useState(initial);
-
-  useEffect(() => {
-    setLabel(initial);
-  }, [initial]);
-
-  return (
-    <form
-      aria-label={ariaLabel}
-      onSubmit={(event) => {
-        event.preventDefault();
-        const next = label.trim();
-        if (!next || busy) return;
-        void onSave(next);
-      }}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto auto",
-        gap: 6,
-      }}
-    >
-      <input
-        aria-label="Account name"
-        autoFocus
-        className="spark-input"
-        value={label}
-        maxLength={80}
-        onChange={(event) => setLabel(event.currentTarget.value)}
-        style={INPUT_STYLE}
-      />
-      <button
-        type="submit"
-        className="spark-btn is-primary"
-        disabled={!label.trim() || busy}
-      >
-        {busy ? "Saving…" : "Save"}
-      </button>
-      <ActionButton disabled={busy} onClick={onCancel}>
-        Cancel
-      </ActionButton>
-    </form>
   );
 }
 
@@ -1591,6 +1267,14 @@ function AccountProviderGroup({
       ) : null}
 
       <div style={{ display: "grid", gap: 8 }}>
+        {(view.anthropicCards ?? []).map((card) => (
+          <AnthropicAccountCard
+            key={card.key}
+            card={card}
+            disabled={view.coraDisabled || view.coraBusy}
+            actions={actions.anthropic}
+          />
+        ))}
         {view.cards.map((card) => (
           <AccountCard
             key={card.key}
@@ -1647,7 +1331,10 @@ function AccountProviderGroup({
             Checking {view.cliLabel} accounts…
           </div>
         ) : null}
-        {view.cards.length === 0 && !view.cliLoading && !view.cliPersonalMissing ? (
+        {view.cards.length === 0 &&
+        (view.anthropicCards ?? []).length === 0 &&
+        !view.cliLoading &&
+        !view.cliPersonalMissing ? (
           <div
             style={{
               color: "var(--muted)",
@@ -1657,6 +1344,18 @@ function AccountProviderGroup({
             }}
           >
             No {view.label} account yet.
+          </div>
+        ) : null}
+        {view.footer ? (
+          <div
+            style={{
+              color: "var(--muted-2, var(--muted))",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10.5,
+              padding: "0 2px",
+            }}
+          >
+            {view.footer}
           </div>
         ) : null}
       </div>
