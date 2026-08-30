@@ -4763,7 +4763,7 @@ async function handleAutomationCreate(
     if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
   }
   // Looms v3: with a graph, every worker node carries its own prompt and a
-  // steps-only graph has nothing to prompt at all — prompt_template is only
+  // steps-only graph has nothing to prompt at all; prompt_template is only
   // required for the single-worker (no graph) shape.
   const promptTemplate = stringParam(params, "prompt_template") ?? "";
   if (!promptTemplate && !graph) {

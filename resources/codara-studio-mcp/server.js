@@ -742,8 +742,8 @@ const TRIGGER_SCHEMA = {
     "onFinishOf REQUIRES an `automationId` that references an EXISTING automation (call codara_list_automations first). " +
     "manual only fires via codara_run_automation or the Hub. " +
     "continuous re-fires immediately after each run finishes. " +
-    "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits — the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed — commit, pull, merge); optional `branch` limits firing to one branch, e.g. 'main'. " +
-    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome — ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
+    "git REQUIRES an `events` array (remoteUpdated: the workspace repo's tracked remote gained commits: the user's own push, or a teammate's push arriving via fetch; localBranchMoved: the checked-out branch tip changed (commit, pull, merge)); optional `branch` limits firing to one branch, e.g. 'main'. " +
+    "onAutomationActivity REQUIRES an `events` array (finished|failed) and fires when automations reach that outcome: ANY automation when `automationId` is omitted, or just that one when set (never fires for itself).",
   required: ["kind"],
   properties: {
     kind: {
@@ -853,7 +853,7 @@ const GUARD_PREDICATE_SCHEMA = {
 const STEP_ACTION_SCHEMA = {
   type: "object",
   description:
-    "step only: the deterministic action this node runs (no AI). Every string field is a template ({{node:id}}, {{incoming}}, {{date}}, {{iteration}}, {{name}}, {{file}}). Filters: {{node:id|json}} renders the value as a JSON string literal WITH quotes (use it inside http bodies: {\"text\": {{node:id|json}}}), |line = first non-empty line, |trim, |upper, |lower. command/script also receive upstream outputs as env vars NODE_OUTPUT_<ID>, INCOMING, DATE, AUTOMATION_NAME — prefer those over splicing multi-line output into a shell line.",
+    "step only: the deterministic action this node runs (no AI). Every string field is a template ({{node:id}}, {{incoming}}, {{date}}, {{iteration}}, {{name}}, {{file}}). Filters: {{node:id|json}} renders the value as a JSON string literal WITH quotes (use it inside http bodies: {\"text\": {{node:id|json}}}), |line = first non-empty line, |trim, |upper, |lower. command/script also receive upstream outputs as env vars NODE_OUTPUT_<ID>, INCOMING, DATE, AUTOMATION_NAME; prefer those over splicing multi-line output into a shell line.",
   required: ["type"],
   properties: {
     type: { type: "string", enum: ["command", "script", "http", "writeFile", "notify"] },
@@ -879,7 +879,7 @@ const STEP_ACTION_SCHEMA = {
 const GRAPH_SCHEMA = {
   type: "object",
   description:
-    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify) — its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
+    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify); its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
   required: ["version", "nodes", "edges", "entryNodeIds"],
   properties: {
     version: { type: "number", enum: [1] },
@@ -894,7 +894,7 @@ const GRAPH_SCHEMA = {
           kind: { type: "string", enum: ["worker", "guard", "merge", "step"] },
           label: { type: "string" },
           worker: WORKER_SCHEMA,
-          prompt: { type: "string", description: "worker only: the prompt template for this node (supports {{var}}/{{node:id}}/{{incoming}}). The node's OUTPUT (what downstream {{node:id}} receives) is the worker's final-report summary, and the worker is told to put its deliverable there verbatim — so ask for the result itself ('produce the digest paragraph') rather than a description of the work." },
+          prompt: { type: "string", description: "worker only: the prompt template for this node (supports {{var}}/{{node:id}}/{{incoming}}). The node's OUTPUT (what downstream {{node:id}} receives) is the worker's final-report summary, and the worker is told to put its deliverable there verbatim, so ask for the result itself ('produce the digest paragraph') rather than a description of the work." },
           isolate: { type: "boolean", description: "worker only: run this node in a fresh run lineage." },
           access: { type: "string", enum: ["full", "edits", "readonly"], description: "worker only, optional (default full): tool-access preset, enforced by the Pi worker harness for every model. full = all tools. edits = no shell/web (terminal tools and the preview JS evaluator included); file writes/edits are contained to the workspace plus the run's report dir. readonly = edits plus no edit tool and no mutating preview tools. The write tool survives both presets for the mandatory final report; it can still create or overwrite files inside the workspace, so readonly is a guardrail against casual mutation, not a jail." },
           blockedTools: { type: "array", items: { type: "string" }, description: "worker only: extra BARE tool names hard-denied on top of the access preset, for any model (e.g. [\"WebSearch\",\"Bash\"]). Parenthesized/scoped forms like \"Bash(rm *)\" are rejected; only plain identifiers are allowed." },
@@ -962,7 +962,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_create_automation",
     description:
-      "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run, never supply paths). Provide name, trigger, loop, worker, and a node graph — WORKER nodes run an AI agent; STEP nodes run deterministic actions with no AI (shell command, inline python/node/bash script with an optional interpreter such as 'uv run python', HTTP request, write file, notify); guards branch; merges join. A loom may be steps-only (e.g. cron → script → notify; then prompt_template may be omitted). Each node's output flows to the next via {{node:id}} / {{incoming}} (and NODE_OUTPUT_<ID> / INCOMING env vars inside command/script steps). Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
+      "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run, never supply paths). Provide name, trigger, loop, worker, and a node graph: WORKER nodes run an AI agent; STEP nodes run deterministic actions with no AI (shell command, inline python/node/bash script with an optional interpreter such as 'uv run python', HTTP request, write file, notify); guards branch; merges join. A loom may be steps-only (e.g. cron → script → notify; then prompt_template may be omitted). Each node's output flows to the next via {{node:id}} / {{incoming}} (and NODE_OUTPUT_<ID> / INCOMING env vars inside command/script steps). Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
     inputSchema: {
       type: "object",
       required: ["name", "trigger", "loop", "worker"],

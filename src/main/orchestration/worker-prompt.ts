@@ -791,7 +791,7 @@ function renderImplementationWorkerPrompt({
     );
   }
 
-  // Looms v3: a worker inside an automation graph is a PIPELINE NODE — its
+  // Looms v3: a worker inside an automation graph is a PIPELINE NODE: its
   // report summary is what the next node receives ({{node:<id>}} / {{incoming}})
   // and what the history shows. Without this contract a worker asked to "write
   // a digest" hands back "Wrote a digest paragraph…" (a description) and the
@@ -801,7 +801,7 @@ function renderImplementationWorkerPrompt({
       "",
       "## PIPELINE OUTPUT",
       "This worker is one node in an automation pipeline. Your final report's `summary` IS this node's output: the next node receives it verbatim (as {{node:<id>}} / {{incoming}} in its prompt, command, request body or file), and it is what the user reads in the automation's history.",
-      "So put the deliverable ITSELF in `summary` — the digest, the list, the answer, the message text — complete and ready to use, never a description of the work (\"Wrote a digest…\" is wrong; the digest is right). Keep evidence and explanations in `proof[]`, `commands_run[]` and `tests[]`.",
+      "So put the deliverable ITSELF in `summary` (the digest, the list, the answer, the message text), complete and ready to use, never a description of the work (\"Wrote a digest…\" is wrong; the digest is right). Keep evidence and explanations in `proof[]`, `commands_run[]` and `tests[]`.",
       "If the task produced no text deliverable (you edited files or ran commands), `summary` is a short factual statement of what changed.",
     );
   }
