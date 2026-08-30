@@ -129,6 +129,11 @@ export interface UnifiedAccountServiceOptions {
   sessions?: UnifiedTerminalSessions;
   /** Closes every session of the CLI before a switch that needs it (Codex). */
   sessionShutdown?: UnifiedSessionShutdown;
+  /**
+   * Runs after either default moved (a switch, a hand-off, a repair, Account
+   * 1 taking an empty default): the shell pointer is rewritten from it.
+   */
+  defaultsChanged?: () => void | Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -177,6 +182,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   private broadcastHook: (() => void) | null;
   private sessionsHook: UnifiedTerminalSessions | null;
   private sessionShutdownHook: UnifiedSessionShutdown | null;
+  private defaultsChangedHook: (() => void | Promise<void>) | null;
 
   constructor(adapter: AccountProviderAdapter<Loc, Raw>, options: UnifiedAccountServiceOptions = {}) {
     this.adapter = adapter;
@@ -185,6 +191,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     this.broadcastHook = options.broadcast ?? null;
     this.sessionsHook = options.sessions ?? null;
     this.sessionShutdownHook = options.sessionShutdown ?? null;
+    this.defaultsChangedHook = options.defaultsChanged ?? null;
   }
 
   get codec() {
@@ -254,6 +261,25 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
 
   setSessionShutdown(hook: UnifiedSessionShutdown | null): void {
     this.sessionShutdownHook = hook;
+  }
+
+  setDefaultsChanged(hook: (() => void | Promise<void>) | null): void {
+    this.defaultsChangedHook = hook;
+  }
+
+  /** Best effort and off the mutation path: a pointer write never fails an account mutation. */
+  private defaultsChanged(): void {
+    try {
+      void Promise.resolve(this.defaultsChangedHook?.()).catch((error: unknown) => {
+        this.log(
+          `[accounts] the active-account pointer was not written: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
+    } catch {
+      // Same rule for a hook that throws synchronously.
+    }
   }
 
   private async withMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -524,6 +550,9 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     if (profile.identityFingerprint) this.stopPersonalProbe();
     else this.startPersonalProbe();
     await this.invalidateCaches().catch(() => undefined);
+    // Registering may have taken an empty Cora default; the CLI default is
+    // repaired by the startup pass, but a shell should follow now.
+    this.defaultsChanged();
     this.broadcast();
     return profile;
   }
@@ -782,6 +811,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       }
     }
     await this.invalidateCaches().catch(() => undefined);
+    this.defaultsChanged();
     this.broadcast();
     return { closedSessionCount };
   }
@@ -975,6 +1005,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
           }`,
         );
       });
+    this.defaultsChanged();
   }
 
   async deleteAccount(
@@ -1199,6 +1230,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         }`,
       );
     });
+    this.defaultsChanged();
   }
 
   /** Arm the mirror over every linked pair and reconcile each once. */

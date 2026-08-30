@@ -30,6 +30,11 @@ import {
  *     longer edits shell startup files, not even to undo its own edit; the
  *     detection only lets Settings tell the user the block is still there and
  *     how to delete it themselves.
+ *
+ * What replaced the feature is deliberately different in kind: the active
+ * account pointer (active-cli-env-pointer.ts) is a data file under
+ * <codara-home>/shell/, never a script, never sourced, and only the bundled
+ * prompt hooks of a Studio shell read it. Nothing under cli/active comes back.
  */
 
 /** Marker lines of the block the retired feature appended to shell profiles. */

@@ -156,6 +156,10 @@ async function main() {
   for (const guard of [
     "plainShellClaudeConfigDir",
     "plainShellGrokHome",
+    // The follow flag rides the same gate as the selectors: only a plain
+    // user shell gets it, whether or not a selector resolved.
+    "plainShellFollowsActiveAccount: true,",
+    'env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"',
     'hasOwnProperty.call(opts.env ?? {}, "SPARK_RUN_ID")',
     'hasOwnProperty.call(opts.env ?? {}, "CLAUDE_CONFIG_DIR")',
     'hasOwnProperty.call(opts.env ?? {}, "CODEX_HOME")',

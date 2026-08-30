@@ -431,6 +431,13 @@ export interface SpawnOptions {
   plainShellClaudeConfigDir?: string;
   plainShellGrokHome?: string;
   /**
+   * A plain user shell exports SPARK_FOLLOW_ACTIVE_ACCOUNT=1 so the bundled
+   * prompt hooks re-read <codaraHome>/shell/active-cli-env and follow later
+   * account switches. Set by spawn() itself, never accepted over IPC; frozen,
+   * worker, agent and caller-selected panes never carry it.
+   */
+  plainShellFollowsActiveAccount?: boolean;
+  /**
    * Main-process-only exact child environment. When present, pty-manager does
    * not inherit, enrich, or append Studio/provider variables. Renderer IPC
    * deliberately never forwards this field.
@@ -864,13 +871,17 @@ async function spawnWithSessionLock(
       releaseNativeGrokProfileLease,
     };
   }
-  // A plain user shell — no Studio startup command, no worker run, no frozen
-  // account, no caller-selected home — follows the Active Claude and Grok
-  // accounts. Codex is intentionally omitted because its account selector
-  // swaps auth.json in one shared state home. Best-effort because a shell must
-  // always open. Deliberately no lease and no persistence: an idle shell tab
-  // must not block account operations, and a restored shell should follow the
-  // account that is Active at restore time.
+  // A plain user shell, with no Studio startup command, no worker run, no
+  // frozen account and no caller-selected home, follows the Active Claude
+  // and Grok accounts: the spawn-time selector makes the first prompt right
+  // (and serves shells without the bundled hooks, such as fish), and the
+  // follow flag lets the bundled prompt hooks track later switches, even
+  // from a personal default that becomes managed. Codex is intentionally
+  // omitted because its account selector swaps auth.json in one shared state
+  // home. Best-effort because a shell must always open. Deliberately no lease
+  // and no persistence: an idle shell tab must not block account operations,
+  // and a restored shell should follow the account that is Active at restore
+  // time.
   if (
     parsedStartup === null &&
     !opts.startupCommand &&
@@ -883,15 +894,14 @@ async function spawnWithSessionLock(
     !Object.prototype.hasOwnProperty.call(opts.env ?? {}, "GROK_HOME")
   ) {
     const selectors = await resolvePlainShellAccountSelectors().catch(() => null);
-    if (selectors) {
-      preparedOpts = {
-        ...preparedOpts,
-        ...(selectors.claudeConfigDir
-          ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
-          : {}),
-        ...(selectors.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
-      };
-    }
+    preparedOpts = {
+      ...preparedOpts,
+      plainShellFollowsActiveAccount: true,
+      ...(selectors?.claudeConfigDir
+        ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
+        : {}),
+      ...(selectors?.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
+    };
   }
   const noShellIntegration =
     preparedOpts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
@@ -1367,6 +1377,7 @@ function doSpawn(
       if (typeof value === "string") env[key] = value;
     }
   }
+  if (opts.plainShellFollowsActiveAccount) env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
   }
 
   const cwd =

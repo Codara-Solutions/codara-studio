@@ -27,6 +27,14 @@ import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
  *
  * Resolving through the runtime stores also repairs the selected Claude/Grok
  * state before the first shell after a switch opens.
+ *
+ * Later switches reach a running shell through the active account pointer
+ * (active-cli-env-pointer.ts) and the bundled prompt hooks. That path only
+ * exports or unsets the two selector variables; it cannot strip the
+ * credential-override variables the spawn-time builders strip here, so a
+ * shell that started personal and follows to a managed account keeps the
+ * overrides it inherited. Documented, not fixed: the hook must never touch a
+ * variable it did not set.
  */
 export interface PlainShellAccountSelectors {
   /** Managed CLAUDE_CONFIG_DIR for the Active Claude account; absent when personal. */

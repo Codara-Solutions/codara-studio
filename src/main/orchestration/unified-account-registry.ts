@@ -14,9 +14,20 @@ import { UnifiedAccountService, type UnifiedTerminalStatus } from "./unified-acc
 
 const log = (message: string): void => console.warn(message);
 
-export const anthropicAccounts = new UnifiedAccountService(claudeAccountAdapter, { log });
-export const codexAccounts = new UnifiedAccountService(codexAccountAdapter, { log });
-export const grokAccounts = new UnifiedAccountService(grokAccountAdapter, { log });
+const defaultsChanged = async (): Promise<void> => {
+  // Imported lazily: the pointer module reads the two profile stores, which
+  // this registry's adapters also resolve, and a plain shell follows the
+  // pointer rather than any service.
+  const { refreshActiveCliEnvPointer } = await import("./active-cli-env-pointer");
+  await refreshActiveCliEnvPointer();
+};
+
+export const anthropicAccounts = new UnifiedAccountService(claudeAccountAdapter, {
+  log,
+  defaultsChanged,
+});
+export const codexAccounts = new UnifiedAccountService(codexAccountAdapter, { log, defaultsChanged });
+export const grokAccounts = new UnifiedAccountService(grokAccountAdapter, { log, defaultsChanged });
 
 const services: Record<PiSubscriptionProvider, UnifiedAccountService> = {
   anthropic: anthropicAccounts as unknown as UnifiedAccountService,

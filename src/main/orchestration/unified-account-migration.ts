@@ -1,5 +1,6 @@
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { ClaudeAccountAdapter } from "./account-adapters/claude-account-adapter";
+import { refreshActiveCliEnvPointer } from "./active-cli-env-pointer";
 import type { ClaudeCliAccountProfileStore } from "./claude-cli-account-profiles";
 import type { ClaudeCliCredentialBackend } from "./claude-cli-credentials";
 import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
@@ -45,6 +46,8 @@ export interface UnifiedAccountMigrationDeps {
   backend?: ClaudeCliCredentialBackend;
   codexStore?: CodexCliAccountProfileStore;
   grokStore?: GrokCliAccountProfileStore;
+  /** Test seam for the shell pointer write that ends the pass. */
+  refreshShellPointer?: () => Promise<void>;
   log?: (message: string) => void;
 }
 
@@ -200,6 +203,11 @@ export async function migrateUnifiedAccounts(
       entry,
     );
   }
+  // Running plain shells follow the pointer; a fresh one after the pass
+  // makes a shell that outlived a previous Studio converge on this default.
+  await step("shell-pointer", async () => {
+    await (deps.refreshShellPointer ?? refreshActiveCliEnvPointer)();
+  });
   return report;
 }
 

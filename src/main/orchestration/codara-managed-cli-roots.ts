@@ -37,6 +37,15 @@ export function codaraNativeCliActivePointerDir(
   return join(resolve(homeDir), "cli", NATIVE_CLI_ACTIVE_DIRNAME);
 }
 
+/**
+ * The data file a running plain shell follows to the active account (see
+ * active-cli-env-pointer.ts). It lives under shell/, never under the retired
+ * active pointer directory, which boot deletes and which counts as managed.
+ */
+export function codaraActiveCliEnvPointerFile(homeDir: string = codaraHomeDir()): string {
+  return join(resolve(homeDir), "shell", "active-cli-env");
+}
+
 export function codaraManagedCliRoots(
   homeDir: string = codaraHomeDir(),
 ): string[] {

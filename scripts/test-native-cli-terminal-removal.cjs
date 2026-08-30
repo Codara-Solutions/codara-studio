@@ -202,6 +202,32 @@ async function main() {
     }
   });
 
+  // The successor of the retired feature is a data file under shell/ that
+  // no shell sources: the pointer module never renders a shell export and
+  // never references the deleted cli/active directory.
+  await check("the active account pointer is data under shell/, not a script", () => {
+    const pointerSource = fs.readFileSync(
+      path.join(ROOT, "src", "main", "orchestration", "active-cli-env-pointer.ts"),
+      "utf8",
+    );
+    assert.ok(!/export (?:CLAUDE_CONFIG_DIR|GROK_HOME|CODEX_HOME)/.test(pointerSource));
+    assert.ok(!pointerSource.includes("cli/active"));
+    assert.ok(!pointerSource.includes("env.sh"));
+    assert.ok(/"shell", "active-cli-env"/.test(
+      fs.readFileSync(
+        path.join(ROOT, "src", "main", "orchestration", "codara-managed-cli-roots.ts"),
+        "utf8",
+      ),
+    ));
+    for (const file of sources) {
+      const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+      assert.ok(
+        !/["'`]cli\/active["'`]/.test(text),
+        `${path.relative(ROOT, file)} references the retired cli/active directory`,
+      );
+    }
+  });
+
   await check("env.sh survives only inside the cleanup that deletes it", () => {
     for (const file of sources) {
       if (file === cleanupPath) continue;
