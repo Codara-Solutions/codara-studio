@@ -34,7 +34,10 @@ for (const file of tests) {
     });
     console.log(`ok  ${Math.round((Date.now() - t0) / 1000)}s`);
   } catch (err) {
-    failed.push({ file, out: `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(-400) });
+    // Keep enough of the tail to include the actual error MESSAGE, not just
+    // the stack frames (an esbuild BuildFailure's message alone can be
+    // hundreds of chars; 400 showed only frames and hid the cause on CI).
+    failed.push({ file, out: `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(-6000) });
     console.log(`FAIL${err.killed ? " (timeout)" : ""}`);
   }
 }

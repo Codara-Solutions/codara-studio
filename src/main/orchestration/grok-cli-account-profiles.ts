@@ -757,7 +757,7 @@ export class GrokCliAccountProfileStore {
       }> = [
         {
           id: GROK_CLI_PERSONAL_PROFILE_ID,
-          label: "Existing Grok login",
+          label: "Account 1",
           managed: false,
           homeDir: dirname(this.personalAuthFile),
           authFile: this.personalAuthFile,
@@ -946,7 +946,7 @@ export class GrokCliAccountProfileStore {
           ? snapshot.defaultProfileId
           : GROK_CLI_PERSONAL_PROFILE_ID
         : normalizeGrokCliProfileId(input.profileId);
-    let label = "Existing Grok login";
+    let label = "Account 1";
     let managed = false;
     let homeDir = dirname(this.personalAuthFile);
     let authFile = this.personalAuthFile;

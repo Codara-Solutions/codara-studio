@@ -41,7 +41,7 @@ const { resolvePlainShellAccountSelectors } = require(OUT);
 
 const personalClaude = {
   profileId: "personal",
-  label: "Existing Claude login",
+  label: "Account 1",
   managed: false,
   connected: true,
   env: { PATH: "/safe/bin" },
@@ -55,7 +55,7 @@ const managedClaude = {
 };
 const personalGrok = {
   profileId: "personal",
-  label: "Existing Grok login",
+  label: "Account 1",
   managed: false,
   connected: true,
   env: { PATH: "/safe/bin" },

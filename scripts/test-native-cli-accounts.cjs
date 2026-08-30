@@ -244,7 +244,7 @@ async function main() {
       {
         runtime: "claude",
         id: "personal",
-        label: "Existing Claude login",
+        label: "Account 1",
         managed: false,
         isDefault: true,
         connected: true,
@@ -254,7 +254,7 @@ async function main() {
       {
         runtime: "codex",
         id: "personal",
-        label: "Existing Codex login",
+        label: "Account 1",
         managed: false,
         isDefault: true,
         connected: true,
@@ -264,7 +264,7 @@ async function main() {
       {
         runtime: "grok",
         id: "personal",
-        label: "Existing Grok login",
+        label: "Account 1",
         managed: false,
         isDefault: true,
         connected: true,

@@ -730,26 +730,28 @@ function createWindow(): void {
   // window, but a tray is the reliable always-visible re-entry point, so we
   // require it before going headless. On Windows we also drop the taskbar
   // button so the hidden window doesn't linger there.
-  let closeFlushPending = false;
   mainWindow.on("close", (e) => {
-    if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
+    if (isQuitting) return; // real quit in flight — let the window close
+    // Close-to-tray: the window hides and the app keeps running. On macOS the
+    // dock is always a way back, so the tray is not required there; elsewhere
+    // a missing tray would strand a headless process, so fall through to a
+    // real quit instead.
+    if (
+      getPreferenceCached("keepRunningInBackground") &&
+      (tray || process.platform === "darwin")
+    ) {
       e.preventDefault();
       mainWindow?.hide();
       if (process.platform === "win32") mainWindow?.setSkipTaskbar(true);
       return;
     }
-    // A direct window close destroys the renderer before window-all-closed can
-    // query main's raw PTY watchers. Give the quit-start IPC one short event
-    // loop window to synchronously persist those live pane ids, then close for
-    // real. Explicit app.quit() already sends the same signal in before-quit.
-    if (!isQuitting && !closeFlushPending) {
-      e.preventDefault();
-      closeFlushPending = true;
-      signalRendererBeforeQuit();
-      setTimeout(() => {
-        if (!windowForEvents.isDestroyed()) windowForEvents.close();
-      }, 50);
-    }
+    // Background running off: the red button IS quit. Route through app.quit()
+    // so before-quit runs the one guarded cleanup (renderer signal, worker
+    // drain, PTY flush, store flush, 5s hard-exit fallback) and then closes
+    // the window for real. The old two-step self-close raced that cleanup and
+    // could leave a torn-down renderer inside a still-open window.
+    e.preventDefault();
+    app.quit();
   });
 
   const openBrowserUrlInSpark = (url: string) => {
@@ -1400,38 +1402,26 @@ async function flushAllStores(): Promise<void> {
   ]);
 }
 
-app.on("window-all-closed", async () => {
-  // Close-to-tray: while background running is enabled and we're not quitting,
-  // never dispose/quit on window-all-closed — but ONLY when a tray actually
-  // exists. The window `close` handler hides rather than closes, so this rarely
-  // fires; keep it as defense in depth so automation timers survive even if a
-  // close path slips past the hide. The `tray` precondition mirrors the close
-  // handler: if the tray failed to create (Linux no-tray, icon load failure)
-  // the user has no way back to a hidden/headless process, so we fall through
-  // and quit normally rather than stranding it.
-  if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
+app.on("window-all-closed", () => {
+  // A real quit already owns cleanup via before-quit — never start a second,
+  // unbounded teardown here (the old duplicate could hang with no hard-exit
+  // fallback, stranding a live process behind a closed window).
+  if (isQuitting) return;
+  // Close-to-tray: while background running is enabled, the process survives
+  // its last window. The window `close` handler hides rather than closes, so
+  // this rarely fires; kept as defense in depth so automation timers survive
+  // even if a close path slips past the hide. macOS needs no tray (the dock
+  // is the way back); elsewhere a missing tray would strand a headless
+  // process, so fall through and quit.
+  if (
+    getPreferenceCached("keepRunningInBackground") &&
+    (tray || process.platform === "darwin")
+  ) {
     return;
   }
-  // Tell the renderer we're quitting BEFORE the PTY teardown flips any restore
-  // pointer inactive (must precede disposeAllGraceful's exit events).
-  signalRendererBeforeQuit();
-  // Stop orchestration-owned workers and provider sessions first, while their
-  // handles are still live. The following PTY sweep then catches any remaining
-  // CLI-backed process. Do not load the run store solely for quit.
-  if (runStoreMod) {
-    await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
-  }
-  // Graceful (bounded) PTY teardown: closing the pseudo-console first lets
-  // Claude/Codex CLIs flush their transcripts, so `--resume` works on the
-  // next launch; stragglers still get taskkill'd. See disposeAllGraceful.
-  await pty.disposeAllGraceful();
-  fsWatcher.disposeAll();
-  disposeAllConnections();
-  await flushAllStores();
-  // Quit on all platforms. The close-to-tray early-return above already
-  // protects the background-running case; if we reach this line the user closed
-  // the last window with background-running off, and a lingering macOS process
-  // with no window or tray is exactly what we're avoiding.
+  // Last window gone with background running off: quit for real. before-quit
+  // runs the full guarded cleanup (worker drain, PTY flush, store flush, 5s
+  // hard-exit fallback).
   app.quit();
 });
 

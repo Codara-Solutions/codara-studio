@@ -71,7 +71,7 @@ async function main() {
   assert.deepEqual(initial.profiles, [
     {
       id: "personal",
-      label: "Existing Codex login",
+      label: "Account 1",
       managed: false,
       isDefault: true,
       connected: true,

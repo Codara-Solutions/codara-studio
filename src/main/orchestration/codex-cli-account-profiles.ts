@@ -722,7 +722,7 @@ export class CodexCliAccountProfileStore {
       }> = [
         {
           id: CODEX_CLI_PERSONAL_PROFILE_ID,
-          label: "Existing Codex login",
+          label: "Account 1",
           managed: false,
           homeDir: dirname(this.personalAuthFile),
           authFile: this.personalAuthFile,
@@ -908,7 +908,7 @@ export class CodexCliAccountProfileStore {
           ? snapshot.defaultProfileId
           : CODEX_CLI_PERSONAL_PROFILE_ID
         : normalizeCodexCliProfileId(input.profileId);
-    let label = "Existing Codex login";
+    let label = "Account 1";
     let managed = false;
     let homeDir = dirname(this.personalAuthFile);
     let authFile = this.personalAuthFile;

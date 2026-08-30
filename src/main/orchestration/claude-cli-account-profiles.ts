@@ -988,7 +988,7 @@ export class ClaudeCliAccountProfileStore {
       }> = [
         {
           id: CLAUDE_CLI_PERSONAL_PROFILE_ID,
-          label: "Existing Claude login",
+          label: "Account 1",
           managed: false,
           configDir: this.personalProfileConfigDir,
         },
@@ -1179,7 +1179,7 @@ export class ClaudeCliAccountProfileStore {
           ? snapshot.defaultProfileId
           : CLAUDE_CLI_PERSONAL_PROFILE_ID
         : normalizeClaudeCliProfileId(input.profileId);
-    let label = "Existing Claude login";
+    let label = "Account 1";
     let managed = false;
     let configDir = this.personalProfileConfigDir;
     let configDirEnv = this.personalProfileConfigDirEnv;

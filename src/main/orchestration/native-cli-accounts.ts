@@ -1611,23 +1611,31 @@ export class NativeCliAccountService {
         profileId,
       });
     }
-    // Deleting the current default is a legitimate ask, not an error: hand
-    // the default back to the personal account (which always exists and can
-    // never be deleted) through the full guarded switch, then delete. Runs
-    // BEFORE the mutation below — the runtime mutex is non-reentrant — and
-    // the store's own delete still re-checks isDefault, so a concurrent
-    // re-default between the two steps degrades to the old error, never to
-    // an unguarded delete.
+    // Deleting the current default or in-use account is a legitimate ask,
+    // not an error: hand the runtime back to the personal account (which
+    // always exists and can never be deleted) through the full guarded
+    // switch — it closes the runtime's running sessions first — then delete.
+    // Runs BEFORE the mutation below (the runtime mutex is non-reentrant),
+    // and the store's delete still re-checks isDefault/inUse, so a
+    // concurrent re-default or fresh session between the two steps degrades
+    // to the old error, never to an unguarded delete.
     {
-      const { profile } = await this.requireProfile(runtime, profileId);
-      if (profile.isDefault && !profile.inUse) {
+      const { profile, inspection } = await this.requireProfile(runtime, profileId);
+      if (profile.isDefault || profile.inUse) {
         const personalId =
           runtime === "claude"
             ? CLAUDE_CLI_PERSONAL_PROFILE_ID
             : runtime === "grok"
               ? GROK_CLI_PERSONAL_PROFILE_ID
               : CODEX_CLI_PERSONAL_PROFILE_ID;
-        await this.setDefault({ runtime, profileId: personalId });
+        if (inspection.defaultProfileId !== personalId) {
+          await this.setDefault({ runtime, profileId: personalId });
+        } else {
+          // Personal is already default, but this profile's sessions are
+          // still running (started while it was active). Close them the same
+          // way a switch would, releasing its in-use lease.
+          await this.sessionShutdown(runtime);
+        }
       }
     }
     return this.withRuntimeMutation(runtime, async () => {

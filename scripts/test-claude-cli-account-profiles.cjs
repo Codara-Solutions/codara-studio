@@ -144,7 +144,7 @@ async function main() {
     profiles: [
       {
         id: "personal",
-        label: "Existing Claude login",
+        label: "Account 1",
         managed: false,
         isDefault: true,
         connected: true,
