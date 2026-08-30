@@ -1,5 +1,7 @@
 import React, { useState } from "react";
+import type { PiSubscriptionProvider } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
+import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
 import {
   ActionButton,
   CardOverflowMenu,
@@ -11,20 +13,21 @@ import {
 } from "./AccountCardPrimitives";
 
 /**
- * One Anthropic account is one card. The main process owns the pairing: a
- * Cora row carries the id of its Claude Code half, so this component never
- * matches anything itself. It only reads the ids back through callbacks and
- * never renders them.
+ * One account is one card, for every provider. The main process owns the
+ * pairing: a Cora row carries the id of its terminal half (Claude Code,
+ * Codex or Grok), so this component never matches anything itself. It only
+ * reads the ids back through callbacks and never renders them. Which
+ * provider the card is for changes the words and the brand, nothing else.
  *
  * A card is one of six states, derived below from what main reported:
- *   active                  the account Cora and Claude Code are using
+ *   active                  the account Cora and the terminal tool are using
  *   signed-in               signed in, one click away from being active
  *   needs-reconnect         the Cora sign-in lapsed with no way back
- *   terminal-only           a Claude Code sign-in Cora does not have yet
- *   cora-only               a Cora sign-in Claude Code does not have yet
- *   account-one-signed-out  the user's own claude login, currently absent
+ *   terminal-only           a terminal sign-in Cora does not have yet
+ *   cora-only               a Cora sign-in the terminal tool does not have yet
+ *   account-one-signed-out  the user's own CLI login, currently absent
  */
-export type AnthropicAccountState =
+export type AccountCardState =
   | "active"
   | "signed-in"
   | "needs-reconnect"
@@ -32,9 +35,10 @@ export type AnthropicAccountState =
   | "cora-only"
   | "account-one-signed-out";
 
-export interface AnthropicAccountCardView {
-  /** Stable across pairing: anthropic:<coraId>, anthropic:cli:<cliId>, or anthropic:account-one. */
+export interface AccountCardView {
+  /** Stable across pairing: <provider>:<coraId>, <provider>:cli:<cliId>, or <provider>:account-one. */
   key: string;
+  provider: PiSubscriptionProvider;
   label: string;
   /** Shown under the name so two similarly named accounts are tellable apart. */
   email?: string;
@@ -42,11 +46,11 @@ export interface AnthropicAccountCardView {
   plan?: string;
   /** Cora row id. Absent on a terminal-only half and on the unlinked Account 1 slot. */
   coraProfileId?: string;
-  /** Claude Code half id. Absent on a Cora-only row. */
+  /** Terminal half id. Absent on a Cora-only row. */
   cliProfileId?: string;
-  /** Account 1: the user's own claude login. Renameable, never deleted or reconnected here. */
+  /** Account 1: the user's own CLI login. Renameable, never deleted or reconnected here. */
   builtIn: boolean;
-  /** The account Cora and Claude Code are running on; both switch together. */
+  /** The account Cora and the terminal tool are running on; both switch together. */
   active: boolean;
   cora?: {
     connected: boolean;
@@ -58,44 +62,48 @@ export interface AnthropicAccountCardView {
     connected: boolean;
     expired?: boolean;
     canRefresh?: boolean;
-    /** Claude Code refuses the profile's folder (permissions); not a sign-out. */
+    /** The tool refuses the profile's folder (permissions); not a sign-out. */
     unsafe?: boolean;
   };
-  /** A terminal-only half that Claude Code is currently set to. */
+  /** A terminal-only half that the terminal tool is currently set to. */
   cliDefault?: boolean;
   busy: boolean;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
   /**
-   * Set after main refused a delete because terminals are still running on
-   * this account: the next Delete closes that many sessions first.
+   * Terminals still running on this account (the count main refused a delete
+   * with, or the live count): the next Delete closes that many first.
    */
   closeSessionsCount?: number;
+  /**
+   * Set after main refused a switch because terminals are running on this
+   * account: the next Use closes that many first. Only a provider whose
+   * switch closes sessions (Codex) ever reports it.
+   */
+  switchCloseSessionsCount?: number;
 }
 
-export interface AnthropicAccountActions {
-  /** Switch Cora and Claude Code to this account together. */
-  onUse: (card: AnthropicAccountCardView) => void;
+export interface AccountCardActions {
+  /** Switch Cora and the terminal tool to this account together. */
+  onUse: (card: AccountCardView, options: { closeSessions: boolean }) => void;
   /** Browser sign-in that rewrites both halves of this account. */
-  onReconnect: (card: AnthropicAccountCardView) => void;
+  onReconnect: (card: AccountCardView) => void;
   /** Give a half account its other half. */
-  onShare: (card: AnthropicAccountCardView) => void;
-  onRename: (card: AnthropicAccountCardView, label: string) => Promise<boolean>;
+  onShare: (card: AccountCardView) => void;
+  onRename: (card: AccountCardView, label: string) => Promise<boolean>;
   onDelete: (
-    card: AnthropicAccountCardView,
+    card: AccountCardView,
     options: { closeSessions: boolean },
   ) => void;
 }
 
-export function anthropicAccountState(
-  card: AnthropicAccountCardView,
-): AnthropicAccountState {
+export function accountCardState(card: AccountCardView): AccountCardState {
   if (!card.coraProfileId) {
     return card.builtIn ? "account-one-signed-out" : "terminal-only";
   }
-  // Claude access tokens last about an hour and are renewed silently from
-  // the refresh token, so a lapsed one is the normal resting state between
-  // sessions. Only a credential with no way back needs the user.
+  // Access tokens are short-lived and renewed silently from the refresh
+  // token, so a lapsed one is the normal resting state between sessions.
+  // Only a credential with no way back needs the user.
   const coraUsable =
     Boolean(card.cora?.connected) &&
     !(card.cora?.expired && !card.cora.canRefresh);
@@ -105,21 +113,30 @@ export function anthropicAccountState(
   return card.active ? "active" : "signed-in";
 }
 
-export const ACCOUNT_ONE_SIGNED_OUT_HINT =
-  "Run claude login in a terminal to use this account.";
+export function accountOneSignedOutHint(
+  descriptor: AccountProviderDescriptor,
+): string {
+  return `Run ${descriptor.loginHint} in a terminal to use this account.`;
+}
 
 /** Usable the way Cora counts it: present, and not expired without a way back. */
-function terminalUsable(card: AnthropicAccountCardView): boolean {
+function terminalUsable(card: AccountCardView): boolean {
   return (
     Boolean(card.terminal?.connected) &&
     !(card.terminal?.expired && !card.terminal.canRefresh)
   );
 }
 
+function sessions(count: number): string {
+  return `${count} ${count === 1 ? "session" : "sessions"}`;
+}
+
 function connectionState(
-  card: AnthropicAccountCardView,
-  state: AnthropicAccountState,
+  card: AccountCardView,
+  state: AccountCardState,
+  descriptor: AccountProviderDescriptor,
 ): ConnectionState {
+  const { cliLabel } = descriptor;
   // Account 1 always says what to do; a raw store error on its own would
   // hide the one instruction that helps.
   if (card.cora?.error && state !== "account-one-signed-out") {
@@ -135,38 +152,38 @@ function connectionState(
     case "cora-only":
       return {
         ok: false,
-        text: "Signed in to Cora only. Share it so Claude Code can use it too.",
+        text: `Signed in to Cora only. Share it so ${cliLabel} can use it too.`,
       };
     case "terminal-only":
-      // Nothing on this branch signs a managed profile in again; the only
-      // way forward is a fresh add, so the line says so.
+      // Nothing here signs a managed profile in again; the only way forward
+      // is a fresh add, so the line says so.
       if (card.terminal?.unsafe) {
         return {
           ok: false,
-          text: "Claude Code cannot use this profile's folder. Delete it and add the account again.",
+          text: `${cliLabel} cannot use this profile's folder. Delete it and add the account again.`,
           danger: true,
         };
       }
       if (!card.terminal?.connected) {
         return {
           ok: false,
-          text: "Not signed in to Claude Code. Delete it and add the account again.",
+          text: `Not signed in to ${cliLabel}. Delete it and add the account again.`,
         };
       }
       return {
         ok: false,
         text: card.cliDefault
-          ? "Signed in to Claude Code only, and the terminal is using it. Share it so Cora can use it too."
-          : "Signed in to Claude Code only. Share it so Cora can use it too.",
+          ? `Signed in to ${cliLabel} only, and the terminal is using it. Share it so Cora can use it too.`
+          : `Signed in to ${cliLabel} only. Share it so Cora can use it too.`,
       };
     case "account-one-signed-out":
       return {
         ok: false,
         text: terminalUsable(card)
-          ? "Found your claude login. Cora is linking it now."
+          ? `Found your ${descriptor.loginHint}. Cora is linking it now.`
           : card.cora?.error
-            ? `${card.cora.error} ${ACCOUNT_ONE_SIGNED_OUT_HINT}`
-            : ACCOUNT_ONE_SIGNED_OUT_HINT,
+            ? `${card.cora.error} ${accountOneSignedOutHint(descriptor)}`
+            : accountOneSignedOutHint(descriptor),
       };
     case "active":
     case "signed-in":
@@ -176,30 +193,38 @@ function connectionState(
       if (card.terminal && !card.terminal.connected) {
         return {
           ok: true,
-          text: "Signed in to Cora. The Claude Code copy is catching up.",
+          text: `Signed in to Cora. The ${cliLabel} copy is catching up.`,
         };
       }
-      return { ok: true, text: "Signed in to Cora and Claude Code." };
+      return { ok: true, text: `Signed in to Cora and ${cliLabel}.` };
   }
 }
 
 function primaryAction(
-  card: AnthropicAccountCardView,
-  state: AnthropicAccountState,
-  actions: AnthropicAccountActions,
+  card: AccountCardView,
+  state: AccountCardState,
+  descriptor: AccountProviderDescriptor,
+  actions: AccountCardActions,
   disabled: boolean,
 ): CardAction | undefined {
   switch (state) {
     case "active":
     case "account-one-signed-out":
       return undefined;
-    case "signed-in":
+    case "signed-in": {
+      // Main refused the switch with a count; the same button now closes
+      // those sessions and switches. Only Codex ever reports one.
+      const switchCount = card.switchCloseSessionsCount ?? 0;
       return {
         id: "use",
-        label: "Use this account",
+        label:
+          switchCount > 0
+            ? `Close ${sessions(switchCount)} and switch`
+            : "Use this account",
         disabled,
-        run: () => actions.onUse(card),
+        run: () => actions.onUse(card, { closeSessions: switchCount > 0 }),
       };
+    }
     case "needs-reconnect":
       return {
         id: "reconnect",
@@ -210,7 +235,7 @@ function primaryAction(
     case "cora-only":
       return {
         id: "share",
-        label: "Share with Claude Code",
+        label: `Share with ${descriptor.cliLabel}`,
         disabled,
         run: () => actions.onShare(card),
       };
@@ -225,23 +250,25 @@ function primaryAction(
   }
 }
 
-export default function AnthropicAccountCard({
+export default function AccountCard({
   card,
+  descriptor,
   disabled,
   actions,
 }: {
-  card: AnthropicAccountCardView;
+  card: AccountCardView;
+  descriptor: AccountProviderDescriptor;
   /** The Pi runtime is missing or another account action is in flight. */
   disabled: boolean;
-  actions: AnthropicAccountActions;
+  actions: AccountCardActions;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
-  const brand = agentBrandColor("claude");
-  const state = anthropicAccountState(card);
+  const brand = agentBrandColor(descriptor.brand);
+  const state = accountCardState(card);
   const controlsDisabled = disabled || card.busy;
-  const status = connectionState(card, state);
-  const action = primaryAction(card, state, actions, controlsDisabled);
+  const status = connectionState(card, state, descriptor);
+  const action = primaryAction(card, state, descriptor, actions, controlsDisabled);
   const renameable = Boolean(card.coraProfileId || card.cliProfileId);
 
   const menuActions: CardAction[] = [];
@@ -257,14 +284,14 @@ export default function AnthropicAccountCard({
     });
   }
   const destructiveActions: CardAction[] = [];
-  // Account 1 is the user's own claude login: Codara never deletes it.
+  // Account 1 is the user's own CLI login: Codara never deletes it.
   if (renameable && !card.builtIn) {
     const closeCount = card.closeSessionsCount ?? 0;
     destructiveActions.push({
       id: "delete",
       label: deleteArmed
         ? closeCount > 0
-          ? `Close ${closeCount} ${closeCount === 1 ? "session" : "sessions"} and delete`
+          ? `Close ${sessions(closeCount)} and delete`
           : "Confirm delete"
         : "Delete",
       danger: true,

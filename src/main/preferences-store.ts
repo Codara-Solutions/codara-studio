@@ -255,9 +255,6 @@ function normalize(
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),
-    // Cosmetic display names for CLI sign-ins that have no name field of
-    // their own (see AppPreferences.nativeCliAccountLabels).
-    nativeCliAccountLabels: normalizeStringMap(src.nativeCliAccountLabels),
     // Opt-in: relaunches only resume agent sessions when the user enabled the
     // Settings toggle. Absent/invalid values fall back to the default (off),
     // which preserves the fresh-shell behavior for existing preference files.

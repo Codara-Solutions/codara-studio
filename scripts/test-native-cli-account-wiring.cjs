@@ -15,7 +15,7 @@ const pty = read("src/main/pty-manager.ts");
 const preload = read("src/preload/index.ts");
 const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const settingsView = read("src/renderer/src/components/AccountCards.tsx");
-const anthropicCard = read("src/renderer/src/components/AnthropicAccountCard.tsx");
+const card = read("src/renderer/src/components/AccountCard.tsx");
 const app = read("src/renderer/src/App.tsx");
 const tabs = read("src/renderer/src/tabs/useTabs.ts");
 const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
@@ -26,14 +26,11 @@ const session = read(
   "src/renderer/src/components/Terminal/useTerminalSession.ts",
 );
 
+// The surviving native channels serve the halves no account row names yet:
+// inspect lists them, rename and delete act on a terminal-only half.
 for (const channel of [
   "native-cli-accounts:inspect",
-  "native-cli-accounts:create",
   "native-cli-accounts:rename",
-  "native-cli-accounts:set-default",
-  "native-cli-accounts:prepare-login",
-  "native-cli-accounts:cancel-login",
-  "native-cli-accounts:logout",
   "native-cli-accounts:delete",
 ]) {
   assert.ok(
@@ -43,6 +40,20 @@ for (const channel of [
   assert.ok(
     preload.includes(`ipcRenderer.invoke("${channel}"`),
     `${channel} must be exposed by preload`,
+  );
+}
+// Sign-in, switch and sign-out are account actions now. Main keeps refusing
+// the retired channels for any caller.
+for (const channel of [
+  "native-cli-accounts:create",
+  "native-cli-accounts:set-default",
+  "native-cli-accounts:prepare-login",
+  "native-cli-accounts:cancel-login",
+  "native-cli-accounts:logout",
+]) {
+  assert.ok(
+    ipc.includes(`"${channel}"`),
+    `${channel} must still be answered (refused) in main`,
   );
 }
 
@@ -143,8 +154,9 @@ assert.match(
   tabs,
   /nativeCliLoginToken:\s*_nativeCliLoginToken/,
 );
-assert.match(app, /cancelLogin\(\{ launchToken \}\)/);
-assert.match(app, /event\.preventDefault\(\)/);
+// Settings no longer opens a sign-in terminal or a fresh session after a
+// switch: the one browser sign-in and the switch both live in main.
+assert.doesNotMatch(app, /cancelLogin|spark:open-native-cli-login|spark:open-native-cli-account|onLoginError/);
 assert.doesNotMatch(
   app,
   /title:\s*`\$\{titlePrefix\}\s*·/,
@@ -189,114 +201,57 @@ assert.match(
 );
 
 // ---------------------------------------------------------------------------
-// Settings presents one merged Accounts section. An Anthropic account is one
-// sign-in with two halves paired in the main process; Codex and Grok keep a
-// Cora sign-in and a terminal sign-in apart, and switching one of their
-// terminal sign-ins still closes that tool's running sessions first.
+// Settings presents one merged Accounts section with one card model for
+// every provider: an account is one sign-in with two halves paired in the
+// main process, and the words come from a per-provider descriptor.
 assert.match(settings, /title="Accounts"/);
-assert.match(settings, /A Claude account is one sign-in for both Cora and Claude Code/);
-assert.match(settings, /closes that tool's running sessions first/);
+assert.match(settings, /Every account is one sign-in for both Cora and its terminal tool/);
+assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
   settings.indexOf("<AccountsSettings />") >= 0,
   "the Agents tab must render the merged Accounts section",
 );
 
-// The Anthropic branch never speaks to the native CLI account store for a
-// switch or a sign-in: Use goes through the Pi make-default channel, which
-// switches Cora and Claude Code together in main, and Add/Reconnect are the
-// Pi browser sign-in, which writes both halves. The only Claude-runtime
-// native calls left are rename and delete of a terminal-only half.
-assert.match(settings, /if \(descriptor\.provider === "anthropic"\) \{/);
-assert.match(settings, /void makeDefault\("anthropic", card\.coraProfileId\)/);
-assert.match(settings, /reconnectAccount\("anthropic", card\.coraProfileId, card\.label\)/);
-assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: "claude",/);
-assert.match(settings, /nativeCliAccounts\.delete\(\{ runtime: "claude", profileId \}\)/);
-assert.equal((settings.match(/runtime: "claude"/g) ?? []).length, 2);
-const anthropicActions = settings.slice(
-  settings.indexOf("    anthropic: {"),
-  settings.indexOf("  const accountsReady ="),
-);
-assert.ok(anthropicActions.length > 0, "the Anthropic action block must exist");
+// No provider speaks to the native CLI account store for a switch or a
+// sign-in: Use goes through the Pi make-default channel, which switches Cora
+// and the terminal half together in main, and Add/Reconnect are the Pi
+// sign-in, which writes both halves. The only native calls left are rename
+// and delete of a terminal-only half.
+assert.match(settings, /return ACCOUNT_PROVIDER_DESCRIPTORS\.map\(\(descriptor\) => \{/);
+assert.doesNotMatch(settings, /descriptor\.provider === "anthropic"/);
+assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId, closeSessions\)/);
+assert.match(settings, /reconnectAccount\(card\.provider, card\.coraProfileId, card\.label\)/);
+assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
+assert.match(settings, /nativeCliAccounts\.delete\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
 assert.doesNotMatch(
-  anthropicActions,
-  /nativeCliAccounts\.(?:setDefault|prepareLogin|create|logout)|spark:open-native-cli/,
-  "no Claude switch or sign-in may go through the native CLI account store",
+  settings,
+  /nativeCliAccounts\.(?:setDefault|prepareLogin|cancelLogin|create|logout)\(|spark:open-native-cli/,
+  "no switch or sign-in may go through the native CLI account store",
 );
-assert.doesNotMatch(anthropicCard, /nativeCliAccounts|spark:open-native-cli/);
+assert.doesNotMatch(card, /nativeCliAccounts|spark:open-native-cli/);
 // Card keys are ids main assigned, so pairing never remounts a card.
-assert.match(settings, /key: `anthropic:\$\{profile\.id\}`/);
-assert.match(settings, /key: `anthropic:cli:\$\{profile\.id\}`/);
-assert.match(settings, /key: "anthropic:account-one"/);
-// Account 1 keeps the Cora row's label (renameable there); the Codara-side
-// preference label is only for the Codex and Grok built-in sign-ins.
-const anthropicBranch = settings.slice(
-  settings.indexOf('if (descriptor.provider === "anthropic") {'),
-  settings.indexOf("// Identity pairing:"),
-);
-assert.doesNotMatch(anthropicBranch, /nativeCliAccountLabels/);
-assert.match(anthropicBranch, /label: personal\.label \|\| "Account 1"/);
-
-// The Codex and Grok path is the two-facet card: a Cora connection and a CLI
-// sign-in share one card only when the main process reports the same
-// anonymous account fingerprint for both, with a same-provider email
-// fallback where a fingerprint verdict is impossible. Unmatched entries keep
-// their own card.
-assert.match(settings, /Identity pairing/);
-assert.match(settings, /cliByFingerprint/);
-assert.match(settings, /profile\.accountFingerprint/);
-assert.match(
-  settings,
-  /key: paired \? `cora:\$\{profile\.id\}\+cli:\$\{paired\.id\}` : `cora:\$\{profile\.id\}`/,
-);
-assert.match(settings, /\.\.\.\(paired \? \{ cli: cliFacet\(paired\) \} : \{\}\)/);
-assert.match(settings, /filter\(\(profile\) => !pairedCliIds\.has\(profile\.id\)\)/);
-assert.match(
-  settings,
-  /profile\.managed \|\| profile\.status === "connected"/,
-  "an unsigned built-in CLI slot must not render as its own account card",
-);
-assert.match(settings, /unsigned built-in CLI slot is not an account/);
-assert.match(settings, /key: `cli:\$\{profile\.id\}`/);
-assert.match(settings, /Only a \*signed-in\* unmatched CLI can merge/);
-assert.match(settings, /card\.cora && !card\.cli && unmatchedSignedInCli\.length > 0/);
-assert.match(settings, /pairHint: `Reconnect to Cora if this is the same account/);
-assert.match(settings, /card\.cli\?\.authState === "connected"/);
+assert.match(settings, /key: `\$\{provider\}:\$\{profile\.id\}`/);
+assert.match(settings, /key: `\$\{provider\}:cli:\$\{profile\.id\}`/);
+assert.match(settings, /key: `\$\{provider\}:account-one`/);
+// Account 1 keeps the Cora row's label for every provider (renameable
+// there); the Codara-side label preference is gone with the two-facet card.
+assert.match(settings, /label: personal\.label \|\| "Account 1"/);
+assert.doesNotMatch(settings, /nativeCliAccountLabels/);
+assert.doesNotMatch(shared, /nativeCliAccountLabels/);
+assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabels/);
+// Nothing in the renderer pairs on identity any more; main owns the link.
+assert.doesNotMatch(settings, /Identity pairing|cliByFingerprint|cliByEmail|pairHint|pairedCliIds|unmatchedSignedInCli/);
 assert.match(settings, /function accountCardShowsUsage/);
 assert.match(settings, /accountCardShowsUsage\(usage\)/);
-assert.match(settings, /const cliByEmail = new Map<string, NativeCliAccountProfile>\(\);/);
-assert.match(settings, /profile\.email\?\.trim\(\)\.toLowerCase\(\)/);
-assert.match(settings, /const candidate = byFingerprint \?\? byEmail;/);
-assert.match(
-  settings,
-  /!profile\.accountFingerprint \|\| !byEmailCandidate\.accountFingerprint/,
-);
-assert.match(settings, /an email never matches across providers/);
-assert.match(settings, /const pairedByEmail = Boolean\(paired && !byFingerprint\);/);
-assert.match(settings, /Same email address\. Reconnect to Cora to fully pair these sign-ins\./);
-assert.match(settings, /const email = profile\.email \?\? paired\?\.email;/);
-assert.match(settings, /\.\.\.\(email \? \{ email \} : \{\}\)/);
-
-// The Codex and Grok built-in sign-in has no name field of its own, so its
-// card name is a Codara-side preference (nativeCliAccountLabels, keyed
-// runtime:profileId), then the store's "Existing … login" label, with
-// "Personal" as last resort.
-assert.match(settings, /\|\| profile\.label \|\| "Personal"/);
-const prefsStore = read("src/main/preferences-store.ts");
-assert.match(shared, /nativeCliAccountLabels: Record<string, string>;/);
-assert.match(shared, /nativeCliAccountLabels: \{\},/);
-assert.match(
-  prefsStore,
-  /nativeCliAccountLabels: normalizeStringMap\(src\.nativeCliAccountLabels\)/,
-);
-assert.match(
-  settings,
-  /label: profile\.managed\s*\? profile\.label\s*: preferences\.nativeCliAccountLabels\[/,
-);
-assert.match(settings, /\$\{descriptor\.runtime\}:\$\{profile\.id\}/);
-assert.match(settings, /if \(!managed\) \{/);
-assert.match(settings, /setPreference\("nativeCliAccountLabels", \{/);
-assert.match(settings, /\[`\$\{runtime\}:\$\{profileId\}`\]: label,/);
+// The switch refusal (Codex only) travels the same way as the delete one.
+assert.match(settings, /refusedWithSessions\(profileId, "use", err\)/);
+assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
+assert.match(card, /switchCloseSessionsCount/);
+assert.match(card, /`Close \$\{sessions\(switchCount\)\} and switch`/);
+const descriptors = read("src/renderer/src/lib/account-provider-descriptors.ts");
+assert.match(descriptors, /codex: \{ cliLabel: "Codex", loginHint: "codex login", switchClosesSessions: true \}/);
+assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1);
 
 // The fingerprint is a one-way digest of the account id, computed in main with
 // the same scheme on both sides. The id itself never crosses IPC.
@@ -393,69 +348,16 @@ for (const projection of [nativeProjection, subscriptionProjection]) {
   assert.doesNotMatch(projection, /\.\.\.profile\b/);
 }
 
-// The Codex and Grok card: a card that is only signed in to the CLI says why
-// it has no usage bars instead of showing none, Use-for-Cora and use-for-CLI
-// are independent role rows, and everything else lives in the "···" menu.
-assert.match(
-  settingsView,
-  /Usage limits show once this account is connected to Cora/,
-);
-assert.match(settingsView, /const cliOnly = Boolean\(cli && !cora\);/);
-assert.match(settingsView, /\) : cliOnly \? \(/);
-assert.match(settingsView, /\{card\.email \? \(/);
-assert.match(settingsView, /\{card\.email\}/);
-assert.match(settingsView, /function AccountRoleRow\(/);
-assert.match(settingsView, /groups=\{\[menuActions, destructiveActions\]\}/);
-assert.match(settingsView, /More actions for \$\{card\.label\}/);
-assert.match(settingsView, /Connected to Cora/);
-assert.match(settingsView, /Not signed in to \$\{cliLabel\}/);
-assert.match(settingsView, /cli\?\.managed/);
-assert.match(settingsView, /usingLabel="Using"/);
-assert.match(settingsView, /label: "Use this account for Cora"/);
-assert.match(settingsView, /: `Use this account for \$\{cliLabel\}`/);
-assert.match(settingsView, /onCliConnect: \(card: AccountCardView\) => void;/);
-assert.match(settingsView, /onCoraConnect: \(card: AccountCardView\) => void;/);
-assert.match(settingsView, /actions\.onCoraConnect\(card\)/);
-assert.match(
-  settings,
-  /onCoraConnect: \(card\) => addAccount\(card\.provider, card\.label\)/,
-);
-assert.match(settings, /onCliConnect: \(card\) => \{/);
-assert.match(settings, /const reusableManaged = runtimeInspection\?\.profiles\.find/);
-assert.match(settings, /profile\.status === "sign_in_required"/);
-assert.match(settings, /removeProfileOnFailure: true/);
-assert.match(settings, /activateOnSuccess: true/);
-assert.match(settings, /spark:open-native-cli-account/);
-assert.match(app, /spark:open-native-cli-account/);
-assert.match(app, /nativeCodexProfileId: profileId/);
-assert.match(app, /nativeGrokProfileId: profileId/);
-// Switching an Anthropic account closes nothing and opens nothing: new
-// terminals pick it up. App only opens a fresh session for Codex and Grok.
-assert.match(app, /\(runtime !== "codex" && runtime !== "grok"\) \|\|/);
-assert.doesNotMatch(app, /nativeClaudeProfileId: profileId/);
-assert.match(settingsView, /"Remove from Cora"/);
-assert.match(settingsView, /`Remove the \$\{cliLabel\} account`/);
-assert.match(settingsView, /export function cliSignInHint\(/);
-assert.match(
-  settingsView,
-  /if \(!facet \|\| facet\.busyAction \|\| facet\.authState !== "signed-out"\) return null;/,
-);
-assert.match(settingsView, /const signInHint = cliSignInHint\(cli, cliLabel\);/);
-assert.match(
-  settingsView,
-  /const cliNeedsSignIn =[\s\S]{0,200}?cli\.authState === "signed-out"/,
-);
-assert.match(settingsView, /id: "cli-sign-in"/);
-assert.match(
-  settingsView,
-  /cli \? actions\.onCliSignIn\(card\) : actions\.onCliConnect\(card\)/,
-);
-assert.match(settingsView, /id: "cli-use"/);
-assert.match(settingsView, /actions\.onCliUse\(card\)/);
-assert.match(settingsView, /`Confirm & close \$\{cliLabel\}`/);
-assert.match(settingsView, /const \[cliSwitchArmed, setCliSwitchArmed\] = useState\(false\)/);
-// The one-account card has none of the two-role machinery.
-assert.doesNotMatch(anthropicCard, /AccountRoleRow|cliSwitchArmed|Confirm & close|Remove from Cora/);
+// The one card and its picker carry none of the two-role machinery.
+for (const source of [card, settingsView, settings, app]) {
+  assert.doesNotMatch(
+    source,
+    /AccountRoleRow|cliSwitchArmed|Confirm & close|Remove from Cora|Usage limits show once this account is connected to Cora|cliSignInHint|onCliConnect|onCoraConnect|onCliUse|Connect to Cora|nativeCodexProfileId: profileId|nativeGrokProfileId: profileId/,
+  );
+}
+assert.match(settingsView, /export function AccountAddPicker\(/);
+assert.match(settingsView, /<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
+assert.match(settingsView, /`Sign in once in your browser\. Cora and \$\{selectedView\.descriptor\.cliLabel\} both use it\.`/);
 
 // The main process owns the Codex shutdown boundary, and only Codex has
 // one: Codara PTYs get a graceful close first, external codex processes are
@@ -479,5 +381,5 @@ assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(pr
 assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 
 console.log(
-  "PASS native CLI account IPC is sanitized, login tokens are refused in main, every provider switches and deletes through the unified account services, and Codex and Grok keep fingerprint-paired two-facet cards until the one card lands",
+  "PASS native CLI account IPC is sanitized, login tokens are refused in main, every provider switches and deletes through the unified account services, and one card model serves all three providers",
 );

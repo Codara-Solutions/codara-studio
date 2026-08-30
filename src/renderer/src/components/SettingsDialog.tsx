@@ -3,7 +3,6 @@ import {
   AGENT_FAMILIES,
   AGENT_FAMILY_IDS,
   familyForModelId,
-  familyForRuntime,
   runtimeForSubscription,
 } from "@shared/agent-families";
 import { ALLOWED_WORKER_MODELS } from "@shared/worker-model-roster";
@@ -11,8 +10,6 @@ import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-lef
 import type {
   AppSettings,
   EditorThemeId,
-  NativeCliAccountProfile,
-  NativeCliAccountRuntime,
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
   PiSubscriptionPrompt,
@@ -50,11 +47,13 @@ import {
 import AccountCards, {
   AccountAddPicker,
   type AccountActions,
-  type AccountCardView,
   type AccountProviderView,
-  type NativeCliAccountBusyAction,
 } from "./AccountCards";
-import type { AnthropicAccountCardView } from "./AnthropicAccountCard";
+import type { AccountCardView } from "./AccountCard";
+import {
+  ACCOUNT_PROVIDER_DESCRIPTORS,
+  accountProviderDetail,
+} from "../lib/account-provider-descriptors";
 import RemoteAccessSettings from "./RemoteAccessSettings";
 import { RuntimeMark } from "./BrandMarks";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
@@ -1951,39 +1950,12 @@ interface PiInstallView {
 }
 
 /**
- * One provider group per family: Cora subscription + the matching local CLI.
- * Order is the order they appear in Settings.
- */
-const ACCOUNT_PROVIDERS: ReadonlyArray<{
-  provider: PiSubscriptionProvider;
-  runtime: NativeCliAccountRuntime;
-  label: string;
-  cliLabel: string;
-}> = AGENT_FAMILY_IDS.map((id) => ({
-  provider: AGENT_FAMILIES[id].subscription,
-  runtime: AGENT_FAMILIES[id].runtime,
-  label: AGENT_FAMILIES[id].vendorLabel,
-  cliLabel: AGENT_FAMILIES[id].cliLabel,
-}));
-
-function cliRuntimeForProvider(
-  provider: PiSubscriptionProvider,
-): NativeCliAccountRuntime {
-  return runtimeForSubscription(provider);
-}
-
-/**
- * One section for every account behind Codara, grouped by the provider they
- * belong to. An Anthropic account is one sign-in with two halves (a Cora row
- * and its Claude Code profile) that the main process pairs and keeps in step;
- * the card shows one account and one Use action. Codex and Grok keep their
- * two sides apart: their own credential stores, login ceremonies, and stored
- * defaults, merged in presentation only.
+ * One section for every account behind Codara, grouped by provider. An
+ * account is one sign-in with two halves (a Cora row and its terminal
+ * profile) that the main process pairs and keeps in step, for Anthropic,
+ * OpenAI and xAI alike; the card shows one account and one Use action.
  */
 function AccountsSettings() {
-  // Preferences carry the Codara-side display names for the Codex and Grok
-  // built-in sign-ins, which their CLIs cannot rename (nativeCliAccountLabels).
-  const { preferences, setPreference } = usePreferences();
   const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
   // True once the first status read settled either way: a store that failed
@@ -1996,21 +1968,17 @@ function AccountsSettings() {
   const [addingProvider, setAddingProvider] = useState<PiSubscriptionProvider | null>(null);
   const [addLabel, setAddLabel] = useState("");
   const [accountMutationId, setAccountMutationId] = useState<string | null>(null);
-  // Main refuses to delete an Anthropic account while terminals run on it and
-  // says how many; the card's next Delete offers to close them first.
+  // Main refuses to delete an account while terminals run on it, and refuses
+  // a Codex switch the same way, saying how many; the card's next Delete or
+  // Use offers to close them first.
   const [closeSessionsPrompt, setCloseSessionsPrompt] = useState<{
     profileId: string;
+    action: "use" | "delete";
     count: number;
   } | null>(null);
   const [cliInspection, setCliInspection] =
     useState<NativeCliAccountsInspection | null>(null);
-  const [cliLoading, setCliLoading] = useState(true);
-  const [cliBusy, setCliBusy] = useState<NativeCliSettingsBusy | null>(null);
   const [cliError, setCliError] = useState<string | null>(null);
-  const [cliNotice, setCliNotice] = useState<string | null>(null);
-  const [addingCliProvider, setAddingCliProvider] =
-    useState<PiSubscriptionProvider | null>(null);
-  const [addCliLabel, setAddCliLabel] = useState("");
   const {
     overview: usageOverview,
     loading: usageLoading,
@@ -2172,6 +2140,8 @@ function AccountsSettings() {
     });
   };
 
+  // One sign-in for every provider: main runs Pi's login (a browser page for
+  // Anthropic and OpenAI, a device code for xAI) and writes both halves.
   const addAccount = (provider: PiSubscriptionProvider, label: string) => {
     beginProfileLogin(
       provider,
@@ -2219,13 +2189,36 @@ function AccountsSettings() {
       window.spark.piSubscriptions.renameAccount({ profileId, label }),
     );
 
+  // A refusal carries the count of terminals it would close; the card's
+  // next Use or Delete resends with closeSessions.
+  const refusedWithSessions = (
+    profileId: string,
+    action: "use" | "delete",
+    err: unknown,
+  ) => {
+    const count = liveTerminalCount(ipcErrorMessage(err));
+    if (count !== null) setCloseSessionsPrompt({ profileId, action, count });
+  };
+
   const makeDefault = (
     provider: PiSubscriptionProvider,
     profileId: string,
-  ): Promise<boolean> =>
-    mutateAccount(profileId, () =>
-      window.spark.piSubscriptions.makeDefault({ provider, profileId }),
-    );
+    closeSessions: boolean,
+  ): Promise<boolean> => {
+    setCloseSessionsPrompt(null);
+    return mutateAccount(profileId, async () => {
+      try {
+        return await window.spark.piSubscriptions.makeDefault({
+          provider,
+          profileId,
+          ...(closeSessions ? { closeSessions: true } : {}),
+        });
+      } catch (err) {
+        refusedWithSessions(profileId, "use", err);
+        throw err;
+      }
+    });
+  };
 
   const deleteAccount = (
     profileId: string,
@@ -2239,16 +2232,15 @@ function AccountsSettings() {
           ...(closeSessions ? { closeSessions: true } : {}),
         });
       } catch (err) {
-        const count = liveTerminalCount(ipcErrorMessage(err));
-        if (count !== null) setCloseSessionsPrompt({ profileId, count });
+        refusedWithSessions(profileId, "delete", err);
         throw err;
       }
     });
   };
 
-  // A terminal-only Claude Code half is renamed and deleted through the
-  // native account store, but its card lives in the same list, so the result
-  // is re-read as the account overview the other mutations return.
+  // A terminal-only half is renamed and deleted through the native account
+  // store, but its card lives in the same list, so the result is re-read as
+  // the account overview the other mutations return.
   const mutateTerminalHalf = (
     cliProfileId: string,
     mutation: () => Promise<unknown>,
@@ -2258,9 +2250,9 @@ function AccountsSettings() {
       return window.spark.piSubscriptions.status();
     });
 
-  // The CLI side is a separate main-process store with its own change feed.
+  // The terminal side is a separate main-process store with its own change
+  // feed; it supplies the halves no row names yet.
   const refreshCli = useCallback(async () => {
-    setCliLoading(true);
     try {
       const next = await window.spark.nativeCliAccounts.inspect();
       setCliInspection(next);
@@ -2269,8 +2261,6 @@ function AccountsSettings() {
       setCliError(
         (err as Error).message || "Command-line accounts could not be loaded.",
       );
-    } finally {
-      setCliLoading(false);
     }
   }, []);
 
@@ -2280,90 +2270,6 @@ function AccountsSettings() {
       void refreshCli();
     });
   }, [refreshCli]);
-
-  const mutateCli = useCallback(
-    async (
-      nextBusy: NativeCliSettingsBusy,
-      operation: () => Promise<unknown>,
-    ): Promise<boolean> => {
-      setCliBusy(nextBusy);
-      setCliError(null);
-      setCliNotice(null);
-      try {
-        await operation();
-        await refreshCli();
-        return true;
-      } catch (err) {
-        setCliError(
-          (err as Error).message || "Command-line account action failed.",
-        );
-        return false;
-      } finally {
-        setCliBusy(null);
-      }
-    },
-    [refreshCli],
-  );
-
-  const signInCli = useCallback(
-    async (
-      runtime: NativeCliAccountRuntime,
-      profileId: string,
-      label: string,
-      expected?: {
-        accountFingerprint?: string;
-        email?: string;
-        removeProfileOnMismatch?: boolean;
-        removeProfileOnFailure?: boolean;
-        activateOnSuccess?: boolean;
-      },
-    ) => {
-      setCliBusy({ runtime, profileId, action: "signing-in" });
-      setCliError(null);
-      try {
-        const prepared = await window.spark.nativeCliAccounts.prepareLogin({
-          runtime,
-          profileId,
-          ...(expected?.accountFingerprint
-            ? { expectedAccountFingerprint: expected.accountFingerprint }
-            : {}),
-          ...(expected?.email ? { expectedEmail: expected.email } : {}),
-          ...(expected?.removeProfileOnMismatch
-            ? { removeProfileOnMismatch: true }
-            : {}),
-          ...(expected?.removeProfileOnFailure
-            ? { removeProfileOnFailure: true }
-            : {}),
-          ...(expected?.activateOnSuccess
-            ? { activateOnSuccess: true }
-            : {}),
-        });
-        const runtimeLabel = familyForRuntime(runtime).cliLabel;
-        const event = new CustomEvent("spark:open-native-cli-login", {
-          cancelable: true,
-          detail: {
-            launchToken: prepared.launchToken,
-            label: `${runtimeLabel} sign-in · ${label || "account"}`,
-          },
-        });
-        const accepted = !window.dispatchEvent(event);
-        if (!accepted) {
-          await window.spark.nativeCliAccounts.cancelLogin({
-            launchToken: prepared.launchToken,
-          });
-          setCliError("A workspace is required to open the sign-in terminal.");
-          await refreshCli();
-        }
-      } catch (err) {
-        setCliError(
-          (err as Error).message || "Could not start the command-line sign-in.",
-        );
-      } finally {
-        setCliBusy(null);
-      }
-    },
-    [refreshCli],
-  );
 
   const submitPrompt = (value: string) => {
     if (!login?.promptId || !value.trim()) return;
@@ -2392,601 +2298,204 @@ function AccountsSettings() {
     const usageByProfile = new Map(
       (usageOverview?.profiles ?? []).map((entry) => [entry.profileId, entry] as const),
     );
-    return ACCOUNT_PROVIDERS.map((descriptor) => {
+    const disabled = !overview?.runtimeInstalled;
+    const busy = busyProvider !== null || accountMutationId !== null;
+    return ACCOUNT_PROVIDER_DESCRIPTORS.map((descriptor) => {
+      const { provider } = descriptor;
       const piProfiles = (overview?.profiles ?? []).filter(
-        (profile) => profile.provider === descriptor.provider,
+        (profile) => profile.provider === provider,
       );
       const inspected = cliInspection?.runtimes.find(
         (entry) => entry.runtime === descriptor.runtime,
       );
       const cliProfiles = inspected?.profiles ?? [];
       const cliUnavailable = inspected?.unavailable === true;
-      const coraDisabled = !overview?.runtimeInstalled;
-      const coraBusy = busyProvider !== null || accountMutationId !== null;
 
-      if (descriptor.provider === "anthropic") {
-        // One card per account, paired in the main process: every Cora row
-        // names its Claude Code half, so nothing is matched here. Keys are
-        // the row id (or the terminal id for a half without a row), which
-        // never changes when a half is shared, so cards never remount.
-        const linked = new Set(
-          piProfiles.flatMap((profile) =>
-            profile.cliProfileId ? [profile.cliProfileId] : [],
-          ),
-        );
-        const rows = piProfiles.map<AnthropicAccountCardView>((profile) => {
-          const usage = usageByProfile.get(profile.id);
-          // The count main refused with is right until the next read; after
-          // that the overview's live count keeps the armed Delete honest.
-          const closeSessionsCount =
-            closeSessionsPrompt?.profileId === profile.id
-              ? closeSessionsPrompt.count
-              : (profile.terminal?.liveSessions ?? 0);
-          return {
-            key: `anthropic:${profile.id}`,
-            label: profile.label,
-            ...(profile.email ? { email: profile.email } : {}),
-            ...(usage?.plan ? { plan: usage.plan } : {}),
-            ...(usage && accountCardShowsUsage(usage)
-              ? { usage: <UsageEntryBody usage={usage} compact /> }
-              : {}),
-            coraProfileId: profile.id,
-            ...(profile.cliProfileId ? { cliProfileId: profile.cliProfileId } : {}),
-            builtIn: profile.builtIn === true,
-            active: profile.isDefault,
-            cora: {
-              connected: profile.connected,
-              expired: profile.expired,
-              canRefresh: profile.canRefresh,
-              ...(profile.error ? { error: profile.error } : {}),
-            },
-            ...(profile.terminal ? { terminal: profile.terminal } : {}),
-            busy: accountMutationId === profile.id,
-            ...(closeSessionsCount > 0 ? { closeSessionsCount } : {}),
-          };
-        });
-        // Account 1 first: it is the user's own claude login and the account
-        // everything else hands off to.
-        rows.sort((left, right) => Number(right.builtIn) - Number(left.builtIn));
-        // Claude Code profiles no row names are terminal-only halves; the
-        // card offers to share them with Cora.
-        const terminalOnly = cliProfiles
-          .filter((profile) => profile.managed && !linked.has(profile.id))
-          .map<AnthropicAccountCardView>((profile) => ({
-            key: `anthropic:cli:${profile.id}`,
-            label: profile.label,
-            ...(profile.email ? { email: profile.email } : {}),
-            cliProfileId: profile.id,
-            builtIn: false,
-            active: false,
-            terminal: {
-              connected: profile.status === "connected",
-              ...(profile.status === "unsafe" ? { unsafe: true } : {}),
-            },
-            cliDefault: profile.isDefault,
-            busy: accountMutationId === profile.id,
-          }));
-        // The user's own claude login has no row until it holds a credential
-        // (main creates one the moment it does). Until then the slot says
-        // what to do instead of vanishing.
-        const personal = cliProfiles.find((profile) => !profile.managed);
-        const accountOneSlot: AnthropicAccountCardView[] =
-          personal && !linked.has(personal.id)
-            ? [
-                {
-                  key: "anthropic:account-one",
-                  label: personal.label || "Account 1",
-                  builtIn: true,
-                  active: false,
-                  terminal: { connected: personal.status === "connected" },
-                  busy: false,
-                },
-              ]
-            : [];
-        const anthropicCards = [...accountOneSlot, ...rows, ...terminalOnly];
-        // The signed-out Account 1 slot is an instruction, not an account.
-        const count = anthropicCards.filter(
-          (card) => card.coraProfileId || card.terminal?.connected,
-        ).length;
-        return {
-          provider: descriptor.provider,
-          label: descriptor.label,
-          cliLabel: descriptor.cliLabel,
-          detail:
-            "One sign-in per account. Switching an account moves Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
-          cards: [],
-          anthropicCards,
-          ...(count > 0 ? { footer: `${count} ${count === 1 ? "account" : "accounts"}` } : {}),
-          coraDisabled,
-          coraBusy,
-          cliDisabled: true,
-          cliLoading: false,
-          cliError: cliUnavailable || Boolean(cliError && !cliInspection),
-          cliPersonalMissing: false,
-          addingCora: addingProvider === descriptor.provider,
-          addCoraLabel: addingProvider === descriptor.provider ? addLabel : "",
-          addingCli: false,
-          addCliLabel: "",
-        };
-      }
-
-      // Identity pairing: the only account identity that crosses IPC is an
-      // anonymous sha256 of the vendor account id, computed on both sides in
-      // the main process from the same value. Equal digests mean the same
-      // account, so its Cora connection and its CLI sign-in share one card.
-      // Anything without a digest on both sides keeps its own card rather than
-      // being matched on a guess.
-      const cliByFingerprint = new Map<string, NativeCliAccountProfile>();
-      for (const profile of cliProfiles) {
-        if (profile.accountFingerprint && !cliByFingerprint.has(profile.accountFingerprint)) {
-          cliByFingerprint.set(profile.accountFingerprint, profile);
-        }
-      }
-      // Email fallback: a connection from before Codara captured account ids
-      // has no fingerprint, but both sides now report the account's email, and
-      // one address inside one provider group is the same account. The digest
-      // always wins; email only stands in where a digest comparison is
-      // impossible on at least one side, because two differing digests are two
-      // accounts no matter what the addresses say. Matching happens inside
-      // this provider's own loop, so an email never matches across providers.
-      const cliByEmail = new Map<string, NativeCliAccountProfile>();
-      for (const profile of cliProfiles) {
-        const email = profile.email?.trim().toLowerCase();
-        if (email && !cliByEmail.has(email)) cliByEmail.set(email, profile);
-      }
-      const pairedCliIds = new Set<string>();
-
-      const cliFacet = (
-        profile: NativeCliAccountProfile,
-      ): NonNullable<AccountCardView["cli"]> => ({
-        profileId: profile.id,
-        runtime: descriptor.runtime,
-        authState: nativeCliAuthState(profile.status),
-        active: profile.isDefault,
-        inUse: profile.inUse,
-        managed: profile.managed,
-        busyAction:
-          cliBusy?.runtime === descriptor.runtime &&
-          cliBusy.profileId === profile.id
-            ? cliBusy.action
-            : null,
-      });
-
-      const coraCards = piProfiles.map<AccountCardView>((profile) => {
-          const usage = usageByProfile.get(profile.id);
-          const byFingerprint = profile.accountFingerprint
-            ? cliByFingerprint.get(profile.accountFingerprint)
-            : undefined;
-          const emailKey = profile.email?.trim().toLowerCase();
-          const byEmailCandidate =
-            !byFingerprint && emailKey ? cliByEmail.get(emailKey) : undefined;
-          // The email match only stands when a fingerprint verdict was
-          // impossible: if both sides carry fingerprints, they differ (a match
-          // would have paired them above), and that is proof of two accounts.
-          const byEmail =
-            byEmailCandidate &&
-            (!profile.accountFingerprint || !byEmailCandidate.accountFingerprint)
-              ? byEmailCandidate
-              : undefined;
-          const candidate = byFingerprint ?? byEmail;
-          // One CLI sign-in can only be the same account as one Cora
-          // connection, so the first match claims it.
-          const paired =
-            candidate && !pairedCliIds.has(candidate.id) ? candidate : undefined;
-          if (paired) pairedCliIds.add(paired.id);
-          const pairedByEmail = Boolean(paired && !byFingerprint);
-          // Both facets are the same account, so their addresses agree; the
-          // Cora one wins if a provider ever reported them differently.
-          const email = profile.email ?? paired?.email;
-          return {
-            key: paired ? `cora:${profile.id}+cli:${paired.id}` : `cora:${profile.id}`,
-            label: profile.label,
-            provider: descriptor.provider,
-            ...(email ? { email } : {}),
-            ...(usage?.plan ? { plan: usage.plan } : {}),
-            // SuperGrok (and any provider with no quota API) reports status
-            // ok and zero windows. That is not a failure, so do not render the
-            // empty report as a red "no usage windows" error on the card.
-            ...(usage && accountCardShowsUsage(usage)
-              ? { usage: <UsageEntryBody usage={usage} compact /> }
-              : {}),
-            // An email match is a strong hint, not proof, so the card says how
-            // to make it one. Reconnecting captures the account id and turns
-            // this into a fingerprint pairing.
-            ...(pairedByEmail
-              ? {
-                  pairHint:
-                    "Same email address. Reconnect to Cora to fully pair these sign-ins.",
-                }
-              : {}),
-            cora: {
-              profileId: profile.id,
-              ...(profile.accountFingerprint
-                ? { accountFingerprint: profile.accountFingerprint }
-                : {}),
-              connected: profile.connected,
-              // Claude access tokens last about an hour and are renewed
-              // silently from the refresh token, so a lapsed one is the normal
-              // resting state between sessions, not a broken sign-in. Only a
-              // credential with no way back needs the user to reconnect.
-              expired: profile.expired && !profile.canRefresh,
-              active: profile.isDefault,
-              busy: accountMutationId === profile.id,
-              ...(profile.error ? { error: profile.error } : {}),
-            },
-            ...(paired ? { cli: cliFacet(paired) } : {}),
-          };
-        });
-      const cliOnlyCards = cliProfiles
-        .filter((profile) => !pairedCliIds.has(profile.id))
-        // The synthetic personal slot is always in inspect so a signed-in
-        // ~/.codex (or ~/.grok) can pair. An unsigned built-in CLI slot is not an account:
-        // showing that empty card next to real Cora connections looked like a
-        // third login that was connected to nothing.
-        .filter((profile) => profile.managed || profile.status === "connected")
-        .map<AccountCardView>((profile) => ({
-          key: `cli:${profile.id}`,
-          // The built-in sign-in has no name field in the CLI. Prefer the
-          // Codara-side rename, then the store's "Existing … login" label,
-          // never a bare "Personal", which collides with Cora's default name
-          // and made the unsigned-in ~/.claude slot look like a second copy
-          // of the first Cora account.
-          label: profile.managed
-            ? profile.label
-            : preferences.nativeCliAccountLabels[
-                `${descriptor.runtime}:${profile.id}`
-              ]?.trim() || profile.label || "Personal",
-          provider: descriptor.provider,
-          ...(profile.email ? { email: profile.email } : {}),
-          cli: cliFacet(profile),
-        }));
-
-      // Reconnecting is what teaches Codara which account a Cora connection
-      // belongs to. Only a *signed-in* unmatched CLI can merge; an empty
-      // personal slot is not a second account, and offering to pair against
-      // it made every Cora-only card claim a Claude Code sign-in that wasn't
-      // there.
-      const unmatchedSignedInCli = cliOnlyCards.filter(
-        (card) => card.cli?.authState === "connected",
+      // One card per account, paired in the main process: every Cora row
+      // names its terminal half, so nothing is matched here. Keys are the
+      // row id (or the terminal id for a half without a row), which never
+      // changes when a half is shared, so cards never remount.
+      const linked = new Set(
+        piProfiles.flatMap((profile) =>
+          profile.cliProfileId ? [profile.cliProfileId] : [],
+        ),
       );
-      const cards: AccountCardView[] = [
-        ...coraCards.map((card) =>
-          card.cora && !card.cli && unmatchedSignedInCli.length > 0
-            ? {
-                ...card,
-                pairHint: `Reconnect to Cora if this is the same account as your ${descriptor.cliLabel} sign-in; they will then share one card.`,
-              }
-            : card,
-        ),
-        ...cliOnlyCards,
-      ];
-      const visibleCards: AccountCardView[] =
-        cards.length > 0
-          ? cards
-          : [
+      const rows = piProfiles.map<AccountCardView>((profile) => {
+        const usage = usageByProfile.get(profile.id);
+        const refused =
+          closeSessionsPrompt?.profileId === profile.id ? closeSessionsPrompt : null;
+        // The count main refused with is right until the next read; after
+        // that the overview's live count keeps the armed Delete honest.
+        const closeSessionsCount =
+          refused?.action === "delete"
+            ? refused.count
+            : (profile.terminal?.liveSessions ?? 0);
+        const switchCloseSessionsCount = refused?.action === "use" ? refused.count : 0;
+        return {
+          key: `${provider}:${profile.id}`,
+          provider,
+          label: profile.label,
+          ...(profile.email ? { email: profile.email } : {}),
+          ...(usage?.plan ? { plan: usage.plan } : {}),
+          // SuperGrok (and any provider with no quota API) reports status ok
+          // and zero windows. That is not a failure, so do not render the
+          // empty report as a red "no usage windows" error on the card.
+          ...(usage && accountCardShowsUsage(usage)
+            ? { usage: <UsageEntryBody usage={usage} compact /> }
+            : {}),
+          coraProfileId: profile.id,
+          ...(profile.cliProfileId ? { cliProfileId: profile.cliProfileId } : {}),
+          builtIn: profile.builtIn === true,
+          active: profile.isDefault,
+          cora: {
+            connected: profile.connected,
+            expired: profile.expired,
+            canRefresh: profile.canRefresh,
+            ...(profile.error ? { error: profile.error } : {}),
+          },
+          ...(profile.terminal ? { terminal: profile.terminal } : {}),
+          busy: accountMutationId === profile.id,
+          ...(closeSessionsCount > 0 ? { closeSessionsCount } : {}),
+          ...(switchCloseSessionsCount > 0 ? { switchCloseSessionsCount } : {}),
+        };
+      });
+      // Account 1 first: it is the user's own CLI login and the account
+      // everything else hands off to.
+      rows.sort((left, right) => Number(right.builtIn) - Number(left.builtIn));
+      // Terminal profiles no row names are terminal-only halves; the card
+      // offers to share them with Cora.
+      const terminalOnly = cliProfiles
+        .filter((profile) => profile.managed && !linked.has(profile.id))
+        .map<AccountCardView>((profile) => ({
+          key: `${provider}:cli:${profile.id}`,
+          provider,
+          label: profile.label,
+          ...(profile.email ? { email: profile.email } : {}),
+          cliProfileId: profile.id,
+          builtIn: false,
+          active: false,
+          terminal: {
+            connected: profile.status === "connected",
+            ...(profile.status === "unsafe" ? { unsafe: true } : {}),
+          },
+          cliDefault: profile.isDefault,
+          busy: accountMutationId === profile.id,
+        }));
+      // The user's own CLI login has no row until it holds a credential
+      // (main creates one the moment it does). Until then the slot says
+      // what to do instead of vanishing.
+      const personal = cliProfiles.find((profile) => !profile.managed);
+      const accountOneSlot: AccountCardView[] =
+        personal && !linked.has(personal.id)
+          ? [
               {
-                key: `empty:${descriptor.provider}`,
-                label: `${familyForRuntime(descriptor.runtime).displayName} account`,
-                provider: descriptor.provider,
-                placeholder: true,
+                key: `${provider}:account-one`,
+                provider,
+                label: personal.label || "Account 1",
+                builtIn: true,
+                active: false,
+                terminal: { connected: personal.status === "connected" },
+                busy: false,
               },
-            ];
-
-      const coraCount = piProfiles.length;
-      const cliCount = cliProfiles.filter(
-        (profile) => profile.managed || profile.status === "connected",
+            ]
+          : [];
+      const cards = [...accountOneSlot, ...rows, ...terminalOnly];
+      // The signed-out Account 1 slot is an instruction, not an account.
+      const count = cards.filter(
+        (card) => card.coraProfileId || card.terminal?.connected,
       ).length;
-      const detail = `${coraCount} ${
-        coraCount === 1 ? "account" : "accounts"
-      } in Cora · ${cliCount} in ${descriptor.cliLabel}`;
-
       return {
-        provider: descriptor.provider,
-        label: descriptor.label,
-        cliLabel: descriptor.cliLabel,
-        detail,
-        cards: visibleCards,
-        coraDisabled,
-        coraBusy,
-        cliDisabled: Boolean(cliBusy),
-        cliLoading: cliLoading && !cliInspection,
+        descriptor,
+        detail: accountProviderDetail(descriptor),
+        cards,
+        ...(count > 0 ? { footer: `${count} ${count === 1 ? "account" : "accounts"}` } : {}),
+        disabled,
+        busy,
         cliError: cliUnavailable || Boolean(cliError && !cliInspection),
-        cliPersonalMissing: Boolean(
-          inspected &&
-            !cliUnavailable &&
-            !cliProfiles.some((profile) => !profile.managed),
-        ),
-        addingCora: addingProvider === descriptor.provider,
-        addCoraLabel: addingProvider === descriptor.provider ? addLabel : "",
-        addingCli: addingCliProvider === descriptor.provider,
-        addCliLabel: addingCliProvider === descriptor.provider ? addCliLabel : "",
+        addLabel: addingProvider === provider ? addLabel : "",
       };
     });
   }, [
     accountMutationId,
-    addCliLabel,
     addLabel,
-    addingCliProvider,
     addingProvider,
     busyProvider,
-    cliBusy,
     cliError,
     cliInspection,
-    cliLoading,
     closeSessionsPrompt,
     overview,
-    preferences.nativeCliAccountLabels,
     usageOverview,
   ]);
 
+  // One account, one action each, for every provider. Every mutation goes
+  // through the Pi account channels, which switch, share, and delete both
+  // halves in the main process; the terminal id is only used for a half
+  // that has no row. Cora and the terminal tool switch together, so nothing
+  // is opened here: new terminals pick the account up. Codex closes its
+  // running sessions in main, after the card has asked with the count.
   const accountActions: AccountActions = {
-    // "Connect to Cora" on a card that only has a CLI sign-in: the same
-    // browser login "Add account" runs, seeded with the card's name. When the
-    // connect-time fingerprint matches the CLI sign-in, the new connection
-    // lands in this same card.
-    onCoraConnect: (card) => addAccount(card.provider, card.label),
-    // Cora-only Codex or Grok card: sign this account in to the CLI. Prefer
-    // the unsigned built-in slot so the default ~/.codex or ~/.grok is the
-    // one that logs in; otherwise create a named managed profile and sign
-    // that in. Pairing folds the new sign-in back onto this card.
-    onCliConnect: (card) => {
-      const runtime = cliRuntimeForProvider(card.provider);
-      const runtimeInspection = cliInspection?.runtimes.find(
-        (entry) => entry.runtime === runtime,
-      );
-      const unsignedPersonal = runtimeInspection?.profiles.find(
-        (profile) => !profile.managed && profile.status === "sign_in_required",
-      );
-      if (unsignedPersonal) {
-        void signInCli(runtime, unsignedPersonal.id, card.label, {
-          accountFingerprint: card.cora?.accountFingerprint,
-          email: card.email,
-          activateOnSuccess: true,
-        });
-        return;
-      }
-      // If an earlier browser flow was cancelled, reuse its empty named slot
-      // instead of creating another identical card on every retry.
-      const normalizedLabel = card.label.trim().toLowerCase();
-      const reusableManaged = runtimeInspection?.profiles.find(
-        (profile) =>
-          profile.managed &&
-          !profile.isDefault &&
-          !profile.inUse &&
-          profile.status === "sign_in_required" &&
-          profile.label.trim().toLowerCase() === normalizedLabel,
-      );
-      if (reusableManaged) {
-        void signInCli(runtime, reusableManaged.id, card.label, {
-          accountFingerprint: card.cora?.accountFingerprint,
-          email: card.email,
-          removeProfileOnMismatch: true,
-          removeProfileOnFailure: true,
-          activateOnSuccess: true,
-        });
-        return;
-      }
-      void (async () => {
-        setCliBusy({ runtime, action: "creating" });
-        setCliError(null);
-        try {
-          const created = await window.spark.nativeCliAccounts.create({
-            runtime,
-            label: card.label.trim() || "Personal",
-          });
-          await refreshCli();
-          await signInCli(runtime, created.profile.id, card.label, {
-            accountFingerprint: card.cora?.accountFingerprint,
-            email: card.email,
-            removeProfileOnMismatch: true,
-            removeProfileOnFailure: true,
-            activateOnSuccess: true,
-          });
-        } catch (err) {
-          setCliError(
-            (err as Error).message || "Could not start the command-line sign-in.",
-          );
-          setCliBusy(null);
-        }
-      })();
-    },
-    onBeginAddCora: (provider) => {
+    onBeginAdd: (provider) => {
       setAddingProvider(provider);
-      setAddingCliProvider(null);
       setAddLabel("");
       setError(null);
     },
-    onAddCoraLabel: setAddLabel,
-    onAddCora: (provider) => addAccount(provider, addLabel),
-    onCancelAddCora: () => {
+    onAddLabel: setAddLabel,
+    onAdd: (provider) => addAccount(provider, addLabel),
+    onCancelAdd: () => {
       setAddingProvider(null);
       setAddLabel("");
     },
-    onBeginAddCli: (provider) => {
-      setAddingCliProvider(provider);
-      setAddingProvider(null);
-      setAddCliLabel("");
-      setCliError(null);
+    onUse: (card, { closeSessions }) => {
+      if (!card.coraProfileId) return;
+      void makeDefault(card.provider, card.coraProfileId, closeSessions);
     },
-    onAddCliLabel: setAddCliLabel,
-    onAddCli: (provider) => {
-      const runtime = cliRuntimeForProvider(provider);
-      const label = addCliLabel.trim();
-      if (!label) return;
-      setAddingCliProvider(null);
-      setAddCliLabel("");
-      void (async () => {
-        setCliBusy({ runtime, action: "creating" });
-        setCliError(null);
-        setCliNotice(null);
-        try {
-          const created = await window.spark.nativeCliAccounts.create({
-            runtime,
-            label,
-          });
-          await refreshCli();
-          await signInCli(runtime, created.profile.id, label, {
-            removeProfileOnFailure: true,
-            activateOnSuccess: true,
-          });
-        } catch (err) {
-          setCliError(
-            (err as Error).message ||
-              "Could not create the command-line account.",
-          );
-          setCliBusy(null);
-        }
-      })();
+    onReconnect: (card) => {
+      if (!card.coraProfileId) return;
+      reconnectAccount(card.provider, card.coraProfileId, card.label);
     },
-    onCancelAddCli: () => {
-      setAddingCliProvider(null);
-      setAddCliLabel("");
-    },
-    onCoraReconnect: (card) => {
-      if (!card.cora) return;
-      reconnectAccount(card.provider, card.cora.profileId, card.label);
-    },
-    onCoraRename: (card, label) =>
-      card.cora ? renameAccount(card.cora.profileId, label) : Promise.resolve(false),
-    onCoraUse: (card) => {
-      if (!card.cora) return;
-      void makeDefault(card.provider, card.cora.profileId);
-    },
-    onCoraDelete: (card) => {
-      if (!card.cora) return;
-      void deleteAccount(card.cora.profileId, false);
-    },
-    onCliSignIn: (card) => {
-      if (!card.cli) return;
-      void signInCli(card.cli.runtime, card.cli.profileId, card.label, {
-        activateOnSuccess: true,
-      });
-    },
-    onCliSignOut: (card) => {
-      if (!card.cli) return;
-      const { runtime, profileId } = card.cli;
-      void mutateCli({ runtime, profileId, action: "signing-out" }, () =>
-        window.spark.nativeCliAccounts.logout({ runtime, profileId }),
-      );
-    },
-    onCliRename: (card, label) => {
-      if (!card.cli) return Promise.resolve(false);
-      const { runtime, profileId, managed } = card.cli;
-      // The built-in sign-in has no name field in the CLI itself, so its name
-      // is a Codara-side preference, purely cosmetic, never sent to the CLI.
-      if (!managed) {
-        return setPreference("nativeCliAccountLabels", {
-          ...preferences.nativeCliAccountLabels,
-          [`${runtime}:${profileId}`]: label,
-        }).then(
-          () => true,
-          (err) => {
-            setCliError(
-              (err as Error).message || "The account name could not be saved.",
-            );
-            return false;
-          },
+    onShare: (card) => {
+      if (card.coraProfileId) {
+        const coraProfileId = card.coraProfileId;
+        void mutateAccount(coraProfileId, () =>
+          window.spark.piSubscriptions.shareLogin({ coraProfileId }),
         );
+        return;
       }
-      return mutateCli({ runtime, profileId, action: "renaming" }, () =>
-        window.spark.nativeCliAccounts.rename({ runtime, profileId, label }),
+      if (!card.cliProfileId) return;
+      const cliProfileId = card.cliProfileId;
+      void mutateAccount(cliProfileId, () =>
+        window.spark.piSubscriptions.shareLogin({
+          cliProfileId,
+          provider: card.provider,
+        }),
       );
     },
-    onCliUse: (card) => {
-      if (!card.cli) return;
-      const { runtime, profileId } = card.cli;
-      void (async () => {
-        let closedSessionCount = 0;
-        const changed = await mutateCli(
-          { runtime, profileId, action: "setting-default" },
-          async () => {
-            const result = await window.spark.nativeCliAccounts.setDefault({
-              runtime,
-              profileId,
-            });
-            closedSessionCount = result.closedSessionCount ?? 0;
-            return result;
-          },
-        );
-        if (!changed) return;
-        const cliLabel = familyForRuntime(runtime).cliLabel;
-        const event = new CustomEvent("spark:open-native-cli-account", {
-          cancelable: true,
-          detail: { runtime, profileId, label: card.label },
-        });
-        const opened = !window.dispatchEvent(event);
-        const closedCopy =
-          closedSessionCount > 0
-            ? ` Closed ${closedSessionCount} running ${cliLabel} ${
-                closedSessionCount === 1 ? "session" : "sessions"
-              } first.`
-            : "";
-        setCliNotice(
-          opened
-            ? `Switched ${cliLabel} to ${card.label}.${closedCopy} Opened a fresh session.`
-            : `Switched ${cliLabel} to ${card.label}.${closedCopy}`,
-        );
-      })();
-    },
-    onCliDelete: (card) => {
-      if (!card.cli) return;
-      const { runtime, profileId } = card.cli;
-      void mutateCli({ runtime, profileId, action: "deleting" }, () =>
-        window.spark.nativeCliAccounts.delete({ runtime, profileId }),
+    onRename: (card, label) => {
+      if (card.coraProfileId) return renameAccount(card.coraProfileId, label);
+      if (!card.cliProfileId) return Promise.resolve(false);
+      const profileId = card.cliProfileId;
+      return mutateTerminalHalf(profileId, () =>
+        window.spark.nativeCliAccounts.rename({
+          runtime: runtimeForSubscription(card.provider),
+          profileId,
+          label,
+        }),
       );
     },
-    // One Anthropic account, one action each. Every mutation goes through the
-    // Pi account channels, which switch, share, and delete both halves in the
-    // main process; the terminal id is only used for a half that has no row.
-    // Cora and Claude Code switch together, so nothing is closed or reopened
-    // here: new terminals pick the account up, running ones keep theirs.
-    anthropic: {
-      onUse: (card) => {
-        if (!card.coraProfileId) return;
-        void makeDefault("anthropic", card.coraProfileId);
-      },
-      onReconnect: (card) => {
-        if (!card.coraProfileId) return;
-        reconnectAccount("anthropic", card.coraProfileId, card.label);
-      },
-      onShare: (card) => {
-        if (card.coraProfileId) {
-          const coraProfileId = card.coraProfileId;
-          void mutateAccount(coraProfileId, () =>
-            window.spark.piSubscriptions.shareLogin({ coraProfileId }),
-          );
-          return;
-        }
-        if (!card.cliProfileId) return;
-        const cliProfileId = card.cliProfileId;
-        void mutateAccount(cliProfileId, () =>
-          window.spark.piSubscriptions.shareLogin({ cliProfileId }),
-        );
-      },
-      onRename: (card, label) => {
-        if (card.coraProfileId) return renameAccount(card.coraProfileId, label);
-        if (!card.cliProfileId) return Promise.resolve(false);
-        const profileId = card.cliProfileId;
-        return mutateTerminalHalf(profileId, () =>
-          window.spark.nativeCliAccounts.rename({
-            runtime: "claude",
-            profileId,
-            label,
-          }),
-        );
-      },
-      onDelete: (card, { closeSessions }) => {
-        if (card.builtIn) return;
-        if (card.coraProfileId) {
-          void deleteAccount(card.coraProfileId, closeSessions);
-          return;
-        }
-        if (!card.cliProfileId) return;
-        const profileId = card.cliProfileId;
-        void mutateTerminalHalf(profileId, () =>
-          window.spark.nativeCliAccounts.delete({ runtime: "claude", profileId }),
-        );
-      },
+    onDelete: (card, { closeSessions }) => {
+      if (card.builtIn) return;
+      if (card.coraProfileId) {
+        void deleteAccount(card.coraProfileId, closeSessions);
+        return;
+      }
+      if (!card.cliProfileId) return;
+      const profileId = card.cliProfileId;
+      void mutateTerminalHalf(profileId, () =>
+        window.spark.nativeCliAccounts.delete({
+          runtime: runtimeForSubscription(card.provider),
+          profileId,
+        }),
+      );
     },
   };
 
@@ -3011,7 +2520,7 @@ function AccountsSettings() {
         <div style={{ minWidth: 0, flex: "1 1 420px" }}>
           <SectionTitle
             title="Accounts"
-            detail="The sign-ins Cora and the terminal tools run on. A Claude account is one sign-in for both Cora and Claude Code. Codex and Grok keep a Cora sign-in and a terminal sign-in apart; switching one of their terminal sign-ins closes that tool's running sessions first."
+            detail="The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok."
           />
         </div>
         <AccountAddPicker providers={providerViews} actions={accountActions} />
@@ -3076,15 +2585,6 @@ function AccountsSettings() {
           style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}
         >
           {cliError}
-        </div>
-      ) : null}
-
-      {cliNotice ? (
-        <div
-          role="status"
-          style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 12 }}
-        >
-          {cliNotice}
         </div>
       ) : null}
 
@@ -3314,12 +2814,6 @@ function PiLoginPanel({
   );
 }
 
-type NativeCliSettingsBusy = {
-  runtime: NativeCliAccountRuntime;
-  profileId?: string;
-  action: NativeCliAccountBusyAction;
-};
-
 /**
  * Electron wraps a main-process throw as "Error invoking remote method 'x':
  * <name>: msg", where the name is whatever class the error carried
@@ -3348,21 +2842,6 @@ function accountCardShowsUsage(usage: UsageEntry): boolean {
   if (usage.limitReached) return true;
   if (usage.status === "ok" || usage.status === "not_connected") return false;
   return Boolean(usage.message);
-}
-
-function nativeCliAuthState(
-  status: NativeCliAccountsInspection["runtimes"][number]["profiles"][number]["status"],
-) {
-  switch (status) {
-    case "connected":
-      return "connected" as const;
-    case "sign_in_required":
-      return "signed-out" as const;
-    case "unsafe":
-      return "error" as const;
-    case "unavailable":
-      return "unavailable" as const;
-  }
 }
 
 // Accounts, plus a pointer to the Capability Center. The fast-mode toggle used

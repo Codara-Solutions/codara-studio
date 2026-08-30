@@ -12,14 +12,16 @@ const runGuard = read("src/main/orchestration/pi-account-run-guard.ts");
 const preload = read("src/preload/index.ts");
 const settings = read("src/renderer/src/components/SettingsDialog.tsx");
 const cards = read("src/renderer/src/components/AccountCards.tsx");
-const anthropicCard = read("src/renderer/src/components/AnthropicAccountCard.tsx");
+const card = read("src/renderer/src/components/AccountCard.tsx");
+const descriptors = read("src/renderer/src/lib/account-provider-descriptors.ts");
 const primitives = read("src/renderer/src/components/AccountCardPrimitives.tsx");
+const app = read("src/renderer/src/App.tsx");
 const usageUi = read("src/renderer/src/components/SubscriptionUsage.tsx");
 const usageMeters = read("src/renderer/src/components/UsageMeters.tsx");
 
 // The account channel set. Every one is registered through the trusted IPC
 // wrapper and exposed by preload; share-login is the one addition of the
-// unified Anthropic model.
+// unified account model.
 const channels = [
   "pi-subscriptions:status",
   "pi-subscriptions:add-account",
@@ -101,12 +103,37 @@ assert.doesNotMatch(usageUi, /function ProviderCard\(/);
 assert.doesNotMatch(usageUi, /export default function SubscriptionUsage/);
 
 // ---------------------------------------------------------------------------
-// One Anthropic account, one card. The main process pairs the Cora row with
-// its Claude Code half; the renderer keys cards by id and matches nothing.
-assert.match(settings, /if \(descriptor\.provider === "anthropic"\) \{/);
-assert.match(settings, /key: `anthropic:\$\{profile\.id\}`/);
-assert.match(settings, /key: `anthropic:cli:\$\{profile\.id\}`/);
-assert.match(settings, /key: "anthropic:account-one"/);
+// One descriptor per provider: the only place the three differ in the panel.
+assert.match(descriptors, /export const ACCOUNT_PROVIDER_DESCRIPTORS/);
+assert.match(descriptors, /AGENT_FAMILY_IDS\.map\(\(id\) => \(\{/);
+assert.match(descriptors, /cliLabel: "Claude Code" \| "Codex" \| "Grok";/);
+assert.match(descriptors, /loginHint: "claude login" \| "codex login" \| "grok login";/);
+assert.match(descriptors, /brand: "claude" \| "codex" \| "grok";/);
+assert.match(descriptors, /claude: \{ cliLabel: "Claude Code", loginHint: "claude login", switchClosesSessions: false \}/);
+assert.match(descriptors, /codex: \{ cliLabel: "Codex", loginHint: "codex login", switchClosesSessions: true \}/);
+assert.match(descriptors, /grok: \{ cliLabel: "Grok", loginHint: "grok login", switchClosesSessions: false \}/);
+assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1, "only Codex closes sessions on a switch");
+assert.match(descriptors, /export function accountProviderDetail\(/);
+assert.ok(
+  descriptors.includes(
+    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. New terminals pick it up; running ones keep theirs. Account 1 is your own ${descriptor.loginHint}.`",
+  ),
+);
+assert.ok(
+  descriptors.includes(
+    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`",
+  ),
+);
+assert.match(descriptors, /if \(descriptor\.switchClosesSessions\) \{/);
+
+// ---------------------------------------------------------------------------
+// One card model for every provider. The main process pairs the Cora row
+// with its terminal half; the renderer keys cards by id and matches nothing.
+assert.match(settings, /return ACCOUNT_PROVIDER_DESCRIPTORS\.map\(\(descriptor\) => \{/);
+assert.match(settings, /detail: accountProviderDetail\(descriptor\),/);
+assert.match(settings, /key: `\$\{provider\}:\$\{profile\.id\}`/);
+assert.match(settings, /key: `\$\{provider\}:cli:\$\{profile\.id\}`/);
+assert.match(settings, /key: `\$\{provider\}:account-one`/);
 assert.match(settings, /profile\.managed && !linked\.has\(profile\.id\)/);
 assert.match(settings, /builtIn: profile\.builtIn === true/);
 assert.match(settings, /active: profile\.isDefault/);
@@ -114,71 +141,77 @@ assert.match(settings, /connected: profile\.connected/);
 assert.match(settings, /expired: profile\.expired/);
 assert.match(settings, /canRefresh: profile\.canRefresh/);
 assert.match(settings, /\.\.\.\(profile\.terminal \? \{ terminal: profile\.terminal \} : \{\}\)/);
-// Nothing in the Anthropic branch pairs on identity.
-const anthropicBranchStart = settings.indexOf('if (descriptor.provider === "anthropic") {');
-const anthropicBranchEnd = settings.indexOf("// Identity pairing:", anthropicBranchStart);
-assert.ok(anthropicBranchStart >= 0 && anthropicBranchEnd > anthropicBranchStart);
-const anthropicBranch = settings.slice(anthropicBranchStart, anthropicBranchEnd);
-assert.doesNotMatch(anthropicBranch, /accountFingerprint|cliByEmail|cliByFingerprint|pairHint/);
-assert.doesNotMatch(anthropicBranch, /nativeCliAccountLabels/);
-
-// The section copy says what the unified account does.
-assert.ok(
-  settings.includes(
-    "One sign-in per account. Switching an account moves Cora and Claude Code together. New terminals pick it up; running ones keep theirs. Account 1 is your own claude login.",
-  ),
+assert.match(settings, /label: personal\.label \|\| "Account 1"/);
+// No provider branch, no renderer-side pairing, no second card shape.
+const accountsSection = settings.slice(
+  settings.indexOf("function AccountsSettings()"),
+  settings.indexOf("function AgentsSettings()"),
+);
+assert.ok(accountsSection.length > 0, "the Accounts section must exist");
+assert.doesNotMatch(accountsSection, /descriptor\.provider === "anthropic"|provider === "anthropic"/);
+assert.doesNotMatch(
+  accountsSection,
+  /accountFingerprint|cliByEmail|cliByFingerprint|pairHint|cliOnlyCards|Identity pairing/,
+);
+assert.doesNotMatch(
+  accountsSection,
+  /signInCli|onCoraConnect|onCliConnect|onCliUse|onCliSignIn|onCliSignOut|onCliDelete|onCoraUse|onCoraDelete|onBeginAddCli|onAddCli/,
+);
+assert.doesNotMatch(accountsSection, /anthropicCards|AnthropicAccountCardView|anthropic: \{/);
+assert.doesNotMatch(settings, /nativeCliAccountLabels|spark:open-native-cli|cliRuntimeForProvider|nativeCliAuthState/);
+assert.doesNotMatch(
+  settings,
+  /nativeCliAccounts\.(?:create|setDefault|prepareLogin|cancelLogin|logout)\(/,
+  "no sign-in, switch or sign-out may go through the native CLI account store",
 );
 // The footer counts accounts, not the signed-out Account 1 instruction slot,
 // and is omitted when there are none.
 assert.match(settings, /card\.coraProfileId \|\| card\.terminal\?\.connected/);
 assert.match(settings, /\.\.\.\(count > 0 \? \{ footer: `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}` \} : \{\}\)/);
-// The cards gate opens once the overview settled either way, so a failed
-// status read still shows what the CLI side can build.
-assert.match(settings, /\(overview !== null \|\| overviewSettled\) && \(cliInspection !== null \|\| cliError !== null\)/);
-assert.match(settings, /setOverviewSettled\(true\)/);
-// Every error class name is stripped before a message reaches the panel.
-assert.match(settings, /\.replace\(\/\^\[A-Za-z\]\*Error:\\s\*\/, ""\)/);
-// The armed Delete derives its count from the live overview after a refusal.
-assert.match(settings, /profile\.terminal\?\.liveSessions \?\? 0/);
-assert.match(settings, /setCloseSessionsPrompt\(null\);\n    void window\.spark\.piSubscriptions\n      \.status\(\)/);
-// A dead-end terminal-only profile says what to do; Account 1 always carries its hint.
-assert.ok(anthropicCard.includes("Not signed in to Claude Code. Delete it and add the account again."));
-assert.ok(anthropicCard.includes("Claude Code cannot use this profile's folder. Delete it and add the account again."));
-assert.match(anthropicCard, /terminalUsable\(card\)\n\s*\? "Found your claude login\. Cora is linking it now\."/);
-assert.match(anthropicCard, /card\.cora\?\.error && state !== "account-one-signed-out"/);
-// The Anthropic picker step is the sign-in, not a naming step.
-assert.match(cards, /oneSignIn\(selectedView\)\n\s*\? `Sign in to \$\{selectedFamily\?\.displayName\}`/);
+// The section copy says what one account is.
+assert.ok(
+  settings.includes(
+    "The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.",
+  ),
+);
+assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 
-// One Use action switches both halves through the Pi make-default channel.
-// Never nativeCliAccounts.setDefault for Claude.
-assert.match(settings, /anthropic: \{/);
-assert.match(settings, /void makeDefault\("anthropic", card\.coraProfileId\)/);
-assert.match(settings, /reconnectAccount\("anthropic", card\.coraProfileId, card\.label\)/);
+// One Use, one Reconnect, one Share, one Rename, one Delete, all through
+// the Pi account channels, the provider taken from the card. The terminal
+// id only reaches the native store for a half that has no row.
+assert.match(settings, /onUse: \(card, \{ closeSessions \}\) => \{/);
+assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId, closeSessions\)/);
+assert.match(settings, /reconnectAccount\(card\.provider, card\.coraProfileId, card\.label\)/);
 assert.match(settings, /piSubscriptions\.shareLogin\(\{ coraProfileId \}\)/);
-assert.match(settings, /piSubscriptions\.shareLogin\(\{ cliProfileId \}\)/);
+assert.match(settings, /piSubscriptions\.shareLogin\(\{\s*cliProfileId,\s*provider: card\.provider,\s*\}\)/);
 assert.match(settings, /void deleteAccount\(card\.coraProfileId, closeSessions\)/);
 assert.match(settings, /\.\.\.\(closeSessions \? \{ closeSessions: true \} : \{\}\)/);
-assert.match(settings, /nativeCliAccounts\.delete\(\{ runtime: "claude", profileId \}\)/);
-assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: "claude",/);
-assert.equal(
-  (settings.match(/runtime: "claude"/g) ?? []).length,
-  2,
-  "the only Claude-runtime native calls are rename and delete of a terminal-only half",
-);
-// A refused delete carries the live terminal count; the card's next Delete
-// offers to close them.
+assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
+assert.match(settings, /nativeCliAccounts\.delete\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
+assert.doesNotMatch(settings, /runtime: "claude"/);
+// A refused switch or delete carries the live terminal count; the card's
+// next Use or Delete offers to close them.
 assert.match(settings, /function liveTerminalCount\(message: string\): number \| null/);
 assert.match(settings, /terminal sessions\? \(\?:is\|are\) using this account/);
-assert.match(settings, /setCloseSessionsPrompt\(\{ profileId, count \}\)/);
-assert.match(settings, /\? closeSessionsPrompt\.count\n\s*: \(profile\.terminal\?\.liveSessions \?\? 0\)/);
+assert.match(settings, /action: "use" \| "delete";/);
+assert.match(settings, /refusedWithSessions\(profileId, "use", err\)/);
+assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
+assert.match(settings, /setCloseSessionsPrompt\(\{ profileId, action, count \}\)/);
+assert.match(settings, /refused\?\.action === "delete"\s*\? refused\.count\s*: \(profile\.terminal\?\.liveSessions \?\? 0\)/);
+assert.match(settings, /const switchCloseSessionsCount = refused\?\.action === "use" \? refused\.count : 0;/);
+assert.match(settings, /setCloseSessionsPrompt\(null\);\n    void window\.spark\.piSubscriptions\n      \.status\(\)/);
 assert.match(settings, /function ipcErrorMessage\(err: unknown\): string/);
+// Every error class name is stripped before a message reaches the panel.
+assert.match(settings, /\.replace\(\/\^\[A-Za-z\]\*Error:\\s\*\/, ""\)/);
 
-// No pop-in: every store answers before any card shows.
+// No pop-in: every store answers before any card shows, and a failed status
+// read still shows what the CLI side can build.
 assert.match(settings, /const accountsReady =/);
 assert.match(
   settings,
   /\(overview !== null \|\| overviewSettled\) && \(cliInspection !== null \|\| cliError !== null\)/,
 );
+assert.match(settings, /setOverviewSettled\(true\)/);
 assert.doesNotMatch(settings, /loading \|\| cliLoading/);
 assert.match(settings, /\{!accountsReady \? \(/);
 
@@ -187,10 +220,13 @@ assert.match(settings, /\{!accountsReady \? \(/);
 // callback.
 assert.match(settings, /openInSystemBrowser\(login\.url!\)/);
 assert.doesNotMatch(settings, /openExternal\(login\.url/);
+assert.doesNotMatch(card, /openExternal|window\.open\(/);
+assert.doesNotMatch(cards, /openExternal|window\.open\(/);
 
 // ---------------------------------------------------------------------------
-// The card itself: six states, one primary action each, one overflow menu.
-assert.match(anthropicCard, /export function anthropicAccountState\(/);
+// The card itself: six states, one primary action each, one overflow menu,
+// every word taken from the descriptor.
+assert.match(card, /export function accountCardState\(card: AccountCardView\): AccountCardState/);
 for (const state of [
   '"active"',
   '"signed-in"',
@@ -199,86 +235,124 @@ for (const state of [
   '"cora-only"',
   '"account-one-signed-out"',
 ]) {
-  assert.ok(anthropicCard.includes(`| ${state}`), `${state} must be a card state`);
+  assert.ok(card.includes(`| ${state}`), `${state} must be a card state`);
 }
-assert.match(anthropicCard, /return card\.builtIn \? "account-one-signed-out" : "terminal-only";/);
-assert.match(anthropicCard, /if \(card\.builtIn && !coraUsable\) return "account-one-signed-out";/);
-assert.match(anthropicCard, /if \(!coraUsable\) return "needs-reconnect";/);
-assert.match(anthropicCard, /if \(!card\.cliProfileId\) return "cora-only";/);
-assert.match(anthropicCard, /return card\.active \? "active" : "signed-in";/);
+assert.match(card, /return card\.builtIn \? "account-one-signed-out" : "terminal-only";/);
+assert.match(card, /if \(card\.builtIn && !coraUsable\) return "account-one-signed-out";/);
+assert.match(card, /if \(!coraUsable\) return "needs-reconnect";/);
+assert.match(card, /if \(!card\.cliProfileId\) return "cora-only";/);
+assert.match(card, /return card\.active \? "active" : "signed-in";/);
 // A refreshable lapse is not an expiry.
-assert.match(anthropicCard, /!\(card\.cora\?\.expired && !card\.cora\.canRefresh\)/);
-assert.ok(anthropicCard.includes('text: "Refreshing the Cora sign-in."'));
+assert.match(card, /!\(card\.cora\?\.expired && !card\.cora\.canRefresh\)/);
+assert.ok(card.includes('text: "Refreshing the Cora sign-in."'));
+assert.match(card, /descriptor: AccountProviderDescriptor;/);
+assert.match(card, /const brand = agentBrandColor\(descriptor\.brand\);/);
+// Provider words live in the descriptor, never in a string the card renders.
+assert.doesNotMatch(card, /agentBrandColor\("claude"\)|["`][^"`\n]*(?:Claude Code|Codex|Grok|claude login)/);
 for (const label of [
-  'label: "Use this account"',
+  '"Use this account"',
   'label: "Reconnect"',
-  'label: "Share with Claude Code"',
+  "label: `Share with ${descriptor.cliLabel}`",
   'label: "Share with Cora"',
   'label: "Rename"',
   '"Confirm delete"',
   '"Delete"',
 ]) {
-  assert.ok(anthropicCard.includes(label), `${label} must render`);
+  assert.ok(card.includes(label), `${label} must render`);
 }
-assert.ok(
-  anthropicCard.includes(
-    '"Run claude login in a terminal to use this account."',
-  ),
-);
-assert.match(anthropicCard, /<UsingChip label="Using" color=\{brand\} \/>/);
+for (const copy of [
+  "`Run ${descriptor.loginHint} in a terminal to use this account.`",
+  "`Found your ${descriptor.loginHint}. Cora is linking it now.`",
+  "`Signed in to Cora only. Share it so ${cliLabel} can use it too.`",
+  "`${cliLabel} cannot use this profile's folder. Delete it and add the account again.`",
+  "`Not signed in to ${cliLabel}. Delete it and add the account again.`",
+  "`Signed in to ${cliLabel} only, and the terminal is using it. Share it so Cora can use it too.`",
+  "`Signed in to ${cliLabel} only. Share it so Cora can use it too.`",
+  "`Signed in to Cora. The ${cliLabel} copy is catching up.`",
+  "`Signed in to Cora and ${cliLabel}.`",
+  '"The Cora sign-in expired. Reconnect to keep using this account."',
+]) {
+  assert.ok(card.includes(copy), `${copy} must be the card's copy`);
+}
+assert.match(card, /card\.cora\?\.error && state !== "account-one-signed-out"/);
+assert.match(card, /<UsingChip label="Using" color=\{brand\} \/>/);
 // Active shows the badge and no Use button.
-assert.match(anthropicCard, /case "active":\s*case "account-one-signed-out":\s*return undefined;/);
+assert.match(card, /case "active":\s*case "account-one-signed-out":\s*return undefined;/);
+// A Codex switch main refused arms the same button to close the sessions
+// and switch; the card never invents the count, so Anthropic and Grok
+// never show it.
+assert.match(card, /const switchCount = card\.switchCloseSessionsCount \?\? 0;/);
+assert.match(card, /\? `Close \$\{sessions\(switchCount\)\} and switch`\s*: "Use this account"/);
+assert.match(card, /run: \(\) => actions\.onUse\(card, \{ closeSessions: switchCount > 0 \}\)/);
+assert.match(card, /onUse: \(card: AccountCardView, options: \{ closeSessions: boolean \}\) => void;/);
 // Delete is two-step inside the menu; the second step closes the terminals
 // main reported and resends with closeSessions.
-assert.match(anthropicCard, /setDeleteArmed\(true\);\s*return false;/);
-assert.match(
-  anthropicCard,
-  /`Close \$\{closeCount\} \$\{closeCount === 1 \? "session" : "sessions"\} and delete`/,
-);
-assert.match(anthropicCard, /actions\.onDelete\(card, \{ closeSessions: closeCount > 0 \}\)/);
-assert.match(anthropicCard, /onClose=\{\(\) => setDeleteArmed\(false\)\}/);
+assert.match(card, /setDeleteArmed\(true\);\s*return false;/);
+assert.match(card, /`Close \$\{sessions\(closeCount\)\} and delete`/);
+assert.match(card, /return `\$\{count\} \$\{count === 1 \? "session" : "sessions"\}`;/);
+assert.match(card, /actions\.onDelete\(card, \{ closeSessions: closeCount > 0 \}\)/);
+assert.match(card, /onClose=\{\(\) => setDeleteArmed\(false\)\}/);
 // Account 1 is renameable but never deleted or reconnected from here.
-assert.match(anthropicCard, /if \(renameable && !card\.builtIn\) \{/);
-assert.equal((anthropicCard.match(/<CardOverflowMenu/g) ?? []).length, 1);
-assert.doesNotMatch(anthropicCard, /AccountRoleRow|cliSwitchArmed|Confirm & close|Remove from Cora/);
-assert.doesNotMatch(anthropicCard, /nativeCliAccounts|piSubscriptions/);
-assert.match(anthropicCard, /agentBrandColor\("claude"\)/);
-assert.match(anthropicCard, /inset 2px 0 0 \$\{brand\}/);
-assert.match(anthropicCard, /\{card\.email\}/);
-assert.match(anthropicCard, /\{card\.plan\} plan/);
+assert.match(card, /if \(renameable && !card\.builtIn\) \{/);
+assert.equal((card.match(/<CardOverflowMenu/g) ?? []).length, 1);
+assert.doesNotMatch(card, /nativeCliAccounts|piSubscriptions/);
+assert.match(card, /inset 2px 0 0 \$\{brand\}/);
+assert.match(card, /\{card\.email\}/);
+assert.match(card, /\{card\.plan\} plan/);
 
-// The Add-account picker has no destination step for Claude: one browser
-// sign-in writes both halves.
+// The two-facet card and every piece of its machinery are gone.
+for (const source of [card, cards, settings, app]) {
+  assert.doesNotMatch(
+    source,
+    /AccountRoleRow|cliSwitchArmed|Confirm & close|Remove from Cora|Remove the \$\{cliLabel\} account|CLI_ONLY_USAGE_HINT|cliSignInHint|AccountCoraFacet|AccountCliFacet|AnthropicAccountCard|anthropicCards|oneSignIn|AddAccountDestination/,
+  );
+}
+assert.doesNotMatch(cards, /Connect to Cora|Sign in to \{selectedView\.cliLabel\}|Use this account for Cora|onBeginAddCli/);
+assert.doesNotMatch(app, /spark:open-native-cli-account|spark:open-native-cli-login|onLoginError|cancelLogin/);
+
+// The Add-account picker has one destination for every provider: choose the
+// agent, name it, sign in. Pi's flow does the rest (a browser page for
+// Anthropic and OpenAI, a device code for xAI).
 assert.match(cards, /export function AccountAddPicker\(/);
 assert.match(settings, /<AccountAddPicker providers=\{providerViews\} actions=\{accountActions\} \/>/);
-assert.match(cards, /const oneSignIn = \(view: AccountProviderView\) => view\.provider === "anthropic";/);
-assert.match(cards, /if \(oneSignIn\(view\)\) \{\s*setDestination\("cora"\);\s*actions\.onBeginAddCora\(view\.provider\);/);
-assert.ok(cards.includes("Sign in once in your browser. Cora and Claude Code both use it."));
-assert.match(cards, /oneSignIn\(selectedView\)\s*\? "Sign in"\s*: "Connect"/);
+assert.match(cards, /const providerDisabled = \(view: AccountProviderView\) => view\.disabled \|\| view\.busy;/);
+assert.match(cards, /setSelectedProvider\(view\.descriptor\.provider\);\s*actions\.onBeginAdd\(view\.descriptor\.provider\);/);
+assert.ok(
+  cards.includes(
+    "`Sign in once in your browser. Cora and ${selectedView.descriptor.cliLabel} both use it.`",
+  ),
+);
+assert.match(cards, />\s*Sign in\s*<\/button>/);
+assert.match(cards, /actions\.onAdd\(selectedView\.descriptor\.provider\);/);
+assert.match(cards, /\{label\} · Cora and \{cliLabel\}/);
 assert.equal(
   (cards.match(/\n\s*Add account\n/g) ?? []).length,
   1,
   "the Accounts UI must render one global Add account trigger",
 );
-// Codex and Grok keep their two destinations.
-assert.ok(cards.includes("Connect to Cora"));
-assert.ok(cards.includes("Sign in to {selectedView.cliLabel}"));
-assert.match(cards, /actions\.onBeginAddCli\(selectedView\.provider\)/);
-// The provider group dispatches Anthropic cards to the one-account card.
-assert.match(cards, /\(view\.anthropicCards \?\? \[\]\)\.map\(\(card\) => \(\s*<AnthropicAccountCard/);
-assert.match(cards, /actions=\{actions\.anthropic\}/);
-assert.match(cards, /anthropic: AnthropicAccountActions;/);
+// The provider group renders the one card for every provider.
+assert.match(cards, /\{view\.cards\.map\(\(card\) => \(\s*<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
+assert.match(cards, /export interface AccountActions extends AccountCardActions \{/);
+assert.match(settings, /const accountActions: AccountActions = \{/);
+assert.match(settings, /onBeginAdd: \(provider\) => \{/);
+assert.match(settings, /onAdd: \(provider\) => addAccount\(provider, addLabel\)/);
+assert.match(settings, /piSubscriptions\.addAccount\(\{/);
+assert.match(settings, /piSubscriptions\.reconnectAccount\(\{ provider, profileId \}\)/);
+
+assert.doesNotMatch(shared, /nativeCliAccountLabels/);
+assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabels/);
 
 // Plain language, no dashes, no configuration vocabulary in visible copy.
 for (const [name, source] of [
-  ["AnthropicAccountCard.tsx", anthropicCard],
+  ["AccountCard.tsx", card],
   ["AccountCardPrimitives.tsx", primitives],
   ["AccountCards.tsx", cards],
+  ["account-provider-descriptors.ts", descriptors],
 ]) {
   assert.doesNotMatch(source, /[\u2013\u2014]/, `${name} must not contain dashes`);
 }
 for (const jargon of ["OAuth", "credential", 'profile"', "managed account"]) {
-  for (const source of [cards, anthropicCard]) {
+  for (const source of [cards, card]) {
     assert.equal(
       source.includes(`>${jargon}`),
       false,
@@ -286,11 +360,7 @@ for (const jargon of ["OAuth", "credential", 'profile"', "managed account"]) {
     );
   }
 }
-const anthropicSection = settings.slice(
-  settings.indexOf("function AccountsSettings()"),
-  settings.indexOf("function AgentsSettings()"),
-);
-assert.doesNotMatch(anthropicSection, /[\u2013\u2014]/, "the Accounts section must not contain dashes");
+assert.doesNotMatch(accountsSection, /[\u2013\u2014]/, "the Accounts section must not contain dashes");
 
 // ---------------------------------------------------------------------------
 // Menus portal through AnchoredMenu (the Settings scroll pane clips in-place
@@ -316,7 +386,7 @@ for (const source of [primitives, cards]) {
     "no absolutely positioned popover may come back to the account cards",
   );
 }
-assert.doesNotMatch(anthropicCard, /position:\s*"absolute"/);
+assert.doesNotMatch(card, /position:\s*"absolute"/);
 assert.match(primitives, /export const SETTINGS_MENU_Z = 120/);
 assert.match(primitives, /aria-haspopup="menu"/);
 assert.match(primitives, /role="menuitem"/);
@@ -336,7 +406,7 @@ assert.match(anchored, /addEventListener\("mousedown", onPointerDown, true\)/);
 assert.match(anchored, /removeEventListener\("mousedown", onPointerDown, true\)/);
 
 // ---------------------------------------------------------------------------
-// Wire contract. The Anthropic row carries the id of its Claude Code half
+// Wire contract. Every provider's row carries the id of its terminal half
 // and a token-blind status for it, never a path, token, or raw account id.
 const connectionDtoStart = shared.indexOf(
   "export interface PiSubscriptionProfileConnection",
@@ -373,7 +443,8 @@ assert.match(
   shared,
   /export type PiSubscriptionShareLoginInput =\s*\| \{ coraProfileId: string \}\s*\| \{ cliProfileId: string; provider\?: PiSubscriptionProvider \};/,
 );
-assert.match(shared, /closeSessions\?: boolean;/);
+assert.match(shared, /export interface PiSubscriptionMakeDefaultInput \{[\s\S]*?closeSessions\?: boolean;/);
+assert.match(shared, /export interface PiSubscriptionDeleteAccountInput \{[\s\S]*?closeSessions\?: boolean;/);
 
 const dtoStart = shared.indexOf("export interface PiSubscriptionAddAccountInput");
 const dtoEnd = shared.indexOf("export interface PiSubscriptionOverview", dtoStart);
@@ -395,7 +466,8 @@ for (const forbiddenField of [
 }
 
 // Token blindness: the overview projects status and the link, computed in
-// main; the renderer never sees a token, a directory, or the Keychain.
+// main for every provider; the renderer never sees a token, a directory, or
+// the Keychain.
 const piAuth = read("src/main/orchestration/pi-subscription-auth.ts");
 assert.match(piAuth, /\.\.\.\(cliProfileId \? \{ cliProfileId \} : \{\}\)/);
 assert.match(piAuth, /\.\.\.\(cliProfileId === "personal" \? \{ builtIn: true as const \} : \{\}\)/);
@@ -404,8 +476,9 @@ assert.match(piAuth, /terminalStatusesByProvider\(\)/);
 assert.match(piAuth, /terminals\.get\(profile\.provider\)\?\.get\(cliProfileId\)/);
 assert.match(piAuth, /profile\.accountEmail \?\? status\?\.accountEmail/);
 assert.match(piAuth, /\.\.\.\(email \? \{ email \} : \{\}\)/);
-assert.doesNotMatch(settings, /accessToken|refreshToken|CLAUDE_CONFIG_DIR|\.credentials\.json|Keychain/);
-assert.doesNotMatch(anthropicCard, /accessToken|refreshToken|CLAUDE_CONFIG_DIR|\.credentials\.json|Keychain/);
+for (const source of [settings, card, cards]) {
+  assert.doesNotMatch(source, /accessToken|refreshToken|CLAUDE_CONFIG_DIR|CODEX_HOME|GROK_HOME|\.credentials\.json|Keychain/);
+}
 
 assert.match(settings, /function accountCardShowsUsage/);
 assert.match(usageUi, /connected && usage\.windows\.length === 0 && !usage\.limitReached/);
@@ -416,5 +489,5 @@ assert.doesNotMatch(
 );
 
 console.log(
-  "PASS one Anthropic account per card with one Use, one Share, one Delete through the unified Pi channels; Codex and Grok keep their two-facet cards; no pop-in, system-browser sign-in, portalled menus, and a token-blind IPC contract",
+  "PASS one account per card for every provider with one Use, one Share, one Delete through the unified Pi channels; one sign-in in the Add picker; no pop-in, system-browser sign-in, portalled menus, and a token-blind IPC contract",
 );

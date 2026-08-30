@@ -1188,11 +1188,6 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
-  // Codara-side display names for command-line sign-ins the CLI itself has no
-  // name field for (the built-in "Personal" one), keyed "<runtime>:<profileId>"
-  // (e.g. "claude:personal"). Purely cosmetic — never sent to the CLI or used
-  // for routing; Settings falls back to "Personal" when no entry exists.
-  nativeCliAccountLabels: Record<string, string>;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -1377,7 +1372,6 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
-  nativeCliAccountLabels: {},
   restoreAgentSessions: false,
   remoteAccessEnabled: false,
   gitAutoFetchEnabled: true,

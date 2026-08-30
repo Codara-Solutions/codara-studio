@@ -2,10 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 
 /**
- * The pieces every account card is built from, shared by the two card
- * shapes: the one-account Anthropic card (AnthropicAccountCard) and the
- * two-role Codex / Grok card (AccountCards). Nothing here knows which
- * provider it is drawing for.
+ * The pieces every account card is built from, shared by the one card shape
+ * (AccountCard) and the Add-account picker (AccountCards). Nothing here
+ * knows which provider it is drawing for.
  */
 
 export const INPUT_STYLE: React.CSSProperties = {
