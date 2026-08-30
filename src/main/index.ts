@@ -1509,7 +1509,19 @@ app.on("before-quit", (event) => {
     } finally {
       clearTimeout(hardExitTimer);
       cleanQuit = true;
-      app.quit();
+      // A quit that was started by the update chip ends in Squirrel's hands:
+      // it applies the downloaded update and relaunches the app. Everything
+      // else is a plain quit. cleanQuit is already true, so the quit Squirrel
+      // issues passes straight through this handler.
+      void import("./auto-updater")
+        .then((updater) => {
+          if (app.isPackaged && updater.isInstallRequested()) {
+            updater.performQuitAndInstall();
+          } else {
+            app.quit();
+          }
+        })
+        .catch(() => app.quit());
     }
   })();
 });

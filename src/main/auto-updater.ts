@@ -248,12 +248,31 @@ export async function checkForUpdatesNow(): Promise<ManualCheckResult> {
 // Invoked from the IPC handler when the renderer's "Restart and install"
 // button is clicked. Wrapping in a function keeps the import of autoUpdater
 // out of ipc.ts so the entire module loads lazily.
+// The install MUST NOT call autoUpdater.quitAndInstall() directly: Squirrel
+// closes every window and issues a quit, but index.ts's before-quit handler
+// preventDefault()s the first quit to run its async cleanup — cancelling the
+// install-quit and stranding a dead black window with the app still running.
+// Instead the click REQUESTS the install and starts a normal quit; index.ts
+// finishes its cleanup and then asks (isInstallRequested/performQuitAndInstall)
+// whether to hand the process to Squirrel instead of plainly quitting.
+let installRequested = false;
+
 export function quitAndInstall(): void {
   if (!app.isPackaged) {
     console.log("[auto-updater] quitAndInstall ignored in dev");
     return;
   }
-  // Silent install, relaunch when done: the whole update is one click — the
-  // app closes, applies the new version, and reopens itself.
+  installRequested = true;
+  app.quit();
+}
+
+export function isInstallRequested(): boolean {
+  return installRequested;
+}
+
+// Called by index.ts at the END of quit cleanup (cleanQuit already true, so
+// the quit Squirrel issues sails through before-quit). Silent install,
+// relaunch when done: the app closes, applies the update, and reopens itself.
+export function performQuitAndInstall(): void {
   autoUpdater.quitAndInstall(true, true);
 }
