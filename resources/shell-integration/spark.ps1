@@ -88,9 +88,76 @@ function Global:spark_open {
 
 Set-Alias -Name tp -Value spark_open -Scope Global -ErrorAction SilentlyContinue
 
+# Follow the Active account. A plain user pane carries
+# SPARK_FOLLOW_ACTIVE_ACCOUNT=1 and main rewrites
+# $env:SPARK_HOME_DIR\shell\active-cli-env on every account switch. The file
+# is data, never dot-sourced or invoked: only CLAUDE_CONFIG_DIR and GROK_HOME
+# lines whose value sits under this Codara home's managed accounts root are
+# honored, and a variable is only ever written when it is unset or itself
+# inside that root (a value the user set elsewhere is never touched). Cost per
+# prompt is one read of the header line; an unchanged revision returns before
+# anything else is parsed. Every failure (missing file, unreadable, bad
+# header) is silent and leaves the environment alone.
+function Global:__Spark-FollowVar {
+    param([string]$name, [string]$root, [string]$target, [System.StringComparison]$cmp)
+    $current = [System.Environment]::GetEnvironmentVariable($name)
+    if ($current -and -not $current.StartsWith($root, $cmp)) { return }
+    if ($target) {
+        if ($current -ne $target) { [System.Environment]::SetEnvironmentVariable($name, $target) }
+    } elseif ($current) {
+        [System.Environment]::SetEnvironmentVariable($name, $null)
+    }
+}
+
+function Global:__Spark-FollowActiveAccount {
+    if ($env:SPARK_FOLLOW_ACTIVE_ACCOUNT -ne '1') { return }
+    try {
+        $sparkHome = $env:SPARK_HOME_DIR
+        if (-not $sparkHome) { $sparkHome = Join-Path $HOME '.codarastudio' }
+        $file = Join-Path (Join-Path $sparkHome 'shell') 'active-cli-env'
+        $header = Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue
+        if (-not $header) { return }
+        $parts = ([string]$header) -split ' '
+        if ($parts.Length -lt 3 -or $parts[0] -ne 'codara-active-cli-env' -or -not $parts[2]) { return }
+        $rev = $parts[2]
+        if ($rev -eq $Global:__SparkActiveEnvRev) { return }
+        $lines = Get-Content -LiteralPath $file -ErrorAction SilentlyContinue
+        if ($null -eq $lines) { return }
+        $sep = [System.IO.Path]::DirectorySeparatorChar
+        # Windows paths compare case-insensitively; elsewhere the prefix
+        # rule is byte-exact like the bash and zsh hooks.
+        $cmp = if ($sep -eq '\') { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
+        $claudeRoot = (Join-Path (Join-Path $sparkHome 'claude-cli') 'accounts') + $sep
+        $grokRoot = (Join-Path (Join-Path $sparkHome 'grok-cli') 'accounts') + $sep
+        $claude = ''
+        $grok = ''
+        foreach ($line in @($lines)) {
+            $text = [string]$line
+            $eq = $text.IndexOf('=')
+            if ($eq -lt 1) { continue }
+            $key = $text.Substring(0, $eq)
+            $value = $text.Substring($eq + 1)
+            if ($key -ne 'CLAUDE_CONFIG_DIR' -and $key -ne 'GROK_HOME') { continue }
+            if ($value -match '[\x00-\x1f\x7f]' -or $value -match '(^|[\\/])\.\.([\\/]|$)') { continue }
+            if ($key -eq 'CLAUDE_CONFIG_DIR') {
+                if ($value.Length -gt $claudeRoot.Length -and $value.StartsWith($claudeRoot, $cmp)) { $claude = $value }
+            } else {
+                if ($value.Length -gt $grokRoot.Length -and $value.StartsWith($grokRoot, $cmp)) { $grok = $value }
+            }
+        }
+        __Spark-FollowVar 'CLAUDE_CONFIG_DIR' $claudeRoot $claude $cmp
+        __Spark-FollowVar 'GROK_HOME' $grokRoot $grok $cmp
+        $Global:__SparkActiveEnvRev = $rev
+    } catch {
+        # Silent by contract: the environment is left alone.
+    }
+}
+
 function Global:Prompt {
     $exit = $LASTEXITCODE
     if ($null -eq $exit) { $exit = if ($?) { 0 } else { 1 } }
+
+    __Spark-FollowActiveAccount
 
     $out = ''
 

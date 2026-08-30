@@ -42,8 +42,75 @@ if [ -z "$__SPARK_HOOKS_LOADED" ]; then
     done
   }
 
+  # Follow the Active account. A plain user pane carries
+  # SPARK_FOLLOW_ACTIVE_ACCOUNT=1 and main rewrites
+  # $SPARK_HOME_DIR/shell/active-cli-env on every account switch. The file is
+  # data, never sourced or evaluated: only CLAUDE_CONFIG_DIR and GROK_HOME lines
+  # whose value sits under this Codara home's managed accounts root are
+  # honored, and a variable is only ever written when it is unset or itself
+  # inside that root (a value the user exported elsewhere is never touched).
+  # Cost per prompt is one builtin read of the header line: no fork, no stat,
+  # and an unchanged revision returns before anything else is parsed. Every
+  # failure (missing file, unreadable, bad header) is silent and leaves the
+  # environment alone. bash 3.2 safe: nothing newer than its builtins is used.
+  _spark_follow_active_account() {
+    [ "${SPARK_FOLLOW_ACTIVE_ACCOUNT-}" = "1" ] || return 0
+    local home="${SPARK_HOME_DIR:-$HOME/.codarastudio}"
+    local file="$home/shell/active-cli-env"
+    local word version rev
+    { IFS=' ' read -r word version rev < "$file"; } 2>/dev/null || return 0
+    [ "$word" = "codara-active-cli-env" ] || return 0
+    [ -n "$rev" ] || return 0
+    [ "$rev" = "${__SPARK_ACTIVE_ENV_REV-}" ] && return 0
+    local claude_root="$home/claude-cli/accounts/"
+    local grok_root="$home/grok-cli/accounts/"
+    local line value claude="" grok=""
+    {
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          CLAUDE_CONFIG_DIR=*|GROK_HOME=*) ;;
+          *) continue ;;
+        esac
+        value="${line#*=}"
+        case "$value" in
+          *[[:cntrl:]]*|*"/../"*|*"/..") continue ;;
+        esac
+        case "$line" in
+          CLAUDE_CONFIG_DIR=*)
+            case "$value" in "$claude_root"?*) claude="$value" ;; esac ;;
+          GROK_HOME=*)
+            case "$value" in "$grok_root"?*) grok="$value" ;; esac ;;
+        esac
+      done < "$file"
+    } 2>/dev/null || return 0
+    _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude"
+    _spark_follow_var GROK_HOME "$grok_root" "$grok"
+    __SPARK_ACTIVE_ENV_REV="$rev"
+  }
+
+  # Write one selector: only when the current value is unset, empty, or
+  # already under the managed root (the spawn-time selector and a previous
+  # hook write both look like that). An empty target means "personal", so
+  # the variable is unset rather than exported empty.
+  _spark_follow_var() {
+    local name="$1" root="$2" target="$3" current
+    current="${!name-}"
+    if [ -n "$current" ]; then
+      case "$current" in
+        "$root"*) ;;
+        *) return 0 ;;
+      esac
+    fi
+    if [ -n "$target" ]; then
+      [ "$current" = "$target" ] || export "$name=$target"
+    elif [ -n "$current" ]; then
+      unset "$name"
+    fi
+  }
+
   _spark_precmd() {
     local _spark_ret=$?
+    _spark_follow_active_account
     printf '\e]133;D;%s\e\\' "$_spark_ret"
     printf '\e]7;file://%s%s\e\\' "${HOSTNAME:-$(uname -n 2>/dev/null)}" "$(_spark_urlencode "$PWD")"
     if [ -z "$__SPARK_PS1_INJECTED" ]; then
