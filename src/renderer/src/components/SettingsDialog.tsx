@@ -3241,7 +3241,7 @@ function PiLoginPanel({
 
       <div style={{ display: "flex", gap: 6 }}>
         {login.url ? (
-          <FooterButton onClick={() => void window.spark.openExternal(login.url!)}>Open browser again</FooterButton>
+          <FooterButton onClick={() => void window.spark.openInSystemBrowser(login.url!)}>Open browser again</FooterButton>
         ) : null}
         <FooterButton onClick={onCancel}>{login.status === "running" ? "Cancel" : "Dismiss"}</FooterButton>
       </div>
