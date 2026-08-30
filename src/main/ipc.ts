@@ -105,7 +105,11 @@ import {
   PI_ACCOUNT_IN_USE_MESSAGE,
 } from "./orchestration/pi-account-run-guard";
 import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
-import { anthropicAccounts } from "./orchestration/anthropic-accounts";
+import {
+  anthropicAccounts,
+  AnthropicAccountSessionsError,
+} from "./orchestration/anthropic-accounts";
+import { unifiedAccountsReady } from "./orchestration/anthropic-account-migration";
 import { focusStudioWindow } from "./window-focus";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
@@ -947,9 +951,12 @@ export function registerIpc(): void {
     return configuredOpenRouterCoraModels(await loadSettings());
   });
 
+  // Every account handler waits for the unified-account startup pass so no
+  // window observes a half-migrated store and no card pops in later.
   handle(
     "native-cli-accounts:inspect",
     async (): Promise<NativeCliAccountsInspection> => {
+      await unifiedAccountsReady();
       return nativeCliAccounts.inspect();
     },
   );
@@ -959,6 +966,7 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountCreateInput> | null,
     ): Promise<NativeCliAccountMutationResult> => {
+      await unifiedAccountsReady();
       const input: NativeCliAccountCreateInput = {
         runtime: nativeCliAccountRuntimeFromIpc(rawInput?.runtime),
         label: nativeCliAccountLabelFromIpc(rawInput?.label),
@@ -974,6 +982,7 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountRenameInput> | null,
     ): Promise<NativeCliAccountMutationResult> => {
+      await unifiedAccountsReady();
       const profile = nativeCliAccountProfileInputFromIpc(rawInput);
       const input: NativeCliAccountRenameInput = {
         ...profile,
@@ -990,9 +999,33 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountProfileInput> | null,
     ): Promise<NativeCliAccountMutationResult> => {
-      const result = await nativeCliAccounts.setDefault(
-        nativeCliAccountProfileInputFromIpc(rawInput),
-      );
+      await unifiedAccountsReady();
+      const input = nativeCliAccountProfileInputFromIpc(rawInput);
+      if (input.runtime === "claude") {
+        // A Claude Code profile is one half of an Anthropic account: switching
+        // it switches the whole account, Cora included. Until the Accounts
+        // panel speaks in account ids, a terminal id is mapped to its row.
+        const row = await anthropicAccounts.coraProfileForCli(input.profileId);
+        if (!row) {
+          throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
+            runtime: "claude",
+            profileId: input.profileId,
+          });
+        }
+        await anthropicAccounts.useAnthropicAccount(row.id);
+        broadcastPiSubscriptionChanged("anthropic");
+        broadcastNativeCliAccountsChanged();
+        const inspection = (await nativeCliAccounts.inspect("claude")).runtimes[0];
+        const profile = inspection.profiles.find((entry) => entry.id === input.profileId);
+        if (!profile) {
+          throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_NOT_FOUND", {
+            runtime: "claude",
+            profileId: input.profileId,
+          });
+        }
+        return { profile, inspection, closedSessionCount: 0 };
+      }
+      const result = await nativeCliAccounts.setDefault(input);
       broadcastNativeCliAccountsChanged();
       return result;
     },
@@ -1003,6 +1036,7 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountLoginInput> | null,
     ): Promise<NativeCliAccountLoginPreparation> => {
+      await unifiedAccountsReady();
       return nativeCliAccounts.prepareLogin(
         nativeCliAccountLoginInputFromIpc(rawInput),
       );
@@ -1014,6 +1048,7 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountCancelLoginInput> | null,
     ): Promise<boolean> => {
+      await unifiedAccountsReady();
       const cancelled = await nativeCliAccounts.cancelPreparedLogin(
         nativeCliLoginTokenFromIpc(rawInput?.launchToken),
       );
@@ -1027,6 +1062,7 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountProfileInput> | null,
     ): Promise<NativeCliAccountsInspection> => {
+      await unifiedAccountsReady();
       await nativeCliAccounts.logout(
         nativeCliAccountProfileInputFromIpc(rawInput),
       );
@@ -1040,9 +1076,19 @@ export function registerIpc(): void {
       _event,
       rawInput: Partial<NativeCliAccountProfileInput> | null,
     ): Promise<NativeCliAccountDeleteResult> => {
-      const result = await nativeCliAccounts.delete(
-        nativeCliAccountProfileInputFromIpc(rawInput),
-      );
+      await unifiedAccountsReady();
+      const input = nativeCliAccountProfileInputFromIpc(rawInput);
+      if (input.runtime === "claude") {
+        // Only a terminal-only half (a managed profile no account links) can
+        // be deleted here; a paired one is deleted with its account.
+        const { deleted } = await anthropicAccounts.deleteTerminalOnlyProfile(
+          input.profileId,
+        );
+        broadcastPiSubscriptionChanged("anthropic");
+        broadcastNativeCliAccountsChanged();
+        return { runtime: "claude", profileId: input.profileId, deleted };
+      }
+      const result = await nativeCliAccounts.delete(input);
       broadcastNativeCliAccountsChanged();
       return result;
     },
@@ -1060,16 +1106,19 @@ export function registerIpc(): void {
   );
 
   handle("pi-subscriptions:status", async () => {
+    await unifiedAccountsReady();
     const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
     return inspectPiSubscriptions();
   });
   handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
+    await unifiedAccountsReady();
     const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
     return startPiSubscriptionLogin(input?.provider, event.sender);
   });
   handle(
     "pi-subscriptions:add-account",
     async (event, input?: Partial<PiSubscriptionAddAccountInput>) => {
+      await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const label = piAccountLabelFromIpc(input?.label, false);
       const { startPiSubscriptionProfileLogin } = await getPiSubscriptionAuth();
@@ -1085,6 +1134,7 @@ export function registerIpc(): void {
   handle(
     "pi-subscriptions:reconnect-account",
     async (event, input?: Partial<PiSubscriptionReconnectAccountInput>) => {
+      await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
       const { startPiSubscriptionProfileLogin } = await getPiSubscriptionAuth();
@@ -1097,6 +1147,7 @@ export function registerIpc(): void {
   handle(
     "pi-subscriptions:rename-account",
     async (_event, input?: Partial<PiSubscriptionRenameAccountInput>) => {
+      await unifiedAccountsReady();
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
       const label = piAccountLabelFromIpc(input?.label, true)!;
       const { renamePiAccountProfile } = await getPiSubscriptionAuth();
@@ -1107,32 +1158,82 @@ export function registerIpc(): void {
   handle(
     "pi-subscriptions:make-default",
     async (_event, input?: Partial<PiSubscriptionMakeDefaultInput>) => {
+      await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
-      const { setDefaultPiAccountProfile } = await getPiSubscriptionAuth();
-      await setDefaultPiAccountProfile(provider, profileId);
+      if (provider === "anthropic") {
+        // One switch for both halves: Cora and Claude Code move together.
+        await anthropicAccounts.useAnthropicAccount(profileId);
+        broadcastNativeCliAccountsChanged();
+      } else {
+        const { setDefaultPiAccountProfile } = await getPiSubscriptionAuth();
+        await setDefaultPiAccountProfile(provider, profileId);
+      }
       return inspectAfterPiAccountMetadataChange(provider);
     },
   );
   handle(
     "pi-subscriptions:delete-account",
     async (_event, input?: Partial<PiSubscriptionDeleteAccountInput>) => {
+      await unifiedAccountsReady();
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
-      return deletePiAccountProfileWithRunGuard(profileId);
+      const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
+      const target = (await inspectPiSubscriptions()).profiles?.find(
+        (profile) => profile.id === profileId,
+      );
+      if (target?.provider !== "anthropic") {
+        return deletePiAccountProfileWithRunGuard(profileId);
+      }
+      try {
+        await anthropicAccounts.deleteAnthropicAccount(profileId, {
+          closeSessions: input?.closeSessions === true,
+          ownershipGuard: async (profile) => {
+            await assertPiAccountProfileIsNotActive(profile.id);
+            return false;
+          },
+        });
+      } catch (error) {
+        // The count travels in the message so the card's second step can say
+        // how many terminals it would close.
+        if (error instanceof AnthropicAccountSessionsError) throw new Error(error.message);
+        throw error;
+      }
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange("anthropic");
+    },
+  );
+  handle(
+    "pi-subscriptions:share-login",
+    async (_event, input?: Partial<Record<"coraProfileId" | "cliProfileId", unknown>>) => {
+      await unifiedAccountsReady();
+      if (input?.coraProfileId !== undefined) {
+        await anthropicAccounts.shareLogin({
+          coraProfileId: piAccountProfileIdFromIpc(input.coraProfileId),
+        });
+      } else {
+        await anthropicAccounts.shareLogin({
+          cliProfileId: nativeCliAccountProfileIdFromIpc(input?.cliProfileId),
+        });
+      }
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange("anthropic");
     },
   );
   handle(
     "pi-subscriptions:respond",
     async (event, input?: { requestId?: unknown; promptId?: unknown; value?: unknown }) => {
+      await unifiedAccountsReady();
       const { answerPiSubscriptionPrompt } = await getPiSubscriptionAuth();
       answerPiSubscriptionPrompt(input ?? {}, event.sender);
     },
   );
   handle("pi-subscriptions:cancel", async (event, input?: { requestId?: unknown }) => {
+    await unifiedAccountsReady();
     const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
   });
   handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
+    await unifiedAccountsReady();
     const provider = piSubscriptionProviderFromIpc(input?.provider);
     const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
     const overview = await inspectPiSubscriptions();
@@ -1150,6 +1251,7 @@ export function registerIpc(): void {
     return installPiRuntimeForWindow(event.sender);
   });
   handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
+    await unifiedAccountsReady();
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
     return inspectPiSubscriptionUsage(input?.force === true);
   });

@@ -1431,9 +1431,16 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
       import("./orchestration/pi-subscription-usage"),
       import("./remote-access/subscription-profile-projection"),
     ]);
-    const inspection = await inspectPiAccountProfileAuthStore();
+    const { anthropicAccounts } = await import("./orchestration/anthropic-accounts");
+    const [inspection, terminals] = await Promise.all([
+      inspectPiAccountProfileAuthStore(),
+      anthropicAccounts.terminalStatuses(),
+    ]);
     const cachedUsage = inspectCachedPiSubscriptionUsageProfiles();
-    const projected = projectRemoteSubscriptionProfiles(inspection, cachedUsage);
+    const projected = projectRemoteSubscriptionProfiles(
+      { ...inspection, terminals },
+      cachedUsage,
+    );
     const windowsByProfile = new Map(
       cachedUsage.map((usage) => [
         usage.profileId,
@@ -1540,7 +1547,12 @@ async function handleSubscriptionAccounts(
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   await pruneCliSubscriptionAuthSessions();
-  const auth = await import("./orchestration/pi-subscription-auth");
+  const [auth, { unifiedAccountsReady }, { anthropicAccounts }] = await Promise.all([
+    import("./orchestration/pi-subscription-auth"),
+    import("./orchestration/anthropic-account-migration"),
+    import("./orchestration/anthropic-accounts"),
+  ]);
+  await unifiedAccountsReady();
 
   if (method === "accounts.login.start") {
     const provider = stringParam(params, "provider");
@@ -1627,7 +1639,14 @@ async function handleSubscriptionAccounts(
     if (!isPiSubscriptionProvider(provider)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
     }
-    await auth.setDefaultPiAccountProfile(provider, profileId);
+    // An Anthropic account switches both halves at once; Codex and xAI only
+    // have the Cora half here.
+    if (provider === "anthropic") {
+      await anthropicAccounts.useAnthropicAccount(profileId);
+      broadcastNativeCliAccountsChangedFromSocket();
+    } else {
+      await auth.setDefaultPiAccountProfile(provider, profileId);
+    }
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(provider);
     return successResponse(id, {
       account: overview.profiles?.find((profile) => profile.id === profileId) ?? null,
@@ -1636,12 +1655,23 @@ async function handleSubscriptionAccounts(
   }
 
   if (method === "accounts.remove") {
-    const overview = await auth.deletePiSubscriptionProfile(profileId, {
-      ownershipGuard: async (profile) => {
-        await assertPiAccountProfileCanBeDeleted(profile.id);
-        return false;
-      },
-    });
+    const ownershipGuard = async (profile: { id: string }): Promise<boolean> => {
+      await assertPiAccountProfileCanBeDeleted(profile.id);
+      return false;
+    };
+    const current = (await auth.inspectPiSubscriptions()).profiles?.find(
+      (profile) => profile.id === profileId,
+    );
+    if (current?.provider === "anthropic") {
+      await anthropicAccounts.deleteAnthropicAccount(profileId, {
+        closeSessions: params.closeSessions === true,
+        ownershipGuard,
+      });
+      broadcastNativeCliAccountsChangedFromSocket();
+      const overview = await auth.refreshPiSubscriptionsAfterMetadataChange("anthropic");
+      return successResponse(id, { removed: profileId, overview });
+    }
+    const overview = await auth.deletePiSubscriptionProfile(profileId, { ownershipGuard });
     return successResponse(id, { removed: profileId, overview });
   }
 
@@ -1694,7 +1724,12 @@ async function handleNativeAccounts(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const { nativeCliAccounts } = await import("./orchestration/native-cli-accounts");
+  const [{ nativeCliAccounts, NativeCliAccountError }, { unifiedAccountsReady }] =
+    await Promise.all([
+      import("./orchestration/native-cli-accounts"),
+      import("./orchestration/anthropic-account-migration"),
+    ]);
+  await unifiedAccountsReady();
   if (method === "nativeAccounts.list") {
     const runtimeValue = stringParam(params, "runtime");
     const runtime = runtimeValue && isAgentRuntimeKind(runtimeValue) ? runtimeValue : undefined;
@@ -1721,6 +1756,22 @@ async function handleNativeAccounts(
   }
 
   const runtime = nativeRuntimeParam(params);
+  if (
+    runtime === "claude" &&
+    (method === "nativeAccounts.add" ||
+      method === "nativeAccounts.login" ||
+      method === "nativeAccounts.use" ||
+      method === "nativeAccounts.logout")
+  ) {
+    // Claude Code is one half of an Anthropic account: sign in once with
+    // accounts.login.start and switch with accounts.use; both halves follow.
+    const unified = new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", { runtime });
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `${unified.message}. Use accounts.login.start to sign in and accounts.use to switch.`,
+    );
+  }
   if (method === "nativeAccounts.add") {
     const label = stringParam(params, "label");
     if (!label) return errorResponse(id, ERR_INVALID_PARAMS, "label is required");
@@ -1768,6 +1819,12 @@ async function handleNativeAccounts(
   }
 
   if (method === "nativeAccounts.remove") {
+    if (runtime === "claude") {
+      const { anthropicAccounts } = await import("./orchestration/anthropic-accounts");
+      const { deleted } = await anthropicAccounts.deleteTerminalOnlyProfile(profileId);
+      broadcastNativeCliAccountsChangedFromSocket();
+      return successResponse(id, { runtime, profileId, deleted });
+    }
     const result = await nativeCliAccounts.delete({ runtime, profileId });
     broadcastNativeCliAccountsChangedFromSocket();
     return successResponse(id, result);

@@ -18,10 +18,7 @@ import {
   type ClaudeCliProfileConnection,
   type ClaudeCliProfileId,
 } from "./claude-cli-account-profiles";
-import {
-  ClaudeCliProfileLeaseRegistry,
-  resolveClaudeCliExecutionProfile,
-} from "./claude-cli-profile-execution";
+import { ClaudeCliProfileLeaseRegistry } from "./claude-cli-profile-execution";
 import {
   CODEX_CLI_PERSONAL_PROFILE_ID,
   codexCliManagedProfilePaths,
@@ -284,6 +281,7 @@ export type NativeCliAccountErrorCode =
   | "NATIVE_CLI_ACCOUNT_LOGOUT_SIGNAL"
   | "NATIVE_CLI_ACCOUNT_LOGOUT_FAILED"
   | "NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED"
+  | "NATIVE_CLI_ACCOUNT_UNIFIED"
   | "NATIVE_CLI_ACCOUNT_OPERATION_FAILED";
 
 const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
@@ -319,6 +317,8 @@ const SAFE_ERROR_MESSAGES: Record<NativeCliAccountErrorCode, string> = {
   NATIVE_CLI_ACCOUNT_LOGOUT_FAILED: "Native CLI account logout failed",
   NATIVE_CLI_ACCOUNT_SESSION_SHUTDOWN_FAILED:
     "Could not safely close every running CLI session; the account was not changed",
+  NATIVE_CLI_ACCOUNT_UNIFIED:
+    "Claude accounts are managed from the Anthropic card: one sign-in serves Cora and Claude Code together",
   NATIVE_CLI_ACCOUNT_OPERATION_FAILED: "Native CLI account operation failed",
 };
 
@@ -981,21 +981,29 @@ export class NativeCliAccountService {
     return this.codexExecutable;
   }
 
-  private loginArgs(
+  /**
+   * Claude Code never signs in, signs out, switches or is created through this
+   * facade any more: one browser sign-in through the Anthropic card writes
+   * both halves, and the unified account service owns every mutation.
+   */
+  private assertNotUnified(
     runtime: NativeCliAccountRuntime,
-    expectedEmail?: string,
-  ): readonly string[] {
-    return runtime === "claude" && expectedEmail
-      ? ["auth", "login", "--email", expectedEmail]
-      : runtime === "claude"
-        ? ["auth", "login"]
-        : runtime === "codex"
-          ? ["login", "--config", CODEX_FILE_AUTH_OVERRIDE]
-          : ["login"];
+    profileId?: string,
+  ): void {
+    if (runtime !== "claude") return;
+    throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
+      runtime,
+      ...(profileId ? { profileId } : {}),
+    });
+  }
+
+  private loginArgs(runtime: NativeCliAccountRuntime): readonly string[] {
+    return runtime === "codex"
+      ? ["login", "--config", CODEX_FILE_AUTH_OVERRIDE]
+      : ["login"];
   }
 
   private logoutArgs(runtime: NativeCliAccountRuntime): readonly string[] {
-    if (runtime === "claude") return ["auth", "logout"];
     if (runtime === "codex") {
       return ["logout", "--config", CODEX_FILE_AUTH_OVERRIDE];
     }
@@ -1007,17 +1015,9 @@ export class NativeCliAccountService {
     profileId: string,
     requireConnected: boolean,
   ): Promise<NodeJS.ProcessEnv> {
+    this.assertNotUnified(runtime, profileId);
     try {
       const baseEnv = { ...this.baseEnv() };
-      if (runtime === "claude") {
-        return (
-          await resolveClaudeCliExecutionProfile(this.claudeStore, {
-            profileId,
-            requireConnected,
-            baseEnv,
-          })
-        ).env;
-      }
       if (runtime === "grok") {
         return (
           await resolveGrokCliExecutionProfile(this.grokStore, {
@@ -1063,14 +1063,13 @@ export class NativeCliAccountService {
     input: NativeCliAccountCreateInput,
   ): Promise<NativeCliAccountMutationResult> {
     const runtime = normalizeRuntime(input.runtime);
+    this.assertNotUnified(runtime);
     return this.withRuntimeMutation(runtime, async () => {
       try {
         const created =
-          runtime === "claude"
-            ? await this.claudeStore.createProfile({ label: input.label })
-            : runtime === "grok"
-              ? await this.grokStore.createProfile({ label: input.label })
-              : await this.codexStore.createProfile({ label: input.label });
+          runtime === "grok"
+            ? await this.grokStore.createProfile({ label: input.label })
+            : await this.codexStore.createProfile({ label: input.label });
         const inspection = await this.inspectRuntime(runtime);
         return {
           profile: this.profileFromInspection(inspection, created.profile.id),
@@ -1118,6 +1117,7 @@ export class NativeCliAccountService {
   ): Promise<NativeCliAccountMutationResult> {
     const runtime = normalizeRuntime(input.runtime);
     const profileId = this.normalizeProfileId(runtime, input.profileId);
+    this.assertNotUnified(runtime, profileId);
     return this.withRuntimeMutation(runtime, async () => {
       const before = await this.requireProfile(runtime, profileId);
       if (before.profile.managed && !before.profile.connected) {
@@ -1157,9 +1157,7 @@ export class NativeCliAccountService {
       }
       try {
         const previousProfileId = before.inspection.defaultProfileId;
-        if (runtime === "claude") {
-          await this.claudeStore.setDefaultProfile(profileId);
-        } else if (runtime === "grok") {
+        if (runtime === "grok") {
           await this.grokStore.setDefaultProfile(profileId);
           try {
             await this.grokAuthSelector(profileId);
@@ -1272,6 +1270,7 @@ export class NativeCliAccountService {
   ): Promise<NativeCliAccountLoginPreparation> {
     const runtime = normalizeRuntime(input.runtime);
     const profileId = this.normalizeProfileId(runtime, input.profileId);
+    this.assertNotUnified(runtime, profileId);
     const expectedAccountFingerprint = input.expectedAccountFingerprint;
     if (
       expectedAccountFingerprint !== undefined &&
@@ -1407,7 +1406,7 @@ export class NativeCliAccountService {
           runtime: plan.runtime,
           profileId: plan.profileId,
           executable: this.executableFor(plan.runtime),
-          args: this.loginArgs(plan.runtime, plan.expectedEmail),
+          args: this.loginArgs(plan.runtime),
           env,
           shell: false,
         });
@@ -1545,6 +1544,7 @@ export class NativeCliAccountService {
   }> {
     const runtime = normalizeRuntime(input.runtime);
     const profileId = this.normalizeProfileId(runtime, input.profileId);
+    this.assertNotUnified(runtime, profileId);
     return this.withRuntimeMutation(runtime, async () => {
       await this.logoutInternal(runtime, profileId);
       return { runtime, profileId };
@@ -1562,6 +1562,7 @@ export class NativeCliAccountService {
         profileId,
       });
     }
+    this.assertNotUnified(runtime, profileId);
     // Deleting the current default or in-use account is a legitimate ask,
     // not an error: hand the runtime back to the personal account (which
     // always exists and can never be deleted) through the full guarded
@@ -1574,11 +1575,9 @@ export class NativeCliAccountService {
       const { profile, inspection } = await this.requireProfile(runtime, profileId);
       if (profile.isDefault || profile.inUse) {
         const personalId =
-          runtime === "claude"
-            ? CLAUDE_CLI_PERSONAL_PROFILE_ID
-            : runtime === "grok"
-              ? GROK_CLI_PERSONAL_PROFILE_ID
-              : CODEX_CLI_PERSONAL_PROFILE_ID;
+          runtime === "grok"
+            ? GROK_CLI_PERSONAL_PROFILE_ID
+            : CODEX_CLI_PERSONAL_PROFILE_ID;
         if (inspection.defaultProfileId !== personalId) {
           await this.setDefault({ runtime, profileId: personalId });
         } else {
@@ -1633,11 +1632,9 @@ export class NativeCliAccountService {
 
       try {
         const result =
-          runtime === "claude"
-            ? await this.claudeStore.deleteProfile(profileId)
-            : runtime === "grok"
-              ? await this.grokStore.deleteProfile(profileId)
-              : await this.codexStore.deleteProfile(profileId);
+          runtime === "grok"
+            ? await this.grokStore.deleteProfile(profileId)
+            : await this.codexStore.deleteProfile(profileId);
         return { runtime, profileId, deleted: result.deleted };
       } catch (error) {
         throw this.sanitizeStoreError(runtime, profileId, error);

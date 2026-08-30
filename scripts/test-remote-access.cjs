@@ -563,6 +563,46 @@ async function main() {
         !serialized.includes("raw provider error"),
       projected,
     );
+    // The unified Anthropic account: the paired Claude Code half rides along
+    // as an opaque id and a coarse status, never as a directory or token.
+    const cliId = "44444444-4444-4444-8444-444444444444";
+    const paired = subscriptionProfiles.projectRemoteSubscriptionProfiles(
+      {
+        ...inspection,
+        snapshot: {
+          ...inspection.snapshot,
+          profiles: [
+            ...inspection.snapshot.profiles.map((profile) =>
+              profile.id === refreshableId
+                ? { ...profile, cliProfileId: cliId }
+                : profile.id === unavailableId
+                  ? { ...profile, cliProfileId: "personal" }
+                  : { ...profile, cliProfileId: cliId },
+            ),
+          ],
+        },
+        terminals: new Map([
+          [cliId, { connected: true, expired: false, canRefresh: true, configDir: "/must-not-cross" }],
+          ["personal", { connected: false, expired: false, canRefresh: false }],
+        ]),
+      },
+      cached,
+    );
+    const pairedJson = JSON.stringify(paired);
+    check(
+      "remote subscription projection carries the Claude Code half as an opaque id plus coarse status",
+      paired.find((entry) => entry.id === refreshableId)?.cliProfileId === cliId &&
+        paired.find((entry) => entry.id === refreshableId)?.terminal?.connected === true &&
+        paired.find((entry) => entry.id === refreshableId)?.terminal?.expired === false &&
+        paired.find((entry) => entry.id === refreshableId)?.builtIn === undefined &&
+        paired.find((entry) => entry.id === unavailableId)?.builtIn === true &&
+        paired.find((entry) => entry.id === unavailableId)?.cliProfileId === "personal" &&
+        paired.find((entry) => entry.id === unavailableId)?.terminal?.connected === false &&
+        paired.find((entry) => entry.id === profileId)?.cliProfileId === undefined &&
+        !pairedJson.includes("must-not-cross") &&
+        !pairedJson.includes("canRefresh"),
+      paired,
+    );
     const staleOrFailed =
       subscriptionProfiles.projectRemoteSubscriptionProfiles(inspection, [
         {

@@ -155,6 +155,12 @@ export interface RemoteSubscriptionProfile {
   status: RemoteSubscriptionStatus;
   isDefault: boolean;
   usage?: RemoteSubscriptionUsage;
+  /** Opaque id of the Claude Code half of an Anthropic account, when paired. */
+  cliProfileId?: string;
+  /** Account 1: the row for the user's own claude login. */
+  builtIn?: true;
+  /** Coarse status of the Claude Code half; absent when there is none. */
+  terminal?: { connected: boolean; expired: boolean };
 }
 
 export type RemoteNativeCliAccountRuntime = "claude" | "codex" | "grok";

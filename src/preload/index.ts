@@ -128,6 +128,7 @@ import type {
   PiSubscriptionAuthEvent,
   PiCatalogModel,
   PiSubscriptionDeleteAccountInput,
+  PiSubscriptionShareLoginInput,
   PiSubscriptionMakeDefaultInput,
   PiSubscriptionOverview,
   PiSubscriptionProfileLoginRequest,
@@ -340,6 +341,12 @@ const api = {
       input: PiSubscriptionDeleteAccountInput,
     ): Promise<PiSubscriptionOverview> =>
       ipcRenderer.invoke("pi-subscriptions:delete-account", input),
+    // Give a half account its other half: a Cora row gets a Claude Code
+    // profile, or a terminal-only Claude Code profile gets a Cora row.
+    shareLogin: (
+      input: PiSubscriptionShareLoginInput,
+    ): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:share-login", input),
     respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:respond", input),
     cancel: (requestId: string): Promise<void> =>

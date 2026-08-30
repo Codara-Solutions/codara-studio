@@ -158,7 +158,9 @@ async function main() {
   const codexStore = new mod.CodexCliAccountProfileStore(codexRoot, {
     personalHomeDir: personalCodex,
     leases: codexLeases,
-    idFactory: () => IDS[codexIdIndex++],
+    // Codex now carries every generic login-plan case; the fixed pool covers
+    // the ids the suite asserts on and random ids serve the rest.
+    idFactory: () => IDS[codexIdIndex++] ?? crypto.randomUUID(),
     authChecker: ({ homeDir }) =>
       codexConnected.has(homeDir)
         ? { connected: true }
@@ -619,31 +621,53 @@ async function main() {
 
   fs.rmSync(personalCodexAuth, { force: true });
 
-  let claudeCreated = await service.create({
+  // Claude Code is one half of an Anthropic account now: every mutation that
+  // used to go through this facade is refused with one typed code, so a
+  // caller learns to use the Anthropic card (accounts.login.start /
+  // accounts.use on the socket). Inspection and rename still work.
+  for (const [operation, input] of [
+    ["create", { runtime: "claude", label: "Work Claude" }],
+    ["setDefault", { runtime: "claude", profileId: "personal" }],
+    ["prepareLogin", { runtime: "claude", profileId: "personal" }],
+    ["logout", { runtime: "claude", profileId: "personal" }],
+  ]) {
+    await expectCode(() => service[operation](input), "NATIVE_CLI_ACCOUNT_UNIFIED");
+  }
+  const claudeCreated = await claudeStore.createProfile({ label: " Work Claude " });
+  assert.equal(claudeCreated.profile.id, IDS[0]);
+  await expectCode(
+    () => service.delete({ runtime: "claude", profileId: claudeCreated.profile.id }),
+    "NATIVE_CLI_ACCOUNT_UNIFIED",
+  );
+  await expectCode(
+    () => service.delete({ runtime: "claude", profileId: "personal" }),
+    "NATIVE_CLI_ACCOUNT_PERSONAL",
+  );
+  let claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
+  claudeConnected.add(claudeManagedDir);
+  const renamedClaude = await service.rename({
     runtime: "claude",
-    label: " Work Claude ",
+    profileId: claudeCreated.profile.id,
+    label: "Claude Primary",
   });
-  const codexCreated = await service.create({
+  assert.equal(renamedClaude.profile.label, "Claude Primary");
+  assert.equal(renamedClaude.profile.status, "connected");
+  assert.equal(JSON.stringify(renamedClaude).includes(claudeRoot), false);
+  assert.equal(
+    sessionShutdownCalls.includes("claude"),
+    false,
+    "nothing about a Claude account closes sessions through this facade",
+  );
+
+  let codexCreated = await service.create({
     runtime: "codex",
     label: " Work Codex ",
   });
-  assert.equal(claudeCreated.profile.id, IDS[0]);
-  assert.equal(claudeCreated.profile.runtime, "claude");
-  assert.equal(claudeCreated.profile.status, "sign_in_required");
   assert.equal(codexCreated.profile.id, IDS[4]);
   assert.equal(codexCreated.profile.runtime, "codex");
   assert.equal(codexCreated.profile.status, "sign_in_required");
-  assert.equal(JSON.stringify(claudeCreated).includes(claudeRoot), false);
   assert.equal(JSON.stringify(codexCreated).includes(codexRoot), false);
 
-  await expectCode(
-    () =>
-      service.setDefault({
-        runtime: "claude",
-        profileId: claudeCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_NOT_CONNECTED",
-  );
   await expectCode(
     () =>
       service.setDefault({
@@ -666,31 +690,16 @@ async function main() {
     "NATIVE_CLI_ACCOUNT_PERSONAL",
   );
 
-  let claudeManagedDir = path.join(
-    claudeRoot,
-    "accounts",
-    claudeCreated.profile.id,
-  );
-  const codexManagedHome = path.join(
+  let codexManagedHome = path.join(
     codexRoot,
     "accounts",
     codexCreated.profile.id,
   );
-  claudeConnected.add(claudeManagedDir);
   codexConnected.add(codexManagedHome);
-  await service.rename({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
-    label: "Claude Primary",
-  });
   await service.rename({
     runtime: "codex",
     profileId: codexCreated.profile.id,
     label: "Codex Primary",
-  });
-  await service.setDefault({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
   });
   let codexDefaultObservedDuringShutdown = null;
   sessionShutdownBehavior = async (runtime) => {
@@ -715,42 +724,42 @@ async function main() {
   // Deleting the current default (not in use) is allowed: the service hands
   // the default back to the personal profile through the full guarded switch,
   // then deletes. The profile is re-created below so the rest of the suite
-  // keeps the exact pre-delete state (connected, "Claude Primary").
+  // keeps the exact pre-delete state (connected, "Codex Primary").
   const defaultDelete = await service.delete({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
+    runtime: "codex",
+    profileId: codexCreated.profile.id,
   });
   assert.equal(defaultDelete.deleted, true);
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].defaultProfileId,
+    (await service.inspect("codex")).runtimes[0].defaultProfileId,
     "personal",
     "deleting the default must hand the default to the personal profile",
   );
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].profiles.some(
-      (profile) => profile.id === claudeCreated.profile.id,
+    (await service.inspect("codex")).runtimes[0].profiles.some(
+      (profile) => profile.id === codexCreated.profile.id,
     ),
     false,
     "the deleted default must be gone",
   );
-  claudeCreated = await service.create({
-    runtime: "claude",
-    label: "Claude Work",
+  codexCreated = await service.create({
+    runtime: "codex",
+    label: "Codex Work",
   });
-  claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
-  claudeConnected.add(claudeManagedDir);
+  codexManagedHome = path.join(codexRoot, "accounts", codexCreated.profile.id);
+  codexConnected.add(codexManagedHome);
   await service.rename({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
-    label: "Claude Primary",
+    runtime: "codex",
+    profileId: codexCreated.profile.id,
+    label: "Codex Primary",
   });
 
   // Login preparation is path-free and reserves the selected profile until
   // the main-owned terminal launcher finishes.
-  await service.setDefault({ runtime: "claude", profileId: "personal" });
+  await service.setDefault({ runtime: "codex", profileId: "personal" });
   const preparation = await service.prepareLogin({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
+    runtime: "codex",
+    profileId: codexCreated.profile.id,
     activateOnSuccess: true,
   });
   assert.deepEqual(Object.keys(preparation).sort(), [
@@ -760,21 +769,21 @@ async function main() {
     "runtime",
   ]);
   const preparationJson = JSON.stringify(preparation);
-  assert.equal(preparationJson.includes(claudeManagedDir), false);
-  assert.equal(preparationJson.includes("claude auth login"), false);
-  assert.equal(preparationJson.includes("CLAUDE_CONFIG_DIR"), false);
+  assert.equal(preparationJson.includes(codexManagedHome), false);
+  assert.equal(preparationJson.includes("codex login"), false);
+  assert.equal(preparationJson.includes("CODEX_HOME"), false);
   assert.equal(
     (
-      await service.inspect("claude")
+      await service.inspect("codex")
     ).runtimes[0].profiles.find(
-      (profile) => profile.id === claudeCreated.profile.id,
+      (profile) => profile.id === codexCreated.profile.id,
     ).inUse,
     true,
   );
   assert.throws(
     () =>
-      claudeLeases.acquire(
-        claudeCreated.profile.id,
+      codexLeases.acquire(
+        codexCreated.profile.id,
         "terminal:late-during-login",
       ),
     /being deleted/i,
@@ -782,16 +791,16 @@ async function main() {
   await expectCode(
     () =>
       service.logout({
-        runtime: "claude",
-        profileId: claudeCreated.profile.id,
+        runtime: "codex",
+        profileId: codexCreated.profile.id,
       }),
     "NATIVE_CLI_ACCOUNT_ACTIVE",
   );
   await expectCode(
     () =>
       service.delete({
-        runtime: "claude",
-        profileId: claudeCreated.profile.id,
+        runtime: "codex",
+        profileId: codexCreated.profile.id,
       }),
     "NATIVE_CLI_ACCOUNT_ACTIVE",
   );
@@ -801,99 +810,95 @@ async function main() {
     loginSpec = spec;
     assert.equal(
       (
-        await service.inspect("claude")
+        await service.inspect("codex")
       ).runtimes[0].profiles.find(
-        (profile) => profile.id === claudeCreated.profile.id,
+        (profile) => profile.id === codexCreated.profile.id,
       ).inUse,
       true,
     );
     return successResult();
   });
-  assert.equal(loginSpec.executable, "/opt/codara/bin/claude");
-  assert.deepEqual(loginSpec.args, ["auth", "login"]);
+  assert.equal(loginSpec.executable, "/opt/codara/bin/codex");
+  assert.deepEqual(loginSpec.args, [
+    "login",
+    "--config",
+    'cli_auth_credentials_store="file"',
+  ]);
   assert.equal(loginSpec.shell, false);
-  assertSanitizedEnv(loginSpec.env, "claude", claudeManagedDir);
-  assert.equal(claudeLeases.isLeased(claudeCreated.profile.id), false);
+  assertSanitizedEnv(loginSpec.env, "codex", codexManagedHome);
+  assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].defaultProfileId,
-    claudeCreated.profile.id,
+    (await service.inspect("codex")).runtimes[0].defaultProfileId,
+    codexCreated.profile.id,
     "a Cora-card login must switch the CLI account in the same operation",
   );
-  await service.setDefault({ runtime: "claude", profileId: "personal" });
+  await service.setDefault({ runtime: "codex", profileId: "personal" });
   await expectCode(
     () => service.launchPreparedLogin(preparation.launchToken, async () => successResult()),
     "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
   );
 
-  // A Cora-card login is account-bound. Claude's browser can reuse another
-  // active Anthropic session, so pre-fill the selected address, verify the
-  // account uuid after login, and remove only the temporary managed slot when
-  // the browser still returns the wrong account.
+  // A Cora-card login is account-bound. The browser can reuse another active
+  // session, so the account id is verified after login and only the
+  // temporary managed slot is removed when the wrong account comes back.
   const mismatchCreated = await service.create({
-    runtime: "claude",
+    runtime: "codex",
     label: "Expected account",
   });
-  const mismatchDir = path.join(
-    claudeRoot,
+  const mismatchHome = path.join(
+    codexRoot,
     "accounts",
     mismatchCreated.profile.id,
   );
   const EXPECTED_OTHER_FINGERPRINT = crypto
     .createHash("sha256")
-    .update("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    .update("acct_expected-other-account")
     .digest("hex");
   const mismatchPlan = await service.prepareLogin({
-    runtime: "claude",
+    runtime: "codex",
     profileId: mismatchCreated.profile.id,
     expectedAccountFingerprint: EXPECTED_OTHER_FINGERPRINT,
-    expectedEmail: "chosen@example.com",
     removeProfileOnMismatch: true,
   });
   await expectCode(
     () =>
-      service.launchPreparedLogin(mismatchPlan.launchToken, async (spec) => {
-        assert.deepEqual(spec.args, [
-          "auth",
-          "login",
-          "--email",
-          "chosen@example.com",
-        ]);
+      service.launchPreparedLogin(mismatchPlan.launchToken, async () => {
         privateFile(
-          path.join(mismatchDir, ".claude.json"),
+          path.join(mismatchHome, "auth.json"),
           JSON.stringify({
-            oauthAccount: {
-              accountUuid: ANTHROPIC_ACCOUNT_UUID,
-              emailAddress: "someone@example.com",
+            tokens: {
+              account_id: CHATGPT_ACCOUNT_ID,
+              access_token: "SECRET",
             },
           }),
         );
-        claudeConnected.add(mismatchDir);
+        codexConnected.add(mismatchHome);
         return successResult();
       }),
     "NATIVE_CLI_ACCOUNT_LOGIN_ACCOUNT_MISMATCH",
   );
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].profiles.some(
+    (await service.inspect("codex")).runtimes[0].profiles.some(
       (profile) => profile.id === mismatchCreated.profile.id,
     ),
     false,
     "a mismatched browser login must not leave a third account card",
   );
-  assert.equal(fs.existsSync(mismatchDir), false);
+  assert.equal(fs.existsSync(mismatchHome), false);
 
   // Closing or failing the browser terminal must also remove a slot created
   // solely for that attempt. Otherwise every retry becomes another empty card.
   const failedCreated = await service.create({
-    runtime: "claude",
+    runtime: "codex",
     label: "Retry account",
   });
-  const failedDir = path.join(
-    claudeRoot,
+  const failedHome = path.join(
+    codexRoot,
     "accounts",
     failedCreated.profile.id,
   );
   const failedPlan = await service.prepareLogin({
-    runtime: "claude",
+    runtime: "codex",
     profileId: failedCreated.profile.id,
     removeProfileOnFailure: true,
   });
@@ -908,25 +913,25 @@ async function main() {
     "NATIVE_CLI_ACCOUNT_LOGIN_FAILED",
   );
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].profiles.some(
+    (await service.inspect("codex")).runtimes[0].profiles.some(
       (profile) => profile.id === failedCreated.profile.id,
     ),
     false,
     "a failed new login must not leave an empty account card",
   );
-  assert.equal(fs.existsSync(failedDir), false);
+  assert.equal(fs.existsSync(failedHome), false);
 
   const cancelledCreated = await service.create({
-    runtime: "claude",
+    runtime: "codex",
     label: "Cancelled account",
   });
-  const cancelledDir = path.join(
-    claudeRoot,
+  const cancelledHome = path.join(
+    codexRoot,
     "accounts",
     cancelledCreated.profile.id,
   );
   const cancelledPlan = await service.prepareLogin({
-    runtime: "claude",
+    runtime: "codex",
     profileId: cancelledCreated.profile.id,
     removeProfileOnFailure: true,
   });
@@ -935,13 +940,13 @@ async function main() {
     true,
   );
   assert.equal(
-    (await service.inspect("claude")).runtimes[0].profiles.some(
+    (await service.inspect("codex")).runtimes[0].profiles.some(
       (profile) => profile.id === cancelledCreated.profile.id,
     ),
     false,
     "cancelling before the login terminal opens must not leave an empty card",
   );
-  assert.equal(fs.existsSync(cancelledDir), false);
+  assert.equal(fs.existsSync(cancelledHome), false);
 
   const codexSuccessPlan = await service.prepareLogin({
     runtime: "codex",
@@ -1045,8 +1050,8 @@ async function main() {
     tokenFactory: () => "opaque-expiring-login-token-00000001",
   });
   const expiryPlan = await expiryService.prepareLogin({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
+    runtime: "codex",
+    profileId: codexCreated.profile.id,
   });
   fakeNow = expiryPlan.expiresAt;
   await expectCode(
@@ -1057,26 +1062,17 @@ async function main() {
       ),
     "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED",
   );
-  assert.equal(claudeLeases.isLeased(claudeCreated.profile.id), false);
+  assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
 
   // Logout uses an exact argv with shell disabled, bounded discarded output,
   // and the selected case-insensitively sanitized profile environment.
   await service.logout({
-    runtime: "claude",
-    profileId: claudeCreated.profile.id,
-  });
-  await service.logout({
     runtime: "codex",
     profileId: codexCreated.profile.id,
   });
-  const claudeLogout = processRequests.at(-2);
   const codexLogout = processRequests.at(-1);
-  assert.equal(claudeLogout.executable, "/opt/codara/bin/claude");
-  assert.deepEqual(claudeLogout.args, ["auth", "logout"]);
-  assert.equal(claudeLogout.shell, false);
-  assert.equal(claudeLogout.timeoutMs, 3210);
-  assert.equal(claudeLogout.maxBufferBytes, 4321);
-  assertSanitizedEnv(claudeLogout.env, "claude", claudeManagedDir);
+  assert.equal(codexLogout.timeoutMs, 3210);
+  assert.equal(codexLogout.maxBufferBytes, 4321);
   assert.equal(codexLogout.executable, "/opt/codara/bin/codex");
   assert.deepEqual(codexLogout.args, [
     "logout",
@@ -1086,10 +1082,11 @@ async function main() {
   assert.equal(codexLogout.shell, false);
   assertSanitizedEnv(codexLogout.env, "codex", codexManagedHome);
 
+  codexConnected.add(codexManagedHome);
   for (const [behavior, code] of [
     [
       async () => {
-        throw new Error(`SECRET ${claudeManagedDir}`);
+        throw new Error(`SECRET ${codexManagedHome}`);
       },
       "NATIVE_CLI_ACCOUNT_LOGOUT_SPAWN_FAILED",
     ],
@@ -1125,12 +1122,12 @@ async function main() {
     await expectCode(
       () =>
         service.logout({
-          runtime: "claude",
-          profileId: claudeCreated.profile.id,
+          runtime: "codex",
+          profileId: codexCreated.profile.id,
         }),
       code,
     );
-    assert.equal(claudeLeases.isLeased(claudeCreated.profile.id), false);
+    assert.equal(codexLeases.isLeased(codexCreated.profile.id), false);
   }
   processBehavior = async () => successResult();
 
@@ -1200,11 +1197,11 @@ async function main() {
   // The queued default change therefore observes a deleted profile rather than
   // turning the target into a logged-out undeletable default mid-operation.
   const raced = await service.create({
-    runtime: "claude",
+    runtime: "codex",
     label: "Delete/default race",
   });
-  const racedDir = path.join(claudeRoot, "accounts", raced.profile.id);
-  claudeConnected.add(racedDir);
+  const racedHome = path.join(codexRoot, "accounts", raced.profile.id);
+  codexConnected.add(racedHome);
   let enterRunner;
   let releaseRunner;
   const runnerEntered = new Promise((resolve) => {
@@ -1219,12 +1216,12 @@ async function main() {
     return successResult();
   };
   const deleting = service.delete({
-    runtime: "claude",
+    runtime: "codex",
     profileId: raced.profile.id,
   });
   await runnerEntered;
   const racingDefault = service.setDefault({
-    runtime: "claude",
+    runtime: "codex",
     profileId: raced.profile.id,
   });
   releaseRunner();
@@ -1353,7 +1350,7 @@ async function main() {
   assert.match(serviceSource, /maxBuffer:\s*request\.maxBufferBytes/);
 
   console.log(
-    "PASS native CLI account façade: sanitized unified DTOs, hash-only Codex and Claude account fingerprints from read-only credential and config access, opaque exclusive login plans, exact bounded CLI processes, typed failures, race safety, and guarded deletion",
+    "PASS native CLI account facade: sanitized unified DTOs, hash-only Codex and Claude account fingerprints from read-only credential and config access, Claude mutations refused in favour of the unified Anthropic account, opaque exclusive login plans, exact bounded CLI processes, typed failures, race safety, and guarded deletion",
   );
 }
 

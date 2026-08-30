@@ -15,6 +15,13 @@ interface SubscriptionProfileMetadata {
   id: string;
   provider: PiSubscriptionProvider;
   label: string;
+  /** The paired Claude Code profile of an Anthropic row; an opaque id. */
+  cliProfileId?: string;
+}
+
+interface SubscriptionTerminalStatus {
+  connected: boolean;
+  expired: boolean;
 }
 
 interface SubscriptionProfileAuthStatus {
@@ -30,6 +37,8 @@ export interface RemoteSubscriptionProfileProjectionInput {
     defaults: Partial<Record<PiSubscriptionProvider, string>>;
   };
   statuses: readonly SubscriptionProfileAuthStatus[];
+  /** Token-blind status of each Claude Code profile, keyed by its id. */
+  terminals?: ReadonlyMap<string, SubscriptionTerminalStatus>;
 }
 
 function projectCachedUsage(
@@ -94,6 +103,11 @@ export function projectRemoteSubscriptionProfiles(
     .map((profile): RemoteSubscriptionProfile => {
       const configured = connected.has(profile.id);
       const usage = projectCachedUsage(profile, configured, cachedByProfileId);
+      const cliProfileId =
+        profile.provider === "anthropic" && typeof profile.cliProfileId === "string"
+          ? profile.cliProfileId
+          : undefined;
+      const terminal = cliProfileId ? inspection.terminals?.get(cliProfileId) : undefined;
       return {
         id: profile.id,
         provider: profile.provider,
@@ -101,6 +115,11 @@ export function projectRemoteSubscriptionProfiles(
         status: configured ? "configured" : "unavailable",
         isDefault: inspection.snapshot.defaults[profile.provider] === profile.id,
         ...(usage ? { usage } : {}),
+        ...(cliProfileId ? { cliProfileId } : {}),
+        ...(cliProfileId === "personal" ? { builtIn: true as const } : {}),
+        ...(terminal
+          ? { terminal: { connected: terminal.connected, expired: terminal.expired } }
+          : {}),
       };
     })
     .sort(

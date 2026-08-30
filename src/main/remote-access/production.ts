@@ -452,9 +452,13 @@ async function listSubscriptionProfilesForRemote(): Promise<
   // path, but it also never presents a stale metadata row as selectable when
   // its credentials are missing. Usage is a synchronous peek at the fresh
   // in-memory cache only: listing profiles never starts vendor/network I/O.
-  const inspection = await inspectPiAccountProfileAuthStore();
+  const { anthropicAccounts } = await import("../orchestration/anthropic-accounts");
+  const [inspection, terminals] = await Promise.all([
+    inspectPiAccountProfileAuthStore(),
+    anthropicAccounts.terminalStatuses(),
+  ]);
   return projectRemoteSubscriptionProfiles(
-    inspection,
+    { ...inspection, terminals },
     inspectCachedPiSubscriptionUsageProfiles(),
   );
 }
