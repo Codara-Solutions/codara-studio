@@ -786,8 +786,15 @@ export class AnthropicAccountService {
     if (snapshot.defaults[PROVIDER] !== coraProfileId) return;
     const accountOne = await this.piStore.registry.accountOneProfile();
     if (accountOne) {
-      await this.useAnthropicAccountLocked(accountOne.id);
-      return;
+      try {
+        await this.useAnthropicAccountLocked(accountOne.id);
+        return;
+      } catch (error) {
+        // Account 1 exists but is signed out on both sides (a claude logout
+        // that already reached Cora): fall through to an empty default rather
+        // than refusing the delete.
+        if (!(error instanceof AnthropicAccountNotConnectedError)) throw error;
+      }
     }
     await this.claudeStore.setDefaultProfile(CLAUDE_CLI_PERSONAL_PROFILE_ID);
     await this.piStore.registry.setDefaultProfile(PROVIDER, null);
