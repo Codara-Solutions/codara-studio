@@ -31,7 +31,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     // node:fs with an injectable readdir failure. A directory that cannot be
@@ -85,6 +85,22 @@ const harnessPlugin = {
             "});\n" +
             "export const watch = real.watch;\n" +
             "export default real;\n",
+          loader: "js",
+        };
+      }
+      if (args.path === "git-exec") {
+        // Git triggers shell out via runGit; the loop tests never exercise a
+        // real repo, so every call answers empty (rev() reads that as null).
+        return {
+          contents: "export async function runGit(){ return { stdout: '', stderr: '', code: 0 }; }\n",
+          loader: "js",
+        };
+      }
+      if (args.path === "git-events") {
+        // Remote-updated fanout: inert here; git-trigger fan-in is not under test.
+        return {
+          contents:
+            "export function emitGitRemoteUpdated(){}\nexport function onGitRemoteUpdated(){ return () => {}; }\n",
           loader: "js",
         };
       }

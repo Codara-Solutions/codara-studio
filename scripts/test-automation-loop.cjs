@@ -33,7 +33,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(codara-home|fs-atomic|agent-runtimes|pty-manager|notify|git-exec|git-events))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -43,6 +43,22 @@ const harnessPlugin = {
         return {
           contents:
             "export function codaraHome(){ return process.env.SPARK_HOME_DIR || require('node:os').tmpdir(); }\nexport function ensureCodaraHomeSync(){}\n",
+          loader: "js",
+        };
+      }
+      if (args.path === "git-exec") {
+        // Git triggers shell out via runGit; the loop tests never exercise a
+        // real repo, so every call answers empty (rev() reads that as null).
+        return {
+          contents: "export async function runGit(){ return { stdout: '', stderr: '', code: 0 }; }\n",
+          loader: "js",
+        };
+      }
+      if (args.path === "git-events") {
+        // Remote-updated fanout: inert here; git-trigger fan-in is not under test.
+        return {
+          contents:
+            "export function emitGitRemoteUpdated(){}\nexport function onGitRemoteUpdated(){ return () => {}; }\n",
           loader: "js",
         };
       }
@@ -98,6 +114,13 @@ const harnessPlugin = {
             "export async function startDirectWorkerRun(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0 }; L.runs.set(id, run); L.launches.push({ kind: 'start', id, note: input.prompt, model: input.model, effort: input.effort, automationId: input.automationId, title: input.title, nodes: input.nodes, freshPass: input.freshPass, preResolved: input.preResolved }); L.pending.push(id); return run; }\n" +
             // Looms v3: a steps-only pass records a run born terminal (no worker).
             "export async function recordStepOnlyPass(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: input.status, executionMode: 'direct', automationId: input.automationId, humanMessages: [{ id: 'n1', author: 'spark', kind: 'note', message: input.summary, createdAt: new Date().toISOString() }], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0, loomPass: { graphVersion: 1, nodeStates: {}, layerCursor: 0, pendingNodeIds: [] } }; L.runs.set(id, run); L.launches.push({ kind: 'step-only', id, status: input.status, summary: input.summary, preResolved: input.preResolved, title: input.title }); return run; }\n" +
+            // Looms v3.1: LIVE steps-only pass (started before the steps run,
+            // node transitions landed as they happen, finalized in place). The
+            // finalize pushes the same step-only launch record the legacy
+            // recordStepOnlyPass pushes, so assertions read one shape.
+            "export async function startStepOnlyPass(input){ const L = globalThis.__LOOP; const id = 'run-' + (++L.seq); const run = { id, status: 'running', executionMode: 'direct', automationId: input.automationId, title: input.title, humanMessages: [], workerAttempts: [], totalCostUsd: 0, estimatedWorkerCostUsd: 0, loomPass: { graphVersion: 1, nodeStates: Object.fromEntries((input.entryNodeIds||[]).map((n) => [n, { status: 'running', attemptIds: [], layer: 0 }])), layerCursor: 0, pendingNodeIds: [...(input.entryNodeIds||[])] } }; L.runs.set(id, run); return run; }\n" +
+            "export async function updateStepOnlyNode(input){ const L = globalThis.__LOOP; const run = L.runs.get(input.runId); if (run) { run.loomPass.nodeStates[input.nodeId] = { status: input.status, attemptIds: [], layer: 0 }; if (input.note) run.humanMessages.push({ id: 'n' + (run.humanMessages.length + 1), author: 'spark', kind: 'note', message: input.note, createdAt: new Date().toISOString() }); } return run; }\n" +
+            "export async function finalizeStepOnlyPass(input){ const L = globalThis.__LOOP; const run = L.runs.get(input.runId); if (run) { run.status = input.status; run.humanMessages.push({ id: 'nf' + (run.humanMessages.length + 1), author: 'spark', kind: 'note', message: input.summary, createdAt: new Date().toISOString() }); } L.launches.push({ kind: 'step-only', id: input.runId, status: input.status, summary: input.summary, preResolved: input.preResolved, title: run ? run.title : undefined }); return run; }\n" +
             // Same-run chain: a fresh task on the existing run (back to non-terminal).
             // Append a fresh LIVE attempt for the chained node (reusing the node's
             // existing task when present so newestAttemptForNode picks it up) and flip
