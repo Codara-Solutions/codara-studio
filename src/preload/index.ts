@@ -101,11 +101,7 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   NavigationTarget,
-  NativeCliAccountCancelLoginInput,
-  NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
-  NativeCliAccountLoginInput,
-  NativeCliAccountLoginPreparation,
   NativeCliAccountMutationResult,
   NativeCliAccountProfileInput,
   NativeCliAccountRenameInput,
@@ -273,30 +269,13 @@ const api = {
   nativeCliAccounts: {
     inspect: (): Promise<NativeCliAccountsInspection> =>
       ipcRenderer.invoke("native-cli-accounts:inspect"),
-    create: (
-      input: NativeCliAccountCreateInput,
-    ): Promise<NativeCliAccountMutationResult> =>
-      ipcRenderer.invoke("native-cli-accounts:create", input),
     rename: (
       input: NativeCliAccountRenameInput,
     ): Promise<NativeCliAccountMutationResult> =>
       ipcRenderer.invoke("native-cli-accounts:rename", input),
-    setDefault: (
-      input: NativeCliAccountProfileInput,
-    ): Promise<NativeCliAccountMutationResult> =>
-      ipcRenderer.invoke("native-cli-accounts:set-default", input),
-    prepareLogin: (
-      input: NativeCliAccountLoginInput,
-    ): Promise<NativeCliAccountLoginPreparation> =>
-      ipcRenderer.invoke("native-cli-accounts:prepare-login", input),
-    cancelLogin: (
-      input: NativeCliAccountCancelLoginInput,
-    ): Promise<boolean> =>
-      ipcRenderer.invoke("native-cli-accounts:cancel-login", input),
-    logout: (
-      input: NativeCliAccountProfileInput,
-    ): Promise<NativeCliAccountsInspection> =>
-      ipcRenderer.invoke("native-cli-accounts:logout", input),
+    // Only a terminal-only half (a managed profile no account links) is
+    // deleted here; a paired one is deleted with its account. Sign-in,
+    // switch and sign-out are account actions on piSubscriptions.
     delete: (
       input: NativeCliAccountProfileInput,
     ): Promise<NativeCliAccountDeleteResult> =>
@@ -305,13 +284,6 @@ const api = {
       const listener = () => handler();
       ipcRenderer.on("native-cli-accounts:changed", listener);
       return () => ipcRenderer.off("native-cli-accounts:changed", listener);
-    },
-    onLoginError: (handler: (message: string) => void): (() => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, message: unknown) => {
-        if (typeof message === "string") handler(message);
-      };
-      ipcRenderer.on("native-cli-accounts:login-error", listener);
-      return () => ipcRenderer.off("native-cli-accounts:login-error", listener);
     },
   },
   piSubscriptions: {

@@ -339,6 +339,27 @@ assert.match(settings, /onAdd: \(provider\) => addAccount\(provider, addLabel\)/
 assert.match(settings, /piSubscriptions\.addAccount\(\{/);
 assert.match(settings, /piSubscriptions\.reconnectAccount\(\{ provider, profileId \}\)/);
 
+// The retired sign-in and switch surfaces are gone from preload and the
+// shared contract; main still refuses them for any caller.
+const preloadStart = preload.indexOf("nativeCliAccounts: {");
+const preloadEnd = preload.indexOf("\n  piSubscriptions:", preloadStart);
+assert.ok(preloadStart >= 0 && preloadEnd > preloadStart);
+const preloadAccountApi = preload.slice(preloadStart, preloadEnd);
+for (const gone of [
+  "create:",
+  "setDefault:",
+  "prepareLogin:",
+  "cancelLogin:",
+  "logout:",
+  "onLoginError:",
+  "native-cli-accounts:login-error",
+]) {
+  assert.equal(preloadAccountApi.includes(gone), false, `${gone} must not be exposed by preload`);
+}
+for (const kept of ["inspect:", "rename:", "delete:", "onChanged:"]) {
+  assert.ok(preloadAccountApi.includes(kept), `${kept} must stay exposed for terminal-only halves`);
+}
+assert.doesNotMatch(shared, /NativeCliAccountLoginInput|NativeCliAccountLoginPreparation|NativeCliAccountCancelLoginInput/);
 assert.doesNotMatch(shared, /nativeCliAccountLabels/);
 assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabels/);
 

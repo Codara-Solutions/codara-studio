@@ -43,7 +43,7 @@ for (const channel of [
   );
 }
 // Sign-in, switch and sign-out are account actions now. Main keeps refusing
-// the retired channels for any caller.
+// the retired channels for any caller; preload no longer offers them.
 for (const channel of [
   "native-cli-accounts:create",
   "native-cli-accounts:set-default",
@@ -55,7 +55,13 @@ for (const channel of [
     ipc.includes(`"${channel}"`),
     `${channel} must still be answered (refused) in main`,
   );
+  assert.equal(
+    preload.includes(`ipcRenderer.invoke("${channel}"`),
+    false,
+    `${channel} must not be exposed by preload`,
+  );
 }
+assert.doesNotMatch(preload, /native-cli-accounts:login-error/);
 
 const dtoStart = shared.indexOf("export type NativeCliAccountRuntime");
 const dtoEnd = shared.indexOf("export interface PiCatalogModel", dtoStart);

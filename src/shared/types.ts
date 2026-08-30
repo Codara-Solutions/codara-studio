@@ -820,23 +820,6 @@ export interface NativeCliAccountProfileInput {
   profileId: string;
 }
 
-/**
- * Binds a CLI browser login to the Cora account whose card started it. The
- * fingerprint is an anonymous main-process digest; the email is only used to
- * pre-fill providers that support it and as a fallback for older connections.
- */
-export interface NativeCliAccountLoginInput
-  extends NativeCliAccountProfileInput {
-  expectedAccountFingerprint?: string;
-  expectedEmail?: string;
-  /** Remove a just-created managed slot when the browser returns another account. */
-  removeProfileOnMismatch?: boolean;
-  /** Remove a just-created managed slot when sign-in is cancelled or fails. */
-  removeProfileOnFailure?: boolean;
-  /** Make the verified sign-in the CLI default as part of the same operation. */
-  activateOnSuccess?: boolean;
-}
-
 export interface NativeCliAccountCreateInput {
   runtime: NativeCliAccountRuntime;
   label: string;
@@ -857,18 +840,6 @@ export interface NativeCliAccountDeleteResult {
   runtime: NativeCliAccountRuntime;
   profileId: string;
   deleted: boolean;
-}
-
-/** One-time renderer-safe handle for a main-owned interactive login launch. */
-export interface NativeCliAccountLoginPreparation {
-  runtime: NativeCliAccountRuntime;
-  profileId: string;
-  launchToken: string;
-  expiresAt: number;
-}
-
-export interface NativeCliAccountCancelLoginInput {
-  launchToken: string;
 }
 
 /**
