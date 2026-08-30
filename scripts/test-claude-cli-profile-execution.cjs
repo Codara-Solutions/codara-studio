@@ -372,6 +372,9 @@ async function main() {
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
       "src/main/orchestration/account-adapters/claude-account-adapter.ts",
+      // The active account pointer derives the plain-shell selector from
+      // the store default; it writes a data file, never launches.
+      "src/main/orchestration/active-cli-env-pointer.ts",
       "src/main/orchestration/anthropic-account-migration.ts",
       "src/main/orchestration/anthropic-accounts.ts",
       "src/main/orchestration/anthropic-credential-mirror.ts",

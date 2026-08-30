@@ -47,33 +47,14 @@ assert.doesNotMatch(
   /type: "cancelled"[^\n]*\n\s*focusStudioWindow/,
 );
 
-// Managed CLI sign-in: same rule, expressed through the login error codes that
-// mean "nothing ran" or "the user closed the login terminal".
-assert.match(ipc, /import \{ focusStudioWindow \} from "\.\/window-focus";/);
-assert.match(ipc, /function isNativeCliLoginCancellation\(error: unknown\): boolean/);
-for (const code of [
-  "NATIVE_CLI_ACCOUNT_LOGIN_SIGNAL",
-  "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_INVALID",
-  "NATIVE_CLI_ACCOUNT_LOGIN_PLAN_EXPIRED",
-]) {
-  assert.ok(
-    isNativeCliLoginCancellationCovers(code),
-    `${code} must be treated as a Studio-side cancellation, not a failure worth stealing focus for`,
-  );
-}
-function isNativeCliLoginCancellationCovers(code) {
-  return new RegExp(`error\\.code === "${code}"`).test(ipc);
-}
+// Managed CLI sign-ins no longer run in a Studio terminal: one browser
+// sign-in through the account card writes both halves, so there is no login
+// terminal to return from and pty:spawn refuses a login token outright.
+assert.doesNotMatch(ipc, /launchPreparedLogin|isNativeCliLoginCancellation|native-cli-accounts:login-error/);
 assert.match(
   ipc,
-  /\.launchPreparedLogin\([\s\S]{0,2000}?\.then\(\s*\(\) => \{[\s\S]{0,240}?focusStudioWindow\(sender\);/,
+  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*throw new NativeCliAccountError\("NATIVE_CLI_ACCOUNT_UNIFIED"\)/,
 );
-assert.match(
-  ipc,
-  /if \(!isNativeCliLoginCancellation\(error\)\) focusStudioWindow\(sender\);/,
-);
-// The account list must still refresh on every outcome, cancel included.
-assert.match(ipc, /\.finally\(\(\) => \{\s*broadcastNativeCliAccountsChanged\(\);/);
 
 // ---------------------------------------------------------------------------
 // The branded page the browser lands on
