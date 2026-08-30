@@ -619,7 +619,7 @@ async function main() {
 
   fs.rmSync(personalCodexAuth, { force: true });
 
-  const claudeCreated = await service.create({
+  let claudeCreated = await service.create({
     runtime: "claude",
     label: " Work Claude ",
   });
@@ -666,7 +666,7 @@ async function main() {
     "NATIVE_CLI_ACCOUNT_PERSONAL",
   );
 
-  const claudeManagedDir = path.join(
+  let claudeManagedDir = path.join(
     claudeRoot,
     "accounts",
     claudeCreated.profile.id,
@@ -712,20 +712,38 @@ async function main() {
     "runtime shutdown must settle before the Codex default/auth selection changes",
   );
 
-  const defaultDeleteCount = processRequests.length;
-  await expectCode(
-    () =>
-      service.delete({
-        runtime: "claude",
-        profileId: claudeCreated.profile.id,
-      }),
-    "NATIVE_CLI_ACCOUNT_DEFAULT",
+  // Deleting the current default (not in use) is allowed: the service hands
+  // the default back to the personal profile through the full guarded switch,
+  // then deletes. The profile is re-created below so the rest of the suite
+  // keeps the exact pre-delete state (connected, "Claude Primary").
+  const defaultDelete = await service.delete({
+    runtime: "claude",
+    profileId: claudeCreated.profile.id,
+  });
+  assert.equal(defaultDelete.deleted, true);
+  assert.equal(
+    (await service.inspect("claude")).runtimes[0].defaultProfileId,
+    "personal",
+    "deleting the default must hand the default to the personal profile",
   );
   assert.equal(
-    processRequests.length,
-    defaultDeleteCount,
-    "default rejection must happen before logout",
+    (await service.inspect("claude")).runtimes[0].profiles.some(
+      (profile) => profile.id === claudeCreated.profile.id,
+    ),
+    false,
+    "the deleted default must be gone",
   );
+  claudeCreated = await service.create({
+    runtime: "claude",
+    label: "Claude Work",
+  });
+  claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
+  claudeConnected.add(claudeManagedDir);
+  await service.rename({
+    runtime: "claude",
+    profileId: claudeCreated.profile.id,
+    label: "Claude Primary",
+  });
 
   // Login preparation is path-free and reserves the selected profile until
   // the main-owned terminal launcher finishes.

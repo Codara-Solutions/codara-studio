@@ -304,7 +304,7 @@ async function main() {
   );
   assert.match(
     agentSocket,
-    /!resumePlan &&\s*effectiveRuntime === headroomReroute\.from/,
+    /!resumePlan &&[\s\S]{0,120}headroomReroute\.from\.includes\(effectiveRuntime\)/,
     "the headroom reroute never moves a resumed worker off its source runtime",
   );
 

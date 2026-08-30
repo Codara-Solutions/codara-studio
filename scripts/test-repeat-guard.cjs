@@ -242,16 +242,25 @@ async function checkWorkerExtensionWiring() {
     else process.env.CODARA_PI_BRIDGE_PATH = previousBridge;
   }
 
+  // worker.ts layers several tool_call policies (browser-only access, the
+  // optional tool fence, the repeat guard). Drive them like Pi does: every
+  // handler sees the call in registration order and the first veto wins; a
+  // bash call passes the access policies untouched, so the repeat guard's
+  // decisions are what surface.
   const onToolCall = handlers.get("tool_call");
   const onToolResult = handlers.get("tool_result");
-  assert.ok(onToolCall && onToolCall.length === 1, "worker.ts must register exactly one tool_call handler");
+  assert.ok(onToolCall && onToolCall.length >= 1, "worker.ts must register a tool_call handler");
   assert.ok(onToolResult && onToolResult.length === 1, "worker.ts must register exactly one tool_result handler");
 
   const results = [];
   for (let i = 0; i < 5; i += 1) {
     const toolCallId = `wire-${i}`;
     const input = { command: "npm run typecheck" };
-    const blocked = await onToolCall[0]({ type: "tool_call", toolCallId, toolName: "bash", input });
+    let blocked;
+    for (const handler of onToolCall) {
+      blocked = await handler({ type: "tool_call", toolCallId, toolName: "bash", input });
+      if (blocked && blocked.block) break;
+    }
     if (blocked && blocked.block) {
       results.push({ blocked: true, reason: blocked.reason });
       continue;

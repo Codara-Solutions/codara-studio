@@ -82,12 +82,12 @@ try {
     assert.equal(isNotificationTargetViewed({ type: "automation", jobId: "job-a", runId: "run-b", workspaceId: "ws-a" }, runView), false);
   });
 
-  test("visual toast timeout is exactly three seconds", () => {
-    assert.match(toastSource, /const AUTO_DISMISS_MS = 3_000;/);
+  test("visual toast timeout is exactly six seconds", () => {
+    assert.match(toastSource, /const AUTO_DISMISS_MS = 6_000;/);
   });
 
   test("auto expiry and X close are visual only", () => {
-    const timerSection = section(toastSource, "window.setTimeout(() => {", "}, AUTO_DISMISS_MS)");
+    const timerSection = section(toastSource, "window.setTimeout(() => {", "}, dismissMs)");
     assert.doesNotMatch(timerSection, /notifications\.(?:markRead|remove)/);
     const closeSection = section(toastSource, 'aria-label="Dismiss notification"', "onMouseEnter");
     assert.match(closeSection, /onClose\(\)/);
@@ -96,7 +96,7 @@ try {
 
   test("matching arrivals are hidden and acknowledged", () => {
     const arrivalSection = section(toastSource, "onInAppNotification((payload) => {", "return () => off();");
-    assert.match(arrivalSection, /isNotificationTargetViewed\(payload\.target, activeViewRef\.current\)/);
+    assert.match(arrivalSection, /isNotificationTargetViewed\(payload\.target, activeViewRef\.current, payload\.kind\)/);
     assert.match(arrivalSection, /acknowledge\(payload\.id\);\s*return;/);
   });
 
@@ -104,7 +104,7 @@ try {
     const viewSection = section(toastSource, "const matchingVisible =", "}, [activeView, acknowledge]);");
     assert.match(viewSection, /setToasts/);
     assert.match(viewSection, /notifications\s*\.list\(\)/);
-    assert.match(viewSection, /isNotificationTargetViewed\(entry\.target, activeView\)/);
+    assert.match(viewSection, /isNotificationTargetViewed\(entry\.target, activeView, entry\.kind\)/);
     assert.match(viewSection, /acknowledge\(entry\.id\)/);
   });
 

@@ -78,7 +78,10 @@ assert.match(piBackend, /resolveCodaraPiFastMode\(provider\)/);
 assert.match(piBackend, /sessionId,\s*\n\s*fastMode,/);
 assert.match(piBackend, /openAiFastMode: fastMode,/);
 assert.match(piRuntimeElectron, /export async function resolveCodaraPiFastMode\(/);
-assert.match(piRuntimeElectron, /if \(provider === "anthropic"\) return false;/);
+assert.match(
+  piRuntimeElectron,
+  /if \(provider === "anthropic" \|\| provider === "openrouter"\) return false;/,
+);
 
 // ── The shared provider gate ───────────────────────────────────────────────
 async function loadChatPolicy() {

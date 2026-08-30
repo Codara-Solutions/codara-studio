@@ -343,8 +343,8 @@ async function main() {
 
   const opus = lookupUsagePrice("claude-opus-5", "claude");
   check("pricing: a listed model resolves", opus !== null);
-  eq("pricing: input rate", opus.input, 15);
-  eq("pricing: cache writes bill at 1.25x input", opus.cacheWrite, 18.75);
+  eq("pricing: input rate", opus.input, 5);
+  eq("pricing: cache writes bill at 1.25x input", opus.cacheWrite, 6.25);
   eq(
     "pricing: a dated model id falls back to its base rate",
     lookupUsagePrice("claude-haiku-4-5-20251001", "claude").input,
@@ -353,7 +353,7 @@ async function main() {
   eq(
     "pricing: a [1m] context tag falls back to the base rate",
     lookupUsagePrice("claude-opus-5[1m]", "claude").input,
-    15,
+    5,
   );
   eq(
     "pricing: a codex model resolves under the openai vendor",
@@ -363,7 +363,7 @@ async function main() {
   eq(
     "pricing: a Cora session running an Anthropic model prices as Anthropic",
     lookupUsagePrice("claude-sonnet-5", "cora").input,
-    3,
+    2,
   );
   eq("pricing: a bare family name is ambiguous and stays unpriced", lookupUsagePrice("opus", "claude"), null);
   eq("pricing: <synthetic> was never billed", lookupUsagePrice("<synthetic>", "claude"), null);
@@ -393,8 +393,8 @@ async function main() {
   );
   const priced = priceUsageRecord(lookupUsagePrice, "claude", "claude-opus-5", totals, null);
   eq("pricing: no reported cost falls to the table", priced.costSource, "priced");
-  // 15 (input) + 1.5 (cache read) + 18.75 (cache write) + 75 (output).
-  near("pricing: every dimension is billed, cache writes included", priced.costUsd, 110.25);
+  // 5 (input) + 0.5 (cache read) + 6.25 (cache write) + 25 (output).
+  near("pricing: every dimension is billed, cache writes included", priced.costUsd, 36.75);
   const unpriced = priceUsageRecord(lookupUsagePrice, "claude", "opus", totals, null);
   eq("pricing: an unknown model reports as unpriced", unpriced.costSource, "unpriced");
   eq("pricing: an unpriced record contributes no cost", unpriced.costUsd, 0);
@@ -492,7 +492,7 @@ async function main() {
     aggregator.add(record({ provider: "cora", reportedCostUsd: 0.5 }));
     const reportedOnly = aggregator.finish().buckets[0];
     eq("aggregation: an all-reported cell says reported", reportedOnly.costSource, "reported");
-    near("aggregation: cache savings use the input/cacheRead spread", reportedOnly.cacheSavingsUsd, 13.5);
+    near("aggregation: cache savings use the input/cacheRead spread", reportedOnly.cacheSavingsUsd, 4.5);
   }
   {
     const aggregator = new UsageAggregator({

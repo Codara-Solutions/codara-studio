@@ -153,8 +153,12 @@ for (const relative of SCANNED) {
 // The premise of this whole check. If the build stops externalizing by
 // `dependencies`, the rule enforced below is no longer the rule that matters.
 const viteConfig = fs.readFileSync(path.join(ROOT, "electron.vite.config.ts"), "utf8");
+// An options object is allowed (main excludes electron-updater so the
+// updater is BUNDLED — electron-builder's collector missed half its dep
+// closure in the packaged asar); what matters is that both builds still
+// externalize by `dependencies`.
 check(
-  (viteConfig.match(/externalizeDepsPlugin\(\)/g) || []).length >= 2,
+  (viteConfig.match(/externalizeDepsPlugin\((?:\)|\{)/g) || []).length >= 2,
   "main and preload are both built with externalizeDepsPlugin()",
 );
 

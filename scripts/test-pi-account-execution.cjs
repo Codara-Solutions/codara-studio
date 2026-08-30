@@ -285,8 +285,11 @@ async function main() {
     workerStart,
   );
   const workerSource = runStoreSource.slice(workerStart, workerEnd);
+  // The resolve moved behind an OpenRouter guard, so the binding is a `let`
+  // assigned inside the non-OpenRouter branch; the ordering contract of
+  // resolve -> stamp -> plan -> cleanup -> start is unchanged.
   const accountResolved = workerSource.indexOf(
-    "const resolvedWorkerAccount = await resolveCodaraPiExecutionAccount({",
+    "resolvedWorkerAccount = await resolveCodaraPiExecutionAccount({",
   );
   const profilePersisted = workerSource.indexOf(
     "await stampAttemptAccountProfile(",

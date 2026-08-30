@@ -82,10 +82,10 @@ async function main() {
   const groups = composer.buildVisibleGroups({});
   // Cora runs on Pi only. The Claude Code / Codex CLI groups chose a manager
   // HARNESS, not a model, and are gone; what remains is one backend split into
-  // two model-family groups.
+  // three model-family groups (OpenAI, Anthropic, xAI).
   check(
     "every group is the Pi backend",
-    groups.length === 2 && groups.every((group) => group.backend === "pi"),
+    groups.length === 3 && groups.every((group) => group.backend === "pi"),
   );
   check(
     "groups are keyed uniquely so both can render",
@@ -147,7 +147,7 @@ async function main() {
   check(
     `Pi rows sort by tier, not catalog order (got ${dressed.models.map((m) => m.id).join(",")})`,
     dressed.models.map((model) => model.id).join(",") ===
-      "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,claude-fable-5,claude-opus-5,claude-sonnet-5",
+      "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,claude-fable-5,claude-opus-5,claude-sonnet-5,grok-4.6",
   );
   check(
     "sorting never moves the default off Sol",

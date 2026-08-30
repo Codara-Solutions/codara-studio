@@ -170,10 +170,15 @@ function testRunStoreAndQuitWiring() {
   const beforeQuit = main.slice(beforeQuitAt);
   const drainAt = beforeQuit.indexOf("shutdownRunRuntimeResources()");
   const ptyAt = beforeQuit.indexOf("await pty.disposeAllGraceful()");
-  const finalQuitAt = beforeQuit.indexOf("cleanQuit = true;\n      app.quit()");
+  // The final quit is updater-aware: after cleanup, cleanQuit flips and the
+  // handler either hands the process to Squirrel (an update was requested)
+  // or calls app.quit(). Both paths sit after the PTY teardown.
+  const finalQuitAt = beforeQuit.indexOf("cleanQuit = true;");
+  const quitCallAt = beforeQuit.indexOf("app.quit()", finalQuitAt);
   assert(drainAt >= 0, "before-quit must await the runtime drain");
   assert(drainAt < ptyAt, "runtime drain must precede broad PTY teardown");
-  assert(ptyAt < finalQuitAt, "PTY teardown must finish before the final app.quit");
+  assert(ptyAt < finalQuitAt, "PTY teardown must finish before the final quit");
+  assert(quitCallAt > finalQuitAt, "a quit path must follow the cleanQuit flip");
 }
 
 async function main() {

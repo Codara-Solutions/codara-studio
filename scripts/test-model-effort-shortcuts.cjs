@@ -152,7 +152,7 @@ assert.match(toast, /window\.addEventListener\("spark:local-toast", handler\)/);
 // user is looking at would produce no visible feedback at all.
 assert.match(
   toast,
-  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, activeView\)/,
+  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, activeView, toast\.kind\)/,
 );
 assert.match(toast, /const clickable = Boolean\(navigateTo\) && !isLocalToast\(toast\)/);
 
