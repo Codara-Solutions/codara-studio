@@ -257,6 +257,102 @@ async function main() {
 
   mirror.stop();
   service.stop();
+
+  // First launch of a user whose Codex default is a managed profile the
+  // old model let them choose: the pass must not flip their terminals to
+  // the personal login just because the Cora default was never chosen.
+  // Three layouts on fresh roots: no Cora rows at all, a Cora-only default
+  // row of another account, and Account 1 holding a Cora default while the
+  // managed profile links a row.
+  const ACCOUNT_WORK = "acct-work";
+  const CLI_WORK = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb5";
+  const world = async (name, rows) => {
+    const root = path.join(TMP, name);
+    const codaraHome = path.join(root, ".codarastudio");
+    const wPiRoot = path.join(codaraHome, "pi-agent");
+    const wCodexRoot = path.join(codaraHome, "codex-cli");
+    const wCodexHome = path.join(root, ".codex");
+    privateDir(wCodexHome);
+    privateFile(
+      path.join(wCodexRoot, "account-profiles.json"),
+      JSON.stringify({ version: 1, profiles: [cliMeta(CLI_WORK, "Work")], defaultProfileId: CLI_WORK }),
+    );
+    privateFile(path.join(wCodexRoot, "active-auth.json"), JSON.stringify({ version: 1, profileId: CLI_WORK }));
+    privateFile(path.join(wCodexHome, "auth.json"), JSON.stringify(authFile(ACCOUNT_WORK, 4, "work@example.com")));
+    privateFile(H.codexProfiles.codexCliManagedProfilePaths(wCodexRoot, CLI_WORK).authFile, JSON.stringify(authFile(ACCOUNT_WORK, 4, "work@example.com")));
+    privateFile(path.join(wCodexRoot, "personal", "auth.json"), JSON.stringify(authFile(ACCOUNT_ONE, 1, "one@example.com")));
+    const wPiStore = new H.piStore.PiAccountAuthStore(wPiRoot);
+    const registered = {};
+    for (const row of rows) {
+      const { profile } = await wPiStore.registry.registerProfile({
+        provider: "openai-codex",
+        label: row.label,
+        ...(row.fingerprint ? { identityFingerprint: row.fingerprint } : {}),
+        ...(row.cliProfileId ? { cliProfileId: row.cliProfileId } : {}),
+      });
+      const { configDir, authFile: target } = H.piStore.piAccountProfilePaths(wPiRoot, profile.id);
+      privateDir(configDir);
+      await AuthStorage.create(target).modify("openai-codex", async () => row.credential);
+      fs.chmodSync(target, 0o600);
+      registered[row.label] = profile;
+    }
+    if (rows.length > 0) {
+      await wPiStore.registry.setDefaultProfile("openai-codex", rows[0].default === false ? null : registered[rows[0].label].id);
+    }
+    const wLeases = new H.execution.CodexCliProfileLeaseRegistry();
+    const wCodexStore = new H.codexProfiles.CodexCliAccountProfileStore(wCodexRoot, { personalHomeDir: wCodexHome, leases: wLeases });
+    const wMirror = new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 30, retryDelayMs: 20 });
+    const wService = new H.accounts.UnifiedAccountService(
+      H.codexAdapter.createCodexAccountAdapter({ store: wCodexStore, leases: wLeases, loadAuthStorage, externalSessionCount: () => 0 }),
+      { piStore: wPiStore, mirror: wMirror, loadAuthStorage, invalidateCaches: async () => undefined, log: (message) => logs.push(message) },
+    );
+    const wReport = await H.migration.migrateUnifiedAccounts({
+      services: { "openai-codex": wService },
+      providers: ["openai-codex"],
+      piStore: wPiStore,
+      codexStore: wCodexStore,
+      log: (message) => logs.push(message),
+    });
+    assert.equal(wReport.failedStep, null, JSON.stringify(wReport));
+    const state = {
+      storeDefault: (await wCodexStore.snapshot()).defaultProfileId,
+      marker: JSON.parse(fs.readFileSync(path.join(wCodexRoot, "active-auth.json"), "utf8")).profileId,
+      liveAccount: JSON.parse(fs.readFileSync(path.join(wCodexHome, "auth.json"), "utf8")).tokens.account_id,
+      coraDefault: (await wPiStore.registry.snapshot()).defaults["openai-codex"],
+      accountOne: await wPiStore.registry.accountOneProfile("openai-codex"),
+      registered,
+    };
+    wMirror.stop();
+    wService.stop();
+    return state;
+  };
+  const untouched = (state) => {
+    assert.equal(state.storeDefault, CLI_WORK, "the Codex store default is the user's managed profile");
+    assert.equal(state.marker, CLI_WORK, "the marker still names the managed profile");
+    assert.equal(state.liveAccount, ACCOUNT_WORK, "the live login is still the managed account");
+  };
+
+  const noRows = await world("no-rows", []);
+  untouched(noRows);
+  assert.ok(noRows.accountOne, "Account 1 is created from the personal vault copy");
+  assert.equal(noRows.coraDefault, undefined, "no Cora row links the managed default, so no Cora default is invented");
+  pass("a managed Codex default with no Cora rows keeps the user's terminals where they are");
+
+  const coraOnly = await world("cora-only", [
+    { label: "Elsewhere", fingerprint: sha("acct-elsewhere"), credential: piCredential("acct-elsewhere", 3) },
+  ]);
+  untouched(coraOnly);
+  assert.equal(coraOnly.coraDefault, coraOnly.registered.Elsewhere.id, "a Cora-only default of another account stays the Cora default");
+  pass("a managed Codex default beside a Cora-only default row leaves both defaults alone");
+
+  const linked = await world("linked", [
+    { label: "Account 1", fingerprint: sha(ACCOUNT_ONE), cliProfileId: "personal", credential: piCredential(ACCOUNT_ONE, 1) },
+    { label: "Work", fingerprint: sha(ACCOUNT_WORK), credential: piCredential(ACCOUNT_WORK, 4) },
+  ]);
+  untouched(linked);
+  assert.equal(linked.coraDefault, linked.registered.Work.id, "the row pairing with the managed default becomes the Cora default");
+  pass("an Account 1 Cora default yields to the managed Codex default once its row is paired");
+
   console.log(`\nPASS codex account migration (${passes} groups)`);
 }
 

@@ -345,6 +345,82 @@ async function main() {
   H.migration.resetUnifiedAccountMigrationForTests();
   pass("the ready gate resolves after a failed step");
 
+  // First launch of a Grok user whose store default is a managed home the
+  // old model let them choose, with no Cora rows and then with a Cora-only
+  // default row of another account: the store default must not be pulled
+  // to personal by a Cora default nobody chose.
+  const GROK_WORK = "cccccccc-cccc-4ccc-8ccc-ccccccccccc9";
+  const GROK_WORK_SUBJECT = "44444444-4444-4444-8444-444444444444";
+  const grokWorld = async (name, rows) => {
+    const root = path.join(TMP, name);
+    const wPiRoot = path.join(root, ".codarastudio", "pi-agent");
+    const wGrokRoot = path.join(root, ".codarastudio", "grok-cli");
+    const wGrokHome = path.join(root, ".grok");
+    privateDir(wGrokHome);
+    const workHome = H.grokProfiles.grokCliManagedProfilePaths(wGrokRoot, GROK_WORK).homeDir;
+    privateDir(workHome);
+    privateFile(
+      path.join(wGrokRoot, "account-profiles.json"),
+      JSON.stringify({ version: 1, profiles: [{ id: GROK_WORK, label: "Work", createdAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-06-01T00:00:00.000Z" }], defaultProfileId: GROK_WORK }),
+    );
+    const slotFor = (subject, n) => ({
+      [GROK_SLOT]: {
+        key: jwt({ sub: subject, iat: T0 + n, exp: T0 + n + 3600, email: `${subject.slice(0, 8)}@example.com` }),
+        auth_mode: "oidc",
+        create_time: "2026-06-01T00:00:00.000Z",
+        user_id: subject,
+        principal_id: subject,
+        principal_type: "User",
+        refresh_token: `grok-refresh-${subject.slice(0, 8)}-${n}`,
+        expires_at: new Date((T0 + n + 3600) * 1000).toISOString(),
+        oidc_issuer: "https://auth.x.ai",
+        oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+      },
+    });
+    privateFile(path.join(workHome, "auth.json"), JSON.stringify(slotFor(GROK_WORK_SUBJECT, 4)));
+    privateFile(path.join(wGrokHome, "auth.json"), JSON.stringify(slotFor(GROK_SUBJECT, 1)));
+    const wPiStore = new H.piStore.PiAccountAuthStore(wPiRoot);
+    const registered = {};
+    for (const row of rows) {
+      const { profile } = await wPiStore.registry.registerProfile({ provider: "xai", label: row.label, identityFingerprint: row.fingerprint });
+      const { configDir, authFile: target } = H.piStore.piAccountProfilePaths(wPiRoot, profile.id);
+      privateDir(configDir);
+      await AuthStorage.create(target).modify("xai", async () => row.credential);
+      fs.chmodSync(target, 0o600);
+      registered[row.label] = profile;
+    }
+    const wLeases = new H.grokExecution.GrokCliProfileLeaseRegistry();
+    const wGrokStore = new H.grokProfiles.GrokCliAccountProfileStore(wGrokRoot, { personalHomeDir: wGrokHome, leases: wLeases });
+    const wMirror = new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 30, retryDelayMs: 20 });
+    const wService = new H.accounts.UnifiedAccountService(
+      H.grokAdapter.createGrokAccountAdapter({ store: wGrokStore, leases: wLeases }),
+      { piStore: wPiStore, mirror: wMirror, loadAuthStorage, invalidateCaches: async () => undefined, log },
+    );
+    const wReport = await H.migration.migrateUnifiedAccounts({ services: { xai: wService }, providers: ["xai"], piStore: wPiStore, grokStore: wGrokStore, log });
+    assert.equal(wReport.failedStep, null, JSON.stringify(wReport));
+    const state = {
+      storeDefault: (await wGrokStore.snapshot()).defaultProfileId,
+      coraDefault: (await wPiStore.registry.snapshot()).defaults.xai,
+      accountOne: await wPiStore.registry.accountOneProfile("xai"),
+      workSubject: JSON.parse(fs.readFileSync(path.join(workHome, "auth.json"), "utf8"))[GROK_SLOT].user_id,
+      registered,
+    };
+    wMirror.stop();
+    wService.stop();
+    return state;
+  };
+  const grokNoRows = await grokWorld("grok-no-rows", []);
+  assert.equal(grokNoRows.storeDefault, GROK_WORK, "the Grok store default stays on the managed home");
+  assert.equal(grokNoRows.workSubject, GROK_WORK_SUBJECT);
+  assert.ok(grokNoRows.accountOne);
+  assert.equal(grokNoRows.coraDefault, undefined);
+  const grokCoraOnly = await grokWorld("grok-cora-only", [
+    { label: "Elsewhere", fingerprint: sha("55555555-5555-4555-8555-555555555555"), credential: { type: "oauth", access: jwt({ sub: "55555555-5555-4555-8555-555555555555", exp: T0 + 9999 }), refresh: "elsewhere-refresh", expires: (T0 + 9999) * 1000 - 300000 } },
+  ]);
+  assert.equal(grokCoraOnly.storeDefault, GROK_WORK, "a Cora-only default row never pulls Grok to personal");
+  assert.equal(grokCoraOnly.coraDefault, grokCoraOnly.registered.Elsewhere.id);
+  pass("a managed Grok default survives the first launch whatever Cora's default is");
+
   // The registry maps providers to runtimes both ways and reports terminal
   // statuses per provider.
   assert.equal(H.registry.cliRuntimeFor("anthropic"), "claude");

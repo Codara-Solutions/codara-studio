@@ -543,6 +543,15 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       }
       if (registered.created) {
         await this.writePiCredential(profile.id, canonical);
+        // A new row takes an empty Cora default. When the CLI already rests
+        // on a managed profile, that default is the user's choice and must
+        // not be pulled to personal by a Cora default nobody chose: the
+        // repair step derives the Cora default from the CLI one instead.
+        const cliDefault = (await this.store.snapshot()).defaultProfileId;
+        const coraDefault = (await this.piStore.registry.snapshot()).defaults[this.provider];
+        if (cliDefault !== this.personalId && coraDefault === profile.id) {
+          await this.piStore.registry.setDefaultProfile(this.provider, null);
+        }
       }
     }
     this.rejectedPersonalLogin = null;
@@ -1221,7 +1230,17 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     });
   }
 
-  /** Make the CLI default follow the Cora default, or derive one from the other. */
+  /**
+   * Make the CLI default follow the Cora default, or derive one from the
+   * other. A Cora default that names a whole account with a managed half
+   * is the user's choice and the CLI follows it. A Cora default that is
+   * Account 1 or an unlinked row while the CLI rests on a managed profile
+   * was taken by registration or by the old model, in which the two
+   * defaults were independent: a chosen Account 1 would have moved the CLI
+   * to personal with it. The CLI default wins there, so a user's terminals
+   * never switch accounts at first launch: its row becomes the Cora
+   * default, or both stay where they are when no row links it.
+   */
   async repairDefaults(): Promise<void> {
     return this.withMutation(async () => {
       const [snapshot, cli] = await Promise.all([
@@ -1231,27 +1250,39 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       const rows = snapshot.profiles.filter((profile) => profile.provider === this.provider);
       const defaultId = snapshot.defaults[this.provider];
       const row = defaultId ? rows.find((profile) => profile.id === defaultId) : undefined;
+      const cliDefaultManaged = cli.defaultProfileId !== this.personalId;
+      const linkedRow = cliDefaultManaged
+        ? rows.find((profile) => profile.cliProfileId === cli.defaultProfileId)
+        : undefined;
       if (row) {
         const link = row.cliProfileId ?? this.personalId;
-        if (cli.defaultProfileId !== link) {
-          await this.store.setDefaultProfile(link).catch((error) => {
-            this.log(
-              `[accounts] could not point ${this.adapter.labels.cliLabel} at the active account: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          });
+        if (cli.defaultProfileId === link) {
+          await this.alignActiveLogged();
+          return;
         }
+        if (cliDefaultManaged && (!row.cliProfileId || row.cliProfileId === this.personalId)) {
+          if (linkedRow) {
+            await this.piStore.registry.setDefaultProfile(this.provider, linkedRow.id);
+          }
+          await this.alignActiveLogged();
+          return;
+        }
+        await this.store.setDefaultProfile(link).catch((error) => {
+          this.log(
+            `[accounts] could not point ${this.adapter.labels.cliLabel} at the active account: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
         await this.alignActiveLogged();
         return;
       }
       const accountOne = rows.find((profile) => profile.cliProfileId === this.personalId);
-      if (cli.defaultProfileId === this.personalId) {
+      if (!cliDefaultManaged) {
         if (accountOne) await this.piStore.registry.setDefaultProfile(this.provider, accountOne.id);
         await this.alignActiveLogged();
         return;
       }
-      const linkedRow = rows.find((profile) => profile.cliProfileId === cli.defaultProfileId);
       if (linkedRow) {
         await this.piStore.registry.setDefaultProfile(this.provider, linkedRow.id);
       }
