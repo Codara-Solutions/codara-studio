@@ -116,7 +116,7 @@ assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1,
 assert.match(descriptors, /export function accountProviderDetail\(/);
 assert.ok(
   descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. New terminals pick it up; running ones keep theirs. Account 1 is your own ${descriptor.loginHint}.`",
+    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`",
   ),
 );
 assert.ok(
