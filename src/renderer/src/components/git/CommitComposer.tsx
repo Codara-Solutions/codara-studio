@@ -37,6 +37,14 @@ interface Props {
   canSplit?: boolean;
 }
 
+// Button labels sit in half-width flex children, so they clip with an ellipsis
+// instead of pushing their icon out of the button when the panel is narrow.
+const ELLIPSIS: React.CSSProperties = {
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 // Commit message box + the branch / sync row. The Commit button is the panel's
 // one accent-tinted primary action.
 export default function CommitComposer({
@@ -247,112 +255,121 @@ export default function CommitComposer({
           onCommit(amend) and reset after each commit. */}
       <AmendToggle checked={amend} disabled={anyBusy} onChange={setAmend} />
 
-      <button
-        type="button"
-        disabled={!canCommit || anyBusy}
-        onClick={() => {
-          onCommit(amend);
-          setAmend(false);
-        }}
-        onMouseEnter={(e) => {
-          if (canCommit && !anyBusy) {
-            e.currentTarget.style.background = "color-mix(in oklch, var(--accent) 26%, transparent)";
-          }
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.background =
-            canCommit && !anyBusy ? "var(--accent-soft)" : "transparent";
-        }}
-        style={{
-          appearance: "none",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7,
-          height: 30,
-          width: "100%",
-          padding: "0 12px",
-          borderRadius: 7,
-          cursor: "default",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          fontWeight: 700,
-          letterSpacing: "0.01em",
-          border:
-            canCommit && !anyBusy
-              ? "1px solid var(--accent-edge)"
-              : "1px solid var(--rule)",
-          background: canCommit && !anyBusy ? "var(--accent-soft)" : "transparent",
-          color: canCommit && !anyBusy ? "var(--ink)" : "var(--muted-2)",
-          boxShadow: canCommit && !anyBusy ? "var(--lift-hi)" : "none",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-        }}
-      >
-        {committing ? <Spinner /> : <CommitIcon />}
-        <span>{amend ? "Amend Last Commit" : commitLabel}</span>
-        {stagedCount > 0 && (
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontWeight: 700,
-              fontVariantNumeric: "tabular-nums",
-              padding: "1px 6px",
-              borderRadius: 999,
-              background: "color-mix(in oklab, var(--ink) 12%, transparent)",
-              color: "var(--ink-dim)",
-            }}
-          >
-            {stagedCount}
-          </span>
-        )}
-      </button>
-
-      {/* "Split into commits" — quieter sibling under Commit: the AI proposes
-          grouping the changes into several commits and the user reviews the
-          plan before anything is committed. Hidden when the host has no
-          split support (remote workspaces). */}
-      {onSplit ? (
+      {/* Commit and its quieter sibling share one row, each taking half the
+          width, so the pair reads as a single action band. Both labels
+          truncate rather than overflow when the panel is narrow. */}
+      <div style={{ display: "flex", alignItems: "stretch", gap: 6 }}>
         <button
           type="button"
-          disabled={!canSplit || anyBusy}
-          onClick={onSplit}
-          title="Group related changes into separate commits — you review the plan before anything is saved"
+          disabled={!canCommit || anyBusy}
+          onClick={() => {
+            onCommit(amend);
+            setAmend(false);
+          }}
+          onMouseEnter={(e) => {
+            if (canCommit && !anyBusy) {
+              e.currentTarget.style.background =
+                "color-mix(in oklch, var(--accent) 26%, transparent)";
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background =
+              canCommit && !anyBusy ? "var(--accent-soft)" : "transparent";
+          }}
           style={{
             appearance: "none",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            gap: 7,
-            height: 28,
-            width: "100%",
+            gap: 6,
+            height: 30,
+            flex: "1 1 0",
+            minWidth: 0,
             padding: "0 10px",
             borderRadius: 7,
             cursor: "default",
             fontFamily: "var(--font-sans)",
             fontSize: 12,
-            fontWeight: 650,
-            border: "1px solid var(--rule)",
-            background: "transparent",
-            color: canSplit && !anyBusy ? "var(--ink-dim)" : "var(--muted-2)",
-            opacity: !canSplit && !anyBusy ? 0.65 : 1,
+            fontWeight: 700,
+            letterSpacing: "0.01em",
+            border:
+              canCommit && !anyBusy
+                ? "1px solid var(--accent-edge)"
+                : "1px solid var(--rule)",
+            background: canCommit && !anyBusy ? "var(--accent-soft)" : "transparent",
+            color: canCommit && !anyBusy ? "var(--ink)" : "var(--muted-2)",
+            boxShadow: canCommit && !anyBusy ? "var(--lift-hi)" : "none",
             transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-          }}
-          onMouseEnter={(e) => {
-            if (canSplit && !anyBusy) {
-              e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 6%, transparent)";
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         >
-          <SplitCommitsIcon />
-          <span>Split into commits</span>
+          {committing ? <Spinner /> : <CommitIcon />}
+          <span style={ELLIPSIS}>{amend ? "Amend Last Commit" : commitLabel}</span>
+          {stagedCount > 0 && (
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                fontWeight: 700,
+                fontVariantNumeric: "tabular-nums",
+                padding: "1px 6px",
+                borderRadius: 999,
+                flexShrink: 0,
+                background: "color-mix(in oklab, var(--ink) 12%, transparent)",
+                color: "var(--ink-dim)",
+              }}
+            >
+              {stagedCount}
+            </span>
+          )}
         </button>
-      ) : null}
+
+        {/* "Split into commits" — quieter sibling beside Commit: the AI proposes
+            grouping the changes into several commits and the user reviews the
+            plan before anything is committed. Hidden when the host has no
+            split support (remote workspaces), leaving Commit the whole row. */}
+        {onSplit ? (
+          <button
+            type="button"
+            disabled={!canSplit || anyBusy}
+            onClick={onSplit}
+            title="Group related changes into separate commits — you review the plan before anything is saved"
+            style={{
+              appearance: "none",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              height: 30,
+              flex: "1 1 0",
+              minWidth: 0,
+              padding: "0 10px",
+              borderRadius: 7,
+              cursor: "default",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+              fontWeight: 650,
+              border: "1px solid var(--rule)",
+              background: "transparent",
+              color: canSplit && !anyBusy ? "var(--ink-dim)" : "var(--muted-2)",
+              opacity: !canSplit && !anyBusy ? 0.65 : 1,
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              if (canSplit && !anyBusy) {
+                e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 6%, transparent)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            <SplitCommitsIcon />
+            <span style={ELLIPSIS}>Split into commits</span>
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -197,6 +197,7 @@ function svg(children: React.ReactNode, strokeWidth = 1.2): React.ReactElement {
       strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
+      style={{ flexShrink: 0 }}
       aria-hidden
     >
       {children}
