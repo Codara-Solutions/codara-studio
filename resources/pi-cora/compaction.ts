@@ -22,7 +22,7 @@ export type CompactionEnv = Record<string, string | undefined>;
  *  is the fallback when a session is started without it. */
 export const DEFAULT_COMPACT_AT_TOKENS = 256000;
 
-/** Pi 0.84.2 fires its own threshold compaction at contextWindow minus this. */
+/** Pi 0.84.4 fires its own threshold compaction at contextWindow minus this. */
 export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16384;
 
 /** Guidance appended to Pi's summary prompt. This is the fallback for direct

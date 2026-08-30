@@ -290,7 +290,7 @@ await assert.rejects(
 );
 delete process.env.CODARA_PI_PROJECT_POLICY;
 
-// The access fence. Names are asserted against Pi 0.84.2's REAL tool
+// The access fence. Names are asserted against Pi 0.84.4's REAL tool
 // inventory (bash, edit, find, grep, ls, read, write natively; web_search +
 // url_context from pi-web-search; deep_search bundled) plus the codara_*
 // bridge roster.
