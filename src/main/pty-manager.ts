@@ -36,6 +36,7 @@ import {
 } from "./orchestration/native-grok-profile-runtime";
 import {
   acquireNativeClaudeProfileLease,
+  notifyNativeClaudeProfileLeaseReleased,
   resolveFrozenNativeClaudeProfile,
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
@@ -176,12 +177,9 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   releaseClaude?.();
   if (releaseClaude && session.nativeClaudeProfileId) {
     // A terminal exit is the moment Claude Code most likely rotated the
-    // account's token; fold it back into Cora's copy now rather than at the
-    // next poll. Best effort and off the teardown path.
-    const cliProfileId = session.nativeClaudeProfileId;
-    void import("./orchestration/anthropic-accounts")
-      .then(({ anthropicAccounts }) => anthropicAccounts.reconcileCliProfile(cliProfileId))
-      .catch(() => undefined);
+    // account's token; the unified account service folds it back into Cora's
+    // copy now rather than at the next poll. Best effort, off the teardown path.
+    notifyNativeClaudeProfileLeaseReleased(session.nativeClaudeProfileId);
   }
   const releaseGrok = session.releaseNativeGrokProfileLease;
   session.releaseNativeGrokProfileLease = undefined;

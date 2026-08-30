@@ -32,6 +32,8 @@ export interface NativeClaudeProfileResolutionHooks {
   ready(): Promise<void>;
   beforeNewProfile(): Promise<void>;
   beforeFrozenProfile(profileId: ClaudeCliProfileId): Promise<void>;
+  /** A terminal on this profile exited; the moment its token most likely rotated. */
+  afterLeaseReleased(profileId: ClaudeCliProfileId): Promise<void>;
 }
 
 let resolutionHooks: NativeClaudeProfileResolutionHooks | null = null;
@@ -89,6 +91,11 @@ export async function resolveFrozenNativeClaudeProfile(
     }
     throw error;
   }
+}
+
+/** Called by the pty layer when a Claude terminal's lease is released. */
+export function notifyNativeClaudeProfileLeaseReleased(profileId: ClaudeCliProfileId): void {
+  void resolutionHooks?.afterLeaseReleased(profileId).catch(() => undefined);
 }
 
 export function acquireNativeClaudeProfileLease(

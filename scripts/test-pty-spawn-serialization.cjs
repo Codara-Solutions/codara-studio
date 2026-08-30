@@ -205,6 +205,7 @@ function stubPlugin() {
       export function acquireNativeClaudeProfileLease(profileId, ownerId) {
         return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
       }
+      export function notifyNativeClaudeProfileLeaseReleased() {}
     `,
     "./orchestration/native-grok-profile-runtime": `
       export function resolveNewNativeGrokProfile() {

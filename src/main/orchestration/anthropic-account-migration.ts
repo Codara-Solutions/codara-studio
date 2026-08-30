@@ -251,6 +251,9 @@ export function startAnthropicAccountMigration(
     beforeFrozenProfile: async (profileId) => {
       await service.reconcileCliProfile(profileId);
     },
+    afterLeaseReleased: async (profileId) => {
+      await service.reconcileCliProfile(profileId);
+    },
   });
   readyPromise = migrateAnthropicAccounts(deps).then(
     () => undefined,
