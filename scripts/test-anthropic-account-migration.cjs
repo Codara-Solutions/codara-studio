@@ -356,7 +356,7 @@ async function main() {
   // Dangling link cleared; Account 1 created and paired with ~/.claude.
   assert.deepEqual(report.clearedLinks, [rowDangling.id]);
   assert.equal((await byId(rowDangling.id)).cliProfileId, undefined);
-  const accountOne = await piStore.registry.accountOneProfile();
+  const accountOne = await piStore.registry.accountOneProfile("anthropic");
   assert.equal(accountOne.id, report.accountOne);
   assert.equal(accountOne.label, "Account 1");
   assert.equal(accountOne.identityFingerprint, fingerprintOf(UUID.personal));

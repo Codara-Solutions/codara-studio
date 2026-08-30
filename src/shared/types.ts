@@ -685,14 +685,14 @@ export interface PiSubscriptionProfileConnection {
    */
   email?: string;
   /**
-   * Opaque id of the Claude Code half of this Anthropic account: "personal"
-   * for the user's own claude login (Account 1), a managed profile id
-   * otherwise. Absent when the account has no terminal half yet.
+   * Opaque id of the CLI half of this account (Claude Code, Codex or Grok):
+   * "personal" for the user's own CLI login (Account 1), a managed profile
+   * id otherwise. Absent when the account has no terminal half yet.
    */
   cliProfileId?: string;
-  /** Account 1: the row for the user's own claude login, never deleted from here. */
+  /** Account 1: the row for the user's own CLI login, never deleted from here. */
   builtIn?: true;
-  /** Token-blind status of the Claude Code half; absent when there is none. */
+  /** Token-blind status of the CLI half; absent when there is none. */
   terminal?: {
     connected: boolean;
     expired: boolean;

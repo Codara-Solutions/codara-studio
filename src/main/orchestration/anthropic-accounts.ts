@@ -388,7 +388,7 @@ export class AnthropicAccountService {
     const watched = await this.mirror.reconcileCliProfile(cliProfileId);
     if (watched) return watched;
     const profile = await this.piStore.registry
-      .profileForCliProfileId(cliProfileId)
+      .profileForCliProfileId(PROVIDER, cliProfileId)
       .catch(() => undefined);
     return profile ? this.reconcileProfile(profile.id) : null;
   }
@@ -496,7 +496,7 @@ export class AnthropicAccountService {
   }
 
   private async ensureAccountOneLocked(): Promise<PiAccountProfile | null> {
-    const existing = await this.piStore.registry.accountOneProfile();
+    const existing = await this.piStore.registry.accountOneProfile(PROVIDER);
     if (existing) {
       await this.watchProfile(existing);
       if (existing.identityFingerprint) {
@@ -797,7 +797,7 @@ export class AnthropicAccountService {
    * speak in terminal ids: the linked row, or Account 1 for "personal".
    */
   async coraProfileForCli(cliProfileId: string): Promise<PiAccountProfile | undefined> {
-    return this.piStore.registry.profileForCliProfileId(cliProfileId);
+    return this.piStore.registry.profileForCliProfileId(PROVIDER, cliProfileId);
   }
 
   async shareLogin(
@@ -834,7 +834,7 @@ export class AnthropicAccountService {
     if (!isClaudeCliManagedProfileId(cliProfileId)) {
       throw new TypeError("Only a managed Claude Code profile can be shared with Cora");
     }
-    const already = await this.piStore.registry.profileForCliProfileId(cliProfileId);
+    const already = await this.piStore.registry.profileForCliProfileId(PROVIDER, cliProfileId);
     if (already) return { coraProfileId: already.id, cliProfileId };
     const claudeSnapshot = await this.claudeStore.snapshot();
     const managed = claudeSnapshot.profiles.find((entry) => entry.id === cliProfileId);
@@ -1024,7 +1024,7 @@ export class AnthropicAccountService {
       if (!isClaudeCliManagedProfileId(cliProfileId)) {
         throw new TypeError("Only a managed Claude Code profile can be deleted here");
       }
-      const linked = await this.piStore.registry.profileForCliProfileId(cliProfileId);
+      const linked = await this.piStore.registry.profileForCliProfileId(PROVIDER, cliProfileId);
       if (linked) {
         throw new Error("This Claude Code profile belongs to an account; delete the account instead");
       }

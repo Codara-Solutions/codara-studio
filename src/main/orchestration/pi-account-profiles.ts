@@ -57,11 +57,12 @@ export interface PiAccountProfile {
    */
   accountEmail?: string;
   /**
-   * The Claude Code half of an Anthropic account: "personal" for the user's
-   * own ~/.claude login (Account 1) or the id of a Codara-managed
-   * CLAUDE_CONFIG_DIR profile. Only anthropic rows carry it, no two rows share
-   * one, and at most one row links "personal". Codara follows this field and
-   * never infers the pairing from marker files inside a CLI directory.
+   * The CLI half of this account (Claude Code, Codex or Grok): "personal" for
+   * the user's own login in the CLI's default home (Account 1) or the id of a
+   * Codara-managed profile of that CLI. Uniqueness is per provider: no two
+   * rows of one provider share a link, and each provider links "personal" at
+   * most once. Codara follows this field and never infers the pairing from
+   * marker files inside a CLI directory.
    */
   cliProfileId?: string;
 }
@@ -84,7 +85,7 @@ export interface RegisterPiAccountProfileInput {
   identityFingerprint?: string;
   /** Optional account email for display. See PiAccountProfile.accountEmail. */
   accountEmail?: string;
-  /** Claude Code profile this anthropic row is paired with. See PiAccountProfile. */
+  /** The CLI profile this row is paired with. See PiAccountProfile. */
   cliProfileId?: string;
   /** New profiles become the provider default when none exists. */
   makeDefault?: boolean;
@@ -175,16 +176,22 @@ export class PiAccountProfileIdCollisionError extends Error {
   }
 }
 
-/** The Claude Code profile is already the other half of a different row. */
+/** The CLI profile is already the other half of a different row of its provider. */
 export class PiAccountProfileLinkCollisionError extends Error {
+  readonly provider: PiSubscriptionProvider;
   readonly cliProfileId: string;
   readonly linkedProfileId: string;
 
-  constructor(cliProfileId: string, linkedProfileId: string) {
+  constructor(
+    provider: PiSubscriptionProvider,
+    cliProfileId: string,
+    linkedProfileId: string,
+  ) {
     super(
-      `Claude Code profile ${cliProfileId} is already linked to Pi account profile ${linkedProfileId}`,
+      `CLI profile ${cliProfileId} (${provider}) is already linked to Pi account profile ${linkedProfileId}`,
     );
     this.name = "PiAccountProfileLinkCollisionError";
+    this.provider = provider;
     this.cliProfileId = cliProfileId;
     this.linkedProfileId = linkedProfileId;
   }
@@ -295,23 +302,20 @@ function normalizeAccountEmail(value: unknown): string | undefined {
 
 /**
  * A link is the literal "personal" or a lowercase UUIDv4 naming a managed
- * Claude Code profile; anything else is refused rather than trimmed.
+ * CLI profile; anything else is refused rather than trimmed.
  */
 function normalizeCliProfileId(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") {
-    throw new TypeError("Claude Code profile id must be a string");
+    throw new TypeError("CLI profile id must be a string");
   }
   if (value === CLI_PERSONAL_PROFILE_ID || UUID_V4_PATTERN.test(value)) return value;
-  throw new TypeError(
-    'Claude Code profile id must be "personal" or a lowercase UUIDv4',
-  );
+  throw new TypeError('CLI profile id must be "personal" or a lowercase UUIDv4');
 }
 
-function assertLinkAllowed(provider: PiSubscriptionProvider, cliProfileId: string | undefined): void {
-  if (cliProfileId !== undefined && provider !== "anthropic") {
-    throw new TypeError("Only an anthropic account profile can link a Claude Code profile");
-  }
+/** Links are unique within a provider, so the collision key carries both. */
+function linkKey(provider: PiSubscriptionProvider, cliProfileId: string): string {
+  return `${provider}:${cliProfileId}`;
 }
 
 function parseSnapshot(value: unknown): PiAccountProfilesSnapshot {
@@ -395,23 +399,25 @@ function parseSnapshot(value: unknown): PiAccountProfilesSnapshot {
     let cliProfileId: string | undefined;
     try {
       cliProfileId = normalizeCliProfileId(raw.cliProfileId);
-      assertLinkAllowed(raw.provider, cliProfileId);
     } catch (error) {
       throw new PiAccountProfilesCorruptError(
         `profiles[${index}].cliProfileId is invalid: ${(error as Error).message}`,
       );
     }
     if (cliProfileId) {
-      // Two rows sharing one Claude Code profile would make the mirror copy
-      // one account's tokens into another; the file is corrupt, not ambiguous.
-      if (cliLinks.has(cliProfileId)) {
+      // Two rows of one provider sharing one CLI profile would make the
+      // mirror copy one account's tokens into another; the file is corrupt,
+      // not ambiguous. Rows of different providers may each link "personal":
+      // it names a different CLI home for each.
+      const key = linkKey(raw.provider, cliProfileId);
+      if (cliLinks.has(key)) {
         throw new PiAccountProfilesCorruptError(
           cliProfileId === CLI_PERSONAL_PROFILE_ID
-            ? 'more than one profile links the "personal" Claude Code profile'
-            : `duplicate Claude Code profile link "${cliProfileId}"`,
+            ? `more than one ${raw.provider} profile links the "personal" CLI profile`
+            : `duplicate CLI profile link "${cliProfileId}" for provider "${raw.provider}"`,
         );
       }
-      cliLinks.add(cliProfileId);
+      cliLinks.add(key);
     }
     ids.add(raw.id);
     profiles.push({
@@ -520,8 +526,8 @@ async function withMutationLock<T>(filePath: string, operation: () => Promise<T>
 }
 
 /**
- * The user's own Claude login (the row linked to "personal") is the natural
- * landing place when an Anthropic default disappears; otherwise the oldest
+ * The user's own CLI login (the provider's row linked to "personal") is the
+ * natural landing place when a default disappears; otherwise the oldest
  * remaining profile of the provider.
  */
 export function nextDefaultAfterDeletion(
@@ -686,23 +692,30 @@ export class PiAccountProfileRegistry {
     return profile ? cloneProfile(profile) : null;
   }
 
-  /** The row paired with the user's own ~/.claude login, when one exists. */
-  async accountOneProfile(): Promise<PiAccountProfile | undefined> {
+  /** The provider's row paired with the user's own CLI login, when one exists. */
+  async accountOneProfile(
+    provider: PiSubscriptionProvider,
+  ): Promise<PiAccountProfile | undefined> {
+    assertProvider(provider);
     const snapshot = await readSnapshotFromDisk(this.filePath);
     const profile = snapshot.profiles.find(
-      (entry) => entry.cliProfileId === CLI_PERSONAL_PROFILE_ID,
+      (entry) => entry.provider === provider && entry.cliProfileId === CLI_PERSONAL_PROFILE_ID,
     );
     return profile ? cloneProfile(profile) : undefined;
   }
 
-  /** Reverse lookup from a Claude Code profile id to the row linking it. */
+  /** Reverse lookup from a provider's CLI profile id to the row linking it. */
   async profileForCliProfileId(
+    provider: PiSubscriptionProvider,
     cliProfileIdInput: string,
   ): Promise<PiAccountProfile | undefined> {
+    assertProvider(provider);
     const cliProfileId = normalizeCliProfileId(cliProfileIdInput);
-    if (!cliProfileId) throw new TypeError("Claude Code profile id is required");
+    if (!cliProfileId) throw new TypeError("CLI profile id is required");
     const snapshot = await readSnapshotFromDisk(this.filePath);
-    const profile = snapshot.profiles.find((entry) => entry.cliProfileId === cliProfileId);
+    const profile = snapshot.profiles.find(
+      (entry) => entry.provider === provider && entry.cliProfileId === cliProfileId,
+    );
     return profile ? cloneProfile(profile) : undefined;
   }
 
@@ -714,19 +727,20 @@ export class PiAccountProfileRegistry {
     const identityFingerprint = normalizeIdentityFingerprint(input.identityFingerprint);
     const accountEmail = normalizeAccountEmail(input.accountEmail);
     const cliProfileId = normalizeCliProfileId(input.cliProfileId);
-    assertLinkAllowed(input.provider, cliProfileId);
     return withMutationLock(this.filePath, async () => {
       const snapshot = await readSnapshotFromDisk(this.filePath);
       if (cliProfileId) {
-        const linked = snapshot.profiles.find((profile) => profile.cliProfileId === cliProfileId);
+        const linked = snapshot.profiles.find(
+          (profile) =>
+            profile.provider === input.provider && profile.cliProfileId === cliProfileId,
+        );
         // The only tolerated repeat is an idempotent re-registration of the
         // same fingerprinted account, which returns the existing row below.
         const sameAccount =
           identityFingerprint !== undefined &&
-          linked?.provider === input.provider &&
-          linked.identityFingerprint === identityFingerprint;
+          linked?.identityFingerprint === identityFingerprint;
         if (linked && !sameAccount) {
-          throw new PiAccountProfileLinkCollisionError(cliProfileId, linked.id);
+          throw new PiAccountProfileLinkCollisionError(input.provider, cliProfileId, linked.id);
         }
       }
       if (identityFingerprint) {
@@ -858,9 +872,10 @@ export class PiAccountProfileRegistry {
   }
 
   /**
-   * Pair a row with its Claude Code profile, or clear the pairing with null.
-   * A link already held by another row is refused rather than moved: moving
-   * it would silently hand one account's terminal to another card.
+   * Pair a row with its CLI profile, or clear the pairing with null. A link
+   * already held by another row of the provider is refused rather than
+   * moved: moving it would silently hand one account's terminal to another
+   * card.
    */
   async recordCliProfileId(
     profileId: string,
@@ -870,20 +885,24 @@ export class PiAccountProfileRegistry {
     const cliProfileId =
       cliProfileIdInput === null ? undefined : normalizeCliProfileId(cliProfileIdInput);
     if (cliProfileIdInput !== null && !cliProfileId) {
-      throw new TypeError("Claude Code profile id is required");
+      throw new TypeError("CLI profile id is required");
     }
     return withMutationLock(this.filePath, async () => {
       const snapshot = await readSnapshotFromDisk(this.filePath);
       const index = snapshot.profiles.findIndex((profile) => profile.id === profileId);
       if (index < 0) throw new PiAccountProfileNotFoundError(profileId);
       const current = snapshot.profiles[index];
-      assertLinkAllowed(current.provider, cliProfileId);
       if (current.cliProfileId === cliProfileId) return cloneProfile(current);
       if (cliProfileId) {
         const linked = snapshot.profiles.find(
-          (profile) => profile.id !== profileId && profile.cliProfileId === cliProfileId,
+          (profile) =>
+            profile.id !== profileId &&
+            profile.provider === current.provider &&
+            profile.cliProfileId === cliProfileId,
         );
-        if (linked) throw new PiAccountProfileLinkCollisionError(cliProfileId, linked.id);
+        if (linked) {
+          throw new PiAccountProfileLinkCollisionError(current.provider, cliProfileId, linked.id);
+        }
       }
       const clockNow = this.now().toISOString();
       const { cliProfileId: _previous, ...rest } = current;

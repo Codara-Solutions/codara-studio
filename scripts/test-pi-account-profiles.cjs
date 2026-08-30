@@ -408,14 +408,23 @@ async function main() {
     "TypeError",
   );
 
-  // The Claude Code link column: an anthropic row may name its terminal half
-  // ("personal" for the user's own ~/.claude, a managed profile id otherwise).
-  // The link is followed, never inferred, so the file must refuse every shape
-  // that would let the credential mirror copy tokens between two accounts.
+  // The CLI link column: a row may name its terminal half ("personal" for
+  // the user's own CLI home, a managed profile id otherwise). Links are unique
+  // per provider. The link is followed, never inferred, so the file must
+  // refuse every shape that would let the credential mirror copy tokens
+  // between two accounts of one provider.
   const CLI_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const CLI_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const linkRoot = path.join(TMP, "links");
-  const linkIds = sequence([IDS.a, IDS.b, IDS.c, IDS.d]);
+  const linkIds = sequence([
+    IDS.a,
+    IDS.b,
+    IDS.c,
+    IDS.d,
+    "10000000-0000-4000-8000-000000000011",
+    "10000000-0000-4000-8000-000000000012",
+    "10000000-0000-4000-8000-000000000013",
+  ]);
   const links = new PiAccountProfileRegistry(linkRoot, {
     idFactory: linkIds,
     now: () => new Date("2026-08-30T08:00:00.000Z"),
@@ -429,15 +438,16 @@ async function main() {
     "a link given at registration round-trips through the file",
     linkedAtRegister.profile.cliProfileId === "personal" &&
       (await links.getProfile(IDS.a))?.cliProfileId === "personal" &&
-      (await links.accountOneProfile())?.id === IDS.a,
+      (await links.accountOneProfile("anthropic"))?.id === IDS.a,
   );
   const unlinked = await links.registerProfile({ provider: "anthropic", label: "Work" });
   const recorded = await links.recordCliProfileId(unlinked.profile.id, CLI_A);
   check(
     "recordCliProfileId pairs a row and profileForCliProfileId finds it",
     recorded.cliProfileId === CLI_A &&
-      (await links.profileForCliProfileId(CLI_A))?.id === IDS.b &&
-      (await links.profileForCliProfileId(CLI_B)) === undefined,
+      (await links.profileForCliProfileId("anthropic", CLI_A))?.id === IDS.b &&
+      (await links.profileForCliProfileId("anthropic", CLI_B)) === undefined &&
+      (await links.profileForCliProfileId("openai-codex", CLI_A)) === undefined,
   );
   check(
     "recording the same link again is a no-op",
@@ -469,17 +479,38 @@ async function main() {
     () => links.recordCliProfileId(third.profile.id, "Personal"),
     "TypeError",
   );
+  // Links are scoped per provider: a Codex row and a Grok row may each link
+  // a managed profile, "personal" may be linked once per provider, and the
+  // reverse lookup never crosses providers.
   const codexRow = await links.registerProfile({ provider: "openai-codex", label: "Codex" });
-  await expectThrows(
-    "only anthropic rows may link a Claude Code profile",
-    () => links.recordCliProfileId(codexRow.profile.id, CLI_B),
-    "TypeError",
+  const codexLinked = await links.recordCliProfileId(codexRow.profile.id, CLI_A);
+  const grokRow = await links.registerProfile({ provider: "xai", label: "Grok", cliProfileId: CLI_B });
+  const grokOne = await links.registerProfile({ provider: "xai", label: "Grok 1", cliProfileId: "personal" });
+  const codexOne = await links.registerProfile({ provider: "openai-codex", label: "Codex 1", cliProfileId: "personal" });
+  check(
+    "an openai-codex and an xai row may link a managed profile and their own personal",
+    codexLinked.cliProfileId === CLI_A &&
+      grokRow.profile.cliProfileId === CLI_B &&
+      grokOne.profile.cliProfileId === "personal" &&
+      codexOne.profile.cliProfileId === "personal" &&
+      (await links.accountOneProfile("xai"))?.id === grokOne.profile.id &&
+      (await links.accountOneProfile("openai-codex"))?.id === codexOne.profile.id &&
+      (await links.accountOneProfile("anthropic"))?.id === IDS.a,
+  );
+  check(
+    "the reverse lookup is scoped by provider",
+    (await links.profileForCliProfileId("openai-codex", CLI_A))?.id === codexRow.profile.id &&
+      (await links.profileForCliProfileId("anthropic", CLI_A))?.id === IDS.b &&
+      (await links.profileForCliProfileId("xai", CLI_A)) === undefined &&
+      (await links.profileForCliProfileId("xai", CLI_B))?.id === grokRow.profile.id,
   );
   await expectThrows(
-    "registering a non-anthropic row with a link is refused",
-    () => links.registerProfile({ provider: "xai", label: "Grok", cliProfileId: CLI_B }),
-    "TypeError",
+    "a second personal link within one provider is refused",
+    () => links.recordCliProfileId(grokRow.profile.id, "personal"),
+    "PiAccountProfileLinkCollisionError",
   );
+  for (const row of [grokRow, grokOne, codexOne]) await links.deleteProfile(row.profile.id);
+  await links.recordCliProfileId(codexRow.profile.id, null);
   const cleared = await links.recordCliProfileId(IDS.b, null);
   check(
     "null clears a link and leaves the rest of the row intact",
@@ -538,9 +569,10 @@ async function main() {
       "PiAccountProfilesCorruptError",
     ],
     [
-      "a link on a non-anthropic row is a corrupt registry",
+      "two personal links in one provider are a corrupt registry even beside other providers",
       [
-        { id: IDS.e, provider: "openai-codex", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: CLI_B },
+        { id: IDS.e, provider: "openai-codex", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+        { id: IDS.f, provider: "openai-codex", label: "Two", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
       ],
       "PiAccountProfilesCorruptError",
     ],
@@ -562,6 +594,28 @@ async function main() {
       name,
       () => new PiAccountProfileRegistry(corruptLinkRoot).snapshot(),
       expectedName,
+    );
+  }
+
+  {
+    const threeRoot = path.join(TMP, "three-personal");
+    fs.mkdirSync(threeRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(threeRoot, PI_ACCOUNT_PROFILES_FILE),
+      JSON.stringify({
+        version: 1,
+        profiles: [
+          { id: IDS.e, provider: "anthropic", label: "One", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+          { id: IDS.f, provider: "openai-codex", label: "Two", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+          { id: IDS.a, provider: "xai", label: "Three", createdAt: "2026-08-30T08:00:00.000Z", updatedAt: "2026-08-30T08:00:00.000Z", cliProfileId: "personal" },
+        ],
+        defaults: {},
+      }),
+    );
+    const three = await new PiAccountProfileRegistry(threeRoot).snapshot();
+    check(
+      "three rows of different providers may each link personal",
+      three.profiles.length === 3 && three.profiles.every((profile) => profile.cliProfileId === "personal"),
     );
   }
 
