@@ -133,6 +133,7 @@ export default function UpdateChip(): React.ReactElement | null {
           justifyContent: "center",
           background: hover && ready ? "var(--hover)" : "transparent",
           border: "none",
+          borderLeft: "1px solid var(--rule-soft)",
           padding: 0,
           cursor: "default",
           WebkitAppRegion: "no-drag",
