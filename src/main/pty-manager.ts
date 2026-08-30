@@ -161,6 +161,8 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+/** Session ids between native account resolution and `sessions.set`. */
+const pendingSpawns = new Set<string>();
 let nextSessionGeneration = 0;
 
 function createSessionGeneration(id: string): string {
@@ -623,7 +625,14 @@ export async function spawn(
   // synchronously, before this function reaches any await. Once inside the
   // critical section we re-check sessions, so queued callers attach to the
   // process the winner created instead of spawning another one.
-  return serializeSessionSpawn(opts.id, () => spawnWithSessionLock(opts));
+  return serializeSessionSpawn(opts.id, async () => {
+    pendingSpawns.add(opts.id);
+    try {
+      return await spawnWithSessionLock(opts);
+    } finally {
+      pendingSpawns.delete(opts.id);
+    }
+  });
 }
 
 async function spawnWithSessionLock(
@@ -2423,8 +2432,17 @@ async function disposeSessionsGraceful(
 }
 
 /** Lease owner ids of every live Studio PTY, for sweeping stale account leases. */
+/**
+ * Every session that holds, or is about to hold, a native account lease: the
+ * table plus the spawns still between lease acquisition and `sessions.set`.
+ * A lease sweep that only trusted the table would release a launching
+ * terminal's lease and let an account delete remove the directory it is
+ * starting in.
+ */
 export function liveSessionOwnerIds(): Set<string> {
-  return new Set([...sessions.keys()].map((id) => `terminal:${id}`));
+  return new Set(
+    [...sessions.keys(), ...pendingSpawns].map((id) => `terminal:${id}`),
+  );
 }
 
 /**

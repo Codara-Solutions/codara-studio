@@ -46,6 +46,7 @@ import {
   type PiAccountProfileOwnershipGuard,
 } from "./pi-account-auth-store";
 import {
+  nextDefaultAfterDeletion,
   PiAccountProfileProtectedError,
   type PiAccountProfile,
 } from "./pi-account-profiles";
@@ -65,9 +66,12 @@ import {
  *  - useAnthropicAccount writes the Pi default and the Claude default in one
  *    step with rollback, and kills nothing: managed terminals run in their
  *    own directory and Account 1 is ~/.claude itself.
- *  - deleteAnthropicAccount hands both sides to Account 1 first, closes only
- *    that account's terminals (after confirmation), then removes the Claude
- *    half (staged rename plus the hashed Keychain item) and the Pi half.
+ *  - deleteAnthropicAccount refuses first (a delete the user then abandons
+ *    changes nothing), hands both sides to Account 1 or the oldest remaining
+ *    account, unlinks the halves so no racing reconcile can rebuild one,
+ *    removes the Pi half, closes only that account's terminals (after
+ *    confirmation), then removes the Claude half (staged rename plus the
+ *    hashed Keychain item).
  *  - shareLogin turns a half into a whole in either direction.
  *  - ensureAccountOne creates or pairs the row for ~/.claude.
  *
@@ -83,6 +87,8 @@ export interface AnthropicTerminalStatus {
   connected: boolean;
   expired: boolean;
   canRefresh: boolean;
+  /** Studio terminals holding a lease on the half right now. */
+  liveSessions: number;
 }
 
 export interface AnthropicAccountView {
@@ -136,8 +142,9 @@ export class AnthropicAccountSessionsError extends Error {
 }
 
 export class AnthropicAccountNotConnectedError extends Error {
-  constructor(profileId: string) {
-    super(`Neither Cora nor Claude Code is signed in to account ${profileId}`);
+  constructor(profile: Pick<PiAccountProfile, "id" | "label">) {
+    // The label is what the card shows; a row uuid tells the user nothing.
+    super(`Neither Cora nor Claude Code is signed in to ${profile.label}. Reconnect it first.`);
     this.name = "AnthropicAccountNotConnectedError";
   }
 }
@@ -172,11 +179,15 @@ function normalizeEmail(value: string | undefined): string | undefined {
   return email ? email : undefined;
 }
 
-function terminalStatusFrom(connection: ClaudeCliProfileConnection): AnthropicTerminalStatus {
+function terminalStatusFrom(
+  connection: ClaudeCliProfileConnection,
+  liveSessions: number,
+): AnthropicTerminalStatus {
   return {
     connected: connection.connected,
     expired: connection.expired,
     canRefresh: connection.canRefresh,
+    liveSessions,
   };
 }
 
@@ -197,6 +208,14 @@ export class AnthropicAccountService {
   private tail: Promise<void> = Promise.resolve();
   private personalWatcher: FSWatcher | null = null;
   private personalProbe: NodeJS.Timeout | null = null;
+  /**
+   * The ~/.claude login that turned out to belong to a row already paired
+   * with a managed profile. The probe keeps watching for a different login
+   * but stops re-deriving this one on every event.
+   */
+  private rejectedPersonalLogin: { access: string; fingerprint: string | null } | null = null;
+  /** Rows mid-delete: every reconcile entry point answers null for them. */
+  private readonly deleting = new Set<string>();
   private broadcastHook: (() => void) | null;
   private sessionsHook: AnthropicTerminalSessions | null;
 
@@ -228,6 +247,13 @@ export class AnthropicAccountService {
       this.resolvedMirror.onChanged(() => {
         void this.invalidateCaches().catch(() => undefined);
         this.broadcast();
+      });
+      // The busy signals behind the Keychain poll cadence: the active
+      // account and any half a terminal is running on poll faster.
+      this.resolvedMirror.setActivity({
+        isActive: async (coraProfileId) =>
+          (await this.piStore.registry.snapshot()).defaults[PROVIDER] === coraProfileId,
+        isLeased: (cliProfileId) => this.leases.isLeased(cliProfileId),
       });
     }
     return this.resolvedMirror;
@@ -350,6 +376,7 @@ export class AnthropicAccountService {
 
   /** Reconcile a row's pair whether or not the mirror is watching it yet. */
   async reconcileProfile(coraProfileId: string): Promise<ReconcilePairResult | null> {
+    if (this.deleting.has(coraProfileId)) return null;
     const watched = await this.mirror.reconcileNow(coraProfileId);
     if (watched) return watched;
     const pair = await this.pairFor(coraProfileId).catch(() => null);
@@ -372,13 +399,23 @@ export class AnthropicAccountService {
     return defaultId ? this.reconcileProfile(defaultId) : null;
   }
 
+  /** Studio terminals holding a lease on a half, with dead owners swept first. */
+  private liveSessionCount(cliProfileId: string): number {
+    return this.leases.owners(cliProfileId).filter((owner) => owner.startsWith("terminal:"))
+      .length;
+  }
+
   /** Terminal status per Claude Code profile id, from one credential read each. */
   async terminalStatuses(): Promise<Map<string, AnthropicTerminalStatus>> {
     const statuses = new Map<string, AnthropicTerminalStatus>();
     try {
       const inspection = await this.claudeStore.inspect();
+      this.sweepLeases();
       for (const connection of inspection.profiles) {
-        statuses.set(connection.id, terminalStatusFrom(connection));
+        statuses.set(
+          connection.id,
+          terminalStatusFrom(connection, this.liveSessionCount(connection.id)),
+        );
       }
     } catch (error) {
       this.log(
@@ -404,6 +441,7 @@ export class AnthropicAccountService {
     );
     const linked = new Set<string>();
     const accounts: AnthropicAccountView[] = [];
+    this.sweepLeases();
     for (const profile of inspection.snapshot.profiles) {
       if (profile.provider !== PROVIDER) continue;
       const cliProfileId = profile.cliProfileId ?? null;
@@ -424,7 +462,9 @@ export class AnthropicAccountService {
         isAccount1: cliProfileId === CLAUDE_CLI_PERSONAL_PROFILE_ID,
         isDefault: inspection.snapshot.defaults[PROVIDER] === profile.id,
         cora,
-        terminal: connection ? terminalStatusFrom(connection) : null,
+        terminal: connection
+          ? terminalStatusFrom(connection, this.liveSessionCount(connection.id))
+          : null,
       });
     }
     const terminalOnly: AnthropicTerminalOnlyView[] = [];
@@ -435,7 +475,7 @@ export class AnthropicAccountService {
         cliProfileId: connection.id,
         label: connection.label,
         isCliDefault: connection.isDefault,
-        terminal: terminalStatusFrom(connection),
+        terminal: terminalStatusFrom(connection, this.liveSessionCount(connection.id)),
       });
     }
     return { accounts, terminalOnly };
@@ -459,8 +499,18 @@ export class AnthropicAccountService {
     const existing = await this.piStore.registry.accountOneProfile();
     if (existing) {
       await this.watchProfile(existing);
-      this.stopPersonalProbe();
-      return existing;
+      if (existing.identityFingerprint) {
+        this.stopPersonalProbe();
+        return existing;
+      }
+      // Registered while the identity was unreachable (offline first
+      // launch). The fingerprint is what folds a later browser sign-in of
+      // the same account into this row instead of a second one, so keep
+      // trying to learn it until it is known.
+      const backfilled = await this.backfillAccountOneIdentity(existing);
+      if (backfilled.identityFingerprint) this.stopPersonalProbe();
+      else this.startPersonalProbe();
+      return backfilled;
     }
     const personal = this.personalLocation();
     const record = await readClaudeCredentialRecord(
@@ -473,17 +523,14 @@ export class AnthropicAccountService {
       this.startPersonalProbe();
       return null;
     }
-    const cliIdentity = await (this.options.readCliIdentity ?? readClaudeCliAccountIdentity)(
-      personal.configDir,
-      personal.configDirEnv,
-      this.homeDir,
-    ).catch((): NativeCliAccountIdentity => ({}));
-    let identity: AnthropicAccountProfile = cliIdentity;
-    if (!identity.fingerprint) {
-      identity = await (this.options.readIdentity ?? readAnthropicAccountProfile)(
-        canonical.access,
-      ).catch((): AnthropicAccountProfile => ({}));
-      identity = { ...identity, email: identity.email ?? cliIdentity.email };
+    if (this.rejectedPersonalLogin?.access === canonical.access) return null;
+    const identity = await this.personalIdentity(canonical);
+    if (
+      this.rejectedPersonalLogin?.fingerprint &&
+      identity.fingerprint === this.rejectedPersonalLogin.fingerprint
+    ) {
+      this.rejectedPersonalLogin = { access: canonical.access, fingerprint: identity.fingerprint };
+      return null;
     }
     const snapshot = await this.piStore.registry.snapshot();
     const unlinked = snapshot.profiles.filter(
@@ -518,6 +565,10 @@ export class AnthropicAccountService {
       if (profile.cliProfileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID) {
         // The same Anthropic account is already a managed profile's row; the
         // personal login stays a plain terminal login rather than a second row.
+        this.rejectedPersonalLogin = {
+          access: canonical.access,
+          fingerprint: identity.fingerprint ?? null,
+        };
         this.log(
           `[accounts] the personal Claude login belongs to ${profile.id}, which is already paired with a managed profile`,
         );
@@ -527,10 +578,75 @@ export class AnthropicAccountService {
         await this.writePiCredential(profile.id, canonical);
       }
     }
+    this.rejectedPersonalLogin = null;
     await this.watchProfile(profile);
     await this.mirror.reconcileNow(profile.id).catch(() => null);
-    this.stopPersonalProbe();
+    if (profile.identityFingerprint) this.stopPersonalProbe();
+    else this.startPersonalProbe();
     await this.invalidateCaches().catch(() => undefined);
+    this.broadcast();
+    return profile;
+  }
+
+  /**
+   * Who ~/.claude is signed in as. The token is authoritative: Anthropic's
+   * profile endpoint answers for the credential itself, while ~/.claude.json
+   * only records whichever login last ran against ~/.claude (the retired
+   * selector left it naming a managed account). The file is the offline
+   * fallback, and when both answer differently the token wins.
+   */
+  private async personalIdentity(
+    canonical: AnthropicCanonicalCredential,
+  ): Promise<AnthropicAccountProfile> {
+    const personal = this.personalLocation();
+    const [fromToken, fromFile] = await Promise.all([
+      (this.options.readIdentity ?? readAnthropicAccountProfile)(canonical.access).catch(
+        (): AnthropicAccountProfile => ({}),
+      ),
+      (this.options.readCliIdentity ?? readClaudeCliAccountIdentity)(
+        personal.configDir,
+        personal.configDirEnv,
+        this.homeDir,
+      ).catch((): NativeCliAccountIdentity => ({})),
+    ]);
+    if (!fromToken.fingerprint) return { ...fromToken, ...fromFile, ...(fromToken.email ? { email: fromToken.email } : {}) };
+    if (fromFile.fingerprint && fromFile.fingerprint !== fromToken.fingerprint) {
+      this.log(
+        "[accounts] ~/.claude.json names a different account than the login in ~/.claude; the login decides",
+      );
+      return fromToken;
+    }
+    return { ...fromToken, email: fromToken.email ?? fromFile.email };
+  }
+
+  private async backfillAccountOneIdentity(existing: PiAccountProfile): Promise<PiAccountProfile> {
+    const personal = this.personalLocation();
+    const record = await readClaudeCredentialRecord(
+      personal.configDir,
+      personal.configDirEnv,
+      this.credentialOptions,
+    ).catch(() => null);
+    const canonical = canonicalFromClaude(record);
+    if (!canonical) return existing;
+    const identity = await this.personalIdentity(canonical);
+    if (!identity.fingerprint) return existing;
+    let profile = existing;
+    try {
+      profile = await this.piStore.registry.recordIdentityFingerprint(
+        existing.id,
+        identity.fingerprint,
+      );
+      if (identity.email && !profile.accountEmail) {
+        profile = await this.piStore.registry.recordAccountEmail(profile.id, identity.email);
+      }
+    } catch (error) {
+      this.log(
+        `[accounts] could not record the identity of Account 1: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return existing;
+    }
     this.broadcast();
     return profile;
   }
@@ -633,6 +749,14 @@ export class AnthropicAccountService {
     }
     const linked = await this.requireProfile(coraProfileId);
     await this.watchProfile(linked);
+    const snapshot = await this.piStore.registry.snapshot();
+    if (snapshot.defaults[PROVIDER] === linked.id) {
+      // The row was already the Cora default while it had no half, so Claude
+      // Code rested on Account 1. The half created now must take the Claude
+      // default with it, or new terminals keep launching on Account 1 until
+      // the next launch repairs the defaults.
+      await this.useAnthropicAccountLocked(linked.id);
+    }
     return cliProfileId;
   }
 
@@ -649,7 +773,7 @@ export class AnthropicAccountService {
       profile.cliProfileId ? this.readCliRecord(profile.cliProfileId) : Promise.resolve(null),
     ]);
     if (!pi && !canonicalFromClaude(cli)) {
-      throw new AnthropicAccountNotConnectedError(profile.id);
+      throw new AnthropicAccountNotConnectedError(profile);
     }
     const before = await this.piStore.registry.snapshot();
     const previousDefault = before.defaults[PROVIDER] ?? null;
@@ -690,7 +814,7 @@ export class AnthropicAccountService {
   ): Promise<{ coraProfileId: string; cliProfileId: string }> {
     const profile = await this.requireProfile(coraProfileId);
     const canonical = await this.readPiCanonical(profile.id);
-    if (!canonical) throw new AnthropicAccountNotConnectedError(profile.id);
+    if (!canonical) throw new AnthropicAccountNotConnectedError(profile);
     const identity = await (this.options.readIdentity ?? readAnthropicAccountProfile)(
       canonical.access,
     ).catch((): AnthropicAccountProfile => ({}));
@@ -771,6 +895,22 @@ export class AnthropicAccountService {
 
   private async removeCliHalf(cliProfileId: string): Promise<void> {
     const location = this.cliLocation(cliProfileId);
+    const claude = await this.claudeStore.snapshot();
+    if (claude.defaultProfileId === cliProfileId) {
+      // The Claude default can lag the Cora default (a rolled-back switch, a
+      // repair that could only log). A half still holding it moves to the
+      // active row's half, or to ~/.claude, so the store never refuses the
+      // delete for it.
+      const snapshot = await this.piStore.registry.snapshot();
+      const active = snapshot.profiles.find(
+        (profile) => profile.id === snapshot.defaults[PROVIDER],
+      );
+      await this.claudeStore.setDefaultProfile(
+        active?.cliProfileId && active.cliProfileId !== cliProfileId
+          ? active.cliProfileId
+          : CLAUDE_CLI_PERSONAL_PROFILE_ID,
+      );
+    }
     await this.claudeStore.deleteProfile(cliProfileId);
     // The directory is gone; this removes the hashed Keychain item.
     await clearClaudeCredentialRecord(
@@ -780,19 +920,31 @@ export class AnthropicAccountService {
     ).catch(() => undefined);
   }
 
-  /** Hand the defaults to Account 1 (or to nothing) before a row disappears. */
+  /**
+   * Hand the defaults on before a row disappears: Account 1 first, then the
+   * oldest remaining account, so deleting the active account never strands
+   * connected ones behind an empty default. Nothing connected means nothing
+   * to hand to, and both defaults go empty.
+   */
   private async handOffDefault(coraProfileId: string): Promise<void> {
     const snapshot = await this.piStore.registry.snapshot();
     if (snapshot.defaults[PROVIDER] !== coraProfileId) return;
-    const accountOne = await this.piStore.registry.accountOneProfile();
-    if (accountOne) {
+    const remaining = snapshot.profiles.filter(
+      (profile) => profile.provider === PROVIDER && profile.id !== coraProfileId,
+    );
+    while (remaining.length > 0) {
+      const nextId = nextDefaultAfterDeletion(remaining, PROVIDER);
+      if (!nextId) break;
+      remaining.splice(
+        remaining.findIndex((profile) => profile.id === nextId),
+        1,
+      );
       try {
-        await this.useAnthropicAccountLocked(accountOne.id);
+        await this.useAnthropicAccountLocked(nextId);
         return;
       } catch (error) {
-        // Account 1 exists but is signed out on both sides (a claude logout
-        // that already reached Cora): fall through to an empty default rather
-        // than refusing the delete.
+        // Signed out on both sides (a claude logout that already reached
+        // Cora): try the next one rather than refusing the delete.
         if (!(error instanceof AnthropicAccountNotConnectedError)) throw error;
       }
     }
@@ -812,26 +964,54 @@ export class AnthropicAccountService {
       if (await options.ownershipGuard?.(profile)) {
         throw new PiAccountProfileProtectedError(profile.id);
       }
-      await this.handOffDefault(profile.id);
-      let closedSessionCount = 0;
       const cliProfileId = profile.cliProfileId;
+      // Every refusal comes before anything moves: the card asks about the
+      // terminals in a second step, and a delete the user then abandons must
+      // not have switched Cora and Claude Code to another account.
       if (cliProfileId) {
         this.sweepLeases();
-        if (this.leases.isLeased(cliProfileId)) {
-          const count = this.leases.owners(cliProfileId).length;
-          if (!options.closeSessions || !this.sessionsHook) {
-            throw new AnthropicAccountSessionsError(count);
-          }
-          closedSessionCount = (await this.sessionsHook.disposeProfileSessions(cliProfileId))
-            .closedSessionCount;
-          this.sweepLeases();
+        if (this.leases.isLeased(cliProfileId) && (!options.closeSessions || !this.sessionsHook)) {
+          throw new AnthropicAccountSessionsError(this.leases.owners(cliProfileId).length);
         }
-        this.mirror.unwatch(profile.id);
-        await this.removeCliHalf(cliProfileId);
       }
-      await this.piStore.deleteProfile(profile.id, {
-        ...(options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {}),
-      });
+      await this.handOffDefault(profile.id);
+      const guard = options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {};
+      let closedSessionCount = 0;
+      if (!cliProfileId) {
+        await this.piStore.deleteProfile(profile.id, guard);
+      } else {
+        // Unlink before either half goes. A reconcile racing the delete (the
+        // usage poller, a Cora launch, the lease-release hook of the
+        // terminals closed below) then resolves no pair and cannot rebuild
+        // the half from the other once its directory and Keychain item are
+        // gone; the mirror is drained so an in-flight read lands first.
+        this.deleting.add(profile.id);
+        try {
+          await this.piStore.registry.recordCliProfileId(profile.id, null);
+          await this.mirror.unwatch(profile.id);
+          try {
+            await this.piStore.deleteProfile(profile.id, guard);
+          } catch (error) {
+            // The Pi half refused (an active run started meanwhile, an
+            // unreadable run store): the row stays whole, not half-deleted.
+            const restored = await this.piStore.registry
+              .recordCliProfileId(profile.id, cliProfileId)
+              .catch(() => null);
+            if (restored) await this.watchProfile(restored);
+            throw error;
+          }
+          if (this.sessionsHook && this.leases.isLeased(cliProfileId)) {
+            closedSessionCount = (await this.sessionsHook.disposeProfileSessions(cliProfileId))
+              .closedSessionCount;
+            this.sweepLeases();
+          }
+          // From here a failure leaves a terminal-only card the user can
+          // delete again, never an account with a missing half.
+          await this.removeCliHalf(cliProfileId);
+        } finally {
+          this.deleting.delete(profile.id);
+        }
+      }
       await this.invalidateCaches().catch(() => undefined);
       this.broadcast();
       return { deleted: true, closedSessionCount };
@@ -851,9 +1031,6 @@ export class AnthropicAccountService {
       const snapshot = await this.claudeStore.snapshot();
       if (!snapshot.profiles.some((entry) => entry.id === cliProfileId)) {
         return { deleted: false };
-      }
-      if (snapshot.defaultProfileId === cliProfileId) {
-        await this.claudeStore.setDefaultProfile(CLAUDE_CLI_PERSONAL_PROFILE_ID);
       }
       this.sweepLeases();
       await this.removeCliHalf(cliProfileId);
@@ -885,7 +1062,7 @@ export class AnthropicAccountService {
           continue;
         }
         await this.piStore.registry.recordCliProfileId(profile.id, null);
-        this.mirror.unwatch(profile.id);
+        await this.mirror.unwatch(profile.id);
         cleared.push(profile.id);
       }
       return cleared;
@@ -991,7 +1168,7 @@ export class AnthropicAccountService {
     }
     const watched = new Set(pairs.map((pair) => pair.coraProfileId));
     for (const pair of this.mirror.watchedPairs()) {
-      if (!watched.has(pair.coraProfileId)) this.mirror.unwatch(pair.coraProfileId);
+      if (!watched.has(pair.coraProfileId)) await this.mirror.unwatch(pair.coraProfileId);
     }
     for (const pair of pairs) this.mirror.watch(pair);
     await this.mirror.reconcileAll();

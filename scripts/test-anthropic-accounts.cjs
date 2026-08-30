@@ -32,6 +32,15 @@ const CLI_IDS = [
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5",
 ];
+const CLI_IDS_2 = [
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3",
+  "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
+];
+const UUID_A = "a1111111-1111-4111-8111-111111111111";
+const UUID_B = "b2222222-2222-4222-8222-222222222222";
+const UUID_C = "c3333333-3333-4333-8333-333333333333";
 const ACCOUNT_UUID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const OTHER_UUID = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 const fingerprintOf = (uuid) => crypto.createHash("sha256").update(uuid.toLowerCase()).digest("hex");
@@ -198,6 +207,9 @@ async function main() {
             count += 1;
           }
         }
+        // The pty layer's lease-release hook reconciles the profile the
+        // terminal ran on, in the middle of the delete that closed it.
+        void service.reconcileCliProfile(profileId).catch(() => null);
         return { closedSessionCount: count };
       },
     },
@@ -449,6 +461,7 @@ async function main() {
   );
   const releaseLease = leases.acquire(terminalOnly.profile.id, "terminal:pane-9");
   liveOwners.add("terminal:pane-9");
+  broadcasts = 0;
   await assert.rejects(
     () => service.deleteAnthropicAccount(sharedRow.id),
     (error) => error.name === "AnthropicAccountSessionsError" && error.sessionCount === 1,
@@ -456,19 +469,43 @@ async function main() {
   assert.ok(await piStore.registry.getProfile(sharedRow.id), "a refused delete changes nothing");
   assert.equal(
     (await piStore.registry.snapshot()).defaults.anthropic,
-    accountOne.id,
-    "the handoff to Account 1 happens before the session check",
+    sharedRow.id,
+    "a refused delete leaves the Cora default where it was",
   );
-  assert.equal((await claudeStore.snapshot()).defaultProfileId, "personal");
+  assert.equal(
+    (await claudeStore.snapshot()).defaultProfileId,
+    terminalOnly.profile.id,
+    "a refused delete leaves the Claude Code default where it was",
+  );
+  assert.equal(broadcasts, 0, "a refused delete emits no broadcast");
+  assert.equal(mirror.pairFor(sharedRow.id).cliProfileId, terminalOnly.profile.id, "still watched");
+  // The live count reaches the overview so the card's armed Delete is current.
+  const listedLeased = await service.listAnthropicAccounts();
+  assert.equal(
+    listedLeased.accounts.find((entry) => entry.coraProfileId === sharedRow.id).terminal.liveSessions,
+    1,
+  );
   const deleted = await service.deleteAnthropicAccount(sharedRow.id, { closeSessions: true });
   assert.deepEqual(deleted, { deleted: true, closedSessionCount: 1 });
   assert.deepEqual(disposed, [terminalOnly.profile.id]);
   releaseLease();
+  assert.equal(
+    (await piStore.registry.snapshot()).defaults.anthropic,
+    accountOne.id,
+    "the delete hands the Cora default to Account 1",
+  );
+  assert.equal((await claudeStore.snapshot()).defaultProfileId, "personal");
   assert.equal(await piStore.registry.getProfile(sharedRow.id), null);
   assert.equal(fs.existsSync(terminalDir), false);
   assert.equal(keychain.has(H.credentials.claudeCliKeychainService(terminalDir)), false);
   assert.equal(fs.existsSync(path.dirname(piAuthFile(sharedRow.id))), false);
   assert.equal(mirror.pairFor(sharedRow.id), undefined);
+  // The lease-release hook fired mid-delete; give its reconcile time to
+  // land before checking that nothing came back.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(fs.existsSync(terminalDir), false, "a racing reconcile must not rebuild the half");
+  assert.equal(keychain.has(H.credentials.claudeCliKeychainService(terminalDir)), false);
+  assert.deepEqual((await claudeStore.reconcile()).orphanProfileIds, []);
   assert.equal(
     fs.readdirSync(path.join(claudeRoot, "accounts")).some((name) => name.includes("deleting")),
     false,
@@ -515,6 +552,189 @@ async function main() {
   assert.equal(readPi(work.id).access, "claude-access-30");
   await service.reconcileDefault();
   pass("reconcileCliProfile folds a terminal-side rotation back into Cora");
+
+  // A second machine: no ~/.claude login, several managed accounts. Every
+  // hand-off, rollback and race below runs against real stores.
+  {
+    const HOME2 = path.join(TMP, "home-2");
+    const piRoot2 = path.join(HOME2, ".codarastudio", "pi-agent");
+    const claudeRoot2 = path.join(HOME2, ".codarastudio", "claude-cli");
+    const personalDir2 = path.join(HOME2, ".claude");
+    privateDir(personalDir2);
+    const piStore2 = new H.piStore.PiAccountAuthStore(piRoot2);
+    const leases2 = new H.execution.ClaudeCliProfileLeaseRegistry();
+    let cliIndex2 = 0;
+    const claudeStore2 = new H.claudeProfiles.ClaudeCliAccountProfileStore(claudeRoot2, {
+      personalConfigDir: personalDir2,
+      personalConfigDirEnv: null,
+      leases: leases2,
+      idFactory: () => CLI_IDS_2[cliIndex2++],
+      authChecker: (input) =>
+        H.claudeProfiles.claudeCredentialAuthChecker(input, { backend, personalFallback: null }),
+    });
+    const mirror2 = new H.mirror.AnthropicCredentialMirror({
+      backend,
+      loadAuthStorage,
+      keychainPoll: null,
+      debounceMs: 30,
+      retryDelayMs: 20,
+    });
+    let networkIdentity2 = {};
+    const liveOwners2 = new Set();
+    const logs2 = [];
+    let deletingCora = null;
+    const service2 = new H.accounts.AnthropicAccountService({
+      piStore: piStore2,
+      claudeStore: claudeStore2,
+      leases: leases2,
+      mirror: mirror2,
+      backend,
+      loadAuthStorage,
+      readIdentity: async () => networkIdentity2,
+      homeDir: HOME2,
+      invalidateCaches: async () => undefined,
+      sessions: {
+        liveOwnerIds: () => liveOwners2,
+        disposeProfileSessions: async (profileId) => {
+          let count = 0;
+          for (const owner of leases2.owners(profileId)) {
+            if (owner.startsWith("terminal:")) {
+              liveOwners2.delete(owner);
+              count += 1;
+            }
+          }
+          // Everything that reconciles concurrently in production: the
+          // lease-release hook, the usage poller, a Cora launch.
+          void service2.reconcileCliProfile(profileId).catch(() => null);
+          if (deletingCora) void service2.reconcileProfile(deletingCora).catch(() => null);
+          void service2.reconcileDefault().catch(() => null);
+          return { closedSessionCount: count };
+        },
+      },
+      platform: "linux",
+      log: (message) => logs2.push(message),
+    });
+    const managedDir2 = (cliId) =>
+      H.claudeProfiles.claudeCliManagedProfileConfigDir(claudeRoot2, cliId);
+    const connectCora2 = async (label, n, identity) => {
+      const target = await piStore2.prepareCredentialTarget({
+        provider: "anthropic",
+        label,
+        identityFingerprint: identity.fingerprint,
+        accountEmail: identity.email,
+      });
+      const { configDir, authFile } = H.piStore.piAccountProfilePaths(piRoot2, target.profile.id);
+      privateDir(configDir);
+      await AuthStorage.create(authFile).modify("anthropic", async () => piCredential(n));
+      fs.chmodSync(authFile, 0o600);
+      return target.profile;
+    };
+    const identityA = { fingerprint: fingerprintOf(UUID_A), email: "a@example.com", accountUuid: UUID_A };
+    const identityB = { fingerprint: fingerprintOf(UUID_B), email: "b@example.com", accountUuid: UUID_B };
+    const identityC = { fingerprint: fingerprintOf(UUID_C), email: "c@example.com", accountUuid: UUID_C };
+    const a = await connectCora2("A", 5, identityA);
+    const aCli = await service2.ensureCliHalf(a.id, H.mirror.canonicalFromPi(piCredential(5)), identityA);
+    const b = await connectCora2("B", 6, identityB);
+    const bCli = await service2.ensureCliHalf(b.id, H.mirror.canonicalFromPi(piCredential(6)), identityB);
+    await service2.useAnthropicAccount(a.id);
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, aCli);
+
+    // Deleting the active account with no Account 1 hands both defaults to
+    // the oldest remaining account instead of a signed-out ~/.claude.
+    assert.deepEqual(await service2.deleteAnthropicAccount(a.id), { deleted: true, closedSessionCount: 0 });
+    assert.equal((await piStore2.registry.snapshot()).defaults.anthropic, b.id);
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, bCli);
+    assert.equal(fs.existsSync(managedDir2(aCli)), false);
+    pass("deleting the active account hands off to the next connected account when Account 1 is absent");
+
+    // A Cora-only row that is already the default gets its half on
+    // reconnect, and the Claude default follows without waiting for a launch.
+    const c = await connectCora2("C", 7, identityC);
+    await service2.useAnthropicAccount(c.id);
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, "personal");
+    const cCli = await service2.ensureCliHalf(c.id, H.mirror.canonicalFromPi(piCredential(7)), identityC);
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, cCli);
+    assert.equal((await piStore2.registry.snapshot()).defaults.anthropic, c.id);
+    pass("a half created for the current Cora default takes the Claude Code default with it");
+
+    // A ~/.claude login that belongs to a managed-linked row is derived once,
+    // not on every probe tick.
+    await writeClaudeSlot(personalDir2, null, claudeCredential(3));
+    fs.writeFileSync(
+      path.join(HOME2, ".claude.json"),
+      JSON.stringify({ oauthAccount: { accountUuid: UUID_B, emailAddress: "b@example.com" } }),
+      { mode: 0o600 },
+    );
+    assert.equal(await service2.ensureAccountOne(), null);
+    assert.equal(await service2.ensureAccountOne(), null);
+    assert.equal(logs2.filter((line) => line.includes("already paired with a managed profile")).length, 1);
+    assert.equal((await piStore2.registry.listProfiles()).length, 2);
+    await backend.clear(personalDir2, null);
+    fs.rmSync(path.join(HOME2, ".claude.json"), { force: true });
+    pass("a personal login owned by a managed-linked row is rejected once and remembered");
+
+    // The Pi half refusing mid-delete leaves the row whole and still watched.
+    let guardCalls = 0;
+    await assert.rejects(
+      () =>
+        service2.deleteAnthropicAccount(b.id, {
+          ownershipGuard: async () => {
+            guardCalls += 1;
+            if (guardCalls > 1) throw new Error("run store unreadable");
+            return false;
+          },
+        }),
+      /run store unreadable/,
+    );
+    assert.equal((await piStore2.registry.getProfile(b.id)).cliProfileId, bCli);
+    assert.equal(mirror2.pairFor(b.id).cliProfileId, bCli);
+    assert.ok(fs.existsSync(managedDir2(bCli)));
+    assert.ok(keychain.has(H.credentials.claudeCliKeychainService(managedDir2(bCli))));
+    pass("a Pi half that refuses to delete leaves the account whole, never half-deleted");
+
+    // Defaults that drifted apart (Claude on B's half, Cora on C) do not make
+    // B undeletable: the Claude default moves to the active row's half.
+    await claudeStore2.setDefaultProfile(bCli);
+    assert.deepEqual(await service2.deleteAnthropicAccount(b.id), { deleted: true, closedSessionCount: 0 });
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, cCli);
+    assert.equal((await piStore2.registry.snapshot()).defaults.anthropic, c.id);
+    assert.equal(fs.existsSync(managedDir2(bCli)), false);
+    pass("a drifted Claude Code default is moved off the half being deleted");
+
+    // Reconciles racing the delete of a leased account cannot rebuild the
+    // half: the directory and the Keychain item stay gone, and no orphan is
+    // left for the store to report.
+    leases2.acquire(cCli, "terminal:pane-c");
+    liveOwners2.add("terminal:pane-c");
+    deletingCora = c.id;
+    const deletedC = await service2.deleteAnthropicAccount(c.id, { closeSessions: true });
+    assert.deepEqual(deletedC, { deleted: true, closedSessionCount: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(fs.existsSync(managedDir2(cCli)), false);
+    assert.equal(keychain.has(H.credentials.claudeCliKeychainService(managedDir2(cCli))), false);
+    assert.deepEqual((await claudeStore2.reconcile()).orphanProfileIds, []);
+    assert.equal((await piStore2.registry.snapshot()).defaults.anthropic, undefined);
+    assert.equal((await claudeStore2.snapshot()).defaultProfileId, "personal");
+    assert.equal(await service2.reconcileCliProfile(cCli), null);
+    pass("reconciles racing a delete never resurrect the deleted half");
+
+    // Account 1 registered offline (no identity anywhere) learns its
+    // fingerprint on a later pass instead of staying unmatchable forever.
+    await writeClaudeSlot(personalDir2, null, claudeCredential(2));
+    const offlineOne = await service2.ensureAccountOne();
+    assert.equal(offlineOne.label, "Account 1");
+    assert.equal(offlineOne.identityFingerprint, undefined);
+    networkIdentity2 = { fingerprint: fingerprintOf(UUID_A), email: "a@example.com" };
+    const learned = await service2.ensureAccountOne();
+    assert.equal(learned.id, offlineOne.id);
+    assert.equal(learned.identityFingerprint, fingerprintOf(UUID_A));
+    assert.equal(learned.accountEmail, "a@example.com");
+    assert.equal((await piStore2.registry.listProfiles()).length, 1);
+    pass("Account 1 registered without an identity is backfilled once the identity is reachable");
+
+    mirror2.stop();
+    service2.stop();
+  }
 
   // Nothing produced by the service is readable by group or other users.
   const offending = [];
