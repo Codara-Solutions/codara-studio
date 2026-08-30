@@ -94,12 +94,19 @@ export function formatActiveCliEnvPointer(
   return `${lines.join("\n")}\n`;
 }
 
-/** Write the pointer with a fresh revision; writes are serialized. */
+/**
+ * Write the pointer with a fresh revision. Writes are serialized, and a
+ * selector function is evaluated inside that serialization: the read
+ * behind write N then always follows write N-1, so revision order is state
+ * order even when two refreshes overlap (every default change in the
+ * startup pass fires one, and each store read is a fresh disk read).
+ */
 export function writeActiveCliEnvPointer(
-  selectors: ActiveCliEnvSelectors,
+  selectors: ActiveCliEnvSelectors | (() => Promise<ActiveCliEnvSelectors>),
   options: WriteActiveCliEnvPointerOptions = {},
 ): Promise<void> {
   const run = tail.then(async () => {
+    const resolved = typeof selectors === "function" ? await selectors() : selectors;
     const homeDir = resolve(options.homeDir ?? codaraHomeDir());
     const pointerFile = options.pointerFile ?? codaraActiveCliEnvPointerFile(homeDir);
     // A revision equal to the last one written would read as "unchanged"
@@ -108,7 +115,7 @@ export function writeActiveCliEnvPointer(
     if (revision <= lastRevision) revision = lastRevision + 1;
     lastRevision = revision;
     await fs.mkdir(dirname(pointerFile), { recursive: true, mode: 0o700 });
-    await atomicWritePrivateFile(pointerFile, formatActiveCliEnvPointer(selectors, revision, homeDir));
+    await atomicWritePrivateFile(pointerFile, formatActiveCliEnvPointer(resolved, revision, homeDir));
   });
   tail = run.then(
     () => undefined,
@@ -155,8 +162,7 @@ export async function activeCliEnvSelectors(
 export async function refreshActiveCliEnvPointer(
   options: RefreshActiveCliEnvPointerOptions = {},
 ): Promise<void> {
-  const selectors = await activeCliEnvSelectors(options);
-  await writeActiveCliEnvPointer(selectors, options);
+  await writeActiveCliEnvPointer(() => activeCliEnvSelectors(options), options);
 }
 
 /** Test seam: forget the last revision so a suite can start from a clean clock. */

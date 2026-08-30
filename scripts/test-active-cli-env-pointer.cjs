@@ -186,6 +186,27 @@ async function main() {
   assert.deepEqual(read().split("\n").slice(1), [`GROK_HOME=${grokDir}`, ""]);
   pass("refresh follows the store defaults and never names CODEX_HOME");
 
+  // Two overlapping refreshes: the store read of the first is slow and
+  // resolves after the second one wrote. The reads run inside the write
+  // serialization, so the later write still reflects the later state and
+  // the highest revision never names a stale default.
+  await claudeStore.setDefaultProfile(CLAUDE_ID);
+  let reads = 0;
+  const slowFirstRead = {
+    rootDir: claudeRoot,
+    snapshot: async () => {
+      reads += 1;
+      if (reads === 1) await new Promise((resolve) => setTimeout(resolve, 120));
+      return claudeStore.snapshot();
+    },
+  };
+  const firstRefresh = M.refreshActiveCliEnvPointer({ claudeStore: slowFirstRead, grokStore });
+  await claudeStore.setDefaultProfile("personal");
+  const secondRefresh = M.refreshActiveCliEnvPointer({ claudeStore: slowFirstRead, grokStore });
+  await Promise.all([firstRefresh, secondRefresh]);
+  assert.deepEqual(read().split("\n").slice(1), [`GROK_HOME=${grokDir}`, ""], "the newest revision reflects the newest default");
+  pass("overlapping refreshes commit in state order");
+
   // The module is data, not a script: no shell export text anywhere in it.
   const source = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "active-cli-env-pointer.ts"), "utf8");
   assert.equal(source.includes("export CLAUDE_CONFIG_DIR"), false);
