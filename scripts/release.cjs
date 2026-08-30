@@ -87,7 +87,7 @@ function bumpLevel(cwd) {
     cwd,
     encoding: "utf8",
   }).stdout;
-  if (/^[a-z]+(\([^)]*\))?!:/m.test(log) || /BREAKING CHANGE/.test(log)) return "major";
+  if (/^[a-z]+(\([^)]*\))?!:/m.test(log) || /^BREAKING CHANGE:/m.test(log)) return "major";
   if (/^feat(\([^)]*\))?:/m.test(log)) return "minor";
   return "patch";
 }

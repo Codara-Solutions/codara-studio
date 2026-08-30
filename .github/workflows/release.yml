@@ -1,0 +1,95 @@
+name: Release
+
+# Every push to main is a release, built on GitHub's free macOS runners:
+# one job builds, signs, and notarizes macOS and cross-builds the Windows
+# installer, publishes both to the release bucket (running apps hear the SSE
+# push within seconds), and pushes the vX.Y.Z tag that seeds the next
+# version computation. A push whose HEAD is a "release: vX.Y.Z" bookkeeping
+# commit (the local pipeline's bump) is skipped, so the two pipelines can
+# coexist without ever double-releasing.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # pushing the release tag
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for semantic versioning
+
+      - name: Guard | signing secrets present
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          RELEASES_S3_ACCESS_KEY_ID: ${{ secrets.RELEASES_S3_ACCESS_KEY_ID }}
+        run: |
+          if [ -z "$CSC_LINK" ]; then
+            echo "::error::CSC_LINK (Developer ID .p12) secret is not set; refusing to publish unsigned macOS builds."
+            exit 1
+          fi
+          if [ -z "$RELEASES_S3_ACCESS_KEY_ID" ]; then
+            echo "::error::RELEASES_* bucket secrets are not set."
+            exit 1
+          fi
+
+      - name: Version | semantic bump from conventional commits
+        id: version
+        run: node scripts/ci-version.cjs
+
+      - uses: actions/setup-node@v4
+        if: steps.version.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.version.outputs.skip != 'true'
+        run: npm ci
+
+      - name: Build, sign, publish macOS
+        if: steps.version.outputs.skip != 'true'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RELEASES_BUCKET: ${{ secrets.RELEASES_BUCKET }}
+          RELEASES_S3_ENDPOINT: ${{ secrets.RELEASES_S3_ENDPOINT }}
+          RELEASES_S3_REGION: ${{ secrets.RELEASES_S3_REGION }}
+          RELEASES_S3_ACCESS_KEY_ID: ${{ secrets.RELEASES_S3_ACCESS_KEY_ID }}
+          RELEASES_S3_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_S3_SECRET_ACCESS_KEY }}
+        run: |
+          npm run package:mac
+          node scripts/publish-release.cjs mac
+
+      - name: Build and publish Windows
+        if: steps.version.outputs.skip != 'true'
+        env:
+          RELEASES_BUCKET: ${{ secrets.RELEASES_BUCKET }}
+          RELEASES_S3_ENDPOINT: ${{ secrets.RELEASES_S3_ENDPOINT }}
+          RELEASES_S3_REGION: ${{ secrets.RELEASES_S3_REGION }}
+          RELEASES_S3_ACCESS_KEY_ID: ${{ secrets.RELEASES_S3_ACCESS_KEY_ID }}
+          RELEASES_S3_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_S3_SECRET_ACCESS_KEY }}
+        run: |
+          npm run package:win
+          node scripts/publish-release.cjs win
+
+      - name: Tag the release
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
