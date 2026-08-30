@@ -83,6 +83,12 @@ export async function readPrivateJsonFile(
 export interface AtomicWritePrivateFileOptions {
   /** Refuse to replace a destination that fails the private-file checks. */
   maxBytes?: number;
+  /**
+   * Chmod the directory to 0700 (default). False for a home the user owns
+   * (~/.grok, ~/.codex), whose mode is not Codara's to change; a directory
+   * created here is still made 0700.
+   */
+  privateDirectory?: boolean;
 }
 
 export async function atomicWritePrivateFile(
@@ -92,7 +98,9 @@ export async function atomicWritePrivateFile(
 ): Promise<void> {
   const directory = dirname(destination);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") await fs.chmod(directory, 0o700);
+  if (process.platform !== "win32" && options.privateDirectory !== false) {
+    await fs.chmod(directory, 0o700);
+  }
   // Throws on a symlink, a non-file or a world-readable file before any
   // temporary file exists.
   await assertPrivateRegularFile(destination, options.maxBytes);

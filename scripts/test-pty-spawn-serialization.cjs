@@ -217,6 +217,7 @@ function stubPlugin() {
       export function acquireNativeGrokProfileLease(profileId, ownerId) {
         return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
       }
+      export function notifyNativeGrokProfileLeaseReleased() {}
     `,
     "./orchestration/codex-cli-profile-execution": `
       export function buildCodexCliSharedEnvironment(baseEnv) {
@@ -561,6 +562,36 @@ async function main() {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
     delete process.env.CLAUDE_CODE_HOST_CREDS_FILE;
+
+    // A Grok pane is frozen on the GROK_HOME it started with: a default
+    // change reroutes only new panes, exactly like Claude.
+    const firstGrokProfile = controller.currentDefaultGrokProfileId;
+    const grokFirst = await pty.spawn(localGrokOptions("grok-frozen"));
+    assert.equal(grokFirst.nativeGrokProfileId, firstGrokProfile);
+    assert.equal(
+      controller.localSpawnCalls.at(-1).options.env.GROK_HOME,
+      `/grok-profiles/${firstGrokProfile}`,
+    );
+    controller.currentDefaultGrokProfileId = "20000000-0000-4000-8000-000000000002";
+    const grokAttach = await pty.spawn(localGrokOptions("grok-frozen"));
+    assert.equal(grokAttach.nativeGrokProfileId, firstGrokProfile);
+    assert.equal(
+      controller.localSpawnCalls.filter(
+        (call) => call.options.env?.GROK_HOME === `/grok-profiles/${firstGrokProfile}`,
+      ).length,
+      1,
+      "Grok default changes must not reroute an existing pane",
+    );
+    const grokNew = await pty.spawn(localGrokOptions("grok-new"));
+    assert.equal(grokNew.nativeGrokProfileId, controller.currentDefaultGrokProfileId);
+    assert.equal(
+      controller.localSpawnCalls.at(-1).options.env.GROK_HOME,
+      `/grok-profiles/${controller.currentDefaultGrokProfileId}`,
+      "a new Grok pane follows the new default",
+    );
+    controller.exitLocal(grokFirst.pid);
+    controller.exitLocal(grokNew.pid);
+    assert.equal(controller.activeProfileLeases.has("terminal:grok-frozen"), false);
 
     // Account activation closes exactly one CLI family through the same
     // graceful PTY path used at app quit. Other agent families stay alive and

@@ -77,11 +77,6 @@ import {
   ensureCodexCliAuthVault,
   finalizeCodexCliLogout,
 } from "./codex-cli-auth-selector";
-import {
-  activateGrokCliAccount,
-  ensureGrokCliAuthVault,
-  finalizeGrokCliLogout,
-} from "./grok-cli-auth-selector";
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
 
@@ -533,13 +528,8 @@ export interface NativeCliAccountServiceOptions {
   codexAuthSelector?: (profileId: string) => Promise<unknown>;
   /** Test seam for the one-time migration of the historical personal login. */
   codexAuthVaultInitializer?: () => Promise<unknown>;
-  /** Test seam. Production swaps only auth.json in the official Grok home. */
-  grokAuthSelector?: (profileId: string) => Promise<unknown>;
-  /** Test seam for preserving the historical Grok login. */
-  grokAuthVaultInitializer?: () => Promise<unknown>;
-  /** Test seams for removing a logged-out credential from the live slot. */
+  /** Test seam for removing a logged-out credential from the live slot. */
   codexAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
-  grokAuthLogoutFinalizer?: (profileId: string) => Promise<unknown>;
   /** Close every live session for a runtime before its account changes. */
   sessionShutdown?: NativeCliAccountSessionShutdown;
 }
@@ -566,10 +556,7 @@ export class NativeCliAccountService {
   private readonly now: () => number;
   private readonly codexAuthSelector: (profileId: string) => Promise<unknown>;
   private readonly codexAuthVaultInitializer: () => Promise<unknown>;
-  private readonly grokAuthSelector: (profileId: string) => Promise<unknown>;
-  private readonly grokAuthVaultInitializer: () => Promise<unknown>;
   private readonly codexAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
-  private readonly grokAuthLogoutFinalizer: (profileId: string) => Promise<unknown>;
   private sessionShutdown: NativeCliAccountSessionShutdown;
   private readonly pendingLoginPlans = new Map<string, PendingLoginPlan>();
   private readonly expiredLoginTokens = new Map<string, number>();
@@ -633,32 +620,11 @@ export class NativeCliAccountService {
               await activateCodexCliAccount(this.codexStore, defaultProfileId);
             }
           });
-    this.grokAuthSelector =
-      options.grokAuthSelector ??
-      (options.grokStore
-        ? async () => undefined
-        : (profileId) => activateGrokCliAccount(this.grokStore, profileId));
-    this.grokAuthVaultInitializer =
-      options.grokAuthVaultInitializer ??
-      (options.grokStore
-        ? async () => undefined
-        : async () => {
-            const active = await ensureGrokCliAuthVault(this.grokStore);
-            const { defaultProfileId } = await this.grokStore.snapshot();
-            if (active !== defaultProfileId) {
-              await activateGrokCliAccount(this.grokStore, defaultProfileId);
-            }
-          });
     this.codexAuthLogoutFinalizer =
       options.codexAuthLogoutFinalizer ??
       (options.codexStore
         ? async () => undefined
         : (profileId) => finalizeCodexCliLogout(this.codexStore, profileId));
-    this.grokAuthLogoutFinalizer =
-      options.grokAuthLogoutFinalizer ??
-      (options.grokStore
-        ? async () => undefined
-        : (profileId) => finalizeGrokCliLogout(this.grokStore, profileId));
     this.sessionShutdown =
       options.sessionShutdown ?? (async () => ({ closedSessionCount: 0 }));
     this.grokIdentityReader =
@@ -858,8 +824,7 @@ export class NativeCliAccountService {
         };
       }
       const store = runtime === "grok" ? this.grokStore : this.codexStore;
-      if (runtime === "grok") await this.grokAuthVaultInitializer();
-      else await this.codexAuthVaultInitializer();
+      if (runtime === "codex") await this.codexAuthVaultInitializer();
       const inspection = await store.inspect();
       const identities =
         runtime === "grok"
@@ -1128,8 +1093,7 @@ export class NativeCliAccountService {
       }
       if (before.inspection.defaultProfileId === profileId) {
         try {
-          if (runtime === "grok") await this.grokAuthSelector(profileId);
-          else if (runtime === "codex") await this.codexAuthSelector(profileId);
+          if (runtime === "codex") await this.codexAuthSelector(profileId);
         } catch (error) {
           throw this.sanitizeStoreError(runtime, profileId, error);
         }
@@ -1158,18 +1122,9 @@ export class NativeCliAccountService {
       try {
         const previousProfileId = before.inspection.defaultProfileId;
         if (runtime === "grok") {
+          // A managed Grok account runs in its own GROK_HOME; the default
+          // only decides where the next terminal starts.
           await this.grokStore.setDefaultProfile(profileId);
-          try {
-            await this.grokAuthSelector(profileId);
-          } catch (error) {
-            await this.grokStore
-              .setDefaultProfile(previousProfileId)
-              .catch(() => undefined);
-            await this.grokAuthSelector(previousProfileId).catch(
-              () => undefined,
-            );
-            throw error;
-          }
         } else {
           await this.codexStore.setDefaultProfile(profileId);
           try {
@@ -1530,11 +1485,9 @@ export class NativeCliAccountService {
         );
       }
       this.assertProcessSucceeded("logout", runtime, profileId, result);
-      if (runtime === "grok") {
-        await this.grokAuthLogoutFinalizer(profileId);
-      } else {
-        await this.codexAuthLogoutFinalizer(profileId);
-      }
+      // `grok logout` ran against the profile's own GROK_HOME and cleared
+      // it; only the Codex vault has a live slot to finalize.
+      if (runtime === "codex") await this.codexAuthLogoutFinalizer(profileId);
     });
   }
 

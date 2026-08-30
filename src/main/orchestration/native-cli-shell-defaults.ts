@@ -6,10 +6,13 @@ import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
 /**
  * The Active native CLI accounts, projected onto plain Studio shells.
  *
- * Claude and Grok still select managed accounts with their documented home
- * variables. A plain terminal tab has no startup command, so these two
- * selectors are added when Settings marks a managed account Active. Codex is
- * intentionally absent: it now has one state home and switches only auth.json.
+ * Claude and Grok select managed accounts with their documented home
+ * variables: a managed Claude account is a CLAUDE_CONFIG_DIR, a managed Grok
+ * account is a GROK_HOME of its own under grok-cli/accounts, and the personal
+ * account of each is the CLI's default home. A plain terminal tab has no
+ * startup command, so these two selectors are added when Settings marks a
+ * managed account Active. Codex is intentionally absent: it has one state
+ * home and its switch moves only auth.json.
  *
  * Two invariants:
  *

@@ -90,8 +90,6 @@ export interface GrokCliProfileLeaseView {
 export interface GrokCliAccountProfileStoreOptions {
   /** Existing Grok home represented by the synthetic `personal` profile. */
   personalHomeDir?: string;
-  /** Optional private auth slot for that historical personal login. */
-  personalAuthFile?: string;
   /** Test seam. Production uses cryptographically random UUIDv4 values. */
   idFactory?: () => string;
   /** Test seam. */
@@ -597,10 +595,7 @@ export class GrokCliAccountProfileStore {
     this.personalHomeDir = resolve(
       options.personalHomeDir?.trim() || defaultPersonalGrokHomeDir(),
     );
-    this.personalAuthFile = resolve(
-      options.personalAuthFile?.trim() ||
-        join(this.personalHomeDir, GROK_CLI_AUTH_FILE),
-    );
+    this.personalAuthFile = join(this.personalHomeDir, GROK_CLI_AUTH_FILE);
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.authChecker = options.authChecker ?? defaultGrokCliAuthChecker;

@@ -105,34 +105,17 @@ async function main() {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
 
-  const G = await loadContract(source("grok-cli-auth-selector.ts"));
-  const grokFixture = fs.mkdtempSync(
-    path.join(os.tmpdir(), "codara-grok-auth-test-"),
-  );
+  // Sign-out followed by a fresh `codex login` in a terminal: the personal
+  // backup is gone while the marker still names personal. The vault must
+  // re-seed from the live login instead of failing every inspect.
+  const reseedFixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-reseed-test-"));
   try {
     const store = {
-      rootDir: path.join(grokFixture, ".codarastudio", "grok-cli"),
-      personalHomeDir: path.join(grokFixture, ".grok"),
+      rootDir: path.join(reseedFixture, ".codarastudio", "codex-cli"),
+      personalHomeDir: path.join(reseedFixture, ".codex"),
     };
     const live = path.join(store.personalHomeDir, "auth.json");
     const managed = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
-    writePrivate(live, "GROK_PERSONAL");
-    writePrivate(managed, "GROK_MANAGED");
-
-    assert.equal(await G.ensureGrokCliAuthVault(store), "personal");
-    assert.equal(await G.activateGrokCliAccount(store, PROFILE), "personal");
-    assert.equal(fs.readFileSync(live, "utf8"), "GROK_MANAGED");
-    writePrivate(live, "GROK_MANAGED_REFRESHED");
-    assert.equal(await G.activateGrokCliAccount(store, "personal"), PROFILE);
-    assert.equal(fs.readFileSync(managed, "utf8"), "GROK_MANAGED_REFRESHED");
-    assert.equal(fs.readFileSync(live, "utf8"), "GROK_PERSONAL");
-    await G.finalizeGrokCliLogout(store, "personal");
-    assert.equal(fs.existsSync(live), false);
-    assert.equal(fs.existsSync(G.grokCliPersonalAuthFile(store.rootDir)), false);
-
-    // Sign-out followed by a fresh `codex login` in a terminal: the personal
-    // backup is gone while the marker still names personal. The vault must
-    // re-seed from the live login instead of failing every inspect.
     writePrivate(T.codexCliPersonalAuthFile(store.rootDir), "OLD_PERSONAL");
     writePrivate(live, "OLD_PERSONAL");
     await T.activateCodexCliAccount(store, "personal");
@@ -161,10 +144,10 @@ async function main() {
       "the live managed credential must not be copied into the personal backup",
     );
   } finally {
-    fs.rmSync(grokFixture, { recursive: true, force: true });
+    fs.rmSync(reseedFixture, { recursive: true, force: true });
   }
 
-  console.log("Native CLI auth-only selector contracts passed");
+  console.log("Codex auth-only selector contracts passed");
 }
 
 main().catch((error) => {

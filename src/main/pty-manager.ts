@@ -31,6 +31,7 @@ import {
 } from "./orchestration/native-codex-profile-runtime";
 import {
   acquireNativeGrokProfileLease,
+  notifyNativeGrokProfileLeaseReleased,
   resolveFrozenNativeGrokProfile,
   resolveNewNativeGrokProfile,
 } from "./orchestration/native-grok-profile-runtime";
@@ -186,6 +187,9 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   const releaseGrok = session.releaseNativeGrokProfileLease;
   session.releaseNativeGrokProfileLease = undefined;
   releaseGrok?.();
+  if (releaseGrok && session.nativeGrokProfileId) {
+    notifyNativeGrokProfileLeaseReleased(session.nativeGrokProfileId);
+  }
 }
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
@@ -2455,6 +2459,21 @@ export async function disposeNativeClaudeProfileSessions(
 ): Promise<NativeCliRuntimeDisposeResult> {
   const ids = [...sessions.entries()]
     .filter(([, session]) => session.nativeClaudeProfileId === profileId)
+    .map(([id]) => id);
+  await disposeSessionsGraceful(ids, maxWaitMs);
+  return { closedSessionCount: ids.length };
+}
+
+/**
+ * Close only the Studio PTYs running on one Grok account, when the user
+ * confirmed that deleting the account may close them.
+ */
+export async function disposeNativeGrokProfileSessions(
+  profileId: string,
+  maxWaitMs = 1500,
+): Promise<NativeCliRuntimeDisposeResult> {
+  const ids = [...sessions.entries()]
+    .filter(([, session]) => session.nativeGrokProfileId === profileId)
     .map(([id]) => id);
   await disposeSessionsGraceful(ids, maxWaitMs);
   return { closedSessionCount: ids.length };
