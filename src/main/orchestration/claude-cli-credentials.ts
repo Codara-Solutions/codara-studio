@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { atomicWritePrivateFile } from "./native-cli-atomic-file";
 
 /**
  * Claude Code's credential slot, read and written the way Claude Code itself
@@ -125,26 +126,9 @@ export async function atomicWriteCredential(
   destination: string,
   credential: string,
 ): Promise<void> {
-  const normalized = normalizeCredential(credential);
-  const directory = dirname(destination);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") await fs.chmod(directory, 0o700);
-  // Refuse to replace a symlink or a world-readable file in place; the
-  // check throws on both before any temporary file exists.
-  await safeCredentialFile(destination);
-  const temporary = join(
-    directory,
-    `.${CLAUDE_CREDENTIALS_FILE}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
-  );
-  try {
-    await fs.writeFile(temporary, normalized, { flag: "wx", mode: 0o600 });
-    if (process.platform !== "win32") await fs.chmod(temporary, 0o600);
-    await fs.rename(temporary, destination);
-    if (process.platform !== "win32") await fs.chmod(destination, 0o600);
-  } catch (error) {
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  await atomicWritePrivateFile(destination, normalizeCredential(credential), {
+    maxBytes: MAX_AUTH_BYTES,
+  });
 }
 
 /**

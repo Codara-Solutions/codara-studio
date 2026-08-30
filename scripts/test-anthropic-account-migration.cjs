@@ -54,7 +54,7 @@ async function buildHarness() {
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as claudeProfiles from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("claude-cli-profile-execution.ts"))};`,
-      `export * as mirror from ${JSON.stringify(orchestration("anthropic-credential-mirror.ts"))};`,
+      `export * as mirror from ${JSON.stringify(orchestration("credential-mirror.ts"))};`,
       `export * as credentials from ${JSON.stringify(orchestration("claude-cli-credentials.ts"))};`,
     ].join("\n"),
   );
@@ -286,10 +286,9 @@ async function main() {
     authChecker: (input) =>
       H.claudeProfiles.claudeCredentialAuthChecker(input, { backend, personalFallback: null }),
   });
-  const mirror = new H.mirror.AnthropicCredentialMirror({
-    backend,
+  const mirror = new H.mirror.CredentialMirror({
     loadAuthStorage,
-    keychainPoll: null,
+    pollWhenWatchBlind: null,
     debounceMs: 30,
     retryDelayMs: 20,
   });
@@ -367,7 +366,7 @@ async function main() {
   assert.equal((await piStore.registry.snapshot()).defaults.anthropic, rowSwapped.id);
   assert.equal((await claudeStore.snapshot()).defaultProfileId, CLI.swapped);
   // Unpaired halves are still there for the Share action.
-  const listed = await service.listAnthropicAccounts();
+  const listed = await service.listAccounts();
   assert.deepEqual(listed.terminalOnly.map((entry) => entry.cliProfileId).sort(), [CLI.lonely, CLI.mismatch].sort());
   assert.ok(listed.accounts.some((entry) => entry.coraProfileId === rowCoraOnly.id && entry.cliProfileId === null));
   assert.ok(

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 "use strict";
 
-// The Anthropic credential mirror, driven against real temp directories and
-// the REAL pinned Pi AuthStorage (proper-lockfile and all). The Keychain is
-// replaced by an in-memory map so no real item is touched.
+// The provider-generic credential mirror over the Claude adapter, driven
+// against real temp directories and the REAL pinned Pi AuthStorage
+// (proper-lockfile and all). The Keychain is replaced by an in-memory map so
+// no real item is touched.
 //
 //   node scripts/test-anthropic-credential-mirror.cjs
 
@@ -70,10 +71,18 @@ function pass(name) {
 }
 
 async function main() {
+  const orchestration = (name) => path.join(ROOT, "src", "main", "orchestration", name);
+  const entry = path.join(TMP, "entry.ts");
+  fs.writeFileSync(
+    entry,
+    [
+      `export * from ${JSON.stringify(orchestration("credential-mirror.ts"))};`,
+      `export * as codec from ${JSON.stringify(orchestration("account-adapters/claude-credential-codec.ts"))};`,
+      `export * as claudeAdapter from ${JSON.stringify(orchestration("account-adapters/claude-account-adapter.ts"))};`,
+    ].join("\n"),
+  );
   await esbuild.build({
-    entryPoints: [
-      path.join(ROOT, "src", "main", "orchestration", "anthropic-credential-mirror.ts"),
-    ],
+    entryPoints: [entry],
     bundle: true,
     platform: "node",
     format: "cjs",
@@ -83,6 +92,7 @@ async function main() {
     logLevel: "silent",
   });
   const mod = require(OUT);
+  const codec = mod.codec;
   const AuthStorage = await loadAuthStorage();
 
   // A Keychain that lives in a map, keyed by service, plus the real file half.
@@ -119,6 +129,11 @@ async function main() {
     },
   };
 
+  // The adapter carries the Keychain seam; a pair built on another backend
+  // (a racing or gated one below) gets its own adapter.
+  const makeAdapter = (adapterBackend) =>
+    mod.claudeAdapter.createClaudeAccountAdapter({ backend: adapterBackend, platform: "linux" });
+  const adapter = makeAdapter(backend);
   let pairIndex = 0;
   function makePair(options = {}) {
     pairIndex += 1;
@@ -129,11 +144,12 @@ async function main() {
     fs.mkdirSync(piDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
     return {
+      provider: "anthropic",
       coraProfileId: CORA_ID,
       cliProfileId: cliId,
       authFile: path.join(piDir, "auth.json"),
-      configDir,
-      configDirEnv: options.personal ? null : configDir,
+      location: { configDir, configDirEnv: options.personal ? null : configDir },
+      adapter,
     };
   }
   const writePi = (pair, credential) => {
@@ -149,22 +165,21 @@ async function main() {
       ? JSON.parse(fs.readFileSync(pair.authFile, "utf8")).anthropic ?? null
       : null;
   const writeClaude = (pair, record) => {
+    const { configDir, configDirEnv } = pair.location;
     if (record === null) {
-      keychain.delete(credentialsMod.claudeCliKeychainService(pair.configDirEnv));
-      fs.rmSync(credentialsMod.claudeCredentialFile(pair.configDir), { force: true });
+      keychain.delete(credentialsMod.claudeCliKeychainService(configDirEnv));
+      fs.rmSync(credentialsMod.claudeCredentialFile(configDir), { force: true });
       return;
     }
-    const file = credentialsMod.claudeCredentialFile(pair.configDir);
+    const file = credentialsMod.claudeCredentialFile(configDir);
     fs.writeFileSync(file, JSON.stringify({ claudeAiOauth: record }), { mode: 0o600 });
     fs.chmodSync(file, 0o600);
-    keychain.delete(credentialsMod.claudeCliKeychainService(pair.configDirEnv));
+    keychain.delete(credentialsMod.claudeCliKeychainService(configDirEnv));
   };
   const readClaude = (pair) =>
-    mod
-      .readClaudeSide(pair, backend)
-      .then((side) => (side.kind === "credential" ? side.record : side));
+    adapter.readCli(pair.location).then((side) => (side.kind === "credential" ? side.raw : side));
   const reconcile = (pair, extra = {}) =>
-    mod.reconcilePair(pair, { backend, loadAuthStorage, retryDelayMs: 20, ...extra });
+    mod.reconcilePair(pair, { loadAuthStorage, retryDelayMs: 20, ...extra });
 
   const T0 = 1_800_000_000_000;
   const pi = (n, extra = {}) => ({
@@ -186,35 +201,48 @@ async function main() {
   // Pure core.
   {
     const canonical = { access: "a", refresh: "r", expiresAt: T0 };
-    assert.deepEqual(mod.canonicalFromPi(mod.piRecordFromCanonical(canonical)), canonical);
+    assert.deepEqual(codec.canonicalFromPi(codec.piRecordFromCanonical(canonical)), canonical);
     assert.deepEqual(
-      mod.canonicalFromClaude(mod.claudeRecordFromCanonical(canonical)),
+      codec.canonicalFromClaude(codec.claudeRecordFromCanonical(canonical)),
       canonical,
     );
-    assert.equal(mod.piRecordFromCanonical(canonical).expires, T0 - PADDING);
-    assert.deepEqual(mod.claudeRecordFromCanonical(canonical).scopes, [
-      ...mod.ANTHROPIC_OAUTH_SCOPES,
+    assert.equal(codec.piRecordFromCanonical(canonical).expires, T0 - PADDING);
+    assert.deepEqual(codec.claudeRecordFromCanonical(canonical).scopes, [
+      ...codec.ANTHROPIC_OAUTH_SCOPES,
     ]);
-    const carried = mod.claudeRecordFromCanonical(canonical, claude(1, { rateLimitTier: "t" }));
+    const carried = codec.claudeRecordFromCanonical(canonical, claude(1, { rateLimitTier: "t" }));
     assert.equal(carried.subscriptionType, "max");
     assert.equal(carried.rateLimitTier, "t");
     assert.deepEqual(carried.scopes, ["user:inference"]);
-    assert.equal(mod.canonicalFromPi({ type: "api_key", key: "x" }), null);
-    assert.equal(mod.canonicalFromClaude(null), null);
+    assert.equal(codec.canonicalFromPi({ type: "api_key", key: "x" }), null);
+    assert.equal(codec.canonicalFromClaude(null), null);
+    assert.equal(codec.claudeCredentialCodec.provider, "anthropic");
+    assert.deepEqual(
+      codec.claudeCredentialCodec.canonicalFromCli(codec.claudeCredentialCodec.cliRecordFromCanonical(canonical, null)),
+      canonical,
+    );
     pass("conversions round-trip and carry Claude-only fields without inventing them");
 
     const c = (n, refresh = `r${n}`) => ({ access: `a${n}`, refresh, expiresAt: T0 + n });
     assert.equal(mod.compareCredentials(null, null), "none");
     assert.equal(mod.compareCredentials(c(1), null), "pi-only");
-    assert.equal(mod.compareCredentials(null, c(1)), "claude-only");
+    assert.equal(mod.compareCredentials(null, c(1)), "cli-only");
     assert.equal(mod.compareCredentials(c(2), c(1)), "pi-newer");
-    assert.equal(mod.compareCredentials(c(1), c(2)), "claude-newer");
+    assert.equal(mod.compareCredentials(c(1), c(2)), "cli-newer");
     assert.equal(mod.compareCredentials(c(1), c(1)), "equal");
     assert.equal(mod.compareCredentials(c(1), { ...c(1), access: "other" }), "conflict");
-    assert.equal(mod.compareCredentials(c(9, ""), c(1)), "claude-newer");
+    assert.equal(mod.compareCredentials(c(9, ""), c(1)), "cli-newer");
     assert.equal(mod.compareCredentials(c(1), c(9, "")), "pi-newer");
-    assert.equal(mod.compareCredentials(c(1, ""), c(2, "")), "claude-newer");
-    pass("comparison: strict expiry, refresh precedence, and conflict on equal expiry");
+    assert.equal(mod.compareCredentials(c(1, ""), c(2, "")), "cli-newer");
+    // The same access token is in sync whatever each side's expiry says
+    // (Pi's client-clock expiry drifts from a JWT's exp), and an equal
+    // expiry is decided by the issue time when both sides report one.
+    assert.equal(mod.compareCredentials(c(1), { ...c(1), expiresAt: T0 + 500, refresh: "other" }), "equal");
+    assert.equal(mod.compareCredentials({ ...c(1), issuedAt: 20 }, { ...c(1), access: "b", issuedAt: 10 }), "pi-newer");
+    assert.equal(mod.compareCredentials({ ...c(1), issuedAt: 10 }, { ...c(1), access: "b", issuedAt: 20 }), "cli-newer");
+    assert.equal(mod.compareCredentials({ ...c(1), issuedAt: 10 }, { ...c(1), access: "b", issuedAt: 10 }), "conflict");
+    assert.equal(mod.compareCredentials({ ...c(1), issuedAt: 10 }, { ...c(1), access: "b" }), "conflict");
+    pass("comparison: identical access first, strict expiry, refresh precedence, issuedAt tie-break, conflict");
   }
 
   // Fresher Pi wins: the Claude side gets the token, its own fields survive.
@@ -224,7 +252,7 @@ async function main() {
     writeClaude(pair, claude(3, { rateLimitTier: "tier" }));
     const result = await reconcile(pair);
     assert.equal(result.verdict, "pi-newer");
-    assert.equal(result.wrote, "claude");
+    assert.equal(result.wrote, "cli");
     const after = await readClaude(pair);
     assert.equal(after.accessToken, "pi-access-5");
     assert.equal(after.refreshToken, "pi-refresh-5");
@@ -233,8 +261,8 @@ async function main() {
     assert.equal(after.subscriptionType, "max");
     assert.equal(after.rateLimitTier, "tier");
     assert.deepEqual(readPi(pair), pi(5), "the winning side is untouched");
-    assert.equal(mode(credentialsMod.claudeCredentialFile(pair.configDir)), 0o600);
-    assert.ok(keychain.has(credentialsMod.claudeCliKeychainService(pair.configDirEnv)));
+    assert.equal(mode(credentialsMod.claudeCredentialFile(pair.location.configDir)), 0o600);
+    assert.ok(keychain.has(credentialsMod.claudeCliKeychainService(pair.location.configDirEnv)));
     const again = await reconcile(pair);
     assert.equal(again.verdict, "equal");
     assert.equal(again.wrote, null);
@@ -248,7 +276,7 @@ async function main() {
     writePi(pair, pi(2));
     writeClaude(pair, claude(7));
     const result = await reconcile(pair);
-    assert.equal(result.verdict, "claude-newer");
+    assert.equal(result.verdict, "cli-newer");
     assert.equal(result.wrote, "pi");
     assert.deepEqual(readPi(pair), {
       type: "oauth",
@@ -295,10 +323,10 @@ async function main() {
   {
     const pair = makePair();
     writePi(pair, pi(3));
-    assert.equal((await reconcile(pair)).wrote, "claude");
+    assert.equal((await reconcile(pair)).wrote, "cli");
     const created = await readClaude(pair);
     assert.equal(created.accessToken, "pi-access-3");
-    assert.deepEqual(created.scopes, [...mod.ANTHROPIC_OAUTH_SCOPES]);
+    assert.deepEqual(created.scopes, [...codec.ANTHROPIC_OAUTH_SCOPES]);
     assert.equal("subscriptionType" in created, false);
     const other = makePair();
     writeClaude(other, claude(3));
@@ -318,21 +346,21 @@ async function main() {
     assert.equal(result.wrote, null);
     assert.equal(await readClaude(pair), null, "the mirror never creates ~/.claude's credential");
     assert.deepEqual(readPi(pair), pi(3));
-    result = await reconcile(pair, { previousClaudePresent: false });
+    result = await reconcile(pair, { previousCliPresent: false });
     assert.equal(result.wrote, null);
-    result = await reconcile(pair, { previousClaudePresent: true });
+    result = await reconcile(pair, { previousCliPresent: true });
     assert.equal(result.wrote, "pi-delete");
     assert.equal(readPi(pair), null, "a claude logout signs Account 1 out of Cora");
     assert.equal(mode(pair.authFile), 0o600);
     // The reverse direction never deletes: a missing Pi side with a live
     // ~/.claude simply gets the credential copied to Pi.
     writeClaude(pair, claude(2));
-    result = await reconcile(pair, { previousClaudePresent: true });
+    result = await reconcile(pair, { previousCliPresent: true });
     assert.equal(result.wrote, "pi");
     assert.equal(readPi(pair).access, "claude-access-2");
     // An existing ~/.claude credential IS updated.
     writePi(pair, pi(8));
-    assert.equal((await reconcile(pair)).wrote, "claude");
+    assert.equal((await reconcile(pair)).wrote, "cli");
     assert.equal((await readClaude(pair)).accessToken, "pi-access-8");
     pass("Account 1 rules: no creation in ~/.claude, logout propagates one way only");
   }
@@ -379,7 +407,7 @@ async function main() {
     assert.equal(result.wrote, null, "the reconcile must not undo the refresh that beat it");
     assert.deepEqual(readPi(pair), pi(9));
     // The next reconcile carries the fresher Pi token over to Claude.
-    assert.equal((await reconcile(pair)).wrote, "claude");
+    assert.equal((await reconcile(pair)).wrote, "cli");
     assert.equal((await readClaude(pair)).accessToken, "pi-access-9");
     pass("a concurrent Pi refresh under the lock is never clobbered");
   }
@@ -400,9 +428,9 @@ async function main() {
         return backend.read(configDir, configDirEnv);
       },
     };
-    const result = await mod.reconcilePair(pair, { backend: racing, loadAuthStorage, retryDelayMs: 20 });
+    const result = await mod.reconcilePair({ ...pair, adapter: makeAdapter(racing) }, { loadAuthStorage, retryDelayMs: 20 });
     assert.equal(result.wrote, null, "the stale comparison must not be written");
-    assert.equal(result.verdict, "claude-newer");
+    assert.equal(result.verdict, "cli-newer");
     assert.equal((await readClaude(pair)).accessToken, "claude-access-9");
     assert.equal((await reconcile(pair)).wrote, "pi");
     assert.equal(readPi(pair).access, "claude-access-9");
@@ -430,14 +458,13 @@ async function main() {
         return backend.read(configDir, configDirEnv);
       },
     };
-    const mirror = new mod.AnthropicCredentialMirror({
-      backend: slow,
+    const mirror = new mod.CredentialMirror({
       loadAuthStorage,
-      keychainPoll: null,
+      pollWhenWatchBlind: null,
       debounceMs: 40,
       retryDelayMs: 20,
     });
-    mirror.watch(pair);
+    mirror.watch({ ...pair, adapter: makeAdapter(slow) });
     const inflight = mirror.reconcileNow(CORA_ID);
     await waitFor(() => gated);
     const drained = mirror.unwatch(CORA_ID);
@@ -463,15 +490,15 @@ async function main() {
       async read(configDir, configDirEnv) {
         reads += 1;
         const raw = await backend.read(configDir, configDirEnv);
-        if (reads === 1) fs.rmSync(pair.configDir, { recursive: true, force: true });
+        if (reads === 1) fs.rmSync(pair.location.configDir, { recursive: true, force: true });
         return raw;
       },
     };
-    const result = await mod.reconcilePair(pair, { backend: vanishing, loadAuthStorage, retryDelayMs: 20 });
+    const result = await mod.reconcilePair({ ...pair, adapter: makeAdapter(vanishing) }, { loadAuthStorage, retryDelayMs: 20 });
     assert.equal(result.verdict, "pi-only");
     assert.equal(result.wrote, null);
-    assert.equal(fs.existsSync(pair.configDir), false, "the deleted directory must stay deleted");
-    assert.equal(keychain.has(credentialsMod.claudeCliKeychainService(pair.configDirEnv)), false);
+    assert.equal(fs.existsSync(pair.location.configDir), false, "the deleted directory must stay deleted");
+    assert.equal(keychain.has(credentialsMod.claudeCliKeychainService(pair.location.configDirEnv)), false);
     pass("a managed half whose directory is gone is not rebuilt by the mirror");
   }
 
@@ -482,17 +509,17 @@ async function main() {
     writePi(pair, pi(1));
     writeClaude(pair, claude(1, { accessToken: "pi-access-1", refreshToken: "pi-refresh-1" }));
     const changes = [];
-    const mirror = new mod.AnthropicCredentialMirror({
-      backend,
+    const mirror = new mod.CredentialMirror({
       loadAuthStorage,
-      keychainPoll: null,
+      pollWhenWatchBlind: null,
       debounceMs: 40,
       retryDelayMs: 20,
     });
     mirror.onChanged((change) => changes.push(change));
     mirror.watch(pair);
     assert.deepEqual(mirror.pairFor(CORA_ID), pair);
-    assert.equal(mirror.pairForCliProfile(CLI_ID).coraProfileId, CORA_ID);
+    assert.equal(mirror.pairForCliProfile("anthropic", CLI_ID).coraProfileId, CORA_ID);
+    assert.equal(mirror.pairForCliProfile("xai", CLI_ID), undefined, "lookups are scoped by provider");
     const initial = await mirror.reconcileNow(CORA_ID);
     assert.equal(initial.verdict, "equal");
     // Fresh fs.watch handles on macOS can miss a write issued right after
@@ -504,7 +531,7 @@ async function main() {
     // file, which is visible a tick earlier.
     await waitFor(() => changes.length === 1);
     assert.equal(readPi(pair).access, "claude-access-4");
-    assert.deepEqual(changes[0], { coraProfileId: CORA_ID, cliProfileId: CLI_ID, wrote: "pi" });
+    assert.deepEqual(changes[0], { provider: "anthropic", coraProfileId: CORA_ID, cliProfileId: CLI_ID, wrote: "pi" });
     await sleep(200);
     assert.equal(changes.length, 1, "the mirror's own write must not trigger another write");
     const settled = await mirror.reconcileNow(CORA_ID);
@@ -514,7 +541,7 @@ async function main() {
     writePi(pair, pi(6));
     await waitFor(() => changes.length === 2);
     assert.equal((await readClaude(pair)).accessToken, "pi-access-6");
-    assert.equal(changes.at(-1).wrote, "claude");
+    assert.equal(changes.at(-1).wrote, "cli");
     await sleep(200);
     assert.equal(changes.length, 2);
 
@@ -532,7 +559,7 @@ async function main() {
 
     // A Keychain-only rotation (no file event) is caught by reconcileNow.
     keychain.set(
-      credentialsMod.claudeCliKeychainService(pair.configDirEnv),
+      credentialsMod.claudeCliKeychainService(pair.location.configDirEnv),
       JSON.stringify({ claudeAiOauth: claude(20) }),
     );
     assert.equal((await mirror.reconcileNow(CORA_ID)).wrote, "pi");
@@ -570,7 +597,7 @@ async function main() {
     pass("every produced credential file is 0600");
   }
 
-  console.log(`\nPASS anthropic credential mirror (${passes} groups)`);
+  console.log(`\nPASS credential mirror over the Claude adapter (${passes} groups)`);
 }
 
 main()

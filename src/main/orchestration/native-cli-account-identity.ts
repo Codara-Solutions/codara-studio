@@ -112,6 +112,27 @@ function jwtPayload(token: unknown): Record<string, unknown> | undefined {
   }
 }
 
+/**
+ * One named claim of a JWT, unverified. Used for the expiry and issue time
+ * the mirror compares by and the account ids the codecs pair by; a missing
+ * or malformed token yields undefined.
+ */
+export function jwtClaim(token: unknown, name: string): unknown {
+  return jwtPayload(token)?.[name];
+}
+
+/** A numeric claim (`exp`, `iat`), or undefined when absent or not finite. */
+export function jwtNumericClaim(token: unknown, name: string): number | undefined {
+  const value = jwtClaim(token, name);
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** A non-empty string claim (`sub`, `email`), trimmed. */
+export function jwtStringClaim(token: unknown, name: string): string | undefined {
+  const value = jwtClaim(token, name);
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
 export function jwtEmailClaim(token: unknown): string | undefined {
   const parsed = jwtPayload(token);
   return parsed ? normalizeAccountEmail(parsed.email) : undefined;
