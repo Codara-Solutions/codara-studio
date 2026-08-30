@@ -593,6 +593,12 @@ async function persistSnapshotAtomically(
  * `.config.json` inside the config directory when one exists, otherwise
  * `$CLAUDE_CONFIG_DIR/.claude.json` — and `~/.claude.json` when the selector is
  * unset, which is why this cannot simply join the personal config directory.
+ *
+ * The home is derived from the personal config directory (`<home>/.claude`
+ * when no selector is set) rather than os.homedir(): every other path in this
+ * store flows from the injected home, and reaching for the process home here
+ * made the onboarding seed read the developer machine's real ~/.claude.json
+ * under test while CI, with no such file, saw the truthful empty seed.
  */
 function personalClaudeConfigFiles(
   personalConfigDir: string,
@@ -602,7 +608,7 @@ function personalClaudeConfigFiles(
     join(personalConfigDir, ".config.json"),
     personalConfigDirEnv
       ? join(personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE)
-      : join(homedir(), CLAUDE_CLI_CONFIG_FILE),
+      : join(dirname(resolve(personalConfigDir)), CLAUDE_CLI_CONFIG_FILE),
   ];
 }
 
