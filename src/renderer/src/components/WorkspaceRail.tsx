@@ -2619,7 +2619,7 @@ function BranchGlyph({
   return (
     <span
       aria-hidden
-      title="Copy branch"
+      title={working ? "Copy branch — agent working" : "Copy branch"}
       style={{
         // Shares the color dot's exact 8px advance so toggling copyBranch
         // never reflows the row's leading cluster. The 13px glyph is centered
@@ -2663,16 +2663,26 @@ function BranchGlyph({
           }}
         />
       )}
+      {/* While working, the glyph recedes — smaller and softer, the same
+          hollowing the plain color dot does — so the comet ring orbits it
+          with clear water instead of crossing its arms. Scale via CSS so
+          the 8px advance and the ring geometry never change. */}
       <svg
         width="13"
         height="13"
         viewBox="0 0 24 24"
         fill="none"
-        stroke={color}
+        stroke={working ? `color-mix(in oklab, ${color} 55%, transparent)` : color}
         strokeWidth="2.4"
         strokeLinecap="round"
         strokeLinejoin="round"
-        style={{ flex: "0 0 auto" }}
+        style={{
+          flex: "0 0 auto",
+          transform: working ? "scale(0.66)" : "none",
+          transformOrigin: "50% 50%",
+          transition:
+            "transform var(--motion-fast) var(--ease-out), stroke var(--motion-fast) var(--ease-out)",
+        }}
       >
         <line x1="6" x2="6" y1="3" y2="15" />
         <circle cx="18" cy="6" r="3" />
