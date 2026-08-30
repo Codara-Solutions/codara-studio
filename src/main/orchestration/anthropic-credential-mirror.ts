@@ -227,6 +227,12 @@ export interface ReconcilePairOptions {
    */
   previousClaudePresent?: boolean;
   retryDelayMs?: number;
+  /**
+   * Consulted right before every write. The mirror answers true once the
+   * pair was unwatched (an account mid-delete) so a reconcile that was
+   * already between its reads and its write cannot re-create a half.
+   */
+  cancelled?: () => boolean;
   log?: (message: string) => void;
 }
 
@@ -283,7 +289,7 @@ export async function reconcilePair(
     // ~/.claude belongs to the user. A credential that was there and is gone
     // now is a `claude logout`; one that was never there is not Codara's to
     // create.
-    if (options.previousClaudePresent === true) {
+    if (options.previousClaudePresent === true && !options.cancelled?.()) {
       const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
       await AuthStorage.create(pair.authFile).delete(PI_PROVIDER);
       await chmodPrivate(pair.authFile);
@@ -293,10 +299,28 @@ export async function reconcilePair(
   }
 
   if (verdict === "pi-newer" || verdict === "pi-only") {
+    // A managed half is created by ensureCliHalf alone. Its directory being
+    // gone here means the account is mid-delete; writing would resurrect it.
+    if (!personal && !(await isDirectory(pair.configDir))) return result;
+    // The Claude side has no lock to repeat the comparison under, and the
+    // read above can be tens of milliseconds old on macOS. Read it again
+    // immediately before writing so a terminal that refreshed in between
+    // (rotating the refresh token Pi still holds) is not overwritten with
+    // the token it just retired; the next reconcile then runs the other way.
+    const latest = await readClaudeSide(pair, options.backend);
+    if (latest.kind !== "credential") return result;
+    const latestCanonical = canonicalFromClaude(latest.record);
+    const latestVerdict = compareCredentials(piCanonical, latestCanonical);
+    result.verdict = latestVerdict;
+    result.claudePresent = latestCanonical !== null;
+    if (latestVerdict !== "pi-newer" && (latestVerdict !== "pi-only" || personal)) {
+      return result;
+    }
+    if (options.cancelled?.()) return result;
     await writeClaudeCredentialRecord(
       pair.configDir,
       pair.configDirEnv,
-      claudeRecordFromCanonical(piCanonical!, claude.record),
+      claudeRecordFromCanonical(piCanonical!, latest.record),
       { ...(options.backend ? { backend: options.backend } : {}) },
     );
     result.wrote = "claude";
@@ -306,9 +330,11 @@ export async function reconcilePair(
   // claude-newer or claude-only: the comparison is repeated under Pi's lock
   // so a Pi refresh that landed in the meantime wins instead of being undone.
   const winner = claudeCanonical!;
+  if (options.cancelled?.()) return result;
   const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
   let written = false;
   await AuthStorage.create(pair.authFile).modify(PI_PROVIDER, async (current) => {
+    if (options.cancelled?.()) return undefined;
     const underLock = compareCredentials(canonicalFromPi(current), winner);
     if (underLock !== "claude-newer" && underLock !== "claude-only") return undefined;
     written = true;
@@ -317,6 +343,13 @@ export async function reconcilePair(
   await chmodPrivate(pair.authFile);
   if (written) result.wrote = "pi";
   return result;
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  return fs.lstat(path).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
 }
 
 async function chmodPrivate(path: string): Promise<void> {
@@ -359,6 +392,8 @@ interface PairState {
   watchers: FSWatcher[];
   debounce: NodeJS.Timeout | null;
   poll: NodeJS.Timeout | null;
+  /** When the poll last reconciled; the idle cadence is measured from here. */
+  lastPolledAt: number;
   tail: Promise<void>;
   /** sha256 of the bytes the mirror itself last produced, per target path. */
   lastWritten: Map<string, string>;
@@ -369,11 +404,20 @@ interface PairState {
 export class AnthropicCredentialMirror {
   private readonly pairs = new Map<string, PairState>();
   private readonly listeners = new Set<(change: AnthropicCredentialMirrorChange) => void>();
-  private readonly options: AnthropicCredentialMirrorOptions;
+  private options: AnthropicCredentialMirrorOptions;
   private stopped = false;
 
   constructor(options: AnthropicCredentialMirrorOptions = {}) {
     this.options = options;
+  }
+
+  /**
+   * The busy signals behind the poll cadence. The production singleton is
+   * built before the lease registry and the account registry are loaded, so
+   * the account service wires them in once it resolves the mirror.
+   */
+  setActivity(hooks: Pick<AnthropicCredentialMirrorOptions, "isActive" | "isLeased">): void {
+    this.options = { ...this.options, ...hooks };
   }
 
   onChanged(listener: (change: AnthropicCredentialMirrorChange) => void): () => void {
@@ -412,13 +456,14 @@ export class AnthropicCredentialMirror {
         if (existing.watchers.length === 0) this.arm(existing);
         return;
       }
-      this.unwatch(pair.coraProfileId);
+      void this.unwatch(pair.coraProfileId);
     }
     const state: PairState = {
       pair: { ...pair },
       watchers: [],
       debounce: null,
       poll: null,
+      lastPolledAt: Date.now(),
       tail: Promise.resolve(),
       lastWritten: new Map(),
       claudePresent: undefined,
@@ -428,11 +473,17 @@ export class AnthropicCredentialMirror {
     this.arm(state);
   }
 
-  unwatch(coraProfileId: string): void {
+  /**
+   * Drop a pair. Resolves once a reconcile already in flight for it has
+   * finished, so a caller about to remove the pair's files can wait for the
+   * last read to land (the write side is refused through `cancelled`).
+   */
+  unwatch(coraProfileId: string): Promise<void> {
     const state = this.pairs.get(coraProfileId);
-    if (!state) return;
+    if (!state) return Promise.resolve();
     this.disarm(state);
     this.pairs.delete(coraProfileId);
+    return state.tail;
   }
 
   /** Close and re-create every watcher; used after sleep and after account mutations. */
@@ -492,6 +543,7 @@ export class AnthropicCredentialMirror {
         ...(this.options.retryDelayMs !== undefined
           ? { retryDelayMs: this.options.retryDelayMs }
           : {}),
+        cancelled: () => this.stopped || this.pairs.get(state.pair.coraProfileId) !== state,
         log: (message) => {
           if (state.conflictLogged) return;
           state.conflictLogged = true;
@@ -614,28 +666,44 @@ export class AnthropicCredentialMirror {
    * Claude Code refreshes into the Keychain on macOS, which no file watcher
    * sees; a poll is the only way a terminal-side rotation reaches Cora
    * between the opportunistic reconciles. Busy pairs poll faster.
+   *
+   * One timer per pair, armed synchronously so a disarm always finds it:
+   * the timer wakes at the active cadence and decides then whether the pair
+   * is busy (reconcile now) or idle (reconcile once the idle interval has
+   * passed since the last poll).
    */
   private schedulePoll(state: PairState): void {
     const intervals = this.pollIntervals();
     if (!intervals || this.stopped) return;
     if (state.poll) clearTimeout(state.poll);
-    const arm = async () => {
-      const busy =
-        (await Promise.resolve(this.options.isActive?.(state.pair.coraProfileId)).catch(
-          () => false,
-        )) === true ||
-        this.options.isLeased?.(state.pair.cliProfileId) === true;
-      const delay = busy ? intervals.activeMs : intervals.idleMs;
-      if (this.stopped || this.pairs.get(state.pair.coraProfileId) !== state) return;
-      state.poll = setTimeout(() => {
-        state.poll = null;
-        void this.enqueue(state)
-          .catch(() => null)
-          .finally(() => this.schedulePoll(state));
-      }, delay);
-      state.poll.unref?.();
-    };
-    void arm();
+    const timer = setTimeout(() => {
+      if (state.poll !== timer) return;
+      state.poll = null;
+      void this.pollTick(state, intervals);
+    }, intervals.activeMs);
+    timer.unref?.();
+    state.poll = timer;
+  }
+
+  private async pollTick(
+    state: PairState,
+    intervals: { activeMs: number; idleMs: number },
+  ): Promise<void> {
+    const current = () => !this.stopped && this.pairs.get(state.pair.coraProfileId) === state;
+    if (!current()) return;
+    const busy =
+      (await Promise.resolve(this.options.isActive?.(state.pair.coraProfileId)).catch(
+        () => false,
+      )) === true ||
+      this.options.isLeased?.(state.pair.cliProfileId) === true;
+    if (!current()) return;
+    if (busy || Date.now() - state.lastPolledAt >= intervals.idleMs) {
+      state.lastPolledAt = Date.now();
+      await this.enqueue(state).catch(() => null);
+    }
+    // A rearm during the reconcile armed its own timer; never add a second.
+    if (!current() || state.poll) return;
+    this.schedulePoll(state);
   }
 }
 

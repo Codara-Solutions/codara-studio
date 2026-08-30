@@ -384,6 +384,97 @@ async function main() {
     pass("a concurrent Pi refresh under the lock is never clobbered");
   }
 
+  // The Claude side has no lock: a terminal refresh that lands between the
+  // mirror's read and its write must win, or both halves end up holding a
+  // refresh token Anthropic already rotated away.
+  {
+    const pair = makePair();
+    writePi(pair, pi(5));
+    writeClaude(pair, claude(3));
+    let reads = 0;
+    const racing = {
+      ...backend,
+      async read(configDir, configDirEnv) {
+        reads += 1;
+        if (reads === 2) writeClaude(pair, claude(9));
+        return backend.read(configDir, configDirEnv);
+      },
+    };
+    const result = await mod.reconcilePair(pair, { backend: racing, loadAuthStorage, retryDelayMs: 20 });
+    assert.equal(result.wrote, null, "the stale comparison must not be written");
+    assert.equal(result.verdict, "claude-newer");
+    assert.equal((await readClaude(pair)).accessToken, "claude-access-9");
+    assert.equal((await reconcile(pair)).wrote, "pi");
+    assert.equal(readPi(pair).access, "claude-access-9");
+    pass("a Claude refresh that lands before the mirror's write wins and flows to Pi next");
+  }
+
+  // Unwatching a pair mid-reconcile: the reads finish, the write is refused,
+  // and the caller can wait for the drain before removing the files.
+  {
+    const pair = makePair();
+    writePi(pair, pi(7));
+    writeClaude(pair, claude(2));
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    let gated = false;
+    const slow = {
+      ...backend,
+      async read(configDir, configDirEnv) {
+        if (!gated) {
+          gated = true;
+          await gate;
+        }
+        return backend.read(configDir, configDirEnv);
+      },
+    };
+    const mirror = new mod.AnthropicCredentialMirror({
+      backend: slow,
+      loadAuthStorage,
+      keychainPoll: null,
+      debounceMs: 40,
+      retryDelayMs: 20,
+    });
+    mirror.watch(pair);
+    const inflight = mirror.reconcileNow(CORA_ID);
+    await waitFor(() => gated);
+    const drained = mirror.unwatch(CORA_ID);
+    release();
+    await drained;
+    const cancelled = await inflight;
+    assert.equal(cancelled.verdict, "pi-newer", "the reads landed");
+    assert.equal(cancelled.wrote, null, "the write was refused");
+    assert.equal((await readClaude(pair)).accessToken, "claude-access-2", "no write after unwatch");
+    assert.deepEqual(readPi(pair), pi(7));
+    mirror.stop();
+    pass("an unwatched pair mid-reconcile lands its reads and refuses its write");
+  }
+
+  // A managed directory that vanished between the read and the write (an
+  // account mid-delete) is never re-created from the Pi side.
+  {
+    const pair = makePair();
+    writePi(pair, pi(4));
+    let reads = 0;
+    const vanishing = {
+      ...backend,
+      async read(configDir, configDirEnv) {
+        reads += 1;
+        const raw = await backend.read(configDir, configDirEnv);
+        if (reads === 1) fs.rmSync(pair.configDir, { recursive: true, force: true });
+        return raw;
+      },
+    };
+    const result = await mod.reconcilePair(pair, { backend: vanishing, loadAuthStorage, retryDelayMs: 20 });
+    assert.equal(result.verdict, "pi-only");
+    assert.equal(result.wrote, null);
+    assert.equal(fs.existsSync(pair.configDir), false, "the deleted directory must stay deleted");
+    assert.equal(keychain.has(credentialsMod.claudeCliKeychainService(pair.configDirEnv)), false);
+    pass("a managed half whose directory is gone is not rebuilt by the mirror");
+  }
+
   // Runtime: watchers converge both directions, the mirror's own writes are
   // not re-triggering, and both sides rotating at once settle on the newest.
   {
@@ -453,7 +544,7 @@ async function main() {
     await sleep(150);
     writePi(pair, pi(30));
     await waitFor(async () => (await readClaude(pair)).accessToken === "pi-access-30");
-    mirror.unwatch(CORA_ID);
+    await mirror.unwatch(CORA_ID);
     assert.equal(await mirror.reconcileNow(CORA_ID), null);
     writePi(pair, pi(40));
     await sleep(150);
