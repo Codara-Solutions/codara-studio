@@ -144,13 +144,14 @@ export async function resolveCodaraPiExecutionAccount(
   // layer receives only an opaque profile id and its private config directory;
   // tokens and provider identities never enter launch plans or run state.
   const { resolvePiAccountRuntimeProfile } = await import("./pi-account-auth-store");
-  if (request.provider === "anthropic") {
-    // A Claude Code terminal may have rotated this account's token since the
-    // last reconcile; a launch on a stale refresh token would fail outright.
-    const { anthropicAccounts } = await import("./anthropic-accounts");
+  {
+    // A terminal may have rotated this account's token since the last
+    // reconcile; a launch on a stale refresh token would fail outright.
+    const { unifiedAccountsFor } = await import("./unified-account-registry");
+    const accounts = unifiedAccountsFor(request.provider);
     await (preferredAccountProfileId
-      ? anthropicAccounts.reconcileProfile(preferredAccountProfileId)
-      : anthropicAccounts.reconcileDefault()
+      ? accounts.reconcileProfile(preferredAccountProfileId)
+      : accounts.reconcileDefault()
     ).catch(() => null);
   }
   const selection = await resolvePiAccountRuntimeProfile({

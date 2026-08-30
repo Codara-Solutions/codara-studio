@@ -1431,10 +1431,10 @@ async function handleAccountsList(id: JsonRpcId): Promise<JsonRpcResponse> {
       import("./orchestration/pi-subscription-usage"),
       import("./remote-access/subscription-profile-projection"),
     ]);
-    const { anthropicAccounts } = await import("./orchestration/anthropic-accounts");
+    const { terminalStatusesByProvider } = await import("./orchestration/unified-account-registry");
     const [inspection, terminals] = await Promise.all([
       inspectPiAccountProfileAuthStore(),
-      anthropicAccounts.terminalStatuses(),
+      terminalStatusesByProvider(),
     ]);
     const cachedUsage = inspectCachedPiSubscriptionUsageProfiles();
     const projected = projectRemoteSubscriptionProfiles(

@@ -368,16 +368,20 @@ async function main() {
   assert.deepEqual(
     externalReferences.map((file) => path.relative(ROOT, file)).sort(),
     [
-      // The unified Anthropic account service, its startup pass and the
-      // credential mirror own the two halves of an account; they read the
-      // store's directories and never launch anything.
+      // The unified account service, its Claude adapter, the startup pass
+      // and the credential mirror own the two halves of an account; they
+      // read the store's directories and never launch anything.
+      "src/main/orchestration/account-adapters/claude-account-adapter.ts",
       "src/main/orchestration/anthropic-account-migration.ts",
       "src/main/orchestration/anthropic-accounts.ts",
+      "src/main/orchestration/anthropic-credential-mirror.ts",
+      "src/main/orchestration/claude-live-slot-undo.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
       // Type-only import of the execution-profile shape; resolution still
       // funnels through native-claude-profile-runtime.
       "src/main/orchestration/native-cli-shell-defaults.ts",
+      "src/main/orchestration/unified-account-migration.ts",
       "src/main/pty-manager.ts",
       // Read-only transcript discovery needs the personal Claude projects
       // root; it is analytics, not an execution or launch surface.

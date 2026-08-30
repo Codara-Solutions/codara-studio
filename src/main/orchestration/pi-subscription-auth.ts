@@ -3,9 +3,13 @@ import { chmod, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, shell, type WebContents } from "electron";
-import { anthropicAccounts } from "./anthropic-accounts";
-import { anthropicCredentialMirror, canonicalFromPi } from "./anthropic-credential-mirror";
+import { credentialMirror } from "./credential-mirror";
 import { loadPiAuthStorage } from "./pi-auth-storage";
+import {
+  terminalStatusesByProvider,
+  unifiedAccountsFor,
+} from "./unified-account-registry";
+import { UnifiedAccountSessionsError } from "./unified-account-errors";
 import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
@@ -223,7 +227,8 @@ function broadcastSubscriptionsChanged(provider: PiSubscriptionProvider): void {
   }
   // An account mutation may have created or removed a credential directory;
   // re-create the watchers so the mirror sees the new layout.
-  if (provider === "anthropic") anthropicCredentialMirror.rearm();
+  void provider;
+  credentialMirror.rearm();
 }
 
 /** Re-read account metadata after a rename/default mutation and wake every UI. */
@@ -319,7 +324,7 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       .then((runtime) => ({ installed: true as const, version: runtime.version, error: undefined }))
       .catch((error) => ({ installed: false as const, version: null, error: safeAuthError(error) })),
     inspectPiAccountProfileAuthStore(),
-    anthropicAccounts.terminalStatuses().catch(() => new Map<string, never>()),
+    terminalStatusesByProvider(),
   ]);
   const statuses = new Map(inspection.statuses.map((status) => [status.profileId, status]));
   const profiles: PiSubscriptionProfileConnection[] = inspection.snapshot.profiles.map((profile) => {
@@ -331,10 +336,10 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     // The registry address was captured at connect time (Anthropic); the
     // credential read covers Codex, whose token carries its own claims.
     const email = profile.accountEmail ?? status?.accountEmail;
-    // The Claude Code half is projected as status only: which id it is, and
-    // whether it is signed in. Its directory and tokens stay in main.
-    const cliProfileId = profile.provider === "anthropic" ? profile.cliProfileId : undefined;
-    const terminal = cliProfileId ? terminals.get(cliProfileId) : undefined;
+    // The CLI half is projected as status only: which id it is, and whether
+    // it is signed in. Its directory and tokens stay in main.
+    const cliProfileId = profile.cliProfileId;
+    const terminal = cliProfileId ? terminals.get(profile.provider)?.get(cliProfileId) : undefined;
     return {
       id: profile.id,
       provider: profile.provider,
@@ -450,25 +455,25 @@ async function persistCredential(
     }
     throw error;
   }
-  if (flow.provider === "anthropic") {
-    // One sign-in serves both halves: the Claude Code side is written from the
-    // credential just received. Its failure is not the sign-in's failure; the
-    // card then offers Share instead.
-    const canonical = canonicalFromPi(credential);
-    if (canonical) {
-      await anthropicAccounts
-        .ensureCliHalf(target.profile.id, canonical, identity)
-        .catch((cliError) => {
-          console.warn(
-            `[accounts] Claude Code half for ${target.profile.id} was not written: ${safeAuthError(cliError)}`,
-          );
-        });
-    }
-    if (flow.makeDefault) {
-      await anthropicAccounts.useAnthropicAccount(target.profile.id);
-    }
-  } else if (flow.makeDefault) {
-    await setDefaultPiAccountProfile(flow.provider, target.profile.id);
+  // One sign-in serves both halves: the CLI side is written from the
+  // credential just received (Codex grows it through a refresh grant first).
+  // Its failure is not the sign-in's failure; the card then offers Share.
+  const service = unifiedAccountsFor(flow.provider);
+  const canonical = service.codec.canonicalFromPi(credential);
+  if (canonical) {
+    await service.ensureCliHalf(target.profile.id, canonical, identity).catch((cliError) => {
+      console.warn(
+        `[accounts] ${service.adapter.labels.cliLabel} half for ${target.profile.id} was not written: ${safeAuthError(cliError)}`,
+      );
+    });
+  }
+  if (flow.makeDefault) {
+    // A Codex switch may have to close sessions the user has not agreed to
+    // close; the login is complete either way and the card offers Use.
+    await service.useAccount(target.profile.id).catch((error) => {
+      if (!(error instanceof UnifiedAccountSessionsError)) throw error;
+      console.warn(`[accounts] ${target.profile.id} was connected but not made active: ${error.message}`);
+    });
   }
   // A newly connected subscription must not read its limits — or its model
   // catalog — through a cache populated while it was still disconnected.
@@ -490,7 +495,6 @@ function oauthStateFromAuthUrl(url: string): string | null {
 
 async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promise<void> {
   const { provider, requestId } = flow;
-  const meta = PROVIDER_META[provider];
   let callback: PiOAuthCallbackServer | null = null;
   // Stall watchdog: a login that produces neither a sign-in URL nor a prompt
   // is stuck (a held callback port, a silently wedged Pi runtime) and used to
@@ -638,12 +642,9 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     if (flow.abort.signal.aborted) throw new Error("Login cancelled");
     const profileId = await persistCredential(flow, credential);
     flow.targetProfileId = profileId;
-    // One Anthropic sign-in wrote both halves, and the picker promised as
-    // much; the completion line says the same thing.
-    const completedMessage =
-      provider === "anthropic"
-        ? `${familyForSubscription(provider).displayName} is signed in to Cora and Claude Code.`
-        : `${meta.label} is connected to Cora.`;
+    // One sign-in wrote both halves, and the picker promised as much; the
+    // completion line says the same thing.
+    const completedMessage = `${familyForSubscription(provider).displayName} is signed in to Cora and ${unifiedAccountsFor(provider).adapter.labels.cliLabel}.`;
     send(owner, {
       type: "completed",
       requestId,
@@ -868,20 +869,20 @@ export async function refreshPiSubscriptionProfileCredential(
     if (process.platform !== "win32") await chmod(paths.authFile, 0o600).catch(() => undefined);
     return { access, refreshed };
   };
+  const service = unifiedAccountsFor(provider);
   let outcome: { access: string | null; refreshed: boolean };
   try {
     outcome = await attempt();
   } catch (error) {
-    if (provider !== "anthropic") throw error;
-    // The refresh token Cora holds may have been rotated by Claude Code on
-    // the same account. If the terminal copy is fresher, take it and try once
+    // The refresh token Cora holds may have been rotated by the CLI on the
+    // same account. If the terminal copy is fresher, take it and try once
     // more before giving up.
-    const repaired = await anthropicAccounts.reconcileProfile(profileId).catch(() => null);
+    const repaired = await service.reconcileProfile(profileId).catch(() => null);
     if (repaired?.wrote !== "pi") throw error;
     outcome = await attempt();
   }
-  if (provider === "anthropic" && outcome.refreshed) {
-    await anthropicAccounts.reconcileProfile(profileId).catch(() => null);
+  if (outcome.refreshed) {
+    await service.reconcileProfile(profileId).catch(() => null);
   }
   return outcome.access;
 }

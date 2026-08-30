@@ -194,6 +194,7 @@ function stubPlugin() {
       export function acquireNativeCodexProfileLease(profileId, ownerId) {
         return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
       }
+      export function notifyNativeCodexProfileLeaseReleased() {}
     `,
     "./orchestration/native-claude-profile-runtime": `
       export function resolveNewNativeClaudeProfile() {

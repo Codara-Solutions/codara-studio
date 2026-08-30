@@ -14,6 +14,7 @@ import {
 import {
   CLAUDE_CREDENTIALS_FILE,
   clearClaudeCredentialRecord,
+  defaultClaudeCliCredentialBackend,
   readClaudeCredentialRecord,
   writeClaudeCredentialRecord,
   type ClaudeCliCredentialBackend,
@@ -67,7 +68,11 @@ export interface ClaudeAccountAdapterOptions {
   platform?: NodeJS.Platform;
 }
 
-export type ClaudeAccountAdapter = AccountProviderAdapter<ClaudeLocation, ClaudeCredentialRecord>;
+export interface ClaudeAccountAdapter
+  extends AccountProviderAdapter<ClaudeLocation, ClaudeCredentialRecord> {
+  /** The Keychain-or-file backend behind readCli and writeCli, for the live-slot undo. */
+  readonly credentialBackend: ClaudeCliCredentialBackend;
+}
 
 export function createClaudeAccountAdapter(
   options: ClaudeAccountAdapterOptions = {},
@@ -100,6 +105,7 @@ export function createClaudeAccountAdapter(
   return {
     provider: "anthropic",
     runtime: "claude",
+    credentialBackend: options.backend ?? defaultClaudeCliCredentialBackend,
     personalId: CLAUDE_CLI_PERSONAL_PROFILE_ID,
     labels: { cliLabel: "Claude Code", loginHint: "claude login" },
     get store() {

@@ -15,7 +15,7 @@ interface SubscriptionProfileMetadata {
   id: string;
   provider: PiSubscriptionProvider;
   label: string;
-  /** The paired Claude Code profile of an Anthropic row; an opaque id. */
+  /** The paired CLI profile of the row; an opaque id. */
   cliProfileId?: string;
 }
 
@@ -37,8 +37,8 @@ export interface RemoteSubscriptionProfileProjectionInput {
     defaults: Partial<Record<PiSubscriptionProvider, string>>;
   };
   statuses: readonly SubscriptionProfileAuthStatus[];
-  /** Token-blind status of each Claude Code profile, keyed by its id. */
-  terminals?: ReadonlyMap<string, SubscriptionTerminalStatus>;
+  /** Token-blind status of each CLI profile, keyed by provider and then by id. */
+  terminals?: ReadonlyMap<PiSubscriptionProvider, ReadonlyMap<string, SubscriptionTerminalStatus>>;
 }
 
 function projectCachedUsage(
@@ -104,10 +104,10 @@ export function projectRemoteSubscriptionProfiles(
       const configured = connected.has(profile.id);
       const usage = projectCachedUsage(profile, configured, cachedByProfileId);
       const cliProfileId =
-        profile.provider === "anthropic" && typeof profile.cliProfileId === "string"
-          ? profile.cliProfileId
-          : undefined;
-      const terminal = cliProfileId ? inspection.terminals?.get(cliProfileId) : undefined;
+        typeof profile.cliProfileId === "string" ? profile.cliProfileId : undefined;
+      const terminal = cliProfileId
+        ? inspection.terminals?.get(profile.provider)?.get(cliProfileId)
+        : undefined;
       return {
         id: profile.id,
         provider: profile.provider,

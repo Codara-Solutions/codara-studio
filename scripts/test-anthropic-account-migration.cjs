@@ -421,7 +421,7 @@ async function main() {
   };
   await H.migration.startAnthropicAccountMigration({ ...deps, service: failing });
   await H.migration.unifiedAccountsReady();
-  assert.ok(logs.some((line) => line.includes('step "clear-dangling-links" failed')));
+  assert.ok(logs.some((line) => line.includes('step "anthropic:clear-dangling-links" failed')));
   H.migration.resetAnthropicAccountMigrationForTests();
   pass("the ready gate resolves after a failed step");
 

@@ -27,6 +27,7 @@ import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-pro
 import {
   acquireNativeCodexProfileLease,
   resolveFrozenNativeCodexProfile,
+  notifyNativeCodexProfileLeaseReleased,
   resolveNewNativeCodexProfile,
 } from "./orchestration/native-codex-profile-runtime";
 import {
@@ -175,6 +176,9 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   const release = session.releaseNativeCodexProfileLease;
   session.releaseNativeCodexProfileLease = undefined;
   release?.();
+  if (release && session.nativeCodexProfileId) {
+    notifyNativeCodexProfileLeaseReleased(session.nativeCodexProfileId);
+  }
   const releaseClaude = session.releaseNativeClaudeProfileLease;
   session.releaseNativeClaudeProfileLease = undefined;
   releaseClaude?.();

@@ -563,7 +563,7 @@ async function main() {
         !serialized.includes("raw provider error"),
       projected,
     );
-    // The unified Anthropic account: the paired Claude Code half rides along
+    // The unified account: the paired CLI half of any provider rides along
     // as an opaque id and a coarse status, never as a directory or token.
     const cliId = "44444444-4444-4444-8444-444444444444";
     const paired = subscriptionProfiles.projectRemoteSubscriptionProfiles(
@@ -582,15 +582,24 @@ async function main() {
           ],
         },
         terminals: new Map([
-          [cliId, { connected: true, expired: false, canRefresh: true, configDir: "/must-not-cross" }],
-          ["personal", { connected: false, expired: false, canRefresh: false }],
+          [
+            "anthropic",
+            new Map([
+              [cliId, { connected: true, expired: false, canRefresh: true, configDir: "/must-not-cross" }],
+              ["personal", { connected: false, expired: false, canRefresh: false }],
+            ]),
+          ],
+          [
+            "openai-codex",
+            new Map([[cliId, { connected: true, expired: true, canRefresh: true, vaultFile: "/must-not-cross" }]]),
+          ],
         ]),
       },
       cached,
     );
     const pairedJson = JSON.stringify(paired);
     check(
-      "remote subscription projection carries the Claude Code half as an opaque id plus coarse status",
+      "remote subscription projection carries the CLI half of every provider as an opaque id plus coarse status",
       paired.find((entry) => entry.id === refreshableId)?.cliProfileId === cliId &&
         paired.find((entry) => entry.id === refreshableId)?.terminal?.connected === true &&
         paired.find((entry) => entry.id === refreshableId)?.terminal?.expired === false &&
@@ -598,9 +607,14 @@ async function main() {
         paired.find((entry) => entry.id === unavailableId)?.builtIn === true &&
         paired.find((entry) => entry.id === unavailableId)?.cliProfileId === "personal" &&
         paired.find((entry) => entry.id === unavailableId)?.terminal?.connected === false &&
-        paired.find((entry) => entry.id === profileId)?.cliProfileId === undefined &&
+        // The openai-codex row's terminal status comes from its own
+        // provider's map, never from the anthropic one that shares the id.
+        paired.find((entry) => entry.id === profileId)?.cliProfileId === cliId &&
+        paired.find((entry) => entry.id === profileId)?.terminal?.connected === true &&
+        paired.find((entry) => entry.id === profileId)?.terminal?.expired === true &&
         !pairedJson.includes("must-not-cross") &&
-        !pairedJson.includes("canRefresh"),
+        !pairedJson.includes("canRefresh") &&
+        !pairedJson.includes("@"),
       paired,
     );
     const staleOrFailed =
