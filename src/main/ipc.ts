@@ -2810,6 +2810,15 @@ export function registerIpc(): void {
   handle("pty:resume", async (_e, args: { id: string }) => {
     pty.resume(args.id);
   });
+  // Renderer backpressure ack: xterm reports parsed bytes so pty-manager can
+  // pause the child at the OS level when the screen falls too far behind.
+  // Fire-and-forget on purpose: it runs on every write callback under a
+  // flood, and an invoke round-trip per ack would cost more than it saves.
+  ipcMain.on("pty:ack", (e, args: { id?: unknown; bytes?: unknown }) => {
+    if (!isTrustedOnSender(e, "pty:ack")) return;
+    if (typeof args?.id !== "string" || typeof args.bytes !== "number") return;
+    pty.ackRenderBytes(args.id, args.bytes);
+  });
   // Detach — the raw-tail-reattach variant of pause used by ChatPanel's backend
   // terminal. Nulls the renderer sink and DISCARDS the pause/backlog state so
   // the next spawn() replays the raw pty tail into a fresh xterm (like a first

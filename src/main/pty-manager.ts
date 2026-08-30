@@ -17,6 +17,7 @@ import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
+import { logMain } from "./file-log";
 import { getConnection, shQuote } from "./remote/connections";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
@@ -95,6 +96,21 @@ interface Session {
   pendingChunks: Buffer[];
   pendingBytes: number;
   flushTimer: NodeJS.Timeout | null;
+  // OS-level read flow control is shared by two independent consumers: the
+  // remote-access socket (reason "remote") and the local renderer's xterm
+  // (reason "render"). The pty is paused while ANY hold is present and
+  // resumed only when the last one is released, so neither consumer can
+  // silently undo the other's pause. See holdFlow / releaseFlow.
+  flowHolds: Set<FlowHoldReason>;
+  // Renderer backpressure accounting (reason "render"). Bytes shipped on
+  // dataChannel that xterm has not yet reported parsed. Accounting starts at
+  // the first pty:ack from this renderer (older or foreign consumers that
+  // never ack are never throttled), and a watchdog releases a hold that sees
+  // no ack progress so a renderer bug can never freeze a child for good.
+  renderUnackedBytes: number;
+  renderAckSeen: boolean;
+  renderHoldWatchdog: NodeJS.Timeout | null;
+  renderUnackedAtHold: number;
   resizedAt: number;
   exited: boolean;
   // Ring buffer of the most recent raw pty bytes for this session, used by
@@ -268,6 +284,17 @@ function consumeStrandedBinding(id: string): StrandedBinding | null {
 
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
+// Renderer backpressure watermarks. xterm.js parses 5 to 35 MB/s while an
+// agent TUI can emit far more, so once the renderer is a quarter megabyte
+// behind the pty is paused at the OS level and the child blocks on its own
+// write until xterm catches up to the low mark. Bounded lag keeps Ctrl+C,
+// scrolling and typing responsive under a flood, and memory flat, instead of
+// running into xterm's 50 MB write-buffer cliff where bytes are dropped.
+const RENDER_HIGH_WATER_BYTES = 256_000;
+const RENDER_LOW_WATER_BYTES = 64_000;
+const RENDER_HOLD_WATCHDOG_MS = 2_000;
+
+type FlowHoldReason = "remote" | "render";
 // Per-session tail buffer cap. Keep enough raw terminal history to reconstruct
 // a full-screen Claude/Codex TUI after a renderer/GPU restart on wake. This is
 // intentionally generous: a raw tail is the only lossless recovery source for
@@ -1043,6 +1070,11 @@ async function doSpawnRemote(
     pendingChunks: [],
     pendingBytes: 0,
     flushTimer: null,
+    flowHolds: new Set<FlowHoldReason>(),
+    renderUnackedBytes: 0,
+    renderAckSeen: false,
+    renderHoldWatchdog: null,
+    renderUnackedAtHold: 0,
     resizedAt: 0,
     exited: false,
     tail: [],
@@ -1423,6 +1455,10 @@ function doSpawn(
     env,
     encoding: null as unknown as string,
     useConpty: process.platform === "win32" ? true : undefined,
+    // Ship node-pty's own conpty.dll instead of whatever the host Windows
+    // build carries, so ConPTY behaviour and throughput do not vary by OS
+    // build (older builds are markedly slower and buggier under floods).
+    useConptyDll: process.platform === "win32" ? true : undefined,
   } as nodePty.IPtyForkOptions);
 
   // If a renderer's xterm was bound to this sessionId on a just-killed PTY
@@ -1448,6 +1484,11 @@ function doSpawn(
     pendingChunks: [],
     pendingBytes: 0,
     flushTimer: null,
+    flowHolds: new Set<FlowHoldReason>(),
+    renderUnackedBytes: 0,
+    renderAckSeen: false,
+    renderHoldWatchdog: null,
+    renderUnackedAtHold: 0,
     resizedAt: 0,
     exited: false,
     tail: [],
@@ -1735,6 +1776,7 @@ function enqueueData(id: string, data: string | Buffer): void {
 export function pause(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  resetRenderFlow(s);
   if (!s.attached) return;
   s.attached = false;
   if (s.pendingChunks.length > 0) {
@@ -1797,6 +1839,7 @@ export function resume(id: string): void {
       s.dataChannel,
       new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),
     );
+    noteRenderBytesSent(s, merged.byteLength);
   }
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
@@ -1833,23 +1876,117 @@ export function resume(id: string): void {
 // far slower than a local pty. Returns whether flow control was available:
 // the ssh2 remote adapter has no equivalent, so callers must treat a false
 // return as "no backpressure possible here" rather than assuming success.
-export function pauseFlow(id: string): boolean {
+//
+// Holds are keyed by reason so the remote socket and the local renderer can
+// each pause and resume independently; the pty resumes when the last hold
+// goes. The default reason keeps the remote-access call sites unchanged.
+export function pauseFlow(id: string, reason: FlowHoldReason = "remote"): boolean {
   const s = sessions.get(id);
   if (!s?.pty.pause) return false;
-  s.pty.pause();
+  holdFlow(s, reason);
   return true;
 }
 
-export function resumeFlow(id: string): boolean {
+export function resumeFlow(id: string, reason: FlowHoldReason = "remote"): boolean {
   const s = sessions.get(id);
   if (!s?.pty.resume) return false;
-  s.pty.resume();
+  releaseFlow(s, reason);
   return true;
+}
+
+function holdFlow(s: Session, reason: FlowHoldReason): void {
+  if (s.flowHolds.has(reason)) return;
+  const wasPaused = s.flowHolds.size > 0;
+  s.flowHolds.add(reason);
+  if (wasPaused || !s.pty.pause) return;
+  try {
+    s.pty.pause();
+  } catch {
+    s.flowHolds.delete(reason);
+  }
+}
+
+function releaseFlow(s: Session, reason: FlowHoldReason): void {
+  if (!s.flowHolds.delete(reason)) return;
+  if (s.flowHolds.size > 0 || !s.pty.resume) return;
+  try {
+    s.pty.resume();
+  } catch {
+    /* the handle is gone; nothing left to resume */
+  }
+}
+
+// Renderer backpressure. Every byte shipped on dataChannel is counted once
+// the renderer has proven it acks (first pty:ack); xterm's write callback
+// acks bytes as they are parsed. Past the high mark the pty is held under
+// reason "render" until the backlog drains to the low mark.
+function noteRenderBytesSent(s: Session, bytes: number): void {
+  if (!s.renderAckSeen || bytes <= 0) return;
+  s.renderUnackedBytes += bytes;
+  if (s.renderUnackedBytes < RENDER_HIGH_WATER_BYTES || s.flowHolds.has("render")) return;
+  if (!s.pty.pause) return;
+  holdFlow(s, "render");
+  armRenderHoldWatchdog(s);
+}
+
+export function ackRenderBytes(id: string, bytes: number): void {
+  const s = sessions.get(id);
+  if (!s || !Number.isFinite(bytes) || bytes <= 0) return;
+  s.renderAckSeen = true;
+  s.renderUnackedBytes = Math.max(0, s.renderUnackedBytes - bytes);
+  if (s.flowHolds.has("render") && s.renderUnackedBytes <= RENDER_LOW_WATER_BYTES) {
+    clearRenderHoldWatchdog(s);
+    releaseFlow(s, "render");
+  }
+}
+
+// A held pty that sees no ack progress within the window is released and its
+// accounting disabled until the renderer acks again: a stuck, reloading or
+// disposed xterm must never leave the child frozen.
+function armRenderHoldWatchdog(s: Session): void {
+  clearRenderHoldWatchdog(s);
+  s.renderUnackedAtHold = s.renderUnackedBytes;
+  s.renderHoldWatchdog = setTimeout(() => {
+    s.renderHoldWatchdog = null;
+    if (!s.flowHolds.has("render")) return;
+    if (s.renderUnackedBytes < s.renderUnackedAtHold) {
+      armRenderHoldWatchdog(s);
+      return;
+    }
+    logMain("pty", `render backpressure watchdog released ${s.id}: no ack progress in ${RENDER_HOLD_WATCHDOG_MS}ms`);
+    s.renderAckSeen = false;
+    s.renderUnackedBytes = 0;
+    releaseFlow(s, "render");
+  }, RENDER_HOLD_WATCHDOG_MS);
+}
+
+function clearRenderHoldWatchdog(s: Session): void {
+  if (!s.renderHoldWatchdog) return;
+  clearTimeout(s.renderHoldWatchdog);
+  s.renderHoldWatchdog = null;
+}
+
+// Drop all renderer accounting and any render hold. Called wherever the
+// renderer stops being a live consumer: detach, pause (workspace switch),
+// a destroyed webContents, and teardown.
+function resetRenderFlow(s: Session): void {
+  clearRenderHoldWatchdog(s);
+  s.renderUnackedBytes = 0;
+  s.renderAckSeen = false;
+  releaseFlow(s, "render");
+}
+
+/** Test and diagnostics view of the flow-control state for one session. */
+export function flowState(id: string): { holds: FlowHoldReason[]; unackedBytes: number } | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  return { holds: [...s.flowHolds], unackedBytes: s.renderUnackedBytes };
 }
 
 export function detach(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
+  resetRenderFlow(s);
   s.webContents = null;
   s.attached = true;
   s.detachedBacklog = [];
@@ -1878,6 +2015,7 @@ function flushDataNow(s: Session): void {
   if (s.webContents.isDestroyed()) {
     s.pendingChunks = [];
     s.pendingBytes = 0;
+    resetRenderFlow(s);
     return;
   }
   const merged = s.pendingChunks.length === 1 ? s.pendingChunks[0] : Buffer.concat(s.pendingChunks, s.pendingBytes);
@@ -1886,6 +2024,7 @@ function flushDataNow(s: Session): void {
   // Ship as Uint8Array so the renderer can hand it directly to xterm.js
   // without going through a string round-trip.
   s.webContents.send(s.dataChannel, new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength));
+  noteRenderBytesSent(s, merged.byteLength);
 }
 
 /** True iff a PTY with this id is currently registered. Used by the
@@ -2548,6 +2687,7 @@ function killNow(id: string): void {
   // forkpty root is still alive. After pty.kill() the shell can exit and
   // reparent surviving jobs, at which point ownership can no longer be proven.
   const posixTree = capturePosixPtyTree(s.pty);
+  clearRenderHoldWatchdog(s);
   try {
     flushDataNow(s);
     s.pty.kill();

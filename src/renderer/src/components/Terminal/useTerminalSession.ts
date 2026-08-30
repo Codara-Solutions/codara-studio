@@ -2459,6 +2459,37 @@ export function useTerminalSession({
           replayTracker.announce(bytes);
         }) ?? (() => undefined);
 
+      // Backpressure acks. Main counts every byte it ships on the data
+      // channel; we report bytes back once xterm has parsed them (write
+      // callback) or once we have consumed them without xterm (hidden-pane
+      // buffer). Past a quarter megabyte of unacked bytes main pauses the pty
+      // at the OS level, so a flooding agent blocks instead of burying the
+      // screen. Acks are coalesced per task so a flood costs one IPC message
+      // per batch, not one per write callback.
+      let ackPending = 0;
+      let ackTimer: number | null = null;
+      const flushAck = () => {
+        ackTimer = null;
+        if (ackPending <= 0 || disposed) return;
+        const bytes = ackPending;
+        ackPending = 0;
+        window.spark.pty.ack?.(sessionId, bytes);
+      };
+      const ack = (bytes: number) => {
+        ackPending += bytes;
+        if (ackPending >= 64_000) {
+          if (ackTimer !== null) window.clearTimeout(ackTimer);
+          flushAck();
+        } else if (ackTimer === null) {
+          ackTimer = window.setTimeout(flushAck, 0);
+        }
+      };
+      cleanups.push(() => {
+        if (ackTimer !== null) window.clearTimeout(ackTimer);
+        ackTimer = null;
+        ackPending = 0;
+      });
+
       const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
@@ -2494,10 +2525,12 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            term.write(bytes);
+            term.write(bytes, () => ack(bytes.length));
             onActivityRef.current?.();
             return;
           }
+          // Consumed without xterm: ack now, the hidden buffer is bounded.
+          ack(bytes.length);
           hiddenBufferRef.current.push(bytes);
           hiddenBytesRef.current += bytes.length;
           hiddenLineBreaksRef.current += countLineFeeds(bytes);
@@ -2515,18 +2548,20 @@ export function useTerminalSession({
           clearNotificationSuppressionRef.current = token;
           try {
             term.write(bytes, () => {
+              ack(bytes.length);
               if (clearNotificationSuppressionRef.current === token) {
                 clearNotificationSuppressionRef.current = null;
               }
             });
           } catch (error) {
+            ack(bytes.length);
             if (clearNotificationSuppressionRef.current === token) {
               clearNotificationSuppressionRef.current = null;
             }
             throw error;
           }
         } else {
-          term.write(bytes);
+          term.write(bytes, () => ack(bytes.length));
         }
         onActivityRef.current?.();
 

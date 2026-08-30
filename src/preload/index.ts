@@ -995,6 +995,10 @@ const api = {
       ipcRenderer.invoke("pty:resourceSnapshot"),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
+    // Backpressure ack (see pty-manager ackRenderBytes). Fire-and-forget.
+    ack: (id: string, bytes: number): void => {
+      ipcRenderer.send("pty:ack", { id, bytes });
+    },
     onHostResume: (handler: HostResumeHandler): (() => void) => {
       const listener = (
         _e: Electron.IpcRendererEvent,

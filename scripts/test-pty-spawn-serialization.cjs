@@ -39,6 +39,23 @@ function createController() {
       let exited = false;
       const handle = {
         pid,
+        // OS-level flow control, recorded so the backpressure suite can assert
+        // when pty-manager pauses and resumes the child.
+        paused: false,
+        pauseCalls: 0,
+        resumeCalls: 0,
+        pause: () => {
+          handle.paused = true;
+          handle.pauseCalls += 1;
+        },
+        resume: () => {
+          handle.paused = false;
+          handle.resumeCalls += 1;
+        },
+        // Push bytes through onData as the child would.
+        emit: (data) => {
+          for (const listener of [...dataListeners]) listener(data);
+        },
         write: () => undefined,
         resize: () => undefined,
         kill: () => {
@@ -719,7 +736,13 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+// Shared with sibling suites (test-pty-render-backpressure.cjs) so the stub
+// plugin and controller have one definition.
+module.exports = { createController, stubPlugin, localOptions, MODULE_TS, CACHE_ROOT, nextTurn };
