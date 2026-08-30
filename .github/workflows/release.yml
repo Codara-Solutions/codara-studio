@@ -21,7 +21,25 @@ permissions:
   contents: write # pushing the release tag
 
 jobs:
+  # Nothing ships untested: the release job only starts after every
+  # typecheck and the full unit-test registry pass on the same OS the
+  # build runs on. A red test means no build, no upload, no release.
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck:node
+      - run: npm run typecheck:web
+      - run: npm run test:all
+
   release:
+    needs: test
     runs-on: macos-latest
     timeout-minutes: 60
     steps:

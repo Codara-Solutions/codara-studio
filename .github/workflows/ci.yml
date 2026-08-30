@@ -1,0 +1,28 @@
+name: CI
+
+# Pull-request gate: contributors' changes run the same typechecks and the
+# full unit-test registry that gate releases, so a PR shows red before a
+# human ever reviews broken code. Branch protection can require this check.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck:node
+      - run: npm run typecheck:web
+      - run: npm run test:all
