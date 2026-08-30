@@ -15,6 +15,7 @@ import type {
   PiUsageProvider,
   PiUsageWindow,
 } from "@shared/types";
+import { ClaudeMark, CodexMark, GrokMark } from "./BrandMarks";
 
 type UsageEntry = PiUsageProvider | PiUsageProfile;
 
@@ -31,44 +32,14 @@ interface AppRegionStyle extends React.CSSProperties {
 const POLL_INTERVAL_MS = 5 * 60_000;
 
 /**
- * Anthropic's mark. Drawn rather than imported so the title bar carries no
- * external asset and the glyph inherits the current theme's ink colour.
+ * The same provider marks as the Settings account cards (BrandMarks.tsx), in
+ * currentColor so the pill draws them in the theme's ink instead of the
+ * family colours used on the cards.
  */
-function AnthropicGlyph({ size = 11 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden focusable="false">
-      <path
-        d="M8.9 3.4 3.2 20.6h4.05l1.16-3.6h6.02l1.16 3.6h4.05L13.96 3.4H8.9Zm-.62 10.2 1.96-6.06 1.96 6.06H8.28Z"
-        fill="currentColor"
-      />
-    </svg>
-  );
-}
-
-/** OpenAI's mark, simplified to a single stroked knot at this size. */
-function OpenAIGlyph({ size = 11 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden focusable="false">
-      <path
-        d="M12 2.6a5.1 5.1 0 0 1 4.42 2.56 5.1 5.1 0 0 1 3.1 8.36 5.1 5.1 0 0 1-4.42 7.88A5.1 5.1 0 0 1 12 21.4a5.1 5.1 0 0 1-7.52-2.4 5.1 5.1 0 0 1-3.1-8.36A5.1 5.1 0 0 1 5.8 2.76 5.1 5.1 0 0 1 12 2.6Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.7"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M12 8.2v7.6M8.6 10.1l6.8 3.8M15.4 10.1l-6.8 3.8"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        opacity="0.95"
-      />
-    </svg>
-  );
-}
-
 function ProviderGlyph({ provider, size }: { provider: UsageEntry["provider"]; size?: number }) {
-  return provider === "anthropic" ? <AnthropicGlyph size={size} /> : <OpenAIGlyph size={size} />;
+  if (provider === "anthropic") return <ClaudeMark size={size} />;
+  if (provider === "openai-codex") return <CodexMark size={size} />;
+  return <GrokMark size={size} />;
 }
 
 /** Three ascending bars — the Usage page's daily chart at glyph size. */
@@ -437,7 +408,7 @@ function UsagePill({
         aria-hidden
         style={{ display: "flex", alignItems: "center", color: "var(--ink)" }}
       >
-        <ProviderGlyph provider={usage.provider} />
+        <ProviderGlyph provider={usage.provider} size={11} />
       </span>
       {"profileId" in usage ? (
         <span
