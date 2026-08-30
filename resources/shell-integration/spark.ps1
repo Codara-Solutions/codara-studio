@@ -241,6 +241,10 @@ if (Get-Module -ListAvailable PSReadLine) {
             $marker = (__Spark-Osc ('633;E;' + (__Spark-Esc $line))) + (__Spark-Osc '633;C')
             [Console]::Write($marker)
             $Global:__SparkCommandRunning = $true
+            # Prompt alone is too late: it ran before the user switched
+            # accounts in Settings. Re-read the pointer on Enter so the
+            # command about to run starts under the Active account.
+            __Spark-FollowActiveAccount
             [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine($key, $arg)
         }
         Set-PSReadLineKeyHandler -Key Enter -ScriptBlock $Global:__SparkAcceptLine

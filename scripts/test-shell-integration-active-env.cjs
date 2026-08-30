@@ -45,6 +45,13 @@ const STEP_TIMEOUT_MS = 15000;
 for (const dir of [HOME, path.dirname(POINTER), CLAUDE_A, CLAUDE_B, CLAUDE_C, GROK_G]) {
   fs.mkdirSync(dir, { recursive: true });
 }
+// A user's own DEBUG trap (bash-preexec, iTerm2, Starship all install one)
+// must keep firing after the follow trap is chained in front of it. The body
+// carries a single quote so the `trap -p` unquoting is exercised too.
+fs.writeFileSync(
+  path.join(HOME, ".bashrc"),
+  "trap '__USER_DEBUG_COUNT=$((__USER_DEBUG_COUNT+1)); __USER_DEBUG_QUOTE=\"it'\"'\"'s\"' DEBUG\n",
+);
 
 let passes = 0;
 function pass(name) {
@@ -144,11 +151,11 @@ class ShellDriver {
     }
   }
 
-  // The hook runs before a prompt is drawn, so a pointer rewritten while the
-  // shell waits at a prompt is seen at the NEXT prompt: one no-op command
-  // advances it, exactly as a user's next keystroke would in a pane.
+  // The pointer is rewritten while the shell already waits at a drawn
+  // prompt, exactly like a switch made in Settings. The probe is the very
+  // next command and must already see it: the hook runs before the fork
+  // (zsh preexec, bash DEBUG trap), not only before the next prompt.
   async probe(id) {
-    this.send(":");
     this.send(
       `printf '@@${id}:%s|%s@@\\n' "\${CLAUDE_CONFIG_DIR-unset}" "\${GROK_HOME-unset}"`,
     );
@@ -255,6 +262,15 @@ async function followScenario(shell) {
     driver.send("unset CLAUDE_CONFIG_DIR");
     writePointer({ claude: CLAUDE_B, grok: GROK_G });
     await expect(CLAUDE_B, GROK_G, "an unset variable is followed again");
+
+    if (shell.exe.endsWith("bash")) {
+      driver.send(
+        "printf '@@dbg:%s|%s@@\\n' \"${__USER_DEBUG_COUNT-unset}\" \"${__USER_DEBUG_QUOTE-unset}\"",
+      );
+      const dbg = await driver.waitFor(/@@dbg:([^@%]*)\|([^@%]*)@@/);
+      assert.ok(Number(dbg[1]) > 5, `${shell.label}: the user's own DEBUG trap must keep firing (count ${dbg[1]})`);
+      assert.equal(dbg[2], "it's", `${shell.label}: the chained trap body keeps its quotes`);
+    }
   } finally {
     await driver.close();
   }
@@ -402,6 +418,19 @@ function sourcePins() {
   assert.ok(
     scripts["spark.ps1"].indexOf("__Spark-FollowActiveAccount\n") > scripts["spark.ps1"].indexOf("function Global:Prompt"),
     "spark.ps1 calls the hook from Global:Prompt",
+  );
+  assert.ok(
+    scripts["spark.ps1"].indexOf("__Spark-FollowActiveAccount\n", scripts["spark.ps1"].indexOf("__SparkAcceptLine = {")) <
+      scripts["spark.ps1"].indexOf("::AcceptLine($key, $arg)"),
+    "spark.ps1 re-reads the pointer on Enter before AcceptLine",
+  );
+  assert.ok(
+    /_spark_preexec\(\) \{\n\s*_spark_follow_active_account/.test(scripts["zshrc.zsh"]),
+    "zshrc.zsh follows the pointer in preexec",
+  );
+  assert.ok(
+    /trap "_spark_follow_active_account\$\{__spark_trap_body:\+;\$__spark_trap_body\}" DEBUG/.test(scripts["bashrc.bash"]),
+    "bashrc.bash follows the pointer from a chained DEBUG trap",
   );
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(pty.includes('env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"'), "pty-manager exports the flag");

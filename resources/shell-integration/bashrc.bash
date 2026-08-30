@@ -53,6 +53,12 @@ if [ -z "$__SPARK_HOOKS_LOADED" ]; then
   # and an unchanged revision returns before anything else is parsed. Every
   # failure (missing file, unreadable, bad header) is silent and leaves the
   # environment alone. bash 3.2 safe: nothing newer than its builtins is used.
+  #
+  # Runs from PROMPT_COMMAND AND a DEBUG trap. The prompt alone is too late
+  # for the common case: the prompt is already drawn when the user switches
+  # accounts in Settings, so a `claude` typed next would still start under
+  # the old selector. The DEBUG trap fires right before each top-level
+  # command, so the switch lands on that very command (see the install below).
   _spark_follow_active_account() {
     [ "${SPARK_FOLLOW_ACTIVE_ACCOUNT-}" = "1" ] || return 0
     local home="${SPARK_HOME_DIR:-$HOME/.codarastudio}"
@@ -124,6 +130,35 @@ if [ -z "$__SPARK_HOOKS_LOADED" ]; then
     *":_spark_precmd:"*) ;;
     *) PROMPT_COMMAND="_spark_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
   esac
+
+  # Follow the pointer right before a command runs. bash has no preexec;
+  # PS0 expands in a subshell (cannot export) so a DEBUG trap is the only
+  # hook that runs in the shell before the fork. An existing DEBUG trap (a
+  # user's bash-preexec, iTerm2 or Starship integration) is chained after
+  # ours, never replaced: `trap -p` prints it as a reusable trap command and
+  # the body is unquoted with builtin expansions only. Without functrace the
+  # trap never fires inside functions, so the hook itself stays cheap.
+  #
+  # Installed at top level on purpose: when a DEBUG trap is already set, bash
+  # saves it on function entry and restores it on return, so a `trap` issued
+  # inside a function would be silently discarded.
+  if [ "${SPARK_FOLLOW_ACTIVE_ACCOUNT-}" = "1" ]; then
+    __spark_prev_trap="$(trap -p DEBUG)"
+    __spark_trap_body=""
+    if [ -n "$__spark_prev_trap" ]; then
+      __spark_q="'"
+      __spark_esc="'\\''"
+      __spark_trap_body="${__spark_prev_trap#trap -- $__spark_q}"
+      __spark_trap_body="${__spark_trap_body%$__spark_q DEBUG}"
+      __spark_trap_body="${__spark_trap_body//"$__spark_esc"/$__spark_q}"
+      unset __spark_q __spark_esc
+    fi
+    case "$__spark_trap_body" in
+      *_spark_follow_active_account*) ;;
+      *) trap "_spark_follow_active_account${__spark_trap_body:+;$__spark_trap_body}" DEBUG ;;
+    esac
+    unset __spark_prev_trap __spark_trap_body
+  fi
 
   # Pre-exec marker via PS0 (bash 4.4+). PS0 is expanded just before a command
   # runs, cleaner than a DEBUG trap, which would clobber user traps and fire

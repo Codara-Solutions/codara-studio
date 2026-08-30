@@ -53,6 +53,12 @@ if [[ -z "$__SPARK_HOOKS_LOADED" ]]; then
   # and an unchanged revision returns before anything else is parsed. Every
   # failure (missing file, unreadable, bad header) is silent and leaves the
   # environment alone. Builtins only, no subshell.
+  #
+  # Runs from precmd AND preexec. precmd alone is too late for the common
+  # case: the prompt is already drawn when the user switches accounts in
+  # Settings, so a `claude` typed next would still start under the old
+  # selector and only the command after it would follow. preexec runs in the
+  # shell right before the fork, so the switch lands on that very command.
   _spark_follow_active_account() {
     emulate -L zsh
     [[ "$SPARK_FOLLOW_ACTIVE_ACCOUNT" = "1" ]] || return 0
@@ -136,6 +142,7 @@ if [[ -z "$__SPARK_HOOKS_LOADED" ]]; then
   }
 
   _spark_preexec() {
+    _spark_follow_active_account
     printf '\e]633;E;%s\e\\' "$(_spark_osc633_esc "$1")"
     printf '\e]133;C\e\\'
   }
