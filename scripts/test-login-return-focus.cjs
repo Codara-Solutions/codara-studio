@@ -172,7 +172,7 @@ assert.match(subscriptionAuth, /callback\.waitForRedirect\(\)\.then\(\(url\) => 
 assert.match(subscriptionAuth, /if \(outcome\.kind === "typed"\) return outcome\.value;/);
 assert.match(subscriptionAuth, /if \(outcome\.kind === "failed"\) throw outcome\.error;/);
 // The listener is released on every exit path, cancel included.
-assert.match(subscriptionAuth, /\} finally \{\s*callback\?\.close\(\);/);
+assert.match(subscriptionAuth, /\} finally \{\s*(?:clearTimeout\(stallWatchdog\);\s*)?callback\?\.close\(\);/);
 
 console.log(
   "PASS Studio returns to the front when a sign-in finishes, and the OpenAI callback lands on a Codara-branded page served from Pi's own registered redirect URI",
