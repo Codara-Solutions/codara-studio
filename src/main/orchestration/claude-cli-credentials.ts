@@ -8,8 +8,9 @@ import { dirname, join, resolve } from "node:path";
  * Claude Code's credential slot, read and written the way Claude Code itself
  * does it: on macOS the Keychain item for the config directory is consulted
  * first and the 0600 `.credentials.json` file second; elsewhere only the file
- * exists. Every write lands in both places so a terminal started against the
- * directory sees the same token Codara sees.
+ * exists. A managed directory is written in both places so a terminal started
+ * against it sees the same token Codara sees; the personal slot on macOS is
+ * written to the Keychain alone, where Claude Code keeps it.
  *
  * Nothing here selects an account. Which directory a terminal runs in is the
  * account store's decision (CLAUDE_CONFIG_DIR per managed profile, unset for
@@ -20,6 +21,29 @@ export const CLAUDE_CREDENTIALS_FILE = ".credentials.json";
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
 const MAX_AUTH_BYTES = 16 * 1024 * 1024;
 const KEYCHAIN_TIMEOUT_MS = 10_000;
+const SECURITY_BINARY = "/usr/bin/security";
+
+interface ClaudeCliCredentialSeams {
+  platform: NodeJS.Platform;
+  securityBinary: string;
+}
+
+const seams: ClaudeCliCredentialSeams = {
+  platform: process.platform,
+  securityBinary: SECURITY_BINARY,
+};
+
+/**
+ * Test seam: point the backend at a fake `security` and a chosen platform so
+ * a suite can exercise the macOS paths without touching the user's Keychain.
+ * Production never calls this.
+ */
+export function setClaudeCliCredentialSeamsForTests(
+  overrides: Partial<ClaudeCliCredentialSeams> | null,
+): void {
+  seams.platform = overrides?.platform ?? process.platform;
+  seams.securityBinary = overrides?.securityBinary ?? SECURITY_BINARY;
+}
 
 export interface ClaudeCliCredentialBackend {
   read(configDir: string, configDirEnv: string | null): Promise<string | null>;
@@ -139,10 +163,10 @@ export function claudeCliKeychainService(configDirEnv: string | null): string {
 }
 
 export function readKeychainCredential(service: string): Promise<string | null> {
-  if (process.platform !== "darwin") return Promise.resolve(null);
+  if (seams.platform !== "darwin") return Promise.resolve(null);
   return new Promise((resolvePromise, reject) => {
     execFile(
-      "/usr/bin/security",
+      seams.securityBinary,
       [
         "find-generic-password",
         "-a",
@@ -179,7 +203,7 @@ export function readKeychainCredential(service: string): Promise<string | null> 
 }
 
 export function writeKeychainCredential(service: string, credential: string): Promise<void> {
-  if (process.platform !== "darwin") return Promise.resolve();
+  if (seams.platform !== "darwin") return Promise.resolve();
   const normalized = normalizeCredential(credential);
   return new Promise((resolvePromise, reject) => {
     // `security -w` without a value opens an interactive prompt. Electron's
@@ -188,7 +212,7 @@ export function writeKeychainCredential(service: string, credential: string): Pr
     // the argument-vector API: no shell is involved and stdout/stderr are
     // discarded. The process is short-lived and its argv is never logged.
     execFile(
-      "/usr/bin/security",
+      seams.securityBinary,
       [
         "add-generic-password",
         "-U",
@@ -213,10 +237,10 @@ export function writeKeychainCredential(service: string, credential: string): Pr
 }
 
 export function deleteKeychainCredential(service: string): Promise<void> {
-  if (process.platform !== "darwin") return Promise.resolve();
+  if (seams.platform !== "darwin") return Promise.resolve();
   return new Promise((resolvePromise, reject) => {
     execFile(
-      "/usr/bin/security",
+      seams.securityBinary,
       [
         "delete-generic-password",
         "-a",
@@ -267,8 +291,22 @@ export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
     return fromKeychain ?? readCredentialFile(claudeCredentialFile(configDir));
   },
   async write(configDir, configDirEnv, credential) {
+    if (keychainDisabled()) {
+      await atomicWriteCredential(claudeCredentialFile(configDir), credential);
+      return;
+    }
+    if (seams.platform === "darwin" && configDirEnv === null) {
+      // ~/.claude is Claude Code's own slot, and on macOS Claude Code keeps
+      // it in the Keychain: `claude logout` removes the item and nothing
+      // else. A file copy of the same login would outlive that logout and
+      // be read back as a credential, so the personal slot gets the item
+      // alone, and a file left there by an earlier Codara (the retired
+      // selector wrote both) is retired once the item holds the login.
+      await writeKeychainCredential(claudeCliKeychainService(null), credential);
+      await removeCredentialFile(claudeCredentialFile(configDir)).catch(() => undefined);
+      return;
+    }
     await atomicWriteCredential(claudeCredentialFile(configDir), credential);
-    if (keychainDisabled()) return;
     await writeKeychainCredential(claudeCliKeychainService(configDirEnv), credential);
   },
   async clear(configDir, configDirEnv) {

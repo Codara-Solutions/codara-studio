@@ -194,6 +194,97 @@ async function main() {
   assert.equal(keychain.has(service), false);
   console.log("PASS the file-only backend is Keychain-free");
 
+  // The production backend on macOS, against a fake `security` that keeps
+  // its items in a JSON file: a managed directory is written to both places,
+  // the personal slot to the Keychain alone (where Claude Code keeps it), a
+  // legacy personal file is retired, and a `claude logout` (the item gone)
+  // reads back as signed out even with that file having been there.
+  if (process.platform !== "win32") {
+    const store = path.join(TMP, "fake-keychain.json");
+    const security = path.join(TMP, "security");
+    fs.writeFileSync(
+      security,
+      [
+        "#!/usr/bin/env node",
+        '"use strict";',
+        'const fs = require("node:fs");',
+        `const STORE = ${JSON.stringify(store)};`,
+        "const args = process.argv.slice(2);",
+        "const command = args.shift();",
+        "const flag = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : undefined; };",
+        "const items = fs.existsSync(STORE) ? JSON.parse(fs.readFileSync(STORE, 'utf8')) : {};",
+        "const key = `${flag('-a')}\u0000${flag('-s')}`;",
+        'if (command === "find-generic-password") {',
+        "  if (!(key in items)) process.exit(44);",
+        "  process.stdout.write(items[key]);",
+        "  process.exit(0);",
+        "}",
+        'if (command === "add-generic-password") {',
+        "  items[key] = flag('-w');",
+        "  fs.writeFileSync(STORE, JSON.stringify(items));",
+        "  process.exit(0);",
+        "}",
+        'if (command === "delete-generic-password") {',
+        "  if (!(key in items)) process.exit(44);",
+        "  delete items[key];",
+        "  fs.writeFileSync(STORE, JSON.stringify(items));",
+        "  process.exit(0);",
+        "}",
+        "process.exit(1);",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+    const items = () => (fs.existsSync(store) ? JSON.parse(fs.readFileSync(store, "utf8")) : {});
+    const itemFor = (configDirEnv) =>
+      Object.entries(items()).find(([key]) =>
+        key.endsWith(`\u0000${mod.claudeCliKeychainService(configDirEnv)}`),
+      )?.[1];
+    const keychainWasDisabled = process.env.CODARA_DISABLE_KEYCHAIN;
+    delete process.env.CODARA_DISABLE_KEYCHAIN;
+    mod.setClaudeCliCredentialSeamsForTests({ platform: "darwin", securityBinary: security });
+    try {
+      const real = {};
+      const darwinManaged = path.join(TMP, "darwin", "accounts", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab");
+      const darwinPersonal = path.join(TMP, "darwin", "home", ".claude");
+      await mod.writeClaudeCredentialRecord(darwinManaged, darwinManaged, record, real);
+      assert.ok(fs.existsSync(mod.claudeCredentialFile(darwinManaged)), "a managed slot keeps its file");
+      assert.deepEqual(JSON.parse(itemFor(darwinManaged)), { claudeAiOauth: record });
+      assert.deepEqual(await mod.readClaudeCredentialRecord(darwinManaged, darwinManaged, real), record);
+
+      fs.mkdirSync(darwinPersonal, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        mod.claudeCredentialFile(darwinPersonal),
+        JSON.stringify({ claudeAiOauth: { ...record, accessToken: "legacy-file-copy" } }),
+        { mode: 0o600 },
+      );
+      await mod.writeClaudeCredentialRecord(darwinPersonal, null, record, real);
+      assert.deepEqual(JSON.parse(itemFor(null)), { claudeAiOauth: record });
+      assert.equal(
+        fs.existsSync(mod.claudeCredentialFile(darwinPersonal)),
+        false,
+        "the personal slot holds no file copy once the item holds the login",
+      );
+      assert.deepEqual(await mod.readClaudeCredentialRecord(darwinPersonal, null, real), record);
+      // claude logout: the item goes, and so does the login as Codara sees it.
+      await mod.deleteKeychainCredential(mod.claudeCliKeychainService(null));
+      assert.equal(await mod.readClaudeCredentialRecord(darwinPersonal, null, real), null);
+      // A Keychain that fails outright is unreadable, not signed out.
+      fs.chmodSync(security, 0o600);
+      await assert.rejects(
+        () => mod.readClaudeCredentialRecord(darwinManaged, darwinManaged, real),
+        /Keychain/,
+      );
+      fs.chmodSync(security, 0o700);
+      await mod.clearClaudeCredentialRecord(darwinManaged, darwinManaged, real);
+      assert.equal(itemFor(darwinManaged), undefined);
+      assert.equal(fs.existsSync(mod.claudeCredentialFile(darwinManaged)), false);
+    } finally {
+      mod.setClaudeCliCredentialSeamsForTests(null);
+      if (keychainWasDisabled !== undefined) process.env.CODARA_DISABLE_KEYCHAIN = keychainWasDisabled;
+    }
+    console.log("PASS on macOS the personal slot lives in the Keychain alone and a logout is seen");
+  }
+
   console.log("\nPASS Claude Code credential store");
 }
 
