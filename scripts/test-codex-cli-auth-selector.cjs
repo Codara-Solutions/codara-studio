@@ -77,6 +77,17 @@ async function main() {
       "legacy account databases are never activated or copied over shared state",
     );
 
+    // Re-selecting the live profile is not a round trip through the vault:
+    // the live file's bytes and inode are untouched (codex-rs may be
+    // rewriting it in place at that moment) and the vault copy trails it.
+    writePrivate(live, "MANAGED_LIVE_ROTATION");
+    const liveBefore = fs.statSync(live);
+    assert.equal(await T.activateCodexCliAccount(store, PROFILE), PROFILE);
+    assert.equal(fs.readFileSync(live, "utf8"), "MANAGED_LIVE_ROTATION");
+    assert.equal(fs.statSync(live).ino, liveBefore.ino, "the live file is not replaced");
+    assert.equal(fs.statSync(live).mtimeMs, liveBefore.mtimeMs, "the live file is not rewritten");
+    assert.equal(fs.readFileSync(managed, "utf8"), "MANAGED_LIVE_ROTATION", "the vault copy trails the live file");
+
     // Simulate Codex refreshing its live token, then switch back. The refresh
     // must be saved into only that account's vault slot.
     writePrivate(live, "MANAGED_REFRESHED");
@@ -98,9 +109,33 @@ async function main() {
       inheritedCodexHome,
       "selector never mutates process env",
     );
-    await T.finalizeCodexCliLogout(store, PROFILE);
-    assert.equal(fs.existsSync(live), false);
+    // A `codex logout` of the live profile removes the live file. The next
+    // switch reads that as the profile signing out: its vault copy goes too,
+    // so the login it logged out of cannot come back on the way back.
+    fs.rmSync(live);
+    assert.equal(await T.activateCodexCliAccount(store, "personal"), PROFILE);
+    assert.equal(fs.existsSync(managed), false, "the signed-out profile's vault copy goes with the live file");
+    assert.equal(fs.readFileSync(live, "utf8"), "PERSONAL_SECRET");
+    // Re-selecting a live profile that signed out is refused (and clears
+    // its vault copy) unless the caller allows a signed-out slot.
+    writePrivate(managed, "MANAGED_AGAIN");
+    await T.activateCodexCliAccount(store, PROFILE);
+    fs.rmSync(live);
+    await assert.rejects(() => T.activateCodexCliAccount(store, PROFILE), /not signed in/);
     assert.equal(fs.existsSync(managed), false);
+    assert.equal(await T.readCodexCliSelection(store.rootDir), PROFILE);
+    assert.equal(await T.activateCodexCliAccount(store, PROFILE, { allowSignedOut: true }), PROFILE);
+    // The live file is not saved into the slot of a profile that no longer
+    // exists (a marker a delete left behind): no orphan directory appears.
+    writePrivate(live, "STALE_LOGIN");
+    fs.rmSync(path.dirname(managed), { recursive: true, force: true });
+    assert.equal(
+      await T.activateCodexCliAccount(store, "personal", { profileExists: async () => false }),
+      PROFILE,
+    );
+    assert.equal(fs.existsSync(path.dirname(managed)), false, "no orphan vault directory is created");
+    assert.equal(fs.readFileSync(live, "utf8"), "PERSONAL_SECRET");
+    writePrivate(managed, "MANAGED_SECRET");
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

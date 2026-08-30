@@ -302,6 +302,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       authFile,
       location: this.adapter.locate(profile.cliProfileId),
       adapter: this.adapter,
+      ...(profile.identityFingerprint ? { identityFingerprint: profile.identityFingerprint } : {}),
     };
   }
 

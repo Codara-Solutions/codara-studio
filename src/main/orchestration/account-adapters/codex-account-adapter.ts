@@ -59,6 +59,11 @@ import {
  * file, so Codex sessions are closed first (after the caller agreed), and a
  * Cora-only account cannot become a Codex half without a refresh grant,
  * because Codex insists on an id_token pi-ai never kept.
+ *
+ * The live file is shared with every terminal, so a `codex login` as another
+ * account while a managed profile owns it is an ordinary event. The vault
+ * copy names the profile's account; a live file of a different account is
+ * reported as foreign rather than as that profile's rotation.
  */
 
 export interface CodexLocation {
@@ -78,6 +83,7 @@ export interface CodexAccountAdapterOptions {
   externalSessionCount?: () => number;
   /** Test seam for the last_refresh stamp. */
   now?: () => Date;
+  log?: (message: string) => void;
 }
 
 export type CodexAccountAdapter = AccountProviderAdapter<CodexLocation, CodexAuthFile>;
@@ -128,8 +134,36 @@ export function createCodexAccountAdapter(
     };
   };
 
-  const readCli = async (location: CodexLocation): Promise<CliSideRead<CodexAuthFile>> =>
-    readFile((await isLive(location)) ? location.liveFile : location.vaultFile);
+  const accountIdOf = (raw: CodexAuthFile | null): string | undefined =>
+    codec.canonicalFromCli(raw)?.extra?.accountId as string | undefined;
+  const fingerprintOf = (canonical: CanonicalCredential): string | undefined => {
+    const accountId =
+      (typeof canonical.extra?.accountId === "string" && canonical.extra.accountId) ||
+      codexAccountIdFromAccessToken(canonical.access);
+    return accountId ? nativeCliAccountFingerprint(accountId) : undefined;
+  };
+
+  const readCli = async (location: CodexLocation): Promise<CliSideRead<CodexAuthFile>> => {
+    if (!(await isLive(location))) return readFile(location.vaultFile);
+    const live = await readFile(location.liveFile);
+    if (location.cliProfileId === CODEX_CLI_PERSONAL_PROFILE_ID || live.kind !== "credential") {
+      return live;
+    }
+    // A managed profile's vault copy names its account. A live file of
+    // another account is an external login into the shared slot, not this
+    // profile's rotation: it is neither mirrored to Cora nor saved into the
+    // profile's vault on the next switch.
+    const vault = await readFile(location.vaultFile);
+    const liveAccount = accountIdOf(live.raw);
+    const vaultAccount = vault.kind === "credential" ? accountIdOf(vault.raw) : undefined;
+    if (liveAccount && vaultAccount && liveAccount !== vaultAccount) {
+      options.log?.(
+        `[accounts] ~/.codex/auth.json holds a login of another account than the live Codex profile ${location.cliProfileId}`,
+      );
+      return { kind: "foreign" };
+    }
+    return live;
+  };
 
   return {
     provider: "openai-codex",
@@ -211,6 +245,11 @@ export function createCodexAccountAdapter(
     lockCli(location, operation) {
       return withCodexSelectionLock(location.rootDir, operation);
     },
+    fingerprintOf,
+    async afterPersonalLogout(location) {
+      if (location.cliProfileId !== CODEX_CLI_PERSONAL_PROFILE_ID) return;
+      await removePrivateFile(location.vaultFile).catch(() => undefined);
+    },
     personalProbePaths() {
       const current = resolveStore();
       return [
@@ -223,12 +262,10 @@ export function createCodexAccountAdapter(
       return readCodexCliAccountIdentity(file).catch((): NativeCliAccountIdentity => ({}));
     },
     async connectTimeIdentity(canonical: CanonicalCredential): Promise<AccountIdentity> {
-      const accountId =
-        (typeof canonical.extra?.accountId === "string" && canonical.extra.accountId) ||
-        codexAccountIdFromAccessToken(canonical.access);
+      const fingerprint = fingerprintOf(canonical);
       const email = jwtEmailClaim(canonical.extra?.idToken) ?? jwtEmailClaim(canonical.access);
       return {
-        ...(accountId ? { fingerprint: nativeCliAccountFingerprint(accountId) } : {}),
+        ...(fingerprint ? { fingerprint } : {}),
         ...(email ? { email } : {}),
       };
     },
@@ -285,8 +322,12 @@ export function createCodexAccountAdapter(
         return context.sessionShutdown();
       },
       async afterDefault(target: string, effectOptions = {}) {
-        await activateCodexCliAccount(resolveStore(), target, {
+        const current = resolveStore();
+        await activateCodexCliAccount(current, target, {
           allowSignedOut: effectOptions.allowSignedOut === true,
+          profileExists: async (profileId) =>
+            (await current.snapshot()).profiles.some((profile) => profile.id === profileId),
+          ...(options.log ? { log: options.log } : {}),
         });
       },
     },

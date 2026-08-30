@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { codexAccountIdFromAccessToken } from "./account-adapters/codex-credential-codec";
 import {
   CODEX_CLI_AUTH_FILE,
   CODEX_CLI_PERSONAL_PROFILE_ID,
@@ -9,6 +10,7 @@ import {
   type CodexCliAccountProfileStore,
   type CodexCliProfileId,
 } from "./codex-cli-account-profiles";
+import { readPrivateJsonFile } from "./native-cli-atomic-file";
 
 const ACTIVE_AUTH_FILE = "active-auth.json";
 const PERSONAL_DIRECTORY = "personal";
@@ -74,6 +76,40 @@ async function atomicCopy(source: string, destination: string): Promise<void> {
 async function removeCredential(path: string): Promise<void> {
   if (!(await safeRegularFile(path))) return;
   await fs.unlink(path);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * The ChatGPT account a credential file was issued for, or undefined when
+ * the file does not say (unparsable bytes, an API-key login). Only the
+ * account id is looked at; no token leaves this function.
+ */
+async function credentialAccountId(path: string): Promise<string | undefined> {
+  const read = await readPrivateJsonFile(path).catch(() => null);
+  if (!read || read.kind !== "value" || !isRecord(read.value)) return undefined;
+  const tokens = read.value.tokens;
+  if (!isRecord(tokens)) return undefined;
+  if (typeof tokens.account_id === "string" && tokens.account_id.length > 0) {
+    return tokens.account_id;
+  }
+  return codexAccountIdFromAccessToken(tokens.access_token);
+}
+
+/**
+ * Whether the live file may be saved into a slot: true unless both name an
+ * account and the accounts differ. A `codex login` as someone else while a
+ * profile owned the live file is an external login, not that profile's
+ * rotation; saving it would rewrite the profile as the other account.
+ */
+async function sameAccountOrUnknown(liveAuth: string, slot: string): Promise<boolean> {
+  const [live, stored] = await Promise.all([
+    credentialAccountId(liveAuth),
+    credentialAccountId(slot),
+  ]);
+  return !live || !stored || live === stored;
 }
 
 async function writeSelection(
@@ -198,12 +234,26 @@ export interface ActivateCodexCliAccountOptions {
    * only remaining account is signed out.
    */
   allowSignedOut?: boolean;
+  /**
+   * Whether a managed profile id is still registered. The live file is not
+   * saved into the slot of a profile that no longer exists (a marker left
+   * behind by a delete), which would otherwise recreate its directory.
+   */
+  profileExists?: (profileId: CodexCliProfileId) => Promise<boolean>;
+  log?: (message: string) => void;
 }
 
 /**
  * Makes one saved account active in the single official ~/.codex state home.
  * Only auth.json moves. Config, sessions, skills, memory and databases never
  * move and CODEX_HOME is never changed.
+ *
+ * The live file is the live profile's slot, so an absent live file means
+ * that profile signed out (`codex logout`): its vault copy goes with it
+ * rather than resurrecting the login on the way back. Re-selecting the live
+ * profile never round-trips the live file through the vault: codex-rs
+ * rewrites auth.json in place on refresh, and a rotation landing between
+ * the two copies would be replaced by the snapshot taken before it.
  */
 export async function activateCodexCliAccount(
   store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
@@ -214,33 +264,44 @@ export async function activateCodexCliAccount(
     const selected = normalizeCodexCliProfileId(rawProfileId);
     const previous = await ensureVaultUnlocked(store);
     const liveAuth = join(store.personalHomeDir, CODEX_CLI_AUTH_FILE);
+    const previousSlot = storedAuthFile(store, previous);
+    const liveSignedIn = await safeRegularFile(liveAuth);
+    if (previous === selected) {
+      if (liveSignedIn) {
+        if (await sameAccountOrUnknown(liveAuth, previousSlot)) {
+          await atomicCopy(liveAuth, previousSlot);
+        }
+        return previous;
+      }
+      await removeCredential(previousSlot);
+      if (!options.allowSignedOut) throw new Error("Selected Codex account is not signed in");
+      return previous;
+    }
     const target = storedAuthFile(store, selected);
     const targetSignedIn = await safeRegularFile(target);
     if (!targetSignedIn && !options.allowSignedOut) {
       throw new Error("Selected Codex account is not signed in");
     }
-    if (await safeRegularFile(liveAuth)) {
-      await atomicCopy(liveAuth, storedAuthFile(store, previous));
+    if (!liveSignedIn) {
+      await removeCredential(previousSlot);
+    } else if (
+      previous !== CODEX_CLI_PERSONAL_PROFILE_ID &&
+      options.profileExists &&
+      !(await options.profileExists(previous))
+    ) {
+      options.log?.(
+        `[accounts] the live Codex login belonged to a profile that no longer exists; it is dropped rather than saved`,
+      );
+    } else if (await sameAccountOrUnknown(liveAuth, previousSlot)) {
+      await atomicCopy(liveAuth, previousSlot);
+    } else {
+      options.log?.(
+        `[accounts] ~/.codex/auth.json held a login of another account than the live Codex profile; it is dropped rather than saved into that profile's slot`,
+      );
     }
     if (targetSignedIn) await atomicCopy(target, liveAuth);
     else await removeCredential(liveAuth);
     await writeSelection(store.rootDir, selected);
     return previous;
-  });
-}
-
-/** Clear a signed-out slot, and the official live slot when it was active. */
-export async function finalizeCodexCliLogout(
-  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
-  rawProfileId: string | null | undefined,
-): Promise<void> {
-  return withSelectionLock(store.rootDir, async () => {
-    const profileId = normalizeCodexCliProfileId(rawProfileId);
-    const active = (await readSelection(store.rootDir)) ??
-      CODEX_CLI_PERSONAL_PROFILE_ID;
-    await removeCredential(storedAuthFile(store, profileId));
-    if (active === profileId) {
-      await removeCredential(join(store.personalHomeDir, CODEX_CLI_AUTH_FILE));
-    }
   });
 }

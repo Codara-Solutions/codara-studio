@@ -36,6 +36,10 @@ import {
  *    credential that exists there but never creates one, and the only
  *    deletion it propagates is that slot going from credential to none,
  *    which signs Account 1 out of Cora as well.
+ *  - A credential that names another account than the row (a `codex login`
+ *    as someone else while a managed profile owns the live file) is never
+ *    copied in either direction: the row keeps its identity and the mirror
+ *    logs the foreign login instead of adopting it.
  *  - Unparsable or half-written files are "unreadable", not "empty": the
  *    reconcile retries briefly and never writes on unreadable input.
  *
@@ -127,6 +131,8 @@ export interface MirrorWatchTarget {
 
 export type CliSideRead<Raw> =
   | { kind: "unreadable" }
+  /** The slot holds a login of an account other than the profile's. */
+  | { kind: "foreign" }
   | { kind: "credential"; raw: Raw | null };
 
 /**
@@ -155,6 +161,18 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    * mutations (a Codex switch moving auth.json), when it has any.
    */
   lockCli?<T>(location: Loc, operation: () => Promise<T>): Promise<T>;
+  /**
+   * The identity fingerprint a credential carries, when the provider's
+   * tokens name the account locally (a Codex account id, a Grok subject).
+   * Undefined when only a network lookup could tell (Claude).
+   */
+  fingerprintOf?(canonical: CanonicalCredential): string | undefined;
+  /**
+   * The personal slot went from credential to none and Cora followed. A
+   * provider that keeps a trailing copy of that slot (the Codex vault)
+   * drops it here, so the logged-out login cannot come back on a switch.
+   */
+  afterPersonalLogout?(location: Loc): Promise<void>;
 }
 
 export interface CredentialPair<Loc = unknown, Raw = unknown> {
@@ -165,6 +183,8 @@ export interface CredentialPair<Loc = unknown, Raw = unknown> {
   authFile: string;
   location: Loc;
   adapter: CredentialMirrorAdapter<Loc, Raw>;
+  /** The row's account fingerprint; a CLI credential of another account is never adopted. */
+  identityFingerprint?: string;
 }
 
 export function isPersonalPair(
@@ -224,7 +244,8 @@ export interface ReconcilePairOptions {
 }
 
 export interface ReconcilePairResult {
-  verdict: CredentialComparison | "unreadable";
+  /** "foreign": the CLI side names another account; nothing was written. */
+  verdict: CredentialComparison | "unreadable" | "foreign";
   wrote: "pi" | "cli" | "pi-delete" | null;
   piPresent: boolean;
   cliPresent: boolean;
@@ -250,13 +271,29 @@ export async function reconcilePair<Loc, Raw>(
       readPiSide(pair.authFile, codec),
       adapter.readCli(pair.location),
     ]);
-    if (pi.kind === "credential" && cli.kind === "credential") break;
+    if (pi.kind === "credential" && cli.kind !== "unreadable") break;
   }
-  if (pi.kind !== "credential" || cli.kind !== "credential") {
+  if (pi.kind !== "credential" || cli.kind === "unreadable") {
     return { verdict: "unreadable", wrote: null, piPresent: false, cliPresent: false };
   }
   const piCanonical = pi.canonical;
+  // A row's identity is fixed at pairing time. A CLI credential of another
+  // account (an external login into a slot this row owns) must not become
+  // the row's Cora half, and the row's Cora half must not overwrite it.
+  const isForeign = (canonical: CanonicalCredential | null): boolean => {
+    if (!canonical || !pair.identityFingerprint || !adapter.fingerprintOf) return false;
+    const fingerprint = adapter.fingerprintOf(canonical);
+    return fingerprint !== undefined && fingerprint !== pair.identityFingerprint;
+  };
+  const foreignResult = (): ReconcilePairResult => {
+    options.log?.(
+      `[accounts] the ${codec.provider} CLI slot of ${pair.coraProfileId} holds another account's login; leaving both halves alone`,
+    );
+    return { verdict: "foreign", wrote: null, piPresent: piCanonical !== null, cliPresent: false };
+  };
+  if (cli.kind === "foreign") return foreignResult();
   const cliCanonical = codec.canonicalFromCli(cli.raw);
+  if (isForeign(cliCanonical)) return foreignResult();
   const verdict = compareCredentials(piCanonical, cliCanonical);
   const personal = isPersonalPair(pair);
   const result: ReconcilePairResult = {
@@ -265,6 +302,9 @@ export async function reconcilePair<Loc, Raw>(
     piPresent: piCanonical !== null,
     cliPresent: cliCanonical !== null,
   };
+  const lock = adapter.lockCli
+    ? <T>(operation: () => Promise<T>) => adapter.lockCli!(pair.location, operation)
+    : <T>(operation: () => Promise<T>) => operation();
 
   if (verdict === "conflict") {
     options.log?.(
@@ -283,6 +323,7 @@ export async function reconcilePair<Loc, Raw>(
       await AuthStorage.create(pair.authFile).delete(codec.provider);
       await chmodPrivate(pair.authFile);
       result.wrote = "pi-delete";
+      await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
     }
     return result;
   }
@@ -291,9 +332,6 @@ export async function reconcilePair<Loc, Raw>(
     // A managed half is created by ensureCliHalf alone. Its directory being
     // gone here means the account is mid-delete; writing would resurrect it.
     if (!personal && !(await adapter.cliSideExists(pair.location))) return result;
-    const lock = adapter.lockCli
-      ? <T>(operation: () => Promise<T>) => adapter.lockCli!(pair.location, operation)
-      : <T>(operation: () => Promise<T>) => operation();
     await lock(async () => {
       // The CLI side has no lock of its own to repeat the comparison under,
       // and the read above can be tens of milliseconds old. Read it again
@@ -303,6 +341,7 @@ export async function reconcilePair<Loc, Raw>(
       const latest = await adapter.readCli(pair.location);
       if (latest.kind !== "credential") return;
       const latestCanonical = codec.canonicalFromCli(latest.raw);
+      if (isForeign(latestCanonical)) return;
       const latestVerdict = compareCredentials(piCanonical, latestCanonical);
       result.verdict = latestVerdict;
       result.cliPresent = latestCanonical !== null;
@@ -321,21 +360,33 @@ export async function reconcilePair<Loc, Raw>(
     return result;
   }
 
-  // cli-newer or cli-only: the comparison is repeated under Pi's lock so a
-  // Pi refresh that landed in the meantime wins instead of being undone.
-  const winner = cliCanonical!;
+  // cli-newer or cli-only. The winner is read again under the slot lock, so
+  // a switch that moved the live file since the read above (Codex) cannot
+  // attribute another profile's login to this pair, and the comparison is
+  // repeated under Pi's lock so a Pi refresh that landed in the meantime
+  // wins instead of being undone.
   if (options.cancelled?.()) return result;
   const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-  let written = false;
-  await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
-    if (options.cancelled?.()) return undefined;
-    const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
-    if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
-    written = true;
-    return codec.piRecordFromCanonical(winner, current);
+  await lock(async () => {
+    const latest = await adapter.readCli(pair.location);
+    if (latest.kind !== "credential") return;
+    const winner = codec.canonicalFromCli(latest.raw);
+    if (isForeign(winner)) return;
+    const latestVerdict = compareCredentials(piCanonical, winner);
+    result.verdict = latestVerdict;
+    result.cliPresent = winner !== null;
+    if (!winner || (latestVerdict !== "cli-newer" && latestVerdict !== "cli-only")) return;
+    let written = false;
+    await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
+      if (options.cancelled?.()) return undefined;
+      const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
+      if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
+      written = true;
+      return codec.piRecordFromCanonical(winner, current);
+    });
+    await chmodPrivate(pair.authFile);
+    if (written) result.wrote = "pi";
   });
-  await chmodPrivate(pair.authFile);
-  if (written) result.wrote = "pi";
   return result;
 }
 
@@ -396,7 +447,8 @@ function samePair(left: CredentialPair, right: CredentialPair): boolean {
   return (
     left.provider === right.provider &&
     left.cliProfileId === right.cliProfileId &&
-    left.authFile === right.authFile
+    left.authFile === right.authFile &&
+    left.identityFingerprint === right.identityFingerprint
   );
 }
 
@@ -566,7 +618,9 @@ export class CredentialMirror {
     }
     if (result.verdict !== "unreadable") {
       state.cliPresent = result.cliPresent;
-      if (result.verdict !== "conflict") state.conflictLogged = false;
+      if (result.verdict !== "conflict" && result.verdict !== "foreign") {
+        state.conflictLogged = false;
+      }
     }
     if (result.wrote === "cli") {
       for (const path of state.pair.adapter.cliWritePaths(state.pair.location)) {

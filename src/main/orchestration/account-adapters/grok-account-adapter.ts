@@ -158,6 +158,10 @@ export function createGrokAccountAdapter(
         (): NativeCliAccountIdentity => ({}),
       );
     },
+    fingerprintOf(canonical) {
+      const subject = jwtStringClaim(canonical.access, "sub");
+      return subject ? nativeCliAccountFingerprint(subject) : undefined;
+    },
     async connectTimeIdentity(canonical: CanonicalCredential): Promise<AccountIdentity> {
       // The xAI access token names the account in `sub`, which is what Pi's
       // own store hashes and what a Grok slot records as user_id.
