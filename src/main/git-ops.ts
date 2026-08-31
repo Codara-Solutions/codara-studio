@@ -209,7 +209,17 @@ export async function computeGitStatus(cwd: string): Promise<GitStatus> {
     return isNotARepo(message) ? emptyStatus(false) : emptyStatus(false, message);
   }
   try {
-    const { stdout } = await runGit(cwd, ["status", "--porcelain=v2", "--branch", "-z"]);
+    // --untracked-files=all: git's default collapses a whole new directory
+    // into one "dir/" entry, which the Changes panel would render as a
+    // nameless row. Listing every file matches what the user expects to
+    // commit and what the diff view can actually open.
+    const { stdout } = await runGit(cwd, [
+      "status",
+      "--porcelain=v2",
+      "--branch",
+      "--untracked-files=all",
+      "-z",
+    ]);
     return parseStatus(stdout);
   } catch (err) {
     return emptyStatus(true, errorText(err));

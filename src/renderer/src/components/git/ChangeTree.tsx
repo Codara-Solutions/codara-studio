@@ -30,7 +30,9 @@ interface DirNode {
 function buildTree(files: GitFileChange[]): DirNode {
   const root: DirNode = { name: "", dirs: new Map(), files: [] };
   for (const file of files) {
-    const parts = file.path.split("/");
+    // A trailing slash (a collapsed untracked directory) must not create an
+    // empty file name; the entry rows under its parent as "<dir>/".
+    const parts = file.path.replace(/\/+$/, "").split("/");
     let node = root;
     for (const part of parts.slice(0, -1)) {
       let child = node.dirs.get(part);

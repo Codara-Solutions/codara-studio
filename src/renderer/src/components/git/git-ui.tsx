@@ -70,10 +70,14 @@ export function statusLabel(status: GitFileStatus): string {
 }
 
 // Split a repo-relative path into a dimmed directory prefix and the file name.
+// A collapsed untracked directory ("docs/evidence/") keeps its last segment as
+// the name, with the slash, so the row never renders nameless.
 export function splitPath(path: string): { dir: string; name: string } {
-  const idx = path.lastIndexOf("/");
-  if (idx === -1) return { dir: "", name: path };
-  return { dir: path.slice(0, idx + 1), name: path.slice(idx + 1) };
+  const dirEntry = path.endsWith("/");
+  const trimmed = dirEntry ? path.replace(/\/+$/, "") : path;
+  const idx = trimmed.lastIndexOf("/");
+  const name = (idx === -1 ? trimmed : trimmed.slice(idx + 1)) + (dirEntry ? "/" : "");
+  return { dir: idx === -1 ? "" : trimmed.slice(0, idx + 1), name };
 }
 
 // Compress git's `%ar` ("3 hours ago") into a glanceable token ("3h").

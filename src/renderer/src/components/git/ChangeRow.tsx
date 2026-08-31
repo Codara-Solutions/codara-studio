@@ -84,7 +84,7 @@ const ChangeRow = React.memo(function ChangeRow({
           "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <FileNodeIcon name={name} isDir={false} size={14} />
+      <FileNodeIcon name={name.replace(/\/$/, "")} isDir={name.endsWith("/")} size={14} />
 
       <span
         style={{
