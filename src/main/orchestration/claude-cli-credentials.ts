@@ -267,12 +267,51 @@ function keychainDisabled(): boolean {
   return process.env.CODARA_DISABLE_KEYCHAIN === "1";
 }
 
+/**
+ * The fresher of two serialized credentials by their claudeAiOauth.expiresAt.
+ * Claude Code 2.1.251 refreshes the personal macOS login into the FILE while
+ * an earlier generation of the same login can sit in the Keychain item, so
+ * the two stores hold different generations of one account. Never-regress
+ * applies across stores exactly as it does across halves: the later expiry is
+ * the login's present. Ties and an unparseable rival keep `first` (the
+ * Keychain in the default backend) so single-store setups are unchanged.
+ */
+export function fresherCredentialString(first: string, second: string): string {
+  const expiry = (raw: string): number | null => {
+    try {
+      const record = parseClaudeCredentialRecord(raw);
+      const value = record?.expiresAt;
+      return typeof value === "number" && Number.isFinite(value) ? value : 0;
+    } catch {
+      return null;
+    }
+  };
+  const a = expiry(first);
+  const b = expiry(second);
+  if (a === null) return b === null ? first : second;
+  if (b === null) return first;
+  return b > a ? second : first;
+}
+
 export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
+  // Read both stores and let the fresher token win. A Keychain item that is
+  // merely older than the file must never shadow it: mirroring a stale item
+  // to Cora kills its session the moment the terminal rotates the refresh
+  // token, which is exactly what happened when Claude Code started writing
+  // its refreshes to .credentials.json.
   async read(configDir, configDirEnv) {
     const fromKeychain = keychainDisabled()
       ? null
       : await readKeychainCredential(claudeCliKeychainService(configDirEnv));
-    return fromKeychain ?? readCredentialFile(claudeCredentialFile(configDir));
+    if (fromKeychain === null) return readCredentialFile(claudeCredentialFile(configDir));
+    let fromFile: string | null = null;
+    try {
+      fromFile = await readCredentialFile(claudeCredentialFile(configDir));
+    } catch {
+      fromFile = null;
+    }
+    if (fromFile === null) return fromKeychain;
+    return fresherCredentialString(fromKeychain, fromFile);
   },
   async write(configDir, configDirEnv, credential) {
     if (keychainDisabled()) {
@@ -280,14 +319,19 @@ export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
       return;
     }
     if (seams.platform === "darwin" && configDirEnv === null) {
-      // ~/.claude is Claude Code's own slot, and on macOS Claude Code keeps
-      // it in the Keychain: `claude logout` removes the item and nothing
-      // else. A file copy of the same login would outlive that logout and
-      // be read back as a credential, so the personal slot gets the item
-      // alone, and a file left there by an earlier Codara (the retired
-      // selector wrote both) is retired once the item holds the login.
+      // ~/.claude is Claude Code's own slot. Older Claude Code kept it in
+      // the Keychain alone; 2.1.251 refreshes into .credentials.json, so a
+      // file that exists is a live store Claude Code reads and must be
+      // updated in place, never deleted from under it. A file is still
+      // never CREATED here: a keychain-only login stays keychain-only, so
+      // an item-only `claude logout` keeps reading as signed out.
       await writeKeychainCredential(claudeCliKeychainService(null), credential);
-      await removeCredentialFile(claudeCredentialFile(configDir)).catch(() => undefined);
+      const personalFile = claudeCredentialFile(configDir);
+      const fileExists = await fs
+        .access(personalFile)
+        .then(() => true)
+        .catch(() => false);
+      if (fileExists) await atomicWriteCredential(personalFile, credential);
       return;
     }
     await atomicWriteCredential(claudeCredentialFile(configDir), credential);

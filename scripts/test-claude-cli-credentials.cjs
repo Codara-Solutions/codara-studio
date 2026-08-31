@@ -251,23 +251,65 @@ async function main() {
       assert.deepEqual(JSON.parse(itemFor(darwinManaged)), { claudeAiOauth: record });
       assert.deepEqual(await mod.readClaudeCredentialRecord(darwinManaged, darwinManaged, real), record);
 
+      // A keychain-only personal login: writes never invent a file, so an
+      // item-only `claude logout` still reads as signed out.
       fs.mkdirSync(darwinPersonal, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(
-        mod.claudeCredentialFile(darwinPersonal),
-        JSON.stringify({ claudeAiOauth: { ...record, accessToken: "legacy-file-copy" } }),
-        { mode: 0o600 },
-      );
       await mod.writeClaudeCredentialRecord(darwinPersonal, null, record, real);
       assert.deepEqual(JSON.parse(itemFor(null)), { claudeAiOauth: record });
       assert.equal(
         fs.existsSync(mod.claudeCredentialFile(darwinPersonal)),
         false,
-        "the personal slot holds no file copy once the item holds the login",
+        "a keychain-only login never grows a file copy",
       );
       assert.deepEqual(await mod.readClaudeCredentialRecord(darwinPersonal, null, real), record);
-      // claude logout: the item goes, and so does the login as Codara sees it.
       await mod.deleteKeychainCredential(mod.claudeCliKeychainService(null));
-      assert.equal(await mod.readClaudeCredentialRecord(darwinPersonal, null, real), null);
+      assert.equal(
+        await mod.readClaudeCredentialRecord(darwinPersonal, null, real),
+        null,
+        "claude logout (item removed, no file) reads as signed out",
+      );
+
+      // Claude Code 2.1.251 refreshes the personal login into the FILE while
+      // the item keeps an earlier generation. The fresher store must win the
+      // read, and a personal write must update the existing file in place
+      // instead of deleting the store Claude Code is actually using.
+      const staleItem = { ...record, accessToken: "stale-keychain-token", expiresAt: 1_000 };
+      const freshFile = { ...record, accessToken: "fresh-file-token", expiresAt: 2_000 };
+      await mod.writeKeychainCredential(
+        mod.claudeCliKeychainService(null),
+        JSON.stringify({ claudeAiOauth: staleItem }),
+      );
+      fs.writeFileSync(
+        mod.claudeCredentialFile(darwinPersonal),
+        JSON.stringify({ claudeAiOauth: freshFile }),
+        { mode: 0o600 },
+      );
+      assert.deepEqual(
+        await mod.readClaudeCredentialRecord(darwinPersonal, null, real),
+        freshFile,
+        "a fresher file wins over a stale Keychain item",
+      );
+      const cordRefresh = { ...record, accessToken: "cora-refreshed-token", expiresAt: 3_000 };
+      await mod.writeClaudeCredentialRecord(darwinPersonal, null, cordRefresh, real);
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(mod.claudeCredentialFile(darwinPersonal), "utf8")),
+        { claudeAiOauth: cordRefresh },
+        "a personal write updates the existing file in place",
+      );
+      assert.deepEqual(JSON.parse(itemFor(null)), { claudeAiOauth: cordRefresh });
+      // The other direction: a fresher item is not regressed by an older file.
+      const fresherItem = { ...record, accessToken: "fresher-item-token", expiresAt: 9_000 };
+      await mod.writeKeychainCredential(
+        mod.claudeCliKeychainService(null),
+        JSON.stringify({ claudeAiOauth: fresherItem }),
+      );
+      assert.deepEqual(
+        await mod.readClaudeCredentialRecord(darwinPersonal, null, real),
+        fresherItem,
+        "a fresher Keychain item wins over a stale file",
+      );
+      await mod.deleteKeychainCredential(mod.claudeCliKeychainService(null));
+      fs.rmSync(mod.claudeCredentialFile(darwinPersonal), { force: true });
       // A Keychain that fails outright is unreadable, not signed out.
       fs.chmodSync(security, 0o600);
       await assert.rejects(
@@ -282,7 +324,19 @@ async function main() {
       mod.setClaudeCliCredentialSeamsForTests(null);
       if (keychainWasDisabled !== undefined) process.env.CODARA_DISABLE_KEYCHAIN = keychainWasDisabled;
     }
-    console.log("PASS on macOS the personal slot lives in the Keychain alone and a logout is seen");
+    console.log("PASS on macOS the fresher credential store wins and a logout is still seen");
+  }
+
+  {
+    const cred = (expiresAt) =>
+      JSON.stringify({ claudeAiOauth: { accessToken: "token", refreshToken: "r", expiresAt } });
+    assert.equal(mod.fresherCredentialString(cred(1000), cred(2000)), cred(2000));
+    assert.equal(mod.fresherCredentialString(cred(2000), cred(1000)), cred(2000));
+    assert.equal(mod.fresherCredentialString(cred(1000), cred(1000)), cred(1000), "ties keep the first store");
+    assert.equal(mod.fresherCredentialString(cred(1000), "not json"), cred(1000), "an unparseable rival never wins");
+    assert.equal(mod.fresherCredentialString("not json", cred(1000)), cred(1000));
+    assert.equal(mod.fresherCredentialString("not json", "also not"), "not json", "two unreadable stores keep the first");
+    console.log("PASS fresherCredentialString picks by expiry and never regresses");
   }
 
   console.log("\nPASS Claude Code credential store");
