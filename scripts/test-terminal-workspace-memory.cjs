@@ -249,6 +249,59 @@ async function main() {
       source.includes("preserveTerminalViewport(term, () => fit.fit())"),
   );
 
+  // A revealed pane must repaint on EVERY fit frame and once more afterwards.
+  // Repainting only on the first frame left a pane blank whenever its canvas
+  // was composited a beat later (a whole workspace revealed at once): the
+  // buffer was intact but nothing redrew it until the TUI happened to write.
+  check(
+    "a reveal repaints on every fit frame, not just the first",
+    !source.includes("let rendererRecovered = false;") &&
+      !source.includes("if (!rendererRecovered) {"),
+  );
+  check(
+    "a reveal schedules a trailing repaint after the fit frames",
+    source.includes("REVEAL_TRAILING_REPAINT_MS") &&
+      /trailingRepaint = window\.setTimeout\(/.test(source),
+  );
+
+  // An alt-screen leave is ambiguous: a real exit, or a full-screen view being
+  // closed by a still-running agent. Confirming against the bottom rows keeps
+  // the chip (and Shift+Enter's TUI newline) alive for the second case, which
+  // otherwise stayed broken until the app restarted.
+  check(
+    "an alt-screen leave is confirmed against the bottom rows before it counts as an exit",
+    source.includes("ALT_SCREEN_EXIT_CONFIRM_MS") &&
+      source.includes("altScreenExitConfirm = window.setTimeout(") &&
+      /if \(stillLive\) return;/.test(source),
+  );
+  check(
+    "an agent handing the screen to a child program is not an exit",
+    source.includes("if (lastAltScreenEnterAt >= leaveAt) return;"),
+  );
+  check(
+    "a prompt marker still ends the agent phase immediately",
+    /if \(sawPromptMarker\) \{[\s\S]{0,400}?resetAgentPhase\(\{ exitSignal: true \}\);/.test(
+      source,
+    ),
+  );
+
+  // The TUI enables bracketed paste once at startup, so a pane's fresh xterm
+  // must be told the mode across a remount or framed input (a dropped image
+  // path) silently degrades to literal text.
+  check(
+    "bracketed-paste mode survives a pane remount",
+    source.includes("const bracketedPasteModes = new Map<string, boolean>()") &&
+      source.includes("bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true)") &&
+      source.includes('bracketedPasteModes.get(sessionId) === true') &&
+      source.includes('term.write("\\u001b[?2004h")'),
+  );
+  check(
+    "the remembered mode is dropped with the rest of a pane's memory",
+    /forgetTerminalSessionMemory\(sessionId: string\): void \{\n  bracketedPasteModes\.delete\(sessionId\);/.test(
+      source,
+    ),
+  );
+
   fs.rmSync(outDir, { recursive: true, force: true });
   if (failures > 0) process.exitCode = 1;
 }

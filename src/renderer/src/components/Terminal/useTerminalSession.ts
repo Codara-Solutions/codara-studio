@@ -70,6 +70,14 @@ const FIT_DEBOUNCE_MS = 8;
 // renderer, so a machine that can't hold a context (GPU eviction storms, driver
 // flake) doesn't thrash a new addon on every tab switch.
 const WEBGL_MAX_RELOADS = 3;
+// How long to wait after an alt-screen leave before deciding it was an exit.
+// Long enough for the agent's restored frame to reach the rows, short enough
+// that a real exit clears the chip promptly.
+const ALT_SCREEN_EXIT_CONFIRM_MS = 400;
+// How long after a reveal's fit frames to issue one more full repaint. Covers
+// a canvas composited after the last frame (a whole workspace revealed at
+// once, a tab transition), which would otherwise stay blank.
+const REVEAL_TRAILING_REPAINT_MS = 250;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const PTY_MANAGER_RESET_SEQUENCE = "\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l";
 
@@ -137,11 +145,24 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
+// Bracketed-paste mode (DECSET 2004) per live session. A TUI enables it ONCE
+// at startup, but a pane's xterm is disposed and recreated on every workspace
+// switch while its PTY keeps running, and the replay that rebuilds the fresh
+// instance is flattened TEXT: it carries no escape sequences, so the new
+// Terminal starts with the mode off while the still-running TUI believes it is
+// on. Anything that frames input for a paste-aware TUI then stops framing it,
+// which is why a dropped image path arrived in Claude Code as literal text
+// instead of an attachment after a few hours of switching around. One boolean
+// per session, remembered across the dispose so the fresh instance can be told
+// what the remote terminal is still doing.
+const bracketedPasteModes = new Map<string, boolean>();
+
 // These registries are remount guards, not durable terminal state. App calls
 // this only after a pane disappears from every active/inactive workspace
 // layout. Exact lifecycle cleanup keeps them bounded without an arbitrary cap
 // that could evict a still-live terminal in an unusually large workspace.
 export function forgetTerminalSessionMemory(sessionId: string): void {
+  bracketedPasteModes.delete(sessionId);
   autorunFiredSessions.delete(sessionId);
   nativeCliLoginTokenFiredSessions.delete(sessionId);
   autoResumeAttempts.delete(sessionId);
@@ -1463,6 +1484,18 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
+      // Re-arm the mode the still-running TUI enabled before this pane's
+      // previous xterm was disposed. Written to the LOCAL terminal only: it
+      // teaches this instance what the remote side is doing and sends nothing
+      // to the PTY. A session whose TUI has since exited re-learns the mode
+      // from its own output, so a stale `true` costs at most one framed paste.
+      if (bracketedPasteModes.get(sessionId) === true) {
+        try {
+          term.write("\u001b[?2004h");
+        } catch {
+          /* a terminal disposed mid-mount just starts without the mode */
+        }
+      }
       if (externalSizeOwnerRef.current) {
         const unsubscribeExternalSize = subscribeExternalTerminalSize(
           sessionId,
@@ -1711,6 +1744,31 @@ export function useTerminalSession({
       // is immediately satisfied, so a FALSE teardown still self-heals the
       // instant the footer reappears (the whole point of Fix 1).
       let redetectSuppressedAfterExit = false;
+      // An alt-screen LEAVE is only an exit when the agent is really gone.
+      // Claude Code and Codex both open full-screen views mid-session (the
+      // transcript view, a diff, an external editor, a picker) and leaving one
+      // emits the same ESC[?1049l as quitting. Treating that as a positive exit
+      // cleared the chip AND armed the post-exit latch, which only re-arms once
+      // the agent's chrome leaves the bottom rows: for a still-running agent it
+      // never does, so the pane stayed chip-less and Shift+Enter sent the shell
+      // continuation backslash into the TUI until the app restarted.
+      //
+      // The confirmation is deferred because this runs BEFORE the chunk reaches
+      // xterm: the restored main screen is not on the rows yet, so the tail can
+      // only be judged once the repaint that follows the leave has landed.
+      let altScreenExitConfirm: number | null = null;
+      // When the agent hands the screen to a child program (an editor, a
+      // pager, a picker) the pair of bytes is LEAVE then ENTER: the agent has
+      // not exited, it is behind that program. The child's own chrome is what
+      // the bottom rows show, so the confirmation below cannot recognise the
+      // agent and would otherwise call it an exit.
+      let lastAltScreenEnterAt = 0;
+      const cancelAltScreenExitConfirm = () => {
+        if (altScreenExitConfirm === null) return;
+        window.clearTimeout(altScreenExitConfirm);
+        altScreenExitConfirm = null;
+      };
+      cleanups.push(cancelAltScreenExitConfirm);
       const shouldUseAgentNewline = () => {
         if (agentPhase === "agent") return true;
         if (hasRecentAgentInput()) return true;
@@ -2045,7 +2103,8 @@ export function useTerminalSession({
         if (agentPhase === "agent") return;
         agentPhase = "agent";
         // A fresh launch/relaunch re-arms re-detection: any prior post-exit
-        // suppression latch is now stale.
+        // suppression latch is now stale, and so is a pending exit confirmation.
+        cancelAltScreenExitConfirm();
         redetectSuppressedAfterExit = false;
         // Start agent-phase marker scanning from a clean carry. The carry is
         // advanced on every chunk INCLUDING the idle-phase chunks before launch,
@@ -2270,6 +2329,7 @@ export function useTerminalSession({
         // always sees this chunk's tail, regardless of which branch we exit by.
         agentMarkerCarry = markerScan.slice(-MARKER_CARRY_MAX);
         const sawAltScreenLeave = markerScan.includes("\x1b[?1049l");
+        if (markerScan.includes("\x1b[?1049h")) lastAltScreenEnterAt = Date.now();
         const sawPromptMarker = hasPromptMarker(markerScan);
         if (
           agentPhase === "idle" &&
@@ -2443,10 +2503,32 @@ export function useTerminalSession({
         // net, since xterm's OSC handler chain has caused us issues
         // before with code 633. This path also runs while panes are hidden,
         // where xterm parser OSC handlers intentionally do not run.
-        if (sawAltScreenLeave || sawPromptMarker) {
-          // Positive byte-level exit signal — suppress re-detection briefly so a
-          // lingering footer frame can't resurrect the just-cleared chip.
+        if (sawPromptMarker) {
+          // A shell prompt marker is unambiguous: the shell is back, so the
+          // agent is gone. Suppress re-detection so a lingering footer frame
+          // can't resurrect the just-cleared chip.
+          cancelAltScreenExitConfirm();
           resetAgentPhase({ exitSignal: true });
+        } else if (sawAltScreenLeave) {
+          // Ambiguous: a real exit, or a full-screen view being closed. Decide
+          // once the repaint that follows has reached the rows.
+          cancelAltScreenExitConfirm();
+          const leaveAt = Date.now();
+          altScreenExitConfirm = window.setTimeout(() => {
+            altScreenExitConfirm = null;
+            if (agentPhase !== "agent") return;
+            // A full-screen child took the screen after the leave: the agent is
+            // still there, behind it.
+            if (lastAltScreenEnterAt >= leaveAt) return;
+            const t = termRef.current;
+            const stillLive = t
+              ? liveRuntimeFromTail(readTerminalTail(t, STATE_TAIL_ROWS))
+              : null;
+            // Chrome still on the bottom rows: the agent only closed a
+            // full-screen view. Leave the phase, the chip and the latch alone.
+            if (stillLive) return;
+            resetAgentPhase({ exitSignal: true });
+          }, ALT_SCREEN_EXIT_CONFIRM_MS);
         }
       };
 
@@ -3396,6 +3478,9 @@ export function useTerminalSession({
           // post-pause backlog from main. Honor the configured scrollback line
           // limit on the stashed combination too, reusing the same trim helper
           // the hot path uses.
+          // Remembered unconditionally: a pane with nothing worth snapshotting
+          // still has a mode the running TUI expects to survive the remount.
+          bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true);
           const pendingBytes = mergeHiddenBuffer(
             hiddenBufferRef.current,
             hiddenBytesRef.current,
@@ -3551,7 +3636,14 @@ export function useTerminalSession({
     // remains under ~50 ms.
     let raf: number | null = null;
     let remainingRestoreFrames = 3;
-    let rendererRecovered = false;
+    // A trailing repaint after the fit frames. A workspace switch reveals a
+    // whole tree at once, and the pane's canvas can be composited a beat after
+    // the last fit frame; a repaint issued before that lands in a buffer the
+    // compositor then discards, leaving the pane blank until the TUI happens
+    // to redraw (the user typing). Repainting on EVERY frame and once more
+    // afterwards costs a few full refreshes per reveal and removes the window
+    // in which a revealed pane can sit blank.
+    let trailingRepaint: number | null = null;
     const restoreAfterFit = () => {
       raf = null;
       try {
@@ -3559,12 +3651,9 @@ export function useTerminalSession({
       } catch {
         /* ignore late layout churn */
       }
-      if (!rendererRecovered) {
-        rendererRecovered = true;
-        // Force a full repaint and recreate a lost WebGL context before
-        // restoring the viewport into the final renderer.
-        recoverRendererRef.current?.();
-      }
+      // Force a full repaint and recreate a lost WebGL context before
+      // restoring the viewport into the final renderer.
+      recoverRendererRef.current?.();
       const term = termRef.current;
       if (term && savedViewport) {
         if (savedViewport.atBottom) term.scrollToBottom();
@@ -3573,7 +3662,12 @@ export function useTerminalSession({
       remainingRestoreFrames -= 1;
       if (remainingRestoreFrames > 0) {
         raf = window.requestAnimationFrame(restoreAfterFit);
+        return;
       }
+      trailingRepaint = window.setTimeout(() => {
+        trailingRepaint = null;
+        recoverRendererRef.current?.();
+      }, REVEAL_TRAILING_REPAINT_MS);
     };
     raf = window.requestAnimationFrame(restoreAfterFit);
     // Read-only mirrors and input-blocked watch panes don't grab keyboard
@@ -3587,6 +3681,7 @@ export function useTerminalSession({
     }
     return () => {
       if (raf !== null) window.cancelAnimationFrame(raf);
+      if (trailingRepaint !== null) window.clearTimeout(trailingRepaint);
     };
   }, [resizeXtermForOwner, visible]);
 

@@ -137,6 +137,13 @@ async function main() {
     debounceMs: 30,
     retryDelayMs: 20,
   });
+  // These pairs are WATCHED: writing a file the mirror watches schedules a
+  // debounced reconcile that can perform the write before the explicit call
+  // below reaches it, leaving that call with an already-synced pair. Both
+  // orders are the mirror doing the same correct thing, so accept either and
+  // let the state assertions that follow pin the credential that had to move.
+  const syncedInto = (result, side) =>
+    result.wrote === side || result.verdict === "equal" || result.verdict === "none";
   let broadcasts = 0;
   let invalidations = 0;
   const liveOwners = new Set();
@@ -312,12 +319,12 @@ async function main() {
   // Cora; a Pi rotation reaches the slot with its metadata intact.
   writeSlot(workHome, slotFile(SUBJECT_B, 30, { first_name: "Rotated" }));
   const rotated = await service.reconcileCliProfile(workCli);
-  assert.equal(rotated.wrote, "pi");
+  assert.ok(syncedInto(rotated, "pi"), JSON.stringify(rotated));
   assert.equal(readPi(work.id).access, keyFor(SUBJECT_B, 30));
   assert.equal(readPi(work.id).expires, (T0 + 30 + 3600) * 1000 - SKEW);
   await writePi(work.id, piCredential(SUBJECT_B, 40));
   const back = await service.reconcileProfile(work.id);
-  assert.equal(back.wrote, "cli");
+  assert.ok(syncedInto(back, "cli"), JSON.stringify(back));
   const rotatedSlot = readSlot(workHome);
   assert.equal(rotatedSlot.key, keyFor(SUBJECT_B, 40));
   assert.equal(rotatedSlot.refresh_token, "refresh-22222222-40");
@@ -385,10 +392,13 @@ async function main() {
   // login of another account that already has a managed row is rejected once.
   fs.rmSync(path.join(personalHome, "auth.json"));
   const signedOut = await service.reconcileProfile(accountOne.id);
-  assert.equal(signedOut.wrote, "pi-delete");
+  assert.ok(
+    signedOut.wrote === "pi-delete" || signedOut.verdict === "none",
+    JSON.stringify(signedOut),
+  );
   assert.equal(readPi(accountOne.id), null);
   writeSlot(personalHome, slotFile(SUBJECT_A, 50));
-  assert.equal((await service.reconcileProfile(accountOne.id)).wrote, "pi");
+  assert.ok(syncedInto(await service.reconcileProfile(accountOne.id), "pi"));
   assert.equal(readPi(accountOne.id).access, keyFor(SUBJECT_A, 50));
   pass("a personal logout signs Account 1 out of Cora and a new login signs it back in");
 

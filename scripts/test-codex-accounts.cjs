@@ -187,6 +187,15 @@ async function main() {
     retryDelayMs: 20,
     log: (message) => logs.push(message),
   });
+  // These pairs are WATCHED. Writing a file the mirror watches schedules a
+  // debounced reconcile, and under load that reconcile can perform the write
+  // before the explicit reconcile below reaches it — leaving the explicit call
+  // with an already-synced pair and nothing to do. Both orders are the mirror
+  // doing the same correct thing, so the direction assertions accept "this call
+  // wrote it" OR "it was already written"; the state assertions that follow
+  // each one still pin the credential that had to arrive.
+  const syncedInto = (result, side) =>
+    result.wrote === side || result.verdict === "equal" || result.verdict === "none";
   let broadcasts = 0;
   const liveOwners = new Set();
   const disposed = [];
@@ -295,13 +304,13 @@ async function main() {
   // Live rotation (Codex refreshed in place) lands in Pi and the vault copy.
   writeFile(liveFile, authFile(ACCOUNT_A, 10));
   const rotated = await service.reconcileCliProfile("personal");
-  assert.equal(rotated.wrote, "pi");
+  assert.ok(syncedInto(rotated, "pi"), JSON.stringify(rotated));
   assert.equal(readPi(accountOne.id).access, accessFor(ACCOUNT_A, 10));
   assert.equal(readPi(accountOne.id).expires, (T0 + 10 + LIFETIME) * 1000);
   // Pi rotation lands in the live file and the vault, with id_token kept.
   await writePi(accountOne.id, piCredential(ACCOUNT_A, 20));
   const back = await service.reconcileProfile(accountOne.id);
-  assert.equal(back.wrote, "cli");
+  assert.ok(syncedInto(back, "cli"), JSON.stringify(back));
   const liveAfter = readFile(liveFile);
   assert.equal(liveAfter.tokens.access_token, accessFor(ACCOUNT_A, 20));
   assert.equal(liveAfter.tokens.refresh_token, "refresh-11111111-20");
@@ -418,11 +427,11 @@ async function main() {
   // rotation there lands in Pi; a Pi rotation lands in the live file and the
   // vault; Account 1's vault copy is what its pair reads now.
   writeFile(liveFile, authFile(ACCOUNT_B, 30));
-  assert.equal((await service.reconcileCliProfile(workCli)).wrote, "pi");
+  assert.ok(syncedInto(await service.reconcileCliProfile(workCli), "pi"));
   assert.equal(readPi(work.id).access, accessFor(ACCOUNT_B, 30));
   assert.equal(readFile(vaultFile(workCli)).tokens.access_token, accessFor(ACCOUNT_B, 6), "the vault only trails on a Codara write");
   await writePi(work.id, piCredential(ACCOUNT_B, 40));
-  assert.equal((await service.reconcileProfile(work.id)).wrote, "cli");
+  assert.ok(syncedInto(await service.reconcileProfile(work.id), "cli"));
   assert.equal(readFile(liveFile).tokens.access_token, accessFor(ACCOUNT_B, 40));
   assert.equal(readFile(vaultFile(workCli)).tokens.access_token, accessFor(ACCOUNT_B, 40));
   assert.equal(readFile(liveFile).tokens.id_token, idTokenFor(ACCOUNT_B, 30));
@@ -622,7 +631,10 @@ async function main() {
   assert.equal(readFile(vaultFile("personal")).tokens.access_token, accessFor(ACCOUNT_A, 90), "the vault trails the live personal login");
   fs.rmSync(liveFile);
   const personalLogout = await service.reconcileProfile(accountOne.id);
-  assert.equal(personalLogout.wrote, "pi-delete");
+  assert.ok(
+    personalLogout.wrote === "pi-delete" || personalLogout.verdict === "none",
+    JSON.stringify(personalLogout),
+  );
   assert.equal(readPi(accountOne.id), null);
   assert.equal(fs.existsSync(vaultFile("personal")), false, "the personal vault copy goes with the logout");
   grantResponse = () => ({
