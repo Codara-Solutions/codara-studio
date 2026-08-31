@@ -284,16 +284,24 @@ export default function AccountCard({
     });
   }
   const destructiveActions: CardAction[] = [];
-  // Account 1 is the user's own CLI login: Codara never deletes it.
-  if (renameable && !card.builtIn) {
-    const closeCount = card.closeSessionsCount ?? 0;
+  if (renameable) {
+    // Account 1 is the user's own CLI login, so its card is FORGOTTEN rather
+    // than deleted: the Cora sign-in and the pairing go, the login itself
+    // stays, and no terminal has to close. The wording deliberately avoids
+    // the retired two-role vocabulary, where an action dropped one half of
+    // a card that went on living as the other.
+    const closeCount = card.builtIn ? 0 : card.closeSessionsCount ?? 0;
     destructiveActions.push({
       id: "delete",
       label: deleteArmed
         ? closeCount > 0
           ? `Close ${sessions(closeCount)} and delete`
-          : "Confirm delete"
-        : "Delete",
+          : card.builtIn
+            ? "Confirm forget"
+            : "Confirm delete"
+        : card.builtIn
+          ? "Forget this account"
+          : "Delete",
       danger: true,
       disabled: controlsDisabled,
       run: () => {

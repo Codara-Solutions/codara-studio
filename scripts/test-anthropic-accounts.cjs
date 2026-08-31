@@ -454,10 +454,6 @@ async function main() {
   // Delete: the active account hands both defaults to Account 1 first, a
   // leased account is refused until sessions may be closed, and nothing of the
   // Claude Code half survives.
-  await assert.rejects(
-    () => service.deleteAccount(accountOne.id),
-    (error) => error.name === "PiAccountProfileProtectedError",
-  );
   const releaseLease = leases.acquire(terminalOnly.profile.id, "terminal:pane-9");
   liveOwners.add("terminal:pane-9");
   broadcasts = 0;
@@ -749,6 +745,26 @@ async function main() {
   visit(path.join(HOME, ".codarastudio"));
   assert.deepEqual(offending, []);
   pass("every produced file is owner-only");
+
+  // Account 1's card is removable: Codara drops the Cora half and the
+  // pairing it owns, and leaves the user's own Claude Code login alone.
+  {
+    const before = await readClaudeSlot(personalDir, null);
+    assert.ok(before.accessToken, "the personal login is there before the removal");
+    const one = await service.ensureAccountOne();
+    const removal = await service.deleteAccount(one.id);
+    assert.equal(removal.closedSessionCount ?? 0, 0, "removing Account 1 closes no session");
+    assert.equal(await piStore.registry.getProfile(one.id), null, "the Cora row is gone");
+    assert.deepEqual(
+      await readClaudeSlot(personalDir, null),
+      before,
+      "the user's own Claude Code login survives untouched",
+    );
+    // The row is not silently rebuilt into a duplicate either: this login
+    // already belongs to a managed row, so ensureAccountOne declines it.
+    assert.equal(await service.ensureAccountOne(), null);
+    pass("Account 1 can be removed from Cora, leaving its Claude Code login alone");
+  }
 
   mirror.stop();
   service.stop();

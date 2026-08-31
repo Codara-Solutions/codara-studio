@@ -292,8 +292,12 @@ assert.match(card, /`Close \$\{sessions\(closeCount\)\} and delete`/);
 assert.match(card, /return `\$\{count\} \$\{count === 1 \? "session" : "sessions"\}`;/);
 assert.match(card, /actions\.onDelete\(card, \{ closeSessions: closeCount > 0 \}\)/);
 assert.match(card, /onClose=\{\(\) => setDeleteArmed\(false\)\}/);
-// Account 1 is renameable but never deleted or reconnected from here.
-assert.match(card, /if \(renameable && !card\.builtIn\) \{/);
+// Account 1 is never RECONNECTED from here (its login is the user's own),
+// but its card can be forgotten: the row goes, the CLI login stays, and the
+// menu says so rather than offering a plain "Delete".
+assert.match(card, /const closeCount = card\.builtIn \? 0 : card\.closeSessionsCount \?\? 0;/);
+assert.match(card, /\? "Forget this account"/);
+assert.doesNotMatch(card, /if \(renameable && !card\.builtIn\) \{/);
 assert.equal((card.match(/<CardOverflowMenu/g) ?? []).length, 1);
 assert.doesNotMatch(card, /nativeCliAccounts|piSubscriptions/);
 assert.match(card, /inset 2px 0 0 \$\{brand\}/);

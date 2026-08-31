@@ -168,6 +168,16 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    */
   fingerprintOf?(canonical: CanonicalCredential): string | undefined;
   /**
+   * The identity fingerprint the CLI SLOT names, read from wherever the
+   * provider records it beside the credential (Claude Code's .claude.json
+   * oauthAccount). Providers whose tokens carry the identity answer through
+   * fingerprintOf instead; Claude's are opaque, so without this hook a row
+   * paired to the personal slot could not tell that the user logged that
+   * slot into a different account, and would adopt the stranger's token as
+   * its own Cora half.
+   */
+  cliIdentityFingerprint?(location: Loc): Promise<string | undefined>;
+  /**
    * The personal slot went from credential to none and Cora followed. A
    * provider that keeps a trailing copy of that slot (the Codex vault)
    * drops it here, so the logged-out login cannot come back on a switch.
@@ -294,6 +304,18 @@ export async function reconcilePair<Loc, Raw>(
   if (cli.kind === "foreign") return foreignResult();
   const cliCanonical = codec.canonicalFromCli(cli.raw);
   if (isForeign(cliCanonical)) return foreignResult();
+  // The slot's own identity record, for providers whose tokens do not name
+  // the account. Only consulted when the slot actually holds a login and the
+  // row knows which account it is: an empty slot names nobody, and an
+  // unreadable identity must not strand a healthy pair.
+  if (cliCanonical !== null && pair.identityFingerprint && adapter.cliIdentityFingerprint) {
+    const slotFingerprint = await adapter
+      .cliIdentityFingerprint(pair.location)
+      .catch(() => undefined);
+    if (slotFingerprint !== undefined && slotFingerprint !== pair.identityFingerprint) {
+      return foreignResult();
+    }
+  }
   const verdict = compareCredentials(piCanonical, cliCanonical);
   const personal = isPersonalPair(pair);
   const result: ReconcilePairResult = {

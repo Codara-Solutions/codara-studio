@@ -184,6 +184,13 @@ export function createClaudeAccountAdapter(
     personalProbePaths() {
       return [{ directory: resolveStore().personalConfigDir, file: CLAUDE_CREDENTIALS_FILE }];
     },
+    // Claude Code's tokens are opaque, so the mirror's foreign check reads
+    // the identity the slot records next to them.
+    cliIdentityFingerprint(location) {
+      return readCliIdentity(location.configDir, location.configDirEnv, homeDir())
+        .then((identity) => identity.fingerprint)
+        .catch(() => undefined);
+    },
     readCliIdentity(location) {
       return readCliIdentity(location.configDir, location.configDirEnv, homeDir()).catch(
         (): NativeCliAccountIdentity => ({}),

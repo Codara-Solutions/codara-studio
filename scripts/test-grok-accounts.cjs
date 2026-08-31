@@ -360,10 +360,6 @@ async function main() {
 
   // Delete: the active account is refused while leased, then hands both
   // defaults to Account 1 and removes the managed home.
-  await assert.rejects(
-    () => service.deleteAccount(accountOne.id),
-    (error) => error.name === "PiAccountProfileProtectedError",
-  );
   const releaseLease = leases.acquire(terminalOnly.profile.id, "terminal:pane-1");
   liveOwners.add("terminal:pane-1");
   await assert.rejects(

@@ -1043,13 +1043,16 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   ): Promise<DeleteAccountResult> {
     return this.withMutation(async () => {
       const profile = await this.requireProfile(coraProfileId);
-      if (profile.cliProfileId === this.personalId) {
-        throw new PiAccountProfileProtectedError(profile.id);
-      }
       if (await options.ownershipGuard?.(profile)) {
         throw new PiAccountProfileProtectedError(profile.id);
       }
-      const cliProfileId = profile.cliProfileId;
+      // Account 1 is the user's own CLI login. Deleting its row removes what
+      // Codara owns (the Cora half and the pairing) and never touches that
+      // login, so the terminal keeps working and no session has to close.
+      // The row comes back, correctly named, the next time the startup pass
+      // reads the personal slot.
+      const personalRow = profile.cliProfileId === this.personalId;
+      const cliProfileId = personalRow ? null : profile.cliProfileId;
       const closeSessions = options.closeSessions === true;
       // Every refusal comes before anything moves: the card asks about the
       // terminals in a second step, and a delete the user then abandons must
@@ -1082,7 +1085,16 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       const guard = options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {};
       let closedSessionCount = 0;
       if (!cliProfileId) {
-        await this.piStore.deleteProfile(profile.id, guard);
+        // A personal row is watched even though Codara owns no CLI half:
+        // drop the pair first so a reconcile cannot rebuild the Cora half
+        // from the login that stays behind.
+        this.deleting.add(profile.id);
+        try {
+          await this.mirror.unwatch(profile.id);
+          await this.piStore.deleteProfile(profile.id, guard);
+        } finally {
+          this.deleting.delete(profile.id);
+        }
       } else {
         // Unlink before either half goes. A reconcile racing the delete (the
         // usage poller, a Cora launch, the lease-release hook of the

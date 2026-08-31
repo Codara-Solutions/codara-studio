@@ -269,6 +269,85 @@ async function main() {
     pass("a fresher Pi token flows to Claude Code and the pair is then in sync");
   }
 
+  // Identity crossover: the user logs their OWN ~/.claude into a different
+  // account. Claude's tokens are opaque, so the slot's identity record is the
+  // only witness; without consulting it the row would adopt a stranger's
+  // login as its Cora half and every card would show that account's usage.
+  {
+    const pair = { ...makePair({ personal: true }), identityFingerprint: "fp-own-account" };
+    writePi(pair, pi(2));
+    writeClaude(pair, claude(9));
+    // Claude Code records the personal identity beside the home, not inside
+    // the config dir: <home>/.claude.json, the file the real reader consults.
+    const slotHome = path.dirname(pair.location.configDir);
+    const identityFile = path.join(slotHome, ".claude.json");
+
+    // Same account: the fresher CLI token still flows to Cora.
+    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own" } }));
+    const sameAccount = await reconcile({
+      ...pair,
+      adapter: { ...adapter, cliIdentityFingerprint: async () => "fp-own-account" },
+    });
+    assert.equal(sameAccount.verdict, "cli-newer");
+    assert.equal(sameAccount.wrote, "pi");
+
+    // Another account in the same slot: nothing moves, in either direction.
+    writePi(pair, pi(2));
+    writeClaude(pair, claude(9));
+    const foreignAdapter = { ...adapter, cliIdentityFingerprint: async () => "fp-someone-else" };
+    const stranger = await reconcile({ ...pair, adapter: foreignAdapter });
+    assert.equal(stranger.verdict, "foreign");
+    assert.equal(stranger.wrote, null);
+    assert.deepEqual(readPi(pair), pi(2), "the row keeps its own Cora credential");
+    assert.equal((await readClaude(pair)).accessToken, "claude-access-9", "the stranger's login is left alone");
+
+    // A fresher Cora half must not overwrite the stranger's slot either.
+    writePi(pair, pi(20));
+    const outward = await reconcile({ ...pair, adapter: foreignAdapter });
+    assert.equal(outward.verdict, "foreign");
+    assert.equal(outward.wrote, null);
+    assert.equal((await readClaude(pair)).accessToken, "claude-access-9");
+
+    // The real adapter reads that identity from the slot's own .claude.json,
+    // so the wiring, not just the mirror rule, is pinned here.
+    const realAdapter = mod.claudeAdapter.createClaudeAccountAdapter({
+      backend,
+      platform: "linux",
+      homeDir: slotHome,
+    });
+    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own-uuid" } }));
+    const ownFingerprint = await realAdapter.cliIdentityFingerprint(pair.location);
+    assert.ok(ownFingerprint, "the adapter reads the slot's identity");
+    writePi(pair, pi(2));
+    writeClaude(pair, claude(9));
+    const mine = await reconcile({
+      ...pair,
+      identityFingerprint: ownFingerprint,
+      adapter: realAdapter,
+    });
+    assert.equal(mine.verdict, "cli-newer", "the row's own login still mirrors");
+    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "other-uuid" } }));
+    writePi(pair, pi(2));
+    writeClaude(pair, claude(9));
+    const theirs = await reconcile({
+      ...pair,
+      identityFingerprint: ownFingerprint,
+      adapter: realAdapter,
+    });
+    assert.equal(theirs.verdict, "foreign", "a re-login into another account is refused");
+    assert.deepEqual(readPi(pair), pi(2));
+
+    // An unreadable identity is not a verdict: a healthy pair keeps working.
+    writePi(pair, pi(2));
+    const unknown = await reconcile({
+      ...pair,
+      adapter: { ...adapter, cliIdentityFingerprint: async () => undefined },
+    });
+    assert.equal(unknown.verdict, "cli-newer");
+    assert.equal(unknown.wrote, "pi");
+    pass("a slot logged into another account is never adopted, in either direction");
+  }
+
   // Fresher Claude wins: the Pi side is rewritten under Pi's lock with the
   // padding re-applied, and the auth file stays owner-only.
   {
