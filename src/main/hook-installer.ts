@@ -83,7 +83,9 @@ const HOOK_EVENTS = [
   "PostToolUse",
   "UserPromptSubmit",
   "Stop",
+  "SubagentStart",
   "SubagentStop",
+  "SessionEnd",
   "Notification",
   "PreCompact",
 ] as const;

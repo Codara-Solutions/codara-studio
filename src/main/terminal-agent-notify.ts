@@ -108,6 +108,11 @@ const OSC_NOTIFY_MUTE_MS = 10_000;
 // teammate can go 20s+ between paints — but an idle teammate's turn IS over,
 // so clearing the counter on total byte-silence is correct in both cases.
 const TEAMMATE_SILENCE_MS = 15_000;
+// Safety net for the hook-fed subagent counter: SubagentStop normally drains
+// it, but an interrupted session (Ctrl+C, crash) can lose that event. Any hook
+// event refreshes the stamp; a counter untouched this long is treated as
+// stale and cleared so the pane can resolve through the normal quiet window.
+const HOOK_SUBAGENT_STALE_MS = 30 * 60_000;
 // Late registration is most visible during cold restore: the shell can print
 // the resume banner + first busy frame before the renderer has hydrated its
 // terminal registry. Replaying a bounded recent tail closes that gap without
@@ -165,6 +170,20 @@ interface PaneWatcher {
   // REPL's turn-stopped signals (progress clear, idle status, quiet window)
   // are held — the pane is still busy even though the main turn ended.
   teammatesActive: number;
+  // Net count of live Claude Code subagents reported by the CLI hooks
+  // (SubagentStart / SubagentStop, routed here by hook-watcher for panes the
+  // user opened themselves). The Agent tool can run subagents in the
+  // background: the main turn ends, the REPL paints its idle prompt, and the
+  // Stop hook fires while those agents keep working. The byte stream cannot
+  // tell that apart from a real finish, so this counter holds the "done"
+  // alert exactly like teammatesActive does, and drains through SubagentStop
+  // instead of a byte-silence heuristic (a background agent can be silent in
+  // the parent pane for minutes).
+  hookSubagentsActive: number;
+  // When the last hook event for this pane arrived; backs the stale-counter
+  // safety net (a SubagentStop lost to an interrupt must not hold the pane
+  // forever).
+  lastHookEventAt: number;
   // When the last non-empty decoded chunk arrived, any content. Backs the
   // teammate counter's silence self-heal in the sweep.
   lastOutputAt: number;
@@ -286,6 +305,8 @@ export function syncTerminalNotifyPanes(input: {
       lastOscNotifyAt: 0,
       lastChunkAssertedWorking: false,
       teammatesActive: 0,
+      hookSubagentsActive: 0,
+      lastHookEventAt: 0,
       lastOutputAt: 0,
       lastEmittedState: null,
     };
@@ -372,6 +393,8 @@ function attach(w: PaneWatcher): void {
     w.lastOscNotifyAt = 0;
     w.lastChunkAssertedWorking = false;
     w.teammatesActive = 0;
+    w.hookSubagentsActive = 0;
+    w.lastHookEventAt = 0;
     w.lastOutputAt = 0;
     w.lastEmittedState = null;
     attach(w);
@@ -434,6 +457,10 @@ function ensureSweep(): void {
       // renderer layout change.
       if (!w.attached) attach(w);
       if (w.excluded || !w.runtime) continue;
+      if (w.hookSubagentsActive > 0 && now - w.lastHookEventAt >= HOOK_SUBAGENT_STALE_MS) {
+        tanLog(`pane=${w.paneId} hook subagent counter stale (no hook events) — cleared`);
+        w.hookSubagentsActive = 0;
+      }
       if (w.teammatesActive > 0) {
         if (now - w.lastOutputAt >= TEAMMATE_SILENCE_MS) {
           // A RUNNING teammate repaints its strip row at least once a second
@@ -445,6 +472,9 @@ function ensureSweep(): void {
           continue;
         }
       }
+      // Hook-reported subagents are not subject to the silence heal: the
+      // parent REPL may paint nothing while a background agent works.
+      if (w.hookSubagentsActive > 0) continue;
       if (w.state !== "working") continue;
       // Stall-aware window: silence right after a working-footer paint is a
       // mid-turn stall until proven otherwise; silence after an idle repaint
@@ -654,6 +684,49 @@ export function noteHostResume(): void {
   }
 }
 
+// Background work the pane still owns even though the main REPL turn ended:
+// stream-counted teammates or hook-reported subagents. While held, every
+// "turn stopped" signal (progress clear, idle status, quiet window, explicit
+// done) is deferred; the alert fires when the last one drains.
+function backgroundHeld(w: PaneWatcher): boolean {
+  return w.teammatesActive > 0 || w.hookSubagentsActive > 0;
+}
+
+function backgroundLabel(w: PaneWatcher): string {
+  return `${w.teammatesActive} teammate(s), ${w.hookSubagentsActive} hook subagent(s) active`;
+}
+
+// Claude Code hook events for a pane the user opened themselves (orchestrated
+// worker panes are excluded and alert through run-store instead). Only the
+// subagent lifecycle is consumed here: Stop is deliberately NOT treated as
+// "finished", because Claude fires it at the end of the main turn even while
+// background agents and background tasks it launched are still running.
+export function noteTerminalHookEvent(paneId: string, hookName: string): void {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded) return;
+  w.lastHookEventAt = Date.now();
+  switch (hookName) {
+    case "SubagentStart":
+      w.hookSubagentsActive += 1;
+      tanLog(`pane=${w.paneId} hook SubagentStart -> ${w.hookSubagentsActive}`);
+      return;
+    case "SubagentStop":
+      w.hookSubagentsActive = Math.max(0, w.hookSubagentsActive - 1);
+      tanLog(`pane=${w.paneId} hook SubagentStop -> ${w.hookSubagentsActive}`);
+      return;
+    case "SessionStart":
+    case "SessionEnd":
+      // A new or ended CLI session owns no subagents from the previous one.
+      if (w.hookSubagentsActive > 0) {
+        tanLog(`pane=${w.paneId} hook ${hookName} — subagent counter reset`);
+      }
+      w.hookSubagentsActive = 0;
+      return;
+    default:
+      return;
+  }
+}
+
 export function noteTerminalWillDispose(paneId: string): void {
   const w = watchers.get(paneId);
   if (w) w.disposing = true;
@@ -822,9 +895,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         // load-bearing — the any-output sustain above then rides the teammate
         // strip's per-second ticks, so the quiet-window sweep stays quiet
         // while a teammate genuinely runs.
-        if (w.teammatesActive > 0) {
+        if (backgroundHeld(w)) {
           tanLog(
-            `pane=${w.paneId} progress-clear held — ${w.teammatesActive} teammate(s) active`,
+            `pane=${w.paneId} progress-clear held — ${backgroundLabel(w)}`,
           );
           // A blocked chip stays blocked — a pending permission prompt is the
           // actionable cue and must not be repainted as mere busyness.
@@ -871,9 +944,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       } else if (/idle/i.test(status)) {
         // Same teammate hold as the progress-clear path: "Idle" describes the
         // main REPL, not a background teammate still running.
-        if (w.teammatesActive > 0) {
+        if (backgroundHeld(w)) {
           tanLog(
-            `pane=${w.paneId} idle status held — ${w.teammatesActive} teammate(s) active`,
+            `pane=${w.paneId} idle status held — ${backgroundLabel(w)}`,
           );
           // Same blocked-chip precedence as the progress-clear hold above.
           if (w.state !== "blocked") emitPaneState(w, "working");
@@ -947,6 +1020,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       // holds above, this is a REAL session end: any teammate bookkeeping
       // dies with the session, so reset it and deliver as usual.
       w.teammatesActive = 0;
+      w.hookSubagentsActive = 0;
       if (
         w.state === "working" &&
         w.userTurnArmed &&
@@ -997,6 +1071,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.lastWorkingAt = 0;
       w.lastChunkAssertedWorking = false;
       w.teammatesActive = 0;
+      w.hookSubagentsActive = 0;
       w.ring = "";
       w.userTurnArmed = false;
     }
@@ -1036,10 +1111,8 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   // actively typing in the pane defers that heal, but someone typing there is
   // watching it, which is exactly the case the suppress-while-watching policy
   // mutes anyway.
-  if (kind === "done" && w.teammatesActive > 0) {
-    tanLog(
-      `pane=${w.paneId} explicit done held — ${w.teammatesActive} teammate(s) active`,
-    );
+  if (kind === "done" && backgroundHeld(w)) {
+    tanLog(`pane=${w.paneId} explicit done held — ${backgroundLabel(w)}`);
     if (w.state !== "blocked") emitPaneState(w, "working");
     return;
   }
@@ -1057,6 +1130,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     // whole pane idle — any residual teammate bookkeeping is stale beside it.
     w.state = "idle";
     w.teammatesActive = 0;
+    w.hookSubagentsActive = 0;
   }
   // Chip state mirrors the announced state, focus-independent: an explicit
   // "done" notification means the turn finished and the agent is ready for

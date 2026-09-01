@@ -276,6 +276,32 @@ async function main() {
   await sleep(4500);
   check("user input re-armed the done alert", alertCount() === beforeLoop + 1);
 
+  // ── Hook-fed background subagents hold the finish ──
+  // The Agent tool can run subagents in the background: the main turn ends
+  // (idle prompt painted, Stop hook fired) while SubagentStart has fired with
+  // no matching SubagentStop yet. The idle frame + quiet window must NOT
+  // alert; the alert lands once the last subagent stops.
+  mod.noteTerminalUserInput("p4");
+  feed("p4", "✻ Delegating… (2s · ↓ 9 tokens)");
+  await sleep(1700);
+  feed("p4", "✻ Delegating… (4s · ↓ 22 tokens)");
+  mod.noteTerminalHookEvent("p4", "SubagentStart");
+  mod.noteTerminalHookEvent("p4", "SubagentStart");
+  mod.noteTerminalHookEvent("p4", "Stop");
+  feed("p4", "\x1b[2K\x1b[GLaunched two agents; I will report when they finish.\r\n> \r\n? for shortcuts");
+  const beforeHook = alertCount();
+  await sleep(4500);
+  check("hook subagents hold the quiet-window finish", alertCount() === beforeHook);
+  mod.noteTerminalHookEvent("p4", "SubagentStop");
+  await sleep(4500);
+  check("one remaining hook subagent still holds the finish", alertCount() === beforeHook);
+  mod.noteTerminalHookEvent("p4", "SubagentStop");
+  await sleep(4500);
+  check(
+    "finish delivers once the last hook subagent stops",
+    alertCount() === beforeHook + 1 && T.alerts[T.alerts.length - 1].kind === "complete",
+  );
+
   // ── Scenario 5: agent exits mid-work (prompt marker) → immediate done ──
   feed("p2", "\x1b]633;E;claude --continue\x07");
   feed("p2", "Claude Code v2.1.170\r\n");
