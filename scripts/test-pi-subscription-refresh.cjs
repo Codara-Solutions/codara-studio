@@ -87,6 +87,8 @@ const stubPlugin = {
       build.onLoad({ filter: new RegExp(`^${name}$`), namespace: "stub" }, () => ({
         loader: "js",
         contents,
+        // Lets a stub re-export pieces of the real module it replaces.
+        resolveDir: path.join(ROOT, "src", "main", "orchestration"),
       }));
     };
 
@@ -105,7 +107,12 @@ const stubPlugin = {
       export async function installPinnedPiRuntime() {}
       export function isPinnedPiRuntimeInstalling() { return false; }
     `);
-    stub(/pi-runtime$/, "runtime", `export const CODARA_PI_VERSION = "0.0.0";`);
+    // Only the pinned version is faked (the fixture runtime reports 0.0.0);
+    // the pi-ai lookup stays real so loadOAuth resolves the vendor module.
+    stub(/pi-runtime$/, "runtime", `
+      export const CODARA_PI_VERSION = "0.0.0";
+      export { resolvePiAiModulePath } from "./pi-runtime.ts";
+    `);
     stub(/pi-account-auth-store$/, "auth-store", `
       export async function inspectPiAccountProfileAuthStore() {
         return {

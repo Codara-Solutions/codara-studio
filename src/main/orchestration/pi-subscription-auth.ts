@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BrowserWindow, shell, type WebContents } from "electron";
 import { credentialMirror } from "./credential-mirror";
@@ -22,7 +21,7 @@ import type {
 
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS, isPiSubscriptionProvider } from "../../shared/agent-families";
 import { resolveCodaraPiRuntime } from "./pi-runtime-electron";
-import { CODARA_PI_VERSION } from "./pi-runtime";
+import { CODARA_PI_VERSION, resolvePiAiModulePath } from "./pi-runtime";
 import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
 import {
   deletePiAccountCredentialProfile,
@@ -262,11 +261,10 @@ async function openOAuthUrl(url: string): Promise<void> {
 async function loadOAuth(provider: PiSubscriptionProvider): Promise<OAuthAuth> {
   const runtime = await resolveCodaraPiRuntime();
   const meta = PROVIDER_META[provider];
-  const modulePath = join(
+  // Never assume where pi-ai lives relative to pi-coding-agent: the packaged
+  // app hoists it to the top-level node_modules, a dev tree nests it.
+  const modulePath = await resolvePiAiModulePath(
     runtime.packageRoot,
-    "node_modules",
-    "@earendil-works",
-    "pi-ai",
     "dist",
     "auth",
     "oauth",

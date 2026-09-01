@@ -163,6 +163,37 @@ async function main() {
     );
   });
 
+  // pi-ai's OAuth modules are looked up the way Node would resolve them from
+  // pi-coding-agent: its private node_modules first, then each ancestor. The
+  // packaged app only has the hoisted copy (electron-builder flattens the
+  // graph), the dev tree only nests it, so both layouts must resolve.
+  await withTempDirectory(async (directory) => {
+    const nodeModules = path.join(directory, "node_modules", "@earendil-works");
+    const packageRoot = path.join(nodeModules, "pi-coding-agent");
+    const oauthSegments = ["dist", "auth", "oauth", "anthropic.js"];
+    const hoisted = path.join(nodeModules, "pi-ai", ...oauthSegments);
+    const nested = path.join(packageRoot, "node_modules", "@earendil-works", "pi-ai", ...oauthSegments);
+    fs.mkdirSync(packageRoot, { recursive: true });
+
+    await assert.rejects(
+      runtime.resolvePiAiModulePath(packageRoot, ...oauthSegments),
+      /does not ship .*anthropic\.js/,
+    );
+
+    fs.mkdirSync(path.dirname(hoisted), { recursive: true });
+    fs.writeFileSync(hoisted, "// hoisted\n");
+    assert.equal(await runtime.resolvePiAiModulePath(packageRoot, ...oauthSegments), hoisted);
+
+    fs.mkdirSync(path.dirname(nested), { recursive: true });
+    fs.writeFileSync(nested, "// nested\n");
+    assert.equal(await runtime.resolvePiAiModulePath(packageRoot, ...oauthSegments), nested);
+  });
+  // And against the real install, whichever layout npm produced.
+  const realOAuth = await runtime.resolvePiAiModulePath(
+    installedRuntime.packageRoot, "dist", "auth", "oauth", "anthropic.js",
+  );
+  assert.equal(fs.existsSync(realOAuth), true);
+
   // Web search ships as a normal dependency of this repo. The resolver reads
   // the package's own pi manifest, so it must find the real entry here.
   const webSearchExtension = await runtime.resolvePiWebSearchExtension([
