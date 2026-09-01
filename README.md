@@ -39,6 +39,9 @@ live in [AGENTS.md](./AGENTS.md).
   iteration loops.
 - **Accounts.** Several Claude, Codex, and Grok logins on one machine, each in
   its own private login directory, sharing your chat history and settings.
+- **Run terminal lifecycle.** Worker panes belong to their run: Temporary
+  worker panes close automatically when a run settles, Service panes remain
+  until their run is deleted, and failed closes retry automatically.
 - **Notifications and remote access.** Codara tells you when an agent finishes
   or needs you, across terminals you typed into yourself and Cora runs, and
   can pair with a phone to watch and answer from anywhere.
