@@ -1,0 +1,18 @@
+title = "codara-studio gitleaks config"
+
+# Start from gitleaks' maintained default rule set (AWS, GitHub, Slack, private
+# keys, generic high-entropy secrets, etc.) and layer repo-specific exceptions
+# on top instead of hand-rolling rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  # Fixtures/mocks intentionally contain placeholder secrets, not real ones.
+  '''(^|/)(test|tests|__tests__|__mocks__|fixtures|scripts/test-.*)/''',
+]
+regexes = [
+  # Placeholder/example values used across docs and .env.example-style files.
+  '''(?i)(YOUR_API_KEY|CHANGE_ME|REPLACE_ME|EXAMPLE|xxxxxxxx|placeholder|<[a-z_-]+>)''',
+]

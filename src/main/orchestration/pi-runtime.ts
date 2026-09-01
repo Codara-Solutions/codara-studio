@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   ChatMode,
   CoraExecutionPolicy,
@@ -233,6 +233,36 @@ export async function resolvePinnedPiRuntime(
   }
   const detail = mismatches.length ? ` Version mismatches: ${mismatches.join(", ")}.` : "";
   throw new Error(`Codara's pinned Pi runtime ${CODARA_PI_VERSION} is not installed.${detail}`);
+}
+
+/**
+ * Locate a file inside the `@earendil-works/pi-ai` build that the pinned Pi
+ * actually uses, following Node's own lookup order: pi-coding-agent's private
+ * node_modules first, then every ancestor's node_modules. The layout differs
+ * between environments — a dev install nests pi-ai under pi-coding-agent when
+ * another dependency pins an older copy at the top level, while
+ * electron-builder re-hoists the production graph so the packaged app carries
+ * a single top-level copy — and pi-ai's `exports` map forbids resolving deep
+ * paths through import(), so the search is done by hand.
+ */
+export async function resolvePiAiModulePath(
+  packageRoot: string,
+  ...segments: readonly string[]
+): Promise<string> {
+  const searched: string[] = [];
+  let dir = resolve(packageRoot);
+  for (;;) {
+    const candidate = join(dir, "node_modules", "@earendil-works", "pi-ai", ...segments);
+    searched.push(candidate);
+    const found = await stat(candidate).catch(() => null);
+    if (found?.isFile()) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  throw new Error(
+    `Pinned Pi does not ship ${join("@earendil-works", "pi-ai", ...segments)}. Searched: ${searched.join(", ")}`,
+  );
 }
 
 /**

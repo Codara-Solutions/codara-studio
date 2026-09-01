@@ -78,7 +78,7 @@ for (const legacySymbol of [
 const workerPrompt = fs.readFileSync(
   path.join(ROOT, "src", "main", "orchestration", "worker-prompt.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n"); // a CRLF checkout (core.autocrlf on Windows) must still match
 const gateMatch = workerPrompt.match(
   /function usesPiWorkerHarness\([^)]*\): boolean \{\n([\s\S]*?)\n\}/,
 );
