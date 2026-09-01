@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -70,7 +70,7 @@ jobs:
         id: version
         run: node scripts/ci-version.cjs
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.version.outputs.skip != 'true'
         with:
           node-version-file: .nvmrc
