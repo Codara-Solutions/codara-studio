@@ -139,7 +139,8 @@
     "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs",
     "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs",
     "test:all": "node scripts/run-all-tests.cjs",
-    "test:step-live-stream": "node scripts/test-step-live-stream.cjs"
+    "test:step-live-stream": "node scripts/test-step-live-stream.cjs",
+    "prepare": "husky"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.209",
@@ -213,6 +214,7 @@
     "electron": "43.1.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
+    "husky": "^9.1.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.5.0",
