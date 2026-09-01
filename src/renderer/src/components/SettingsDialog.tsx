@@ -2483,7 +2483,9 @@ function AccountsSettings() {
       );
     },
     onDelete: (card, { closeSessions }) => {
-      if (card.builtIn) return;
+      // Account 1 is deletable too: its row is forgotten (the Cora sign-in
+      // and the pairing go, the personal login stays), so the card takes the
+      // same path as any other row rather than being turned away here.
       if (card.coraProfileId) {
         void deleteAccount(card.coraProfileId, closeSessions);
         return;

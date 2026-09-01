@@ -298,6 +298,13 @@ assert.match(card, /onClose=\{\(\) => setDeleteArmed\(false\)\}/);
 assert.match(card, /const closeCount = card\.builtIn \? 0 : card\.closeSessionsCount \?\? 0;/);
 assert.match(card, /\? "Forget this account"/);
 assert.doesNotMatch(card, /if \(renameable && !card\.builtIn\) \{/);
+// ...and the handler must carry the forget through. A guard here turned the
+// menu item into a no-op: the card confirmed and stayed on screen.
+assert.doesNotMatch(settings, /if \(card\.builtIn\) return;/);
+assert.match(
+  settings,
+  /onDelete: \(card, \{ closeSessions \}\) => \{[\s\S]{0,400}?if \(card\.coraProfileId\) \{\s*void deleteAccount\(card\.coraProfileId, closeSessions\);/,
+);
 assert.equal((card.match(/<CardOverflowMenu/g) ?? []).length, 1);
 assert.doesNotMatch(card, /nativeCliAccounts|piSubscriptions/);
 assert.match(card, /inset 2px 0 0 \$\{brand\}/);
