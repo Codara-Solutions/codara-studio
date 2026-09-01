@@ -2,13 +2,37 @@
   "name": "codara-studio",
   "version": "1.0.0",
   "description": "Codara Studio — cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
-  "main": "out/main/index.js",
-  "author": "Etienne",
+  "homepage": "https://studio.codarasolutions.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Codara-Solutions/codara-studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Codara-Solutions/codara-studio/issues"
+  },
+  "license": "MIT",
+  "author": "Codara Solutions",
+  "keywords": [
+    "electron",
+    "terminal",
+    "terminal-multiplexer",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "mcp",
+    "agent-orchestration",
+    "developer-tools"
+  ],
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "out/main/index.js",
   "bin": {
     "cora": "cli/cora.cjs"
   },
   "scripts": {
+    "test": "node scripts/run-all-tests.cjs",
     "icon:dev": "node scripts/stamp-dev-electron-icon.cjs",
     "predev": "node scripts/stamp-dev-electron-icon.cjs",
     "dev": "electron-vite dev",
@@ -16,7 +40,6 @@
     "test:cora-cli": "node scripts/test-cora-cli.cjs",
     "test:overlay-performance": "node scripts/test-overlay-performance.cjs",
     "build": "electron-vite build",
-    "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "test:renderer-chunks": "node scripts/test-renderer-chunks.mjs",
     "test:preview-webview": "node scripts/test-browser-pane-webview-liveness.cjs && node scripts/test-preview-navigation.cjs && node scripts/test-browser-storage-boundary.cjs",
     "prestart": "node scripts/stamp-dev-electron-icon.cjs",
@@ -143,7 +166,6 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.209",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-javascript": "^6.2.5",
@@ -234,7 +256,6 @@
       "!**/node_modules/node-pty/prebuilds/win32-ia32/**"
     ],
     "asarUnpack": [
-      "node_modules/@anthropic-ai/claude-agent-sdk-*/**",
       "node_modules/@earendil-works/pi-coding-agent/node_modules/**/*.node",
       "node_modules/pi-web-search/**",
       "node_modules/@vscode/ripgrep/**",
@@ -304,13 +325,5 @@
       "provider": "generic",
       "url": "https://studio.codarasolutions.com/releases"
     }
-  },
-  "allowScripts": {
-    "cpu-features@0.0.10": true,
-    "electron@43.1.1": true,
-    "electron-winstaller@5.4.0": true,
-    "esbuild@0.21.5": true,
-    "node-pty@1.1.0": true,
-    "ssh2@1.17.0": true
   }
 }
