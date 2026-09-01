@@ -39,14 +39,19 @@ without spending CPU repainting idle screens.
 - `lib/store.cjs` — offline reads of `~/.codarastudio/runs`; run inspection works
   with the app closed.
 - `lib/ui.cjs` — colors, the logo, tables, time formatting.
+- `lib/chat-motion.cjs`, `lib/chat-slash.cjs`, `lib/command-editor.cjs`,
+  `lib/model-picker.cjs`, `lib/run-picker.cjs`, `lib/clipboard.cjs` — the
+  pieces of the chat UI.
 - `commands/` — one file per command group (`chat.cjs` owns the TUI; the rest
-  cover sessions, runs, agents/watch, board/whiteboard, automations, bench,
-  and status).
+  cover sessions, runs, agents/watch, board/whiteboard, automations, auth,
+  profiles, bench, and status).
 - `bench/tasks.cjs` — the harness benchmark suite: tiered tasks with hidden
   contract checks and reference solutions; `bench/score.cjs` is the scorer;
   `bench/adopt.cjs` re-attaches to a live bench run whose bench process was
   killed (resumes green polling, drives remaining checkpoint stages, grades,
-  appends a history row flagged `adopted`).
+  appends a history row flagged `adopted`); `bench/rivals.cjs` is the Hermes
+  adapter for same-model comparisons; `bench/history.jsonl` is the committed
+  score history.
 
 Housekeeping: `cora ws prune` removes workspaces whose directory no longer
 exists (bench runs register throwaway tmpdirs as real workspaces; the bench
@@ -54,9 +59,12 @@ also prunes its own after grading).
 
 ## Accounts
 
-`cora auth list` shows both account layers in one Hermes-style directory:
+`cora auth list` shows both halves of every account in one directory:
 Cora's OAuth subscriptions and the native Claude Code, Codex, and Grok
-identities used by Studio terminals. They remain independent on purpose.
+identities used by Studio terminals. An account normally has both halves
+(see `docs/architecture.md`, Accounts); `cora auth use` picks the Cora half
+new chats run on, `cora auth cli use` picks the CLI half new terminals sign in
+as.
 
 ```sh
 cora auth list
