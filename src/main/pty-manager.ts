@@ -2206,6 +2206,14 @@ export function resize(id: string, cols: number, rows: number): void {
   }
 }
 
+// The pty's process id, for callers that reason about the process tree
+// below a pane (the terminal-agent notifier's background-task hold). Remote
+// panes carry pid 0 and report null.
+export function sessionPid(id: string): number | null {
+  const pid = sessions.get(id)?.pty.pid;
+  return typeof pid === "number" && pid > 0 ? pid : null;
+}
+
 export function hasSession(id: string): boolean {
   return sessions.has(id);
 }

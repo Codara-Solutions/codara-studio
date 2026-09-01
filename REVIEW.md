@@ -247,14 +247,14 @@ subagents and `run_in_background` Bash tasks are still running. Teammates
 panes were dropped in `hook-watcher.ts:785-792` before reaching anything but
 the session registry.
 
-What is still open: background **tasks** (a `Bash` call with
-`run_in_background: true`, or a `Monitor`). Claude fires no hook when the task
-completes; the parent is re-invoked later and fires `PreToolUse`/`Stop` again.
-Options: count `PreToolUse` for `Bash` with `tool_input.run_in_background`
-and treat the next `UserPromptSubmit` or `Stop` as the drain, or parse the
-"N background task(s) live" string Claude paints (present in the binary,
-exact footer form not captured live). Capture a live session with
-`SPARK_TERMINAL_NOTIFY_LOG` on before choosing.
+Background **tasks** (a `Bash` call with `run_in_background: true`, or a
+`Monitor`) are covered in a follow-up: the `PreToolUse` hook counts the
+launch, a `Stop` with no `UserPromptSubmit` before it is the follow-up turn
+Claude runs when a task reports back and drains one, and a descendant of the
+pane's shell started after the launch that is still alive keeps the pane
+busy (checked every 2 s, capped at an hour) so a long-lived monitor that
+fires many follow-up turns cannot slip through. Windows has no process list
+here, so the counter alone decides there.
 
 ### 3.2 Use the structured signals Claude Code already offers
 

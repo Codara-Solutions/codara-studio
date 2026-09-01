@@ -797,7 +797,13 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
   // what the terminal-agent notifier needs to avoid a false "finished" while
   // background agents keep working. Excluded (orchestrated) panes are ignored
   // inside the notifier.
-  noteTerminalHookEvent(envelope.paneId, envelope.hookName);
+  noteTerminalHookEvent(
+    envelope.paneId,
+    envelope.hookName,
+    envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)
+      ? (envelope.payload as Record<string, unknown>)
+      : null,
+  );
 
   const payloadObj =
     envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)
