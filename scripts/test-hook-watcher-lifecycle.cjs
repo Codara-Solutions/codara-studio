@@ -30,6 +30,10 @@ function lifecycleStubs() {
       "export function nativeClaudeProfileId() { return undefined; }",
     ],
     [
+      "./terminal-agent-notify",
+      "export function noteTerminalHookEvent() {}",
+    ],
+    [
       "./orchestration/run-store",
       [
         "export function applyHookStateReport() { globalThis.__hookDispatches++; }",

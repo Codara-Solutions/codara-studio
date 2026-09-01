@@ -29,6 +29,7 @@ import { join } from "node:path";
 
 import { recordSessionStart } from "./agent-session-registry";
 import { nativeClaudeProfileId } from "./pty-manager";
+import { noteTerminalHookEvent } from "./terminal-agent-notify";
 import { codaraHome } from "./codara-home";
 
 type RunStoreModule = typeof import("./orchestration/run-store");
@@ -790,6 +791,13 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
   if (!envelope.paneId) {
     return;
   }
+
+  // Manual panes (a `claude` the user typed into a Studio shell) never reach
+  // the run-store dispatch below, but their subagent lifecycle is exactly
+  // what the terminal-agent notifier needs to avoid a false "finished" while
+  // background agents keep working. Excluded (orchestrated) panes are ignored
+  // inside the notifier.
+  noteTerminalHookEvent(envelope.paneId, envelope.hookName);
 
   const payloadObj =
     envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)

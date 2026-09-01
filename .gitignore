@@ -1,8 +1,6 @@
 node_modules/
 out/
 dist/
-dist2/
-dist3/
 .playwright-mcp/
 release/
 coverage/
@@ -25,7 +23,8 @@ experiments/
 !.env.example
 
 # Local-only artifacts (not source)
-.claude/
+.claude/settings.local.json
+.claude/**/*.local.*
 .gyp-venv/
 .npmrc
 __pycache__/

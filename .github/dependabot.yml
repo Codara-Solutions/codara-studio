@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # The agent runtime is pinned on purpose (see CONTRIBUTING.md); bump it deliberately.
+      - dependency-name: "@earendil-works/*"
+      - dependency-name: pi-web-search
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

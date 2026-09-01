@@ -1,6 +1,6 @@
 if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "pre-commit: gitleaks is not installed or not on PATH — refusing to commit unscanned." >&2
-  echo "  Install: winget install Gitleaks.Gitleaks   (or see https://github.com/gitleaks/gitleaks#installing)" >&2
+  echo "pre-commit: gitleaks is not installed or not on PATH, refusing to commit unscanned." >&2
+  echo "  Install: brew install gitleaks   |   winget install Gitleaks.Gitleaks   |   https://github.com/gitleaks/gitleaks#installing" >&2
   echo "  Bypass once (not recommended): git commit --no-verify" >&2
   exit 1
 fi

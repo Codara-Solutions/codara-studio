@@ -156,7 +156,7 @@ function scriptPathOf(command) {
 }
 
 // A settings file already poisoned the way the incident poisoned the user's:
-// eight events, every one pointing at a script that no longer exists.
+// every managed event, each one pointing at a script that no longer exists.
 function poisonedSettings(deadScript, extras = {}) {
   const events = [
     "SessionStart",
@@ -164,7 +164,9 @@ function poisonedSettings(deadScript, extras = {}) {
     "PostToolUse",
     "UserPromptSubmit",
     "Stop",
+    "SubagentStart",
     "SubagentStop",
+    "SessionEnd",
     "Notification",
     "PreCompact",
   ];
@@ -216,7 +218,7 @@ async function main() {
 
     check("a missing settings.json is created", fs.existsSync(settingsPath));
     const commands = sparkCommands(readSettings(settingsPath));
-    check("one hook command per event is written", commands.length === 8, `got ${commands.length}`);
+    check("one hook command per event is written", commands.length === 10, `got ${commands.length}`);
     check(
       "the hook command points at the durable copy, not the app directory",
       commands.length > 0 && commands.every((c) => scriptPathOf(c.command) === stableScript),
@@ -234,7 +236,7 @@ async function main() {
     const referenced = commands.map((c) => scriptPathOf(c.command));
     check(
       "the referenced script still exists after the app directory is deleted",
-      referenced.length === 8 && referenced.every((p) => p !== null && fs.existsSync(p)),
+      referenced.length === 10 && referenced.every((p) => p !== null && fs.existsSync(p)),
       `referenced: ${referenced[0]}`,
     );
     const stat = fs.existsSync(stableScript) ? fs.statSync(stableScript) : null;
@@ -321,7 +323,7 @@ async function main() {
     const commands = sparkCommands(readSettings(settingsPath));
     check(
       "an installable boot removes every dead hook entry",
-      commands.length === 8 && !commands.some((c) => c.command.includes(dead)),
+      commands.length === 10 && !commands.some((c) => c.command.includes(dead)),
       `${commands.length} commands, dead present: ${commands.some((c) => c.command.includes(dead))}`,
     );
   }
@@ -355,7 +357,7 @@ async function main() {
     const commands = sparkCommands(readSettings(settingsPath));
     check(
       "live pre-rename entries are replaced by codara-hook.py entries",
-      commands.length === 8 && commands.every((c) => scriptPathOf(c.command) === stableScript),
+      commands.length === 10 && commands.every((c) => scriptPathOf(c.command) === stableScript),
       commands.length ? commands[0].command : "no commands",
     );
     check(
@@ -545,7 +547,7 @@ async function main() {
     const commands = sparkCommands(readSettings(settingsPath));
     check(
       "booting from a worktree still installs hooks",
-      commands.length === 8,
+      commands.length === 10,
       `${commands.length} commands`,
     );
     check(
@@ -602,7 +604,7 @@ async function main() {
     check("repeated installs are byte-identical", first === third);
     check(
       "repeated installs do not duplicate entries",
-      sparkCommands(JSON.parse(third)).length === 8,
+      sparkCommands(JSON.parse(third)).length === 10,
       `${sparkCommands(JSON.parse(third)).length} commands`,
     );
 
@@ -617,7 +619,7 @@ async function main() {
     await fresh.installClaudeHooks(opts);
     check(
       "accumulated duplicate entries collapse to one per event",
-      sparkCommands(readSettings(settingsPath)).length === 8,
+      sparkCommands(readSettings(settingsPath)).length === 10,
       `${sparkCommands(readSettings(settingsPath)).length} commands`,
     );
 
@@ -650,7 +652,7 @@ async function main() {
         (e) => e.matcher === "Bash" && e.hooks.some((h) => h.command === "echo mine"),
       ),
     );
-    check("our entry is added alongside it", sparkCommands(mixed).length === 8);
+    check("our entry is added alongside it", sparkCommands(mixed).length === 10);
   }
 
   // -------------------------------------------------------------------
@@ -755,7 +757,7 @@ async function main() {
         const commands = sparkCommands(readSettings(settingsPath));
         check(
           "a failed refresh keeps the durable copy instead of the app directory",
-          commands.length === 8 && commands.every((c) => scriptPathOf(c.command) === stableScript),
+          commands.length === 10 && commands.every((c) => scriptPathOf(c.command) === stableScript),
           commands.length ? commands[0].command : "no commands",
         );
       }

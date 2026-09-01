@@ -31,11 +31,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24 # matches the development machines the suites are green on
+          node-version-file: .nvmrc
           cache: npm
       - run: npm ci
       - run: npm run typecheck:node
       - run: npm run typecheck:web
+      - run: npm run typecheck:e2e
       # Some suites drive the BUILT app surface (agent-socket handshake) or a
       # real Chromium (chat-surface-routing) — give them what they need.
       - run: npm run build
@@ -72,7 +73,7 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.version.outputs.skip != 'true'
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
