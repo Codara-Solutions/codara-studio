@@ -58,6 +58,7 @@ const harnessPlugin = {
             "export function tap(id, h){ globalThis.__TAN.taps.set(id, h); return () => globalThis.__TAN.taps.delete(id); }\n" +
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
+            "export function sessionPid(){ return null; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n",
           loader: "js",
         };
@@ -300,6 +301,34 @@ async function main() {
   check(
     "finish delivers once the last hook subagent stops",
     alertCount() === beforeHook + 1 && T.alerts[T.alerts.length - 1].kind === "complete",
+  );
+
+  // ── Hook-fed background tasks hold the finish ──
+  // A Bash call with run_in_background (or a Monitor) ends the main turn
+  // while the command keeps running; Claude reacts to its completion with a
+  // follow-up turn that ends in a Stop no UserPromptSubmit preceded. The pane
+  // stays busy until that follow-up turn ends. (The process-tree half of the
+  // hold is inert here: the pty stub reports no pid.)
+  mod.noteTerminalUserInput("p4");
+  mod.noteTerminalHookEvent("p4", "UserPromptSubmit");
+  feed("p4", "✻ Launching… (2s · ↓ 9 tokens)");
+  await sleep(1700);
+  feed("p4", "✻ Launching… (4s · ↓ 22 tokens)");
+  mod.noteTerminalHookEvent("p4", "PreToolUse", { tool_name: "Bash", tool_input: { command: "npm test", run_in_background: true } });
+  mod.noteTerminalHookEvent("p4", "Stop");
+  feed("p4", "\x1b[2K\x1b[GRunning the tests in the background.\r\n> \r\n? for shortcuts");
+  const beforeTask = alertCount();
+  await sleep(4500);
+  check("a background task holds the quiet-window finish", alertCount() === beforeTask);
+  // Task completes: Claude runs a follow-up turn and stops again.
+  feed("p4", "✻ Reading… (1s · ↓ 3 tokens)");
+  await sleep(1200);
+  mod.noteTerminalHookEvent("p4", "Stop");
+  feed("p4", "\x1b[2K\x1b[GTests passed.\r\n> \r\n? for shortcuts");
+  await sleep(4500);
+  check(
+    "finish delivers after the task's follow-up turn",
+    alertCount() === beforeTask + 1 && T.alerts[T.alerts.length - 1].kind === "complete",
   );
 
   // ── Scenario 5: agent exits mid-work (prompt marker) → immediate done ──

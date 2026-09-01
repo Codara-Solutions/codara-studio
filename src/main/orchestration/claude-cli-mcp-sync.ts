@@ -216,6 +216,17 @@ export async function syncClaudeCliMcpServers(
             return copy;
           })();
     try {
+      // Claude Code rewrites .claude.json itself with the default 0644 mode,
+      // and the private writer refuses a group- or world-readable target, so
+      // without this every sync into a live account failed with "permissions
+      // are not private". The file is config, not a credential; tightening it
+      // to owner-only is harmless for the CLI and lets the write proceed.
+      // Only a regular file is touched: chmod follows symlinks, and the
+      // writer rejects those on its own.
+      if (participant.exists && process.platform !== "win32") {
+        const linkStat = await fs.lstat(participant.path).catch(() => null);
+        if (linkStat?.isFile()) await fs.chmod(participant.path, 0o600).catch(() => undefined);
+      }
       await atomicWritePrivateFile(participant.path, `${JSON.stringify(next, null, 2)}\n`, {
         maxBytes: MAX_CONFIG_BYTES,
       });

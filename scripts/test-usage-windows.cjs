@@ -35,6 +35,12 @@ const harnessPlugin = {
       path: "pi-runtime-electron",
       namespace: "stub",
     }));
+    // file-log reaches electron through codara-home; the helpers under test
+    // never log.
+    build.onResolve({ filter: /\/file-log$/ }, () => ({
+      path: "file-log",
+      namespace: "stub",
+    }));
     // The module graph reaches pi-runtime-electron from several files, each
     // importing a different symbol. A Proxy-backed namespace satisfies every
     // named import without enumerating them, and nothing under test calls one.

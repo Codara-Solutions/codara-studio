@@ -13,6 +13,11 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
+import {
+  aliveProcesses,
+  descendantsStartedAfter,
+  type OwnedProcessIdentity,
+} from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
@@ -113,6 +118,12 @@ const TEAMMATE_SILENCE_MS = 15_000;
 // event refreshes the stamp; a counter untouched this long is treated as
 // stale and cleared so the pane can resolve through the normal quiet window.
 const HOOK_SUBAGENT_STALE_MS = 30 * 60_000;
+// Process-tree hold for background tasks: re-list at most this often while a
+// launch is pending, and give up on it after this long so a stray process
+// (an MCP server the CLI started lazily mid-turn, a daemonized command) can
+// never keep a pane busy forever.
+const BACKGROUND_PROC_RECHECK_MS = 2_000;
+const BACKGROUND_PROC_MAX_HOLD_MS = 60 * 60_000;
 // Late registration is most visible during cold restore: the shell can print
 // the resume banner + first busy frame before the renderer has hydrated its
 // terminal registry. Replaying a bounded recent tail closes that gap without
@@ -184,6 +195,25 @@ interface PaneWatcher {
   // safety net (a SubagentStop lost to an interrupt must not hold the pane
   // forever).
   lastHookEventAt: number;
+  // Background tasks the CLI launched this turn and has not yet reacted to:
+  // a Bash tool call with run_in_background, or a Monitor. PreToolUse
+  // increments; a Stop that no UserPromptSubmit preceded is the follow-up
+  // turn Claude runs when a task completes, and drains one. Held like the
+  // subagent counter: the main turn ending is not "finished" while > 0.
+  hookBackgroundTasks: number;
+  // A UserPromptSubmit arrived since the last Stop, so the next Stop ends a
+  // user turn rather than a task follow-up.
+  hookPromptSinceStop: boolean;
+  // When the earliest still-pending background launch happened (ms epoch),
+  // 0 when none. Anchors the process-tree check below.
+  backgroundLaunchAt: number;
+  // Descendants of the pane's shell that started after backgroundLaunchAt and
+  // were alive at the last check. A long-lived monitor keeps firing follow-up
+  // turns (each draining the counter above) while it is still running; the
+  // live process is the signal that survives that, so the pane stays busy
+  // while any of these are alive.
+  backgroundProcs: OwnedProcessIdentity[];
+  lastBackgroundProcCheckAt: number;
   // When the last non-empty decoded chunk arrived, any content. Backs the
   // teammate counter's silence self-heal in the sweep.
   lastOutputAt: number;
@@ -307,6 +337,11 @@ export function syncTerminalNotifyPanes(input: {
       teammatesActive: 0,
       hookSubagentsActive: 0,
       lastHookEventAt: 0,
+      hookBackgroundTasks: 0,
+      hookPromptSinceStop: false,
+      backgroundLaunchAt: 0,
+      backgroundProcs: [],
+      lastBackgroundProcCheckAt: 0,
       lastOutputAt: 0,
       lastEmittedState: null,
     };
@@ -395,6 +430,7 @@ function attach(w: PaneWatcher): void {
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;
     w.lastHookEventAt = 0;
+    clearBackgroundWork(w);
     w.lastOutputAt = 0;
     w.lastEmittedState = null;
     attach(w);
@@ -472,9 +508,9 @@ function ensureSweep(): void {
           continue;
         }
       }
-      // Hook-reported subagents are not subject to the silence heal: the
-      // parent REPL may paint nothing while a background agent works.
-      if (w.hookSubagentsActive > 0) continue;
+      // Hook-reported subagents and background tasks are not subject to the
+      // silence heal: the parent REPL may paint nothing while they work.
+      if (w.hookSubagentsActive > 0 || backgroundTasksActive(w, now)) continue;
       if (w.state !== "working") continue;
       // Stall-aware window: silence right after a working-footer paint is a
       // mid-turn stall until proven otherwise; silence after an idle repaint
@@ -689,11 +725,73 @@ export function noteHostResume(): void {
 // "turn stopped" signal (progress clear, idle status, quiet window, explicit
 // done) is deferred; the alert fires when the last one drains.
 function backgroundHeld(w: PaneWatcher): boolean {
-  return w.teammatesActive > 0 || w.hookSubagentsActive > 0;
+  return (
+    w.teammatesActive > 0 ||
+    w.hookSubagentsActive > 0 ||
+    backgroundTasksActive(w, Date.now())
+  );
 }
 
 function backgroundLabel(w: PaneWatcher): string {
-  return `${w.teammatesActive} teammate(s), ${w.hookSubagentsActive} hook subagent(s) active`;
+  return `${w.teammatesActive} teammate(s), ${w.hookSubagentsActive} hook subagent(s), ${w.hookBackgroundTasks} background task(s), ${w.backgroundProcs.length} live process(es)`;
+}
+
+function clearBackgroundWork(w: PaneWatcher): void {
+  w.hookBackgroundTasks = 0;
+  w.hookPromptSinceStop = false;
+  w.backgroundLaunchAt = 0;
+  w.backgroundProcs = [];
+  w.lastBackgroundProcCheckAt = 0;
+}
+
+// Whether background tasks still hold this pane: the hook counter, or a
+// process launched after the pending launch that is still alive. The
+// process list is consulted only while a launch is pending and at most every
+// BACKGROUND_PROC_RECHECK_MS; on platforms without `ps` the counter alone
+// decides.
+function backgroundTasksActive(w: PaneWatcher, now: number): boolean {
+  if (w.backgroundLaunchAt === 0) return false;
+  if (now - w.backgroundLaunchAt > BACKGROUND_PROC_MAX_HOLD_MS) {
+    tanLog(`pane=${w.paneId} background hold expired after ${BACKGROUND_PROC_MAX_HOLD_MS}ms`);
+    clearBackgroundWork(w);
+    return false;
+  }
+  if (now - w.lastBackgroundProcCheckAt >= BACKGROUND_PROC_RECHECK_MS) {
+    w.lastBackgroundProcCheckAt = now;
+    const rootPid = pty.sessionPid(w.paneId);
+    if (rootPid !== null) {
+      // The hook process that reported the launch, and the CLI's own tool
+      // shell, start in the same window; a fresh listing on every check keeps
+      // only what is still running right now.
+      const listed = descendantsStartedAfter(rootPid, w.backgroundLaunchAt - 2_000);
+      if (listed !== null) {
+        const alive = w.backgroundProcs.length > 0 ? aliveProcesses(w.backgroundProcs) : listed;
+        w.backgroundProcs = alive.length > 0 ? alive : listed;
+      }
+    }
+  }
+  if (w.hookBackgroundTasks > 0) return true;
+  if (w.backgroundProcs.length > 0) return true;
+  // Counter drained and nothing alive: the launch is over.
+  clearBackgroundWork(w);
+  return false;
+}
+
+function hookToolName(payload: Record<string, unknown> | null): string {
+  const value = payload?.tool_name ?? payload?.toolName ?? payload?.tool;
+  return typeof value === "string" ? value : "";
+}
+
+function hookLaunchesBackgroundWork(payload: Record<string, unknown> | null): boolean {
+  const tool = hookToolName(payload);
+  if (tool === "Monitor") return true;
+  if (tool !== "Bash") return false;
+  const input = payload?.tool_input ?? payload?.toolInput;
+  return (
+    typeof input === "object" &&
+    input !== null &&
+    (input as Record<string, unknown>).run_in_background === true
+  );
 }
 
 // Claude Code hook events for a pane the user opened themselves (orchestrated
@@ -701,11 +799,37 @@ function backgroundLabel(w: PaneWatcher): string {
 // subagent lifecycle is consumed here: Stop is deliberately NOT treated as
 // "finished", because Claude fires it at the end of the main turn even while
 // background agents and background tasks it launched are still running.
-export function noteTerminalHookEvent(paneId: string, hookName: string): void {
+export function noteTerminalHookEvent(
+  paneId: string,
+  hookName: string,
+  payload: Record<string, unknown> | null = null,
+): void {
   const w = watchers.get(paneId);
   if (!w || w.excluded) return;
-  w.lastHookEventAt = Date.now();
+  const now = Date.now();
+  w.lastHookEventAt = now;
   switch (hookName) {
+    case "PreToolUse":
+      if (hookLaunchesBackgroundWork(payload)) {
+        w.hookBackgroundTasks += 1;
+        if (w.backgroundLaunchAt === 0) w.backgroundLaunchAt = now;
+        tanLog(
+          `pane=${w.paneId} hook PreToolUse ${hookToolName(payload)} in background -> ${w.hookBackgroundTasks}`,
+        );
+      }
+      return;
+    case "UserPromptSubmit":
+      w.hookPromptSinceStop = true;
+      return;
+    case "Stop":
+      // A Stop with no user prompt since the previous Stop is the follow-up
+      // turn the CLI runs when a background task reports back.
+      if (!w.hookPromptSinceStop && w.hookBackgroundTasks > 0) {
+        w.hookBackgroundTasks -= 1;
+        tanLog(`pane=${w.paneId} hook Stop after task follow-up -> ${w.hookBackgroundTasks}`);
+      }
+      w.hookPromptSinceStop = false;
+      return;
     case "SubagentStart":
       w.hookSubagentsActive += 1;
       tanLog(`pane=${w.paneId} hook SubagentStart -> ${w.hookSubagentsActive}`);
@@ -721,6 +845,7 @@ export function noteTerminalHookEvent(paneId: string, hookName: string): void {
         tanLog(`pane=${w.paneId} hook ${hookName} — subagent counter reset`);
       }
       w.hookSubagentsActive = 0;
+      clearBackgroundWork(w);
       return;
     default:
       return;
@@ -1021,6 +1146,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       // dies with the session, so reset it and deliver as usual.
       w.teammatesActive = 0;
       w.hookSubagentsActive = 0;
+      clearBackgroundWork(w);
       if (
         w.state === "working" &&
         w.userTurnArmed &&
@@ -1072,6 +1198,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.lastChunkAssertedWorking = false;
       w.teammatesActive = 0;
       w.hookSubagentsActive = 0;
+      clearBackgroundWork(w);
       w.ring = "";
       w.userTurnArmed = false;
     }
@@ -1131,6 +1258,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     w.state = "idle";
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;
+    clearBackgroundWork(w);
   }
   // Chip state mirrors the announced state, focus-independent: an explicit
   // "done" notification means the turn finished and the agent is ready for

@@ -34,6 +34,7 @@
 // simply omitted rather than rendered as a confident zero.
 
 import { readFile, stat } from "node:fs/promises";
+import { logMain } from "../file-log";
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 import type {
   PiSubscriptionProvider,
@@ -637,21 +638,32 @@ async function profileUsage(
       windows: [],
       checkedAt,
     };
-  } catch {
+  } catch (error) {
     // Fixed copy only: errors from fs/fetch/runtime loading can contain a local
-    // credential path or vendor response detail and must not cross IPC.
+    // credential path or vendor response detail and must not cross IPC. The
+    // local log keeps the error class and message (never a token: every
+    // message on this path is fixed copy or a Node network error) so a card
+    // stuck on this state can be diagnosed from ~/.codarastudio/logs/main.log.
     const providerLabel =
       profile.provider === "anthropic"
         ? "Claude"
         : profile.provider === "openai-codex"
           ? "ChatGPT"
           : "xAI";
-    return profileProblem(
-      profile,
-      checkedAt,
-      "error",
-      `${providerLabel} usage could not be checked. Retry, then reconnect this account if it persists.`,
+    const name = error instanceof Error ? error.name : "Error";
+    const detail = error instanceof Error ? error.message : String(error);
+    logMain(
+      "usage",
+      `${profile.provider} ${profile.id.slice(0, 8)} check failed: ${name}: ${detail.slice(0, 300)}`,
     );
+    const cause = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+    const message =
+      name === "TimeoutError" || name === "AbortError"
+        ? `${providerLabel} usage check timed out. The account is still connected; retry in a moment.`
+        : detail === "fetch failed" || typeof cause === "string"
+          ? `${providerLabel} usage could not be reached (network). The account is still connected; retry when online.`
+          : `${providerLabel} usage could not be checked. Retry, then reconnect this account if it persists.`;
+    return profileProblem(profile, checkedAt, "error", message);
   }
 }
 

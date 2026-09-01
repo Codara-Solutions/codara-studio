@@ -160,6 +160,16 @@ const stubPlugin = {
         }
       `,
     }));
+    // file-log reaches electron through codara-home; this harness never
+    // needs the log, only the returned profiles.
+    build.onResolve({ filter: /\/file-log$/ }, () => ({
+      path: "file-log",
+      namespace: "stub",
+    }));
+    build.onLoad({ filter: /^file-log$/, namespace: "stub" }, () => ({
+      loader: "js",
+      contents: "export function logMain() {}",
+    }));
     build.onResolve({ filter: /pi-subscription-auth$/ }, () => ({
       path: "subscription-auth",
       namespace: "stub",

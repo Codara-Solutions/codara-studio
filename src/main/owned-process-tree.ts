@@ -103,3 +103,36 @@ export function signalOwnedProcessTree(
 export function isOwnedProcessTreeAlive(tree: OwnedProcessTree | null): boolean {
   return tree ? currentMembers(tree).length > 0 : false;
 }
+
+// `ps -o lstart` prints a ctime-style stamp ("Tue Sep  1 23:48:34 2026") that
+// Date.parse reads as local time; null when the platform gave something else.
+export function processStartMs(startedAt: string): number | null {
+  const ms = Date.parse(startedAt.replace(/\s+/g, " "));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Every process below `rootPid` that started at or after `sinceMs`, excluding
+ * the root itself. Null when the process list is unavailable (Windows, ps
+ * failure) so callers can tell "nothing there" from "cannot tell".
+ */
+export function descendantsStartedAfter(
+  rootPid: number,
+  sinceMs: number,
+): OwnedProcessIdentity[] | null {
+  const tree = captureOwnedProcessTree(rootPid);
+  if (!tree) return null;
+  return tree.members.filter((member) => {
+    if (member.pid === rootPid) return false;
+    const started = processStartMs(member.startedAt);
+    return started !== null && started >= sinceMs;
+  });
+}
+
+/** The subset of `members` still running under the same start time. */
+export function aliveProcesses(
+  members: readonly OwnedProcessIdentity[],
+): OwnedProcessIdentity[] {
+  if (members.length === 0) return [];
+  return [...currentMembers({ rootPid: members[0].pid, members })];
+}
