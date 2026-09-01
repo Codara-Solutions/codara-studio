@@ -1,9 +1,19 @@
+import { dirname, join, resolve } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { ClaudeAccountAdapter } from "./account-adapters/claude-account-adapter";
 import { refreshActiveCliEnvPointer } from "./active-cli-env-pointer";
-import type { ClaudeCliAccountProfileStore } from "./claude-cli-account-profiles";
+import {
+  CLAUDE_CLI_CONFIG_FILE,
+  claudeCliManagedProfileConfigDir,
+  type ClaudeCliAccountProfileStore,
+} from "./claude-cli-account-profiles";
 import type { ClaudeCliCredentialBackend } from "./claude-cli-credentials";
 import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
+import {
+  CLAUDE_CLI_MCP_BASELINE_FILE,
+  managedClaudeConfigFile,
+  syncClaudeCliMcpServers,
+} from "./claude-cli-mcp-sync";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
 import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
@@ -202,6 +212,49 @@ export async function migrateUnifiedAccounts(
       },
       entry,
     );
+    if (service.adapter.runtime === "claude") {
+      // MCP servers belong to the user, not to one Anthropic login. They live
+      // in `.claude.json`, which stays per account because it also carries the
+      // account identity, so every managed account used to start with an empty
+      // list while the personal login had the real one. Share just that block,
+      // every launch, so a server added anywhere reaches every account and a
+      // machine that predates this repairs itself without the user editing
+      // JSON by hand.
+      await step(
+        named("share-mcp-servers"),
+        async () => {
+          const store = (deps.claudeStore ??
+            service.adapter.store) as ClaudeCliAccountProfileStore;
+          const snapshot = await store.snapshot();
+          const shared = await syncClaudeCliMcpServers({
+            baselinePath: join(store.rootDir, CLAUDE_CLI_MCP_BASELINE_FILE),
+            files: [
+              // Claude Code's own file: updated in place, never created here.
+              {
+                path:
+                  store.personalConfigDirEnv === null
+                    ? join(dirname(resolve(store.personalConfigDir)), CLAUDE_CLI_CONFIG_FILE)
+                    : join(store.personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE),
+                create: false,
+              },
+              ...snapshot.profiles.map((profile) => ({
+                path: managedClaudeConfigFile(
+                  claudeCliManagedProfileConfigDir(store.rootDir, profile.id),
+                ),
+                create: true,
+              })),
+            ],
+            log,
+          });
+          if (shared.written.length > 0) {
+            log(
+              `[accounts] shared ${shared.names.length} MCP server(s) across ${shared.written.length} Claude account file(s)`,
+            );
+          }
+        },
+        entry,
+      );
+    }
   }
   // Running plain shells follow the pointer; a fresh one after the pass
   // makes a shell that outlived a previous Studio converge on this default.
