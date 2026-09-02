@@ -80,7 +80,12 @@ for (const id of [
   assert.match(app, new RegExp(`"${id}": \\(\\) =>`), `${id} has no handler in App`);
 }
 // Bracketed paste + submit, the same path autorun uses — not a raw pty.write.
-assert.match(app, /window\.spark\.pty\.inject\(target\.paneId, "\/model", \{ submit: true \}\)/);
+// Claude Code gets its draft stashed first (Ctrl+S = chat:stash) so the
+// command is never appended to a half-written message and sent as one.
+assert.match(
+  app,
+  /window\.spark\.pty\.inject\(target\.paneId, "\/model", \{\s*submit: true,\s*stashDraft: target\.runtime === "claude",?\s*\}\)/,
+);
 // Claude Code DOES take a mid-session effort command, so the terminal branch
 // types `/effort` at it rather than claiming the level is fixed until respawn.
 // (`--effort` is also a spawn-time flag; that is what the chat backend
@@ -89,7 +94,7 @@ const effortHandler = app.match(/"agent\.cycleEffort": \(\) => \{[\s\S]*?\n {6}\
 assert.ok(effortHandler, "agent.cycleEffort handler not found");
 assert.match(
   effortHandler[0],
-  /window\.spark\.pty\.inject\(target\.paneId, "\/effort", \{ submit: true \}\)/,
+  /window\.spark\.pty\.inject\(target\.paneId, "\/effort", \{\s*submit: true,\s*stashDraft: target\.runtime === "claude",?\s*\}\)/,
 );
 // Codex has no effort command; its model picker carries reasoning depth.
 assert.match(
@@ -97,6 +102,17 @@ assert.match(
   /target\.runtime === "codex"[\s\S]*?pty\.inject\(target\.paneId, "\/model", \{ submit: true \}\)/,
 );
 assert.doesNotMatch(effortHandler[0], /fixed for this session/);
+// The stash keystroke is plumbed through every layer as an explicit option and
+// written BEFORE the bracketed paste, outside it (0x13 inside a paste is just
+// text to the CLI). Only Claude Code binds Ctrl+S to chat:stash; a plain shell
+// would read it as XOFF, so it must never be implied.
+const ptyManager = read("src/main/pty-manager.ts");
+assert.match(
+  ptyManager,
+  /opts\?: \{ submit\?: boolean; stashDraft\?: boolean \}[\s\S]*?if \(opts\?\.stashDraft\) write\(id, "\\x13"\);[\s\S]*?write\(id, `\\x1b\[200~/,
+);
+assert.match(read("src/main/ipc.ts"), /stashDraft: args\.stashDraft === true/);
+assert.match(read("src/preload/index.ts"), /stashDraft: opts\?\.stashDraft/);
 // Plain shells keep native Ctrl+M (CR) / Ctrl+N (readline next-history).
 assert.match(
   app,

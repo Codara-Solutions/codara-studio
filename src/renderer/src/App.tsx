@@ -4917,8 +4917,14 @@ export default function App() {
         }
         if (target.kind === "terminal") {
           // Bracketed paste + submit, the same path autorun uses, so the CLI
-          // receives it exactly as if the user had typed it.
-          void window.spark.pty.inject(target.paneId, "/model", { submit: true });
+          // receives it exactly as if the user had typed it. For Claude Code
+          // the draft is stashed first (its own Ctrl+S) so a half-written
+          // message is not submitted with "/model" glued onto its end; it
+          // restores the draft itself once the picker closes.
+          void window.spark.pty.inject(target.paneId, "/model", {
+            submit: true,
+            stashDraft: target.runtime === "claude",
+          });
           return;
         }
         emitLocalToast(
@@ -4951,7 +4957,12 @@ export default function App() {
             );
             return;
           }
-          void window.spark.pty.inject(target.paneId, "/effort", { submit: true });
+          // Grok has no Ctrl+S stash either, so only Claude Code gets the
+          // draft parked before the command.
+          void window.spark.pty.inject(target.paneId, "/effort", {
+            submit: true,
+            stashDraft: target.runtime === "claude",
+          });
           return;
         }
         emitLocalToast(
