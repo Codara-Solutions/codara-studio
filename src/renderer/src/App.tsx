@@ -1395,9 +1395,18 @@ export default function App() {
     };
   }, [booted]);
 
-  // Persist on change (debounced)
+  // Persist on change (debounced). The first run after boot is skipped: the
+  // state in hand is exactly what state:load returned, and writing it back
+  // opened a 200 ms window where a workspace the `cora` CLI had just
+  // registered through the agent socket was overwritten by this stale echo
+  // until the next change-driven save restored it.
+  const persistArmed = useRef(false);
   useEffect(() => {
     if (!booted) return;
+    if (!persistArmed.current) {
+      persistArmed.current = true;
+      return;
+    }
     if (saveTimer.current !== null) {
       window.clearTimeout(saveTimer.current);
     }
