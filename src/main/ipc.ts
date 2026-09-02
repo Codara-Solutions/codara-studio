@@ -2760,9 +2760,12 @@ export function registerIpc(): void {
 
   handle(
     "pty:inject",
-    async (_e, args: { id: string; text: string; submit?: boolean }) => {
+    async (_e, args: { id: string; text: string; submit?: boolean; stashDraft?: boolean }) => {
       await awaitPendingSpawn(args.id);
-      pty.inject(args.id, args.text, { submit: args.submit ?? true });
+      pty.inject(args.id, args.text, {
+        submit: args.submit ?? true,
+        stashDraft: args.stashDraft === true,
+      });
       // Injected prompts (slash commands, drag-drop paths) start turns the
       // same way keystrokes do.
       noteTerminalUserInput(args.id);

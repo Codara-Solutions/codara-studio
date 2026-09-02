@@ -79,6 +79,8 @@ Defaults from `src/renderer/src/shortcuts/commands.ts`. `Mod` is Cmd on macOS an
 | Open model picker | Mod+Shift+m | `agent.openModelPicker` |
 | Open thinking effort picker | Mod+Shift+n | `agent.openEffortPicker` |
 
+Over a Cora chat the two cycle chords act on the composer pills. Over a terminal pane with a live CLI they type the CLI's own `/model` or `/effort` command at it. For Claude Code the pane first receives Ctrl+S (Claude Code's `chat:stash`), so a half-written message is parked instead of being submitted with the command appended; Claude Code restores the draft itself once the picker closes.
+
 ## Settings tabs
 
 Settings opens with `Mod+,` (`src/renderer/src/components/SettingsDialog.tsx`).

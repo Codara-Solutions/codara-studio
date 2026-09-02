@@ -2180,8 +2180,21 @@ export function publishOutput(id: string, data: string | Buffer): void {
 // it. If a future caller targets a non-interactive shell that doesn't honor
 // bracketed paste, the escapes will be echoed verbatim and that's the bug to
 // fix at the call site, not here.
-export function inject(id: string, text: string, opts?: { submit?: boolean }): void {
+//
+// stashDraft: Claude Code binds Ctrl+S (0x13) to `chat:stash`, which parks a
+// non-empty prompt aside and clears the input; once the next slash command has
+// run Claude Code pops it back on its own ("Draft restored"). Sending that
+// keystroke first means a chord that types `/model` or `/effort` at a pane no
+// longer glues the command onto whatever the user was mid-way through writing
+// and submits the lot as a message. Only callers targeting Claude Code should
+// set it — a plain shell reads 0x13 as XOFF and freezes its output.
+export function inject(
+  id: string,
+  text: string,
+  opts?: { submit?: boolean; stashDraft?: boolean },
+): void {
   if (!sessions.has(id)) return;
+  if (opts?.stashDraft) write(id, "\x13");
   // ConPTY corrupts NULs, so strip them. Also strip any bracketed-paste
   // start/end markers (CSI 200~ / CSI 201~) the payload itself contains: this
   // helper OWNS the paste wrap, so a marker inside `text` can only break out of

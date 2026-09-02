@@ -233,18 +233,20 @@ test("over a live agent pane Ctrl+M types /model and Ctrl+N types /effort", asyn
 
     // Both chords type the CLI's own slash command at it, as if the user had.
     // Claude Code takes `/effort` mid-session ("Set effort level for model
-    // usage"), so the pane needs no respawn to change reasoning depth.
+    // usage"), so the pane needs no respawn to change reasoning depth. Both
+    // stash the draft first (Claude Code's own Ctrl+S) so a half-typed message
+    // is not submitted with the command glued onto its end.
     await page.keyboard.press(modKey("m"));
     await expect
       .poll(injections, { timeout: 15_000 })
-      .toEqual([{ id: LIVE_PANE_ID, text: "/model", submit: true }]);
+      .toEqual([{ id: LIVE_PANE_ID, text: "/model", submit: true, stashDraft: true }]);
 
     await page.keyboard.press(modKey("n"));
     await expect
       .poll(injections, { timeout: 15_000 })
       .toEqual([
-        { id: LIVE_PANE_ID, text: "/model", submit: true },
-        { id: LIVE_PANE_ID, text: "/effort", submit: true },
+        { id: LIVE_PANE_ID, text: "/model", submit: true, stashDraft: true },
+        { id: LIVE_PANE_ID, text: "/effort", submit: true, stashDraft: true },
       ]);
   } finally {
     await app?.close();
