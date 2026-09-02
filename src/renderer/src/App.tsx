@@ -1161,6 +1161,28 @@ export default function App() {
     return m;
   }, [workspaces, globalRuns.runs, terminalWorking, tabs.tabs, tabs.tabsWorkspaceId]);
 
+  // Per-workspace count of agents working right now, for the rail's live
+  // badge: every Cora run in an active phase counts its manager plus each
+  // worker task currently running, and every manual terminal pane whose agent
+  // is mid-turn counts one. Zero hides the badge. Memoized on the same inputs
+  // as workingByWorkspaceId so the rail's React.memo keeps holding.
+  const agentCountByWorkspaceId = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const w of workspaces) {
+      let count = 0;
+      for (const r of globalRuns.runs) {
+        if (r.workspaceId !== w.id || !isRunningStatus(r.status)) continue;
+        count += 1;
+        for (const task of r.workerTasks) {
+          if (task.status === "running" || task.status === "claimed") count += 1;
+        }
+      }
+      count += Object.keys(terminalWorking[w.id] ?? {}).length;
+      m[w.id] = count;
+    }
+    return m;
+  }, [workspaces, globalRuns.runs, terminalWorking]);
+
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
   // clearing state event, so its map entry would otherwise live forever
@@ -5752,6 +5774,7 @@ export default function App() {
             side="left"
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
+            agentCountByWorkspaceId={agentCountByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -5895,6 +5918,7 @@ export default function App() {
             side="right"
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
+            agentCountByWorkspaceId={agentCountByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}

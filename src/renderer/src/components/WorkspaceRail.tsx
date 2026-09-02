@@ -133,6 +133,11 @@ interface RailProps {
   // passes a memoized object so this prop stays referentially stable like
   // toneByWorkspaceId.
   workingByWorkspaceId?: Record<string, boolean>;
+  // Per-workspace number of agents working right now (Cora managers, their
+  // running workers, and manual terminal agents mid-turn). Renders the accent
+  // pill at the row's right edge; zero hides it. Memoized by App like the
+  // maps above.
+  agentCountByWorkspaceId?: Record<string, number>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -757,6 +762,7 @@ function WorkspaceRail(props: RailProps) {
         dragOffset={reorderPreview?.offsets[w.id] ?? 0}
         tone={props.toneByWorkspaceId?.[w.id] ?? null}
         working={props.workingByWorkspaceId?.[w.id] ?? false}
+        agentCount={props.agentCountByWorkspaceId?.[w.id] ?? 0}
         missing={missingWorkspaceIds.has(w.id)}
         folderColorManaged={groupId !== null}
         menuBoundaryRef={wsScrollRef}
@@ -1927,6 +1933,8 @@ interface RowProps {
   dragOffset?: number;
   tone?: ChatStatusTone | null;
   working?: boolean;
+  /** Agents working in this workspace right now; 0 hides the live pill. */
+  agentCount?: number;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
   /** Folder members inherit their ordered shade from the folder family. */
@@ -1952,6 +1960,7 @@ function WorkspaceRow({
   dragOffset = 0,
   tone,
   working = false,
+  agentCount = 0,
   missing = false,
   folderColorManaged = false,
   menuBoundaryRef,
@@ -2325,6 +2334,8 @@ function WorkspaceRow({
           </div>
         )}
 
+        {agentCount > 0 && !editing && <LiveAgentPill count={agentCount} accent={accent} />}
+
         <div style={{ flex: "0 0 18px" }}>
           <button
             ref={menuBtnRef}
@@ -2574,6 +2585,54 @@ function RowMenuItem({
     >
       {label}
     </button>
+  );
+}
+
+// "N agents working" pill at a workspace row's right edge. Deliberately unlike
+// the folder header's bare muted count (that one says how many workspaces a
+// folder holds): this reads in the workspace's own accent, on a tinted pill,
+// with a small live dot in front of the number. The dot is static; the
+// workspace color dot at the row's left already animates while work is live,
+// and two spinners on one row would fight for attention.
+function LiveAgentPill(props: { count: number; accent: string }) {
+  const { count, accent } = props;
+  const label = `${count} agent${count === 1 ? "" : "s"} working`;
+  return (
+    <span
+      role="status"
+      title={label}
+      aria-label={label}
+      data-testid="workspace-live-agents"
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        height: 16,
+        padding: "0 6px 0 5px",
+        borderRadius: 999,
+        background: `color-mix(in oklab, ${accent} 16%, transparent)`,
+        color: accent,
+        fontSize: 10,
+        fontWeight: 700,
+        lineHeight: "16px",
+        fontVariantNumeric: "tabular-nums",
+        letterSpacing: "0.02em",
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 5,
+          height: 5,
+          borderRadius: 999,
+          background: accent,
+          boxShadow: `0 0 0 2px color-mix(in oklab, ${accent} 30%, transparent)`,
+        }}
+      />
+      {count}
+    </span>
   );
 }
 
