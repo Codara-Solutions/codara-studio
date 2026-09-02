@@ -19,6 +19,7 @@ import {
   type OwnedProcessIdentity,
 } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
+import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude / Codex CLI
@@ -1411,6 +1412,8 @@ function deliver(
     soundKind: kind === "done" ? "done" : "needs-you",
     target: { type: "terminal", workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
   });
+  // A finished turn is when the subscription quota actually moved.
+  nudgeUsageRefresh();
 }
 
 // Test/maintenance escape hatch: drop every watcher (e.g. before a full

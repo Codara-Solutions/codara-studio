@@ -87,7 +87,7 @@ Settings opens with `Mod+,` (`src/renderer/src/components/SettingsDialog.tsx`).
 
 | Tab | What lives there |
 |---|---|
-| General | Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers), Agent sessions (resume on relaunch), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound clip, OS-specific cues), Git (auto-fetch remotes, notify when teammates push, instant git triggers), Copy-branch workspaces. |
+| General | Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers), Agent sessions (resume on relaunch), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound clip, OS-specific cues), Git (auto-fetch remotes, notify when teammates push, notify when a pull request is opened, instant git triggers), Copy-branch workspaces. |
 | Editor | Code editor (Vim mode, autosave) and Inline AI autocomplete. |
 | Default terminal | Default shell, resource overview, output history and scrollback lines, run terminal lifecycle for worker panes. |
 | API and model | OpenRouter key and Git commit message generation. |

@@ -2188,6 +2188,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "automation.blocked",
   "app.update-ready",
   "git.teammate-push",
+  "git.pull-request",
 ]);
 const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
   "success",

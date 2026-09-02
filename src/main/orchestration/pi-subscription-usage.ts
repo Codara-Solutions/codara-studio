@@ -54,10 +54,11 @@ import type { PiAccountProfile } from "./pi-account-profiles";
 const REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_CACHE_TTL_MS = 60_000;
 /** Anthropic's informational OAuth endpoint has a much tighter request budget
- * than an actual Claude session. The quota moves slowly, so follow the same
- * 15-minute cadence used by mature multi-account clients instead of polling a
- * pair of accounts every minute. */
-const ANTHROPIC_CACHE_TTL_MS = 15 * 60_000;
+ * than an actual Claude session, so timer-driven reads stay at five minutes.
+ * The numbers still move promptly because usage-activity-refresh.ts forces a
+ * live read whenever an agent finishes a turn, which is the only time the
+ * quota actually changes. */
+const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_ANTHROPIC_BACKOFF_MS = 5 * 60_000;
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
 const CLAUDE_CODE_USER_AGENT = "claude-code/2.1.0";

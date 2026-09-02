@@ -35,13 +35,16 @@ const harnessPlugin = {
     build.onResolve({ filter: /^@shared\// }, (args) => ({
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
-    build.onResolve({ filter: /^(electron|\.\/pty-manager|\.\/notify)$/ }, (args) => ({
-      path: args.path,
-      namespace: "stub",
-    }));
+    build.onResolve(
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/orchestration\/usage-activity-refresh)$/ },
+      (args) => ({ path: args.path, namespace: "stub" }),
+    );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
         "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+      if (args.path === "./orchestration/usage-activity-refresh") {
+        return { contents: "export function nudgeUsageRefresh() {}\n", loader: "js" };
+      }
       if (args.path === "electron") {
         return {
           contents:

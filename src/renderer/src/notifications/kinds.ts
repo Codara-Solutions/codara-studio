@@ -36,6 +36,7 @@ export const NOTIFY_KIND_META: Record<NotifyKind, NotifyKindMeta> = {
   "automation.step": { label: "Automation", tone: "success", glyph: "loop" },
   "app.update-ready": { label: "Update ready", tone: "success", glyph: "bell" },
   "git.teammate-push": { label: "Teammate pushed", tone: "success", glyph: "bell" },
+  "git.pull-request": { label: "Pull request", tone: "success", glyph: "bell" },
 };
 
 // Tolerates unknown kinds from a persisted history written by a newer build.
@@ -57,6 +58,7 @@ const COMPLETION_KINDS: ReadonlySet<NotifyKind> = new Set<NotifyKind>([
   "terminal.agent.failed",
   // A push is history, not a prompt: stays in the center after the click.
   "git.teammate-push",
+  "git.pull-request",
 ]);
 
 export function isCompletionKind(kind: NotifyKind): boolean {

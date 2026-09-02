@@ -1004,6 +1004,12 @@ export type PiSubscriptionAuthEvent =
       // show up.
       type: "changed";
       provider: PiSubscriptionProvider;
+    }
+  | {
+      // The main process re-read usage live because an agent finished a turn
+      // (src/main/orchestration/usage-activity-refresh.ts). The cache already
+      // holds the fresh numbers; a non-forced read picks them up.
+      type: "usage";
     };
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate
@@ -1174,6 +1180,10 @@ export interface AppPreferences {
   // the local git user (user.email) raises one grouped "teammate pushed"
   // notification per repository. Default on; requires auto-fetch.
   notifyTeammatePushes?: boolean;
+  // When on, a pull request opened by someone else on a watched repository
+  // raises one notification per PR. Default on; requires auto-fetch and a
+  // signed-in gh.
+  notifyPullRequests?: boolean;
   // How long an in-app toast stays on screen before auto-dismissing, in ms.
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
@@ -1348,6 +1358,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,
+  notifyPullRequests: true,
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
 };
 
@@ -1484,7 +1495,10 @@ export type NotifyKind =
   | "app.update-ready"
   // Background auto-fetch found commits by someone else on a remote branch
   // (src/main/git-auto-fetch.ts). One grouped alert per repository per pass.
-  | "git.teammate-push";
+  | "git.teammate-push"
+  // Someone opened (or reopened, or marked ready) a pull request on a watched
+  // GitHub repository (src/main/github-push-watch.ts). One alert per PR.
+  | "git.pull-request";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.
