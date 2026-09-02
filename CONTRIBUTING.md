@@ -25,8 +25,10 @@ project healthy and your work easy to land.
   fresh build.
 - Match the commit style you see in `git log`: a conventional prefix
   (`feat(scope):`, `fix(scope):`, `docs:`), imperative mood, and a body that
-  explains why. The subject decides the release bump, so a feature is `feat:`
-  and a breaking change carries `!`. Do not add em dashes in new code or prose.
+  explains why. A breaking change carries `!` and bumps the major; every
+  other merge bumps the patch unless a commit body carries a `Release: minor`
+  line, which marks a milestone release. Do not add em dashes in new code or
+  prose.
 - A gitleaks pre-commit hook runs on `git commit`; install gitleaks
   (`brew install gitleaks` or `winget install Gitleaks.Gitleaks`).
 

@@ -70,9 +70,10 @@ function capture(cmd, args, cwd) {
   return res.stdout.trim();
 }
 
-// Semantic bump from the conventional-commit subjects since the last release
-// commit ("release: vX.Y.Z"): breaking change -> major, feat -> minor,
-// anything else -> patch. RELEASE_BUMP=major|minor|patch overrides.
+// Semantic bump from the commits since the last release commit
+// ("release: vX.Y.Z"): breaking change -> major, a "Release: minor" trailer
+// in any commit body -> minor, anything else (feat: included) -> patch.
+// RELEASE_BUMP=major|minor|patch overrides.
 function bumpLevel(cwd) {
   const forced = process.env.RELEASE_BUMP;
   if (forced === "major" || forced === "minor" || forced === "patch") return forced;
@@ -88,7 +89,7 @@ function bumpLevel(cwd) {
     encoding: "utf8",
   }).stdout;
   if (/^[a-z]+(\([^)]*\))?!:/m.test(log) || /^BREAKING CHANGE:/m.test(log)) return "major";
-  if (/^feat(\([^)]*\))?:/m.test(log)) return "minor";
+  if (/^Release: minor$/im.test(log)) return "minor";
   return "patch";
 }
 

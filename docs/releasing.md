@@ -11,9 +11,11 @@ There are two pipelines. The GitHub Actions one is canonical.
    means no release.
 2. `release` job: refuses to run without the signing and bucket secrets;
    `scripts/ci-version.cjs` computes the next version from the highest
-   `vX.Y.Z` tag and the conventional commit subjects since it (a `!` or
-   `BREAKING CHANGE` bumps the major, `feat:` the minor, anything else the
-   patch), and writes it into `package.json` inside the runner only. A HEAD
+   `vX.Y.Z` tag and the commits since it (a `!` or `BREAKING CHANGE` bumps
+   the major, a `Release: minor` line in any commit body bumps the minor,
+   anything else, `feat:` included, bumps the patch), and writes it into
+   `package.json` inside the runner only. Every merge to `main` ships, so
+   the minor is reserved for releases you decide to call a milestone. A HEAD
    whose subject starts with `release:` is skipped.
 3. `npm run package:mac` signs and notarizes with the Developer ID
    certificate, `scripts/publish-release.cjs mac` uploads the DMG, ZIP, and
