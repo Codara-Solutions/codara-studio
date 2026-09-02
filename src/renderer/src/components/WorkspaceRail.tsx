@@ -2600,20 +2600,18 @@ function RowMenuItem({
 // with a small live dot in front of the number. The dot is static; the
 // workspace color dot at the row's left already animates while work is live,
 // and two spinners on one row would fight for attention.
-// The row's agent census: a small spark glyph and the number of agent
-// sessions the workspace holds (Cora managers and workers plus every manual
-// Claude Code / Codex / Grok pane, idle ones included). It reads like the
-// folder header's member count, in the same type, but the glyph and its
-// placement inside the row keep the two from being confused. While any of
-// them is mid-turn the count takes the workspace accent; idle it stays muted,
-// so the rail is quiet when nothing is happening.
+// The row's agent census as "working over total": a muted "3" when the
+// workspace holds three idle agent sessions (Cora managers and workers plus
+// every manual Claude Code / Codex / Grok pane), and "1/3" in the workspace
+// accent the moment one of them is mid-turn. Same 10px tabular type as the
+// folder header's member count; the slash and the row placement keep the two
+// apart, and no glyph or chip is drawn so the rail stays quiet.
 function AgentCount(props: { total: number; working: number; accent: string }) {
   const { total, working, accent } = props;
   const label =
     working > 0
-      ? `${total} agent${total === 1 ? "" : "s"}, ${working} working`
+      ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
       : `${total} agent${total === 1 ? "" : "s"} idle`;
-  const color = working > 0 ? accent : "var(--muted-2)";
   return (
     <span
       role="status"
@@ -2623,29 +2621,24 @@ function AgentCount(props: { total: number; working: number; accent: string }) {
       data-working={working > 0 ? "true" : "false"}
       style={{
         flex: "0 0 auto",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 3,
         marginRight: 2,
-        color,
+        color: working > 0 ? accent : "var(--muted-2)",
         fontSize: 10,
-        fontWeight: 650,
+        fontWeight: 600,
         fontVariantNumeric: "tabular-nums",
+        letterSpacing: "0.01em",
         whiteSpace: "nowrap",
         transition: "color 240ms ease",
       }}
     >
-      <svg
-        aria-hidden
-        width="9"
-        height="9"
-        viewBox="0 0 16 16"
-        fill="currentColor"
-        style={{ opacity: working > 0 ? 1 : 0.75 }}
-      >
-        <path d="M8 1c.4 3.6 2.9 6.2 6.5 6.6v.8C10.9 8.8 8.4 11.4 8 15c-.4-3.6-2.9-6.2-6.5-6.6v-.8C5.1 7.2 7.6 4.6 8 1z" />
-      </svg>
-      {total}
+      {working > 0 ? (
+        <>
+          {working}
+          <span style={{ color: "var(--muted-2)" }}>/{total}</span>
+        </>
+      ) : (
+        total
+      )}
     </span>
   );
 }
