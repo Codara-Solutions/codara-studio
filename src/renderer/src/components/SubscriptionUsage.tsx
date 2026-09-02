@@ -15,6 +15,10 @@ import type {
 
 export type UsageEntry = PiUsageProvider | PiUsageProfile;
 
+// Cached re-read cadence for the Accounts panel; the network read behind it
+// is governed by the main-process cache and the agent-turn refresh.
+const USAGE_PANEL_TICK_MS = 60_000;
+
 /**
  * Headroom as a colour: green with plenty left, through amber, to red as the
  * window fills. Kept identical to the title bar's scale in UsageMeters.tsx so
@@ -185,26 +189,44 @@ export function useSubscriptionUsage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback((force: boolean) => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback((force: boolean, opts?: { quiet?: boolean }) => {
+    // Quiet reads keep the bars on screen: a background tick must not flash
+    // the loading state over numbers that are almost always unchanged.
+    if (!opts?.quiet) {
+      setLoading(true);
+      setError(null);
+    }
     window.spark.piSubscriptions
       .usage(force)
       .then((next) => setOverview(next))
-      .catch((err: unknown) => setError((err as Error).message))
-      .finally(() => setLoading(false));
+      .catch((err: unknown) => {
+        if (!opts?.quiet) setError((err as Error).message);
+      })
+      .finally(() => {
+        if (!opts?.quiet) setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     load(false);
   }, [load]);
 
+  // Reset countdowns tick and the main-process cache may have been refreshed
+  // by an agent finishing a turn; a quiet cached read every minute keeps the
+  // panel current without a network request of its own.
+  useEffect(() => {
+    const timer = setInterval(() => load(false, { quiet: true }), USAGE_PANEL_TICK_MS);
+    return () => clearInterval(timer);
+  }, [load]);
+
   // A connect, disconnect, or completed login flow anywhere in the app drops
   // the main-process cache and pushes this event; re-read so the limits follow
-  // the new session without the user pressing Refresh.
+  // the new session without the user pressing Refresh. "usage" means the main
+  // process already fetched live numbers after an agent turn.
   useEffect(() => {
     return window.spark.piSubscriptions.onEvent((event) => {
       if (event.type === "changed" || event.type === "completed") load(false);
+      else if (event.type === "usage") load(false, { quiet: true });
     });
   }, [load]);
 

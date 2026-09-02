@@ -484,7 +484,9 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
   // poll tick or an app restart.
   useEffect(() => {
     return window.spark.piSubscriptions.onEvent((event) => {
-      if (event.type === "changed" || event.type === "completed") load(false);
+      if (event.type === "changed" || event.type === "completed" || event.type === "usage") {
+        load(false);
+      }
     });
   }, [load]);
 

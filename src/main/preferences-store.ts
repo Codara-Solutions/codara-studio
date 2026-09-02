@@ -281,6 +281,10 @@ function normalize(
       typeof src.notifyTeammatePushes === "boolean"
         ? src.notifyTeammatePushes
         : DEFAULT_PREFERENCES.notifyTeammatePushes,
+    notifyPullRequests:
+      typeof src.notifyPullRequests === "boolean"
+        ? src.notifyPullRequests
+        : DEFAULT_PREFERENCES.notifyPullRequests,
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
   };
 }

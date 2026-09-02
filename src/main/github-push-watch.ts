@@ -37,6 +37,10 @@ import { loadState, onStateSaved } from "./storage";
 // Private-repository push events arrive with `commits: []` and `size: null`,
 // but they do carry `before` and `head`, so one `/compare` call per alert
 // recovers the exact commit count and subject line.
+//
+// The same feed carries PullRequestEvent, so "someone opened a pull request"
+// alerts ride on the identical poll at no extra request: one notification per
+// PR opened, reopened, or marked ready for review by anyone but the viewer.
 
 export const GITHUB_PUSH_WATCH_MAX_REPOS = 32;
 export const GITHUB_PUSH_WATCH_CONCURRENCY = 2;
@@ -252,10 +256,18 @@ const unsubscribes: Array<() => void> = [];
 // cwd → GitHub repo, memoized for the process lifetime.
 const repoRefByCwd = new Map<string, Promise<RepoRef | null>>();
 
+function pushesEnabled(): boolean {
+  return deps.getPreference("notifyTeammatePushes") !== false;
+}
+
+function pullRequestsEnabled(): boolean {
+  return deps.getPreference("notifyPullRequests") !== false;
+}
+
 function enabled(): boolean {
   return (
     deps.getPreference("gitAutoFetchEnabled") !== false &&
-    deps.getPreference("notifyTeammatePushes") !== false
+    (pushesEnabled() || pullRequestsEnabled())
   );
 }
 
@@ -427,6 +439,80 @@ function parsePushEvents(body: unknown, viewer: string): PushRecord[] {
   return out;
 }
 
+interface PullRequestRecord {
+  id: string;
+  actor: string;
+  action: "opened" | "reopened" | "ready_for_review";
+  number: number;
+  title: string;
+  url: string;
+  headBranch: string;
+  draft: boolean;
+}
+
+const PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "ready_for_review"]);
+
+export function parsePullRequestEvents(body: unknown, viewer: string): PullRequestRecord[] {
+  if (!Array.isArray(body)) return [];
+  const out: PullRequestRecord[] = [];
+  for (const raw of body) {
+    const event = raw as {
+      id?: unknown;
+      type?: unknown;
+      actor?: { login?: unknown };
+      payload?: {
+        action?: unknown;
+        pull_request?: {
+          number?: unknown;
+          title?: unknown;
+          html_url?: unknown;
+          draft?: unknown;
+          head?: { ref?: unknown };
+        };
+      };
+    };
+    if (event.type !== "PullRequestEvent") continue;
+    const id = typeof event.id === "string" ? event.id : null;
+    const actor = typeof event.actor?.login === "string" ? event.actor.login : null;
+    const action = typeof event.payload?.action === "string" ? event.payload.action : "";
+    const pr = event.payload?.pull_request;
+    if (!id || !actor || !pr || !PULL_REQUEST_ACTIONS.has(action)) continue;
+    if (typeof pr.number !== "number") continue;
+    const draft = pr.draft === true;
+    // A draft being opened is not a request for anyone's attention yet; the
+    // ready_for_review event covers the moment it becomes one.
+    if (draft && action !== "ready_for_review") continue;
+    if (actor.toLowerCase() === viewer.toLowerCase()) continue;
+    out.push({
+      id,
+      actor,
+      action: action as PullRequestRecord["action"],
+      number: pr.number,
+      title: typeof pr.title === "string" ? pr.title.trim() : "",
+      url: typeof pr.html_url === "string" ? pr.html_url : "",
+      headBranch: typeof pr.head?.ref === "string" ? pr.head.ref : "",
+      draft,
+    });
+  }
+  return out;
+}
+
+export function formatPullRequestNotification(
+  repoName: string,
+  pr: { actor: string; action: string; number: number; title: string },
+): { title: string; body: string } {
+  const verb =
+    pr.action === "reopened"
+      ? "reopened"
+      : pr.action === "ready_for_review"
+        ? "marked ready"
+        : "opened";
+  return {
+    title: `${pr.actor} ${verb} PR #${pr.number} in ${repoName}`,
+    body: pr.title || `Pull request #${pr.number}`,
+  };
+}
+
 // One /compare per branch turns `before...head` into an exact commit count and
 // the newest subject line — the detail the private-repo event payload omits.
 async function describeRange(
@@ -533,8 +619,10 @@ async function pollRepo(repo: WatchedRepo, auth: string, viewer: string): Promis
   repo.etag = response.headers["etag"] ?? repo.etag;
   schedule();
 
-  const pushes = parsePushEvents(response.body, viewer);
+  const pushes = pushesEnabled() ? parsePushEvents(response.body, viewer) : [];
   const fresh = pushes.filter((push) => !repo.seenEventIds.includes(push.id));
+  const pullRequests = pullRequestsEnabled() ? parsePullRequestEvents(response.body, viewer) : [];
+  const freshPullRequests = pullRequests.filter((pr) => !repo.seenEventIds.includes(pr.id));
   rememberSeen(
     repo,
     (Array.isArray(response.body) ? response.body : [])
@@ -547,6 +635,23 @@ async function pollRepo(repo: WatchedRepo, auth: string, viewer: string): Promis
   if (!repo.seeded) {
     repo.seeded = true;
     return;
+  }
+  // Oldest first, so several PRs opened between polls arrive in order.
+  for (const pr of [...freshPullRequests].reverse()) {
+    const { title, body } = formatPullRequestNotification(repo.displayName, pr);
+    const target = pickTargetWorkspace(repo, pr.headBranch ? [pr.headBranch] : []);
+    const sourceKey = `github-pr:${repo.key}#${pr.number}`;
+    deps.rearm(sourceKey);
+    deps.publish({
+      kind: "git.pull-request",
+      sourceKey,
+      tone: "success",
+      soundKind: "done",
+      // A review request deserves a chime; it is a person waiting on you.
+      title,
+      body,
+      target: { type: "workspace", workspaceId: target.id, panel: "git" },
+    });
   }
   if (fresh.length === 0) return;
 

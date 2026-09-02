@@ -139,7 +139,13 @@ async function makeHarness(mod, { workspaces, http, remotes = {}, prefs = {}, to
   const h = {
     http,
     now: 1_000_000,
-    prefs: { gitAutoFetchEnabled: true, notifyTeammatePushes: true, gitAutoFetchIntervalMinutes: 3, ...prefs },
+    prefs: {
+      gitAutoFetchEnabled: true,
+      notifyTeammatePushes: true,
+      notifyPullRequests: true,
+      gitAutoFetchIntervalMinutes: 3,
+      ...prefs,
+    },
     online: true,
     published: [],
     rearmed: [],
@@ -264,6 +270,85 @@ test("first poll seeds silently; a later teammate push publishes once, silent an
   mod.stopGitHubPushWatch();
 });
 
+function prEvent(actor, action, number, { id, title = "Fix the thing", draft = false, branch = "fix/thing" } = {}) {
+  eventSeq += 1;
+  return {
+    id: id ?? String(eventSeq),
+    type: "PullRequestEvent",
+    actor: { login: actor },
+    payload: {
+      action,
+      pull_request: {
+        number,
+        title,
+        draft,
+        html_url: `https://github.com/o/n/pull/${number}`,
+        head: { ref: branch },
+      },
+    },
+  };
+}
+
+test("a teammate's pull request alerts once per PR with a chime; drafts and my own stay quiet", async ({ mod }) => {
+  const http = makeHttp();
+  http.setEvents("Codara-Solutions/studio", [pushEvent(VIEWER, "main", { id: "1" })]);
+  const h = await makeHarness(mod, {
+    workspaces: [
+      ws("w1", "/r1", { name: "codara-studio" }),
+      ws("w2", "/r1-fix", { name: "fix", copyBranch: { branch: "fix/thing" } }),
+    ],
+    http,
+    remotes: {
+      "/r1": "git@github.com:Codara-Solutions/studio.git",
+      "/r1-fix": "git@github.com:Codara-Solutions/studio.git",
+    },
+  });
+  h.advance(60_000);
+  await h.pass();
+  assert.equal(h.published.length, 0);
+
+  http.setEvents("Codara-Solutions/studio", [
+    prEvent("Ed3scomb3s", "opened", 21, { id: "p4", draft: true, title: "WIP" }),
+    prEvent(VIEWER, "opened", 20, { id: "p3", title: "Mine" }),
+    prEvent("Ed3scomb3s", "closed", 19, { id: "p2" }),
+    prEvent("Ed3scomb3s", "opened", 18, { id: "p1", title: "Stash the draft first" }),
+    pushEvent(VIEWER, "main", { id: "1" }),
+  ]);
+  h.advance(3 * 60_000);
+  await h.pass();
+  assert.equal(h.published.length, 1, "only the teammate's non-draft opened PR alerts");
+  const [event] = h.published;
+  assert.equal(event.kind, "git.pull-request");
+  assert.equal(event.title, "Ed3scomb3s opened PR #18 in codara-studio");
+  assert.equal(event.body, "Stash the draft first");
+  assert.equal(event.silent, undefined, "a review request chimes");
+  assert.deepEqual(event.target, { type: "workspace", workspaceId: "w2", panel: "git" });
+  assert.deepEqual(h.rearmed, ["github-pr:codara-solutions/studio#18"]);
+
+  // The same events again: already seen, nothing new.
+  h.advance(3 * 60_000);
+  await h.pass();
+  assert.equal(h.published.length, 1);
+
+  // The draft becoming ready is the moment it asks for attention.
+  http.setEvents("Codara-Solutions/studio", [
+    prEvent("Ed3scomb3s", "ready_for_review", 21, { id: "p5", title: "WIP" }),
+    prEvent("Ed3scomb3s", "opened", 21, { id: "p4", draft: true, title: "WIP" }),
+  ]);
+  h.advance(3 * 60_000);
+  await h.pass();
+  assert.equal(h.published.length, 2);
+  assert.equal(h.published[1].title, "Ed3scomb3s marked ready PR #21 in codara-studio");
+
+  // PR alerts off, pushes on: PR events are ignored but the poll continues.
+  h.prefs.notifyPullRequests = false;
+  http.setEvents("Codara-Solutions/studio", [prEvent("Ed3scomb3s", "opened", 22, { id: "p6" })]);
+  h.advance(3 * 60_000);
+  await h.pass();
+  assert.equal(h.published.length, 2);
+  mod.stopGitHubPushWatch();
+});
+
 test("my own pushes never notify — including squash merges the email filter used to miss", async ({ mod }) => {
   const http = makeHttp();
   http.setEvents("o/n", [pushEvent("someone", "main", { id: "seed" })]);
@@ -365,10 +450,12 @@ test("disabled preference, offline, missing token and non-GitHub remotes all sta
   h.advance(60_000);
 
   h.prefs.notifyTeammatePushes = false;
+  h.prefs.notifyPullRequests = false;
   await h.pass();
-  assert.equal(h.eventCalls().length, 0, "notify pref off → no polling at all");
+  assert.equal(h.eventCalls().length, 0, "both notify prefs off → no polling at all");
 
   h.prefs.notifyTeammatePushes = true;
+  h.prefs.notifyPullRequests = true;
   h.online = false;
   await h.pass();
   assert.equal(h.eventCalls().length, 0, "offline → no polling");

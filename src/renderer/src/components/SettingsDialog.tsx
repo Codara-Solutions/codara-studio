@@ -1549,6 +1549,12 @@ function GeneralSettings({
                 checked={preferences.notifyTeammatePushes !== false}
                 onChange={(v) => void setPreference("notifyTeammatePushes", v)}
               />
+              <ToggleRow
+                title="Notify me when a pull request is opened"
+                desc="One alert per pull request someone else opens, reopens, or marks ready for review on a watched repository, with a chime. Rides on the same GitHub poll as push alerts; drafts stay quiet until they are ready."
+                checked={preferences.notifyPullRequests !== false}
+                onChange={(v) => void setPreference("notifyPullRequests", v)}
+              />
             </>
           ) : null}
         </div>
@@ -2016,6 +2022,9 @@ function AccountsSettings() {
         refresh();
         return;
       }
+      // A live usage re-read after an agent turn; the usage panel listens for
+      // it on its own, and there is no login-flow state to touch here.
+      if (event.type === "usage") return;
       setPromptValue("");
       if (event.type === "completed") {
         setOverview(event.overview);
