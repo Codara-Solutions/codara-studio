@@ -1055,6 +1055,13 @@ export default function App() {
   const [terminalWorking, setTerminalWorking] = useState<
     Record<string, Record<string, true>>
   >({});
+  // Manual terminal panes that currently host an agent CLI at all, working or
+  // idle at its prompt, keyed the same way. The rail's per-workspace agent
+  // count reads this so an idle Claude Code session still counts as one
+  // agent; the working map above only says which of them are mid-turn.
+  const [terminalAgents, setTerminalAgents] = useState<
+    Record<string, Record<string, true>>
+  >({});
 
   // Keep the rail's per-pane activity map level-triggered and idempotent. Both
   // detectors feed this: the main-process PTY monitor covers hidden workspaces,
@@ -1062,10 +1069,15 @@ export default function App() {
   // pane currently drawing the worker chip. If either one confirms working,
   // the workspace dot animates; any non-working state from that same detector
   // clears its pane entry.
-  const setTerminalPaneWorking = useCallback(
-    (workspaceId: string, paneId: string, active: boolean) => {
+  const setPaneFlag = useCallback(
+    (
+      setter: typeof setTerminalWorking,
+      workspaceId: string,
+      paneId: string,
+      active: boolean,
+    ) => {
       if (!workspaceId || !paneId) return;
-      setTerminalWorking((current) => {
+      setter((current) => {
         const workspace = current[workspaceId];
         if (active) {
           if (workspace?.[paneId]) return current;
@@ -1084,6 +1096,16 @@ export default function App() {
       });
     },
     [],
+  );
+  const setTerminalPaneWorking = useCallback(
+    (workspaceId: string, paneId: string, active: boolean) =>
+      setPaneFlag(setTerminalWorking, workspaceId, paneId, active),
+    [setPaneFlag],
+  );
+  const setTerminalPaneAgent = useCallback(
+    (workspaceId: string, paneId: string, present: boolean) =>
+      setPaneFlag(setTerminalAgents, workspaceId, paneId, present),
+    [setPaneFlag],
   );
 
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
@@ -1161,27 +1183,40 @@ export default function App() {
     return m;
   }, [workspaces, globalRuns.runs, terminalWorking, tabs.tabs, tabs.tabsWorkspaceId]);
 
-  // Per-workspace count of agents working right now, for the rail's live
-  // badge: every Cora run in an active phase counts its manager plus each
-  // worker task currently running, and every manual terminal pane whose agent
-  // is mid-turn counts one. Zero hides the badge. Memoized on the same inputs
-  // as workingByWorkspaceId so the rail's React.memo keeps holding.
-  const agentCountByWorkspaceId = useMemo(() => {
-    const m: Record<string, number> = {};
+  // Per-workspace agent census for the rail: `total` is every agent session
+  // the workspace holds right now (a Cora run in an active phase counts its
+  // manager plus each running worker; every manual terminal pane hosting an
+  // agent CLI counts one, idle or not), and `working` is how many of those
+  // are mid-turn. The rail shows the total and brightens it while any work.
+  const agentsByWorkspaceId = useMemo(() => {
+    const m: Record<string, { total: number; working: number }> = {};
     for (const w of workspaces) {
-      let count = 0;
+      let total = 0;
+      let working = 0;
       for (const r of globalRuns.runs) {
         if (r.workspaceId !== w.id || !isRunningStatus(r.status)) continue;
-        count += 1;
+        total += 1;
+        working += 1;
         for (const task of r.workerTasks) {
-          if (task.status === "running" || task.status === "claimed") count += 1;
+          if (task.status === "running" || task.status === "claimed") {
+            total += 1;
+            working += 1;
+          }
         }
       }
-      count += Object.keys(terminalWorking[w.id] ?? {}).length;
-      m[w.id] = count;
+      const agentPanes = terminalAgents[w.id] ?? {};
+      const workingPanes = terminalWorking[w.id] ?? {};
+      total += Object.keys(agentPanes).length;
+      for (const paneId of Object.keys(workingPanes)) {
+        // A working pane always counts, even if its census entry has not
+        // arrived yet (the two maps are fed by the same event).
+        if (!agentPanes[paneId]) total += 1;
+        working += 1;
+      }
+      m[w.id] = { total, working };
     }
     return m;
-  }, [workspaces, globalRuns.runs, terminalWorking]);
+  }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents]);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
@@ -1191,14 +1226,16 @@ export default function App() {
   // loaded yet.
   useEffect(() => {
     if (workspaces.length === 0) return;
-    setTerminalWorking((current) => {
-      const live = new Set(workspaces.map((w) => w.id));
+    const live = new Set(workspaces.map((w) => w.id));
+    const prune = (current: Record<string, Record<string, true>>) => {
       const stale = Object.keys(current).filter((id) => !live.has(id));
       if (stale.length === 0) return current;
       const next = { ...current };
       for (const id of stale) delete next[id];
       return next;
-    });
+    };
+    setTerminalWorking(prune);
+    setTerminalAgents(prune);
   }, [workspaces]);
 
   // Keep every active chat's stable Runs surface in existence without stealing
@@ -2416,6 +2453,13 @@ export default function App() {
         payload.paneId,
         payload.state === "working",
       );
+      // An identified CLI in any state but "done" is an agent session the
+      // workspace holds; a pane back at a plain shell reports runtime null.
+      setTerminalPaneAgent(
+        payload.workspaceId,
+        payload.paneId,
+        payload.runtime !== null && payload.state !== "done",
+      );
     }
     if (!payload?.tabId || !payload.paneId || !payload.state) return;
     const t = tabsRef.current;
@@ -2565,7 +2609,7 @@ export default function App() {
     // so drop any tracked paneId no longer in the live pane list. Same
     // same-object-when-unchanged discipline as the notifier effect.
     const livePaneIds = new Set(panes.map((p) => p.paneId));
-    setTerminalWorking((current) => {
+    const pruneClosedPanes = (current: Record<string, Record<string, true>>) => {
       const ws = current[workspaceId];
       if (!ws) return current;
       const kept: Record<string, true> = {};
@@ -2580,7 +2624,9 @@ export default function App() {
         return restWorkspaces;
       }
       return { ...current, [workspaceId]: kept };
-    });
+    };
+    setTerminalWorking(pruneClosedPanes);
+    setTerminalAgents(pruneClosedPanes);
     // Optional chaining: during dev HMR the renderer can be newer than the
     // preload of a long-lived instance; degrade to no-op instead of throwing
     // inside the effect.
@@ -5785,7 +5831,7 @@ export default function App() {
             side="left"
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
-            agentCountByWorkspaceId={agentCountByWorkspaceId}
+            agentsByWorkspaceId={agentsByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -5929,7 +5975,7 @@ export default function App() {
             side="right"
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
-            agentCountByWorkspaceId={agentCountByWorkspaceId}
+            agentsByWorkspaceId={agentsByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}

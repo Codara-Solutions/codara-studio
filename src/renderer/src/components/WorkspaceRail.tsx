@@ -133,11 +133,11 @@ interface RailProps {
   // passes a memoized object so this prop stays referentially stable like
   // toneByWorkspaceId.
   workingByWorkspaceId?: Record<string, boolean>;
-  // Per-workspace number of agents working right now (Cora managers, their
-  // running workers, and manual terminal agents mid-turn). Renders the accent
-  // pill at the row's right edge; zero hides it. Memoized by App like the
-  // maps above.
-  agentCountByWorkspaceId?: Record<string, number>;
+  // Per-workspace agent census (Cora managers and running workers plus every
+  // manual terminal agent, idle or not) and how many are mid-turn. Renders
+  // the quiet count at the row's right edge; zero hides it. Memoized by App
+  // like the maps above.
+  agentsByWorkspaceId?: Record<string, { total: number; working: number }>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -762,7 +762,8 @@ function WorkspaceRail(props: RailProps) {
         dragOffset={reorderPreview?.offsets[w.id] ?? 0}
         tone={props.toneByWorkspaceId?.[w.id] ?? null}
         working={props.workingByWorkspaceId?.[w.id] ?? false}
-        agentCount={props.agentCountByWorkspaceId?.[w.id] ?? 0}
+        agentTotal={props.agentsByWorkspaceId?.[w.id]?.total ?? 0}
+        agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
         missing={missingWorkspaceIds.has(w.id)}
         folderColorManaged={groupId !== null}
         menuBoundaryRef={wsScrollRef}
@@ -1933,8 +1934,10 @@ interface RowProps {
   dragOffset?: number;
   tone?: ChatStatusTone | null;
   working?: boolean;
-  /** Agents working in this workspace right now; 0 hides the live pill. */
-  agentCount?: number;
+  /** Agent sessions this workspace holds right now, idle included; 0 hides the count. */
+  agentTotal?: number;
+  /** How many of those are mid-turn; brightens the count. */
+  agentWorking?: number;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
   /** Folder members inherit their ordered shade from the folder family. */
@@ -1960,7 +1963,8 @@ function WorkspaceRow({
   dragOffset = 0,
   tone,
   working = false,
-  agentCount = 0,
+  agentTotal = 0,
+  agentWorking = 0,
   missing = false,
   folderColorManaged = false,
   menuBoundaryRef,
@@ -2334,7 +2338,9 @@ function WorkspaceRow({
           </div>
         )}
 
-        {agentCount > 0 && !editing && <LiveAgentPill count={agentCount} accent={accent} />}
+        {agentTotal > 0 && !editing && (
+          <AgentCount total={agentTotal} working={agentWorking} accent={accent} />
+        )}
 
         <div style={{ flex: "0 0 18px" }}>
           <button
@@ -2594,44 +2600,52 @@ function RowMenuItem({
 // with a small live dot in front of the number. The dot is static; the
 // workspace color dot at the row's left already animates while work is live,
 // and two spinners on one row would fight for attention.
-function LiveAgentPill(props: { count: number; accent: string }) {
-  const { count, accent } = props;
-  const label = `${count} agent${count === 1 ? "" : "s"} working`;
+// The row's agent census: a small spark glyph and the number of agent
+// sessions the workspace holds (Cora managers and workers plus every manual
+// Claude Code / Codex / Grok pane, idle ones included). It reads like the
+// folder header's member count, in the same type, but the glyph and its
+// placement inside the row keep the two from being confused. While any of
+// them is mid-turn the count takes the workspace accent; idle it stays muted,
+// so the rail is quiet when nothing is happening.
+function AgentCount(props: { total: number; working: number; accent: string }) {
+  const { total, working, accent } = props;
+  const label =
+    working > 0
+      ? `${total} agent${total === 1 ? "" : "s"}, ${working} working`
+      : `${total} agent${total === 1 ? "" : "s"} idle`;
+  const color = working > 0 ? accent : "var(--muted-2)";
   return (
     <span
       role="status"
       title={label}
       aria-label={label}
-      data-testid="workspace-live-agents"
+      data-testid="workspace-agent-count"
+      data-working={working > 0 ? "true" : "false"}
       style={{
         flex: "0 0 auto",
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        height: 16,
-        padding: "0 6px 0 5px",
-        borderRadius: 999,
-        background: `color-mix(in oklab, ${accent} 16%, transparent)`,
-        color: accent,
+        gap: 3,
+        marginRight: 2,
+        color,
         fontSize: 10,
-        fontWeight: 700,
-        lineHeight: "16px",
+        fontWeight: 650,
         fontVariantNumeric: "tabular-nums",
-        letterSpacing: "0.02em",
         whiteSpace: "nowrap",
+        transition: "color 240ms ease",
       }}
     >
-      <span
+      <svg
         aria-hidden
-        style={{
-          width: 5,
-          height: 5,
-          borderRadius: 999,
-          background: accent,
-          boxShadow: `0 0 0 2px color-mix(in oklab, ${accent} 30%, transparent)`,
-        }}
-      />
-      {count}
+        width="9"
+        height="9"
+        viewBox="0 0 16 16"
+        fill="currentColor"
+        style={{ opacity: working > 0 ? 1 : 0.75 }}
+      >
+        <path d="M8 1c.4 3.6 2.9 6.2 6.5 6.6v.8C10.9 8.8 8.4 11.4 8 15c-.4-3.6-2.9-6.2-6.5-6.6v-.8C5.1 7.2 7.6 4.6 8 1z" />
+      </svg>
+      {total}
     </span>
   );
 }
