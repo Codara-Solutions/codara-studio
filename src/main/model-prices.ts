@@ -62,6 +62,7 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
   "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
   "anthropic/claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+  "anthropic/claude-fable-5-1": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
   "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "anthropic/claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
   "anthropic/claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
@@ -248,7 +249,12 @@ export function priceKeyForWorker(
 // family names are genuinely ambiguous across generations (which "opus"?), and
 // `<synthetic>` marks locally generated CLI messages that were never billed —
 // reporting those as unpriced beats guessing a generation and inventing spend.
-const UNPRICEABLE_USAGE_MODELS = new Set(["<synthetic>", "synthetic", "opus", "sonnet", "haiku", "fable"]);
+// Bare family names are ambiguous and stay unpriced. Claude Code's
+// `<synthetic>` placeholder and the `claude-test` fixture model were never
+// billed, so they price at zero rather than being flagged as unknown.
+const UNPRICEABLE_USAGE_MODELS = new Set(["opus", "sonnet", "haiku", "fable"]);
+const FREE_USAGE_MODELS = new Set(["<synthetic>", "synthetic", "claude-test"]);
+const FREE_RATE: UsagePriceRate = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 // Vendor prefixes inferred from the model id itself. The Usage scan reads raw
 // transcript model names, which are bare (`claude-opus-5`, `gpt-5.6-sol`) while
@@ -293,6 +299,7 @@ export function lookupUsagePrice(
   const slash = untagged.lastIndexOf("/");
   const bare = slash === -1 ? untagged : untagged.slice(slash + 1);
   if (UNPRICEABLE_USAGE_MODELS.has(bare)) return null;
+  if (FREE_USAGE_MODELS.has(bare)) return FREE_RATE;
 
   const vendor =
     slash === -1
@@ -324,7 +331,19 @@ function usageModelKeyCandidates(bare: string): string[] {
   candidates.push(withoutEffort);
   candidates.push(withoutEffort.replace(/:.+$/, ""));
   // Release-dated ids (`-20251001`) price at their base model's rate.
-  candidates.push(withoutEffort.replace(/:.+$/, "").replace(/-\d{6,8}$/, ""));
+  const base = withoutEffort.replace(/:.+$/, "").replace(/-\d{6,8}$/, "");
+  candidates.push(base);
+  // A point release the table does not list yet (`claude-fable-5-1`,
+  // `claude-opus-5-2`) prices at its family's current rate instead of showing
+  // up unpriced: drop trailing short version segments one at a time, keeping
+  // at least the family and its major version.
+  let trimmed = base;
+  for (;;) {
+    const next = trimmed.replace(/-\d{1,2}$/, "");
+    if (next === trimmed || !/-\d{1,2}$/.test(next)) break;
+    trimmed = next;
+    candidates.push(trimmed);
+  }
   return candidates;
 }
 

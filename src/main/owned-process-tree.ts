@@ -15,7 +15,10 @@ export interface OwnedProcessTree {
 }
 
 const MAX_PS_OUTPUT_BYTES = 4 * 1024 * 1024;
-const PS_TIMEOUT_MS = 500;
+// Generous on purpose: a null listing means a teardown cannot find the
+// children it has to signal, and a loaded CI runner takes well over half a
+// second to print every command line.
+const PS_TIMEOUT_MS = 2_500;
 // `lstart` is a fixed ctime-style stamp ("Tue Sep  1 23:48:34 2026"); the
 // command line follows it and runs to the end of the line.
 const PS_LINE_RE =
