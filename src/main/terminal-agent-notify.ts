@@ -6,6 +6,7 @@ import {
   coercePublicRuntime,
   countTeammateEvents,
   runtimeFromCommandLine,
+  runtimeFromProcessCommand,
   sniffLiveRuntime,
   sniffRuntime,
   stripAnsi,
@@ -15,6 +16,7 @@ import {
 import * as pty from "./pty-manager";
 import {
   aliveProcesses,
+  descendantProcesses,
   descendantsStartedAfter,
   type OwnedProcessIdentity,
 } from "./owned-process-tree";
@@ -125,6 +127,14 @@ const HOOK_SUBAGENT_STALE_MS = 30 * 60_000;
 // never keep a pane busy forever.
 const BACKGROUND_PROC_RECHECK_MS = 2_000;
 const BACKGROUND_PROC_MAX_HOLD_MS = 60 * 60_000;
+// Agent exit by process tree. Prompt markers and alt-screen leave only exist
+// when shell integration is loaded and the TUI uses the alt screen; a pane
+// that auto-launched its agent has neither, and an inline Codex that quits
+// left the chip on "ready" until the pane was closed. The sweep instead looks
+// for the agent's own process under the pane's shell: seen once, then gone,
+// is the exit. Checks share one `ps` listing per tick across every pane.
+const AGENT_PROC_RECHECK_MS = 2_000;
+const PROCESS_LIST_MAX_AGE_MS = 900;
 // Late registration is most visible during cold restore: the shell can print
 // the resume banner + first busy frame before the renderer has hydrated its
 // terminal registry. Replaying a bounded recent tail closes that gap without
@@ -215,6 +225,10 @@ interface PaneWatcher {
   // while any of these are alive.
   backgroundProcs: OwnedProcessIdentity[];
   lastBackgroundProcCheckAt: number;
+  // Process-tree exit detection: the agent process was observed under the
+  // pane's shell at least once since the runtime was identified.
+  agentProcSeen: boolean;
+  lastAgentProcCheckAt: number;
   // When the last non-empty decoded chunk arrived, any content. Backs the
   // teammate counter's silence self-heal in the sweep.
   lastOutputAt: number;
@@ -343,6 +357,8 @@ export function syncTerminalNotifyPanes(input: {
       backgroundLaunchAt: 0,
       backgroundProcs: [],
       lastBackgroundProcCheckAt: 0,
+      agentProcSeen: false,
+      lastAgentProcCheckAt: 0,
       lastOutputAt: 0,
       lastEmittedState: null,
     };
@@ -494,6 +510,10 @@ function ensureSweep(): void {
       // renderer layout change.
       if (!w.attached) attach(w);
       if (w.excluded || !w.runtime) continue;
+      if (agentProcessGone(w, now)) {
+        markAgentExited(w, now, "process tree");
+        continue;
+      }
       if (w.hookSubagentsActive > 0 && now - w.lastHookEventAt >= HOOK_SUBAGENT_STALE_MS) {
         tanLog(`pane=${w.paneId} hook subagent counter stale (no hook events) — cleared`);
         w.hookSubagentsActive = 0;
@@ -938,6 +958,8 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     }
     if (sniffed) {
       w.runtime = sniffed;
+      w.agentProcSeen = false;
+      w.lastAgentProcCheckAt = 0;
       w.state = "idle";
       w.workingSince = 0;
       w.lastWorkingAt = 0;
@@ -1175,37 +1197,62 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     const exited =
       newMatches(PROMPT_MARKER_G, text, carryLen).length > 0 ||
       text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
-    if (exited) {
-      tanLog(`pane=${w.paneId} agent exited (prompt marker / alt-screen leave); state was ${w.state}`);
-      if (
-        w.state === "working" &&
-        w.userTurnArmed &&
-        workedLongEnough(w) &&
-        now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-      ) {
-        deliver(w, "done", null);
-      }
-      // The foreground TUI handed control back to the shell → chip "done".
-      // Emit while w.runtime is still set so the payload names the agent, then
-      // reset lastEmittedState so a fresh agent re-launched in this same pane
-      // re-emits "launching"/"working" rather than being deduped against the
-      // stale value.
-      emitPaneState(w, "done");
-      w.lastEmittedState = null;
-      w.runtime = null;
-      w.state = "idle";
-      w.workingSince = 0;
-      w.lastWorkingAt = 0;
-      w.lastChunkAssertedWorking = false;
-      w.teammatesActive = 0;
-      w.hookSubagentsActive = 0;
-      clearBackgroundWork(w);
-      w.ring = "";
-      w.userTurnArmed = false;
-    }
+    if (exited) markAgentExited(w, now, "prompt marker / alt-screen leave");
   }
 
   w.carry = text.slice(-CARRY_MAX);
+}
+
+// The foreground agent handed control back to the shell, seen either in the
+// stream (prompt marker, alt-screen leave) or in the process tree.
+function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
+  tanLog(`pane=${w.paneId} agent exited (${reason}); state was ${w.state}`);
+  if (
+    w.state === "working" &&
+    w.userTurnArmed &&
+    workedLongEnough(w) &&
+    now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
+  ) {
+    deliver(w, "done", null);
+  }
+  // Chip "done". Emit while w.runtime is still set so the payload names the
+  // agent, then reset lastEmittedState so a fresh agent re-launched in this
+  // same pane re-emits "launching"/"working" rather than being deduped
+  // against the stale value.
+  emitPaneState(w, "done");
+  w.lastEmittedState = null;
+  w.runtime = null;
+  w.state = "idle";
+  w.workingSince = 0;
+  w.lastWorkingAt = 0;
+  w.lastChunkAssertedWorking = false;
+  w.teammatesActive = 0;
+  w.hookSubagentsActive = 0;
+  clearBackgroundWork(w);
+  w.agentProcSeen = false;
+  w.lastAgentProcCheckAt = 0;
+  w.ring = "";
+  w.userTurnArmed = false;
+}
+
+// True once the agent process that was running under this pane's shell is no
+// longer there. Fail-safe in every uncertain case: no pid, no process list
+// (Windows), or an agent whose binary name is not recognised never arms, so a
+// live agent is never declared gone on a guess.
+function agentProcessGone(w: PaneWatcher, now: number): boolean {
+  if (now - w.lastAgentProcCheckAt < AGENT_PROC_RECHECK_MS) return false;
+  w.lastAgentProcCheckAt = now;
+  const rootPid = pty.sessionPid(w.paneId);
+  if (rootPid === null) return false;
+  const below = descendantProcesses(rootPid, PROCESS_LIST_MAX_AGE_MS);
+  if (below === null) return false;
+  const present = below.some((proc) => runtimeFromProcessCommand(proc.command) === w.runtime);
+  if (present) {
+    if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${w.runtime} process seen under pid ${rootPid}`);
+    w.agentProcSeen = true;
+    return false;
+  }
+  return w.agentProcSeen;
 }
 
 // An explicit OSC 9/777 from the foreground program. Codex's own copy says
@@ -1379,7 +1426,8 @@ function deliver(
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
   const label = runtimeLabel(w.runtime);
   const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";
-  const inWorkspace = w.workspaceName ? ` in workspace “${w.workspaceName}”` : "";
+  // The workspace rides on the event itself (subtitle / chip), not in prose.
+  const inWorkspace = "";
   const duration = compactDuration(w.lastWorkingAt - w.workingSince);
   const kindName =
     kind === "done"
@@ -1400,10 +1448,9 @@ function deliver(
         : kind === "failed"
           ? `${label} — stopped`
           : `${label} — needs you`,
+    ...(w.workspaceName ? { workspaceName: w.workspaceName } : {}),
     body: body
-      ? w.workspaceName
-        ? `${body}${duration ? ` · worked ${duration}` : ""} — workspace “${w.workspaceName}”`
-        : `${body}${duration ? ` · worked ${duration}` : ""}`
+      ? `${body}${duration ? ` · worked ${duration}` : ""}`
       : kind === "done"
         ? `Finished${duration ? ` after ${duration}` : ""} in ${where}${inWorkspace}. Click to jump to the terminal.`
         : kind === "failed"

@@ -34,7 +34,11 @@ Every pane's raw stream is also tapped by `src/main/terminal-agent-notify.ts`,
 which recognizes Claude Code, Codex, and Grok from their banners and footers
 (`src/shared/agent-patterns.ts`), tracks working / blocked / idle, and raises
 "finished" and "needs you" notifications through `src/main/notify/`. Hidden
-panes are handled here precisely because the renderer cannot see them.
+panes are handled here precisely because the renderer cannot see them. An
+agent's exit is taken from the shell's prompt markers or the alt-screen
+leave when those exist, and otherwise from the process tree: once the agent's
+process has been seen under the pane's shell, its disappearance is the exit
+(`src/main/owned-process-tree.ts`, one shared `ps` listing per sweep tick).
 
 ## The agent socket and MCP server
 

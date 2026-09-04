@@ -616,5 +616,24 @@ check(
   true,
 );
 
+// Process-tree identity: which agent a RUNNING process is, from its ps args.
+for (const [command, expected] of [
+  ["claude --dangerously-skip-permissions --resume abc", "claude"],
+  ["/Users/x/.nvm/versions/node/v22/bin/node /x/node_modules/@openai/codex/bin/codex.js", "codex"],
+  ["/x/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex-aarch64-apple-darwin", "codex"],
+  ["codex-aarch64-apple-darwin exec", "codex"],
+  ["grok --yolo", "grok"],
+  // The shell hosting the agent names it in -c but is not the agent.
+  ["/bin/zsh -f -ic claude --resume abc; exec zsh -i", null],
+  ["bash -lc codex", null],
+  // Unrelated processes that merely contain the words.
+  ["python3 /Users/x/.codarastudio/claude-hooks/codara-hook.py PreToolUse", null],
+  ["tail -n 0 -f /tmp/claude-501/x", null],
+  ["node /x/codex-server/index.js", null],
+  ["", null],
+]) {
+  check(`process command → runtime: ${command || "(empty)"}`, ap.runtimeFromProcessCommand(command), expected);
+}
+
 process.exitCode = failures === 0 ? 0 : 1;
 console.log(failures === 0 ? "\nAll agent-pattern checks passed." : `\n${failures} check(s) FAILED.`);
