@@ -18,6 +18,8 @@ const WRAPPER_TAGS = [
   "system-reminder",
   "environment_context",
   "user_instructions",
+  "INSTRUCTIONS",
+  "codex_internal_context",
   "command-name",
   "command-message",
   "command-args",
@@ -28,7 +30,7 @@ const WRAPPER_TAGS = [
   "task-notification",
 ];
 const WRAPPER_BLOCK_RE = new RegExp(
-  WRAPPER_TAGS.map((tag) => `<${tag}>[\\s\\S]*?(?:</${tag}>|$)`).join("|"),
+  WRAPPER_TAGS.map((tag) => `<${tag}(?:\\s[^>]*)?>[\\s\\S]*?(?:</${tag}>|$)`).join("|"),
   "gi",
 );
 
@@ -36,7 +38,13 @@ const WRAPPER_BLOCK_RE = new RegExp(
 // remains. The "Caveat: " check catches the bare first-run banner Claude Code
 // emits outside any wrapper tag.
 export function sanitizeUserText(raw: string): string | null {
-  const cleaned = raw.replace(WRAPPER_BLOCK_RE, " ").replace(/\s+/g, " ").trim();
+  const cleaned = raw
+    .replace(/^\s*# AGENTS\.md instructions for [^\r\n]*(?:\r?\n|$)/gim, " ")
+    .replace(WRAPPER_BLOCK_RE, " ")
+    .replace(/<image\b[^>]*>(?:[\s\S]*?<\/image>)?/gi, " ")
+    .replace(/\[Image #\d+\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!cleaned || cleaned.startsWith("Caveat: ")) return null;
   return cleaned;
 }

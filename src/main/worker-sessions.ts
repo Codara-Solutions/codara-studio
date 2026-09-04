@@ -32,7 +32,7 @@ import {
   resolveSafeGrokTranscriptPath,
 } from "./orchestration/grok-sessions";
 import { codexProvider } from "./providers/codex";
-import { clampTitle, findClaudeAiTitle, parseClaudeHead } from "./session-titles";
+import { clampTitle, findClaudeAiTitle, parseClaudeHead, sanitizeUserText } from "./session-titles";
 
 const TRANSCRIPT_HEAD_BYTES = 256 * 1024;
 const SESSION_SCAN_CONCURRENCY = 16;
@@ -138,17 +138,8 @@ function textFromContent(content: unknown): string | null {
 
 function sessionTitle(value: string | null): string | null {
   if (!value) return null;
-  const cleaned = value
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, " ")
-    .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, " ")
-    .replace(/<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/gi, " ")
-    .replace(/<local-command-(?:caveat|stdout)>[\s\S]*?<\/local-command-(?:caveat|stdout)>/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned || cleaned.startsWith("Caveat: The messages below were generated")) return null;
-  return cleaned.length <= TITLE_LIMIT
-    ? cleaned
-    : `${cleaned.slice(0, TITLE_LIMIT - 1).trimEnd()}…`;
+  const cleaned = sanitizeUserText(value);
+  return cleaned ? clampTitle(cleaned, TITLE_LIMIT) : null;
 }
 
 export function parseClaudeSessionHead(text: string): {

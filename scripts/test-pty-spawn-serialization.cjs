@@ -21,6 +21,8 @@ function createController() {
     connectionCalls: [],
     shellCalls: [],
     localSpawnCalls: [],
+    binaryCalls: [],
+    missingBinary: false,
     activeProfileLeases: new Map(),
     currentDefaultProfileId: "00000000-0000-4000-8000-000000000001",
     currentDefaultClaudeProfileId: "10000000-0000-4000-8000-000000000001",
@@ -199,6 +201,13 @@ function stubPlugin() {
     `,
     "./env-sanitize": "export function sanitizeNestedAgentEnv() {}",
     "./path-reconstruction": "export function injectEnrichedPath() {}",
+    "./binary-resolver": `
+      export async function resolveBinary(name) {
+        const controller = globalThis.__codaraPtySpawnHarness;
+        controller.binaryCalls.push(name);
+        return controller.missingBinary ? null : "/installed tools/bin/" + name;
+      }
+    `,
     "./hook-rpc": "export function getHookRpcEnvSafe() { return null; }",
     "./codara-home": "export function codaraHome() { return '/tmp/codara-pty-test'; }",
     "./orchestration/native-codex-profile-runtime": `
@@ -375,6 +384,27 @@ async function main() {
     globalThis.__codaraPtySpawnHarness = controller;
     const pty = require(outfile);
 
+    controller.missingBinary = true;
+    await assert.rejects(pty.spawn(localCodexOptions("missing-codex")), /Cannot find codex/);
+    assert.equal(controller.localSpawnCalls.length, 0);
+    assert.equal(controller.activeProfileLeases.size, 0);
+    controller.missingBinary = false;
+    for (const runtime of ["codex", "claude", "grok"]) {
+      const options = runtime === "codex" ? localCodexOptions(runtime)
+        : runtime === "claude" ? localClaudeOptions(runtime) : localGrokOptions(runtime);
+      options.shell = { id: "zsh", label: "zsh", exe: "/bin/zsh", args: [], family: "zsh" };
+      options.env = { SPARK_NO_SHELL_INTEGRATION: "1", PATH: "/usr/bin:/bin" };
+      await pty.spawn(options);
+      const call = controller.localSpawnCalls.at(-1);
+      assert.ok(call.args.at(-1).startsWith(`'/installed tools/bin/${runtime}' `));
+      assert.ok((call.options.env.Path ?? call.options.env.PATH).startsWith(`/installed tools/bin${path.delimiter}`));
+      controller.exitLocal(call.pid);
+      pty.dispose(runtime);
+    }
+    assert.equal(controller.activeProfileLeases.size, 0);
+    controller.localSpawnCalls.length = 0;
+    controller.binaryCalls.length = 0;
+
     // Same id: only the first caller may cross the remote process boundary.
     const first = pty.spawn(remoteOptions("same-id", "same-host", "codex"));
     const second = pty.spawn(remoteOptions("same-id", "same-host", "claude"));
@@ -396,6 +426,7 @@ async function main() {
     assert.equal(secondResult.startupCommandHandled, false);
     assert.equal(secondResult.attached, true);
     assert.equal(secondResult.pid, firstResult.pid);
+    assert.equal(controller.binaryCalls.length, 0, "remote sessions must resolve CLIs on the remote host");
 
     // The local PowerShell path has multiple awaits of its own. Its existing
     // family lock protects profile files across ids but, by itself, does not

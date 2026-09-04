@@ -1,27 +1,53 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   enumerateDays,
   makeUsageWindow,
   resolveLocalTimeZone,
   totalTokens,
   type UsageDayBucket,
+  type UsageProjectRow,
   type UsageProviderKind,
+  type UsageSessionRow,
+  type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@shared/usage-analytics";
 import { ClaudeMark, CodexMark } from "../BrandMarks";
 import { SparkIcon } from "../icons";
-import { formatCount, formatDayShort, formatPercent, formatTokens, formatUsd } from "./usage-format";
+import {
+  formatCount,
+  formatDayShort,
+  formatPercent,
+  formatTokens,
+  formatUsd,
+} from "./usage-format";
 
 // The Usage page: what the three harnesses on this machine actually spent.
 // The scan lives in the main process; this file is display only.
 //
-// The cost figure leads because it is the question people open this for. The
-// chart is the one loud element — everything around it stays in the app's quiet
-// register (hairline rules, mono numerals, uppercase micro-labels), so the bars
-// are what the eye lands on.
+// Layout, top to bottom: a row of stat cards that answer the money and volume
+// questions at a glance, a daily intensity grid beside the token mix, the one
+// loud element (the stacked daily chart), a card per provider with its share,
+// a breakdown table (model, project, or day), the most recent sessions, and
+// the sources the scan read. Everything but the chart stays in the app's quiet
+// register: hairline cards, mono numerals, uppercase micro-labels.
 
-const WINDOW_OPTIONS = [7, 30, 90] as const;
+const WINDOW_OPTIONS: ReadonlyArray<{ days: number; label: string }> = [
+  { days: 7, label: "7d" },
+  { days: 30, label: "30d" },
+  { days: 90, label: "90d" },
+  { days: 365, label: "1y" },
+];
+
+// How many trailing days the intensity grid shows at most.
+const INTENSITY_DAYS = 42;
+const RECENT_SESSIONS_SHOWN = 12;
 
 const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   claude: "Claude Code",
@@ -30,7 +56,11 @@ const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
 };
 
 // Stacking order, bottom band first.
-const PROVIDER_ORDER: readonly UsageProviderKind[] = ["cora", "codex", "claude"];
+const PROVIDER_ORDER: readonly UsageProviderKind[] = [
+  "cora",
+  "codex",
+  "claude",
+];
 
 /**
  * Provider identity colours.
@@ -48,20 +78,29 @@ const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
   cora: "var(--accent)",
 };
 
-function ProviderMark({ provider, size = 12 }: { provider: UsageProviderKind; size?: number }) {
+function ProviderMark({
+  provider,
+  size = 12,
+}: {
+  provider: UsageProviderKind;
+  size?: number;
+}) {
   if (provider === "claude") return <ClaudeMark size={size} />;
   if (provider === "codex") return <CodexMark size={size} />;
   return <SparkIcon size={size} />;
 }
 
 type UsageMetric = "cost" | "tokens";
-type UsageBreakdown = "model" | "day";
+type UsageBreakdown = "model" | "project" | "day";
 
 // Reopening the tab, or flipping back to a window already fetched, reuses the
 // last answer inside this window instead of re-running a scan that takes
 // seconds on a large history. Refresh always bypasses it.
 const SUMMARY_TTL_MS = 2 * 60 * 1000;
-const summaryCache = new Map<string, { fetchedAtMs: number; summary: UsageSummary }>();
+const summaryCache = new Map<
+  string,
+  { fetchedAtMs: number; summary: UsageSummary }
+>();
 
 function windowKey(input: UsageSummaryInput): string {
   return `${input.sinceDay}|${input.untilDay}|${input.timeZone}`;
@@ -77,6 +116,26 @@ const LABEL: React.CSSProperties = {
 const MONO: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontVariantNumeric: "tabular-nums",
+};
+
+const CARD: React.CSSProperties = {
+  border: "1px solid var(--rule-soft)",
+  borderRadius: "var(--radius-surface)",
+  background: "color-mix(in oklab, var(--panel) 55%, transparent)",
+  padding: "14px 16px",
+  minWidth: 0,
+};
+
+const CARD_TITLE: React.CSSProperties = {
+  fontSize: 12,
+  fontWeight: 600,
+  color: "var(--ink)",
+};
+
+const CARD_HINT: React.CSSProperties = {
+  fontSize: 11,
+  color: "var(--muted)",
+  marginTop: 2,
 };
 
 interface DayTotals {
@@ -96,12 +155,9 @@ export default function UsagePage() {
 
   // Bumped by Refresh to re-read the clock. Without it the range would hold the
   // `new Date()` captured when the window length last changed, and a tab left
-  // open overnight would keep asking for yesterday — today's usage would be
-  // invisible no matter how often the user refreshed.
+  // open overnight would keep asking for yesterday.
   const [rangeEpoch, setRangeEpoch] = useState(0);
 
-  // Otherwise recomputed only when the window length changes, so an unrelated
-  // re-render never shifts the range and triggers a fresh scan.
   const timeZone = useMemo(() => resolveLocalTimeZone(), []);
   const range = useMemo(
     () => makeUsageWindow(windowDays, new Date(), timeZone),
@@ -111,38 +167,39 @@ export default function UsagePage() {
   // Guards against a slow earlier scan resolving after a newer one and
   // overwriting it with a stale window's numbers.
   const requestRef = useRef(0);
-  // Set by Refresh and consumed by the fetch effect, so one gesture both
-  // re-reads the clock and bypasses the summary cache.
   const pendingForceRef = useRef(false);
 
-  const load = useCallback(async (input: UsageSummaryInput, options?: { force?: boolean }) => {
-    const key = windowKey(input);
-    const cached = summaryCache.get(key);
-    // The counter is bumped on EVERY load, cache hits included. Serving a hit
-    // without claiming the newest request number would let an older, slower
-    // scan for a different window resolve afterwards, pass the staleness check,
-    // and paint 90-day totals under a 30-day header.
-    const request = (requestRef.current += 1);
-    if (!options?.force && cached && Date.now() - cached.fetchedAtMs < SUMMARY_TTL_MS) {
-      setSummary(cached.summary);
+  const load = useCallback(
+    async (input: UsageSummaryInput, options?: { force?: boolean }) => {
+      const key = windowKey(input);
+      const cached = summaryCache.get(key);
+      const request = (requestRef.current += 1);
+      if (
+        !options?.force &&
+        cached &&
+        Date.now() - cached.fetchedAtMs < SUMMARY_TTL_MS
+      ) {
+        setSummary(cached.summary);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
       setError(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const next = await window.spark.usageAnalytics.summary(input);
-      if (requestRef.current !== request) return;
-      summaryCache.set(key, { fetchedAtMs: Date.now(), summary: next });
-      setSummary(next);
-    } catch (err) {
-      if (requestRef.current !== request) return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (requestRef.current === request) setLoading(false);
-    }
-  }, []);
+      try {
+        const next = await window.spark.usageAnalytics.summary(input);
+        if (requestRef.current !== request) return;
+        summaryCache.set(key, { fetchedAtMs: Date.now(), summary: next });
+        setSummary(next);
+      } catch (err) {
+        if (requestRef.current !== request) return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (requestRef.current === request) setLoading(false);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const force = pendingForceRef.current;
@@ -150,36 +207,59 @@ export default function UsagePage() {
     void load(range, { force });
   }, [load, range]);
 
-  // Bumping the epoch rebuilds `range` off the current clock, which re-runs the
-  // effect above even when the resulting days are unchanged (the memo returns a
-  // new object), so Refresh always rescans.
   const refresh = useCallback(() => {
     pendingForceRef.current = true;
     setRangeEpoch((epoch) => epoch + 1);
   }, []);
 
-  const days = useMemo(() => enumerateDays(range.sinceDay, range.untilDay), [range]);
+  const days = useMemo(
+    () => enumerateDays(range.sinceDay, range.untilDay),
+    [range],
+  );
   const buckets = summary?.buckets ?? [];
 
   const daily = useMemo(() => buildDailyTotals(days, buckets), [days, buckets]);
-  const byDay = useMemo(() => new Map(daily.map((entry) => [entry.day, entry])), [daily]);
+  const byDay = useMemo(
+    () => new Map(daily.map((entry) => [entry.day, entry])),
+    [daily],
+  );
 
   const totals = useMemo(() => summarizeBuckets(buckets), [buckets]);
   const activeDays = daily.filter((day) => day.tokens > 0).length;
   const dailyAverage = activeDays === 0 ? 0 : totals.tokens / activeDays;
   const observedInput = totals.uncachedInputTokens + totals.cachedInputTokens;
-  const cachedShare = observedInput === 0 ? 0 : totals.cachedInputTokens / observedInput;
+  const cachedShare =
+    observedInput === 0 ? 0 : totals.cachedInputTokens / observedInput;
 
   // Each source counts its own distinct sessions, and the three transcript
-  // roots are disjoint, so summing them is exact — unlike summing the per-cell
-  // counts, where one session spanning days and models is counted repeatedly.
+  // roots are disjoint, so summing them is exact.
   const sessionCount = (summary?.sources ?? []).reduce(
     (total, source) => total + source.distinctSessions,
     0,
   );
 
   const modelRows = useMemo(() => buildModelRows(buckets), [buckets]);
-  const dayRows = useMemo(() => daily.filter((day) => day.tokens > 0).reverse(), [daily]);
+  const projectRows = useMemo(
+    () => buildProjectRows(summary?.projects ?? []),
+    [summary],
+  );
+  const dayRows = useMemo(
+    () => daily.filter((day) => day.tokens > 0).reverse(),
+    [daily],
+  );
+  const providerCards = useMemo(
+    () => buildProviderCards(buckets, summary?.sources ?? [], totals.tokens),
+    [buckets, summary, totals.tokens],
+  );
+  const intensityDays = useMemo(() => daily.slice(-INTENSITY_DAYS), [daily]);
+  const bestDay = useMemo(
+    () =>
+      daily.reduce<DayTotals | null>(
+        (best, entry) => (entry.tokens > (best?.tokens ?? 0) ? entry : best),
+        null,
+      ),
+    [daily],
+  );
 
   return (
     <div
@@ -194,12 +274,12 @@ export default function UsagePage() {
     >
       <div
         style={{
-          maxWidth: 1040,
+          maxWidth: 1080,
           margin: "0 auto",
           padding: "22px 26px 44px",
           display: "flex",
           flexDirection: "column",
-          gap: 26,
+          gap: 18,
         }}
       >
         <header
@@ -211,13 +291,21 @@ export default function UsagePage() {
             gap: 12,
           }}
         >
-          <span style={LABEL}>Usage</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={LABEL}>Usage</span>
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>
+              {formatDayShort(range.sinceDay)} –{" "}
+              {formatDayShort(range.untilDay)}
+              {summary ? ` · scanned ${formatUpdatedAt(summary.readAt)}` : ""}
+              {totals.unpricedRecords > 0 ? " · some models are unpriced" : ""}
+            </span>
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Segmented
               label="Usage window"
               options={WINDOW_OPTIONS.map((option) => ({
-                value: String(option),
-                label: `${option}d`,
+                value: String(option.days),
+                label: option.label,
               }))}
               value={String(windowDays)}
               onChange={(value) => setWindowDays(Number(value))}
@@ -230,7 +318,8 @@ export default function UsagePage() {
           <div
             role="alert"
             style={{
-              border: "1px solid color-mix(in oklch, var(--danger) 45%, transparent)",
+              border:
+                "1px solid color-mix(in oklch, var(--danger) 45%, transparent)",
               borderRadius: "var(--radius-surface)",
               padding: "8px 12px",
               fontSize: 12,
@@ -254,45 +343,76 @@ export default function UsagePage() {
           </p>
         ) : (
           <>
-            {/* The financial answer, first and biggest. */}
+            {/* The money and volume answers, first. */}
             <section
               style={{
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "flex-end",
-                justifyContent: "space-between",
-                gap: 24,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+                gap: 10,
               }}
             >
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                <span
-                  style={{
-                    ...MONO,
-                    fontSize: 30,
-                    lineHeight: 1.1,
-                    letterSpacing: "-0.01em",
-                  }}
-                >
-                  {formatUsd(totals.costUsd)}
-                  {totals.pricedRecords > 0 && (
-                    <span style={{ color: "var(--muted)", fontSize: 18 }}>*</span>
-                  )}
-                </span>
-                <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                  {formatDayShort(range.sinceDay)} – {formatDayShort(range.untilDay)} ·{" "}
-                  {formatCount(sessionCount)} sessions
-                </span>
-              </div>
-
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 26 }}>
-                <Figure label="Tokens" value={formatTokens(totals.tokens)} />
-                <Figure label="Daily avg" value={formatTokens(dailyAverage)} />
-                <Figure label="Cache hits" value={formatPercent(cachedShare)} />
-                <Figure label="Cache saved" value={formatUsd(totals.cacheSavingsUsd)} />
-              </div>
+              <StatCard
+                label="Est. cost"
+                value={`${formatUsd(totals.costUsd)}${totals.pricedRecords > 0 ? "*" : ""}`}
+                icon={<CoinsGlyph />}
+                emphasis
+              />
+              <StatCard
+                label="Total tokens"
+                value={formatTokens(totals.tokens)}
+                icon={<SparkGlyph />}
+              />
+              <StatCard
+                label="Sessions"
+                value={formatCount(sessionCount)}
+                icon={<SessionsGlyph />}
+              />
+              <StatCard
+                label="Active days"
+                value={`${activeDays} / ${days.length}`}
+                icon={<CalendarGlyph />}
+              />
+              <StatCard
+                label="Daily average"
+                value={formatTokens(dailyAverage)}
+                icon={<GaugeGlyph />}
+              />
+              <StatCard
+                label="Cache hits"
+                value={formatPercent(cachedShare)}
+                icon={<CacheGlyph />}
+              />
+              <StatCard
+                label="Cache saved"
+                value={formatUsd(totals.cacheSavingsUsd)}
+                icon={<SavedGlyph />}
+              />
+              <StatCard
+                label="Output tokens"
+                value={formatTokens(totals.outputTokens)}
+                icon={<OutputGlyph />}
+              />
             </section>
 
-            <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <section
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1.25fr) minmax(0, 0.9fr)",
+                gap: 12,
+              }}
+            >
+              <IntensityGrid days={intensityDays} bestDay={bestDay} />
+              <TokenMix totals={totals} />
+            </section>
+
+            <section
+              style={{
+                ...CARD,
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+              }}
+            >
               <div
                 style={{
                   display: "flex",
@@ -302,21 +422,59 @@ export default function UsagePage() {
                   gap: 12,
                 }}
               >
-                <Legend />
-                <Segmented
-                  label="Chart metric"
-                  options={[
-                    { value: "cost", label: "Cost" },
-                    { value: "tokens", label: "Tokens" },
-                  ]}
-                  value={metric}
-                  onChange={(value) => setMetric(value as UsageMetric)}
-                />
+                <div>
+                  <div style={CARD_TITLE}>Daily usage</div>
+                  <div style={CARD_HINT}>
+                    Stacked by provider. Hover a day for the split.
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+                  <Legend />
+                  <Segmented
+                    label="Chart metric"
+                    options={[
+                      { value: "cost", label: "Cost" },
+                      { value: "tokens", label: "Tokens" },
+                    ]}
+                    value={metric}
+                    onChange={(value) => setMetric(value as UsageMetric)}
+                  />
+                </div>
               </div>
               <UsageChart days={days} byDay={byDay} metric={metric} />
             </section>
 
-            <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <section
+              style={{ display: "flex", flexDirection: "column", gap: 10 }}
+            >
+              <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+                <span style={LABEL}>Providers</span>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {providerCards.filter((card) => card.tokens > 0).length} with
+                  usage in this window
+                </span>
+              </div>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                  gap: 10,
+                }}
+              >
+                {providerCards.map((card) => (
+                  <ProviderCard key={card.provider} card={card} />
+                ))}
+              </div>
+            </section>
+
+            <section
+              style={{
+                ...CARD,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
               <div
                 style={{
                   display: "flex",
@@ -325,11 +483,21 @@ export default function UsagePage() {
                   gap: 12,
                 }}
               >
-                <span style={LABEL}>Breakdown</span>
+                <div>
+                  <div style={CARD_TITLE}>Breakdown</div>
+                  <div style={CARD_HINT}>
+                    {breakdown === "model"
+                      ? "Every model that ran, costliest first."
+                      : breakdown === "project"
+                        ? "Every working directory the agents ran in, costliest first."
+                        : "Each day with activity, newest first."}
+                  </div>
+                </div>
                 <Segmented
                   label="Breakdown grouping"
                   options={[
                     { value: "model", label: "Model" },
+                    { value: "project", label: "Project" },
                     { value: "day", label: "Day" },
                   ]}
                   value={breakdown}
@@ -338,16 +506,43 @@ export default function UsagePage() {
               </div>
               {breakdown === "model" ? (
                 <ModelTable rows={modelRows} />
+              ) : breakdown === "project" ? (
+                <ProjectTable rows={projectRows} />
               ) : (
                 <DayTable rows={dayRows} />
               )}
               {totals.pricedRecords > 0 && (
                 <p style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>
-                  * Estimated where the transcript reported no cost: those calls are priced from
-                  Codara's local rate table, which drifts from vendor list prices. Cora reports
-                  exact costs and is used as-is.
+                  * Estimated where the transcript reported no cost: those calls
+                  are priced from Codara's local rate table, which drifts from
+                  vendor list prices. Cora reports exact costs and is used
+                  as-is.
                 </p>
               )}
+            </section>
+
+            <section
+              style={{
+                ...CARD,
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+              }}
+            >
+              <div>
+                <div style={CARD_TITLE}>Recent sessions</div>
+                <div style={CARD_HINT}>
+                  The last{" "}
+                  {Math.min(
+                    RECENT_SESSIONS_SHOWN,
+                    summary.recentSessions.length,
+                  )}{" "}
+                  sessions with activity in this window.
+                </div>
+              </div>
+              <SessionsTable
+                rows={summary.recentSessions.slice(0, RECENT_SESSIONS_SHOWN)}
+              />
             </section>
 
             <SourcesFooter summary={summary} />
@@ -360,7 +555,10 @@ export default function UsagePage() {
 
 /* ── Derivations ─────────────────────────────────────────────────────────── */
 
-function buildDailyTotals(days: string[], buckets: UsageDayBucket[]): DayTotals[] {
+function buildDailyTotals(
+  days: string[],
+  buckets: UsageDayBucket[],
+): DayTotals[] {
   const rows = new Map<string, DayTotals>();
   for (const day of days) {
     rows.set(day, { day, costUsd: 0, tokens: 0, byProvider: new Map() });
@@ -373,7 +571,10 @@ function buildDailyTotals(days: string[], buckets: UsageDayBucket[]): DayTotals[
     const tokens = totalTokens(bucket.totals);
     row.costUsd += bucket.costUsd;
     row.tokens += tokens;
-    const provider = row.byProvider.get(bucket.provider) ?? { costUsd: 0, tokens: 0 };
+    const provider = row.byProvider.get(bucket.provider) ?? {
+      costUsd: 0,
+      tokens: 0,
+    };
     provider.costUsd += bucket.costUsd;
     provider.tokens += tokens;
     row.byProvider.set(bucket.provider, provider);
@@ -389,7 +590,9 @@ interface SummaryTotals {
   cachedInputTokens: number;
   cacheCreationTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   pricedRecords: number;
+  unpricedRecords: number;
 }
 
 function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
@@ -401,7 +604,9 @@ function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
     cachedInputTokens: 0,
     cacheCreationTokens: 0,
     outputTokens: 0,
+    reasoningTokens: 0,
     pricedRecords: 0,
+    unpricedRecords: 0,
   };
   for (const bucket of buckets) {
     totals.costUsd += bucket.costUsd;
@@ -411,7 +616,11 @@ function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
     totals.cachedInputTokens += bucket.totals.cachedInputTokens;
     totals.cacheCreationTokens += bucket.totals.cacheCreationTokens;
     totals.outputTokens += bucket.totals.outputTokens;
-    if (bucket.costSource === "priced") totals.pricedRecords += bucket.recordCount;
+    totals.reasoningTokens += bucket.totals.reasoningTokens;
+    if (bucket.costSource === "priced")
+      totals.pricedRecords += bucket.recordCount;
+    if (bucket.costSource === "unpriced")
+      totals.unpricedRecords += bucket.recordCount;
   }
   return totals;
 }
@@ -449,7 +658,661 @@ function buildModelRows(buckets: UsageDayBucket[]): ModelRow[] {
     if (bucket.costSource === "unpriced") row.unpriced = true;
     rows.set(key, row);
   }
-  return [...rows.values()].sort((a, b) => b.costUsd - a.costUsd || b.outputTokens - a.outputTokens);
+  return [...rows.values()].sort(
+    (a, b) => b.costUsd - a.costUsd || b.outputTokens - a.outputTokens,
+  );
+}
+
+interface ProjectRow {
+  key: string;
+  project: string;
+  providers: UsageProviderKind[];
+  tokens: number;
+  sessions: number;
+  records: number;
+  costUsd: number;
+}
+
+// The scan keeps one row per provider and directory; the table merges the
+// providers that shared a directory into one line so a project reads as one
+// project no matter which agents worked in it.
+function buildProjectRows(projects: UsageProjectRow[]): ProjectRow[] {
+  const rows = new Map<string, ProjectRow>();
+  for (const entry of projects) {
+    const row = rows.get(entry.project) ?? {
+      key: entry.project,
+      project: entry.project,
+      providers: [],
+      tokens: 0,
+      sessions: 0,
+      records: 0,
+      costUsd: 0,
+    };
+    if (!row.providers.includes(entry.provider))
+      row.providers.push(entry.provider);
+    row.tokens += totalTokens(entry.totals);
+    row.sessions += entry.sessions;
+    row.records += entry.records;
+    row.costUsd += entry.costUsd;
+    rows.set(entry.project, row);
+  }
+  return [...rows.values()].sort(
+    (a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens,
+  );
+}
+
+interface ProviderCardData {
+  provider: UsageProviderKind;
+  source: UsageSource | null;
+  tokens: number;
+  costUsd: number;
+  sessions: number;
+  records: number;
+  topModel: string | null;
+  share: number;
+}
+
+function buildProviderCards(
+  buckets: UsageDayBucket[],
+  sources: UsageSource[],
+  allTokens: number,
+): ProviderCardData[] {
+  return [...PROVIDER_ORDER].reverse().map((provider) => {
+    const modelTokens = new Map<string, number>();
+    let tokens = 0;
+    let costUsd = 0;
+    let records = 0;
+    for (const bucket of buckets) {
+      if (bucket.provider !== provider) continue;
+      const count = totalTokens(bucket.totals);
+      tokens += count;
+      costUsd += bucket.costUsd;
+      records += bucket.recordCount;
+      modelTokens.set(
+        bucket.model,
+        (modelTokens.get(bucket.model) ?? 0) + count,
+      );
+    }
+    let topModel: string | null = null;
+    let best = 0;
+    for (const [model, count] of modelTokens) {
+      if (count > best) {
+        best = count;
+        topModel = model;
+      }
+    }
+    const source = sources.find((entry) => entry.provider === provider) ?? null;
+    return {
+      provider,
+      source,
+      tokens,
+      costUsd,
+      sessions: source?.distinctSessions ?? 0,
+      records,
+      topModel,
+      share: allTokens === 0 ? 0 : tokens / allTokens,
+    };
+  });
+}
+
+function formatUpdatedAt(iso: string): string {
+  const parsed = Date.parse(iso);
+  if (Number.isNaN(parsed)) return "";
+  return new Date(parsed).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatSessionTime(ms: number): string {
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  const time = date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (sameDay) return `Today ${time}`;
+  return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+}
+
+function projectLabel(project: string): string {
+  if (!project) return "No directory recorded";
+  const trimmed = project.replace(/[\\/]+$/, "");
+  const parts = trimmed.split(/[\\/]/);
+  return parts[parts.length - 1] || trimmed;
+}
+
+/* ── Stat cards ──────────────────────────────────────────────────────────── */
+
+function StatCard({
+  label,
+  value,
+  icon,
+  emphasis = false,
+}: {
+  label: string;
+  value: string;
+  icon: React.ReactNode;
+  emphasis?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        ...CARD,
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "12px 14px",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 32,
+          height: 32,
+          flex: "0 0 32px",
+          borderRadius: 8,
+          background: emphasis
+            ? "color-mix(in oklab, var(--accent) 16%, transparent)"
+            : "color-mix(in oklab, var(--ink) 6%, transparent)",
+          color: emphasis ? "var(--accent)" : "var(--muted)",
+        }}
+      >
+        {icon}
+      </span>
+      <div
+        style={{
+          minWidth: 0,
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+        }}
+      >
+        <span
+          style={{
+            ...MONO,
+            fontSize: emphasis ? 20 : 16,
+            fontWeight: 600,
+            lineHeight: 1.1,
+            color: "var(--ink)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {value}
+        </span>
+        <span style={LABEL}>{label}</span>
+      </div>
+    </div>
+  );
+}
+
+const GLYPH_PROPS = {
+  width: 15,
+  height: 15,
+  viewBox: "0 0 16 16",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.4,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+};
+
+function CoinsGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <ellipse cx="8" cy="4.5" rx="5" ry="2" />
+      <path d="M3 4.5v3c0 1.1 2.2 2 5 2s5-.9 5-2v-3" />
+      <path d="M3 7.5v3c0 1.1 2.2 2 5 2s5-.9 5-2v-3" />
+    </svg>
+  );
+}
+function SparkGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <path d="M8 2c.4 3.2 2.6 5.4 5.8 5.8v.4C10.6 8.6 8.4 10.8 8 14c-.4-3.2-2.6-5.4-5.8-5.8v-.4C5.4 7.4 7.6 5.2 8 2z" />
+    </svg>
+  );
+}
+function SessionsGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <rect x="2" y="3" width="12" height="10" rx="2" />
+      <path d="M5 7l2 1.5L5 10M8.5 10h3" />
+    </svg>
+  );
+}
+function CalendarGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <rect x="2.5" y="3.5" width="11" height="10" rx="1.5" />
+      <path d="M2.5 7h11M5.5 2v3M10.5 2v3" />
+    </svg>
+  );
+}
+function GaugeGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <path d="M2.5 11.5a5.5 5.5 0 1 1 11 0" />
+      <path d="M8 11.5l2.6-3.6" />
+    </svg>
+  );
+}
+function CacheGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <ellipse cx="8" cy="4" rx="5" ry="2" />
+      <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4" />
+      <path d="M3 8c0 1.1 2.2 2 5 2s5-.9 5-2" />
+    </svg>
+  );
+}
+function SavedGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <path d="M8 2.5l4.5 2.2v3.6c0 2.7-1.9 4.6-4.5 5.7-2.6-1.1-4.5-3-4.5-5.7V4.7L8 2.5z" />
+      <path d="M6 8l1.5 1.5L10.2 6.7" />
+    </svg>
+  );
+}
+function OutputGlyph() {
+  return (
+    <svg {...GLYPH_PROPS}>
+      <path d="M3 8h9M8.5 4.5L12 8l-3.5 3.5" />
+    </svg>
+  );
+}
+
+/* ── Intensity grid and token mix ────────────────────────────────────────── */
+
+function intensityFor(tokens: number, peak: number): number {
+  if (tokens <= 0 || peak <= 0) return 0;
+  const share = tokens / peak;
+  if (share > 0.75) return 4;
+  if (share > 0.5) return 3;
+  if (share > 0.25) return 2;
+  return 1;
+}
+
+const INTENSITY_FILL: Record<number, string> = {
+  0: "color-mix(in oklab, var(--ink) 5%, transparent)",
+  1: "color-mix(in oklab, var(--accent) 30%, transparent)",
+  2: "color-mix(in oklab, var(--accent) 52%, transparent)",
+  3: "color-mix(in oklab, var(--accent) 76%, transparent)",
+  4: "var(--accent)",
+};
+
+function IntensityGrid({
+  days,
+  bestDay,
+}: {
+  days: DayTotals[];
+  bestDay: DayTotals | null;
+}) {
+  const peak = days.reduce((max, day) => Math.max(max, day.tokens), 0);
+  const columns = days.length > 21 ? 21 : Math.max(7, days.length);
+  return (
+    <section style={CARD}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 12,
+        }}
+      >
+        <div>
+          <div style={CARD_TITLE}>Daily intensity</div>
+          <div style={CARD_HINT}>
+            Token activity per day across every provider.
+          </div>
+        </div>
+        {bestDay && bestDay.tokens > 0 && (
+          <span
+            style={{
+              ...LABEL,
+              padding: "3px 8px",
+              borderRadius: 99,
+              border: "1px solid var(--rule)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Peak {formatDayShort(bestDay.day)}
+          </span>
+        )}
+      </div>
+      <div
+        role="img"
+        aria-label="Recent token activity"
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
+          gap: 3,
+        }}
+      >
+        {days.map((day) => (
+          <span
+            key={day.day}
+            title={`${formatDayShort(day.day)}: ${formatTokens(day.tokens)} tokens · ${formatUsd(day.costUsd)}`}
+            style={{
+              aspectRatio: "1 / 1",
+              minHeight: 10,
+              borderRadius: 3,
+              background: INTENSITY_FILL[intensityFor(day.tokens, peak)],
+            }}
+          />
+        ))}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+          marginTop: 10,
+          ...MONO,
+          fontSize: 9,
+          color: "var(--muted)",
+        }}
+      >
+        <span>{days[0] ? formatDayShort(days[0].day) : ""}</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          Less
+          <span style={{ display: "inline-flex", gap: 3 }} aria-hidden>
+            {[0, 1, 2, 3, 4].map((level) => (
+              <span
+                key={level}
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 2,
+                  background: INTENSITY_FILL[level],
+                }}
+              />
+            ))}
+          </span>
+          More
+        </span>
+        <span>
+          {days.length > 0 ? formatDayShort(days[days.length - 1].day) : ""}
+        </span>
+      </div>
+    </section>
+  );
+}
+
+function TokenMix({ totals }: { totals: SummaryTotals }) {
+  const segments = [
+    {
+      key: "input",
+      label: "New input",
+      value: totals.uncachedInputTokens,
+      fill: "var(--ink)",
+    },
+    {
+      key: "output",
+      label: "Output",
+      value: totals.outputTokens,
+      fill: "var(--accent)",
+    },
+    {
+      key: "cache-read",
+      label: "Cache read",
+      value: totals.cachedInputTokens,
+      fill: "color-mix(in oklab, var(--ink) 45%, transparent)",
+    },
+    {
+      key: "cache-write",
+      label: "Cache write",
+      value: totals.cacheCreationTokens,
+      fill: "color-mix(in oklab, var(--ink) 22%, transparent)",
+    },
+  ];
+  const total = segments.reduce((sum, segment) => sum + segment.value, 0);
+  return (
+    <section style={CARD}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 12,
+        }}
+      >
+        <div>
+          <div style={CARD_TITLE}>Token mix</div>
+          <div style={CARD_HINT}>
+            Where the tokens went, across every provider.
+          </div>
+        </div>
+        {totals.reasoningTokens > 0 && (
+          <span
+            style={{
+              ...LABEL,
+              padding: "3px 8px",
+              borderRadius: 99,
+              border: "1px solid var(--rule)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {formatTokens(totals.reasoningTokens)} reasoning
+          </span>
+        )}
+      </div>
+      <div
+        aria-label="Combined token mix"
+        style={{
+          display: "flex",
+          height: 10,
+          borderRadius: 99,
+          overflow: "hidden",
+          background: "color-mix(in oklab, var(--ink) 5%, transparent)",
+        }}
+      >
+        {total > 0 &&
+          segments.map((segment) =>
+            segment.value > 0 ? (
+              <span
+                key={segment.key}
+                title={`${segment.label}: ${formatTokens(segment.value)}`}
+                style={{
+                  width: `${(segment.value / total) * 100}%`,
+                  background: segment.fill,
+                }}
+              />
+            ) : null,
+          )}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "8px 14px",
+          marginTop: 12,
+          fontSize: 11,
+        }}
+      >
+        {segments.map((segment) => (
+          <div
+            key={segment.key}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
+            }}
+          >
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                color: "var(--ink-dim)",
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: 2,
+                  background: segment.fill,
+                  flex: "0 0 7px",
+                }}
+              />
+              {segment.label}
+            </span>
+            <span style={{ ...MONO, color: "var(--ink-dim)" }}>
+              {formatTokens(segment.value)}
+              <span style={{ color: "var(--muted)", marginLeft: 6 }}>
+                {total > 0 ? formatPercent(segment.value / total, 0) : "0%"}
+              </span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* ── Provider cards ──────────────────────────────────────────────────────── */
+
+function ProviderCard({ card }: { card: ProviderCardData }) {
+  const status = card.source?.status ?? "missing";
+  const statusLabel =
+    status === "ok"
+      ? card.tokens > 0
+        ? "Active"
+        : "Quiet"
+      : status === "error"
+        ? "Error"
+        : "Not found";
+  const statusColor =
+    status === "error"
+      ? "var(--danger)"
+      : status === "ok" && card.tokens > 0
+        ? "var(--ok)"
+        : "var(--muted-2)";
+  return (
+    <div
+      style={{
+        ...CARD,
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: "12px 14px",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          aria-hidden
+          style={{ display: "flex", color: PROVIDER_COLOR[card.provider] }}
+        >
+          <ProviderMark provider={card.provider} size={14} />
+        </span>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--ink)",
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          {PROVIDER_LABEL[card.provider]}
+        </span>
+        <span
+          title={card.source?.message ?? card.source?.dir ?? ""}
+          style={{
+            ...LABEL,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              background: statusColor,
+            }}
+          />
+          {statusLabel}
+        </span>
+      </div>
+      <div
+        title={card.topModel ?? undefined}
+        style={{
+          ...MONO,
+          fontSize: 11,
+          color: "var(--muted)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {card.topModel ?? "No model yet"}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          gap: 8,
+          fontSize: 11,
+        }}
+      >
+        <Mini label="Tokens" value={formatTokens(card.tokens)} />
+        <Mini label="Sessions" value={formatCount(card.sessions)} />
+        <Mini label="Cost" value={formatUsd(card.costUsd)} />
+      </div>
+      <div
+        aria-label={`${PROVIDER_LABEL[card.provider]} share of tokens`}
+        style={{
+          height: 5,
+          borderRadius: 99,
+          overflow: "hidden",
+          background: "color-mix(in oklab, var(--ink) 6%, transparent)",
+        }}
+      >
+        <span
+          style={{
+            display: "block",
+            height: "100%",
+            width: `${Math.max(card.share * 100, card.tokens > 0 ? 2 : 0)}%`,
+            background: PROVIDER_COLOR[card.provider],
+            borderRadius: 99,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function Mini({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}
+    >
+      <span style={{ ...MONO, fontSize: 12, color: "var(--ink-dim)" }}>
+        {value}
+      </span>
+      <span style={LABEL}>{label}</span>
+    </div>
+  );
 }
 
 /* ── Chart ───────────────────────────────────────────────────────────────── */
@@ -468,20 +1331,31 @@ const DENSE_AXIS_THRESHOLD = 10;
  * Rounding UP is the point: stopping at the last step below the peak would draw
  * the tallest day past the top of the plot, where it is clipped.
  */
-export function niceScale(peak: number, count: number): { max: number; ticks: number[] } {
+export function niceScale(
+  peak: number,
+  count: number,
+): { max: number; ticks: number[] } {
   if (!(peak > 0)) return { max: 0, ticks: [0] };
   const rawStep = peak / count;
   const magnitude = 10 ** Math.floor(Math.log10(rawStep));
   const normalized = rawStep / magnitude;
-  const step = (normalized > 5 ? 10 : normalized > 2 ? 5 : normalized > 1 ? 2 : 1) * magnitude;
+  const step =
+    (normalized > 5 ? 10 : normalized > 2 ? 5 : normalized > 1 ? 2 : 1) *
+    magnitude;
   const max = Math.ceil(peak / step) * step;
   const ticks: number[] = [];
-  for (let value = 0; value <= max + step * 1e-6; value += step) ticks.push(value);
+  for (let value = 0; value <= max + step * 1e-6; value += step)
+    ticks.push(value);
   return { max, ticks };
 }
 
 /** A bar with rounded top corners and a square base, so the stack sits flush. */
-function topRoundedBar(x: number, y: number, width: number, height: number): string {
+function topRoundedBar(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): string {
   const radius = Math.min(BAR_CAP_RADIUS, height, width / 2);
   if (radius <= 0) return `M${x},${y}h${width}v${height}h${-width}Z`;
   return [
@@ -521,7 +1395,12 @@ function UsageChart({
         let stackTop = 0;
         const bands = PROVIDER_ORDER.map((provider) => {
           const cell = entry?.byProvider.get(provider);
-          const value = cell === undefined ? 0 : metric === "cost" ? cell.costUsd : cell.tokens;
+          const value =
+            cell === undefined
+              ? 0
+              : metric === "cost"
+                ? cell.costUsd
+                : cell.tokens;
           const base = stackTop;
           stackTop += value;
           return { provider, value, base, top: stackTop };
@@ -533,16 +1412,14 @@ function UsageChart({
 
   const peak = columns.reduce((max, column) => Math.max(max, column.total), 0);
   const { max, ticks } = niceScale(peak, TICK_COUNT);
-  // The plot stops short of the viewBox top so the tallest bar's cap is not
-  // shaved by the edge.
   const toY = (value: number) =>
     max === 0 ? VIEW_HEIGHT : VIEW_HEIGHT - (value / max) * PLOT_HEIGHT;
   const format = metric === "cost" ? formatUsd : formatTokens;
 
   const slot = days.length === 0 ? 0 : VIEW_WIDTH / days.length;
-  // A 2px gutter at 90 days is sub-pixel once scaled down, so the gap is a
+  // A 2px gutter at 365 days is sub-pixel once scaled down, so the gap is a
   // proportion of the slot with a floor that keeps 7-day bars from touching.
-  const barWidth = Math.max(1, slot - Math.max(2, slot * 0.22));
+  const barWidth = Math.max(1, slot - Math.max(1, slot * 0.22));
 
   const handleMove = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -556,7 +1433,8 @@ function UsageChart({
   );
 
   const hovered = hoverIndex === null ? undefined : columns[hoverIndex];
-  const hoverLeft = days.length === 0 ? 0 : (((hoverIndex ?? 0) + 0.5) / days.length) * 100;
+  const hoverLeft =
+    days.length === 0 ? 0 : (((hoverIndex ?? 0) + 0.5) / days.length) * 100;
   const dense = days.length > DENSE_AXIS_THRESHOLD;
 
   return (
@@ -564,7 +1442,14 @@ function UsageChart({
       <div style={{ display: "flex", gap: 10 }}>
         {/* Axis labels sit outside the SVG: the plot scales non-uniformly to
             the pane width, which would stretch any text inside it. */}
-        <div style={{ position: "relative", width: 46, height: 208, flex: "0 0 46px" }}>
+        <div
+          style={{
+            position: "relative",
+            width: 46,
+            height: 208,
+            flex: "0 0 46px",
+          }}
+        >
           {ticks.map((tick) => (
             <span
               key={tick}
@@ -610,8 +1495,6 @@ function UsageChart({
               />
             ))}
 
-            {/* Full-height band behind the hovered day, so the readout is tied
-                to a column rather than floating over the plot. */}
             {hoverIndex !== null && (
               <rect
                 x={hoverIndex * slot}
@@ -624,14 +1507,12 @@ function UsageChart({
 
             {columns.map((column, index) => {
               const x = index * slot + (slot - barWidth) / 2;
-              // Only the topmost non-empty band gets rounded caps; the ones
-              // below it must stay square to sit flush under their neighbour.
-              const topBand = [...column.bands].reverse().find((band) => band.value > 0);
+              const topBand = [...column.bands]
+                .reverse()
+                .find((band) => band.value > 0);
               return (
                 <g key={column.day}>
                   {column.bands.map((band) => {
-                    // An empty day draws nothing rather than a zero-height
-                    // sliver, so gaps read as gaps.
                     if (band.value <= 0) return null;
                     const y = toY(band.top);
                     const height = Math.max(0, toY(band.base) - y);
@@ -645,7 +1526,9 @@ function UsageChart({
                             : `M${x},${y}h${barWidth}v${height}h${-barWidth}Z`
                         }
                         fill={PROVIDER_COLOR[band.provider]}
-                        opacity={hoverIndex === null || hoverIndex === index ? 1 : 0.5}
+                        opacity={
+                          hoverIndex === null || hoverIndex === index ? 1 : 0.5
+                        }
                       />
                     );
                   })}
@@ -661,7 +1544,8 @@ function UsageChart({
                 position: "absolute",
                 top: 0,
                 left: `${hoverLeft}%`,
-                transform: hoverLeft > 60 ? "translateX(-100%)" : "translateX(0)",
+                transform:
+                  hoverLeft > 60 ? "translateX(-100%)" : "translateX(0)",
                 pointerEvents: "none",
                 zIndex: 2,
                 minWidth: 158,
@@ -671,11 +1555,17 @@ function UsageChart({
                 fontSize: 11,
               }}
             >
-              <div style={{ ...LABEL, marginBottom: 1 }}>{formatDayShort(hovered.day)}</div>
+              <div style={{ ...LABEL, marginBottom: 1 }}>
+                {formatDayShort(hovered.day)}
+              </div>
               {[...hovered.bands].reverse().map((band) => (
                 <div
                   key={band.provider}
-                  style={{ display: "flex", justifyContent: "space-between", gap: 14 }}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 14,
+                  }}
                 >
                   <span
                     style={{
@@ -709,8 +1599,6 @@ function UsageChart({
         </div>
       </div>
 
-      {/* Under ten days every column is named; past that the axis keeps three
-          anchors so the labels never collide. */}
       <div
         style={{
           display: "flex",
@@ -721,7 +1609,11 @@ function UsageChart({
         }}
       >
         {dense
-          ? [days[0], days[Math.floor(days.length / 2)], days[days.length - 1]].map((day, index) => (
+          ? [
+              days[0],
+              days[Math.floor(days.length / 2)],
+              days[days.length - 1],
+            ].map((day, index) => (
               <span key={day ?? index} style={{ color: "var(--muted)" }}>
                 {day === undefined ? "" : formatDayShort(day)}
               </span>
@@ -732,8 +1624,6 @@ function UsageChart({
                 style={{
                   flex: 1,
                   textAlign: "center",
-                  // Weekends read a shade quieter, which is usually the shape
-                  // of the week in this data.
                   color: isWeekend(day) ? "var(--muted-2)" : "var(--muted)",
                 }}
               >
@@ -784,10 +1674,15 @@ function ModelTable({ rows }: { rows: ModelRow[] }) {
         {rows.map((row) => (
           <tr key={`${row.provider}:${row.model}`} className="usage-row">
             <td style={CELL}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <span
+                style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+              >
                 <span
                   aria-hidden
-                  style={{ display: "flex", color: PROVIDER_COLOR[row.provider] }}
+                  style={{
+                    display: "flex",
+                    color: PROVIDER_COLOR[row.provider],
+                  }}
                 >
                   <ProviderMark provider={row.provider} size={12} />
                 </span>
@@ -799,7 +1694,82 @@ function ModelTable({ rows }: { rows: ModelRow[] }) {
             <td style={NUM_CELL}>{formatTokens(row.cachedInputTokens)}</td>
             <td style={NUM_CELL}>{formatTokens(row.cacheCreationTokens)}</td>
             <td style={NUM_CELL}>{formatTokens(row.outputTokens)}</td>
-            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>{formatUsd(row.costUsd)}</td>
+            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+              {formatUsd(row.costUsd)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ProjectTable({ rows }: { rows: ProjectRow[] }) {
+  if (rows.length === 0) return <EmptyRow />;
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <thead>
+        <tr>
+          <th style={HEAD_CELL}>Project</th>
+          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Sessions</th>
+          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Turns</th>
+          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Tokens</th>
+          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.key} className="usage-row">
+            <td style={CELL} title={row.project || undefined}>
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 8,
+                  minWidth: 0,
+                }}
+              >
+                <span style={{ display: "inline-flex", gap: 3 }} aria-hidden>
+                  {row.providers.map((provider) => (
+                    <span
+                      key={provider}
+                      style={{
+                        display: "flex",
+                        color: PROVIDER_COLOR[provider],
+                      }}
+                    >
+                      <ProviderMark provider={provider} size={12} />
+                    </span>
+                  ))}
+                </span>
+                <span
+                  style={{ color: row.project ? "var(--ink)" : "var(--muted)" }}
+                >
+                  {projectLabel(row.project)}
+                </span>
+                {row.project && (
+                  <span
+                    style={{
+                      ...MONO,
+                      fontSize: 10,
+                      color: "var(--muted-2)",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      maxWidth: 320,
+                    }}
+                  >
+                    {row.project}
+                  </span>
+                )}
+              </span>
+            </td>
+            <td style={NUM_CELL}>{formatCount(row.sessions)}</td>
+            <td style={NUM_CELL}>{formatCount(row.records)}</td>
+            <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
+            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+              {formatUsd(row.costUsd)}
+            </td>
           </tr>
         ))}
       </tbody>
@@ -832,7 +1802,9 @@ function DayTable({ rows }: { rows: DayTotals[] }) {
                 {formatUsd(row.byProvider.get(provider)?.costUsd ?? 0)}
               </td>
             ))}
-            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>{formatUsd(row.costUsd)}</td>
+            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+              {formatUsd(row.costUsd)}
+            </td>
             <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
           </tr>
         ))}
@@ -841,9 +1813,96 @@ function DayTable({ rows }: { rows: DayTotals[] }) {
   );
 }
 
+function SessionsTable({ rows }: { rows: UsageSessionRow[] }) {
+  if (rows.length === 0) return <EmptyRow />;
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <th style={HEAD_CELL}>Last active</th>
+            <th style={HEAD_CELL}>Project</th>
+            <th style={HEAD_CELL}>Model</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Turns</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Input</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Output</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cache</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.provider}:${row.sessionId}`} className="usage-row">
+              <td
+                style={{
+                  ...CELL,
+                  ...MONO,
+                  color: "var(--muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {formatSessionTime(row.lastMs)}
+              </td>
+              <td style={CELL} title={row.project || row.sessionId}>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    style={{
+                      display: "flex",
+                      color: PROVIDER_COLOR[row.provider],
+                    }}
+                  >
+                    <ProviderMark provider={row.provider} size={12} />
+                  </span>
+                  <span
+                    style={{
+                      color: row.project ? "var(--ink)" : "var(--muted)",
+                    }}
+                  >
+                    {projectLabel(row.project)}
+                  </span>
+                </span>
+              </td>
+              <td style={{ ...CELL, ...MONO, color: "var(--ink-dim)" }}>
+                {row.model || "Unknown"}
+              </td>
+              <td style={NUM_CELL}>{formatCount(row.records)}</td>
+              <td style={NUM_CELL}>
+                {formatTokens(row.totals.uncachedInputTokens)}
+              </td>
+              <td style={NUM_CELL}>{formatTokens(row.totals.outputTokens)}</td>
+              <td style={NUM_CELL}>
+                {formatTokens(
+                  row.totals.cachedInputTokens + row.totals.cacheCreationTokens,
+                )}
+              </td>
+              <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+                {formatUsd(row.costUsd)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function EmptyRow() {
   return (
-    <p style={{ padding: "28px 0", textAlign: "center", fontSize: 12, color: "var(--muted)" }}>
+    <p
+      style={{
+        padding: "28px 0",
+        textAlign: "center",
+        fontSize: 12,
+        color: "var(--muted)",
+      }}
+    >
       No usage in this window.
     </p>
   );
@@ -891,34 +1950,31 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
           <span>{source.dir || "—"}</span>
           {source.status === "ok" ? (
             <span>
-              {formatCount(source.scannedFiles)} files · {formatCount(source.distinctSessions)}{" "}
-              sessions
+              {formatCount(source.scannedFiles)} files ·{" "}
+              {formatCount(source.distinctSessions)} sessions
             </span>
           ) : (
-            <span style={{ color: source.status === "error" ? "var(--danger)" : "var(--muted)" }}>
+            <span
+              style={{
+                color:
+                  source.status === "error" ? "var(--danger)" : "var(--muted)",
+              }}
+            >
               {source.message ?? source.status}
             </span>
           )}
         </div>
       ))}
       <span style={{ ...MONO, fontSize: 10, color: "var(--muted-2)" }}>
-        Scanned in {(summary.scanDurationMs / 1000).toFixed(1)}s · managed accounts link their
-        transcripts into the personal home, so each session is counted once
+        Scanned in {(summary.scanDurationMs / 1000).toFixed(1)}s · managed
+        accounts link their transcripts into the personal home, so each session
+        is counted once
       </span>
     </section>
   );
 }
 
 /* ── Small pieces ────────────────────────────────────────────────────────── */
-
-function Figure({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={LABEL}>{label}</span>
-      <span style={{ ...MONO, fontSize: 14, color: "var(--ink-dim)" }}>{value}</span>
-    </div>
-  );
-}
 
 function Segmented({
   label,
@@ -957,17 +2013,17 @@ function Segmented({
               border: "none",
               borderRadius: 99,
               padding: "3px 10px",
-              // Selected reads as a filled ink plate rather than a colour: the
-              // accent means "interactive" elsewhere, and a toggle that is
-              // merely current should not shout louder than the chart.
-              background: selected ? "color-mix(in oklab, var(--ink) 9%, transparent)" : "transparent",
+              background: selected
+                ? "color-mix(in oklab, var(--ink) 9%, transparent)"
+                : "transparent",
               color: selected ? "var(--ink)" : "var(--muted)",
               fontFamily: "var(--font-sans)",
               fontSize: 10,
               letterSpacing: "0.06em",
               textTransform: "uppercase",
               cursor: "default",
-              transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
             }}
           >
             {option.label}
@@ -978,7 +2034,13 @@ function Segmented({
   );
 }
 
-function RefreshButton({ onClick, busy }: { onClick: () => void; busy: boolean }) {
+function RefreshButton({
+  onClick,
+  busy,
+}: {
+  onClick: () => void;
+  busy: boolean;
+}) {
   const [hover, setHover] = useState(false);
   return (
     <button
@@ -1002,7 +2064,8 @@ function RefreshButton({ onClick, busy }: { onClick: () => void; busy: boolean }
         background: hover && !busy ? "var(--hover)" : "transparent",
         color: busy ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--muted)",
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <svg
@@ -1015,6 +2078,9 @@ function RefreshButton({ onClick, busy }: { onClick: () => void; busy: boolean }
         strokeLinecap="round"
         strokeLinejoin="round"
         aria-hidden
+        style={
+          busy ? { animation: "spark-spin 1s linear infinite" } : undefined
+        }
       >
         <path d="M12 7a5 5 0 1 1-1.6-3.66" />
         <path d="M12.2 1.9v2.6H9.6" />
@@ -1053,7 +2119,10 @@ function Legend() {
             color: "var(--ink-dim)",
           }}
         >
-          <span aria-hidden style={{ display: "flex", color: PROVIDER_COLOR[provider] }}>
+          <span
+            aria-hidden
+            style={{ display: "flex", color: PROVIDER_COLOR[provider] }}
+          >
             <ProviderMark provider={provider} size={11} />
           </span>
           {PROVIDER_LABEL[provider]}

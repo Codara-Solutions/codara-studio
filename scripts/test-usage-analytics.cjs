@@ -118,6 +118,12 @@ async function main() {
     });
 
   const claude = parseClaudeLine(claudeLine());
+  eq("claude: a line without cwd has no project", claude.project, null);
+  eq(
+    "claude: cwd is the project",
+    parseClaudeLine(claudeLine({ cwd: "/Users/x/Projects/app" })).project,
+    "/Users/x/Projects/app",
+  );
   check("claude: a real-shaped assistant line parses", claude !== null);
   eq("claude: model carries through", claude.model, "claude-opus-5");
   eq("claude: uncached input", claude.totals.uncachedInputTokens, 2);
@@ -218,6 +224,24 @@ async function main() {
     );
     eq("codex: the model is carried forward from turn_context", record.model, "gpt-5.5");
     eq("codex: the session id comes from session_meta", record.sessionId, "019efba8-6f47-7fa2-b182-66ae4ed19230");
+    eq("codex: session_meta without cwd leaves the project null", record.project, null);
+    {
+      const withCwd = initialCodexScanState();
+      parseCodexLine(
+        JSON.stringify({
+          timestamp: "2026-06-24T22:03:02.839Z",
+          type: "session_meta",
+          payload: { id: "s2", cwd: "/Users/x/Projects/other" },
+        }),
+        withCwd,
+      );
+      parseCodexLine(turnContext("gpt-5.5"), withCwd);
+      eq(
+        "codex: session_meta cwd is carried onto every record",
+        parseCodexLine(tokenCount(), withCwd).project,
+        "/Users/x/Projects/other",
+      );
+    }
     eq("codex: input_tokens is inclusive of cache", record.totals.uncachedInputTokens, 12874 - 12672);
     eq("codex: cached input", record.totals.cachedInputTokens, 12672);
     eq("codex: output", record.totals.outputTokens, 635);
@@ -303,6 +327,14 @@ async function main() {
     const record = parsePiLine(piMessage(), state);
     check("cora: a real-shaped assistant message parses", record !== null);
     eq("cora: the session id comes from the header line", record.sessionId, "run-mshkh9ky-1ffh0j-auto-fast-0-1");
+    {
+      const withCwd = initialPiScanState();
+      parsePiLine(
+        JSON.stringify({ type: "session", id: "s3", cwd: "/Users/x/Projects/cora", timestamp: "2026-07-01T00:00:00Z", version: 1 }),
+        withCwd,
+      );
+      eq("cora: the header cwd is the project", parsePiLine(piMessage(), withCwd).project, "/Users/x/Projects/cora");
+    }
     eq("cora: input maps to uncached input", record.totals.uncachedInputTokens, 2);
     eq("cora: cacheRead maps to cached input", record.totals.cachedInputTokens, 0);
     eq("cora: cacheWrite maps to cache creation", record.totals.cacheCreationTokens, 14361);
@@ -365,8 +397,24 @@ async function main() {
     lookupUsagePrice("claude-sonnet-5", "cora").input,
     2,
   );
+  eq(
+    "pricing: a listed point release prices at its own row",
+    lookupUsagePrice("claude-fable-5-1", "claude").input,
+    10,
+  );
+  eq(
+    "pricing: an unlisted point release falls back to its family's major version",
+    lookupUsagePrice("claude-opus-5-2", "claude").input,
+    5,
+  );
+  eq(
+    "pricing: a dated unlisted point release still resolves",
+    lookupUsagePrice("claude-fable-5-1-20260901[1m]", "claude").output,
+    50,
+  );
   eq("pricing: a bare family name is ambiguous and stays unpriced", lookupUsagePrice("opus", "claude"), null);
-  eq("pricing: <synthetic> was never billed", lookupUsagePrice("<synthetic>", "claude"), null);
+  eq("pricing: <synthetic> was never billed, so it prices at zero", lookupUsagePrice("<synthetic>", "claude").output, 0);
+  eq("pricing: the claude-test fixture model prices at zero", lookupUsagePrice("claude-test", "claude").input, 0);
   eq("pricing: an unknown model stays unpriced", lookupUsagePrice("llama-9", "codex"), null);
   eq(
     "pricing: a model without a cacheRead rate falls back to the input rate",
@@ -449,6 +497,31 @@ async function main() {
     const result = aggregator.finish();
     eq("aggregation: both out-of-window records are reported", result.outOfWindow, 2);
     eq("aggregation: only the in-window record survives", result.buckets.length, 1);
+  }
+  {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-07-20",
+      untilDay: "2026-07-31",
+      lookup: lookupUsagePrice,
+    });
+    aggregator.add(record({ project: "/p/one", sessionId: "s-1", timestampMs: Date.parse("2026-07-21T10:00:00Z") }));
+    aggregator.add(record({ project: "/p/one", sessionId: "s-1", timestampMs: Date.parse("2026-07-21T11:00:00Z"), model: "claude-sonnet-5" }));
+    aggregator.add(record({ project: "/p/one", sessionId: "s-1", timestampMs: Date.parse("2026-07-21T12:00:00Z") }));
+    aggregator.add(record({ project: "/p/two", sessionId: "s-2", timestampMs: Date.parse("2026-07-22T10:00:00Z") }));
+    aggregator.add(record({ project: null, sessionId: "s-3", timestampMs: Date.parse("2026-07-23T10:00:00Z"), provider: "codex", model: "gpt-5.5" }));
+    const result = aggregator.finish();
+    eq("projects: one row per provider and directory", result.projects.length, 3);
+    eq("projects: the costliest project leads", result.projects[0].project, "/p/one");
+    eq("projects: records are counted", result.projects[0].records, 3);
+    eq("projects: sessions are distinct", result.projects[0].sessions, 1);
+    eq("projects: a record without cwd lands on the empty project", result.projects.find((row) => row.provider === "codex").project, "");
+    eq("sessions: newest first", result.recentSessions[0].sessionId, "s-3");
+    const first = result.recentSessions.find((row) => row.sessionId === "s-1");
+    eq("sessions: the majority model names the session", first.model, "claude-opus-5");
+    eq("sessions: first and last stamps span the session", first.lastMs - first.firstMs, 2 * 60 * 60 * 1000);
+    eq("sessions: records are turns", first.records, 3);
+    eq("sessions: the project is carried", first.project, "/p/one");
   }
   {
     // The Claude content-block repeat: the same message written once per block,
@@ -612,6 +685,7 @@ async function main() {
     },
     reportedCostUsd: null,
     dedupeKey: null,
+    project: null,
     ...over,
   });
 
@@ -625,7 +699,7 @@ async function main() {
           provider: "claude",
           // One row with both optional fields null, one with both populated:
           // the interned encoding must round-trip either.
-          records: [cachedRecord(), cachedRecord({ dedupeKey: "m:r", reportedCostUsd: 0.25 })],
+          records: [cachedRecord(), cachedRecord({ dedupeKey: "m:r", reportedCostUsd: 0.25, project: "/Users/x/app" })],
         },
       ],
       ["/tmp/b.jsonl", { size: 20, mtimeMs: 2000, provider: "cora", records: [cachedRecord({ provider: "cora", model: "gpt-5.6-sol", sessionId: "session-b" })] }],
@@ -643,6 +717,13 @@ async function main() {
     eq("cache codec: a populated dedupe key survives", restored.get("/tmp/a.jsonl").records[1].dedupeKey, "m:r");
     eq("cache codec: a populated cost survives", restored.get("/tmp/a.jsonl").records[1].reportedCostUsd, 0.25);
     eq("cache codec: token totals survive", restored.get("/tmp/a.jsonl").records[0].totals.cacheCreationTokens, 3);
+    eq("cache codec: a null project stays null", restored.get("/tmp/a.jsonl").records[0].project, null);
+    eq("cache codec: the interned project survives", restored.get("/tmp/a.jsonl").records[1].project, "/Users/x/app");
+    // A record cached by the version-1 writer never had the field at all.
+    const legacy = new Map([["/tmp/c.jsonl", { size: 1, mtimeMs: 1, provider: "claude", records: [(() => { const r = cachedRecord(); delete r.project; return r; })()] }]]);
+    const legacyRestored = new Map();
+    decodeScanCache(encodeScanCache(legacy), legacyRestored);
+    eq("cache codec: a record without the project field encodes as null", legacyRestored.get("/tmp/c.jsonl").records[0].project, null);
   }
   {
     // A corrupt row must disqualify its WHOLE file entry. Keeping the surviving
