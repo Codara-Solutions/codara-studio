@@ -31,6 +31,8 @@ export interface UsageRecord {
   timestampMs: number;
   model: string;
   sessionId: string;
+  /** The working directory the session ran in, or null when the transcript did not say. */
+  project: string | null;
   totals: UsageTokenTotals;
   /** Cost the transcript itself reported, when it carried one. */
   reportedCostUsd: number | null;
@@ -76,12 +78,39 @@ export interface UsageSummaryInput {
   timeZone: string;
 }
 
+/** One project's share of the window, across every model it used. */
+export interface UsageProjectRow {
+  provider: UsageProviderKind;
+  /** Working directory as recorded, or "" for records that carried none. */
+  project: string;
+  totals: UsageTokenTotals;
+  costUsd: number;
+  sessions: number;
+  records: number;
+}
+
+/** One session's footprint in the window; the page shows the most recent few. */
+export interface UsageSessionRow {
+  provider: UsageProviderKind;
+  sessionId: string;
+  project: string;
+  /** The model that produced most of the session's records. */
+  model: string;
+  firstMs: number;
+  lastMs: number;
+  totals: UsageTokenTotals;
+  costUsd: number;
+  records: number;
+}
+
 export interface UsageSummary {
   readAt: string;
   timeZone: string;
   sinceDay: string;
   untilDay: string;
   buckets: UsageDayBucket[];
+  projects: UsageProjectRow[];
+  recentSessions: UsageSessionRow[];
   sources: UsageSource[];
   scanDurationMs: number;
   /** Names where the prices came from, so the UI can attribute the estimate. */
@@ -110,6 +139,10 @@ export function totalTokens(totals: UsageTokenTotals): number {
 
 function int(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -177,6 +210,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     timestampMs,
     model,
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
+    project: nonEmptyString(record["cwd"]),
     totals: {
       uncachedInputTokens: int(usageRecord["input_tokens"]),
       cachedInputTokens: int(usageRecord["cache_read_input_tokens"]),
@@ -199,11 +233,12 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 export interface CodexScanState {
   model: string;
   sessionId: string;
+  cwd: string | null;
   lastUsageSignature: string | null;
 }
 
 export function initialCodexScanState(): CodexScanState {
-  return { model: "", sessionId: "", lastUsageSignature: null };
+  return { model: "", sessionId: "", cwd: null, lastUsageSignature: null };
 }
 
 /**
@@ -231,6 +266,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   if (record["type"] === "session_meta") {
     const id = payloadRecord["id"] ?? payloadRecord["session_id"];
     if (typeof id === "string") state.sessionId = id;
+    state.cwd = nonEmptyString(payloadRecord["cwd"]) ?? state.cwd;
     return null;
   }
 
@@ -281,6 +317,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,
+    project: state.cwd,
     totals,
     // Rollouts carry no cost, and one file is one session, so no global dedup.
     reportedCostUsd: null,
@@ -293,10 +330,11 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 /** Rolling state for one Pi session file: the id from its header line. */
 export interface PiScanState {
   sessionId: string;
+  cwd: string | null;
 }
 
 export function initialPiScanState(fallbackSessionId = ""): PiScanState {
-  return { sessionId: fallbackSessionId };
+  return { sessionId: fallbackSessionId, cwd: null };
 }
 
 /**
@@ -321,6 +359,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
     if (typeof record["id"] === "string" && record["id"].length > 0) {
       state.sessionId = record["id"];
     }
+    state.cwd = nonEmptyString(record["cwd"]) ?? state.cwd;
     return null;
   }
 
@@ -356,6 +395,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
     timestampMs,
     model,
     sessionId: state.sessionId,
+    project: state.cwd,
     totals: {
       uncachedInputTokens: int(usageRecord["input"]),
       cachedInputTokens: int(usageRecord["cacheRead"]),
@@ -477,8 +517,13 @@ export interface UsageAggregateOptions {
   lookup: UsagePriceLookup;
 }
 
+/** How many sessions the summary keeps, newest first. */
+export const RECENT_SESSION_LIMIT = 40;
+
 export interface UsageAggregateResult {
   buckets: UsageDayBucket[];
+  projects: UsageProjectRow[];
+  recentSessions: UsageSessionRow[];
   /** Records dropped because an earlier record carried the same dedupe key. */
   duplicatesDropped: number;
   /** Records whose local day fell outside the requested window. */
@@ -502,6 +547,27 @@ interface MutableBucket {
   sessions: Set<string>;
 }
 
+interface MutableProject {
+  provider: UsageProviderKind;
+  project: string;
+  totals: UsageTokenTotals;
+  costUsd: number;
+  records: number;
+  sessions: Set<string>;
+}
+
+interface MutableSession {
+  provider: UsageProviderKind;
+  sessionId: string;
+  project: string;
+  firstMs: number;
+  lastMs: number;
+  totals: UsageTokenTotals;
+  costUsd: number;
+  records: number;
+  modelCounts: Map<string, number>;
+}
+
 /**
  * Folds records into `(day, provider, model)` cells.
  *
@@ -511,6 +577,8 @@ interface MutableBucket {
  */
 export class UsageAggregator {
   private readonly buckets = new Map<string, MutableBucket>();
+  private readonly projects = new Map<string, MutableProject>();
+  private readonly sessions = new Map<string, MutableSession>();
   private readonly seen = new Set<string>();
   private readonly toDay: (timestampMs: number) => string;
   private readonly options: UsageAggregateOptions;
@@ -583,10 +651,94 @@ export class UsageAggregator {
     if (priced.costSource === "reported") bucket.reportedRecords += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
+
+    const project = record.project ?? "";
+    const projectKey = `${record.provider}\n${project}`;
+    let projectRow = this.projects.get(projectKey);
+    if (projectRow === undefined) {
+      projectRow = {
+        provider: record.provider,
+        project,
+        totals: EMPTY_USAGE_TOTALS,
+        costUsd: 0,
+        records: 0,
+        sessions: new Set<string>(),
+      };
+      this.projects.set(projectKey, projectRow);
+    }
+    projectRow.totals = addUsageTotals(projectRow.totals, record.totals);
+    projectRow.costUsd += priced.costUsd;
+    projectRow.records += 1;
+    if (record.sessionId.length > 0) projectRow.sessions.add(record.sessionId);
+
+    if (record.sessionId.length > 0) {
+      const sessionKey = `${record.provider}\n${record.sessionId}`;
+      let session = this.sessions.get(sessionKey);
+      if (session === undefined) {
+        session = {
+          provider: record.provider,
+          sessionId: record.sessionId,
+          project,
+          firstMs: record.timestampMs,
+          lastMs: record.timestampMs,
+          totals: EMPTY_USAGE_TOTALS,
+          costUsd: 0,
+          records: 0,
+          modelCounts: new Map(),
+        };
+        this.sessions.set(sessionKey, session);
+      }
+      if (session.project.length === 0 && project.length > 0) session.project = project;
+      session.firstMs = Math.min(session.firstMs, record.timestampMs);
+      session.lastMs = Math.max(session.lastMs, record.timestampMs);
+      session.totals = addUsageTotals(session.totals, record.totals);
+      session.costUsd += priced.costUsd;
+      session.records += 1;
+      session.modelCounts.set(record.model, (session.modelCounts.get(record.model) ?? 0) + 1);
+    }
     return true;
   }
 
   finish(): UsageAggregateResult {
+    const projects: UsageProjectRow[] = [...this.projects.values()]
+      .map((row) => ({
+        provider: row.provider,
+        project: row.project,
+        totals: row.totals,
+        costUsd: row.costUsd,
+        sessions: row.sessions.size,
+        records: row.records,
+      }))
+      .sort(
+        (a, b) =>
+          b.costUsd - a.costUsd ||
+          totalTokens(b.totals) - totalTokens(a.totals) ||
+          a.project.localeCompare(b.project),
+      );
+    const recentSessions: UsageSessionRow[] = [...this.sessions.values()]
+      .sort((a, b) => b.lastMs - a.lastMs || a.sessionId.localeCompare(b.sessionId))
+      .slice(0, RECENT_SESSION_LIMIT)
+      .map((session) => {
+        let model = "";
+        let best = -1;
+        for (const [candidate, count] of session.modelCounts) {
+          if (count > best) {
+            best = count;
+            model = candidate;
+          }
+        }
+        return {
+          provider: session.provider,
+          sessionId: session.sessionId,
+          project: session.project,
+          model,
+          firstMs: session.firstMs,
+          lastMs: session.lastMs,
+          totals: session.totals,
+          costUsd: session.costUsd,
+          records: session.records,
+        };
+      });
     const buckets: UsageDayBucket[] = [];
     for (const bucket of this.buckets.values()) {
       buckets.push({
@@ -610,6 +762,8 @@ export class UsageAggregator {
     );
     return {
       buckets,
+      projects,
+      recentSessions,
       duplicatesDropped: this.duplicatesDropped,
       outOfWindow: this.outOfWindow,
     };

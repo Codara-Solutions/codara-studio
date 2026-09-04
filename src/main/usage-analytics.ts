@@ -49,7 +49,8 @@ const CACHE_RETENTION_DAYS = 90;
 // main process's loop; yielding keeps IPC (and the window) responsive.
 const FILES_PER_YIELD = 24;
 
-const SCAN_CACHE_VERSION = 1;
+// Version 2 added the interned project (working directory) per record.
+const SCAN_CACHE_VERSION = 2;
 
 export interface CachedFile {
   size: number;
@@ -262,6 +263,8 @@ type SerializedRecord = [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  /** Index into the projects table, or null when the record carried none. */
+  projectIndex: number | null,
 ];
 
 interface SerializedFile {
@@ -274,8 +277,10 @@ interface SerializedFile {
 export function encodeScanCache(cache: ScanCache): string {
   const models: string[] = [];
   const sessions: string[] = [];
+  const projects: string[] = [];
   const modelIndex = new Map<string, number>();
   const sessionIndex = new Map<string, number>();
+  const projectIndex = new Map<string, number>();
   const intern = (table: string[], index: Map<string, number>, value: string): number => {
     const existing = index.get(value);
     if (existing !== undefined) return existing;
@@ -302,11 +307,13 @@ export function encodeScanCache(cache: ScanCache): string {
         record.totals.reasoningTokens,
         record.dedupeKey,
         record.reportedCostUsd,
+        // A record read before projects existed carries no field at all.
+        typeof record.project === "string" ? intern(projects, projectIndex, record.project) : null,
       ]),
     };
   }
 
-  return JSON.stringify({ version: SCAN_CACHE_VERSION, models, sessions, files });
+  return JSON.stringify({ version: SCAN_CACHE_VERSION, models, sessions, projects, files });
 }
 
 /**
@@ -325,13 +332,15 @@ export function decodeScanCache(raw: string, cache: ScanCache): void {
   if (root["version"] !== SCAN_CACHE_VERSION) return;
   const models = root["models"];
   const sessions = root["sessions"];
+  const projects = root["projects"];
   const files = root["files"];
-  if (!Array.isArray(models) || !Array.isArray(sessions)) return;
+  if (!Array.isArray(models) || !Array.isArray(sessions) || !Array.isArray(projects)) return;
   if (typeof files !== "object" || files === null) return;
   // A numeric entry in an intern table would pass the per-row guards below and
   // land in a record's model, so a corrupt table rejects the whole cache.
   if (!models.every((value) => typeof value === "string")) return;
   if (!sessions.every((value) => typeof value === "string")) return;
+  if (!projects.every((value) => typeof value === "string")) return;
 
   for (const [path, raw] of Object.entries(files as Record<string, unknown>)) {
     if (typeof raw !== "object" || raw === null) continue;
@@ -350,13 +359,18 @@ export function decodeScanCache(raw: string, cache: ScanCache): void {
     // never be re-parsed, silently losing the dropped rows' usage.
     let corrupt = false;
     for (const row of rows) {
-      if (!Array.isArray(row) || row.length < 10) {
+      if (!Array.isArray(row) || row.length < 11) {
         corrupt = true;
         break;
       }
-      const [timestampMs, mIndex, sIndex, uncached, cached, creation, output, reasoning, dedupeKey, cost] =
+      const [timestampMs, mIndex, sIndex, uncached, cached, creation, output, reasoning, dedupeKey, cost, pIndex] =
         row as SerializedRecord;
       const model = typeof mIndex === "number" ? (models as string[])[mIndex] : undefined;
+      const project = typeof pIndex === "number" ? (projects as string[])[pIndex] : null;
+      if (typeof pIndex === "number" && project === undefined) {
+        corrupt = true;
+        break;
+      }
       if (
         !Number.isFinite(timestampMs) ||
         model === undefined ||
@@ -374,6 +388,7 @@ export function decodeScanCache(raw: string, cache: ScanCache): void {
         timestampMs,
         model,
         sessionId: (typeof sIndex === "number" ? (sessions as string[])[sIndex] : undefined) ?? "",
+        project: project ?? null,
         totals: {
           uncachedInputTokens: uncached,
           cachedInputTokens: cached,
@@ -611,7 +626,14 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
     timeZone,
     sinceDay,
     untilDay,
-    buckets: aggregator.finish().buckets,
+    ...(() => {
+      const result = aggregator.finish();
+      return {
+        buckets: result.buckets,
+        projects: result.projects,
+        recentSessions: result.recentSessions,
+      };
+    })(),
     sources,
     scanDurationMs: Math.max(0, Date.now() - startedAtMs),
     pricedBy: "model-prices",
