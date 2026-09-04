@@ -302,6 +302,11 @@ async function writeSettingsToDisk(settings: AppSettings): Promise<void> {
   await writeFileAtomic(settingsPath(), json);
 }
 
+/** The last durable state, without touching disk; null before the first load. */
+export function cachedState(): AppState | null {
+  return cache;
+}
+
 export async function loadState(): Promise<AppState> {
   if (cache) return cache;
   cache = await readFromDisk();

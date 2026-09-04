@@ -434,6 +434,24 @@ function ToastCard({
         >
           {palette.title}
         </div>
+        {toast.workspaceName && (
+          <div
+            data-testid="toast-workspace"
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: "var(--muted)",
+              letterSpacing: "0.02em",
+              marginTop: -1,
+              marginBottom: 4,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {toast.workspaceName}
+          </div>
+        )}
         <div
           style={{
             fontSize: 12,

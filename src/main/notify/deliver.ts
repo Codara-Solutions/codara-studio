@@ -120,7 +120,22 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   if (channels.native && (!appFocused || !channels.inApp)) {
     try {
       if (Notification.isSupported()) {
-        const n = new Notification({ title: event.title, body: event.body });
+        // macOS has a subtitle line for the workspace; elsewhere it rides on
+        // the title so the origin is never lost in a one-line banner.
+        const n = new Notification(
+          process.platform === "darwin"
+            ? {
+                title: event.title,
+                body: event.body,
+                ...(event.workspaceName ? { subtitle: event.workspaceName } : {}),
+              }
+            : {
+                title: event.workspaceName
+                  ? `${event.title} · ${event.workspaceName}`
+                  : event.title,
+                body: event.body,
+              },
+        );
         n.on("click", () => focusTarget(event.target));
         n.show();
       }

@@ -456,6 +456,24 @@ function CenterEntry({
           >
             {entry.title || meta.label}
           </span>
+          {entry.workspaceName && (
+            <span
+              title={entry.workspaceName}
+              style={{
+                flex: "0 1 auto",
+                minWidth: 0,
+                maxWidth: "45%",
+                fontSize: 10,
+                fontWeight: 600,
+                color: "var(--muted)",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {entry.workspaceName}
+            </span>
+          )}
           <span style={{ flex: "0 0 auto", fontSize: 10, color: "var(--muted)" }}>
             {timeLabel(entry.createdAt)}
           </span>

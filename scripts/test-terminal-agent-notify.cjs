@@ -84,7 +84,7 @@ const harnessPlugin = {
           "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId && T.activeContext.paneId === t.paneId;\n" +
           "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
           "  if (!d.deliver) return;\n" +
-          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, target: t });\n" +
+          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, workspaceName: event.workspaceName, target: t });\n" +
           "}\n",
         loader: "js",
         resolveDir: path.join(ROOT, "src", "main", "notify"),
@@ -184,7 +184,10 @@ async function main() {
       T.alerts[0].target.tabId === "t1" &&
       T.alerts[0].target.paneId === "p1",
   );
-  check("alert body names the workspace", /Fleet/.test(T.alerts[0].body));
+  check(
+    "alert carries the workspace name as its own field, not in the prose",
+    /Fleet/.test(T.alerts[0].workspaceName ?? "") && !/Fleet/.test(T.alerts[0].body),
+  );
 
   // ── Scenario 2: same flow, but the user IS watching that tab → suppressed ──
   T.activeContext = { workspaceId: "ws1", tabId: "t1", paneId: "p1" };

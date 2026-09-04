@@ -1,6 +1,7 @@
 import type { BrowserWindow } from "electron";
 import { makeId } from "@shared/ids";
 import type {
+  NavigationTarget,
   NotifyEvent,
   RunStatus,
   SparkEvent,
@@ -9,6 +10,7 @@ import type {
 import { logMain } from "../file-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { getPreferenceCached, loadPreferences } from "../preferences-store";
+import { cachedState } from "../storage";
 import { isWatchingPane, isWatchingRun } from "./attention";
 import {
   activeWindow,
@@ -64,12 +66,25 @@ function watchingTarget(event: PublishInput): boolean {
   return false;
 }
 
+// The workspace name for an event's target, from the cached app state. A
+// producer that already knows the name (the terminal notifier) passes it;
+// run, automation and repository alerts only carry the id.
+function workspaceNameFor(target: NavigationTarget): string | undefined {
+  const workspaceId = "workspaceId" in target ? target.workspaceId : undefined;
+  if (!workspaceId) return undefined;
+  return cachedState()?.workspaces.find((workspace) => workspace.id === workspaceId)?.name;
+}
+
 export function publish(input: PublishInput): void {
   const event: NotifyEvent = {
     ...input,
     id: makeId("notify"),
     createdAt: new Date().toISOString(),
   };
+  if (!event.workspaceName) {
+    const name = workspaceNameFor(event.target);
+    if (name) event.workspaceName = name;
+  }
   const watching = watchingTarget(input);
   const dnd = getPreferenceCached("notificationsDnd") === true;
   const decision = decide(

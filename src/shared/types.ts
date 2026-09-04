@@ -1530,6 +1530,11 @@ export interface NotifyEvent {
   // they are worth a toast and a bell entry, but the chime is reserved for
   // "something is waiting on you". The other channels are unaffected.
   silent?: boolean;
+  // The workspace the event belongs to, by name, so every surface can say
+  // where it came from: the toast and center show it under the title, the
+  // native notification carries it as its subtitle. Filled in by publish()
+  // from the target's workspaceId when the producer does not set it.
+  workspaceName?: string;
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.
