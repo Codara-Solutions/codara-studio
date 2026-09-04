@@ -21,17 +21,27 @@ const MAX_PS_OUTPUT_BYTES = 4 * 1024 * 1024;
 const PS_TIMEOUT_MS = 2_500;
 // `lstart` is a fixed ctime-style stamp ("Tue Sep  1 23:48:34 2026"); the
 // command line follows it and runs to the end of the line.
-const PS_LINE_RE =
+const PS_LINE_RE_WITH_ARGS =
   /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s*(.*?)\s*$/;
+// The narrow form has no command column: everything after the parent pid is
+// the start stamp, exactly as the listing was read before command lines.
+const PS_LINE_RE_BARE = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
 
 // Callers that poll (the terminal notifier's one-second sweep, once per
 // watched pane) share one listing per short window instead of forking `ps`
 // per pane per tick. Signalling and teardown paths ask for a fresh list.
-let cachedList: { at: number; list: readonly Omit<OwnedProcessIdentity, "depth">[] } | null =
-  null;
+let cachedList: {
+  at: number;
+  list: readonly Omit<OwnedProcessIdentity, "depth">[];
+} | null = null;
 
 function safePid(pid: unknown): pid is number {
-  return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid;
+  return (
+    typeof pid === "number" &&
+    Number.isSafeInteger(pid) &&
+    pid > 1 &&
+    pid !== process.pid
+  );
 }
 
 function listProcesses(
@@ -41,26 +51,49 @@ function listProcesses(
   if (maxAgeMs > 0 && cachedList && Date.now() - cachedList.at <= maxAgeMs) {
     return cachedList.list;
   }
-  const result = spawnSync("ps", ["-axo", "pid=,ppid=,lstart=,args="], {
+  // The command line is wanted (it names which agent a process is) but never
+  // required: teardown only needs pid, parent and start time, and a listing
+  // that fails with the wider columns must not leave a child unsignalled. So
+  // fall back to the narrow form, with empty command lines, before giving up.
+  const processes =
+    runPs(["-axo", "pid=,ppid=,lstart=,args="], PS_LINE_RE_WITH_ARGS) ??
+    runPs(["-axo", "pid=,ppid=,lstart="], PS_LINE_RE_BARE);
+  if (!processes) return null;
+  cachedList = { at: Date.now(), list: processes };
+  return processes;
+}
+
+function runPs(
+  args: string[],
+  lineRe: RegExp,
+): Array<Omit<OwnedProcessIdentity, "depth">> | null {
+  const result = spawnSync("ps", args, {
     encoding: "utf8",
     timeout: PS_TIMEOUT_MS,
     maxBuffer: MAX_PS_OUTPUT_BYTES,
     windowsHide: true,
   });
-  if (result.error || result.status !== 0 || typeof result.stdout !== "string") return null;
-
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string")
+    return null;
   const processes: Array<Omit<OwnedProcessIdentity, "depth">> = [];
   for (const line of result.stdout.split(/\r?\n/)) {
-    const match = PS_LINE_RE.exec(line);
+    const match = lineRe.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
     const parentPid = Number(match[2]);
     const startedAt = match[3].trim();
-    if (!safePid(pid) || !Number.isSafeInteger(parentPid) || parentPid < 0 || !startedAt) continue;
+    if (
+      !safePid(pid) ||
+      !Number.isSafeInteger(parentPid) ||
+      parentPid < 0 ||
+      !startedAt
+    )
+      continue;
     processes.push({ pid, parentPid, startedAt, command: match[4] ?? "" });
   }
-  cachedList = { at: Date.now(), list: processes };
-  return processes;
+  // An empty listing means the columns did not parse at all on this platform;
+  // treat it as a failure so the caller can try the narrower form.
+  return processes.length === 0 ? null : processes;
 }
 
 /**
@@ -105,8 +138,12 @@ function currentMembers(
 ): readonly OwnedProcessIdentity[] {
   const listed = listProcesses(maxAgeMs);
   if (!listed) return [];
-  const identities = new Map(listed.map((entry) => [entry.pid, entry.startedAt]));
-  return tree.members.filter((member) => identities.get(member.pid) === member.startedAt);
+  const identities = new Map(
+    listed.map((entry) => [entry.pid, entry.startedAt]),
+  );
+  return tree.members.filter(
+    (member) => identities.get(member.pid) === member.startedAt,
+  );
 }
 
 export function signalOwnedProcessTree(
@@ -127,7 +164,9 @@ export function signalOwnedProcessTree(
   return signaled;
 }
 
-export function isOwnedProcessTreeAlive(tree: OwnedProcessTree | null): boolean {
+export function isOwnedProcessTreeAlive(
+  tree: OwnedProcessTree | null,
+): boolean {
   return tree ? currentMembers(tree).length > 0 : false;
 }
 
