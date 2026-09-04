@@ -5,6 +5,8 @@ export interface OwnedProcessIdentity {
   parentPid: number;
   startedAt: string;
   depth: number;
+  /** The full command line as `ps` prints it; empty when unavailable. */
+  command: string;
 }
 
 export interface OwnedProcessTree {
@@ -12,16 +14,31 @@ export interface OwnedProcessTree {
   members: readonly OwnedProcessIdentity[];
 }
 
-const MAX_PS_OUTPUT_BYTES = 2 * 1024 * 1024;
+const MAX_PS_OUTPUT_BYTES = 4 * 1024 * 1024;
 const PS_TIMEOUT_MS = 500;
+// `lstart` is a fixed ctime-style stamp ("Tue Sep  1 23:48:34 2026"); the
+// command line follows it and runs to the end of the line.
+const PS_LINE_RE =
+  /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s*(.*?)\s*$/;
+
+// Callers that poll (the terminal notifier's one-second sweep, once per
+// watched pane) share one listing per short window instead of forking `ps`
+// per pane per tick. Signalling and teardown paths ask for a fresh list.
+let cachedList: { at: number; list: readonly Omit<OwnedProcessIdentity, "depth">[] } | null =
+  null;
 
 function safePid(pid: unknown): pid is number {
   return typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid;
 }
 
-function listProcesses(): readonly Omit<OwnedProcessIdentity, "depth">[] | null {
+function listProcesses(
+  maxAgeMs = 0,
+): readonly Omit<OwnedProcessIdentity, "depth">[] | null {
   if (process.platform === "win32") return null;
-  const result = spawnSync("ps", ["-axo", "pid=,ppid=,lstart="], {
+  if (maxAgeMs > 0 && cachedList && Date.now() - cachedList.at <= maxAgeMs) {
+    return cachedList.list;
+  }
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,lstart=,args="], {
     encoding: "utf8",
     timeout: PS_TIMEOUT_MS,
     maxBuffer: MAX_PS_OUTPUT_BYTES,
@@ -31,14 +48,15 @@ function listProcesses(): readonly Omit<OwnedProcessIdentity, "depth">[] | null 
 
   const processes: Array<Omit<OwnedProcessIdentity, "depth">> = [];
   for (const line of result.stdout.split(/\r?\n/)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+    const match = PS_LINE_RE.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
     const parentPid = Number(match[2]);
     const startedAt = match[3].trim();
     if (!safePid(pid) || !Number.isSafeInteger(parentPid) || parentPid < 0 || !startedAt) continue;
-    processes.push({ pid, parentPid, startedAt });
+    processes.push({ pid, parentPid, startedAt, command: match[4] ?? "" });
   }
+  cachedList = { at: Date.now(), list: processes };
   return processes;
 }
 
@@ -48,9 +66,12 @@ function listProcesses(): readonly Omit<OwnedProcessIdentity, "depth">[] | null 
  * by killing its Pi parent first. Start timestamps make later signaling safe
  * even if a PID is recycled during the shutdown grace period.
  */
-export function captureOwnedProcessTree(rootPid: number): OwnedProcessTree | null {
+export function captureOwnedProcessTree(
+  rootPid: number,
+  maxAgeMs = 0,
+): OwnedProcessTree | null {
   if (!safePid(rootPid)) return null;
-  const listed = listProcesses();
+  const listed = listProcesses(maxAgeMs);
   if (!listed) return null;
   const byPid = new Map(listed.map((entry) => [entry.pid, entry]));
   if (!byPid.has(rootPid)) return null;
@@ -75,8 +96,11 @@ export function captureOwnedProcessTree(rootPid: number): OwnedProcessTree | nul
   return { rootPid, members };
 }
 
-function currentMembers(tree: OwnedProcessTree): readonly OwnedProcessIdentity[] {
-  const listed = listProcesses();
+function currentMembers(
+  tree: OwnedProcessTree,
+  maxAgeMs = 0,
+): readonly OwnedProcessIdentity[] {
+  const listed = listProcesses(maxAgeMs);
   if (!listed) return [];
   const identities = new Map(listed.map((entry) => [entry.pid, entry.startedAt]));
   return tree.members.filter((member) => identities.get(member.pid) === member.startedAt);
@@ -119,8 +143,9 @@ export function processStartMs(startedAt: string): number | null {
 export function descendantsStartedAfter(
   rootPid: number,
   sinceMs: number,
+  maxAgeMs = 0,
 ): OwnedProcessIdentity[] | null {
-  const tree = captureOwnedProcessTree(rootPid);
+  const tree = captureOwnedProcessTree(rootPid, maxAgeMs);
   if (!tree) return null;
   return tree.members.filter((member) => {
     if (member.pid === rootPid) return false;
@@ -132,7 +157,22 @@ export function descendantsStartedAfter(
 /** The subset of `members` still running under the same start time. */
 export function aliveProcesses(
   members: readonly OwnedProcessIdentity[],
+  maxAgeMs = 0,
 ): OwnedProcessIdentity[] {
   if (members.length === 0) return [];
-  return [...currentMembers({ rootPid: members[0].pid, members })];
+  return [...currentMembers({ rootPid: members[0].pid, members }, maxAgeMs)];
+}
+
+/**
+ * Every process below `rootPid` right now, excluding the root. Null when the
+ * process list is unavailable. `maxAgeMs` lets a polling caller reuse a
+ * listing taken within that window.
+ */
+export function descendantProcesses(
+  rootPid: number,
+  maxAgeMs = 0,
+): OwnedProcessIdentity[] | null {
+  const tree = captureOwnedProcessTree(rootPid, maxAgeMs);
+  if (!tree) return null;
+  return tree.members.filter((member) => member.pid !== rootPid);
 }

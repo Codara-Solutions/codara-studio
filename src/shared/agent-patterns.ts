@@ -283,6 +283,37 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
   return null;
 }
 
+// Which first-party agent a live PROCESS is, from its `ps` command line. This
+// is the process-tree counterpart of runtimeFromCommandLine: that one reads a
+// shell command as typed (so `npx codex` resolves through the wrapper list),
+// while a running process shows its resolved executable, which may be a
+// versioned native binary ("codex-aarch64-apple-darwin"), a script under a
+// runtime ("node .../codex.js"), or the bare name. A shell that merely
+// carries the agent's name in its own `-c` string is not the agent.
+const AGENT_PROCESS_BASENAME_RE = /^(claude|codex|grok)(?:[-.][\w.-]*)?$/;
+// A running agent script shows its interpreter first ("node …/codex.js"),
+// which never appears in a typed launch command, hence the wider set here.
+const AGENT_PROCESS_WRAPPERS = new Set([...AGENT_LAUNCH_WRAPPERS, "node", "nodejs", "python", "python3"]);
+export function runtimeFromProcessCommand(command: string): PublicAgentRuntime | null {
+  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const basename = (token: string): string =>
+    token.toLowerCase().split(/[/\\]/).pop() ?? "";
+  const first = basename(tokens[0]);
+  // A shell wrapper (`/bin/zsh -ic "claude …"`) names the agent in its
+  // arguments but is not the agent process; the real one is its child.
+  if (/^(?:-?(?:zsh|bash|sh|fish|pwsh|powershell|cmd))(?:\.exe)?$/.test(first)) return null;
+  const candidates = AGENT_PROCESS_WRAPPERS.has(first.replace(/\.exe$/, ""))
+    ? tokens.slice(1).filter((token) => !token.startsWith("-"))
+    : [tokens[0]];
+  for (const token of candidates) {
+    const name = basename(token).replace(/\.(?:js|cjs|mjs|exe)$/, "");
+    const match = AGENT_PROCESS_BASENAME_RE.exec(name);
+    if (match) return match[1] as PublicAgentRuntime;
+  }
+  return null;
+}
+
 // ── Generic-arm runtime promotion (renderer arming-race recovery) ──────────
 // The renderer's terminal poller can "arm" a pane as running BEFORE it knows
 // which agent CLI it is: Claude enters the alt screen (`ESC[?1049h`) a beat
