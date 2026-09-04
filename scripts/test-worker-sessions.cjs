@@ -223,6 +223,20 @@ async function main() {
   ));
   check("Codex supports response-item user records", codexFallback.title === "Review this change");
 
+  const codexInjectedContext = parseCodexSessionHead(jsonl(
+    { type: "response_item", payload: { type: "message", role: "user", content: [
+      { type: "input_text", text: "# AGENTS.md instructions for /workspace/project\n\n<INSTRUCTIONS>Repository rules</INSTRUCTIONS><environment_context>cwd</environment_context>" },
+    ] } },
+    { type: "event_msg", payload: { type: "user_message", message: '<codex_internal_context source="goal">Continue the goal</codex_internal_context>' } },
+    { type: "event_msg", payload: { type: "user_message", message: '<image name=[Image #1] path="/tmp/screenshot.png">[Image #1]</image> Fix the session launch' } },
+  ));
+  check("Codex titles skip repository context and image markup", codexInjectedContext.title === "Fix the session launch");
+  const codexIncompleteContext = parseCodexSessionHead(jsonl(
+    { type: "event_msg", payload: { type: "user_message", message: "<environment_context>truncated context" } },
+    { type: "event_msg", payload: { type: "user_message", message: "Explain this error" } },
+  ));
+  check("Codex titles skip incomplete injected wrappers", codexIncompleteContext.title === "Explain this error");
+
   const codexSubagent = parseCodexSessionHead(jsonl({
     type: "session_meta",
     payload: {

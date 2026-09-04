@@ -3035,6 +3035,9 @@ export function useTerminalSession({
         }
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
+        if (!disposed) {
+          onAgentStateRef.current?.({ runtime: null, running: false, exitConfirmed: true });
+        }
         consumeBootResume();
         return;
       }

@@ -1,3 +1,5 @@
+import type { ShellInfo } from "@shared/types";
+
 const MAX_STARTUP_COMMAND_LENGTH = 8_192;
 const MAX_STARTUP_ARG_COUNT = 48;
 const SAFE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,255}$/;
@@ -7,6 +9,25 @@ export interface ManualAgentStartup {
   runtime: "claude" | "codex" | "grok";
   /** Complete child argv, including argv[0]. */
   childArgv: string[];
+}
+
+export function formatManualAgentStartup(
+  startup: ManualAgentStartup,
+  binary: string,
+  family: ShellInfo["family"],
+): string {
+  const args = startup.childArgv.slice(1);
+  if (family === "pwsh" || family === "powershell") {
+    const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+    return `& ${[binary, ...args].map(quote).join(" ")}`;
+  }
+  if (family === "cmd") {
+    return `"${binary}" ${args.map((arg) => `"${arg}"`).join(" ")}`;
+  }
+  const quote = (value: string): string => family === "fish"
+    ? `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
+    : `'${value.replace(/'/g, "'\\''")}'`;
+  return [binary, ...args].map(quote).join(" ");
 }
 
 /**
@@ -217,4 +238,3 @@ function tokenizeKnownStartup(source: string): string[] | null {
   push();
   return tokens;
 }
-

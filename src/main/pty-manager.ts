@@ -2,7 +2,7 @@ import * as nodePty from "node-pty";
 import { spawn as spawnChild } from "node:child_process";
 import { promises as fsp, chmodSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { WebContents } from "electron";
 import type {
@@ -15,11 +15,12 @@ import type {
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
+import { resolveBinary } from "./binary-resolver";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { getConnection, shQuote } from "./remote/connections";
-import { parseManualAgentStartupCommand } from "./manual-agent-startup";
+import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
 import { isCodaraManagedCliPath } from "./orchestration/codara-managed-cli-roots";
@@ -839,6 +840,25 @@ async function spawnWithSessionLock(
   }
 
   let preparedOpts = opts;
+  let resolvedStartup = opts.startupCommand;
+  if (parsedStartup) {
+    const binary = await resolveBinary(parsedStartup.runtime);
+    if (!binary) {
+      throw new Error(`Cannot find ${parsedStartup.runtime}. Install its CLI, restart Codara, and try again.`);
+    }
+    resolvedStartup = formatManualAgentStartup(parsedStartup, binary, opts.shell.family);
+    const pathKey = process.platform === "win32" ? "Path" : "PATH";
+    const launchEnv = { ...opts.shell.env, ...opts.env };
+    const inheritedPath = Object.entries(launchEnv).find(([key]) => key.toLowerCase() === "path")?.[1];
+    // npm shims may need a sibling node binary even when argv[0] is absolute.
+    const baseEnv: Record<string, string> = {};
+    injectEnrichedPath(baseEnv);
+    for (const key of Object.keys(launchEnv)) {
+      if (key.toLowerCase() === "path") delete launchEnv[key];
+    }
+    launchEnv[pathKey] = [dirname(binary), inheritedPath ?? baseEnv[pathKey]].filter(Boolean).join(delimiter);
+    preparedOpts = { ...preparedOpts, env: launchEnv };
+  }
   if (
     opts.nativeCodexProfileId !== undefined ||
     parsedStartup?.runtime === "codex"
@@ -856,7 +876,7 @@ async function spawnWithSessionLock(
       () => undefined,
     );
     preparedOpts = {
-      ...opts,
+      ...preparedOpts,
       nativeCodexProfileId: execution.profileId,
       nativeCodexHome,
       releaseNativeCodexProfileLease,
@@ -956,7 +976,7 @@ async function spawnWithSessionLock(
     preparedOpts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
   const launch = withStartupCommand(
     preparedOpts.shell,
-    preparedOpts.startupCommand,
+    resolvedStartup,
     noShellIntegration,
   );
   const spawnOpts: SpawnOptions =
