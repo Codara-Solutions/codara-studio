@@ -47,10 +47,11 @@ async function main() {
   const laterAnchor = mod.descendantsStartedAfter(root.pid, Date.now() + 60_000);
   check("a future anchor lists nothing", Array.isArray(laterAnchor) && laterAnchor.length === 0);
   check("listed processes are alive while running", mod.aliveProcesses(found).length === 1);
-  check("members carry their command line", /sleep/.test(found[0].command));
-  const below = mod.descendantProcesses(root.pid);
-  check("descendantProcesses lists the sleep and not the root", Array.isArray(below) && below.length === 1 && below[0].pid !== root.pid);
-  const cachedBelow = mod.descendantProcesses(root.pid, 5_000);
+  check("the narrow listing leaves the command line empty", found[0].command === "");
+  const below = await mod.descendantProcessesWithCommands(root.pid);
+  check("descendantProcessesWithCommands lists the sleep and not the root", Array.isArray(below) && below.length === 1 && below[0].pid !== root.pid);
+  check("the async listing carries the command line", /sleep/.test(below[0].command));
+  const cachedBelow = await mod.descendantProcessesWithCommands(root.pid, 5_000);
   check("a cached listing within the window answers the same", Array.isArray(cachedBelow) && cachedBelow.length === 1);
   await new Promise((r) => root.on("exit", r));
   await sleep(300);

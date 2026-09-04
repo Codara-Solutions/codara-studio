@@ -16,7 +16,7 @@ import {
 import * as pty from "./pty-manager";
 import {
   aliveProcesses,
-  descendantProcesses,
+  descendantProcessesWithCommands,
   descendantsStartedAfter,
   type OwnedProcessIdentity,
 } from "./owned-process-tree";
@@ -229,6 +229,10 @@ interface PaneWatcher {
   // pane's shell at least once since the runtime was identified.
   agentProcSeen: boolean;
   lastAgentProcCheckAt: number;
+  // Set by the async listing when the agent process was seen and is now gone;
+  // the next sweep consumes it.
+  agentProcGone: boolean;
+  agentProcCheckInflight: boolean;
   // When the last non-empty decoded chunk arrived, any content. Backs the
   // teammate counter's silence self-heal in the sweep.
   lastOutputAt: number;
@@ -359,6 +363,8 @@ export function syncTerminalNotifyPanes(input: {
       lastBackgroundProcCheckAt: 0,
       agentProcSeen: false,
       lastAgentProcCheckAt: 0,
+      agentProcGone: false,
+      agentProcCheckInflight: false,
       lastOutputAt: 0,
       lastEmittedState: null,
     };
@@ -959,6 +965,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     if (sniffed) {
       w.runtime = sniffed;
       w.agentProcSeen = false;
+      w.agentProcGone = false;
       w.lastAgentProcCheckAt = 0;
       w.state = "idle";
       w.workingSince = 0;
@@ -1230,29 +1237,47 @@ function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
   w.hookSubagentsActive = 0;
   clearBackgroundWork(w);
   w.agentProcSeen = false;
+  w.agentProcGone = false;
   w.lastAgentProcCheckAt = 0;
   w.ring = "";
   w.userTurnArmed = false;
 }
 
 // True once the agent process that was running under this pane's shell is no
-// longer there. Fail-safe in every uncertain case: no pid, no process list
+// longer there. The listing is read off the main thread; each check kicks one
+// off (shared across panes within a short window) and records its verdict for
+// the next sweep. Fail-safe in every uncertain case: no pid, no process list
 // (Windows), or an agent whose binary name is not recognised never arms, so a
 // live agent is never declared gone on a guess.
 function agentProcessGone(w: PaneWatcher, now: number): boolean {
+  if (w.agentProcGone) {
+    w.agentProcGone = false;
+    return true;
+  }
+  if (w.agentProcCheckInflight) return false;
   if (now - w.lastAgentProcCheckAt < AGENT_PROC_RECHECK_MS) return false;
   w.lastAgentProcCheckAt = now;
   const rootPid = pty.sessionPid(w.paneId);
   if (rootPid === null) return false;
-  const below = descendantProcesses(rootPid, PROCESS_LIST_MAX_AGE_MS);
-  if (below === null) return false;
-  const present = below.some((proc) => runtimeFromProcessCommand(proc.command) === w.runtime);
-  if (present) {
-    if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${w.runtime} process seen under pid ${rootPid}`);
-    w.agentProcSeen = true;
-    return false;
-  }
-  return w.agentProcSeen;
+  const runtime = w.runtime;
+  w.agentProcCheckInflight = true;
+  void descendantProcessesWithCommands(rootPid, PROCESS_LIST_MAX_AGE_MS)
+    .then((below) => {
+      // The pane may have changed hands while the listing ran.
+      if (below === null || w.runtime !== runtime) return;
+      const present = below.some((proc) => runtimeFromProcessCommand(proc.command) === runtime);
+      if (present) {
+        if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);
+        w.agentProcSeen = true;
+      } else if (w.agentProcSeen) {
+        w.agentProcGone = true;
+      }
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      w.agentProcCheckInflight = false;
+    });
+  return false;
 }
 
 // An explicit OSC 9/777 from the foreground program. Codex's own copy says
