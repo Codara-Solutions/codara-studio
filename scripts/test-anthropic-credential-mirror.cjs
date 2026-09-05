@@ -269,6 +269,20 @@ async function main() {
     pass("a fresher Pi token flows to Claude Code and the pair is then in sync");
   }
 
+  {
+    const pair = makePair();
+    pair.adapter = makeAdapter(credentialsMod.fileOnlyClaudeCliCredentialBackend);
+    writePi(pair, pi(5));
+    const file = credentialsMod.claudeCredentialFile(pair.location.configDir);
+    const extras = { mcpOAuth: { server: { accessToken: "mcp-live", refreshToken: "mcp-refresh" } } };
+    fs.writeFileSync(file, JSON.stringify({ ...extras, claudeAiOauth: claude(3) }), { mode: 0o600 });
+    assert.equal((await reconcile(pair)).wrote, "cli");
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(raw.mcpOAuth, extras.mcpOAuth);
+    assert.equal(raw.claudeAiOauth.accessToken, "pi-access-5");
+    assert.equal(readPi(pair).mcpOAuth, undefined, "MCP grants never enter Pi account credentials");
+    pass("the real file backend preserves MCP grants during a mirror reconciliation");
+  }
   // Identity crossover: the user logs their OWN ~/.claude into a different
   // account. Claude's tokens are opaque, so the slot's identity record is the
   // only witness; without consulting it the row would adopt a stranger's

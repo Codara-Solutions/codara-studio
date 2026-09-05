@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   claudeCliManagedProfileConfigDir,
   isClaudeCliManagedProfileId,
@@ -8,6 +9,7 @@ import {
 } from "./claude-cli-account-profiles";
 import {
   defaultClaudeCliCredentialBackend,
+  parseClaudeCredentialRecord,
   type ClaudeCliCredentialBackend,
 } from "./claude-cli-credentials";
 
@@ -191,7 +193,10 @@ export async function undoLiveSlotSwap(
         const verified = await backend
           .read(input.personalConfigDir, input.personalConfigDirEnv)
           .catch(() => null);
-        if (verified !== vaulted) {
+        if (!isDeepStrictEqual(
+          parseClaudeCredentialRecord(verified),
+          parseClaudeCredentialRecord(vaulted),
+        )) {
           throw new Error("The personal Claude login could not be restored to ~/.claude");
         }
         result.personalRestored = true;

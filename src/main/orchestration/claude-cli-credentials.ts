@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { lock } from "proper-lockfile";
 import { atomicWritePrivateFile } from "./native-cli-atomic-file";
 
 /**
@@ -10,9 +11,12 @@ import { atomicWritePrivateFile } from "./native-cli-atomic-file";
  * does it: on macOS the Keychain item for the config directory is consulted
  * first and the 0600 `.credentials.json` file second; elsewhere only the file
  * exists. A managed directory is written in both places so a terminal started
- * against it sees the same token Codara sees; the personal slot on macOS is
- * written to the Keychain alone, where Claude Code keeps it.
+ * against it sees the same token Codara sees; the personal slot on macOS
+ * updates the Keychain and an existing credential file, without creating a
+ * file for a login that uses only the Keychain.
  *
+ * Only claudeAiOauth is changed. MCP grants and other fields in each store
+ * survive writes and sign-outs, and never move to a different account.
  * Nothing here selects an account. Which directory a terminal runs in is the
  * account store's decision (CLAUDE_CONFIG_DIR per managed profile, unset for
  * the user's own ~/.claude); this module only moves bytes for one directory.
@@ -71,7 +75,7 @@ export function claudeCredentialFile(configDir: string): string {
   return join(resolve(configDir), CLAUDE_CREDENTIALS_FILE);
 }
 
-export function normalizeCredential(value: string | Buffer): string {
+function normalizeCredentialStore(value: string | Buffer): string {
   const text = Buffer.isBuffer(value) ? value.toString("utf8") : value;
   if (Buffer.byteLength(text, "utf8") > MAX_AUTH_BYTES) {
     throw new Error("Claude account credential is unexpectedly large");
@@ -81,7 +85,16 @@ export function normalizeCredential(value: string | Buffer): string {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new TypeError();
     }
-    const oauth = (parsed as { claudeAiOauth?: unknown }).claudeAiOauth;
+    return JSON.stringify(parsed);
+  } catch {
+    throw new Error("Claude account credential is invalid");
+  }
+}
+
+export function normalizeCredential(value: string | Buffer): string {
+  const normalized = normalizeCredentialStore(value);
+  try {
+    const oauth = (JSON.parse(normalized) as { claudeAiOauth?: unknown }).claudeAiOauth;
     if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) {
       throw new TypeError();
     }
@@ -92,7 +105,7 @@ export function normalizeCredential(value: string | Buffer): string {
     ) {
       throw new TypeError();
     }
-    return JSON.stringify(parsed);
+    return normalized;
   } catch {
     // Never include JSON.parse's source excerpt: it can contain token bytes.
     throw new Error("Claude account credential is invalid");
@@ -119,14 +132,14 @@ export async function safeCredentialFile(path: string): Promise<boolean> {
 
 export async function readCredentialFile(path: string): Promise<string | null> {
   if (!(await safeCredentialFile(path))) return null;
-  return normalizeCredential(await fs.readFile(path));
+  return normalizeCredentialStore(await fs.readFile(path));
 }
 
 export async function atomicWriteCredential(
   destination: string,
   credential: string,
 ): Promise<void> {
-  await atomicWritePrivateFile(destination, normalizeCredential(credential), {
+  await atomicWritePrivateFile(destination, normalizeCredentialStore(credential), {
     maxBytes: MAX_AUTH_BYTES,
   });
 }
@@ -177,7 +190,7 @@ export function readKeychainCredential(service: string): Promise<string | null> 
           return;
         }
         try {
-          resolvePromise(normalizeCredential(stdout.trim()));
+          resolvePromise(normalizeCredentialStore(stdout.trim()));
         } catch {
           reject(new Error("Claude Code credential in Keychain is invalid"));
         }
@@ -188,7 +201,7 @@ export function readKeychainCredential(service: string): Promise<string | null> 
 
 export function writeKeychainCredential(service: string, credential: string): Promise<void> {
   if (seams.platform !== "darwin") return Promise.resolve();
-  const normalized = normalizeCredential(credential);
+  const normalized = normalizeCredentialStore(credential);
   return new Promise((resolvePromise, reject) => {
     // `security -w` without a value opens an interactive prompt. Electron's
     // hidden main process has no controlling terminal, so that form hangs or
@@ -280,7 +293,8 @@ export function fresherCredentialString(first: string, second: string): string {
   const expiry = (raw: string): number | null => {
     try {
       const record = parseClaudeCredentialRecord(raw);
-      const value = record?.expiresAt;
+      if (!record) return null;
+      const value = record.expiresAt;
       return typeof value === "number" && Number.isFinite(value) ? value : 0;
     } catch {
       return null;
@@ -293,6 +307,67 @@ export function fresherCredentialString(first: string, second: string): string {
   return b > a ? second : first;
 }
 
+function loginFromStore(raw: string | null): string | null {
+  return parseClaudeCredentialRecord(raw) === null ? null : raw;
+}
+
+/** Only the Claude login moves between accounts; MCP grants belong to this store. */
+function replaceLogin(raw: string | null, credential: string | null): string | null {
+  const store = raw === null ? {} : JSON.parse(normalizeCredentialStore(raw));
+  if (credential === null) delete store.claudeAiOauth;
+  else store.claudeAiOauth = JSON.parse(normalizeCredential(credential)).claudeAiOauth;
+  return Object.keys(store).length === 0 ? null : JSON.stringify(store);
+}
+
+async function mutateLogin(
+  configDir: string,
+  configDirEnv: string | null,
+  credential: string | null,
+  fileOnly = false,
+): Promise<void> {
+  if (credential !== null) normalizeCredential(credential);
+  const created = await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
+  let compromised = false;
+  // Claude Code 2.1.261 uses this same proper-lockfile lock for login and MCP
+  // mutations. Reading inside it prevents a concurrent MCP refresh from
+  // being replaced by the snapshot taken before the lock was acquired.
+  const release = await lock(join(configDir, ".storage-write"), {
+    realpath: false,
+    retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 },
+    stale: 15_000,
+    onCompromised: () => { compromised = true; },
+  });
+  const assertLocked = (): void => {
+    if (compromised) throw new Error("Claude credential write lock was lost");
+  };
+  try {
+    const file = claudeCredentialFile(configDir);
+    const useKeychain = !fileOnly && !keychainDisabled() && seams.platform === "darwin";
+    const service = claudeCliKeychainService(configDirEnv);
+    const fromFile = await readCredentialFile(file);
+    const fromKeychain = useKeychain ? await readKeychainCredential(service) : null;
+    // Preserve each backend's own fields. A newer Claude token in one store
+    // says nothing about the freshness of an MCP token in the other store.
+    const nextFile = replaceLogin(fromFile, credential);
+    const nextKeychain = replaceLogin(fromKeychain, credential);
+    const writeFile = !useKeychain || configDirEnv !== null || fromFile !== null;
+    assertLocked();
+    if (useKeychain && nextKeychain !== fromKeychain) {
+      if (nextKeychain === null) await deleteKeychainCredential(service);
+      else await writeKeychainCredential(service, nextKeychain);
+    }
+    assertLocked();
+    if (writeFile && nextFile !== fromFile) {
+      if (nextFile === null) await removeCredentialFile(file);
+      else await atomicWriteCredential(file, nextFile);
+    }
+    assertLocked();
+  } finally {
+    await release();
+    if (credential === null && created) await fs.rmdir(configDir).catch(() => undefined);
+  }
+}
+
 export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
   // Read both stores and let the fresher token win. A Keychain item that is
   // merely older than the file must never shadow it: mirroring a stale item
@@ -302,11 +377,13 @@ export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
   async read(configDir, configDirEnv) {
     const fromKeychain = keychainDisabled()
       ? null
-      : await readKeychainCredential(claudeCliKeychainService(configDirEnv));
-    if (fromKeychain === null) return readCredentialFile(claudeCredentialFile(configDir));
+      : loginFromStore(await readKeychainCredential(claudeCliKeychainService(configDirEnv)));
+    if (fromKeychain === null) {
+      return loginFromStore(await readCredentialFile(claudeCredentialFile(configDir)));
+    }
     let fromFile: string | null = null;
     try {
-      fromFile = await readCredentialFile(claudeCredentialFile(configDir));
+      fromFile = loginFromStore(await readCredentialFile(claudeCredentialFile(configDir)));
     } catch {
       fromFile = null;
     }
@@ -314,46 +391,23 @@ export const defaultClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
     return fresherCredentialString(fromKeychain, fromFile);
   },
   async write(configDir, configDirEnv, credential) {
-    if (keychainDisabled()) {
-      await atomicWriteCredential(claudeCredentialFile(configDir), credential);
-      return;
-    }
-    if (seams.platform === "darwin" && configDirEnv === null) {
-      // ~/.claude is Claude Code's own slot. Older Claude Code kept it in
-      // the Keychain alone; 2.1.251 refreshes into .credentials.json, so a
-      // file that exists is a live store Claude Code reads and must be
-      // updated in place, never deleted from under it. A file is still
-      // never CREATED here: a keychain-only login stays keychain-only, so
-      // an item-only `claude logout` keeps reading as signed out.
-      await writeKeychainCredential(claudeCliKeychainService(null), credential);
-      const personalFile = claudeCredentialFile(configDir);
-      const fileExists = await fs
-        .access(personalFile)
-        .then(() => true)
-        .catch(() => false);
-      if (fileExists) await atomicWriteCredential(personalFile, credential);
-      return;
-    }
-    await atomicWriteCredential(claudeCredentialFile(configDir), credential);
-    await writeKeychainCredential(claudeCliKeychainService(configDirEnv), credential);
+    await mutateLogin(configDir, configDirEnv, credential);
   },
   async clear(configDir, configDirEnv) {
-    await removeCredentialFile(claudeCredentialFile(configDir));
-    if (keychainDisabled()) return;
-    await deleteKeychainCredential(claudeCliKeychainService(configDirEnv));
+    await mutateLogin(configDir, configDirEnv, null);
   },
 };
 
 /** Test seam: the file half of the backend with no Keychain at all. */
 export const fileOnlyClaudeCliCredentialBackend: ClaudeCliCredentialBackend = {
   async read(configDir) {
-    return readCredentialFile(claudeCredentialFile(configDir));
+    return loginFromStore(await readCredentialFile(claudeCredentialFile(configDir)));
   },
   async write(configDir, _configDirEnv, credential) {
-    await atomicWriteCredential(claudeCredentialFile(configDir), credential);
+    await mutateLogin(configDir, _configDirEnv, credential, true);
   },
   async clear(configDir) {
-    await removeCredentialFile(claudeCredentialFile(configDir));
+    await mutateLogin(configDir, null, null, true);
   },
 };
 
@@ -372,6 +426,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export function parseClaudeCredentialRecord(raw: string | null): ClaudeCredentialRecord | null {
   if (raw === null) return null;
+  const store = JSON.parse(normalizeCredentialStore(raw)) as { claudeAiOauth?: unknown };
+  if (store.claudeAiOauth === undefined || store.claudeAiOauth === null) return null;
   const parsed = JSON.parse(normalizeCredential(raw)) as { claudeAiOauth: Record<string, unknown> };
   const oauth = parsed.claudeAiOauth;
   const accessToken = typeof oauth.accessToken === "string" ? oauth.accessToken : "";
@@ -419,9 +475,9 @@ export async function readClaudeCredentialRecord(
 }
 
 /**
- * 0700 directory, atomic 0600 file, then the Keychain item on macOS. Writes
- * are whole records: the caller merges into the previous record itself so
- * fields Claude Code expects (scopes, subscriptionType) are never dropped.
+ * Replace only claudeAiOauth under Claude Code's storage lock. Callers merge
+ * login fields (scopes, subscriptionType) into the previous login record;
+ * the backend preserves the surrounding credential store independently.
  */
 export async function writeClaudeCredentialRecord(
   configDir: string,

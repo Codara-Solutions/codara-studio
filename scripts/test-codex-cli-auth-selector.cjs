@@ -55,6 +55,13 @@ async function main() {
     );
     writePrivate(sharedState, "SHARED_SESSION_INDEX");
     writePrivate(legacySplitState, "LEGACY_SPLIT_INDEX");
+    const mcpCredentials = path.join(store.personalHomeDir, ".credentials.json");
+    const mcpConfig = path.join(store.personalHomeDir, "config.toml");
+    writePrivate(mcpCredentials, JSON.stringify({ server: { access_token: "MCP_TOKEN" } }));
+    writePrivate(mcpConfig, '[mcp_servers.server]\nurl = "https://mcp.example.test"\n');
+    const mcpBefore = [mcpCredentials, mcpConfig].map((file) => ({
+      content: fs.readFileSync(file, "utf8"), mtimeMs: fs.statSync(file).mtimeMs,
+    }));
 
     assert.equal(await T.ensureCodexCliAuthVault(store), "personal");
     assert.equal(
@@ -136,6 +143,10 @@ async function main() {
     assert.equal(fs.existsSync(path.dirname(managed)), false, "no orphan vault directory is created");
     assert.equal(fs.readFileSync(live, "utf8"), "PERSONAL_SECRET");
     writePrivate(managed, "MANAGED_SECRET");
+    for (const [index, file] of [mcpCredentials, mcpConfig].entries()) {
+      assert.deepEqual({ content: fs.readFileSync(file, "utf8"), mtimeMs: fs.statSync(file).mtimeMs },
+        mcpBefore[index], "Codex switches, rotations and sign-outs leave MCP credentials and config untouched");
+    }
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }

@@ -194,6 +194,49 @@ async function main() {
   assert.equal(keychain.has(service), false);
   console.log("PASS the file-only backend is Keychain-free");
 
+  const mcp = { testServer: { accessToken: "mcp-access", refreshToken: "mcp-refresh" } };
+  const other = { mcpOAuth: mcp, mcpOAuthClientInfo: { testServer: { clientId: "client" } }, futureField: { keep: true } };
+  const file = mod.claudeCredentialFile(managed);
+  fs.writeFileSync(file, JSON.stringify({ ...other, claudeAiOauth: record }), { mode: 0o600 });
+  await mod.writeClaudeCredentialRecord(managed, managed, { ...record, accessToken: "rotated" }, fileOnly);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+    ...other, claudeAiOauth: { ...record, accessToken: "rotated" },
+  }, "refreshing Claude preserves MCP tokens, client registrations and unknown fields");
+  await mod.clearClaudeCredentialRecord(managed, managed, fileOnly);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), other);
+  assert.equal(await mod.readClaudeCredentialRecord(managed, managed, fileOnly), null);
+  assert.equal(await mod.fileOnlyClaudeCliCredentialBackend.read(managed, managed), null);
+  await mod.clearClaudeCredentialRecord(managed, managed, fileOnly);
+  await mod.writeClaudeCredentialRecord(managed, managed, record, fileOnly);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { ...other, claudeAiOauth: record });
+
+  // A snapshot originating in another account must not carry its MCP grants
+  // along, or roll back an MCP rotation since that snapshot was read.
+  await mod.fileOnlyClaudeCliCredentialBackend.write(managed, managed, JSON.stringify({
+    claudeAiOauth: record, mcpOAuth: { foreignServer: { accessToken: "foreign" } },
+  }));
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).mcpOAuth, mcp);
+
+  // Hold the same cross-process lock Claude uses while its MCP login rotates.
+  const lockfile = require("proper-lockfile");
+  const release = await lockfile.lock(path.join(managed, ".storage-write"), { realpath: false });
+  let settled = false;
+  const pendingWrite = mod.writeClaudeCredentialRecord(managed, managed, record, fileOnly)
+    .then(() => { settled = true; });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(settled, false, "Codara waits for Claude's credential mutation");
+  const refreshedMcp = { ...other, mcpOAuth: { testServer: { accessToken: "new-mcp", refreshToken: "new-refresh" } } };
+  fs.writeFileSync(file, JSON.stringify({ ...refreshedMcp, claudeAiOauth: record }));
+  await release();
+  await pendingWrite;
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { ...refreshedMcp, claudeAiOauth: record });
+  fs.writeFileSync(file, '{"mcpOAuth":"SECRET_BYTES"');
+  await assert.rejects(() => mod.writeClaudeCredentialRecord(managed, managed, record, fileOnly),
+    (error) => /invalid/.test(error.message) && !error.message.includes("SECRET_BYTES"));
+  await assert.rejects(() => mod.clearClaudeCredentialRecord(managed, managed, fileOnly), /invalid/);
+  assert.equal(fs.readFileSync(file, "utf8"), '{"mcpOAuth":"SECRET_BYTES"');
+  console.log("PASS MCP grants survive refresh, sign-out, re-login and a concurrent MCP rotation");
+
   // The production backend on macOS, against a fake `security` that keeps
   // its items in a JSON file: a managed directory is written to both places,
   // the personal slot to the Keychain alone (where Claude Code keeps it), a
@@ -250,6 +293,35 @@ async function main() {
       assert.ok(fs.existsSync(mod.claudeCredentialFile(darwinManaged)), "a managed slot keeps its file");
       assert.deepEqual(JSON.parse(itemFor(darwinManaged)), { claudeAiOauth: record });
       assert.deepEqual(await mod.readClaudeCredentialRecord(darwinManaged, darwinManaged, real), record);
+
+      // Keychain and file MCP grants can rotate independently of the Claude
+      // login. Preserve both, regardless of which login wins an account read.
+      for (const [dir, env] of [[darwinManaged, darwinManaged], [darwinPersonal, null]]) {
+        const credentialFile = mod.claudeCredentialFile(dir);
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const keychainExtras = { ...other, mcpOAuth: { testServer: { accessToken: "keychain-mcp" } } };
+        await mod.writeKeychainCredential(mod.claudeCliKeychainService(env), JSON.stringify({
+          ...keychainExtras, claudeAiOauth: { ...record, expiresAt: 100 },
+        }));
+        fs.writeFileSync(credentialFile, JSON.stringify({ ...other, claudeAiOauth: record }), { mode: 0o600 });
+        await mod.writeClaudeCredentialRecord(dir, env, { ...record, accessToken: "new-login" }, real);
+        assert.deepEqual(JSON.parse(fs.readFileSync(credentialFile, "utf8")), {
+          ...other, claudeAiOauth: { ...record, accessToken: "new-login" },
+        });
+        assert.deepEqual(JSON.parse(itemFor(env)), {
+          ...keychainExtras, claudeAiOauth: { ...record, accessToken: "new-login" },
+        });
+        await mod.clearClaudeCredentialRecord(dir, env, real);
+        assert.deepEqual(JSON.parse(fs.readFileSync(credentialFile, "utf8")), other);
+        assert.deepEqual(JSON.parse(itemFor(env)), keychainExtras);
+        assert.equal(await mod.defaultClaudeCliCredentialBackend.read(dir, env), null,
+          "MCP-only stores are a signed-out Claude account");
+        await mod.writeClaudeCredentialRecord(dir, env, record, real);
+        assert.deepEqual(JSON.parse(itemFor(env)), { ...keychainExtras, claudeAiOauth: record });
+        await mod.deleteKeychainCredential(mod.claudeCliKeychainService(env));
+        fs.rmSync(credentialFile);
+      }
+      await mod.writeClaudeCredentialRecord(darwinManaged, darwinManaged, record, real);
 
       // A keychain-only personal login: writes never invent a file, so an
       // item-only `claude logout` still reads as signed out.
