@@ -21,6 +21,9 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
       args: ["."],
       env: {
         ...process.env,
+        CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+        GROK_HOME: join(fixture.userDataDir, "grok-home"),
+        CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
         PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
@@ -150,6 +153,9 @@ test("Codex stays ready during draft editing and working through partial repaint
       args: ["."],
       env: {
         ...process.env,
+        CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+        GROK_HOME: join(fixture.userDataDir, "grok-home"),
+        CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,
@@ -196,6 +202,9 @@ test("silent Codex is detected without a banner or saved session", async () => {
       args: ["."],
       env: {
         ...process.env,
+        CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+        GROK_HOME: join(fixture.userDataDir, "grok-home"),
+        CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,
@@ -214,16 +223,26 @@ test("silent Codex is detected without a banner or saved session", async () => {
     await input.press("Enter");
     await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole("status", { name: "CODEX working" })).toHaveCount(0);
+    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
+    await expect(count).toHaveText("1");
     await input.press("Control+c");
     await expect(page.getByRole("status", { name: "CODEX ready" })).toHaveCount(0, { timeout: 15_000 });
+    await expect(count).toHaveCount(0, { timeout: 15_000 });
   } finally {
     await app?.close();
   }
 });
 
-test("cold-restored Claude is rehydrated as working even when output starts immediately", async () => {
+for (const phase of ["working", "idle"] as const) {
+test(`cold-restored Claude appears in the workspace count while ${phase}`, async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture();
+  if (phase === "idle") {
+    const fakeClaude = join(fixture.binDir, process.platform === "win32" ? "claude.cmd" : "claude");
+    await writeFile(fakeClaude, process.platform === "win32"
+      ? "@echo off\r\necho Claude Code v2.1.261\r\necho ? for shortcuts\r\nping 127.0.0.1 -n 60 >nul\r\n"
+      : "#!/bin/sh\nprintf 'Claude Code v2.1.261\\r\\n❯ \\r\\n? for shortcuts\\r\\n'\nsleep 60\n");
+  }
 
   let app: ElectronApplication | null = null;
   try {
@@ -231,8 +250,10 @@ test("cold-restored Claude is rehydrated as working even when output starts imme
       args: ["."],
       env: {
         ...process.env,
-        PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
+        CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+        GROK_HOME: join(fixture.userDataDir, "grok-home"),
         CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
+        PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
         // Force PATH reconstruction to use the explicit test PATH instead of
         // the developer machine's login-shell PATH (which contains real
         // Claude ahead of this fixture binary).
@@ -291,14 +312,20 @@ test("cold-restored Claude is rehydrated as working even when output starts imme
     await page.waitForLoadState("domcontentloaded");
 
     const workspaceA = page.locator('[data-workspace-id="ws-a"]');
-    await expect(page.getByRole("status", { name: "CLAUDE working" })).toBeVisible({
+    await expect(page.getByRole("status", { name: phase === "working" ? "CLAUDE working" : "CLAUDE ready" })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(workspaceA).toHaveAttribute("aria-busy", "true");
+    const count = workspaceA.getByTestId("workspace-agent-count");
+    await expect(count).toHaveText(phase === "working" ? "1/1" : "1");
+    await expect(count).toHaveAttribute("aria-label", phase === "working" ? "1 of 1 agent working" : "1 agent idle");
+    await expect(workspaceA).toHaveAttribute("aria-busy", String(phase === "working"));
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await expect(count).toHaveText(phase === "working" ? "1/1" : "1");
   } finally {
     await app?.close();
   }
 });
+}
 
 async function prepareFixture(): Promise<{
   userDataDir: string;

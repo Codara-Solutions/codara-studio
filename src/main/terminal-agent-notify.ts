@@ -990,7 +990,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     }
     rearm(paneSourceKey(w.paneId));
   }
-  if (!w.runtime) {
+  if (!w.runtime || w.lastEmittedState === null) {
     let sniffed: PublicAgentRuntime | null = launchedRuntime;
     if (!sniffed) {
       // The ring was just updated above, so its tail is exactly the fresh
@@ -1374,6 +1374,11 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
       if (present) {
         if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);
         w.agentProcSeen = true;
+        // A restored runtime hint can bypass banner discovery entirely. The
+        // process confirms presence even when the CLI never repaints a footer.
+        if (w.lastEmittedState === null) {
+          emitPaneState(w, w.state === "failed" ? "error" : w.state);
+        }
       } else if (w.agentProcSeen) {
         w.agentProcGone = true;
       }

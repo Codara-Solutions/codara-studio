@@ -1,5 +1,6 @@
 import type { RuntimeState } from "@shared/types";
-import type { TerminalAgentSession, TerminalLeafWorker } from "./types";
+import type { Tab, TerminalAgentSession, TerminalLeafWorker } from "./types";
+import { collectLeaves } from "./paneTree";
 
 type LiveAgentRuntime = TerminalAgentSession["runtime"];
 
@@ -82,4 +83,33 @@ export function liveTerminalRuntime(
 ): LiveAgentRuntime | null {
   const chip = visibleWorkerChip(worker);
   return chip ? liveAgentRuntime(chip.runtime) : null;
+}
+
+export function terminalAgentCensus(
+  tabs: readonly Tab[],
+  detectedAgents: Readonly<Record<string, true>> = {},
+  detectedWorking: Readonly<Record<string, true>> = {},
+): { total: number; working: number } {
+  const agents = new Set(Object.keys(detectedAgents));
+  const working = new Set(Object.keys(detectedWorking));
+  for (const tab of tabs) {
+    if (tab.kind !== "terminal") continue;
+    collectLeaves(tab.root).forEach((leaf) => {
+      const worker = leaf.worker;
+      if (!worker) return;
+      if (worker.source === "spark" || worker.agentRunning === false) {
+        agents.delete(leaf.paneId);
+        working.delete(leaf.paneId);
+        return;
+      }
+      // Hydration strips transient workers. A saved resume pointer alone
+      // cannot prove the CLI launched, but a live chip must count immediately.
+      if (!liveTerminalRuntime(worker)) return;
+      agents.add(leaf.paneId);
+      if (worker.runtimeState === "working") working.add(leaf.paneId);
+      else if (worker.runtimeState) working.delete(leaf.paneId);
+    });
+  }
+  for (const paneId of working) agents.add(paneId);
+  return { total: agents.size, working: working.size };
 }
