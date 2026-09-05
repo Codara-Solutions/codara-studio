@@ -206,6 +206,14 @@ async function main() {
     emptyPtr !== null && emptyPtr.sessionId === "new-id",
   );
 
+  const codexRecord = rec({ runtime: "codex", active: true, nativeCodexProfileId: "personal" });
+  const recoveredCodex = mergeSessionStart(null, codexRecord);
+  check("merge: process-bound Codex recovers a missing restore pointer", recoveredCodex?.runtime === "codex" && recoveredCodex.active === true && recoveredCodex.sessionId === "new-id");
+  const switchedCodex = mergeSessionStart(ptr(), codexRecord);
+  check("merge: a Codex session replaces a stale Claude pointer without its profile", switchedCodex?.runtime === "codex" && switchedCodex.nativeClaudeProfileId === undefined && switchedCodex.nativeCodexProfileId === "personal");
+  const exitedCodex = mergeSessionStart(ptr({ runtime: "codex", sessionId: "new-id", active: true }), { ...codexRecord, active: false });
+  check("merge: process-confirmed Codex exit disables restore", exitedCodex?.active === false);
+
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
     process.exit(1);

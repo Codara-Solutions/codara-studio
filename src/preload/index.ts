@@ -219,7 +219,11 @@ function isMissingIpcHandlerError(err: unknown, channel: string): boolean {
 // local so the preload stays free of main-process imports.
 interface AgentSessionStartRecord {
   paneId: string;
-  runtime: "claude";
+  runtime: "claude" | "codex";
+  nativeClaudeProfileId?: string;
+  nativeCodexProfileId?: string;
+  active?: boolean;
+  restoreOnBoot?: boolean;
   sessionId: string;
   transcriptPath?: string;
   cwd?: string;

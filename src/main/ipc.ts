@@ -3060,6 +3060,14 @@ export function registerIpc(): void {
                 nativeGrokProfileId: nativeGrokExecution?.profileId,
               }
             : null;
+        } else if (args.paneId && process.platform === "darwin") {
+          // Continuous process tracking owns manual Codex identity. A cwd/mtime
+          // guess here can steal another pane's conversation while it starts.
+          const bound = latestSessionStart(args.paneId);
+          if (bound?.runtime === "codex" && bound.active && !bound.restoreOnBoot && bound.transcriptPath) {
+            found = { sessionId: bound.sessionId, transcriptPath: bound.transcriptPath,
+              nativeCodexProfileId: bound.nativeCodexProfileId };
+          }
         } else {
           // strict: an unmatched-cwd fallback here would bind the pane to some
           // OTHER session's rollout. This poll loop retries for 15s, so a

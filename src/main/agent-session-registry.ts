@@ -1,5 +1,5 @@
-// Agent-session registry — the EXACT session identity for every Claude that
-// runs in a Codara pane, fed by the SessionStart hook (see hook-watcher.ts).
+// Session identity for each pane, fed by Claude SessionStart hooks and
+// Codex process-owned transcript tracking.
 //
 // Why this exists: the renderer's restore pointer was captured by filesystem
 // discovery ("newest transcript CREATED in this cwd within 60s"), which is
@@ -22,8 +22,12 @@ import { join } from "node:path";
 
 export interface SessionStartRecord {
   paneId: string;
-  // Hooks are Claude-only today; Codex keeps the discovery heuristic.
-  runtime: "claude";
+  runtime: "claude" | "codex";
+  nativeCodexProfileId?: string;
+  /** Process-confirmed Codex presence, retained through app shutdown. */
+  active?: boolean;
+  /** Computed on read, never persisted. */
+  restoreOnBoot?: boolean;
   /** Frozen native Claude account. Missing records are legacy personal. */
   nativeClaudeProfileId?: string;
   sessionId: string;
@@ -51,6 +55,7 @@ interface RegistryDeps {
 
 let deps: RegistryDeps | null = null;
 let entries = new Map<string, SessionStartRecord>();
+let coldEntries = new Map<string, SessionStartRecord>();
 let persistTimer: NodeJS.Timeout | null = null;
 // In-flight one-time backfill, exposed via agentSessionBackfillSettled() so
 // the test harness (and any shutdown flush) can await it — boot never does.
@@ -71,7 +76,9 @@ function isValidRecord(rec: unknown): rec is SessionStartRecord {
     typeof r.paneId === "string" &&
     r.paneId.length > 0 &&
     typeof r.sessionId === "string" &&
-    r.sessionId.length > 0 &&
+    /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(r.sessionId) &&
+    (r.runtime === "claude" || r.runtime === "codex") &&
+    (r.active === undefined || typeof r.active === "boolean") &&
     typeof r.timestamp === "string"
   );
 }
@@ -93,7 +100,7 @@ export function applySessionStart(
     const incoming = parseTs(rec.timestamp);
     const current = parseTs(existing.timestamp);
     if (incoming < current) return false;
-    if (incoming === current && rec.sessionId === existing.sessionId) return false;
+    if (incoming === current && rec.sessionId === existing.sessionId && rec.active === existing.active) return false;
   }
   map.set(rec.paneId, rec);
   // Prune oldest-by-timestamp beyond the cap so the persisted file stays small.
@@ -242,21 +249,27 @@ function schedulePersist(): void {
   if (persistTimer) return;
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    const path = filePath();
-    if (!path) return;
-    const payload = JSON.stringify({
-      version: FILE_VERSION,
-      entries: [...entries.values()],
-    });
-    writeChain = writeChain
-      .then(async () => {
-        const tmp = `${path}.tmp`;
-        await fs.writeFile(tmp, payload, "utf8");
-        await fs.rename(tmp, path);
-      })
-      .catch(() => undefined); // best-effort; repopulated from hooks next boot
+    void persistEntries();
   }, PERSIST_DEBOUNCE_MS);
   persistTimer.unref?.();
+}
+
+function persistEntries(): Promise<void> {
+  const path = filePath();
+  if (!path) return Promise.resolve();
+  const payload = JSON.stringify({ version: FILE_VERSION, entries: [...entries.values()] });
+  writeChain = writeChain.then(async () => {
+    const tmp = `${path}.tmp`;
+    await fs.writeFile(tmp, payload, "utf8");
+    await fs.rename(tmp, path);
+  }).catch(() => undefined);
+  return writeChain;
+}
+
+export function flushAgentSessionRegistry(): Promise<void> {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = null;
+  return persistEntries();
 }
 
 /**
@@ -270,6 +283,7 @@ function schedulePersist(): void {
 export async function initAgentSessionRegistry(opts: RegistryDeps): Promise<void> {
   deps = opts;
   const hadFile = await loadFromDisk();
+  coldEntries = new Map(entries);
   if (!hadFile) {
     // Deliberately NOT awaited. A just-migrated processed/ history (thousands
     // of small files, cold AV-scanned reads) once stalled boot 30s+ before the
@@ -295,12 +309,13 @@ export function agentSessionBackfillSettled(): Promise<void> {
  * events re-announce the same id every turn and would otherwise be pure noise.
  */
 export function recordSessionStart(rec: SessionStartRecord): void {
-  const previousId = entries.get(rec.paneId)?.sessionId;
+  const previous = entries.get(rec.paneId);
+  const previousId = previous?.sessionId;
   if (!applySessionStart(entries, rec)) return;
   schedulePersist();
-  if (previousId === rec.sessionId) return;
+  if (previousId === rec.sessionId && previous?.runtime === rec.runtime && previous?.active === rec.active) return;
   deps?.log?.(
-    `hook bind pane=${rec.paneId} id=${rec.sessionId} source=${rec.source ?? "-"}` +
+    `session bind pane=${rec.paneId} id=${rec.sessionId} source=${rec.source ?? "-"}` +
       (previousId ? ` (was ${previousId})` : ""),
   );
   try {
@@ -312,13 +327,16 @@ export function recordSessionStart(rec: SessionStartRecord): void {
 
 /** Newest SessionStart seen for a pane (this run or persisted), or null. */
 export function latestSessionStart(paneId: string): SessionStartRecord | null {
-  return entries.get(paneId) ?? null;
+  const rec = entries.get(paneId);
+  if (!rec) return null;
+  return { ...rec, restoreOnBoot: rec.runtime === "codex" && rec.active === true && coldEntries.get(paneId) === rec };
 }
 
 // Test-only: reset module state between harness cases.
 export function __resetAgentSessionRegistryForTest(): void {
   deps = null;
   entries = new Map();
+  coldEntries = new Map();
   backfillPromise = null;
   if (persistTimer) {
     clearTimeout(persistTimer);

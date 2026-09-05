@@ -1517,6 +1517,10 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
 // reloads and cold hydration can subscribe after a transition already fired;
 // querying this snapshot lets them reconcile to the daemon's current truth
 // instead of waiting for a future edge that may never come.
+export function manualTerminalPaneIds(): Set<string> {
+  return new Set([...watchers.values()].filter((w) => !w.excluded && !w.disposing).map((w) => w.paneId));
+}
+
 export function terminalAgentStateSnapshot(workspaceId?: string): TerminalAgentStatePayload[] {
   const out: TerminalAgentStatePayload[] = [];
   for (const w of watchers.values()) {

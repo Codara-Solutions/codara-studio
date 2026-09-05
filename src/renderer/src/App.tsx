@@ -2046,13 +2046,11 @@ export default function App() {
         if (healed) {
           t.setLeafAgentSession(tab.id, rec.paneId, {
             ...healed,
-            // The hook fired because a session is starting in this pane right
-            // now, but `active` is the running-at-quit judgment the poller
-            // owns — only assert it when the TUI is already confirmed live
-            // (the poller's next tick keeps it correct either way).
-            active:
-              paneRuntimeRef.current.get(rec.paneId)?.altScreenActive === true ||
-              healed.active === true,
+            // Codex tracking confirms process presence. Claude hooks identify
+            // the conversation but still rely on the TUI for running state.
+            active: rec.runtime === "codex" && rec.active !== undefined
+              ? rec.active
+              : paneRuntimeRef.current.get(rec.paneId)?.altScreenActive === true || healed.active === true,
           });
         }
         return;

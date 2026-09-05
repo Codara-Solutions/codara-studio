@@ -39,8 +39,10 @@ import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
-import { initAgentSessionRegistry } from "./agent-session-registry";
-import { activeTerminalAgentPaneIds, noteHostResume } from "./terminal-agent-notify";
+import { initAgentSessionRegistry, flushAgentSessionRegistry } from "./agent-session-registry";
+import { createCodexSessionTracker } from "./codex-session-tracker";
+import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
+import { activeTerminalAgentPaneIds, manualTerminalPaneIds, noteHostResume } from "./terminal-agent-notify";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
@@ -1138,6 +1140,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn("[main] agent-session registry failed to init:", err);
   }
+  codexSessionTracker.start();
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
@@ -1435,6 +1438,17 @@ app.on("window-all-closed", () => {
   app.quit();
 });
 
+const codexSessionTracker = createCodexSessionTracker({
+  codexHome: defaultPersonalCodexHomeDir,
+  panes: () => {
+    const manual = manualTerminalPaneIds();
+    return pty.resourceSnapshot().sessions
+      .filter((session) => manual.has(session.id) && !session.remote)
+      .map((session) => ({ paneId: session.id, pid: session.pid,
+        generationId: session.generationId, nativeCodexProfileId: pty.nativeCodexProfileId(session.id) }));
+  },
+});
+
 // Electron does NOT await async before-quit listeners, so everything after the
 // first await would race process teardown — dropping the final flushAllStores()
 // on macOS Cmd+Q, updater quitAndInstall, and OS-initiated quits. Use the
@@ -1473,6 +1487,8 @@ app.on("before-quit", (event) => {
 
   void (async () => {
     try {
+      await codexSessionTracker.flush();
+      await flushAgentSessionRegistry();
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.

@@ -2952,16 +2952,30 @@ export function useTerminalSession({
         bootResumeEntered = false;
         onBootResumeConsumedRef.current?.();
       };
+      let bootSession = agentSession;
+      let registryBootResume = false;
+      if (!cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
+        const start = await window.spark.agentSession.latestStart?.(sessionId).catch(() => null);
+        if (start?.runtime === "codex" && start.restoreOnBoot && start.active) {
+          const healed = mergeSessionStart(bootSession, start);
+          if (healed) {
+            bootSession = healed;
+            agentSessionRef.current = healed;
+            onResumeFallbackRef.current?.(healed);
+          }
+          registryBootResume = bootSession?.runtime === "codex" && bootSession.sessionId === start.sessionId;
+        }
+      }
       if (
-        bootResume === true &&
-        agentSession?.sessionId &&
+        (bootResume === true || registryBootResume) &&
+        bootSession?.sessionId &&
         !cmd &&
         !readOnlyRef.current &&
         !inputBlockedRef.current &&
         !autorunFiredSessions.has(sessionId)
       ) {
         bootResumeEntered = true;
-        let restore = agentSession;
+        let restore = bootSession;
         logRestore(`pane=${sessionId} boot-resume gate entered (${restore.runtime} id=${restore.sessionId})`);
         const prefs = await window.spark.preferences.load().catch(() => null);
         if (prefs?.restoreAgentSessions === true) {
@@ -2979,11 +2993,15 @@ export function useTerminalSession({
           }
           // computeResumePlan owns the probe → repair/self-heal/clear decision;
           // it is shared verbatim with the in-place death re-arm below.
-          const plan = await computeResumePlan(restore);
-          resumeCommand = plan.resumeCommand;
-          resumeIsFreshFallback = plan.resumeIsFreshFallback;
-          fallbackNotice = plan.fallbackNotice;
-          fallbackSession = plan.fallbackSession;
+          if (restore.active !== false) {
+            const plan = await computeResumePlan(restore);
+            resumeCommand = plan.resumeCommand;
+            resumeIsFreshFallback = plan.resumeIsFreshFallback;
+            fallbackNotice = plan.fallbackNotice;
+            fallbackSession = plan.fallbackSession;
+          } else {
+            logRestore(`pane=${sessionId} process registry confirms the session was closed`);
+          }
         } else {
           logRestore(`pane=${sessionId} restore pref off; pointer deactivated`);
           // Pref off: the pane stays a plain shell, but the hydrated pointer
@@ -3012,7 +3030,8 @@ export function useTerminalSession({
         externalSizeOwnerRef.current && initialExternalRows
           ? initialExternalRows
           : Math.max(1, term.rows);
-      const cwd = initialCwd && initialCwd.trim().length > 0 ? initialCwd : "";
+      const restoreCwd = resumeCommand !== null ? agentSessionRef.current?.cwd : undefined;
+      const cwd = restoreCwd ?? (initialCwd && initialCwd.trim().length > 0 ? initialCwd : "");
       // Agent panes — a claude/codex autorun or any restore/resume — flip
       // SPARK_NO_SHELL_INTEGRATION=1: spark.ps1's OSC 633;E echo would feed
       // the TUI stray input, the user $PROFILE only adds latency and error

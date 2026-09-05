@@ -43,6 +43,7 @@ async function main() {
     agentSessionBackfillSettled,
     recordSessionStart,
     latestSessionStart,
+    flushAgentSessionRegistry,
     __resetAgentSessionRegistryForTest,
   } = require(outfile);
 
@@ -146,6 +147,20 @@ async function main() {
       "persist: loaded record beats older backlog replay",
       latestSessionStart("pane-1")?.sessionId === "sess-a",
     );
+  }
+
+  {
+    recordSessionStart(rec({ paneId: "codex-pane", runtime: "codex", active: true, timestamp: "2026-09-05T12:00:00Z" }));
+    check("Codex live bindings are not cold restore requests", latestSessionStart("codex-pane").restoreOnBoot === false);
+    await flushAgentSessionRegistry();
+    __resetAgentSessionRegistryForTest();
+    await initAgentSessionRegistry({ dir: tmpDir });
+    check("Codex presence survives shutdown independently of renderer capture", latestSessionStart("codex-pane").restoreOnBoot === true);
+    recordSessionStart(rec({ paneId: "codex-pane", runtime: "codex", active: false, timestamp: "2026-09-05T12:01:00Z" }));
+    await flushAgentSessionRegistry();
+    __resetAgentSessionRegistryForTest();
+    await initAgentSessionRegistry({ dir: tmpDir });
+    check("an intentionally closed Codex is not restored", latestSessionStart("codex-pane").restoreOnBoot === false && latestSessionStart("codex-pane").active === false);
   }
 
   // ── first-init backfill from hooks/processed (one-time seed) ──
