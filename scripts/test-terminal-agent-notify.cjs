@@ -36,7 +36,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/orchestration\/usage-activity-refresh)$/ },
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/orchestration\/usage-activity-refresh)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -44,6 +44,16 @@ const harnessPlugin = {
         "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
       if (args.path === "./orchestration/usage-activity-refresh") {
         return { contents: "export function nudgeUsageRefresh() {}\n", loader: "js" };
+      }
+      if (args.path === "./owned-process-tree") {
+        return {
+          contents:
+            init +
+            `export { aliveProcesses, descendantsStartedAfter } from ${JSON.stringify(path.join(ROOT, "src/main/owned-process-tree.ts"))};\n` +
+            "export async function descendantProcessesWithCommands(pid){ return globalThis.__TAN.processes?.get(pid) ?? null; }\n",
+          loader: "js",
+          resolveDir: ROOT,
+        };
       }
       if (args.path === "electron") {
         return {
@@ -61,7 +71,7 @@ const harnessPlugin = {
             "export function tap(id, h){ globalThis.__TAN.taps.set(id, h); return () => globalThis.__TAN.taps.delete(id); }\n" +
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
-            "export function sessionPid(){ return null; }\n" +
+            "export function sessionPid(id){ return globalThis.__TAN.pids?.get(id) ?? null; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n",
           loader: "js",
         };
@@ -367,8 +377,20 @@ async function main() {
   feed("p2", "• Working \x1b[2m(0s • esc to interrupt)\x1b[22m");
   await sleep(400);
   feed("p2", "› Write tests for @filename\r\n  gpt-5.5 default · ~\\Documents\\Project\r\n");
-  await sleep(4600);
+  for (let i = 0; i < 5; i += 1) {
+    feed("p2", `\x1b[20;3H› Review the streaming changes and generating tests ${i}`);
+    await sleep(920);
+  }
   check("codex boot blip produced no spurious alert", alertCount() === beforeBlip);
+  check(
+    "typing a Codex prompt does not sustain the startup working state",
+    mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p2")?.state === "idle",
+  );
+  feed("p2", "\x1b[20;3H› Still generating a draft (thinking)");
+  check(
+    "draft repaint does not start a Codex turn",
+    mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p2")?.state === "idle",
+  );
 
   // ── Scenario 7b: Codex live chrome without banner/633;E still arms ──
   T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
@@ -377,6 +399,14 @@ async function main() {
   check(
     "late Codex working footer arms without banner or 633;E",
     T.chips.some((chip) => chip.paneId === "p9" && chip.runtime === "codex" && chip.state === "working"),
+  );
+  for (let i = 0; i < 5; i += 1) {
+    feed("p9", "\x1b[20;3HW\x1b[38;2;47;47;47morking\x1b[m");
+    await sleep(920);
+  }
+  check(
+    "Codex shimmer repaints sustain a real working turn",
+    mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p9")?.state === "working",
   );
   const beforeCodexPrompt = alertCount();
   feed("p9", "Approve shell command?\r\n  echo hello\r\n");
@@ -487,6 +517,49 @@ async function main() {
       mod.classifyBannerLine(line) === want,
     );
   }
+
+  // A running CLI can be completely silent when registration misses its banner.
+  T.pids = new Map([["p10", 1010], ["p11", 1011]]);
+  T.processes = new Map([
+    [1010, [
+      { pid: 2011, depth: 2, command: "claude --print child task" },
+      { pid: 2010, depth: 1, command: "/opt/codex/codex-aarch64-apple-darwin" },
+    ]],
+    [1011, [{ pid: 2012, depth: 1, command: "tail -f /tmp/codex.log" }]],
+  ]);
+  const beforeRecovery = alertCount();
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "recovery",
+    workspaceName: "Recovery",
+    panes: [
+      { paneId: "p10", tabId: "t10", tabTitle: "Silent Codex", excluded: false },
+      { paneId: "p11", tabId: "t11", tabTitle: "Plain shell", excluded: false },
+      { paneId: "p12", tabId: "t12", tabTitle: "Footer only", excluded: false },
+    ],
+  });
+  const waitForState = async (paneId, state) => {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      const found = state === "done"
+        ? T.chips.findLast((chip) => chip.paneId === paneId)
+        : mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === paneId);
+      if (found?.state === state) return found;
+      await sleep(50);
+    }
+    throw new Error(`Timed out waiting for ${paneId} to become ${state}`);
+  };
+  const recovered = await waitForState("p10", "idle");
+  check("process scan recovers silent Codex and prefers it over its child agent", recovered.runtime === "codex");
+  check("process presence never reports a working turn", !T.chips.some((chip) => chip.paneId === "p10" && chip.state === "working"));
+  check("recovery does not send a completion alert", alertCount() === beforeRecovery);
+  check("process arguments mentioning Codex do not create a chip", !T.chips.some((chip) => chip.paneId === "p11"));
+  feed("p12", "› Review this branch\r\ngpt-6-astra high fast · ~/src\r\n");
+  check("GPT-6 footer recovers Codex without a startup banner", mod.terminalAgentStateSnapshot().some((chip) => chip.paneId === "p12" && chip.runtime === "codex"));
+  T.processes.set(1010, []);
+  await waitForState("p10", "done");
+  check("recovered Codex clears when its process exits", !mod.terminalAgentStateSnapshot().some((chip) => chip.paneId === "p10"));
+  T.processes.set(1010, [{ pid: 2020, depth: 1, command: "codex" }]);
+  check("a later silent Codex launch is detected again", (await waitForState("p10", "idle")).runtime === "codex");
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

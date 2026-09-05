@@ -515,11 +515,12 @@ function ensureSweep(): void {
       // exit or a transient attach failure instead of waiting for another
       // renderer layout change.
       if (!w.attached) attach(w);
-      if (w.excluded || !w.runtime) continue;
-      if (agentProcessGone(w, now)) {
+      if (w.excluded || w.disposing) continue;
+      if (checkAgentProcess(w, now)) {
         markAgentExited(w, now, "process tree");
         continue;
       }
+      if (!w.runtime) continue;
       if (w.hookSubagentsActive > 0 && now - w.lastHookEventAt >= HOOK_SUBAGENT_STALE_MS) {
         tanLog(`pane=${w.paneId} hook subagent counter stale (no hook events) — cleared`);
         w.hookSubagentsActive = 0;
@@ -995,15 +996,16 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // stripped text, and each used to re-run stripAnsi over it per chunk.
     const plain = stripAnsi(text);
 
-    // Activity sustain: while a turn is running, ANY pty output counts as
-    // "still working". Codex (live-captured v0.138.0) repaints its full
-    // footer rarely — between repaints it only shimmers the word "Working",
-    // which matches no pattern — so pattern matches alone would go quiet
-    // mid-turn and fire a premature "done". Both Claude and Codex TUIs are
-    // byte-silent when genuinely idle (verified in all three live captures),
-    // so output while working is a safe liveness signal. Entering "working"
-    // still requires a real pattern/OSC match.
-    if (w.state === "working") w.lastWorkingAt = now;
+    // Codex shimmers "Working" between full footer repaints. Sustain an
+    // existing turn on those frames, but not on arbitrary output: editing
+    // the composer also emits PTY bytes and can prolong a stale busy state.
+    // A shimmer alone must never start a new turn.
+    if (
+      w.state === "working" &&
+      (w.runtime !== "codex" || /^(?:\s*[•●]?\s*Working\s*)+$/i.test(stripAnsi(decoded)))
+    ) {
+      w.lastWorkingAt = now;
+    }
 
     // Teammate lifecycle bookkeeping (Claude only). Must run BEFORE the
     // turn-stopped handlers below: a "1 teammate started" transcript line and
@@ -1243,13 +1245,11 @@ function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
   w.userTurnArmed = false;
 }
 
-// True once the agent process that was running under this pane's shell is no
-// longer there. The listing is read off the main thread; each check kicks one
-// off (shared across panes within a short window) and records its verdict for
-// the next sweep. Fail-safe in every uncertain case: no pid, no process list
-// (Windows), or an agent whose binary name is not recognised never arms, so a
-// live agent is never declared gone on a guess.
-function agentProcessGone(w: PaneWatcher, now: number): boolean {
+// Recover missed launches even when an idle agent emits no more output, and
+// return true once a previously seen agent is gone. Listings are shared across
+// panes and read asynchronously. A process proves presence, never busy state;
+// unavailable listings leave both detection and exit to the output signals.
+function checkAgentProcess(w: PaneWatcher, now: number): boolean {
   if (w.agentProcGone) {
     w.agentProcGone = false;
     return true;
@@ -1264,7 +1264,31 @@ function agentProcessGone(w: PaneWatcher, now: number): boolean {
   void descendantProcessesWithCommands(rootPid, PROCESS_LIST_MAX_AGE_MS)
     .then((below) => {
       // The pane may have changed hands while the listing ran.
-      if (below === null || w.runtime !== runtime) return;
+      if (
+        below === null ||
+        watchers.get(w.paneId) !== w ||
+        w.disposing ||
+        pty.sessionPid(w.paneId) !== rootPid ||
+        w.runtime !== runtime
+      ) return;
+      if (!runtime) {
+        // Prefer the outer agent over a different CLI it launched as a worker.
+        for (const proc of [...below].sort((a, b) => a.depth - b.depth)) {
+          const detected = runtimeFromProcessCommand(proc.command);
+          if (!detected) continue;
+          w.runtime = detected;
+          w.agentProcSeen = true;
+          w.agentProcGone = false;
+          w.state = "idle";
+          w.workingSince = 0;
+          w.lastWorkingAt = 0;
+          w.lastChunkAssertedWorking = false;
+          tanLog(`pane=${w.paneId} runtime recovered from process tree: ${detected}`);
+          emitPaneState(w, "idle");
+          return;
+        }
+        return;
+      }
       const present = below.some((proc) => runtimeFromProcessCommand(proc.command) === runtime);
       if (present) {
         if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);

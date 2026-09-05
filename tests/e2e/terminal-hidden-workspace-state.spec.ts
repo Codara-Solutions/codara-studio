@@ -125,6 +125,45 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
   }
 });
 
+test("silent Codex is detected without a banner or saved session", async () => {
+  test.skip(process.platform === "win32", "Process discovery uses the Unix process listing");
+  test.setTimeout(60_000);
+  const fixture = await prepareFixture();
+  // A silent Codex-shaped Node launcher proves process recovery without
+  // emitting any agent text or touching a real Codex account.
+  const silentCodex = join(fixture.binDir, "codex.js");
+  await writeFile(silentCodex, "setTimeout(() => {}, 30000);\n");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => {
+      (tab as HTMLElement).click();
+    });
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${silentCodex}"`, { delay: 2 });
+    await input.press("Enter");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("status", { name: "CODEX working" })).toHaveCount(0);
+    await input.press("Control+c");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toHaveCount(0, { timeout: 15_000 });
+  } finally {
+    await app?.close();
+  }
+});
+
 test("cold-restored Claude is rehydrated as working even when output starts immediately", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture();

@@ -192,7 +192,7 @@ const CODEX_LIVE_IDENTITY: RegExp[] = [
   /OpenAI\s*Codex/,
   /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
   /Context\s+\d+%\s+(?:used|left)/i,
-  /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+  /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
 ];
 
 const GROK_LIVE_IDENTITY: RegExp[] = [
@@ -442,18 +442,14 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /\bGoodbye\b!?/i,
     ],
   },
-  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines.
+  // Codex activity needs the elapsed-time footer. Bare status words also
+  // occur in prompt drafts and transcript text, so they cannot start a turn.
   // Codex has no AskUserQuestion-style MCQ, so it never classifies as
   // blocked — "needs you" is Claude-only.
   codex: {
     working: [
-      /esc\s*to\s*interrupt/i,
       /\(\s*\d+\s*s\s*[·•]\s*esc/i,
-      /\(thinking\)/i,
-      /\(working\)/i,
       /\bWorking\s*\(\d+\s*s/i,
-      /Generating/i,
-      /Streaming/i,
     ],
     blocked: [],
     done: [
@@ -740,7 +736,7 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
     /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
     /esc\s*to\s*interrupt/i,
     /Context\s+\d+%\s+(?:used|left)/i,
-    /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+    /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
     /\?\s*for\s*shortcuts/i,
     /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
   ],
