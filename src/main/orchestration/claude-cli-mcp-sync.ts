@@ -19,9 +19,10 @@ import { atomicWritePrivateFile } from "./native-cli-atomic-file";
  * The merge is three-way against a baseline of the last synced state
  * (mcp-servers.json under the Claude accounts root). Without a baseline a
  * union would resurrect a server the user had just deleted: it would still be
- * present in the other files and flow back. With one, an entry missing from a
- * file it used to be in reads as a deletion. When an entry changed on more
- * than one side the most recently written file wins, and an edit outranks a
+ * present in the other files and flow back. The baseline records the list
+ * each participant actually received, so an empty config from a newly
+ * connected account cannot delete everyone's servers. When an entry changed
+ * on more than one side the most recently written file wins, and an edit outranks a
  * deletion so a rename or a token refresh is never lost to a stale copy.
  */
 
@@ -112,21 +113,33 @@ async function readParticipant(file: McpSyncFile): Promise<ReadFile> {
   }
 }
 
-async function readBaseline(path: string): Promise<McpServerMap> {
+interface McpBaseline {
+  mcpServers: McpServerMap;
+  participants: Record<string, McpServerMap>;
+}
+
+async function readBaseline(path: string): Promise<McpBaseline> {
+  const empty = { mcpServers: {}, participants: {} };
   try {
     const parsed: unknown = JSON.parse(await fs.readFile(path, "utf8"));
-    if (!isRecord(parsed)) return {};
+    if (!isRecord(parsed)) return empty;
     const servers = parsed.mcpServers;
-    return isRecord(servers) ? (servers as McpServerMap) : {};
+    return {
+      mcpServers: isRecord(servers) ? servers : {},
+      participants: isRecord(parsed.participants)
+        ? Object.fromEntries(Object.entries(parsed.participants).filter(
+            (entry): entry is [string, McpServerMap] => isRecord(entry[1]),
+          ))
+        : {},
+    };
   } catch {
-    return {};
+    return empty;
   }
 }
 
 /**
- * Three-way merge across every participant that could be read. Files that do
- * not exist yet are not evidence of a deletion, so only files that exist (or
- * that the baseline says once held the entry) can vote one away.
+ * Three-way merge across readable participants. Only an entry that this
+ * participant previously received can count as a deletion from that file.
  */
 export function mergeMcpServers(
   baseline: McpServerMap,
@@ -135,6 +148,8 @@ export function mergeMcpServers(
     mtimeMs: number;
     exists: boolean;
     readable?: boolean;
+    /** The last list this file actually received; empty for a new participant. */
+    previousServers?: McpServerMap;
   }[],
 ): McpServerMap {
   // Only files we could actually READ get a vote. An unreadable one is not
@@ -173,8 +188,13 @@ export function mergeMcpServers(
       merged[name] = winner.servers[name];
       continue;
     }
-    // Unchanged wherever it still is. A file that dropped it deleted it.
-    if (holders.length === present.length) merged[name] = baseline[name];
+    // An identity-only config from a newly connected account never held the
+    // shared list, so its missing entries cannot be evidence of deletion.
+    const deleted = present.some((participant) =>
+      !Object.prototype.hasOwnProperty.call(participant.servers, name) &&
+      Object.prototype.hasOwnProperty.call(participant.previousServers ?? baseline, name),
+    );
+    if (!deleted) merged[name] = baseline[name];
   }
   return merged;
 }
@@ -197,15 +217,23 @@ export async function syncClaudeCliMcpServers(
   const participants = await Promise.all(input.files.map(readParticipant));
   const baseline = await readBaseline(input.baselinePath);
   const merged = mergeMcpServers(
-    baseline,
-    participants.map((participant) => ({ ...participant, readable: participant.doc !== null })),
+    baseline.mcpServers,
+    participants.map((participant) => ({
+      ...participant,
+      readable: participant.doc !== null,
+      previousServers: baseline.participants[participant.path] ?? {},
+    })),
   );
   const mergedFingerprint = fingerprint(merged);
   const written: string[] = [];
+  const nextParticipants = { ...baseline.participants };
   for (const participant of participants) {
     if (!participant.exists && !participant.create) continue;
     if (participant.exists && participant.doc === null) continue;
-    if (fingerprint(participant.servers) === mergedFingerprint) continue;
+    if (fingerprint(participant.servers) === mergedFingerprint) {
+      nextParticipants[participant.path] = merged;
+      continue;
+    }
     const doc = participant.doc ?? {};
     const next =
       Object.keys(merged).length > 0
@@ -231,6 +259,7 @@ export async function syncClaudeCliMcpServers(
         maxBytes: MAX_CONFIG_BYTES,
       });
       written.push(participant.path);
+      nextParticipants[participant.path] = merged;
     } catch (error) {
       input.log?.(
         `[accounts] could not share the MCP server list into ${participant.path}: ${
@@ -239,12 +268,12 @@ export async function syncClaudeCliMcpServers(
       );
     }
   }
-  const changed = mergedFingerprint !== fingerprint(baseline);
-  if (changed || written.length > 0) {
+  const changed = mergedFingerprint !== fingerprint(baseline.mcpServers);
+  if (changed || written.length > 0 || fingerprint(nextParticipants) !== fingerprint(baseline.participants)) {
     try {
       await atomicWritePrivateFile(
         input.baselinePath,
-        `${JSON.stringify({ mcpServers: merged }, null, 2)}\n`,
+        `${JSON.stringify({ mcpServers: merged, participants: nextParticipants }, null, 2)}\n`,
         { maxBytes: MAX_CONFIG_BYTES },
       );
     } catch (error) {

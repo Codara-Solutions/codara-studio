@@ -448,6 +448,36 @@ async function main() {
   H.migration.resetUnifiedAccountMigrationForTests();
   pass("the ready gate resolves after a failed step");
 
+  {
+    const root = path.join(TMP, "undo-mcp");
+    const personal = path.join(TMP, "undo-mcp-home", ".claude");
+    const managed = path.join(root, "accounts", CLI.swapped);
+    privateFile(path.join(root, "active-auth.json"), JSON.stringify({ version: 1, profileId: CLI.swapped }));
+    privateFile(path.join(root, "personal", ".credentials.json"), JSON.stringify({
+      ...JSON.parse(claudeCredential("vaulted", 1)), mcpOAuth: { old: { accessToken: "stale-vault-mcp" } },
+    }));
+    const personalMcp = { server: { accessToken: "personal-mcp" } };
+    const managedMcp = { server: { accessToken: "managed-mcp" } };
+    privateFile(path.join(personal, ".credentials.json"), JSON.stringify({
+      ...JSON.parse(claudeCredential("live", 9)), mcpOAuth: personalMcp,
+    }));
+    privateFile(path.join(managed, ".credentials.json"), JSON.stringify({
+      ...JSON.parse(claudeCredential("managed", 2)), mcpOAuth: managedMcp,
+    }));
+    const result = await H.liveSlot.undoLiveSlotSwap({
+      claudeRootDir: root, personalConfigDir: personal, personalConfigDirEnv: null,
+      backend: H.credentials.fileOnlyClaudeCliCredentialBackend,
+      managedProfileExists: async () => true,
+    });
+    assert.equal(result.personalRestored, true, "verification compares the restored login, not unrelated MCP fields");
+    const read = (dir) => JSON.parse(fs.readFileSync(path.join(dir, ".credentials.json"), "utf8"));
+    assert.deepEqual(read(personal).mcpOAuth, personalMcp);
+    assert.deepEqual(read(managed).mcpOAuth, managedMcp);
+    assert.equal(read(personal).claudeAiOauth.accessToken, "vaulted-access-1");
+    assert.equal(read(managed).claudeAiOauth.accessToken, "live-access-9");
+    assert.equal(fs.existsSync(path.join(root, "personal")), false, "clearing the retired slot does not recreate its directory");
+    pass("startup restores Claude logins without replacing either account's MCP grants");
+  }
   // undoLiveSlotSwap on its own: an unreadable ~/.claude defers the whole
   // restore (marker and vault kept, nothing written), and a stale marker
   // naming a profile the registry no longer has copies its token nowhere.

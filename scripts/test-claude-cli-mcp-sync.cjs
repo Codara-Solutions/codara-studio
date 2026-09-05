@@ -184,6 +184,64 @@ async function main() {
     pass("additions travel both ways, deletions propagate, an edit outranks a deletion");
   }
 
+  {
+    const dir = caseDir("new-account");
+    const baselinePath = path.join(dir, "mcp-servers.json");
+    const personal = path.join(dir, ".claude.json");
+    const managed = path.join(dir, "managed.json");
+    fs.writeFileSync(personal, JSON.stringify({ mcpServers: { keep: { command: "server" } } }));
+    const files = [{ path: personal, create: false }];
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    fs.writeFileSync(managed, JSON.stringify({ oauthAccount: { accountUuid: "new-account" } }));
+    files.push({ path: managed, create: true });
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    assert.deepEqual(servers(personal), { keep: { command: "server" } },
+      "a newly connected account with identity but no MCP list cannot delete everyone's servers");
+    assert.deepEqual(servers(managed), servers(personal));
+    fs.writeFileSync(managed, JSON.stringify({ oauthAccount: { accountUuid: "new-account" } }));
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    assert.deepEqual(servers(personal), {}, "deletion propagates once the account actually received the list");
+    pass("newly connected accounts receive the existing MCP list before they can delete from it");
+  }
+
+  {
+    const dir = caseDir("legacy-baseline");
+    const baselinePath = path.join(dir, "mcp-servers.json");
+    const personal = path.join(dir, ".claude.json");
+    const managed = path.join(dir, "managed.json");
+    const keep = { keep: { command: "server" } };
+    fs.writeFileSync(baselinePath, JSON.stringify({ mcpServers: keep }), { mode: 0o600 });
+    fs.writeFileSync(personal, JSON.stringify({ mcpServers: keep }));
+    fs.writeFileSync(managed, JSON.stringify({ oauthAccount: { accountUuid: "new-account" } }));
+    const files = [{ path: personal, create: false }, { path: managed, create: true }];
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    assert.deepEqual(servers(personal), keep);
+    assert.deepEqual(servers(managed), keep);
+    assert.deepEqual(read(baselinePath).participants[managed], keep);
+    pass("a legacy baseline without participant history seeds safely");
+  }
+
+  if (process.platform !== "win32") {
+    const dir = caseDir("failed-participant");
+    const baselinePath = path.join(dir, "mcp-servers.json");
+    const personal = path.join(dir, ".claude.json");
+    const managed = path.join(dir, "managed.json");
+    const target = path.join(dir, "elsewhere.json");
+    const keep = { keep: { command: "server" } };
+    fs.writeFileSync(personal, JSON.stringify({ mcpServers: keep }));
+    fs.writeFileSync(target, "{}");
+    fs.symlinkSync(target, managed);
+    const files = [{ path: personal, create: false }, { path: managed, create: true }];
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    assert.equal(read(baselinePath).participants[managed], undefined, "a failed write is not recorded as received");
+    fs.unlinkSync(managed);
+    fs.writeFileSync(managed, "{}");
+    await mod.syncClaudeCliMcpServers({ baselinePath, files });
+    assert.deepEqual(servers(personal), keep);
+    assert.deepEqual(servers(managed), keep);
+    pass("a failed sync cannot turn into a deletion on the next pass");
+  }
+
   // Two different edits to one server: the most recently written file wins.
   {
     const dir = caseDir("conflict");
