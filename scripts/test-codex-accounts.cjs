@@ -198,6 +198,7 @@ async function main() {
     result.wrote === side || result.verdict === "equal" || result.verdict === "none";
   let broadcasts = 0;
   const liveOwners = new Set();
+  let liveRuntimeCount;
   const disposed = [];
   const shutdowns = [];
   const service = new H.accounts.UnifiedAccountService(adapter, {
@@ -210,6 +211,7 @@ async function main() {
     },
     sessions: {
       liveOwnerIds: () => liveOwners,
+      liveRuntimeSessionCount: async () => liveRuntimeCount ?? liveOwners.size,
       disposeProfileSessions: async (profileId) => {
         disposed.push(profileId);
         let count = 0;
@@ -401,6 +403,11 @@ async function main() {
   leases.acquire("personal", "terminal:codex-pane");
   liveOwners.add("terminal:codex-pane");
   externalSessions = 2;
+  assert.equal(await service.switchSessionCount(), 3);
+  liveRuntimeCount = 0;
+  assert.equal(await service.switchSessionCount(), 2, "a live shell lease is not a running Codex session");
+  assert.equal(leases.isLeased("personal"), true, "runtime inspection does not release live shell leases");
+  liveRuntimeCount = 1;
   await assert.rejects(
     () => service.useAccount(work.id),
     (error) => error.name === "UnifiedAccountSessionsError" && error.sessionCount === 3 && /switch/.test(error.message),
@@ -409,6 +416,8 @@ async function main() {
   assert.equal(marker(), "personal");
   const switched = await service.useAccount(work.id, { closeSessions: true });
   assert.equal(switched.closedSessionCount, 3);
+  liveRuntimeCount = undefined;
+  assert.equal(await service.switchSessionCount(), 0, "closed sessions disappear from the live count");
   assert.deepEqual(shutdowns, [3]);
   assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], work.id);
   assert.equal((await codexStore.snapshot()).defaultProfileId, workCli);

@@ -18,6 +18,7 @@ export interface NativeCliProcessSnapshot {
   parentPid: number;
   startedAt: string;
   command: string;
+  executable?: string;
 }
 
 export interface NativeCliExternalShutdownResult {
@@ -63,6 +64,19 @@ export function parseNativeCliProcessList(output: string): NativeCliProcessSnaps
 }
 
 const POSIX_LIST_COMMAND = ["ps", ["-axo", "pid=,ppid=,lstart=,command="]] as const;
+const POSIX_EXECUTABLE_ARGS = ["-axo", "pid=,comm="];
+
+function withExecutables(processes: NativeCliProcessSnapshot[], output: string): NativeCliProcessSnapshot[] {
+  const executables = new Map<number, string>();
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (match) executables.set(Number(match[1]), match[2]);
+  }
+  return processes.flatMap((entry) => {
+    const executable = executables.get(entry.pid);
+    return executable ? [{ ...entry, executable }] : [];
+  });
+}
 const WINDOWS_LIST_COMMAND = [
   "powershell.exe",
   [
@@ -72,7 +86,7 @@ const WINDOWS_LIST_COMMAND = [
     "-Command",
     [
       "Get-CimInstance Win32_Process",
-      "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine",
+      "Select-Object ProcessId,ParentProcessId,CreationDate,CommandLine,ExecutablePath",
       "ConvertTo-Json -Compress",
     ].join(" | "),
   ],
@@ -89,7 +103,13 @@ function listPosixProcesses(): NativeCliProcessSnapshot[] {
   if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
     throw new Error("Could not inspect running native CLI sessions");
   }
-  return parseNativeCliProcessList(result.stdout);
+  const executableResult = spawnSync("ps", POSIX_EXECUTABLE_ARGS, {
+    encoding: "utf8", timeout: PROCESS_LIST_TIMEOUT_MS, maxBuffer: PROCESS_LIST_MAX_BYTES,
+  });
+  if (executableResult.error || executableResult.status !== 0) {
+    throw new Error("Could not inspect running native CLI executables");
+  }
+  return withExecutables(parseNativeCliProcessList(result.stdout), executableResult.stdout);
 }
 
 async function listPosixProcessesAsync(): Promise<NativeCliProcessSnapshot[]> {
@@ -99,7 +119,10 @@ async function listPosixProcessesAsync(): Promise<NativeCliProcessSnapshot[]> {
     maxBuffer: PROCESS_LIST_MAX_BYTES,
     windowsHide: true,
   });
-  return parseNativeCliProcessList(stdout);
+  const executables = await execFileAsync("ps", POSIX_EXECUTABLE_ARGS, {
+    encoding: "utf8", timeout: PROCESS_LIST_TIMEOUT_MS, maxBuffer: PROCESS_LIST_MAX_BYTES,
+  });
+  return withExecutables(parseNativeCliProcessList(stdout), executables.stdout);
 }
 
 function parseWindowsProcessList(output: string): NativeCliProcessSnapshot[] {
@@ -126,6 +149,7 @@ function parseWindowsProcessList(output: string): NativeCliProcessSnapshot[] {
         startedAt:
           typeof record.CreationDate === "string" ? record.CreationDate : "",
         command,
+        ...(typeof record.ExecutablePath === "string" ? { executable: record.ExecutablePath } : {}),
       }];
     });
   } catch {
@@ -181,9 +205,18 @@ function commandStartsWithNamedExecutable(
 export function commandRunsNativeCli(
   runtime: NativeCliAccountRuntime,
   command: string,
+  executable?: string,
 ): boolean {
   const normalized = command.trim().replace(/\\/g, "/");
   if (!normalized) return false;
+  // ps does not quote paths with spaces. Its argv[0] prefix can be a
+  // directory named Codex, as in ChatGPT's "Codex Framework.framework".
+  // The OS executable name distinguishes those helpers from the CLI.
+  if (executable) {
+    const name = executable.replace(/\\/g, "/").split("/").pop()?.toLowerCase();
+    if (runtime === "codex" && name !== "codex" && name !== "codex.exe" &&
+        name !== "node" && name !== "node.exe") return false;
+  }
 
   if (runtime === "codex") {
     // ChatGPT embeds the Codex app server. It is application infrastructure,
@@ -258,7 +291,7 @@ function descendantPids(
  * The native CLI sessions started outside Codara: one root per wrapper
  * chain. Codara's own process tree is excluded, so a CLI running inside a
  * Studio pane (a child of the pane's shell, itself a child of Studio) is
- * counted by the lease table and closed by the pty layer, never here.
+ * counted from the PTY process tree and closed by the pty layer, never here.
  */
 export function nativeCliRootProcesses(
   runtime: NativeCliAccountRuntime,
@@ -270,10 +303,29 @@ export function nativeCliRootProcesses(
     (entry) =>
       entry.pid !== currentPid &&
       !owned.has(entry.pid) &&
-      commandRunsNativeCli(runtime, entry.command),
+      commandRunsNativeCli(runtime, entry.command, entry.executable),
   );
   const candidatePids = new Set(candidates.map((entry) => entry.pid));
-  return candidates.filter((entry) => !candidatePids.has(entry.parentPid));
+  return candidates.filter((entry) =>
+    ![...ancestorPids(processes, entry.pid)].some((pid) => candidatePids.has(pid)),
+  );
+}
+
+export async function inspectNativeCliProcesses(): Promise<NativeCliProcessSnapshot[]> {
+  return process.platform === "win32" ? listWindowsProcessesAsync() : listPosixProcessesAsync();
+}
+
+/** PTY roots containing a live CLI, including a CLI typed into a plain shell. */
+export function nativeCliPtyRoots(
+  runtime: NativeCliAccountRuntime,
+  processes: readonly NativeCliProcessSnapshot[],
+  roots: readonly number[],
+): Set<number> {
+  const cliPids = new Set(processes.filter((entry) =>
+    commandRunsNativeCli(runtime, entry.command, entry.executable),
+  ).map((entry) => entry.pid));
+  return new Set(roots.filter((root) => cliPids.has(root) ||
+    [...descendantPids(processes, root)].some((pid) => cliPids.has(pid))));
 }
 
 async function waitForTrees(

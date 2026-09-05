@@ -197,9 +197,10 @@ assert.match(settings, /action: "use" \| "delete";/);
 assert.match(settings, /refusedWithSessions\(profileId, "use", err\)/);
 assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
 assert.match(settings, /setCloseSessionsPrompt\(\{ profileId, action, count \}\)/);
-assert.match(settings, /refused\?\.action === "delete"\s*\? refused\.count\s*: \(profile\.terminal\?\.liveSessions \?\? 0\)/);
-assert.match(settings, /const switchCloseSessionsCount = refused\?\.action === "use" \? refused\.count : 0;/);
-assert.match(settings, /setCloseSessionsPrompt\(null\);\n    void window\.spark\.piSubscriptions\n      \.status\(\)/);
+assert.match(settings, /profile\.terminal\?\.liveSessions \?\? \(refused\?\.action === "delete"/);
+assert.match(settings, /overview\?\.switchSessionCounts\?\.\[provider\] \?\? refused\.count/);
+assert.doesNotMatch(settings.slice(settings.indexOf("  const refresh = () => {", settings.indexOf("function AccountsSettings")), settings.indexOf("  useEffect(() => {", settings.indexOf("function AccountsSettings"))), /setCloseSessionsPrompt/);
+assert.match(settings, /personal && personal\.status !== "connected" && !linked\.has\(personal\.id\)/);
 assert.match(settings, /function ipcErrorMessage\(err: unknown\): string/);
 // Every error class name is stripped before a message reaches the panel.
 assert.match(settings, /\.replace\(\/\^\[A-Za-z\]\*Error:\\s\*\/, ""\)/);

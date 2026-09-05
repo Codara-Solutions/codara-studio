@@ -1999,9 +1999,6 @@ function AccountsSettings() {
   const refresh = () => {
     setLoading(true);
     setError(null);
-    // A refusal's session count is only right until the next read; the
-    // overview carries the live count from then on.
-    setCloseSessionsPrompt(null);
     void window.spark.piSubscriptions
       .status()
       .then(setOverview)
@@ -2011,6 +2008,27 @@ function AccountsSettings() {
         setOverviewSettled(true);
       });
   };
+
+  useEffect(() => {
+    if (!closeSessionsPrompt) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const next = await window.spark.piSubscriptions.status();
+        if (!cancelled) setOverview(next);
+      } catch {
+        // Keep the last refusal if inspection fails; main rechecks on Use.
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 2_000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [closeSessionsPrompt]);
 
   useEffect(() => {
     refresh();
@@ -2206,7 +2224,14 @@ function AccountsSettings() {
     err: unknown,
   ) => {
     const count = liveTerminalCount(ipcErrorMessage(err));
-    if (count !== null) setCloseSessionsPrompt({ profileId, action, count });
+    if (count === null) return;
+    setCloseSessionsPrompt({ profileId, action, count });
+    // The refusal is newer than the overview that rendered the Use button.
+    setOverview(current => {
+      const provider = current?.profiles?.find(profile => profile.id === profileId)?.provider;
+      if (!current || !provider || action !== "use") return current;
+      return { ...current, switchSessionCounts: { ...current.switchSessionCounts, [provider]: count } };
+    });
   };
 
   const makeDefault = (
@@ -2333,13 +2358,12 @@ function AccountsSettings() {
         const usage = usageByProfile.get(profile.id);
         const refused =
           closeSessionsPrompt?.profileId === profile.id ? closeSessionsPrompt : null;
-        // The count main refused with is right until the next read; after
-        // that the overview's live count keeps the armed Delete honest.
+        // Store-change broadcasts must not disarm the requested action.
+        // Fresh counts replace the refusal while its card stays open.
         const closeSessionsCount =
-          refused?.action === "delete"
-            ? refused.count
-            : (profile.terminal?.liveSessions ?? 0);
-        const switchCloseSessionsCount = refused?.action === "use" ? refused.count : 0;
+          profile.terminal?.liveSessions ?? (refused?.action === "delete" ? refused.count : 0);
+        const switchCloseSessionsCount = refused?.action === "use"
+          ? (overview?.switchSessionCounts?.[provider] ?? refused.count) : 0;
         return {
           key: `${provider}:${profile.id}`,
           provider,
@@ -2390,12 +2414,12 @@ function AccountsSettings() {
           cliDefault: profile.isDefault,
           busy: accountMutationId === profile.id,
         }));
-      // The user's own CLI login has no row until it holds a credential
-      // (main creates one the moment it does). Until then the slot says
-      // what to do instead of vanishing.
+      // Main owns identity pairing. A connected personal login without a
+      // row may already belong to a managed account, so never invent a
+      // second account or claim it is linking. Keep only the sign-in hint.
       const personal = cliProfiles.find((profile) => !profile.managed);
       const accountOneSlot: AccountCardView[] =
-        personal && !linked.has(personal.id)
+        personal && personal.status !== "connected" && !linked.has(personal.id)
           ? [
               {
                 key: `${provider}:account-one`,
@@ -2403,7 +2427,7 @@ function AccountsSettings() {
                 label: personal.label || "Account 1",
                 builtIn: true,
                 active: false,
-                terminal: { connected: personal.status === "connected" },
+                terminal: { connected: false },
                 busy: false,
               },
             ]

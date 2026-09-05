@@ -7,6 +7,35 @@ import { delimiter, join } from "node:path";
 const FIRST = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
 
+test("a sanctioned exit does not auto-resume a running Codex conversation", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  const app = await electron.launch({ args: ["."], env: fixture.env });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole("tab", { name: /terminals/i }).evaluate(tab => (tab as HTMLElement).click());
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${fixture.script}"`, { delay: 2 });
+    await input.press("Enter");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
+    const paneId = await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id");
+    await expect.poll(async () => (await fixture.records()).find(rec => rec.paneId === paneId)?.sessionId,
+      { timeout: 20_000 }).toBe(FIRST);
+    const before = await fixture.launches();
+    await app.evaluate(({ BrowserWindow }, id) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send(`pty:exit:${id}`, { exitCode: 0, sanctioned: true });
+      }
+    }, paneId);
+    await page.waitForTimeout(3_000);
+    expect(await fixture.launches()).toEqual(before);
+  } finally {
+    await app.close();
+  }
+});
+
 test("Codex captures a delayed transcript, follows a session switch, and resumes it after restart", async () => {
   test.skip(process.platform === "win32", "Process file tracking uses lsof on Unix.");
   test.setTimeout(90_000);
@@ -34,6 +63,63 @@ test("Codex captures a delayed transcript, follows a session switch, and resumes
     app = await electron.launch({ args: ["."], env: fixture.env });
     await expect.poll(async () => (await fixture.launches()).filter((entry) => entry[0] === "resume").at(-1)?.[1],
       { timeout: 20_000 }).toBe(SECOND);
+    const restoredPage = await app.firstWindow();
+    await expect(restoredPage.locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
+      .toHaveText("1", { timeout: 15_000 });
+  } finally {
+    await app?.close();
+  }
+});
+
+test("cold app startup counts every restored agent before visiting another workspace", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(90_000);
+  const fixture = await prepare();
+  await writeFile(join(fixture.userData, "spark-state.json"), JSON.stringify({
+    workspaces: [
+      { id: "ws-restore", name: "Restore", cwd: fixture.workspace, workers: [] },
+      { id: "ws-other", name: "Other", cwd: join(fixture.workspace, "old"), workers: [] },
+    ], activeWorkspaceId: "ws-restore",
+  }));
+  await writeFile(join(fixture.userData, "agent-session-starts.json"), JSON.stringify({ version: 1,
+    entries: [FIRST, SECOND].map((id, index) => ({
+      paneId: `boot-pane-${index}`, runtime: "codex", sessionId: id,
+      transcriptPath: index === 0 ? fixture.firstPath : fixture.secondPath,
+      cwd: fixture.workspace, active: true, source: "process", timestamp: "2026-09-05T12:00:00Z",
+    })),
+  }));
+  const env = { ...fixture.env, SPARK_TEST_CODEX_SECOND_WORKING: "1" };
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env });
+    const page = await app.firstWindow();
+    await page.addInitScript(({ workspace, first, second, firstPath, secondPath }) => {
+      localStorage.setItem("spark.tabs:ws-restore", JSON.stringify({ v: 6,
+        tabs: [first, second].map((id, index) => ({
+          id: `boot-tab-${index}`, kind: "terminal", title: `Restored ${index + 1}`,
+          activePaneId: `boot-pane-${index}`,
+          root: { kind: "leaf", paneId: `boot-pane-${index}`, cwd: workspace,
+            agentSession: { runtime: "codex", sessionId: id, cwd: workspace,
+              transcriptPath: index === 0 ? firstPath : secondPath,
+              active: true, capturedAt: "2026-09-05T12:00:00Z" } },
+        })), activeId: "boot-tab-0",
+      }));
+    }, { workspace: fixture.workspace, first: FIRST, second: SECOND, firstPath: fixture.firstPath, secondPath: fixture.secondPath });
+    await page.reload();
+    await expect(page.locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
+      .toHaveText("1/2", { timeout: 20_000 });
+    await app.close();
+    app = null;
+    const before = (await fixture.launches()).length;
+    app = await electron.launch({ args: ["."], env });
+    const restoredPage = await app.firstWindow();
+    const row = restoredPage.locator('[data-workspace-id="ws-restore"]');
+    await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(before + 2);
+    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1/2", { timeout: 15_000 });
+    await expect(row.getByTestId("workspace-agent-count")).toHaveAttribute("aria-label", "1 of 2 agents working");
+    await restoredPage.locator('[data-workspace-id="ws-other"]').evaluate(element => (element as HTMLElement).click());
+    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1/2");
+    await expect(restoredPage.locator('[data-workspace-id="ws-other"]').getByTestId("workspace-agent-count")).toHaveCount(0);
   } finally {
     await app?.close();
   }
@@ -100,7 +186,10 @@ async function prepare() {
     fs.appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify([...args, "cwd:" + process.cwd()]) + "\\n");
     const paths = ${JSON.stringify({ [FIRST]: firstPath, [SECOND]: secondPath })};
     let current;
-    const show = () => process.stdout.write("\\x1b[2J\\x1b[HOpenAI Codex (v0.153.4)\\r\\n› Ask Codex to do anything\\r\\ngpt-6-astra high · ~/workspace");
+    const show = () => process.stdout.write("\\x1b[2J\\x1b[HOpenAI Codex (v0.153.4)\\r\\n" +
+      (process.env.SPARK_TEST_CODEX_SECOND_WORKING === "1" && args[1] === ${JSON.stringify(SECOND)}
+        ? "• Working (9m 21s • esc to interrupt)\\r\\n" : "") +
+      "› Ask Codex to do anything\\r\\ngpt-6-astra high · ~/workspace");
     const select = (id) => { current = fs.openSync(paths[id], "a"); fs.writeSync(current, "\\n"); show(); };
     show();
     process.stdin.setRawMode(true);
@@ -121,6 +210,7 @@ async function prepare() {
     userData, workspace, script, firstPath, secondPath,
     env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, SHELL: "/bin/false",
       CODEX_HOME: codexHome, SPARK_USER_DATA_DIR: userData, CODARA_HOME_DIR: userData, SPARK_HOME_DIR: userData,
+      CLAUDE_CONFIG_DIR: join(root, "claude-home"), GROK_HOME: join(root, "grok-home"),
       SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1" },
     records: async (): Promise<Array<{ paneId: string; sessionId: string; active: boolean }>> => {
       try { return JSON.parse(await readFile(join(userData, "agent-session-starts.json"), "utf8")).entries; } catch { return []; }

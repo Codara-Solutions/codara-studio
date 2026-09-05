@@ -2879,7 +2879,7 @@ export function useTerminalSession({
         // poller turns into running:false, so agentRunningRef would already be
         // false) — silently relaunch it with `--resume`. The pref is checked in
         // respawnWithResume; a crash-loop guard caps repeated attempts.
-        if (disposed || isAppTearingDown()) return;
+        if (disposed || info.sanctioned || isAppTearingDown()) return;
         if (readOnlyRef.current || inputBlockedRef.current) return;
         if (!agentRunningRef.current) return;
         const session = agentSessionRef.current;

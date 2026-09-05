@@ -53,13 +53,14 @@ export interface AccountCliLeases {
 
 export interface SwitchContext {
   closeSessions: boolean;
-  /** Studio panes holding a lease on any profile of this CLI, dead ones swept. */
+  /** Studio panes currently running this CLI, including launches in progress. */
   liveSessionCount(): Promise<number>;
   /** Closes every session of this CLI; null when the host wired none. */
   sessionShutdown: (() => Promise<{ closedSessionCount: number }>) | null;
 }
 
 export interface SwitchSideEffects {
+  sessionCount(context: SwitchContext): Promise<number>;
   /**
    * Runs before either default moves. Throws UnifiedAccountSessionsError
    * when the switch would close sessions the caller did not agree to close.

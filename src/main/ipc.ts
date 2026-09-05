@@ -700,6 +700,7 @@ export function registerIpc(): void {
   });
   codexAccounts.setTerminalSessions({
     liveOwnerIds: () => pty.liveSessionOwnerIds(),
+    liveRuntimeSessionCount: () => pty.liveNativeCliRuntimeSessionCount("codex"),
     disposeProfileSessions: () => closeEveryCodexSession(),
   });
   for (const provider of ["anthropic", "openai-codex", "xai"] as const) {

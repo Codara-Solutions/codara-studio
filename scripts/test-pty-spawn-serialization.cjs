@@ -222,6 +222,12 @@ function stubPlugin() {
       }
       export function notifyNativeCodexProfileLeaseReleased() {}
     `,
+    "./orchestration/native-cli-process-shutdown": `
+      export { nativeCliPtyRoots } from ${JSON.stringify(path.join(ROOT, "src/main/orchestration/native-cli-process-shutdown.ts"))};
+      export async function inspectNativeCliProcesses() {
+        return globalThis.__codaraPtySpawnHarness.processes ?? [];
+      }
+    `,
     "./orchestration/native-claude-profile-runtime": `
       export function resolveNewNativeClaudeProfile() {
         return Promise.resolve(globalThis.__codaraPtySpawnHarness.resolveClaudeProfile());
@@ -308,6 +314,7 @@ function stubPlugin() {
       build.onLoad({ filter: /.*/, namespace: "pty-spawn-harness" }, (args) => ({
         contents: sources[args.path],
         loader: "js",
+        resolveDir: ROOT,
       }));
     },
   };
@@ -680,8 +687,24 @@ async function main() {
     const closeCodex = await pty.spawn(localCodexOptions("switch-codex"));
     const keepClaude = await pty.spawn(localClaudeOptions("switch-claude"));
     const closeGrok = await pty.spawn(localGrokOptions("switch-grok"));
+    const idleCodexShell = await pty.spawn(localCodexOptions("idle-codex-shell"));
+    const typedCodexShell = await pty.spawn(localOptions("typed-codex-shell"));
+    controller.processes = [
+      { pid: closeCodex.pid, parentPid: 1, command: "zsh" },
+      { pid: 500001, parentPid: closeCodex.pid, command: "codex --yolo", executable: "/bin/codex" },
+      { pid: idleCodexShell.pid, parentPid: 1, command: "zsh" },
+      { pid: typedCodexShell.pid, parentPid: 1, command: "zsh" },
+      { pid: 500002, parentPid: typedCodexShell.pid, command: "codex --yolo", executable: "/bin/codex" },
+    ];
+    assert.equal(await pty.liveNativeCliRuntimeSessionCount("codex"), 2);
+    let closedExit;
+    pty.onExit(closeCodex.id, info => { closedExit = info; });
     const codexClosed = await pty.disposeNativeCliRuntimeGraceful("codex", 0);
-    assert.equal(codexClosed.closedSessionCount, 1);
+    assert.equal(codexClosed.closedSessionCount, 2);
+    assert.equal(closedExit.sanctioned, true, "account switches are deliberate exits");
+    assert.equal(pty.exists(idleCodexShell.id), true, "a shell whose Codex exited stays open");
+    assert.equal(pty.exists(typedCodexShell.id), false, "Codex typed in a plain shell is closed too");
+    assert.equal(await pty.liveNativeCliRuntimeSessionCount("codex"), 0);
     assert.equal(pty.exists(closeCodex.id), false);
     assert.equal(pty.exists(keepClaude.id), true);
     assert.equal(pty.exists(closeGrok.id), true);

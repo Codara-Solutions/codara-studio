@@ -33,6 +33,28 @@ async function main() {
   });
   const shutdown = require(outfile);
 
+  const framework = "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/152.0/Helpers";
+  for (const executable of [
+    `${framework}/Codex (Service).app/Contents/MacOS/Codex (Service)`,
+    `${framework}/browser_crashpad_handler`,
+    "/Users/test/Codex Projects/tool",
+  ]) {
+    assert.equal(shutdown.commandRunsNativeCli("codex", `${executable} --type=utility`, executable), false,
+      "a directory prefix named Codex is not a CLI executable");
+  }
+  const tree = [
+    { pid: 20, parentPid: 1, command: "zsh" },
+    { pid: 21, parentPid: 20, command: "node /bin/codex", executable: "/bin/node" },
+    { pid: 22, parentPid: 21, command: "sh wrapper" },
+    { pid: 23, parentPid: 22, command: "codex --yolo", executable: "/bin/codex" },
+    { pid: 30, parentPid: 1, command: "zsh" },
+    { pid: 40, parentPid: 1, command: `${framework}/browser_crashpad_handler`, executable: `${framework}/browser_crashpad_handler` },
+  ];
+  assert.deepEqual([...shutdown.nativeCliPtyRoots("codex", tree, [20, 30, 40])], [20],
+    "count live CLI descendants, not idle shells or application helpers");
+  assert.deepEqual(shutdown.nativeCliRootProcesses("codex", tree, 999).map(p => p.pid), [21],
+    "a wrapper chain with an intermediate shell is still one session");
+
   const parsed = shutdown.parseNativeCliProcessList(
     [
       "  101  10 Fri Aug 21 02:12:07 2026 node /old/.local/bin/codex --yolo",
