@@ -13,6 +13,7 @@ import { createLimiter, workQueueRelevantFingerprint } from "./github-work-queue
 import { publish, rearm, type PublishInput } from "./notify";
 import { getPreferenceCached } from "./preferences-store";
 import { loadState, onStateSaved } from "./storage";
+import { subscribeToEvents } from "./sse-client";
 
 // "A teammate pushed" alerts, sourced from GitHub rather than from the local
 // git remote-tracking refs.
@@ -30,9 +31,9 @@ import { loadState, onStateSaved } from "./storage";
 // against the live API), so a quiet repository is free to watch. `X-Poll-
 // Interval` (60s today) is honoured as a floor on top of the user's interval.
 //
-// Deliberately NOT webhooks: they need a public HTTPS endpoint, which a
-// desktop app does not have. Deliberately NOT the notifications inbox
-// (`GET /notifications`): it carries issue/PR/CI threads and no push activity.
+// Authorized website subscriptions deliver webhook events immediately. The
+// conditional Events API poll reconciles reconnect gaps and missed webhooks.
+// The public release stream never carries repository events.
 //
 // Private-repository push events arrive with `commits: []` and `size: null`,
 // but they do carry `before` and `head`, so one `/compare` call per alert
@@ -73,6 +74,8 @@ export interface GitHubPushWatchDependencies {
   ): Promise<{ stdout: string; stderr: string }>;
   /** The GitHub token to authenticate with, or null when `gh` is signed out. */
   getToken(): Promise<string | null>;
+  subscribe: typeof subscribeToEvents;
+  nudgeRepos(cwds: string[]): void;
   httpGet(url: string, headers: Record<string, string>): Promise<HttpResponse>;
   publish(input: PublishInput): void;
   rearm(sourceKey: string): void;
@@ -92,6 +95,8 @@ function productionDependencies(): GitHubPushWatchDependencies {
   return {
     loadState,
     onStateSaved,
+    subscribe: subscribeToEvents,
+    nudgeRepos: (cwds) => { void import("./git-auto-fetch").then((m) => m.nudgeGitAutoFetchNow(cwds)); },
     runGit,
     getToken: async () => {
       try {
@@ -250,7 +255,11 @@ let lastFingerprint: string | null = null;
 let limiter = createLimiter(GITHUB_PUSH_WATCH_CONCURRENCY);
 let rebuildChain: Promise<void> = Promise.resolve();
 let viewerLogin: string | null = null;
-let viewerLookupFailed = false;
+let viewerRetryAt = 0;
+let stopEvents: (() => void) | null = null;
+let eventFingerprint = "";
+let queuedEvents = 0;
+let eventChain: Promise<void> = Promise.resolve();
 let cachedToken: { value: string | null; expiresAt: number } | null = null;
 const unsubscribes: Array<() => void> = [];
 // cwd → GitHub repo, memoized for the process lifetime.
@@ -284,6 +293,11 @@ async function token(): Promise<string | null> {
   const now = deps.now();
   if (cachedToken && cachedToken.expiresAt > now) return cachedToken.value;
   const value = await deps.getToken();
+  if (cachedToken && cachedToken.value !== value) {
+    viewerLogin = null;
+    viewerRetryAt = 0;
+    for (const repo of repos.values()) { repo.paused = false; repo.backoffMs = 0; repo.etag = null; }
+  }
   cachedToken = { value, expiresAt: now + GITHUB_PUSH_WATCH_TOKEN_TTL_MS };
   return value;
 }
@@ -301,7 +315,7 @@ function apiHeaders(auth: string, extra: Record<string, string> = {}): Record<st
 // The signed-in account. Every push by this login is the user's own — including
 // the squash merges whose commit emails match nobody.
 async function resolveViewer(auth: string): Promise<string | null> {
-  if (viewerLogin || viewerLookupFailed) return viewerLogin;
+  if (viewerLogin || deps.now() < viewerRetryAt) return viewerLogin;
   try {
     const response = await deps.httpGet(`${API_ROOT}/user`, apiHeaders(auth));
     const login = (response.body as { login?: unknown } | null)?.login;
@@ -312,7 +326,7 @@ async function resolveViewer(auth: string): Promise<string | null> {
   } catch {
     /* fall through to the failure path */
   }
-  viewerLookupFailed = true;
+  viewerRetryAt = deps.now() + intervalMs();
   deps.log("could not resolve the signed-in GitHub account; push alerts stay off");
   return null;
 }
@@ -400,8 +414,67 @@ async function rebuildRepoTable(state: AppState): Promise<void> {
     deps.log(`${dropped} repositories beyond the ${GITHUB_PUSH_WATCH_MAX_REPOS}-repo cap are not watched`);
   }
   repos = next;
+  syncEventSubscription();
   scheduleNextPass();
 }
+
+function syncEventSubscription(): void {
+  const keys = deps.getPreference("gitAutoFetchEnabled") === false ? [] : [...repos.keys()].sort();
+  const fingerprint = keys.join("\n");
+  if (fingerprint === eventFingerprint) return;
+  stopEvents?.();
+  eventFingerprint = fingerprint;
+  stopEvents = null;
+  if (!keys.length) return;
+  stopEvents = deps.subscribe({
+    url: "https://studio.codarasolutions.com/api/github/events",
+    request: async () => {
+      const auth = await deps.getToken();
+      if (auth !== cachedToken?.value) cachedToken = cachedToken ? { ...cachedToken, expiresAt: 0 } : null;
+      if (!auth) throw new Error("GitHub is signed out");
+      return { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" },
+        body: JSON.stringify({ repos: keys }) };
+    },
+    onEvent: (message) => {
+      if (!started || fingerprint !== eventFingerprint) return;
+      if (message.event === "resync") {
+        deps.nudgeRepos(keys.flatMap((key) => repos.get(key)?.workspaces.map((workspace) => workspace.cwd) ?? []));
+        nudgeGitHubPushWatch();
+        return;
+      }
+      if (message.event !== "github") return;
+      let data: { repo?: string; event?: unknown };
+      try { data = JSON.parse(message.data); } catch { return; }
+      const repo = typeof data.repo === "string" ? repos.get(data.repo) : undefined;
+      if (!repo || !data.event) return;
+      deps.nudgeRepos(repo.workspaces.map((workspace) => workspace.cwd));
+      if (queuedEvents >= 128) return;
+      queuedEvents += 1;
+      eventChain = eventChain.then(async () => {
+        if (!started || fingerprint !== eventFingerprint || !enabled()) return;
+        const auth = await token();
+        const viewer = auth ? await resolveViewer(auth) : null;
+        if (auth && viewer) await deliverEvents(repo, [data.event], auth, viewer, true);
+      }).catch(() => { /* The conditional poll reconciles failed delivery. */ })
+        .finally(() => { queuedEvents -= 1; });
+    },
+    onError: (message) => deps.log(`${message}; reconnecting event stream`),
+  });
+}
+
+function eventIdentity(raw: unknown): string | null {
+  const event = raw as { id?: string; type?: string; payload?: { ref?: string; head?: string;
+    action?: string; pull_request?: { number?: number; updated_at?: string; head?: { sha?: string } } } } | null;
+  if (!event || typeof event !== "object") return null;
+  if (event.type === "PushEvent" && event.payload?.head) return `push:${event.payload.ref}:${event.payload.head}`;
+  const pr = event.payload?.pull_request;
+  if (event.type === "PullRequestEvent" && pr?.number) {
+    return `pr:${pr.number}:${event.payload?.action}:${pr.updated_at ?? pr.head?.sha ?? ""}`;
+  }
+  return typeof event.id === "string" ? event.id : null;
+}
+
+export function waitForGitHubWebhookEvents(): Promise<void> { return eventChain; }
 
 function queueRebuild(state: AppState): Promise<void> {
   rebuildChain = rebuildChain
@@ -599,6 +672,16 @@ async function pollRepo(repo: WatchedRepo, auth: string, viewer: string): Promis
     schedule();
     return;
   }
+  if (response.status === 429 || (response.status === 403 &&
+      (response.headers["x-ratelimit-remaining"] === "0" || response.headers["retry-after"]))) {
+    const retry = response.headers["retry-after"] ?? "";
+    const retryMs = /^\d+$/.test(retry) ? Number(retry) * 1_000 : Date.parse(retry) - deps.now();
+    const resetMs = Number(response.headers["x-ratelimit-reset"]) * 1_000 - deps.now();
+    repo.backoffMs = Math.max(60_000, Number.isFinite(retryMs) ? retryMs : 0,
+      Number.isFinite(resetMs) ? resetMs : 0);
+    repo.nextDueAt = deps.now() + repo.backoffMs + jitter(5_000);
+    return;
+  }
   if (response.status === 404 || response.status === 403 || response.status === 401) {
     // No access, or the token lost the scope. Retrying on a timer would just
     // burn requests; a restart or a re-auth picks it up again.
@@ -619,23 +702,18 @@ async function pollRepo(repo: WatchedRepo, auth: string, viewer: string): Promis
   repo.etag = response.headers["etag"] ?? repo.etag;
   schedule();
 
-  const pushes = pushesEnabled() ? parsePushEvents(response.body, viewer) : [];
-  const fresh = pushes.filter((push) => !repo.seenEventIds.includes(push.id));
-  const pullRequests = pullRequestsEnabled() ? parsePullRequestEvents(response.body, viewer) : [];
-  const freshPullRequests = pullRequests.filter((pr) => !repo.seenEventIds.includes(pr.id));
-  rememberSeen(
-    repo,
-    (Array.isArray(response.body) ? response.body : [])
-      .map((e) => (e as { id?: unknown }).id)
-      .filter((id): id is string => typeof id === "string"),
-  );
+  await deliverEvents(repo, response.body, auth, viewer, false);
+}
 
-  // The first successful poll establishes "what already happened" — reporting
-  // it would announce a week of history the moment the app opens.
-  if (!repo.seeded) {
-    repo.seeded = true;
-    return;
-  }
+async function deliverEvents(repo: WatchedRepo, eventBody: unknown, auth: string, viewer: string, live: boolean): Promise<void> {
+  const events = (Array.isArray(eventBody) ? eventBody : []).filter((event) => event && typeof event === "object")
+    .map((event) => ({ ...event, id: eventIdentity(event) }));
+  const pushes = pushesEnabled() ? parsePushEvents(events, viewer) : [];
+  const fresh = pushes.filter((push) => !repo.seenEventIds.includes(push.id));
+  const pullRequests = pullRequestsEnabled() ? parsePullRequestEvents(events, viewer) : [];
+  const freshPullRequests = pullRequests.filter((pr) => !repo.seenEventIds.includes(pr.id));
+  rememberSeen(repo, events.map((event) => event.id).filter((id): id is string => typeof id === "string"));
+  if (!repo.seeded && !live) { repo.seeded = true; return; }
   // Oldest first, so several PRs opened between polls arrive in order.
   for (const pr of [...freshPullRequests].reverse()) {
     const { title, body } = formatPullRequestNotification(repo.displayName, pr);
@@ -718,11 +796,12 @@ export async function runGitHubPushWatchPass(): Promise<void> {
   if (!started || passRunning) return;
   passRunning = true;
   try {
+    syncEventSubscription();
     if (!enabled() || !deps.isOnline()) return;
+    const auth = await token();
     const now = deps.now();
     const due = [...repos.values()].filter((repo) => !repo.paused && repo.nextDueAt <= now);
     if (due.length === 0) return;
-    const auth = await token();
     if (!auth) {
       for (const repo of due) repo.nextDueAt = now + intervalMs();
       return;
@@ -745,7 +824,7 @@ export function nudgeGitHubPushWatch(): void {
   if (!started || !enabled()) return;
   const dueAt = deps.now() + 5_000 + jitter(5_000);
   for (const repo of repos.values()) {
-    if (repo.paused) continue;
+    if (repo.paused || repo.backoffMs > 0) continue;
     if (repo.nextDueAt > dueAt) repo.nextDueAt = dueAt;
   }
   scheduleNextPass();
@@ -773,6 +852,9 @@ export async function startGitHubPushWatch(
 
 export function stopGitHubPushWatch(): void {
   started = false;
+  stopEvents?.();
+  stopEvents = null;
+  eventFingerprint = "";
   clearScheduled();
   for (const unsubscribe of unsubscribes.splice(0)) {
     try {
@@ -785,7 +867,7 @@ export function stopGitHubPushWatch(): void {
   repoRefByCwd.clear();
   lastFingerprint = null;
   viewerLogin = null;
-  viewerLookupFailed = false;
+  viewerRetryAt = 0;
   cachedToken = null;
   passRunning = false;
 }

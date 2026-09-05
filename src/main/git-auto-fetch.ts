@@ -257,6 +257,7 @@ interface RepoEntry {
   seeded: boolean;
   lastRefs: RefSnapshot | null;
   lastFetchAt: number;
+  nudgeAt: number | null;
 }
 
 export interface GitAutoFetchRepoSnapshot {
@@ -273,6 +274,7 @@ let deps: GitAutoFetchDependencies = productionDependencies();
 let started = false;
 let repos = new Map<string, RepoEntry>();
 let timer: unknown = null;
+let timerDueAt = Number.POSITIVE_INFINITY;
 let passRunning = false;
 let lastPassAt = 0;
 let lastFingerprint: string | null = null;
@@ -417,6 +419,7 @@ async function rebuildRepoTable(state: AppState): Promise<void> {
       seeded: previous?.seeded ?? false,
       lastRefs: previous?.lastRefs ?? null,
       lastFetchAt: previous?.lastFetchAt ?? 0,
+      nudgeAt: previous?.nudgeAt ?? null,
     });
   }
   for (const entry of next.values()) {
@@ -451,6 +454,7 @@ async function runRepoPass(repo: RepoEntry, intervalMs: number): Promise<void> {
     repo.nextDueAt = now + GIT_AUTO_FETCH_MIN_TICK_MS;
     return;
   }
+  repo.nudgeAt = null;
   try {
     const before = repo.lastRefs ?? (await snapshotRemoteRefs(repo.cwd, repo.remote));
     await deps.runGit(repo.cwd, autoFetchGitArgs(repo.remote), {
@@ -462,7 +466,7 @@ async function runRepoPass(repo: RepoEntry, intervalMs: number): Promise<void> {
     repo.lastRefs = after;
     repo.backoffMs = 0;
     repo.lastFetchAt = deps.now();
-    repo.nextDueAt = repo.lastFetchAt + intervalMs;
+    repo.nextDueAt = repo.nudgeAt ?? repo.lastFetchAt + intervalMs;
     if (!repo.seeded) {
       repo.seeded = true;
       return;
@@ -498,6 +502,7 @@ async function runRepoPass(repo: RepoEntry, intervalMs: number): Promise<void> {
 // ── Scheduler ───────────────────────────────────────────────────────────────
 
 function clearScheduled(): void {
+  timerDueAt = Number.POSITIVE_INFINITY;
   if (timer !== null) {
     deps.clearTimeout(timer);
     timer = null;
@@ -505,8 +510,7 @@ function clearScheduled(): void {
 }
 
 function scheduleNextPass(): void {
-  clearScheduled();
-  if (!started) return;
+  if (!started || passRunning) return;
   const now = deps.now();
   let earliest = Number.POSITIVE_INFINITY;
   for (const repo of repos.values()) {
@@ -516,9 +520,14 @@ function scheduleNextPass(): void {
   // Nothing due (or the feature is off): still wake occasionally so a flipped
   // preference or an un-paused repository is noticed without a subscription.
   const wanted = Number.isFinite(earliest) ? earliest - now : GIT_AUTO_FETCH_MAX_TICK_MS;
-  const delay = Math.max(GIT_AUTO_FETCH_MIN_TICK_MS, Math.min(GIT_AUTO_FETCH_MAX_TICK_MS, wanted));
+  const urgent = [...repos.values()].some((repo) => !repo.paused && repo.nudgeAt !== null && repo.nextDueAt === repo.nudgeAt);
+  const delay = Math.max(urgent ? 0 : GIT_AUTO_FETCH_MIN_TICK_MS, Math.min(GIT_AUTO_FETCH_MAX_TICK_MS, wanted));
+  if (timer !== null && timerDueAt <= now + delay) return;
+  clearScheduled();
+  timerDueAt = now + delay;
   timer = deps.setTimeout(() => {
     timer = null;
+    timerDueAt = Number.POSITIVE_INFINITY;
     void runGitAutoFetchPass();
   }, delay);
 }
@@ -528,6 +537,7 @@ function scheduleNextPass(): void {
 // "fetch everything now" action — can drive it directly.
 export async function runGitAutoFetchPass(): Promise<void> {
   if (!started || passRunning) return;
+  clearScheduled();
   passRunning = true;
   try {
     if (!enabled()) return;
@@ -554,16 +564,15 @@ export async function runGitAutoFetchPass(): Promise<void> {
 // Bring every repository's next fetch forward (short jitter, never
 // immediately). "resume" always nudges; "focus" only when the last pass is
 // older than one interval, so ordinary alt-tabbing costs nothing.
-// A push webhook told us the remote moved RIGHT NOW: fetch everything at
-// once (tiny jitter only). The per-repo snapshot diff downstream makes the
-// pass a no-op for repos that didn't move, so firing broadly is cheap and
-// avoids brittle webhook-payload -> local-repo name matching.
-export function nudgeGitAutoFetchNow(): void {
+// Webhook nudges coalesce without postponing an earlier deadline. A nudge
+// received during fetch survives that fetch and schedules one follow-up.
+export function nudgeGitAutoFetchNow(cwds?: readonly string[]): void {
   if (!started || !enabled()) return;
   const dueAt = deps.now() + jitter(500);
   for (const repo of repos.values()) {
-    if (repo.paused) continue;
-    if (repo.nextDueAt > dueAt) repo.nextDueAt = dueAt;
+    if (repo.paused || (cwds && !repo.workspaces.some((workspace) => cwds.includes(workspace.cwd)))) continue;
+    repo.nudgeAt = Math.min(repo.nudgeAt ?? dueAt, dueAt);
+    repo.nextDueAt = Math.min(repo.nextDueAt, repo.nudgeAt);
   }
   scheduleNextPass();
 }

@@ -46,3 +46,21 @@ prompts skipped, and `cora.send` is not rate limited.
 
 `phone-notify.ts` bridges the unified notification pipeline (`src/main/notify/`)
 to paired devices with delivery receipts.
+
+### Reconnect recovery
+
+Paired mobile sessions give LAN a 350 ms head start, then race the authenticated
+relay. A failed relay attempt leaves pending LAN attempts alive, and the first
+successful pinned Noise handshake cancels the other attempts. Initial pairing
+remains LAN-only.
+
+The relay probes an existing Studio socket for two seconds before replacing a
+silent connection. A responsive Studio keeps ownership. Late frames from
+recently closed phone streams are ignored within a bounded retirement window,
+so a cancelled phone cannot disconnect other sessions. Studio also enforces an
+authentication deadline and a 60-second server-heartbeat deadline.
+
+The relay must run as one replica until connection routing has shared ownership.
+Aggregate `relay_metrics` logs report active connections/sessions, forwarded
+bytes, slow receivers, buffered high-water and acceptance latency totals. Payloads
+remain encrypted end to end; the relay does not inspect application messages.

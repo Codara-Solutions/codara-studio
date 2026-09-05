@@ -601,6 +601,21 @@ test("repo with no remote or two non-origin remotes is skipped; scheduler timer 
   mod.stopGitAutoFetch();
 });
 
+test("webhook nudges only the matching repository without a ten-second floor or burst starvation", async ({ mod }) => {
+  const world = makeWorld();
+  for (const cwd of ["/a", "/b"]) { world.addRepo(`${cwd}/.git`); world.bind(cwd, `${cwd}/.git`); }
+  const h = await makeHarness(mod, { workspaces: [ws("a", "/a"), ws("b", "/b")], world });
+  const before = mod.getGitAutoFetchSnapshot();
+  mod.nudgeGitAutoFetchNow(["/a"]);
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].ms, 0);
+  const timer = h.timers[0];
+  h.now += 100;
+  mod.nudgeGitAutoFetchNow(["/a"]);
+  assert.equal(h.timers[0], timer, "a burst cannot postpone an already scheduled fetch");
+  assert.equal(mod.getGitAutoFetchSnapshot()[1].nextDueAt, before[1].nextDueAt);
+});
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 (async () => {
