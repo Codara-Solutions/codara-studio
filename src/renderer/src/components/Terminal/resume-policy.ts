@@ -49,6 +49,7 @@ export function decideResume(
 export interface AgentSessionPointer {
   runtime: "claude" | "codex" | "grok";
   nativeClaudeProfileId?: string;
+  nativeCodexProfileId?: string;
   nativeGrokProfileId?: string;
   sessionId: string;
   cwd: string;
@@ -61,8 +62,11 @@ export interface AgentSessionPointer {
 // (src/main/agent-session-registry.ts).
 export interface SessionStartRecord {
   paneId?: string;
-  runtime: "claude";
+  runtime: "claude" | "codex";
+  active?: boolean;
+  restoreOnBoot?: boolean;
   nativeClaudeProfileId?: string;
+  nativeCodexProfileId?: string;
   sessionId: string;
   transcriptPath?: string;
   cwd?: string;
@@ -101,41 +105,45 @@ export function mergeSessionStart(
     // scoped to the launch directory's project bucket.
     if (!start.cwd) return null;
     return {
-      runtime: "claude",
+      runtime: start.runtime,
+      nativeCodexProfileId: start.nativeCodexProfileId,
       nativeClaudeProfileId: start.nativeClaudeProfileId,
       sessionId: start.sessionId,
       cwd: start.cwd,
       transcriptPath: start.transcriptPath,
       capturedAt: new Date(startTs).toISOString(),
-      // No pointer means no running-at-quit judgment was ever made; never
-      // invent restore eligibility here.
-      active: false,
+      // Claude hooks only identify a conversation; Codex process tracking
+      // also knows whether the session was still open.
+      active: start.runtime === "codex" && start.active === true,
     };
   }
   if (startTs <= parseTimestamp(pointer.capturedAt)) return null;
-  if (pointer.runtime === "claude" && pointer.sessionId === start.sessionId) {
+  if (pointer.runtime === start.runtime && pointer.sessionId === start.sessionId) {
     // Same session re-announced (our own `--resume`, or a compact). Identity
     // is unchanged; only fill a missing transcript path.
-    if (pointer.transcriptPath || !start.transcriptPath) return null;
+    if ((pointer.transcriptPath || !start.transcriptPath) &&
+        (start.runtime !== "codex" || start.active === undefined || start.active === pointer.active)) return null;
     return {
       ...pointer,
       nativeClaudeProfileId:
-        start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId,
-      transcriptPath: start.transcriptPath,
+        start.runtime === "claude" ? start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId : undefined,
+      transcriptPath: start.transcriptPath ?? pointer.transcriptPath,
+      active: start.runtime === "codex" ? start.active ?? pointer.active : pointer.active,
       capturedAt: new Date(startTs).toISOString(),
     };
   }
   return {
-    runtime: "claude",
+    runtime: start.runtime,
+    nativeCodexProfileId: start.nativeCodexProfileId,
     nativeClaudeProfileId:
-      start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId,
+      start.runtime === "claude" ? start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId : undefined,
     sessionId: start.sessionId,
     cwd: start.cwd ?? pointer.cwd,
     transcriptPath: start.transcriptPath,
     capturedAt: new Date(startTs).toISOString(),
     // Eligibility judgment carries over: the pane's agent was (or wasn't)
     // running at quit regardless of which session id it was showing.
-    active: pointer.active,
+    active: start.runtime === "codex" ? start.active ?? pointer.active : pointer.active,
   };
 }
 
