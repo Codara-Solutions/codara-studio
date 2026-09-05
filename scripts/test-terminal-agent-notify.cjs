@@ -563,6 +563,32 @@ async function main() {
   T.processes.set(1010, [{ pid: 2020, depth: 1, command: "codex" }]);
   check("a later silent Codex launch is detected again", (await waitForState("p10", "idle")).runtime === "codex");
 
+  const restoredPanes = ["claude", "codex", "grok"].map((runtime, index) => {
+    const paneId = `restored-${runtime}`;
+    const pid = 1100 + index;
+    T.pids.set(paneId, pid);
+    T.processes.set(pid, [{ pid: pid + 100, depth: 1, command: runtime }]);
+    return { paneId, tabId: `tab-${runtime}`, excluded: false, runtimeHint: runtime };
+  });
+  mod.syncTerminalNotifyPanes({ workspaceId: "cold-start", panes: [
+    ...restoredPanes,
+    { paneId: "not-started", tabId: "missing", excluded: false, runtimeHint: "claude" },
+    { paneId: "restored-banner", tabId: "banner", excluded: false, runtimeHint: "claude" },
+  ] });
+  check("a saved runtime hint does not count an agent before it starts",
+    !mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "not-started"));
+  feed("restored-banner", "Claude Code v2.1.261\r\n");
+  check("a restored idle banner publishes presence without a working turn",
+    mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "restored-banner" && entry.runtime === "claude"));
+  for (const pane of restoredPanes) {
+    const state = await waitForState(pane.paneId, "idle");
+    check(`a silent restored ${pane.runtimeHint} is included in snapshots`, state.runtime === pane.runtimeHint);
+  }
+  T.processes.set(1101, []);
+  await waitForState("restored-codex", "done");
+  check("a restored agent leaves the census after it exits",
+    !mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "restored-codex"));
+
   T.dimensions = new Map([["p13", { cols: 100, rows: 20 }]]);
   feed("p13", "\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/src");
   await waitForState("p13", "working");

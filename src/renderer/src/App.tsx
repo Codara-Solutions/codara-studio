@@ -91,6 +91,7 @@ import {
   createManualAgentLaunchWorker,
   isPaneAgentInjectable,
   mergeTerminalRuntimeState,
+  terminalAgentCensus,
 } from "./tabs/terminalAgentState";
 import {
   resolveEffectiveActiveId,
@@ -1204,19 +1205,16 @@ export default function App() {
           }
         }
       }
-      const agentPanes = terminalAgents[w.id] ?? {};
-      const workingPanes = terminalWorking[w.id] ?? {};
-      total += Object.keys(agentPanes).length;
-      for (const paneId of Object.keys(workingPanes)) {
-        // A working pane always counts, even if its census entry has not
-        // arrived yet (the two maps are fed by the same event).
-        if (!agentPanes[paneId]) total += 1;
-        working += 1;
-      }
+      const layoutTabs = w.id === tabs.tabsWorkspaceId
+        ? tabs.tabs
+        : tabs.inactiveWorkspaceLayouts.find((layout) => layout.workspaceId === w.id)?.tabs ?? [];
+      const terminals = terminalAgentCensus(layoutTabs, terminalAgents[w.id], terminalWorking[w.id]);
+      total += terminals.total;
+      working += terminals.working;
       m[w.id] = { total, working };
     }
     return m;
-  }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents]);
+  }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
@@ -2531,7 +2529,7 @@ export default function App() {
           : { ...existing, runtimeState };
       },
     );
-  }, [setTerminalPaneWorking]);
+  }, [setTerminalPaneWorking, setTerminalPaneAgent]);
 
   // ── Terminal-agent notifications (manual claude/codex panes) ──────────────
   //
@@ -2553,100 +2551,105 @@ export default function App() {
   //      the tab + pane.
   useEffect(() => {
     if (!booted) return;
-    const workspaceId = tabs.tabsWorkspaceId;
-    if (!workspaceId) return;
-    const panes: Array<{
-      paneId: string;
-      tabId: string;
-      tabTitle: string;
-      excluded: boolean;
-      runtimeHint?: "claude" | "codex" | "grok" | null;
-    }> = [];
-    for (const tab of tabs.tabs) {
-      if (tab.kind !== "terminal") continue;
-      const workersTab = tab.scope?.kind === "workers";
-      forEachTerminalLeaf(tab.root, (leaf) => {
-        panes.push({
-          paneId: leaf.paneId,
-          tabId: tab.id,
-          tabTitle: tab.title,
-          // Cora-spawned worker panes are excluded from terminal-agent alerts
-          // for their WHOLE lifetime, not just while state==="running". The
-          // run-store lifecycle already alerts these workers; the pty tap must
-          // never speak for them. The old state gate leaked at TEARDOWN: state
-          // leaves "running" (worker_attempt.finished flips it to "done") while
-          // the CLI is still painting its exit / a lingering permission prompt,
-          // so the pane became watched and that boot/exit prompt matched the
-          // broad "blocked" patterns → a bogus "needs you" toast for a prompt
-          // nobody had to answer. `leaf.worker.source` is never cleared to null
-          // once set to "spark" (only manual chips clear; spark panes keep their
-          // metadata with agentRunning:false), so this covers the pane until it
-          // is closed.
-          //
-          // Reachability: `source:"spark"` panes are created inside a
-          // workers-scoped tab (ensureWorkerTerminalTab), already covered by the
-          // `workersTab` clause. The spark clause therefore only bites once such
-          // a pane is DETACHED/moved into a plain tab (detachTerminalPaneToNewTab
-          // / moveTerminalPane carry the worker meta across). No chip regression
-          // for the orchestration lifecycle: a running spark pane was ALREADY not
-          // fed by this tap; its chip comes from the run-store worker lifecycle
-          // (worker_attempt.* → setLeafWorker) and the renderer visible-buffer
-          // poller, both independent of `excluded`.
-          //
-          // Known trade-off (accepted): if a user DETACHES a done worker pane and
-          // manually runs `claude`/`codex` in it, that reused session no longer
-          // fires done/blocked toasts and — while the pane is hidden — its chip
-          // runtimeState can go stale (the notifier tap was the only hidden-pane
-          // writer; teardown via alt-screen exit still clears it). This is a rare
-          // path and the bogus-alert fix is worth it; if it ever needs alerts,
-          // clear leaf.worker on detach so the pane reads as a plain terminal.
-          excluded: workersTab || leaf.worker?.source === "spark",
-          runtimeHint:
-            leaf.agentSession?.active === true
-              ? leaf.agentSession.runtime
-              : leaf.worker?.agentRunning !== false &&
-                  (leaf.worker?.runtime === "claude" || leaf.worker?.runtime === "codex")
-                ? leaf.worker.runtime
-                : null,
+    const layouts = [
+      ...tabs.inactiveWorkspaceLayouts,
+      ...(tabs.tabsWorkspaceId ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs }] : []),
+    ];
+    for (const layout of layouts) {
+      const workspaceId = layout.workspaceId;
+      const panes: Array<{
+        paneId: string;
+        tabId: string;
+        tabTitle: string;
+        excluded: boolean;
+        runtimeHint?: "claude" | "codex" | "grok" | null;
+      }> = [];
+      for (const tab of layout.tabs) {
+        if (tab.kind !== "terminal") continue;
+        const workersTab = tab.scope?.kind === "workers";
+        forEachTerminalLeaf(tab.root, (leaf) => {
+          panes.push({
+            paneId: leaf.paneId,
+            tabId: tab.id,
+            tabTitle: tab.title,
+            // Cora-spawned worker panes are excluded from terminal-agent alerts
+            // for their WHOLE lifetime, not just while state==="running". The
+            // run-store lifecycle already alerts these workers; the pty tap must
+            // never speak for them. The old state gate leaked at TEARDOWN: state
+            // leaves "running" (worker_attempt.finished flips it to "done") while
+            // the CLI is still painting its exit / a lingering permission prompt,
+            // so the pane became watched and that boot/exit prompt matched the
+            // broad "blocked" patterns → a bogus "needs you" toast for a prompt
+            // nobody had to answer. `leaf.worker.source` is never cleared to null
+            // once set to "spark" (only manual chips clear; spark panes keep their
+            // metadata with agentRunning:false), so this covers the pane until it
+            // is closed.
+            //
+            // Reachability: `source:"spark"` panes are created inside a
+            // workers-scoped tab (ensureWorkerTerminalTab), already covered by the
+            // `workersTab` clause. The spark clause therefore only bites once such
+            // a pane is DETACHED/moved into a plain tab (detachTerminalPaneToNewTab
+            // / moveTerminalPane carry the worker meta across). No chip regression
+            // for the orchestration lifecycle: a running spark pane was ALREADY not
+            // fed by this tap; its chip comes from the run-store worker lifecycle
+            // (worker_attempt.* → setLeafWorker) and the renderer visible-buffer
+            // poller, both independent of `excluded`.
+            //
+            // Known trade-off (accepted): if a user DETACHES a done worker pane and
+            // manually runs `claude`/`codex` in it, that reused session no longer
+            // fires done/blocked toasts and — while the pane is hidden — its chip
+            // runtimeState can go stale (the notifier tap was the only hidden-pane
+            // writer; teardown via alt-screen exit still clears it). This is a rare
+            // path and the bogus-alert fix is worth it; if it ever needs alerts,
+            // clear leaf.worker on detach so the pane reads as a plain terminal.
+            excluded: workersTab || leaf.worker?.source === "spark",
+            runtimeHint:
+              leaf.agentSession?.active === true
+                ? leaf.agentSession.runtime
+                : leaf.worker?.agentRunning !== false &&
+                    (leaf.worker?.runtime === "claude" || leaf.worker?.runtime === "codex")
+                  ? leaf.worker.runtime
+                  : null,
+          });
         });
-      });
+      }
+      // Prune activity-spin entries for panes that closed while this workspace
+      // was hidden: a pane removed off-screen never gets a clearing state event,
+      // so drop any tracked paneId no longer in the live pane list. Same
+      // same-object-when-unchanged discipline as the notifier effect.
+      const livePaneIds = new Set(panes.map((p) => p.paneId));
+      const pruneClosedPanes = (current: Record<string, Record<string, true>>) => {
+        const ws = current[workspaceId];
+        if (!ws) return current;
+        const kept: Record<string, true> = {};
+        let changed = false;
+        for (const paneId of Object.keys(ws)) {
+          if (livePaneIds.has(paneId)) kept[paneId] = true;
+          else changed = true;
+        }
+        if (!changed) return current;
+        if (Object.keys(kept).length === 0) {
+          const { [workspaceId]: _droppedWs, ...restWorkspaces } = current;
+          return restWorkspaces;
+        }
+        return { ...current, [workspaceId]: kept };
+      };
+      setTerminalWorking(pruneClosedPanes);
+      setTerminalAgents(pruneClosedPanes);
+      // Optional chaining: during dev HMR the renderer can be newer than the
+      // preload of a long-lived instance; degrade to no-op instead of throwing
+      // inside the effect.
+      const workspaceName = workspaces.find((w) => w.id === workspaceId)?.name ?? "";
+      window.spark.terminalNotify
+        ?.sync?.({ workspaceId, workspaceName, panes })
+        ?.then((states) => {
+          for (const state of states ?? []) reconcileTerminalAgentState(state);
+        })
+        ?.catch(() => {
+          /* registry sync is best-effort; the next layout change retries */
+        });
     }
-    // Prune activity-spin entries for panes that closed while this workspace
-    // was hidden: a pane removed off-screen never gets a clearing state event,
-    // so drop any tracked paneId no longer in the live pane list. Same
-    // same-object-when-unchanged discipline as the notifier effect.
-    const livePaneIds = new Set(panes.map((p) => p.paneId));
-    const pruneClosedPanes = (current: Record<string, Record<string, true>>) => {
-      const ws = current[workspaceId];
-      if (!ws) return current;
-      const kept: Record<string, true> = {};
-      let changed = false;
-      for (const paneId of Object.keys(ws)) {
-        if (livePaneIds.has(paneId)) kept[paneId] = true;
-        else changed = true;
-      }
-      if (!changed) return current;
-      if (Object.keys(kept).length === 0) {
-        const { [workspaceId]: _droppedWs, ...restWorkspaces } = current;
-        return restWorkspaces;
-      }
-      return { ...current, [workspaceId]: kept };
-    };
-    setTerminalWorking(pruneClosedPanes);
-    setTerminalAgents(pruneClosedPanes);
-    // Optional chaining: during dev HMR the renderer can be newer than the
-    // preload of a long-lived instance; degrade to no-op instead of throwing
-    // inside the effect.
-    const workspaceName = workspaces.find((w) => w.id === workspaceId)?.name ?? "";
-    window.spark.terminalNotify
-      ?.sync?.({ workspaceId, workspaceName, panes })
-      ?.then((states) => {
-        for (const state of states ?? []) reconcileTerminalAgentState(state);
-      })
-      ?.catch(() => {
-        /* registry sync is best-effort; the next layout change retries */
-      });
-  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, workspaces, reconcileTerminalAgentState]);
+  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts, workspaces, reconcileTerminalAgentState]);
 
   useEffect(() => {
     if (!booted) return;

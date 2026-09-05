@@ -80,6 +80,32 @@ for (const runtime of ["claude", "codex"]) {
 }
 
 const seededWorker = state.createManualAgentLaunchWorker("claude", "pane-1");
+const idleLeaf = {
+  kind: "leaf", paneId: "idle",
+  worker: { ...seededWorker, runtimeState: "idle" },
+};
+const workingLeaf = {
+  kind: "leaf", paneId: "busy",
+  worker: { ...seededWorker, runtime: "codex", runtimeState: "working" },
+};
+const terminalTabs = [{
+  id: "terminal", kind: "terminal", title: "terminals", activePaneId: "idle",
+  root: { kind: "split", direction: "horizontal", ratio: 0.5, a: idleLeaf, b: workingLeaf },
+}];
+assert.deepEqual(state.terminalAgentCensus(terminalTabs), { total: 2, working: 1 },
+  "live restored chips count before notifier events arrive");
+assert.deepEqual(state.terminalAgentCensus(terminalTabs, { idle: true, busy: true }, { busy: true }),
+  { total: 2, working: 1 }, "renderer and daemon observations of one pane are not double-counted");
+assert.deepEqual(state.terminalAgentCensus([], { hidden: true }, { hidden: true }),
+  { total: 1, working: 1 }, "unmounted background terminals remain in the daemon census");
+assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {
+  kind: "leaf", paneId: "saved", agentSession: { runtime: "claude", active: true, sessionId: "saved" },
+} }]), { total: 0, working: 0 }, "a durable resume pointer is not a live agent");
+for (const worker of [{ ...seededWorker, source: "spark" }, { ...seededWorker, agentRunning: false }]) {
+  assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: { ...idleLeaf, worker } }],
+    { idle: true }, { idle: true }), { total: 0, working: 0 },
+    "run-owned workers and exited agents do not inflate manual terminal counts");
+}
 assert.equal(
   state.isPaneAgentInjectable(seededWorker, undefined),
   false,
