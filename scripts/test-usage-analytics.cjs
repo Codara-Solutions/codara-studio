@@ -373,6 +373,14 @@ async function main() {
 
   /* ── Pricing ───────────────────────────────────────────────────────────── */
 
+  for (const model of ["gpt-6-astra", "openai/gpt-6-astra", "gpt-6-astra@high", "gpt-6-astra-20260901"]) {
+    const rate = lookupUsagePrice(model, "codex");
+    check(`pricing: ${model} resolves`, rate !== null);
+    eq(`pricing: ${model} input`, rate.input, 10);
+    eq(`pricing: ${model} output`, rate.output, 50);
+    eq(`pricing: ${model} cached input`, rate.cacheRead, 1);
+    eq(`pricing: ${model} cache writes`, rate.cacheWrite, 12.5);
+  }
   const opus = lookupUsagePrice("claude-opus-5", "claude");
   check("pricing: a listed model resolves", opus !== null);
   eq("pricing: input rate", opus.input, 5);
@@ -439,6 +447,9 @@ async function main() {
     priceUsageRecord(lookupUsagePrice, "cora", "claude-opus-5", totals, 0.5).costUsd,
     0.5,
   );
+  const astra = priceUsageRecord(lookupUsagePrice, "codex", "gpt-6-astra", totals, null);
+  eq("pricing: Astra usage is priced instead of unpriced", astra.costSource, "priced");
+  near("pricing: Astra charges input, output, cache reads and writes", astra.costUsd, 73.5);
   const priced = priceUsageRecord(lookupUsagePrice, "claude", "claude-opus-5", totals, null);
   eq("pricing: no reported cost falls to the table", priced.costSource, "priced");
   // 5 (input) + 0.5 (cache read) + 6.25 (cache write) + 25 (output).

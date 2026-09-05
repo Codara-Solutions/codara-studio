@@ -36,8 +36,7 @@ export interface ModelPrice {
    */
   cacheRead?: number;
   /**
-   * USD per 1M cache-WRITE input tokens (Anthropic's 5-minute prompt cache is
-   * billed at 1.25x the input rate). Only Anthropic bills writes separately;
+   * USD per 1M cache-WRITE input tokens (billed separately by some models);
    * when omitted, cache-creation tokens are billed at the plain `input` rate.
    */
   cacheWrite?: number;
@@ -69,7 +68,11 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
 
-  // OpenAI — GPT-5.6 / legacy GPT-5 / GPT-4o roster. GPT-5.6 cached input is
+  // Standard short-context rates, verified 2026-09-05:
+  // https://developers.openai.com/api/docs/models/gpt-6-astra
+  "openai/gpt-6-astra": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+
+  // OpenAI GPT-5.6 / legacy GPT-5 / GPT-4o roster. GPT-5.6 cached input is
   // billed at 10% of the uncached input price.
   "openai/gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5 },
   "openai/gpt-5.6-terra": { input: 2.5, output: 15, cacheRead: 0.25 },

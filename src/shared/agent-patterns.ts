@@ -190,9 +190,9 @@ const CLAUDE_LIVE_IDENTITY: RegExp[] = [
 
 const CODEX_LIVE_IDENTITY: RegExp[] = [
   /OpenAI\s*Codex/,
-  /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
+  /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
   /Context\s+\d+%\s+(?:used|left)/i,
-  /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+  /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
 ];
 
 const GROK_LIVE_IDENTITY: RegExp[] = [
@@ -442,18 +442,14 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /\bGoodbye\b!?/i,
     ],
   },
-  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines.
+  // Codex activity needs the elapsed-time footer. Bare status words also
+  // occur in prompt drafts and transcript text, so they cannot start a turn.
   // Codex has no AskUserQuestion-style MCQ, so it never classifies as
   // blocked — "needs you" is Claude-only.
   codex: {
     working: [
-      /esc\s*to\s*interrupt/i,
-      /\(\s*\d+\s*s\s*[·•]\s*esc/i,
-      /\(thinking\)/i,
-      /\(working\)/i,
-      /\bWorking\s*\(\d+\s*s/i,
-      /Generating/i,
-      /Streaming/i,
+      /\(\s*(?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
+      /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s/i,
     ],
     blocked: [],
     done: [
@@ -545,6 +541,28 @@ export function classifyTail(
     if (matchEndsPast(re, stripped, freshFrom)) return "done";
   }
   return null;
+}
+
+// A rendered Codex frame separates the live status line from editable prompt
+// text. Only the status immediately above the current composer can assert
+// work; quoted status text inside a draft or older transcript cannot.
+export function classifyCodexScreen(tail: string): "working" | "idle" | null {
+  const lines = stripAnsi(tail).split(/\r?\n/);
+  let composer = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*›/.test(lines[i])) {
+      composer = i;
+      break;
+    }
+  }
+  const above = lines.slice(0, composer < 0 ? lines.length : composer).filter((line) => line.trim());
+  const status = above[above.length - 1] ?? "";
+  if (RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))) return "working";
+  if (composer < 0) return null;
+  const footer = lines.slice(composer + 1).join("\n");
+  return CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer)) || /\?\s*for\s*shortcuts/i.test(footer)
+    ? "idle"
+    : null;
 }
 
 // Narrow post-submit detector for Cora's worker launch driver. Unlike the
@@ -737,10 +755,10 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
   ],
   codex: [
     /OpenAI\s*Codex/,
-    /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
+    /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
     /esc\s*to\s*interrupt/i,
     /Context\s+\d+%\s+(?:used|left)/i,
-    /\bgpt-5[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
+    /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
     /\?\s*for\s*shortcuts/i,
     /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
   ],

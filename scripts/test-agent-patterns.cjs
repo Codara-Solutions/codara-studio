@@ -51,6 +51,28 @@ check(
   ap.classifyTail("codex", "\x1b[2K▌ Working (32s • Esc to interrupt)"),
   "working",
 );
+for (const draft of [
+  "Look at the streaming changes in this branch",
+  "Generating a report should preserve the existing code",
+  "The chip says (working) while I am (thinking)",
+  "Explain what esc to interrupt does",
+]) {
+  check(
+    `codex prompt draft is not working: ${draft}`,
+    ap.classifyTail("codex", `› ${draft}\n  gpt-6-astra high fast · ~/project`),
+    null,
+  );
+  check(
+    `codex prompt repaint is not working: ${draft}`,
+    ap.classifyTail("codex", `\x1b[20;3H${draft}`),
+    null,
+  );
+}
+check(
+  "codex footer split across chunks still starts work",
+  ap.classifyTail("codex", "• Working (3s • esc to interrupt)", "• Working (3s • e".length),
+  "working",
+);
 check(
   "worker submit accepts Codex 0.144 bare Working shimmer",
   ap.workerSubmitTurnStarted("codex", "\x1b[27;3H\x1b[38;2;128;128;128mWorking"),
@@ -111,6 +133,17 @@ check("633;E plain shell command", ap.sniffOsc633CommandRuntime("\x1b]633;E;git 
 
 check("live sniff Codex working footer without banner", ap.sniffLiveRuntime("Working (0s • esc to interrupt)"), "codex");
 check("live sniff Codex statusline without banner", ap.sniffLiveRuntime("gpt-5.6-sol xhigh fast · ~/src"), "codex");
+for (const model of ["gpt-6-astra", "gpt-6", "gpt-7.1-codex"]) {
+  const footer = `› Review this branch\n${model} high fast · ~/src`;
+  check(`live sniff ${model} without startup banner`, ap.sniffLiveRuntime(footer), "codex");
+  check(`idle ${model} keeps the Codex UI present`, ap.agentUiPresent("codex", footer), true);
+  check(`detecting ${model} does not imply working`, ap.classifyTail("codex", footer), null);
+}
+check(
+  "live sniff Codex statusline with ANSI styling",
+  ap.sniffLiveRuntime("\x1b[33mgpt-6-astra\x1b[0m high fast · ~/src"),
+  "codex",
+);
 check("live sniff Claude mode line", ap.sniffLiveRuntime("⏸ manual mode on"), "claude");
 check("live sniff ignores plain shell", ap.sniffLiveRuntime("$ git status\nnothing to commit"), null);
 

@@ -125,6 +125,102 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
   }
 });
 
+test("Codex stays ready during draft editing and working through partial repaints", async () => {
+  test.setTimeout(90_000);
+  const fixture = await prepareFixture();
+  const launcher = join(fixture.binDir, "codex.js");
+  await writeFile(launcher, String.raw`
+    const out = (text) => process.stdout.write(text);
+    const idle = () => out("\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[7;1H› Explain this status\r\nWorking (9m 21s • esc to interrupt)\r\ngpt-6-astra high fast · ~/project");
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    idle();
+    let started = false;
+    process.stdin.on("data", (data) => {
+      if (started || !data.includes(13)) { if (!started) idle(); return; }
+      started = true;
+      out("\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project");
+      setTimeout(() => out("\x1b[5;6Hking\x1b[5;16H2"), 1000);
+      setTimeout(idle, 22000);
+    });
+  `);
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => (tab as HTMLElement).click());
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${launcher}"`, { delay: 2 });
+    await input.press("Enter");
+    const ready = page.getByRole("status", { name: "CODEX ready" });
+    const working = page.getByRole("status", { name: "CODEX working" });
+    await expect(ready).toBeVisible({ timeout: 15_000 });
+    await input.pressSequentially("Working (9m 21s • esc to interrupt)", { delay: 30 });
+    await page.waitForTimeout(3000);
+    await expect(ready).toBeVisible();
+    await input.press("Enter");
+    await expect(working).toBeVisible({ timeout: 5000 });
+    for (let i = 0; i < 17; i++) {
+      await page.waitForTimeout(1000);
+      await expect(working).toBeVisible();
+    }
+    await expect(ready).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await app?.close();
+  }
+});
+
+test("silent Codex is detected without a banner or saved session", async () => {
+  test.skip(process.platform === "win32", "Process discovery uses the Unix process listing");
+  test.setTimeout(60_000);
+  const fixture = await prepareFixture();
+  // A silent Codex-shaped Node launcher proves process recovery without
+  // emitting any agent text or touching a real Codex account.
+  const silentCodex = join(fixture.binDir, "codex.js");
+  await writeFile(silentCodex, "setTimeout(() => {}, 30000);\n");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => {
+      (tab as HTMLElement).click();
+    });
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${silentCodex}"`, { delay: 2 });
+    await input.press("Enter");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("status", { name: "CODEX working" })).toHaveCount(0);
+    await input.press("Control+c");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toHaveCount(0, { timeout: 15_000 });
+  } finally {
+    await app?.close();
+  }
+});
+
 test("cold-restored Claude is rehydrated as working even when output starts immediately", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture();
@@ -142,6 +238,9 @@ test("cold-restored Claude is rehydrated as working even when output starts imme
         // Claude ahead of this fixture binary).
         ...(process.platform === "win32" ? {} : { SHELL: "/bin/false" }),
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -265,9 +364,9 @@ async function prepareFixture(): Promise<{
       [
         "#!/bin/sh",
         "printf '>_ OpenAI Codex (v0.144.1)\\r\\n'",
-        "printf '• Working (0s • esc to interrupt)\\r\\n'",
+        "printf '• Working (9m 21s • esc to interrupt)\\r\\n'",
         "sleep 3",
-        "printf '› Write tests for @filename\\r\\n'",
+        "printf '\\033[1A\\r\\033[2K› Write tests for @filename\\r\\n'",
         "printf 'gpt-5.6-sol default · Context 100% left\\r\\n'",
         "sleep 30",
       ].join("\n"),

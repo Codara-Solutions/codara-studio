@@ -113,6 +113,8 @@ interface Session {
   renderHoldWatchdog: NodeJS.Timeout | null;
   renderUnackedAtHold: number;
   resizedAt: number;
+  cols: number;
+  rows: number;
   exited: boolean;
   // Ring buffer of the most recent raw pty bytes for this session, used by
   // the agent-socket terminal.read RPC so a sibling sub-agent can peek at
@@ -1118,6 +1120,8 @@ async function doSpawnRemote(
     renderHoldWatchdog: null,
     renderUnackedAtHold: 0,
     resizedAt: 0,
+    cols,
+    rows,
     exited: false,
     tail: [],
     tailBytes: 0,
@@ -1541,6 +1545,8 @@ function doSpawn(
     renderHoldWatchdog: null,
     renderUnackedAtHold: 0,
     resizedAt: 0,
+    cols,
+    rows,
     exited: false,
     tail: [],
     tailBytes: 0,
@@ -2233,6 +2239,8 @@ export function resize(id: string, cols: number, rows: number): void {
   if (!s) return;
   try {
     s.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0));
+    s.cols = Math.max(1, cols | 0);
+    s.rows = Math.max(1, rows | 0);
     s.resizedAt = Date.now();
   } catch {
     /* pty may have exited */
@@ -2245,6 +2253,11 @@ export function resize(id: string, cols: number, rows: number): void {
 export function sessionPid(id: string): number | null {
   const pid = sessions.get(id)?.pty.pid;
   return typeof pid === "number" && pid > 0 ? pid : null;
+}
+
+export function sessionDimensions(id: string): { cols: number; rows: number } | null {
+  const session = sessions.get(id);
+  return session ? { cols: session.cols, rows: session.rows } : null;
 }
 
 export function hasSession(id: string): boolean {

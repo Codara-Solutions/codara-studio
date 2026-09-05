@@ -258,6 +258,7 @@ export default function NotificationCenter({
                   <CenterEntry
                     key={entry.id}
                     entry={entry}
+                    onRemove={() => center.remove(entry.id)}
                     onOpen={() => {
                       // Opening an entry acts on every notification kind. Guard
                       // on navigation so an entry is never removed without a visit.
@@ -373,13 +374,16 @@ function DndSwitch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function CenterEntry({
   entry,
   onOpen,
+  onRemove,
   resolveQuestion,
 }: {
   entry: NotificationCenterEntry;
   onOpen: () => void;
+  onRemove: () => void;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
 }) {
   const [hover, setHover] = useState(false);
+  const [deleteActive, setDeleteActive] = useState(false);
   const meta = kindMeta(entry.kind);
   const toneVar = toneVarOf(entry);
 
@@ -400,130 +404,162 @@ function CenterEntry({
   const waitingOnAnswer = resolvedQuestion !== null;
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 8,
-        padding: "6px 8px",
-        margin: "0 4px",
-        borderRadius: "var(--radius-control, 7px)",
-        background: hover ? "var(--hover)" : "transparent",
-        transition: "background var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        aria-hidden
+    <div style={{ position: "relative", margin: "0 4px" }}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         style={{
-          flex: "0 0 18px",
-          width: 18,
-          height: 18,
-          marginTop: 1,
-          display: "grid",
-          placeItems: "center",
-          borderRadius: "var(--radius-control, 5px)",
-          background: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
-          border: `1px solid color-mix(in oklch, ${toneVar} 32%, transparent)`,
-          color: toneVar,
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 8,
+          padding: "6px 36px 6px 8px",
+          borderRadius: "var(--radius-control, 7px)",
+          background: hover ? "var(--hover)" : "transparent",
+          transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
-        <NotifyGlyphSvg glyph={meta.glyph} size={11} />
-      </span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              fontSize: 12,
-              fontWeight: entry.read ? 500 : 600,
-              color: "var(--ink)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-            }}
-          >
-            {entry.title || meta.label}
-          </span>
-          {entry.workspaceName && (
+        <span
+          aria-hidden
+          style={{
+            flex: "0 0 18px",
+            width: 18,
+            height: 18,
+            marginTop: 1,
+            display: "grid",
+            placeItems: "center",
+            borderRadius: "var(--radius-control, 5px)",
+            background: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
+            border: `1px solid color-mix(in oklch, ${toneVar} 32%, transparent)`,
+            color: toneVar,
+          }}
+        >
+          <NotifyGlyphSvg glyph={meta.glyph} size={11} />
+        </span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
             <span
-              title={entry.workspaceName}
               style={{
-                flex: "0 1 auto",
+                flex: 1,
                 minWidth: 0,
-                maxWidth: "45%",
-                fontSize: 10,
-                fontWeight: 600,
-                color: "var(--muted)",
+                fontSize: 12,
+                fontWeight: entry.read ? 500 : 600,
+                color: "var(--ink)",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
               }}
             >
-              {entry.workspaceName}
+              {entry.title || meta.label}
             </span>
-          )}
-          <span style={{ flex: "0 0 auto", fontSize: 10, color: "var(--muted)" }}>
-            {timeLabel(entry.createdAt)}
-          </span>
-          {!entry.read && (
-            <span
-              aria-label="Unread"
-              style={{
-                flex: "0 0 6px",
-                width: 6,
-                height: 6,
-                borderRadius: "50%",
-                background: "var(--accent)",
-              }}
-            />
-          )}
-        </div>
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--ink-dim, var(--muted))",
-            lineHeight: 1.4,
-            overflow: "hidden",
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflowWrap: "anywhere",
-          }}
-        >
-          {entry.body}
-        </div>
-        {/* A pending question announces ITSELF here and nothing more. The
-            options used to render as one-click answer buttons, which turned a
-            notification into a decision surface: the choices were shown
-            stripped of the reasoning that makes them meaningful, truncated to
-            three of four, and answerable without ever reading the question in
-            context. Deciding belongs in the run, so this only says an answer is
-            wanted and takes you there. */}
-        {waitingOnAnswer && (
+            {entry.workspaceName && (
+              <span
+                title={entry.workspaceName}
+                style={{
+                  flex: "0 1 auto",
+                  minWidth: 0,
+                  maxWidth: "45%",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: "var(--muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {entry.workspaceName}
+              </span>
+            )}
+            <span style={{ flex: "0 0 auto", fontSize: 10, color: "var(--muted)" }}>
+              {timeLabel(entry.createdAt)}
+            </span>
+            {!entry.read && (
+              <span
+                aria-label="Unread"
+                style={{
+                  flex: "0 0 6px",
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  background: "var(--accent)",
+                }}
+              />
+            )}
+          </div>
           <div
             style={{
-              marginTop: 5,
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
+              fontSize: 11,
+              color: "var(--ink-dim, var(--muted))",
+              lineHeight: 1.4,
+              overflow: "hidden",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflowWrap: "anywhere",
             }}
           >
-            Open the run to answer
+            {entry.body}
           </div>
-        )}
+          {/* A pending question announces ITSELF here and nothing more. The
+              options used to render as one-click answer buttons, which turned a
+              notification into a decision surface: the choices were shown
+              stripped of the reasoning that makes them meaningful, truncated to
+              three of four, and answerable without ever reading the question in
+              context. Deciding belongs in the run, so this only says an answer is
+              wanted and takes you there. */}
+          {waitingOnAnswer && (
+            <div
+              style={{
+                marginTop: 5,
+                color: "var(--muted)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 10,
+              }}
+            >
+              Open the run to answer
+            </div>
+          )}
+        </div>
       </div>
+      <button
+        type="button"
+        aria-label={`Delete notification: ${entry.title || meta.label}`}
+        title="Delete notification"
+        onClick={onRemove}
+        onMouseEnter={() => setDeleteActive(true)}
+        onMouseLeave={() => setDeleteActive(false)}
+        onFocus={() => setDeleteActive(true)}
+        onBlur={() => setDeleteActive(false)}
+        style={{
+          appearance: "none",
+          position: "absolute",
+          top: 4,
+          right: 4,
+          display: "grid",
+          placeItems: "center",
+          width: 26,
+          height: 26,
+          padding: 0,
+          border: "none",
+          borderRadius: "var(--radius-control, 5px)",
+          color: deleteActive ? "var(--danger)" : "var(--muted)",
+          background: deleteActive ? "color-mix(in oklab, var(--danger) 12%, transparent)" : "transparent",
+          cursor: "pointer",
+          transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6" />
+        </svg>
+      </button>
     </div>
   );
 }

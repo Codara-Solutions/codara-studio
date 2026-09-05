@@ -17,6 +17,7 @@ import {
   advanceGenericArm,
   agentUiPresent,
   classifyTail,
+  classifyCodexScreen,
   coercePublicRuntime,
   hasPromptMarker,
   promoteGenericArm,
@@ -1682,6 +1683,7 @@ export function useTerminalSession({
       let genericArmRingFrom = 0;
       let genericArmBudget = 0;
       let agentPhase: "idle" | "agent" = "idle";
+      let agentPhaseRevision = 0;
       // Tracks the first-party runtime ("claude"|"codex") if the
       // detected runtime maps to one — drives the state poller below, which
       // only has regex tables for those three. Non-first-party runtimes still
@@ -1808,6 +1810,7 @@ export function useTerminalSession({
       let stateTimer: number | null = null;
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
+      let authoritativeCodexState: RuntimeState | null = null;
       let idleSinceMs: number | null = null;
       // D4 (stale-footer false "working"): Claude/Codex leave their last footer
       // frame frozen on screen after a turn ends; classifyTail keeps matching
@@ -1868,6 +1871,12 @@ export function useTerminalSession({
         }
       };
       const reportRuntimeState = (state: RuntimeState) => {
+        // Main sees Codex's reconstructed screen even while this pane is hidden.
+        // Its state must not be overwritten by a frozen renderer or a partial
+        // frame sampled between two PTY writes.
+        if (activeRuntime === "codex" && authoritativeCodexState !== null && state !== "done") {
+          state = authoritativeCodexState;
+        }
         // Read-only mirrors never report to main: their xterm buffer lacks the
         // canonical pane's history, so their classification can diverge and
         // would flap the run-store attempt state the canonical pane reports.
@@ -1907,7 +1916,7 @@ export function useTerminalSession({
         }
         lastProcessedTickMs = now;
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
-        let raw = classifyTail(activeRuntime, tail);
+        let raw = activeRuntime === "codex" ? classifyCodexScreen(tail) : classifyTail(activeRuntime, tail);
         if (activeRuntime === "codex" && raw === "blocked") raw = null;
 
         // D4 (stale-footer false "working"). Once a turn is confirmed working,
@@ -2030,6 +2039,7 @@ export function useTerminalSession({
           uiGoneTicks = 0;
         }
 
+        if (activeRuntime === "codex" && effectiveRaw === null && confirmedState === "working") return;
         if (confirmedState === "working" && effectiveRaw === null) {
           if (idleSinceMs === null) idleSinceMs = now;
           if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
@@ -2099,9 +2109,23 @@ export function useTerminalSession({
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
       };
 
+      const promoteAgentRuntime = (runtime: PublicAgentRuntime) => {
+        markRecentAgentInput(runtime);
+        agentRunningRef.current = true;
+        onAgentStateRef.current?.({ runtime, running: true });
+        startStatePoller(runtime);
+        reportRuntimeState("launching");
+        genericArmRingFrom = 0;
+        genericArmBudget = 0;
+      };
       const setAgentRunning = (runtime: AgentRuntime | null) => {
-        if (agentPhase === "agent") return;
+        const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
+        if (agentPhase === "agent") {
+          if (!activeRuntime && publicRuntime) promoteAgentRuntime(publicRuntime);
+          return;
+        }
         agentPhase = "agent";
+        agentPhaseRevision += 1;
         // A fresh launch/relaunch re-arms re-detection: any prior post-exit
         // suppression latch is now stale, and so is a pending exit confirmation.
         cancelAltScreenExitConfirm();
@@ -2123,7 +2147,6 @@ export function useTerminalSession({
         // activity indicator tracks correctly. A null `runtime` argument
         // means "something is interactive but we don't know what" — used by
         // the alt-screen fallback below for unrecognised TUIs.
-        const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
         // Arm the runtime-promotion bookkeeping whenever this arm leaves the pane
         // WITHOUT a first-party runtime — the generic alt-screen fallback
         // (runtime===null) OR a recognised non-public CLI (aider/opencode/… that
@@ -2163,6 +2186,7 @@ export function useTerminalSession({
       const resetAgentPhase = (
         options: { keepRecentAgentInput?: boolean; exitSignal?: boolean } = {},
       ) => {
+        agentPhaseRevision += 1;
         // A POSITIVE exit signal (prompt marker / alt-screen-leave / UI-verified
         // Ctrl+C exit) means the agent genuinely left — briefly suppress Fix 1's
         // re-detection so a footer frame still lingering in the bottom tail can't
@@ -2193,6 +2217,8 @@ export function useTerminalSession({
         } else {
           clearRecentAgentInput();
         }
+        authoritativeCodexState = null;
+        codexStateRevision += 1;
         activeRuntime = null;
         stopStatePoller();
         agentPhase = "idle";
@@ -2279,16 +2305,55 @@ export function useTerminalSession({
       // missed clearInterval here would leak a timer for the lifetime of the
       // (now-disposed) hook.
       cleanups.push(() => stopStatePoller());
+      let codexStateRevision = 0;
+      const observeCodexState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
+        if (disposed || state.paneId !== sessionId) return;
+        codexStateRevision += 1;
+        authoritativeCodexState = state.runtime === "codex" ? state.state : null;
+        if (activeRuntime === "codex" && state.state === "done") resetAgentPhase({ exitSignal: true });
+      };
+      const offCodexState = window.spark.terminalNotify?.onState?.(observeCodexState);
+      cleanups.push(() => offCodexState?.());
+      const initialCodexStateRevision = codexStateRevision;
+      void window.spark.terminalNotify?.snapshot?.()
+        ?.then((states) => {
+          if (!disposed && codexStateRevision === initialCodexStateRevision) states.forEach(observeCodexState);
+        })
+        ?.catch(() => undefined);
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
       cleanups.push(() => osc633Dispose.dispose());
+      let presenceCheckInflight = false;
       const presenceTimer = window.setInterval(() => {
-        if (agentPhase !== "idle") return;
-        if (!visibleRef.current || redetectSuppressedAfterExit) return;
+        if (activeRuntime || !visibleRef.current) return;
         if (!onAgentStateRef.current) return;
         const host = termRef.current;
         if (!host) return;
-        const live = liveRuntimeFromTail(readTerminalTail(host, STATE_TAIL_ROWS));
-        if (live) setAgentRunning(live);
+        if (agentPhase === "idle" && !redetectSuppressedAfterExit) {
+          const live = liveRuntimeFromTail(readTerminalTail(host, STATE_TAIL_ROWS));
+          if (live) {
+            setAgentRunning(live);
+            return;
+          }
+        }
+        // Main also checks the process tree, so a silent session can recover
+        // without its banner or footer. Use the normal agent callback to create
+        // the manual worker chip even if this pane has no saved agent session.
+        if (presenceCheckInflight || readOnlyRef.current || !window.spark.terminalNotify?.snapshot) return;
+        presenceCheckInflight = true;
+        const revision = agentPhaseRevision;
+        void window.spark.terminalNotify.snapshot()
+          .then((states) => {
+            if (disposed || activeRuntime || !visibleRef.current || agentPhaseRevision !== revision) return;
+            const live = states.find((state) =>
+              state.paneId === sessionId &&
+              state.runtime !== null &&
+              state.state !== "done" &&
+              state.state !== "error",
+            );
+            if (live?.runtime) setAgentRunning(live.runtime);
+          })
+          .catch(() => undefined)
+          .finally(() => { presenceCheckInflight = false; });
       }, 1_000);
       cleanups.push(() => window.clearInterval(presenceTimer));
       // FinalTerm OSC 133;A is the generic "prompt start" marker emitted by
@@ -2485,13 +2550,7 @@ export function useTerminalSession({
             // sending the TUI newline, start the state poller, and report
             // "launching" so the chip reads "starting" until the first real
             // working/idle classification lands.
-            markRecentAgentInput(promoted);
-            agentRunningRef.current = true;
-            onAgentStateRef.current?.({ runtime: promoted, running: true });
-            startStatePoller(promoted);
-            reportRuntimeState("launching");
-            genericArmRingFrom = 0;
-            genericArmBudget = 0;
+            promoteAgentRuntime(promoted);
           }
         }
 
@@ -2510,6 +2569,7 @@ export function useTerminalSession({
           cancelAltScreenExitConfirm();
           resetAgentPhase({ exitSignal: true });
         } else if (sawAltScreenLeave) {
+          if (activeRuntime === "codex" && authoritativeCodexState !== null) return;
           // Ambiguous: a real exit, or a full-screen view being closed. Decide
           // once the repaint that follows has reached the rows.
           cancelAltScreenExitConfirm();
