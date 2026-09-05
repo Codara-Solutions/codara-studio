@@ -190,7 +190,7 @@ const CLAUDE_LIVE_IDENTITY: RegExp[] = [
 
 const CODEX_LIVE_IDENTITY: RegExp[] = [
   /OpenAI\s*Codex/,
-  /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
+  /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
   /Context\s+\d+%\s+(?:used|left)/i,
   /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,
 ];
@@ -448,8 +448,8 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
   // blocked — "needs you" is Claude-only.
   codex: {
     working: [
-      /\(\s*\d+\s*s\s*[·•]\s*esc/i,
-      /\bWorking\s*\(\d+\s*s/i,
+      /\(\s*(?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
+      /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s/i,
     ],
     blocked: [],
     done: [
@@ -541,6 +541,28 @@ export function classifyTail(
     if (matchEndsPast(re, stripped, freshFrom)) return "done";
   }
   return null;
+}
+
+// A rendered Codex frame separates the live status line from editable prompt
+// text. Only the status immediately above the current composer can assert
+// work; quoted status text inside a draft or older transcript cannot.
+export function classifyCodexScreen(tail: string): "working" | "idle" | null {
+  const lines = stripAnsi(tail).split(/\r?\n/);
+  let composer = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^\s*›/.test(lines[i])) {
+      composer = i;
+      break;
+    }
+  }
+  const above = lines.slice(0, composer < 0 ? lines.length : composer).filter((line) => line.trim());
+  const status = above[above.length - 1] ?? "";
+  if (RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))) return "working";
+  if (composer < 0) return null;
+  const footer = lines.slice(composer + 1).join("\n");
+  return CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer)) || /\?\s*for\s*shortcuts/i.test(footer)
+    ? "idle"
+    : null;
 }
 
 // Narrow post-submit detector for Cora's worker launch driver. Unlike the
@@ -733,7 +755,7 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
   ],
   codex: [
     /OpenAI\s*Codex/,
-    /\bWorking\s*\(\d+\s*s\s*[·•]\s*esc/i,
+    /\bWorking\s*\((?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+\s*s\s*[·•]\s*esc/i,
     /esc\s*to\s*interrupt/i,
     /Context\s+\d+%\s+(?:used|left)/i,
     /\bgpt-\d+[\w.-]*\s+(?:xhigh|high|medium|low|minimal|default)\b/i,

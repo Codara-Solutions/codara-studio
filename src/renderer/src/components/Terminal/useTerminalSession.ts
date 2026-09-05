@@ -17,6 +17,7 @@ import {
   advanceGenericArm,
   agentUiPresent,
   classifyTail,
+  classifyCodexScreen,
   coercePublicRuntime,
   hasPromptMarker,
   promoteGenericArm,
@@ -1809,6 +1810,7 @@ export function useTerminalSession({
       let stateTimer: number | null = null;
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
+      let authoritativeCodexState: RuntimeState | null = null;
       let idleSinceMs: number | null = null;
       // D4 (stale-footer false "working"): Claude/Codex leave their last footer
       // frame frozen on screen after a turn ends; classifyTail keeps matching
@@ -1869,6 +1871,12 @@ export function useTerminalSession({
         }
       };
       const reportRuntimeState = (state: RuntimeState) => {
+        // Main sees Codex's reconstructed screen even while this pane is hidden.
+        // Its state must not be overwritten by a frozen renderer or a partial
+        // frame sampled between two PTY writes.
+        if (activeRuntime === "codex" && authoritativeCodexState !== null && state !== "done") {
+          state = authoritativeCodexState;
+        }
         // Read-only mirrors never report to main: their xterm buffer lacks the
         // canonical pane's history, so their classification can diverge and
         // would flap the run-store attempt state the canonical pane reports.
@@ -1908,7 +1916,7 @@ export function useTerminalSession({
         }
         lastProcessedTickMs = now;
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
-        let raw = classifyTail(activeRuntime, tail);
+        let raw = activeRuntime === "codex" ? classifyCodexScreen(tail) : classifyTail(activeRuntime, tail);
         if (activeRuntime === "codex" && raw === "blocked") raw = null;
 
         // D4 (stale-footer false "working"). Once a turn is confirmed working,
@@ -2031,6 +2039,7 @@ export function useTerminalSession({
           uiGoneTicks = 0;
         }
 
+        if (activeRuntime === "codex" && effectiveRaw === null && confirmedState === "working") return;
         if (confirmedState === "working" && effectiveRaw === null) {
           if (idleSinceMs === null) idleSinceMs = now;
           if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
@@ -2208,6 +2217,8 @@ export function useTerminalSession({
         } else {
           clearRecentAgentInput();
         }
+        authoritativeCodexState = null;
+        codexStateRevision += 1;
         activeRuntime = null;
         stopStatePoller();
         agentPhase = "idle";
@@ -2294,6 +2305,21 @@ export function useTerminalSession({
       // missed clearInterval here would leak a timer for the lifetime of the
       // (now-disposed) hook.
       cleanups.push(() => stopStatePoller());
+      let codexStateRevision = 0;
+      const observeCodexState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
+        if (disposed || state.paneId !== sessionId) return;
+        codexStateRevision += 1;
+        authoritativeCodexState = state.runtime === "codex" ? state.state : null;
+        if (activeRuntime === "codex" && state.state === "done") resetAgentPhase({ exitSignal: true });
+      };
+      const offCodexState = window.spark.terminalNotify?.onState?.(observeCodexState);
+      cleanups.push(() => offCodexState?.());
+      const initialCodexStateRevision = codexStateRevision;
+      void window.spark.terminalNotify?.snapshot?.()
+        ?.then((states) => {
+          if (!disposed && codexStateRevision === initialCodexStateRevision) states.forEach(observeCodexState);
+        })
+        ?.catch(() => undefined);
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
       cleanups.push(() => osc633Dispose.dispose());
       let presenceCheckInflight = false;
@@ -2543,6 +2569,7 @@ export function useTerminalSession({
           cancelAltScreenExitConfirm();
           resetAgentPhase({ exitSignal: true });
         } else if (sawAltScreenLeave) {
+          if (activeRuntime === "codex" && authoritativeCodexState !== null) return;
           // Ambiguous: a real exit, or a full-screen view being closed. Decide
           // once the repaint that follows has reached the rows.
           cancelAltScreenExitConfirm();

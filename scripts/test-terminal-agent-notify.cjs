@@ -72,6 +72,7 @@ const harnessPlugin = {
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
             "export function sessionPid(id){ return globalThis.__TAN.pids?.get(id) ?? null; }\n" +
+            "export function sessionDimensions(id){ return globalThis.__TAN.dimensions?.get(id) ?? null; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n",
           loader: "js",
         };
@@ -535,6 +536,7 @@ async function main() {
       { paneId: "p10", tabId: "t10", tabTitle: "Silent Codex", excluded: false },
       { paneId: "p11", tabId: "t11", tabTitle: "Plain shell", excluded: false },
       { paneId: "p12", tabId: "t12", tabTitle: "Footer only", excluded: false },
+      { paneId: "p13", tabId: "t13", tabTitle: "Rendered Codex", excluded: false },
     ],
   });
   const waitForState = async (paneId, state) => {
@@ -560,6 +562,35 @@ async function main() {
   check("recovered Codex clears when its process exits", !mod.terminalAgentStateSnapshot().some((chip) => chip.paneId === "p10"));
   T.processes.set(1010, [{ pid: 2020, depth: 1, command: "codex" }]);
   check("a later silent Codex launch is detected again", (await waitForState("p10", "idle")).runtime === "codex");
+
+  T.dimensions = new Map([["p13", { cols: 100, rows: 20 }]]);
+  feed("p13", "\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/src");
+  await waitForState("p13", "working");
+  feed("p13", "\x1b[5;6Hking\x1b[5;16H2");
+  await sleep(16_000);
+  check("a rendered Codex busy footer survives partial repaints and long silence", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+  feed("p13", "\x1b[?1049h\x1b[2JTranscript view");
+  feed("p13", "\x1b[?1049l");
+  await sleep(1200);
+  check("closing Codex transcript view does not clear the agent or its working state", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+  feed("p13", "\x1b[5;1H\x1b[2K\x1b[7;1H\x1b[J› Explain this status\r\nWorking (9m 21s • esc to interrupt)\r\ngpt-6-astra high fast · ~/src");
+  await waitForState("p13", "idle");
+  check("a cleared busy footer and a quoted footer in the draft resolve to ready", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "idle");
+  feed("p13", "\x1b[5;1H• Working (0s • esc to interrupt)");
+  await waitForState("p13", "working");
+  feed("p13", "\x1b]9;Codex: turn completed\x07");
+  await waitForState("p13", "idle");
+  feed("p13", "\x1b[5;6Hking");
+  await sleep(2200);
+  check("explicit completion is not undone by a queued busy repaint", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "idle");
+  feed("p13", "\x1b[5;1H\x1b[2K");
+  await sleep(1200);
+  feed("p13", "\x1b[5;1H• Working (1s • esc to interrupt)");
+  await waitForState("p13", "working");
+  feed("p13", "\r\nYou've hit your usage limit\r\n");
+  await waitForState("p13", "error");
+  await sleep(2200);
+  check("a failure is not overwritten by the retained busy frame", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "error");
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

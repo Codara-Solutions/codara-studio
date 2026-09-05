@@ -14,6 +14,7 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
+import { CodexTerminalScreen } from "./codex-terminal-screen";
 import {
   aliveProcesses,
   descendantProcessesWithCommands,
@@ -187,6 +188,10 @@ interface PaneWatcher {
   // silence that began with the working footer still painting reads as a
   // mid-turn stall, not a finish (see TURN_QUIET_STALL_MS).
   lastChunkAssertedWorking: boolean;
+  codexScreen: CodexTerminalScreen | null;
+  codexIdleSince: number | null;
+  // Explicit outcomes outrank an old busy frame until Codex paints its composer idle.
+  codexAwaitingIdle: boolean;
   // Net count of live background teammates (Task-tool / background agents),
   // fed by countTeammateEvents on the transcript stream. While > 0, the main
   // REPL's turn-stopped signals (progress clear, idle status, quiet window)
@@ -353,6 +358,9 @@ export function syncTerminalNotifyPanes(input: {
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
       lastChunkAssertedWorking: false,
+      codexScreen: null,
+      codexIdleSince: null,
+      codexAwaitingIdle: false,
       teammatesActive: 0,
       hookSubagentsActive: 0,
       lastHookEventAt: 0,
@@ -450,6 +458,7 @@ function attach(w: PaneWatcher): void {
     w.lastWorkingAt = 0;
     w.lastOscNotifyAt = 0;
     w.lastChunkAssertedWorking = false;
+    clearCodexScreen(w);
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;
     w.lastHookEventAt = 0;
@@ -488,6 +497,7 @@ function removeWatcher(paneId: string): void {
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
   watchers.delete(paneId);
+  clearCodexScreen(w);
   // Free the notify policy's per-source dedup state for the dead pane.
   rearm(paneSourceKey(paneId));
   try {
@@ -521,6 +531,33 @@ function ensureSweep(): void {
         continue;
       }
       if (!w.runtime) continue;
+      if (w.runtime === "codex" && w.codexScreen) {
+        const dimensions = pty.sessionDimensions(w.paneId);
+        if (dimensions) w.codexScreen.resize(dimensions.cols, dimensions.rows);
+        const state = w.codexScreen.state();
+        if (state === "working") {
+          w.codexIdleSince = null;
+          if (!w.codexAwaitingIdle) enterWorking(w, now);
+        } else if (state === "idle") {
+          w.codexAwaitingIdle = false;
+          if (w.state === "failed") continue;
+          w.codexIdleSince ??= now;
+          if (now - w.codexIdleSince >= 1_200) {
+            const finished = w.state === "working";
+            w.state = "idle";
+            emitPaneState(w, "idle");
+            if (finished && w.userTurnArmed && workedLongEnough(w) && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+              deliver(w, "done", null);
+            }
+            if (finished) w.userTurnArmed = false;
+          }
+        } else {
+          w.codexIdleSince = null;
+        }
+        // Silence and incomplete repaints cannot end a turn while the rendered
+        // busy footer is still present. Only an idle frame or explicit event can.
+        continue;
+      }
       if (w.hookSubagentsActive > 0 && now - w.lastHookEventAt >= HOOK_SUBAGENT_STALE_MS) {
         tanLog(`pane=${w.paneId} hook subagent counter stale (no hook events) — cleared`);
         w.hookSubagentsActive = 0;
@@ -982,6 +1019,20 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
 
   if (w.runtime) {
     const now = Date.now();
+    if (w.runtime === "codex" && !w.excluded) {
+      const dimensions = pty.sessionDimensions(w.paneId);
+      if (dimensions) {
+        if (!w.codexScreen) {
+          w.codexScreen = new CodexTerminalScreen(dimensions.cols, dimensions.rows, () => {
+            w.codexAwaitingIdle = false;
+          });
+          w.codexScreen.write(w.ring);
+        } else {
+          w.codexScreen.resize(dimensions.cols, dimensions.rows);
+          w.codexScreen.write(chunk);
+        }
+      }
+    }
     // Set true below when THIS chunk positively asserts working (footer
     // pattern / structured busy signal); the per-chunk value feeds the
     // stall-aware quiet window in the sweep.
@@ -1069,11 +1120,15 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           deliver(w, "done", null);
         }
         if (w.state === "working") w.state = "idle";
+        if (w.runtime === "codex") {
+          w.codexAwaitingIdle = true;
+        }
         w.userTurnArmed = false;
         // Turn done = ready for input → chip "idle". Emit regardless of the
         // toast gate; the chip is focus-independent.
         emitPaneState(w, "idle");
       } else {
+        w.codexAwaitingIdle = false;
         enterWorking(w, now);
         chunkAssertedWorking = true;
       }
@@ -1081,6 +1136,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     for (const m of newMatches(OSC21337_G, text, carryLen)) {
       const status = /(?:^|;)status=([^;]*)/.exec(m[1] ?? "")?.[1] ?? "";
       if (/working/i.test(status)) {
+        w.codexAwaitingIdle = false;
         enterWorking(w, now);
         chunkAssertedWorking = true;
       } else if (/waiting/i.test(status) && w.runtime === "claude") {
@@ -1118,6 +1174,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         }
         w.state = "idle";
         w.userTurnArmed = false;
+        if (w.runtime === "codex") {
+          w.codexAwaitingIdle = true;
+        }
         emitPaneState(w, "idle");
       }
     }
@@ -1130,6 +1189,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       const shouldAlert =
         priorState !== problem.kind &&
         (priorState === "working" || w.userTurnArmed);
+      if (w.runtime === "codex") w.codexAwaitingIdle = true;
       w.state = problem.kind;
       emitPaneState(w, problem.kind === "failed" ? "error" : "blocked");
       if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
@@ -1145,7 +1205,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the carry exists to bridge phrases split across chunk boundaries, but
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = applyProblem ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
+    const cls = applyProblem || w.codexScreen ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
     if (cls === "blocked" && w.runtime === "claude") {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can
@@ -1203,10 +1263,13 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // TUI vanished ended *somehow* — surface it; the suppression policy
     // swallows the alert when the user themselves quit the agent (they're
     // looking at that tab, by definition).
-    const exited =
-      newMatches(PROMPT_MARKER_G, text, carryLen).length > 0 ||
-      text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
-    if (exited) markAgentExited(w, now, "prompt marker / alt-screen leave");
+    const promptReturned = newMatches(PROMPT_MARKER_G, text, carryLen).length > 0;
+    const leftAltScreen = text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
+    if (promptReturned || (leftAltScreen && !w.codexScreen)) {
+      markAgentExited(w, now, "prompt marker / alt-screen leave");
+    }
+    // Codex also leaves the alternate screen when closing transcript views.
+    // Its process exit or a shell prompt marker confirms when the agent left.
   }
 
   w.carry = text.slice(-CARRY_MAX);
@@ -1215,6 +1278,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
 // The foreground agent handed control back to the shell, seen either in the
 // stream (prompt marker, alt-screen leave) or in the process tree.
 function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
+  clearCodexScreen(w);
   tanLog(`pane=${w.paneId} agent exited (${reason}); state was ${w.state}`);
   if (
     w.state === "working" &&
@@ -1243,6 +1307,13 @@ function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
   w.lastAgentProcCheckAt = 0;
   w.ring = "";
   w.userTurnArmed = false;
+}
+
+function clearCodexScreen(w: PaneWatcher): void {
+  w.codexScreen?.dispose();
+  w.codexScreen = null;
+  w.codexIdleSince = null;
+  w.codexAwaitingIdle = false;
 }
 
 // Recover missed launches even when an idle agent emits no more output, and
@@ -1285,6 +1356,16 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
           w.lastChunkAssertedWorking = false;
           tanLog(`pane=${w.paneId} runtime recovered from process tree: ${detected}`);
           emitPaneState(w, "idle");
+          if (detected === "codex") {
+            const dimensions = pty.sessionDimensions(w.paneId);
+            const recent = pty.readTailChunks(w.paneId, BOOTSTRAP_TAIL_BYTES) ?? [];
+            if (dimensions && recent.length > 0) {
+              w.codexScreen = new CodexTerminalScreen(dimensions.cols, dimensions.rows, () => {
+                w.codexAwaitingIdle = false;
+              });
+              for (const chunk of recent) w.codexScreen.write(chunk);
+            }
+          }
           return;
         }
         return;
@@ -1353,6 +1434,9 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     // A DONE announcement with no live teammates is the program declaring the
     // whole pane idle — any residual teammate bookkeeping is stale beside it.
     w.state = "idle";
+    if (w.runtime === "codex") {
+      w.codexAwaitingIdle = true;
+    }
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;
     clearBackgroundWork(w);
