@@ -26,7 +26,16 @@ export function codexProcessForPane(rootPid: number, processes: readonly Process
       seen.add(pid);
       const process = processes.find((entry) => entry.pid === pid);
       const runtime = process ? runtimeFromProcessCommand(process.command) : null;
-      if (runtime === "codex") return pid;
+      if (runtime === "codex") {
+        // npm's launcher stays alive while the native child owns the rollout.
+        // Only unwrap the official launcher, not an agent's arbitrary workers.
+        const executable = process?.command.trim().split(/\s+/)[0].split(/[\\/]/).pop();
+        const wrapped = process && /^(?:node|nodejs)(?:\.exe)?$/.test(executable ?? "") && /[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js(?:["']|\s|$)/.test(process.command)
+          ? processes.find((entry) => entry.parentPid === pid && runtimeFromProcessCommand(entry.command) === "codex")
+          : undefined;
+        if (wrapped) { next.push(wrapped.pid); continue; }
+        return pid;
+      }
       if (runtime) continue;
       next.push(...processes.filter((entry) => entry.parentPid === pid).map((entry) => entry.pid));
     }

@@ -34,7 +34,18 @@ const esbuild = require("esbuild");
   ];
   assert.equal(codexProcessForPane(100, processes), 101);
   assert.equal(codexProcessForPane(200, processes), 200);
+  assert.equal(codexProcessForPane(100, [
+    processes[0],
+    { pid: 101, parentPid: 100, command: "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js" },
+    { pid: 102, parentPid: 101, command: "/usr/local/lib/node_modules/@openai/codex/vendor/codex" },
+    { pid: 103, parentPid: 102, command: "codex exec review" },
+  ]), 102, "npm launchers bind through their native child without following its workers");
+
   assert.equal(codexProcessForPane(100, [{ pid: 100, parentPid: 1, command: "claude" }, ...processes.slice(1)]), null);
+  assert.equal(codexProcessForPane(100, [processes[0],
+    { pid: 101, parentPid: 100, command: "codex -p /usr/local/lib/node_modules/@openai/codex/bin/codex.js" },
+    processes[2],
+  ]), 101, "mentioning the launcher in a prompt must not select a child agent");
   assert.deepEqual(parseCodexOpenFiles(`p101\nn${paths[0]}\nn${paths[0]}\np200\nn${paths[1]}\nn/tmp/log`), new Map([[101, [paths[0]]], [200, [paths[1]]]]));
   assert.equal((await sessionFromOpenRollouts(paths)).sessionId, ids[1], "subagent transcripts never replace the interactive conversation");
   await fs.utimes(paths[0], 500, 500);
