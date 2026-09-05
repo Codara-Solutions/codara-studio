@@ -179,10 +179,12 @@ function putObject(key, body, contentType) {
     await putObject(`releases/${name}`, body, contentTypeFor(name));
     console.log("ok");
   }
-  console.log(
-    "\nDone. The website picks up the new feed within a minute and pushes the\n" +
-      "update to every running Codara Studio via SSE.",
-  );
+  try {
+    const notified = await require("./notify-release.cjs").notifyRelease();
+    console.log(notified ? "Release event delivered." : "Published. The website will discover the feed within a minute.");
+  } catch (err) {
+    console.warn(`Published; immediate notification failed (${err.message}). The website poll will retry.`);
+  }
 })().catch((err) => {
   console.error(`\nFAILED: ${err.message}`);
   process.exit(1);

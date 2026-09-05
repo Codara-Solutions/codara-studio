@@ -1,4 +1,5 @@
 import { app, BrowserWindow } from "electron";
+import { subscribeToEvents } from "./sse-client";
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
 
 // Bridges electron-updater lifecycle into the renderer over a single
@@ -59,23 +60,9 @@ function send(window: BrowserWindow, event: UpdaterEvent): void {
 }
 
 export function registerAutoUpdater(mainWindow: BrowserWindow): void {
-  // Dev mode: electron-updater throws because it can't find dev-app-update.yml
-  // and would spam the console with "ENOENT: ... app-update.yml". We log once
-  // and bail — nothing about the dev workflow benefits from running it.
-  if (!app.isPackaged) {
-    console.log("[auto-updater] update checks skipped in dev");
-    // The SSE stream still runs: its git-push webhook events drive instant
-    // fetches for git triggers, which dev instances use like packaged ones.
-    subscribeToReleasePush({ handleReleases: false });
-    return;
-  }
-
-  // Guard against accidental double-registration (e.g. a second
-  // createWindow() on macOS reactivation). The autoUpdater itself is a
-  // singleton so re-binding listeners would just produce duplicate IPC
-  // messages.
   if (registered) return;
   registered = true;
+  if (!app.isPackaged) return;
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
@@ -132,6 +119,7 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
 
   setTimeout(() => {
     void safeCheck();
+    subscribeToReleasePush();
   }, INITIAL_CHECK_DELAY_MS);
 
   // Fallback poll — see PERIODIC_CHECK_MS. unref-less on purpose: Electron's
@@ -140,11 +128,12 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
     void safeCheck();
   }, PERIODIC_CHECK_MS);
 
-  subscribeToReleasePush();
 }
 
+let pendingCheck: Promise<void> | null = null;
 function safeCheck(): Promise<void> {
-  return autoUpdater
+  if (pendingCheck) return pendingCheck;
+  pendingCheck = autoUpdater
     .checkForUpdates()
     .then(() => undefined)
     .catch((err: unknown) => {
@@ -153,7 +142,8 @@ function safeCheck(): Promise<void> {
       // move on; don't crash main and don't alarm the user.
       const message = err instanceof Error ? err.message : String(err);
       console.warn("[auto-updater] checkForUpdates failed (ignored):", message);
-    });
+    }).finally(() => { pendingCheck = null; });
+  return pendingCheck;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,58 +155,24 @@ function safeCheck(): Promise<void> {
 // any `event: release` frame triggers a check. Reconnects forever with capped
 // backoff; the periodic poll covers any window where the stream is down.
 
-let sseBackoffMs = 5_000;
-
-function subscribeToReleasePush(opts: { handleReleases: boolean } = { handleReleases: true }): void {
-  const controller = new AbortController();
-  app.on("before-quit", () => controller.abort());
-
-  const connect = async (): Promise<void> => {
-    try {
-      const res = await fetch(RELEASE_EVENTS_URL, {
-        signal: controller.signal,
-        headers: { accept: "text/event-stream" },
-      });
-      if (!res.ok || !res.body) throw new Error(`stream responded ${res.status}`);
-      sseBackoffMs = 5_000;
-      console.log("[auto-updater] release push stream connected");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        // Frames are separated by a blank line; we only inspect event names.
-        let idx: number;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          if (/^event:\s*release$/m.test(frame)) {
-            if (opts.handleReleases) {
-              console.log("[auto-updater] release push received — checking");
-              void safeCheck();
-            }
-          } else if (/^event:\s*git-push$/m.test(frame)) {
-            // A GitHub webhook reached the website: some watched remote just
-            // gained commits. Fetch immediately so git triggers (and the
-            // "teammate pushed" surfaces) react in seconds, not minutes.
-            console.log("[auto-updater] git-push webhook event — nudging fetch");
-            void import("./git-auto-fetch").then((m) => m.nudgeGitAutoFetchNow());
-          }
-        }
-      }
-      throw new Error("stream ended");
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[auto-updater] release stream dropped (${message}); retrying in ${sseBackoffMs}ms`);
-      setTimeout(() => void connect(), sseBackoffMs);
-      sseBackoffMs = Math.min(sseBackoffMs * 2, 5 * 60 * 1000);
-    }
-  };
-
-  void connect();
+function subscribeToReleasePush(): void {
+  let platformVersion = app.getVersion();
+  const stop = subscribeToEvents({
+    url: RELEASE_EVENTS_URL,
+    onEvent: (event) => {
+      if (event.event === "resync") { void safeCheck(); return; }
+      if (event.event !== "release") return;
+      try {
+        const data = JSON.parse(event.data);
+        const version = data[process.platform === "darwin" ? "mac" : "win"]?.version;
+        if (typeof version !== "string" || version === platformVersion) return;
+        platformVersion = version;
+        void safeCheck();
+      } catch { /* Periodic checks reconcile malformed or missed events. */ }
+    },
+    onError: (message) => console.warn(`[auto-updater] ${message}; reconnecting`),
+  });
+  app.once("before-quit", stop);
 }
 
 // Manual "Check for updates" from the Settings › About panel. Unlike the

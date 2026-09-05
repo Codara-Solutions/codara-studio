@@ -51,3 +51,13 @@ Installers and the update feed are served from
 `https://studio.codarasolutions.com/releases/`. `latest.yml` and
 `latest-mac.yml` carry a base64 SHA-512 per file; see `SECURITY.md` for how to
 compare it.
+
+### Immediate update notification
+
+After publishing a platform's installers and feed, `publish-release.cjs` asks
+GitHub Actions for an OIDC token and notifies the website's `/hooks/releases`
+endpoint. The release job has `id-token: write`; the website accepts only its
+main-branch workflow and immutable repository ID. Tokens are never logged.
+Manual releases and temporary notification failures use the website's existing
+60-second feed poll. Desktop clients reconnect stalled event streams, replay
+missed events where available, and reconcile with the release feed after gaps.

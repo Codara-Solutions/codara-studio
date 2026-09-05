@@ -18,6 +18,7 @@ async function loadModule() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-gh-push-watch-"));
   const outfile = path.join(temp, "github-push-watch.cjs");
   const STUBS = {
+    "./git-auto-fetch": `export function nudgeGitAutoFetchNow() {}`,
     "./git-exec": `export function runGit() { throw new Error("production stub"); }`,
     "./storage": `
       export function loadState() { throw new Error("production stub"); }
@@ -104,6 +105,7 @@ function makeHttp() {
       etag: opts.etag ?? `etag-${list.length}-${Math.random()}`,
       status: opts.status ?? 200,
       pollInterval: opts.pollInterval ?? 60,
+      headers: opts.headers ?? {},
     });
   };
   http.get = async (url, headers) => {
@@ -116,7 +118,7 @@ function makeHttp() {
       const key = `${eventsMatch[1]}/${eventsMatch[2]}`;
       const entry = http.events.get(key);
       if (!entry) return { status: 404, headers: {}, body: null };
-      if (entry.status !== 200) return { status: entry.status, headers: {}, body: null };
+      if (entry.status !== 200) return { status: entry.status, headers: entry.headers, body: null };
       if (headers["If-None-Match"] && headers["If-None-Match"] === entry.etag) {
         return { status: 304, headers: { etag: entry.etag, "x-poll-interval": String(entry.pollInterval) }, body: null };
       }
@@ -170,6 +172,8 @@ async function makeHarness(mod, { workspaces, http, remotes = {}, prefs = {}, to
       throw new Error("unexpected git " + args.join(" "));
     },
     getToken: async () => token,
+    subscribe: (options) => { h.stream = options; return () => {}; },
+    nudgeRepos: (cwds) => { h.nudged = cwds; },
     httpGet: http.get,
     publish: (e) => h.published.push(e),
     rearm: (k) => h.rearmed.push(k),
@@ -520,6 +524,44 @@ test("adding a workspace rebuilds the table and keeps existing repos seeded", as
   assert.equal(snaps.find((r) => r.key === "o/n").seeded, true, "existing repo keeps its seed");
   assert.equal(snaps.find((r) => r.key === "o/second").seeded, false);
   mod.stopGitHubPushWatch();
+});
+
+test("a webhook targets its repository and deduplicates the later Events API copy", async ({ mod }) => {
+  const http = makeHttp();
+  const h = await makeHarness(mod, { workspaces: [ws("w1", "/r1")], http,
+    remotes: { "/r1": "https://github.com/o/n.git" } });
+  const event = pushEvent("mate", "main", { id: "hook:delivery", head: "new-head", before: "old-head" });
+  h.stream.onEvent({ event: "github", data: JSON.stringify({ repo: "o/n", event }) });
+  await mod.waitForGitHubWebhookEvents();
+  assert.deepEqual(h.nudged, ["/r1"]);
+  assert.equal(h.published.length, 1);
+  http.setEvents("o/n", [{ ...event, id: "github-event-id" }]);
+  h.advance(60_000);
+  await h.pass();
+  assert.equal(h.published.length, 1);
+  h.stream.onEvent({ event: "github", data: JSON.stringify({ repo: "another/repo", event }) });
+  await mod.waitForGitHubWebhookEvents();
+  assert.equal(h.published.length, 1);
+});
+
+test("rate limiting delays a repository without permanently pausing it", async ({ mod }) => {
+  for (const status of [403, 429]) {
+    const http = makeHttp();
+    http.setEvents("o/n", [], { status, headers: { "retry-after": "120", "x-ratelimit-remaining": "0" } });
+    const h = await makeHarness(mod, { workspaces: [ws("w1", "/r1")], http,
+      remotes: { "/r1": "https://github.com/o/n.git" } });
+    h.advance(60_000);
+    await h.pass();
+    assert.equal(mod.getGitHubPushWatchSnapshot()[0].paused, false);
+    assert.equal(mod.getGitHubPushWatchSnapshot()[0].nextDueAt, h.now + 120_000);
+    mod.nudgeGitHubPushWatch();
+    assert.equal(mod.getGitHubPushWatchSnapshot()[0].nextDueAt, h.now + 120_000);
+    http.setEvents("o/n", []);
+    h.advance(120_000);
+    await h.pass();
+    assert.equal(mod.getGitHubPushWatchSnapshot()[0].seeded, true);
+    mod.stopGitHubPushWatch();
+  }
 });
 
 // ── Runner ──────────────────────────────────────────────────────────────────

@@ -20,6 +20,7 @@ const CONTROL_MAX_BYTES = 4_096;
 const RELAY_HANDSHAKE_TIMEOUT_MS = 5_000;
 const RELAY_INITIAL_RESULT_TIMEOUT_MS = 6_000;
 const MAX_RELAY_HANDSHAKES = 4;
+const MAX_RELAY_TUNNELS = 8;
 const MAX_TUNNEL_READ_BUFFER = 4 * 1024 * 1024;
 const MAX_WS_BUFFERED_BYTES = 4 * 1024 * 1024;
 const RECONNECT_MAX_MS = 30_000;
@@ -133,6 +134,14 @@ export class RemoteRelayClient {
     }
     this.socket = socket;
     let authenticated = false;
+    let deadline: NodeJS.Timeout;
+    const armDeadline = (ms: number): void => {
+      clearTimeout(deadline);
+      deadline = setTimeout(() => socket.terminate(), ms);
+      deadline.unref?.();
+    };
+    armDeadline(10_000);
+    socket.on("ping", () => { if (authenticated) armDeadline(60_000); });
 
     socket.on("open", () => {
       if (this.stopped || socket !== this.socket) {
@@ -160,6 +169,7 @@ export class RemoteRelayClient {
           return;
         }
         authenticated = true;
+        armDeadline(60_000);
         this.reconnectDelayMs = 1_000;
         this.setReady(true);
         this.resolveInitial(true);
@@ -172,7 +182,9 @@ export class RemoteRelayClient {
       if (!this.stopped) this.options.log(`relay connection error: ${safeError(err)}`);
     });
     socket.on("close", () => {
-      if (this.socket === socket) this.socket = null;
+      clearTimeout(deadline);
+      if (this.socket !== socket) return;
+      this.socket = null;
       this.setReady(false);
       this.closeAllTunnels();
       if (!authenticated) this.resolveInitial(false);
@@ -228,7 +240,8 @@ export class RemoteRelayClient {
     if (
       !peer ||
       !this.options.isAuthorized(peer) ||
-      this.tunnels.size >= MAX_RELAY_HANDSHAKES ||
+      this.handshakeTimers.size >= MAX_RELAY_HANDSHAKES ||
+      this.tunnels.size >= MAX_RELAY_TUNNELS ||
       this.tunnels.has(control.streamId)
     ) {
       this.sendControl({ type: "reject", v: 1, streamId: control.streamId });
