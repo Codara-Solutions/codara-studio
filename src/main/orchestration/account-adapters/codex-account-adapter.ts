@@ -311,10 +311,13 @@ export function createCodexAccountAdapter(
       return activeId(resolveStore().rootDir);
     },
     switchSideEffects: {
+      async sessionCount(context: SwitchContext) {
+        return (await context.liveSessionCount()) + (await externalSessionCount());
+      },
       async beforeSwitch(target: string, context: SwitchContext) {
         const current = resolveStore();
         if ((await activeId(current.rootDir)) === target) return { closedSessionCount: 0 };
-        const count = (await context.liveSessionCount()) + (await externalSessionCount());
+        const count = await this.sessionCount(context);
         if (count === 0) return { closedSessionCount: 0 };
         if (!context.closeSessions || !context.sessionShutdown) {
           throw new UnifiedAccountSessionsError(count, "switch");

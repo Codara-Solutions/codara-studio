@@ -751,6 +751,8 @@ export interface PiSubscriptionProfileLoginRequest {
 }
 
 export interface PiSubscriptionOverview {
+  /** Current sessions a provider-wide account switch would close. */
+  switchSessionCounts?: Partial<Record<PiSubscriptionProvider, number>>;
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
   runtimeError?: string;

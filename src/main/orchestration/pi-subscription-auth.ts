@@ -317,12 +317,15 @@ function compatibilityConnection(
 }
 
 export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> {
-  const [runtimeResult, inspection, terminals] = await Promise.all([
+  const [runtimeResult, inspection, terminals, switchSessionCounts] = await Promise.all([
     resolveCodaraPiRuntime()
       .then((runtime) => ({ installed: true as const, version: runtime.version, error: undefined }))
       .catch((error) => ({ installed: false as const, version: null, error: safeAuthError(error) })),
     inspectPiAccountProfileAuthStore(),
     terminalStatusesByProvider(),
+    Promise.all(PI_SUBSCRIPTION_PROVIDERS.map(async (provider) =>
+      [provider, await unifiedAccountsFor(provider).switchSessionCount().catch(() => undefined)] as const,
+    )).then(Object.fromEntries),
   ]);
   const statuses = new Map(inspection.statuses.map((status) => [status.profileId, status]));
   const profiles: PiSubscriptionProfileConnection[] = inspection.snapshot.profiles.map((profile) => {
@@ -366,6 +369,7 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     ...(isPinnedPiRuntimeInstalling() ? { runtimeInstalling: true } : {}),
     connections,
     profiles,
+    switchSessionCounts,
   };
 }
 

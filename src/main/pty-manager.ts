@@ -23,6 +23,7 @@ import { getConnection, shQuote } from "./remote/connections";
 import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
+import { inspectNativeCliProcesses, nativeCliPtyRoots } from "./orchestration/native-cli-process-shutdown";
 import { isCodaraManagedCliPath } from "./orchestration/codara-managed-cli-roots";
 import { buildGrokCliProfileEnvironment } from "./orchestration/grok-cli-profile-execution";
 import { buildClaudeCliProfileEnvironment } from "./orchestration/claude-cli-profile-environment";
@@ -184,6 +185,7 @@ interface Session {
 const sessions = new Map<string, Session>();
 /** Session ids between native account resolution and `sessions.set`. */
 const pendingSpawns = new Set<string>();
+const pendingCodexSpawns = new Set<string>();
 let nextSessionGeneration = 0;
 
 function createSessionGeneration(id: string): string {
@@ -683,10 +685,15 @@ export async function spawn(
   // process the winner created instead of spawning another one.
   return serializeSessionSpawn(opts.id, async () => {
     pendingSpawns.add(opts.id);
+    if (!isRemotePath(opts.cwd) && (opts.nativeCodexProfileId !== undefined ||
+        parseManualAgentStartupCommand(opts.startupCommand)?.runtime === "codex")) {
+      pendingCodexSpawns.add(opts.id);
+    }
     try {
       return await spawnWithSessionLock(opts);
     } finally {
       pendingSpawns.delete(opts.id);
+      pendingCodexSpawns.delete(opts.id);
     }
   });
 }
@@ -2589,6 +2596,25 @@ function sessionUsesNativeCliRuntime(
   return session.nativeCodexProfileId !== undefined;
 }
 
+async function nativeCliRuntimeSessionIds(runtime: NativeCliSessionRuntime): Promise<string[]> {
+  if (runtime !== "codex") {
+    return [...sessions].filter(([, session]) => sessionUsesNativeCliRuntime(session, runtime))
+      .map(([id]) => id);
+  }
+  const candidates = [...sessions];
+  const roots = nativeCliPtyRoots(runtime, await inspectNativeCliProcesses(),
+    candidates.map(([, session]) => session.pty.pid));
+  return candidates.filter(([id, session]) =>
+    sessions.get(id) === session && roots.has(session.pty.pid),
+  ).map(([id]) => id);
+}
+
+export async function liveNativeCliRuntimeSessionCount(runtime: NativeCliSessionRuntime): Promise<number> {
+  const ids = new Set(await nativeCliRuntimeSessionIds(runtime));
+  if (runtime === "codex") for (const id of pendingCodexSpawns) ids.add(id);
+  return ids.size;
+}
+
 /**
  * Gracefully closes an exact subset of Codara-owned PTYs. Account switching
  * uses the runtime-filtered variant below; app quit uses the all-session
@@ -2729,16 +2755,17 @@ export async function disposeNativeGrokProfileSessions(
 }
 
 /**
- * Close every Studio PTY pinned to one native CLI runtime before its account
+ * Close every Studio PTY running one native CLI runtime before its account
  * selection changes. Other shells and other agent families remain running.
  */
 export async function disposeNativeCliRuntimeGraceful(
   runtime: NativeCliSessionRuntime,
   maxWaitMs = 1500,
 ): Promise<NativeCliRuntimeDisposeResult> {
-  const ids = [...sessions.entries()]
-    .filter(([, session]) => sessionUsesNativeCliRuntime(session, runtime))
-    .map(([id]) => id);
+  const ids = await nativeCliRuntimeSessionIds(runtime);
+  if (runtime === "codex" && pendingCodexSpawns.size > 0) {
+    throw new Error("Codex terminals are still starting. Try switching accounts again once they open.");
+  }
   await disposeSessionsGraceful(ids, maxWaitMs);
   return { closedSessionCount: ids.length };
 }

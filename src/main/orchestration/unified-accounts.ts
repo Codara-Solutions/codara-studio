@@ -114,6 +114,7 @@ export interface DeleteAccountResult {
 
 export interface UnifiedTerminalSessions {
   liveOwnerIds(): ReadonlySet<string>;
+  liveRuntimeSessionCount?(): Promise<number>;
   disposeProfileSessions(cliProfileId: string): Promise<{ closedSessionCount: number }>;
 }
 
@@ -761,8 +762,11 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     return this.withMutation(() => this.useAccountLocked(coraProfileId, options));
   }
 
-  /** Studio panes holding a lease on any profile of this CLI, dead ones swept. */
+  /** Prefer live CLI processes; hosts without an inspector fall back to leases. */
   private async liveTerminalSessionCount(): Promise<number> {
+    if (this.sessionsHook?.liveRuntimeSessionCount) {
+      return this.sessionsHook.liveRuntimeSessionCount();
+    }
     this.sweepLeases();
     const ids = [this.personalId, ...(await this.store.snapshot()).profiles.map((entry) => entry.id)];
     const owners = new Set<string>();
@@ -780,6 +784,10 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       liveSessionCount: () => this.liveTerminalSessionCount(),
       sessionShutdown: this.sessionShutdownHook,
     };
+  }
+
+  async switchSessionCount(): Promise<number> {
+    return this.adapter.switchSideEffects?.sessionCount(this.switchContext(false)) ?? 0;
   }
 
   private async useAccountLocked(

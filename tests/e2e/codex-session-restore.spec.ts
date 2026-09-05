@@ -7,6 +7,35 @@ import { delimiter, join } from "node:path";
 const FIRST = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
 
+test("a sanctioned exit does not auto-resume a running Codex conversation", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(60_000);
+  const fixture = await prepare();
+  const app = await electron.launch({ args: ["."], env: fixture.env });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole("tab", { name: /terminals/i }).evaluate(tab => (tab as HTMLElement).click());
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${fixture.script}"`, { delay: 2 });
+    await input.press("Enter");
+    await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 15_000 });
+    const paneId = await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id");
+    await expect.poll(async () => (await fixture.records()).find(rec => rec.paneId === paneId)?.sessionId,
+      { timeout: 20_000 }).toBe(FIRST);
+    const before = await fixture.launches();
+    await app.evaluate(({ BrowserWindow }, id) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send(`pty:exit:${id}`, { exitCode: 0, sanctioned: true });
+      }
+    }, paneId);
+    await page.waitForTimeout(3_000);
+    expect(await fixture.launches()).toEqual(before);
+  } finally {
+    await app.close();
+  }
+});
+
 test("Codex captures a delayed transcript, follows a session switch, and resumes it after restart", async () => {
   test.skip(process.platform === "win32", "Process file tracking uses lsof on Unix.");
   test.setTimeout(90_000);
@@ -121,6 +150,7 @@ async function prepare() {
     userData, workspace, script, firstPath, secondPath,
     env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, SHELL: "/bin/false",
       CODEX_HOME: codexHome, SPARK_USER_DATA_DIR: userData, CODARA_HOME_DIR: userData, SPARK_HOME_DIR: userData,
+      CLAUDE_CONFIG_DIR: join(root, "claude-home"), GROK_HOME: join(root, "grok-home"),
       SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1" },
     records: async (): Promise<Array<{ paneId: string; sessionId: string; active: boolean }>> => {
       try { return JSON.parse(await readFile(join(userData, "agent-session-starts.json"), "utf8")).entries; } catch { return []; }
