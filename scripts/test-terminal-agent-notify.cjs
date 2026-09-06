@@ -663,6 +663,22 @@ async function main() {
   }
   check("idle status repaints do not resurrect completed work", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "idle");
 
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-reopen", panes: [
+    { paneId: "reopen", tabId: "reopen-tab", excluded: false, runtimeHint: "codex" },
+  ] });
+  feed("reopen", "OpenAI Codex (v0.153.4)\r\n");
+  const beforeReopen = alertCount();
+  for (const reply of ["\x1b[1;1R", "\x1b[?1;1R", "\x1b[?1;2c", "\x1b[>0;276;0c",
+    "\x1b[0n", "\x1b[8;40;120t", "\x1b[?2004;1$y", "\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+    "\x1bP1$r0m\x1b\\", "\x1b[I", "\x1b[O", "\x1b[1;1R\x1b[?1;2c"]) {
+    mod.noteTerminalUserInput("reopen", reply);
+    feed("reopen", "\x1b]9;Codex: restored previous response\x07");
+  }
+  check("terminal replies during restore cannot arm a completion notification", alertCount() === beforeReopen);
+  mod.noteTerminalUserInput("reopen", "\x1b[1;1Rwrite tests\r");
+  feed("reopen", "\x1b]9;Codex: new prompt completed\x07");
+  check("real input mixed with a terminal reply still arms completion", alertCount() === beforeReopen + 1);
+
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);
   console.log(`\nAll ${pass} terminal-agent-notify checks passed.`);

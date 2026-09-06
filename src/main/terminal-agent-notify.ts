@@ -769,7 +769,10 @@ function enterWorking(w: PaneWatcher, now: number): void {
 // completion guard. Excluded (Cora worker) panes are driven programmatically
 // and alert through run-store instead, so they're skipped. Unknown panes
 // (chat backends, orchestration ptys) are a cheap Map-miss no-op.
-export function noteTerminalUserInput(paneId: string): void {
+export function noteTerminalUserInput(paneId: string, data?: string): void {
+  // xterm's onData also carries device/cursor/color replies and focus reports.
+  // Restoring a TUI requests these without a user starting a new turn.
+  if (data !== undefined && /^(?:\x1b\[[?>=]?[\d;:]*(?:[cnRt]|\$y)|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\)+$/.test(data)) return;
   const w = watchers.get(paneId);
   if (!w || w.excluded) return;
   if (w.state !== "working") {

@@ -2756,7 +2756,7 @@ export function registerIpc(): void {
     pty.write(args.id, args.data);
     // User keystrokes are the notifier's "a fresh turn may start" signal —
     // they re-arm the pane's alert dedup (see noteTerminalUserInput).
-    noteTerminalUserInput(args.id);
+    noteTerminalUserInput(args.id, args.data);
   });
 
   handle(

@@ -137,7 +137,9 @@ for (const pointer of ["missing", "stale", "wrong-runtime", "closed"] as const) 
     }] }));
     let app: ElectronApplication | null = null;
     try {
-      app = await electron.launch({ args: ["."], env: fixture.env });
+      app = await electron.launch({ args: ["."], env: {
+        ...fixture.env, SPARK_TEST_CODEX_REPLY_NOTICE: pointer === "missing" ? "1" : "0",
+      } });
       const page = await app.firstWindow();
       await page.waitForLoadState("domcontentloaded");
       await page.addInitScript(({ pointer, workspace, first, firstPath }) => {
@@ -157,6 +159,17 @@ for (const pointer of ["missing", "stale", "wrong-runtime", "closed"] as const) 
           { timeout: 20_000 }).toBe(SECOND);
         await expect(page.getByRole("status", { name: "CODEX ready" })).toBeVisible({ timeout: 10_000 });
         expect((await fixture.launches()).filter((entry) => entry[0] === "resume").at(-1)).toContain(`cwd:${await realpath(fixture.workspace)}`);
+        if (pointer === "missing") {
+          await expect.poll(() => readFile(fixture.startupReplies, "utf8").catch(() => "")).toContain("R");
+          await page.waitForTimeout(2000);
+          expect(await readFile(join(fixture.userData, "logs", "main.log"), "utf8"))
+            .not.toContain("Codex: restored previous response");
+          expect(await page.evaluate(() => window.spark.notifications.list())).toEqual([]);
+          await page.locator(".xterm-helper-textarea:visible").first().press("Enter");
+          await expect.poll(async () => (await page.evaluate(() => window.spark.notifications.list()))
+            .filter(entry => entry.kind === "terminal.agent.done").map(entry => entry.body))
+            .toEqual(["Codex: new prompt completed"]);
+        }
       }
     } finally {
       await app?.close();
@@ -249,6 +262,7 @@ async function prepare() {
       "\n" + JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "fixture ".repeat(200) } }) + "\n");
   }
   const launchLog = join(root, "launches.jsonl");
+  const startupReplies = join(root, "terminal-replies.txt");
   const script = join(bin, "codex.js");
   await writeFile(script, `
     const fs = require("node:fs");
@@ -265,9 +279,21 @@ async function prepare() {
     show();
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdin.on("data", (data) => { if (data.includes(115)) select(${JSON.stringify(SECOND)}); });
+    process.stdin.on("data", (data) => {
+      if (process.env.SPARK_TEST_CODEX_REPLY_NOTICE === "1") {
+        if (/\\x1b\\[\\d+;\\d+R/.test(data.toString())) {
+          fs.appendFileSync(${JSON.stringify(startupReplies)}, data);
+          process.stdout.write("\\x1b]9;Codex: restored previous response\\x07");
+        } else if (data.includes(13)) {
+          process.stdout.write("\\x1b]9;Codex: new prompt completed\\x07");
+        }
+        return;
+      }
+      if (data.includes(115)) select(${JSON.stringify(SECOND)});
+    });
     if (args[0] === "delayed") setTimeout(() => select(${JSON.stringify(FIRST)}), 18000);
     else select(args[0] === "resume" ? args[1] : ${JSON.stringify(FIRST)});
+    if (process.env.SPARK_TEST_CODEX_REPLY_NOTICE === "1") process.stdout.write("\\x1b[6n");
   `);
   const wrapper = join(bin, "codex");
   await writeFile(wrapper, `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${script.replace(/'/g, "'\\''")}' "$@"\n`);
@@ -283,7 +309,7 @@ async function prepare() {
     activeWorkspaceId: "ws-restore",
   }));
   return {
-    userData, workspace, script, firstPath, secondPath, launchLog,
+    userData, workspace, script, firstPath, secondPath, launchLog, startupReplies,
     env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, SHELL: shell,
       CODEX_HOME: codexHome, SPARK_USER_DATA_DIR: userData, CODARA_HOME_DIR: userData, SPARK_HOME_DIR: userData,
       CLAUDE_CONFIG_DIR: join(root, "claude-home"), GROK_HOME: join(root, "grok-home"),
