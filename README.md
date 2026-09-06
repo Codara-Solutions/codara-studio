@@ -209,12 +209,16 @@ Releases are nightly. The GitHub Actions `Release` workflow runs at 03:00 UTC
 full unit registry, derives the next version from the conventional commits
 since the last `vX.Y.Z` tag (a breaking change bumps the major, a
 `Release: minor` trailer the minor, anything else including `feat:` the
-patch), builds and signs macOS, cross-builds the Windows installer, uploads
-both to the release bucket, and pushes the tag. Everything merged since the
-last tag ships as one release; a night with nothing new is skipped. The
-tracked `package.json` version is not bumped by CI; tags are the source of
-truth. `npm run release:mac|win|all` is the manual fallback that builds from a
-pristine worktree and needs the untracked `.env.releases`.
+patch), builds and signs macOS, and cross-builds the Windows installer.
+Both platforms are saved as an immutable Actions artifact before a dedicated
+GitHub App tags the built commit. Publication then uploads binaries followed
+by update feeds; failed uploads resume from the original artifact without
+rebuilding. Everything merged since the last tag ships as one release; a
+night with nothing new is skipped. The tracked `package.json` version is not
+bumped by CI. Tags reserve versions, and failed publications can be resumed
+with `gh workflow run Release --ref main -f resume_run_id=ORIGINAL_RUN_ID`.
+`npm run release:mac|win|all` is the separate manual fallback that builds from
+a pristine worktree and needs the untracked `.env.releases`.
 Details in [docs/releasing.md](./docs/releasing.md).
 
 ## License

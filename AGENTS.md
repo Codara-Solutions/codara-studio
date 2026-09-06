@@ -41,10 +41,13 @@ existing code is written; when in doubt, read neighboring files and match them.
 
 - Releases are nightly, not per push: the `Release` GitHub Actions workflow
   runs at 03:00 UTC (or via `gh workflow run Release`), tests, builds, signs,
-  and publishes everything merged to `main` since the last `vX.Y.Z` tag as one
-  release, then pushes the new tag. Nothing new since the last tag means no
-  release. Tags are the version source of truth; the tracked `package.json`
-  version is not bumped by CI.
+  and saves both platforms before a dedicated GitHub App tags the built
+  commit. Only then are binaries and update feeds published. Nothing new
+  since the last tag means no new release. Tags reserve versions; recover a
+  failed publication with the original run's immutable artifact using
+  `gh workflow run Release --ref main -f resume_run_id=ORIGINAL_RUN_ID`.
+  Never move a tag or rebuild an already tagged version. The tracked
+  `package.json` version is not bumped by CI. See `docs/releasing.md`.
 - Commits whose subject starts with `release:` are the version-bump records
   the manual `scripts/release.cjs` pipeline creates; both pipelines skip them,
   which is what prevents release loops. Do not use that prefix for ordinary
