@@ -9,6 +9,7 @@
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
 
@@ -25,6 +26,7 @@ function createController() {
     missingBinary: false,
     activeProfileLeases: new Map(),
     currentDefaultProfileId: "00000000-0000-4000-8000-000000000001",
+    codexStateHome: path.resolve(os.homedir(), ".codex"),
     currentDefaultClaudeProfileId: "10000000-0000-4000-8000-000000000001",
     currentDefaultGrokProfileId: "20000000-0000-4000-8000-000000000001",
     failNextLocalSpawn: false,
@@ -94,7 +96,7 @@ function createController() {
       const selected = profileId ?? controller.currentDefaultProfileId;
       return {
         profileId: selected,
-        stateHome: "/shared/.codex",
+        stateHome: controller.codexStateHome,
         env: {
           ...process.env,
         },
@@ -251,17 +253,6 @@ function stubPlugin() {
         return globalThis.__codaraPtySpawnHarness.acquireProfile(profileId, ownerId);
       }
       export function notifyNativeGrokProfileLeaseReleased() {}
-    `,
-    "./orchestration/codex-cli-profile-execution": `
-      export function buildCodexCliSharedEnvironment(baseEnv) {
-        const env = {};
-        for (const [key, value] of Object.entries(baseEnv)) {
-          const upper = key.toUpperCase();
-          if (upper === "CODEX_HOME" || upper === "OPENAI_API_KEY" || upper === "CODEX_API_KEY") continue;
-          if (typeof value === "string") env[key] = value;
-        }
-        return env;
-      }
     `,
     "./orchestration/codex-trust": `
       export function ensureCodexProjectTrust() { return Promise.resolve(); }
@@ -515,6 +506,26 @@ async function main() {
     pty.killImmediate("codex-frozen");
     assert.equal(controller.activeProfileLeases.has("terminal:codex-frozen"), false);
 
+    controller.codexStateHome = path.join(tmp, "custom codex home");
+    for (const restored of [false, true]) {
+      const id = restored ? "codex-custom-resumed" : "codex-custom-new";
+      const options = localCodexOptions(id, restored ? firstProfile : undefined);
+      if (restored) {
+        options.startupCommand = "codex resume 00000000-0000-4000-8000-000000000003 --yolo";
+      }
+      options.env = { CODEX_HOME: path.join(tmp, "stale-selector") };
+      await pty.spawn(options);
+      const childEnv = controller.localSpawnCalls.at(-1).options.env;
+      assert.equal(
+        childEnv.CODEX_HOME,
+        controller.codexStateHome,
+        "new and restored terminals must use the resolved history home",
+      );
+      assert.equal(childEnv.OPENAI_API_KEY, undefined);
+      pty.killImmediate(id);
+    }
+    controller.codexStateHome = path.resolve(os.homedir(), ".codex");
+
     // Process-construction failure releases the deletion-blocking lease.
     controller.failNextLocalSpawn = true;
     await assert.rejects(
@@ -530,12 +541,22 @@ async function main() {
     // reach a frozen pane, and the home pointer is always this app's.
     process.env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
     process.env.SPARK_HOME_DIR = "/outer/app/home";
+    const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const previousGrokHome = process.env.GROK_HOME;
+    process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "personal claude");
+    process.env.GROK_HOME = path.join(tmp, "personal grok");
     process.env.ANTHROPIC_API_KEY = "must-not-leak";
     process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR = "/wrong/securestorage";
     process.env.CLAUDE_CODE_HOST_CREDS_FILE = "/wrong/host-creds";
     const firstClaudeProfile = controller.currentDefaultClaudeProfileId;
     const claudeFirst = await pty.spawn(localClaudeOptions("claude-frozen"));
     const firstClaudeSpawn = controller.localSpawnCalls.at(-1);
+    assert.equal(firstClaudeSpawn.options.env.SPARK_PERSONAL_CLAUDE_CONFIG_DIR, process.env.CLAUDE_CONFIG_DIR);
+    assert.equal(firstClaudeSpawn.options.env.SPARK_PERSONAL_GROK_HOME, process.env.GROK_HOME);
+    if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
+    if (previousGrokHome === undefined) delete process.env.GROK_HOME;
+    else process.env.GROK_HOME = previousGrokHome;
     assert.equal(claudeFirst.nativeClaudeProfileId, firstClaudeProfile);
     assert.equal(
       firstClaudeSpawn.options.env.CLAUDE_CONFIG_DIR,

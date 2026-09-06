@@ -129,6 +129,12 @@ async function main() {
     assert.deepEqual(read().split("\n").slice(1), [""], `${description} must be refused`);
   }
   assert.equal(M.formatActiveCliEnvPointer({ claudeConfigDir: claudeDir }, 7, HOME), `codara-active-cli-env 1 7\nCLAUDE_CONFIG_DIR=${claudeDir}\n`);
+  if (process.platform === "win32") {
+    assert.equal(
+      M.formatActiveCliEnvPointer({ claudeConfigDir: claudeDir.toUpperCase() }, 7, HOME),
+      `codara-active-cli-env 1 7\nCLAUDE_CONFIG_DIR=${claudeDir.toUpperCase()}\n`,
+    );
+  }
   pass("values outside the managed roots are refused");
 
   // The Codara home override decides the managed roots and the file location.

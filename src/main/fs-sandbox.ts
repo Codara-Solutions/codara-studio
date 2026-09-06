@@ -5,6 +5,7 @@ import { promises as fsp } from "node:fs";
 import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
 import { claudeConfigDir } from "./orchestration/claude-paths";
+import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
 
 // Read-path allowlist for fs:* IPC handlers. Defence-in-depth only — if the
 // renderer is compromised, this stops a hostile script from reading arbitrary
@@ -81,7 +82,7 @@ let staticAllowedCache: string[] | null = null;
 function staticAllowed(): string[] {
   staticAllowedCache ??= [
     claudeConfigDir(),
-    home(".codex"),
+    defaultPersonalCodexHomeDir(),
     home(".cache/spark"),
     // Cora memory files (MEMORY.md and workspaces/<id>.md) open in ordinary
     // editor tabs, and they live outside every workspace root. Deliberately

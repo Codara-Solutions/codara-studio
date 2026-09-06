@@ -61,8 +61,8 @@ export function codaraManagedCliRoots(
 function isInside(child: string, parent: string): boolean {
   // Claude Code hashes the literal config-directory string, so Codara-owned
   // paths are persisted NFC-normalized; compare on that spelling both ways.
-  const inner = child.normalize("NFC");
-  const outer = parent.normalize("NFC");
+  const inner = (process.platform === "win32" ? child.toLowerCase() : child).normalize("NFC");
+  const outer = (process.platform === "win32" ? parent.toLowerCase() : parent).normalize("NFC");
   return inner === outer || inner.startsWith(outer.endsWith(sep) ? outer : `${outer}${sep}`);
 }
 

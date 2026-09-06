@@ -2,6 +2,22 @@ import type { ClaudeCliExecutionProfile } from "./claude-cli-profile-execution";
 import type { GrokCliExecutionProfile } from "./grok-cli-profile-execution";
 import { resolveNewNativeClaudeProfile } from "./native-claude-profile-runtime";
 import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
+import { resolve } from "node:path";
+import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
+
+/** Preserve personal selectors before a managed profile replaces the child env. */
+export function personalCliShellHomeEnvironment(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const personal = (key: string): string => {
+    const value = baseEnv[key]?.trim();
+    return value && !isCodaraManagedCliPath(value) ? resolve(value) : "";
+  };
+  return {
+    SPARK_PERSONAL_CLAUDE_CONFIG_DIR: personal("CLAUDE_CONFIG_DIR"),
+    SPARK_PERSONAL_GROK_HOME: personal("GROK_HOME"),
+  };
+}
 
 /**
  * The Active native CLI accounts, projected onto plain Studio shells.

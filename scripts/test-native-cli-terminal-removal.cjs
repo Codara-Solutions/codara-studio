@@ -462,7 +462,7 @@ async function main() {
     await check("detection never modifies the startup file", () => {
       assert.equal(fs.readFileSync(rc, "utf8"), contents);
       assert.equal(fs.statSync(rc).mtimeMs, before.mtimeMs);
-      assert.equal(fs.statSync(rc).mode & 0o777, 0o644);
+      assert.equal(fs.statSync(rc).mode & 0o777, before.mode & 0o777);
       assert.equal(fs.existsSync(`${rc}.codara-backup`), false);
     });
   }

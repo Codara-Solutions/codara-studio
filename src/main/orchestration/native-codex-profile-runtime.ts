@@ -66,10 +66,11 @@ export async function resolveNewNativeCodexProfile(
   const selected = await nativeCodexProfileStore.resolveProfile({
     useDefault: true,
   });
+  const stateHome = defaultPersonalCodexHomeDir();
   return {
     ...selected,
-    stateHome: defaultPersonalCodexHomeDir(),
-    env: buildCodexCliSharedEnvironment(baseEnv),
+    stateHome,
+    env: buildCodexCliSharedEnvironment(baseEnv, stateHome),
   };
 }
 

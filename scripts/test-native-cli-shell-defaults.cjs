@@ -37,7 +37,7 @@ buildSync({
   outfile: OUT,
 });
 
-const { resolvePlainShellAccountSelectors } = require(OUT);
+const { resolvePlainShellAccountSelectors, personalCliShellHomeEnvironment } = require(OUT);
 
 const personalClaude = {
   profileId: "personal",
@@ -69,6 +69,24 @@ const managedGrok = {
 };
 
 async function main() {
+  const customClaude = path.join(TMP, "custom claude");
+  const customGrok = path.join(TMP, "custom grok");
+  assert.deepEqual(personalCliShellHomeEnvironment({
+    CLAUDE_CONFIG_DIR: customClaude,
+    GROK_HOME: customGrok,
+  }), {
+    SPARK_PERSONAL_CLAUDE_CONFIG_DIR: customClaude,
+    SPARK_PERSONAL_GROK_HOME: customGrok,
+  });
+  assert.deepEqual(personalCliShellHomeEnvironment({}), {
+    SPARK_PERSONAL_CLAUDE_CONFIG_DIR: "",
+    SPARK_PERSONAL_GROK_HOME: "",
+  });
+  const codaraRoot = path.resolve(process.env.CODARA_HOME_DIR || process.env.SPARK_HOME_DIR || path.join(os.homedir(), ".codarastudio"));
+  assert.equal(personalCliShellHomeEnvironment({
+    CLAUDE_CONFIG_DIR: path.join(codaraRoot, "claude-cli", "accounts", "managed"),
+  }).SPARK_PERSONAL_CLAUDE_CONFIG_DIR, "");
+  console.log("PASS personal home snapshots preserve custom paths and exclude managed selectors");
   // Both defaults personal: nothing to apply, the shell stays untouched.
   assert.equal(
     await resolvePlainShellAccountSelectors({

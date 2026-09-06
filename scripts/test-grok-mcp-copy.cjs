@@ -71,6 +71,9 @@ const FAKE_CWD = fs.mkdtempSync(path.join(TMP_ROOT, "grok-mcp-copy-ws-"));
 const realHomedir = os.homedir;
 os.homedir = () => FAKE_HOME;
 process.env.HOME = FAKE_HOME;
+process.env.CODEX_HOME = path.join(FAKE_HOME, ".codex");
+process.env.GROK_HOME = path.join(FAKE_HOME, ".grok");
+process.env.CLAUDE_CONFIG_DIR = path.join(FAKE_HOME, ".claude");
 process.on("exit", () => {
   os.homedir = realHomedir;
   fs.rmSync(FAKE_HOME, { recursive: true, force: true });

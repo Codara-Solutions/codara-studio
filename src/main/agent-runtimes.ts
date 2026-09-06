@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -12,6 +11,10 @@ import type {
 import { listProviders } from "./providers";
 import type { CliProvider } from "./providers/types";
 import { claudeConfigDir } from "./orchestration/claude-paths";
+import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
+import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
+import { defaultPersonalClaudeConfigDirEnv } from "./orchestration/claude-cli-account-profiles";
+import { claudeCliKeychainService } from "./orchestration/claude-cli-credentials";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,7 +42,7 @@ async function probeCodexAuth(): Promise<RuntimeAuthProbe> {
   // An exported API key authenticates codex without auth.json.
   if ((process.env.OPENAI_API_KEY ?? "").trim()) return { authenticated: true };
   try {
-    const raw = await fs.readFile(join(homedir(), ".codex", "auth.json"), "utf8");
+    const raw = await fs.readFile(join(defaultPersonalCodexHomeDir(), "auth.json"), "utf8");
     const parsed = JSON.parse(raw) as {
       OPENAI_API_KEY?: unknown;
       tokens?: { access_token?: unknown };
@@ -100,7 +103,7 @@ async function probeClaudeAuth(): Promise<RuntimeAuthProbe> {
     try {
       await execFileAsync(
         "security",
-        ["find-generic-password", "-s", "Claude Code-credentials"],
+        ["find-generic-password", "-s", claudeCliKeychainService(defaultPersonalClaudeConfigDirEnv())],
         { windowsHide: true, timeout: VERSION_TIMEOUT_MS },
       );
       return { authenticated: true };
@@ -120,7 +123,7 @@ async function probeClaudeAuth(): Promise<RuntimeAuthProbe> {
 async function probeGrokAuth(): Promise<RuntimeAuthProbe> {
   if ((process.env.XAI_API_KEY ?? "").trim()) return { authenticated: true };
   try {
-    const raw = await fs.readFile(join(homedir(), ".grok", "auth.json"), "utf8");
+    const raw = await fs.readFile(join(defaultPersonalGrokHomeDir(), "auth.json"), "utf8");
     JSON.parse(raw);
     return { authenticated: true };
   } catch (err) {

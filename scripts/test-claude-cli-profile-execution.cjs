@@ -366,8 +366,11 @@ async function main() {
     );
   });
   assert.deepEqual(
-    externalReferences.map((file) => path.relative(ROOT, file)).sort(),
+    externalReferences.map((file) => path.relative(ROOT, file).split(path.sep).join("/")).sort(),
     [
+      // Read-only sign-in probe: it derives the personal keychain service
+      // name from CLAUDE_CONFIG_DIR and never launches anything.
+      "src/main/agent-runtimes.ts",
       // The unified account service, its Claude adapter, the startup pass
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
