@@ -80,6 +80,10 @@ async function main() {
   );
 
   const groups = composer.buildVisibleGroups({});
+  check(
+    "the offline picker includes every supported OpenAI variant",
+    groups[0].models.map(model => model.id).join(",") === ids.join(","),
+  );
   // Cora runs on Pi only. The Claude Code / Codex CLI groups chose a manager
   // HARNESS, not a model, and are gone; what remains is one backend split into
   // three model-family groups (OpenAI, Anthropic, xAI).
@@ -182,10 +186,8 @@ async function main() {
       ] },
     ])?.id === "claude-fable-5",
   );
-  // The failure this ordering exists to prevent. keepCurrentGeneration
-  // auto-advances to the newest OpenAI generation, so when a 5.7 ships, Sol is
-  // dropped as last-generation and the new rows are unrecognized. If premium
-  // ranked above "unknown", the default would silently become Fable.
+  // A newly discovered generation adds choices without retiring the supported
+  // variants or changing the default to a premium model.
   const nextGen = {
     models: composer
       .buildVisibleGroups({
@@ -197,9 +199,27 @@ async function main() {
       .flatMap((group) => group.models),
   };
   check(
-    "Sol is retired once a newer OpenAI generation ships",
-    !nextGen.models.some((model) => model.id === "gpt-5.6-sol"),
+    "supported variants remain when a newer OpenAI generation ships",
+    ids.every(id => nextGen.models.some(model => model.id === id)),
   );
+
+  const astraCatalog = [
+    { id: "gpt-6-astra", label: "GPT-6 Astra", provider: "openai-codex" },
+    ...piCatalog,
+    { id: "gpt-5.5", label: "GPT-5.5", provider: "openai-codex" },
+    { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark", provider: "openai-codex" },
+  ];
+  for (const live of [astraCatalog, [...astraCatalog].reverse()]) {
+    const openai = composer.buildVisibleGroups({ piCatalog: live })[0].models;
+    check(
+      "Astra coexists with Sol, Terra, and Luna without duplicate or retired rows",
+      openai.map(model => model.id).join(",") === [...ids, "gpt-6-astra"].join(","),
+    );
+    check(
+      "the restored variants retain their supported reasoning levels",
+      openai.filter(model => ids.includes(model.id)).every(model => composer.effortsFor(model).includes("max")),
+    );
+  }
   check(
     `a next-gen catalog still does not default to premium (got ${nextGen.models[0]?.id})`,
     nextGen.models[0]?.id !== "claude-fable-5" && nextGen.models.length > 0,

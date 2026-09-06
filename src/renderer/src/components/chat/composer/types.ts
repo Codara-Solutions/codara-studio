@@ -1,4 +1,5 @@
 import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
+import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 import type {
   AgentEffortLevel,
   ChatBackendKind,
@@ -60,12 +61,12 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
 // Curated rows. PI_MODELS seeds the picker and is merged with whatever the
 // live catalog reports.
 const PI_MODELS: ChatModelOption[] = [
-  {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
+  ...CODEX_MODEL_CATALOG.map(({ id, label, effortLevels }): ChatModelOption => ({
+    id,
+    label,
     backend: "pi",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  },
+    effortLevels,
+  })),
   {
     id: "claude-fable-5",
     label: "Claude Fable 5",
@@ -344,12 +345,12 @@ function mergePiModels(
 // The live catalog carries every model a provider still serves, including long
 // superseded ones (gpt-5.3-codex-spark, claude-opus-4-1). The picker should
 // offer the current lineup only. This is expressed as a RULE rather than a list
-// of ids, so the day Opus 6 or GPT-5.7 ships it takes over automatically —
-// which is the entire reason the catalog is dynamic in the first place.
+// of ids, so newly discovered models appear without a picker update.
 //
 // The two providers need different rules because they version differently:
-//   * OpenAI ships a generation at a time (5.6 sol/terra/luna), so keep every
-//     model at the highest generation and drop earlier ones wholesale.
+//   * OpenAI keeps the supported variants from the shared catalog alongside
+//     the newest live generation. Discovering Astra does not retire Sol,
+//     Terra, or Luna; those remain supported elsewhere in the app too.
 //   * Anthropic ships tiers on independent cadences (Sonnet 5 alongside Opus
 //     4.8), so keep the newest release of each tier instead. Anchoring to a
 //     single highest version would delete a whole tier the moment one tier
@@ -415,6 +416,7 @@ function keepCurrentGeneration(
     return models.filter((model) => {
       const baseId = decomposeModelId(model.id).baseId;
       if (MINOR_TIER_PATTERN.test(baseId)) return false;
+      if (CODEX_MODEL_CATALOG.some((entry) => entry.id === baseId)) return true;
       const generation = codexGeneration(baseId);
       return generation === null || compareVersions(generation, newest) === 0;
     });

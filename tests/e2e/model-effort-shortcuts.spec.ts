@@ -121,6 +121,58 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
   }
 });
 
+test("OpenAI picker keeps Sol, Terra, and Luna alongside Astra", async () => {
+  test.setTimeout(60_000);
+  const fixture = await prepareFixture();
+  const app = await electron.launch({ args: ["."], env: {
+    ...process.env,
+    SPARK_USER_DATA_DIR: fixture.userDataDir,
+    CODARA_HOME_DIR: fixture.userDataDir,
+    SPARK_HOME_DIR: fixture.userDataDir,
+    CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+    CLAUDE_CONFIG_DIR: join(fixture.userDataDir, "claude-home"),
+    GROK_HOME: join(fixture.userDataDir, "grok-home"),
+    SPARK_SKIP_LEGACY_MIGRATION: "1",
+    SPARK_NO_SHELL_INTEGRATION: "1",
+  } });
+  try {
+    const page = await app.firstWindow();
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("pi-models:catalog");
+      ipcMain.handle("pi-models:catalog", () => [
+        { id: "gpt-6-astra", label: "GPT-6 Astra", provider: "openai-codex", reasoning: true },
+        { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai-codex", reasoning: true },
+      ]);
+    });
+    await page.reload();
+    await selectCoraTab(page);
+    const trigger = page.locator(".composer-model-thinking-trigger").first();
+    const menu = page.locator(".composer-model-thinking-menu");
+    const openai = menu.locator(".composer-model-group").filter({ hasText: "OpenAI" });
+    const labels = ["GPT-5.6 Sol", "GPT-5.6 Terra", "GPT-5.6 Luna", "GPT-6 Astra"];
+    for (const label of labels) {
+      await trigger.click();
+      await expect(openai.getByRole("option")).toHaveCount(4);
+      await openai.getByRole("option").filter({ hasText: label }).click();
+      await expect(menu.getByText("Choose thinking depth")).toBeVisible();
+      await menu.getByRole("option", { name: /^High/ }).click();
+      await expect(menu).toBeHidden();
+      await expect(trigger.locator(".composer-pill-label")).toHaveText(label);
+    }
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("pi-models:catalog");
+      ipcMain.handle("pi-models:catalog", () => []);
+    });
+    await trigger.click();
+    await expect(openai.getByRole("option")).toHaveCount(3);
+    for (const label of labels.slice(0, 3)) {
+      await expect(openai.getByRole("option").filter({ hasText: label })).toBeVisible();
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 // The seeded pane id, asserted against the injection the chord produces.
 const LIVE_PANE_ID = "pane-live-agent";
 
