@@ -4,7 +4,7 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const read = (relativePath) =>
-  fs.readFileSync(path.join(ROOT, relativePath), "utf8");
+  fs.readFileSync(path.join(ROOT, relativePath), "utf8").replace(/\r\n/g, "\n");
 
 const shared = read("src/shared/types.ts");
 const ipc = read("src/main/ipc.ts");

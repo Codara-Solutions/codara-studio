@@ -4126,7 +4126,7 @@ function AboutSettings() {
       alive = false;
     };
   }, []);
-  const version = (packageJson as { version: string }).version;
+  const version = import.meta.env.VITE_APP_VERSION ?? packageJson.version;
 
   const handleCheck = async () => {
     setChecking(true);

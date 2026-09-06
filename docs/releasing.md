@@ -25,7 +25,11 @@ There are two pipelines. The GitHub Actions one is canonical.
    `studio.codarasolutions.com` and self-update through electron-updater.
 
 The tracked `package.json` version is not bumped; tags are the source of
-truth. `Settings, About` in a dev build therefore shows the tracked value.
+truth. `Settings, About` under `npm run dev` shows the nearest reachable
+release tag, commits since that tag, and the commit hash, for example
+`v1.6.7-dev.0+g806bfd1`. Without release tags it falls back to the tracked
+package version with a `-dev` suffix. Packaged builds show the release version
+written into `package.json` by the release pipeline.
 
 Secrets used: `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`, `RELEASES_BUCKET`,

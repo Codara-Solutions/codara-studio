@@ -1,8 +1,25 @@
 import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import packageJson from "./package.json";
 
-export default defineConfig({
+function developmentVersion(): string {
+  try {
+    const description = execFileSync(
+      "git",
+      ["describe", "--tags", "--match", "v[0-9]*", "--long", "--abbrev=7"],
+      { cwd: __dirname, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+    ).trim();
+    const match = /^v(\d+\.\d+\.\d+)-(\d+)-g([a-f0-9]+)$/.exec(description);
+    if (match) return `${match[1]}-dev.${match[2]}+g${match[3]}`;
+  } catch {
+    // Source archives and checkouts without release tags still support dev.
+  }
+  return `${packageJson.version}-dev`;
+}
+
+export default defineConfig(({ command }) => ({
   main: {
     // electron-updater is BUNDLED (not externalized): electron-builder's
     // module collector mis-walks this hoisted npm tree and shipped an asar
@@ -49,6 +66,9 @@ export default defineConfig({
     root: resolve(__dirname, "src/renderer"),
     define: {
       "process.env.NODE_ENV": JSON.stringify("production"),
+      "import.meta.env.VITE_APP_VERSION": JSON.stringify(
+        command === "serve" ? developmentVersion() : packageJson.version,
+      ),
     },
     plugins: [react()],
     resolve: {
@@ -137,4 +157,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));
