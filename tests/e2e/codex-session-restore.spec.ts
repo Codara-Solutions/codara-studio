@@ -2,7 +2,7 @@ import { test, expect, type ElectronApplication } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { chmod, mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 const FIRST = "11111111-1111-4111-8111-111111111111";
 const SECOND = "22222222-2222-4222-8222-222222222222";
@@ -108,6 +108,7 @@ test("cold app startup counts every restored agent before visiting another works
     await page.reload();
     await expect(page.locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
       .toHaveText("1/2", { timeout: 20_000 });
+    await page.locator('[data-workspace-id="ws-other"]').evaluate(element => (element as HTMLElement).click());
     await app.close();
     app = null;
     const before = (await fixture.launches()).length;
@@ -125,7 +126,7 @@ test("cold app startup counts every restored agent before visiting another works
   }
 });
 
-for (const pointer of ["missing", "stale", "closed"] as const) {
+for (const pointer of ["missing", "stale", "wrong-runtime", "closed"] as const) {
   test(pointer === "closed" ? "Codex keeps an intentionally closed conversation closed" : `Codex restores the process-bound conversation with a ${pointer} renderer pointer`, async () => {
     test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
     test.setTimeout(60_000);
@@ -143,8 +144,8 @@ for (const pointer of ["missing", "stale", "closed"] as const) {
         localStorage.setItem("spark.tabs:ws-restore", JSON.stringify({ v: 6, tabs: [{
           id: "restore-terminal", kind: "terminal", title: "terminals", activePaneId: "restore-pane",
           root: { kind: "leaf", paneId: "restore-pane", cwd: pointer === "stale" ? `${workspace}/old` : workspace,
-            ...(pointer !== "missing" ? { agentSession: { runtime: "codex", sessionId: first,
-              transcriptPath: firstPath, cwd: workspace, active: pointer === "closed", capturedAt: "2026-09-01T00:00:00Z" } } : {}) },
+            ...(pointer !== "missing" ? { agentSession: { runtime: pointer === "wrong-runtime" ? "claude" : "codex", sessionId: first,
+              transcriptPath: firstPath, cwd: workspace, active: pointer === "closed" || pointer === "wrong-runtime", capturedAt: "2026-09-01T00:00:00Z" } } : {}) },
         }], activeId: "restore-terminal" }));
       }, { pointer, workspace: fixture.workspace, first: FIRST, firstPath: fixture.firstPath });
       await page.reload();
@@ -163,6 +164,75 @@ for (const pointer of ["missing", "stale", "closed"] as const) {
   });
 }
 
+test("restart restores hidden Claude and leaves a closed Claude conversation closed", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix CLI wrapper.");
+  test.setTimeout(90_000);
+  const fixture = await prepare();
+  const bin = dirname(fixture.script);
+  const project = join(fixture.env.CLAUDE_CONFIG_DIR, "projects", fixture.workspace.replace(/[^a-zA-Z0-9]/g, "-"));
+  await mkdir(project, { recursive: true });
+  for (const id of [FIRST, SECOND]) {
+    await writeFile(join(project, `${id}.jsonl`), JSON.stringify({ type: "user", message: { role: "user", content: "fixture" } }) + "\n");
+  }
+  const script = join(bin, "claude.js");
+  await writeFile(script, `
+    const fs = require("node:fs");
+    const args = process.argv.slice(2);
+    if (args.includes("--version")) { console.log("Claude Code 2.1.261"); process.exit(0); }
+    if (args[0] === "auth") { console.log(JSON.stringify({ loggedIn: false })); process.exit(0); }
+    fs.appendFileSync(${JSON.stringify(fixture.launchLog)}, JSON.stringify(["claude", ...args]) + "\\n");
+    process.stdout.write("Claude Code v2.1.261\\r\\n❯ \\r\\n? for shortcuts\\r\\n");
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", (data) => { if (data.includes(113)) process.exit(0); });
+  `);
+  await writeFile(join(bin, "claude"), `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${script.replace(/'/g, "'\\''")}' "$@"\n`);
+  await chmod(join(bin, "claude"), 0o755);
+  await writeFile(join(fixture.userData, "spark-state.json"), JSON.stringify({
+    workspaces: [{ id: "ws-restore", name: "Restore", cwd: fixture.workspace, workers: [] },
+      { id: "ws-other", name: "Other", cwd: join(fixture.workspace, "old"), workers: [] }], activeWorkspaceId: "ws-restore",
+  }));
+  await writeFile(join(fixture.userData, "agent-session-starts.json"), JSON.stringify({ version: 1,
+    entries: [FIRST, SECOND].map((sessionId, index) => ({ paneId: `claude-pane-${index}`, runtime: "claude", sessionId,
+      transcriptPath: join(project, `${sessionId}.jsonl`), cwd: fixture.workspace, active: true,
+      timestamp: "2026-09-05T12:00:00Z" })),
+  }));
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    const page = await app.firstWindow();
+    await page.addInitScript(({ workspace, first, second }) => {
+      localStorage.setItem("spark.tabs:ws-restore", JSON.stringify({ v: 6,
+        tabs: [first, second].map((id, index) => ({ id: `claude-tab-${index}`, kind: "terminal", title: `Claude ${index}`,
+          activePaneId: `claude-pane-${index}`, root: { kind: "leaf", paneId: `claude-pane-${index}`, cwd: workspace,
+            agentSession: { runtime: "claude", sessionId: id, cwd: workspace, active: true, capturedAt: "2026-09-01T00:00:00Z" } } })),
+        activeId: "claude-tab-1",
+      }));
+    }, { workspace: fixture.workspace, first: FIRST, second: SECOND });
+    await page.reload();
+    await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(2);
+    const closedPane = page.locator('[data-terminal-pane-id="claude-pane-1"]');
+    await expect(closedPane.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 15_000 });
+    await closedPane.locator(".xterm-helper-textarea").press("q");
+    await expect(closedPane.getByRole("status", { name: "CLAUDE ready" })).toHaveCount(0, { timeout: 10_000 });
+    await page.locator('[data-workspace-id="ws-other"]').evaluate(element => (element as HTMLElement).click());
+    await app.close();
+    app = null;
+    expect((await fixture.records()).find(rec => rec.paneId === "claude-pane-0")?.active).toBe(true);
+    expect((await fixture.records()).find(rec => rec.paneId === "claude-pane-1")?.active).toBe(false);
+    const before = (await fixture.launches()).length;
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    await expect.poll(async () => (await fixture.launches()).length, { timeout: 20_000 }).toBe(before + 1);
+    expect((await fixture.launches()).at(-1)).toContain(FIRST);
+    await expect((await app.firstWindow()).locator('[data-workspace-id="ws-restore"]').getByTestId("workspace-agent-count"))
+      .toHaveText("1", { timeout: 10_000 });
+    await (await app.firstWindow()).waitForTimeout(3000);
+    expect((await fixture.launches()).length).toBe(before + 1);
+  } finally {
+    await app?.close();
+  }
+});
+
 async function prepare() {
   const root = await mkdtemp(join(tmpdir(), "codara-codex-restore-e2e-"));
   const userData = join(root, "app");
@@ -174,7 +244,8 @@ async function prepare() {
   const firstPath = join(sessions, `rollout-2026-08-01T00-00-00-${FIRST}.jsonl`);
   const secondPath = join(sessions, `rollout-2026-08-01T00-00-01-${SECOND}.jsonl`);
   for (const [id, path] of [[FIRST, firstPath], [SECOND, secondPath]]) {
-    await writeFile(path, JSON.stringify({ type: "session_meta", payload: { id, cwd: workspace, source: "cli", timestamp: "2026-08-01T00:00:00Z" } }) +
+    await writeFile(path, JSON.stringify({ type: "session_meta", payload: { id, cwd: workspace, source: "cli", timestamp: "2026-08-01T00:00:00Z",
+      base_instructions: { text: "CLI instructions. ".repeat(2000) } } }) +
       "\n" + JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "fixture ".repeat(200) } }) + "\n");
   }
   const launchLog = join(root, "launches.jsonl");
@@ -201,14 +272,19 @@ async function prepare() {
   const wrapper = join(bin, "codex");
   await writeFile(wrapper, `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${script.replace(/'/g, "'\\''")}' "$@"\n`);
   await chmod(wrapper, 0o755);
+  // Keep login-shell PATH reconstruction inside the fixture, so installed
+  // CLIs and personal shell profiles cannot replace the fake executables.
+  const shell = join(bin, "bash");
+  await writeFile(shell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n');
+  await chmod(shell, 0o755);
   await writeFile(join(userData, "spark-preferences.json"), JSON.stringify({ restoreAgentSessions: true }));
   await writeFile(join(userData, "spark-state.json"), JSON.stringify({
     workspaces: [{ id: "ws-restore", name: "Restore", cwd: workspace, color: "#34D3C3", workers: [] }],
     activeWorkspaceId: "ws-restore",
   }));
   return {
-    userData, workspace, script, firstPath, secondPath,
-    env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, SHELL: "/bin/false",
+    userData, workspace, script, firstPath, secondPath, launchLog,
+    env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, SHELL: shell,
       CODEX_HOME: codexHome, SPARK_USER_DATA_DIR: userData, CODARA_HOME_DIR: userData, SPARK_HOME_DIR: userData,
       CLAUDE_CONFIG_DIR: join(root, "claude-home"), GROK_HOME: join(root, "grok-home"),
       SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1" },

@@ -144,6 +144,7 @@ test("Codex stays ready during draft editing and working through partial repaint
       started = true;
       out("\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project");
       setTimeout(() => out("\x1b[5;6Hking\x1b[5;16H2"), 1000);
+      setTimeout(() => out("\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\r\n• Waiting for background terminal (15m 35s • esc to interrupt) · 1 background terminal running\r\n  └ npx playwright test tests/e2e/codex-session-restore.spec.ts\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/project"), 3000);
       setTimeout(() => {
         out("\x1b[2J\x1b[H" + "x".repeat(process.stdout.columns * 10));
         out("\x1b[5;1H• Working (9m 22s • esc to interrupt)\x1b[K\x1b[7;1H› Ask Codex to do anything\x1b[K\x1b[8;1Hgpt-6-astra high fast · ~/project\x1b[J");
@@ -293,6 +294,11 @@ test(`cold-restored Claude appears in the workspace count while ${phase}`, async
       ? "@echo off\r\necho Claude Code v2.1.261\r\necho ? for shortcuts\r\nping 127.0.0.1 -n 60 >nul\r\n"
       : "#!/bin/sh\nprintf 'Claude Code v2.1.261\\r\\n❯ \\r\\n? for shortcuts\\r\\n'\nsleep 60\n");
   }
+  const fixtureShell = join(fixture.binDir, "bash");
+  if (process.platform !== "win32") {
+    await writeFile(fixtureShell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n');
+    await chmod(fixtureShell, 0o755);
+  }
 
   let app: ElectronApplication | null = null;
   try {
@@ -304,10 +310,8 @@ test(`cold-restored Claude appears in the workspace count while ${phase}`, async
         GROK_HOME: join(fixture.userDataDir, "grok-home"),
         CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
         PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
-        // Force PATH reconstruction to use the explicit test PATH instead of
-        // the developer machine's login-shell PATH (which contains real
-        // Claude ahead of this fixture binary).
-        ...(process.platform === "win32" ? {} : { SHELL: "/bin/false" }),
+        // Keep PATH reconstruction inside the fixture's shell environment.
+        ...(process.platform === "win32" ? {} : { SHELL: fixtureShell }),
         SPARK_USER_DATA_DIR: fixture.userDataDir,
         CODARA_HOME_DIR: fixture.userDataDir,
         SPARK_HOME_DIR: fixture.userDataDir,

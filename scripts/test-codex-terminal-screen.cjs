@@ -58,6 +58,16 @@ const esbuild = require("esbuild");
     assert.equal(screen.state(), "idle", "a draft stays idle after repainting over wrapped transcript");
     await paint("\x1b[6;1H• Working (0s • esc to interrupt)\x1b[K");
     assert.equal(screen.state(), "working", "the next live turn is recognized after the stale-wrap completion");
+    screen.resize(160, 24);
+    const background = "• Waiting for background terminal (15m 35s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close";
+    await paint("\x1b[2J\x1b[HFinal progress update.\r\n\r\n" + background + "\r\n  └ npx playwright test tests/e2e/codex-session-restore.spec.ts\r\n    --workers=1 --output=/tmp/restore-tests\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/project");
+    assert.equal(screen.state(), "working", "background terminal command details do not hide the live timer");
+    screen.resize(75, 24);
+    assert.equal(screen.state(), "working", "wrapped background terminal status remains working");
+    await paint("\x1b[2J\x1b[H" + background + "\r\n  └ npx playwright test\r\n\r\nAll tests passed.\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/project");
+    assert.equal(screen.state(), "idle", "a final response after an old background wait is ready");
+    await paint("\x1b[2J\x1b[HFinal response.\r\n› Explain this status\r\n" + background + "\r\n  └ npx playwright test\r\ngpt-6-astra high fast · ~/project");
+    assert.equal(screen.state(), "idle", "a background terminal footer quoted in a draft stays ready");
     console.log("Codex terminal screen checks passed.");
   } finally {
     screen.dispose();

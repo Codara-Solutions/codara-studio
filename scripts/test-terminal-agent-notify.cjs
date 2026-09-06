@@ -601,6 +601,12 @@ async function main() {
   feed("p13", "\x1b[?1049l");
   await sleep(1200);
   check("closing Codex transcript view does not clear the agent or its working state", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+  const beforeBackgroundWait = alertCount();
+  feed("p13", "\x1b[5;1H\x1b[J• Waiting for background terminal (15m 35s • esc to interrupt)\r\n  └ npx playwright test tests/e2e/codex-session-restore.spec.ts\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/src");
+  await sleep(2500);
+  check("Codex stays working while waiting for a background terminal", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+  check("a background terminal wait does not send completion", alertCount() === beforeBackgroundWait);
+  feed("p13", "\x1b[6;1H\x1b[2K");
   feed("p13", "\x1b[5;1H\x1b[2K\x1b[7;1H\x1b[J› Explain this status\r\nWorking (9m 21s • esc to interrupt)\r\ngpt-6-astra high fast · ~/src");
   await waitForState("p13", "idle");
   check("a cleared busy footer and a quoted footer in the draft resolve to ready", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "idle");

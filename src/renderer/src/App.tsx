@@ -460,6 +460,7 @@ export default function App() {
   // integration. Used as the launch profile for terminal tabs so a fresh
   // interactive pane reports cwd/prompt/open-file events to the renderer.
   const [integratedShell, setIntegratedShell] = useState<ShellInfo | null>(null);
+  const [terminalShellResolved, setTerminalShellResolved] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
@@ -1386,6 +1387,8 @@ export default function App() {
         if (!cancelled) setIntegratedShell(shell);
       } catch {
         /* fall back to defaultShell */
+      } finally {
+        if (!cancelled) setTerminalShellResolved(true);
       }
     })();
     return () => {
@@ -1995,8 +1998,12 @@ export default function App() {
   // Quit the PTYs are killed while the renderer is still alive, before any
   // unload fires — so this earlier main-driven signal is what makes it reliable.
   useEffect(() => {
-    const off = window.spark.app.onBeforeQuit?.(({ activeAgentPaneIds }) => {
+    const off = window.spark.app.onBeforeQuit?.(({ activeAgentPaneIds, authoritative }) => {
       markAppTearingDown();
+      if (authoritative) {
+        tabsRef.current.flushAgentSessionsNow(activeAgentPaneIds);
+        return;
+      }
       const active = new Set(activeAgentPaneIds);
       for (const [paneId, runtime] of paneRuntimeRef.current) {
         if (runtime.altScreenActive === true) active.add(paneId);
@@ -2044,9 +2051,8 @@ export default function App() {
         if (healed) {
           t.setLeafAgentSession(tab.id, rec.paneId, {
             ...healed,
-            // Codex tracking confirms process presence. Claude hooks identify
-            // the conversation but still rely on the TUI for running state.
-            active: rec.runtime === "codex" && rec.active !== undefined
+            // Process tracking and the quit census override renderer liveness.
+            active: rec.active !== undefined
               ? rec.active
               : paneRuntimeRef.current.get(rec.paneId)?.altScreenActive === true || healed.active === true,
           });
@@ -5792,7 +5798,9 @@ export default function App() {
     );
   }
 
-  const terminalShell = integratedShell ?? defaultShell;
+  // Restore consumes a one-shot startup command. Mounting with a temporary
+  // shell would spend that command before the terminal launch profile arrives.
+  const terminalShell = terminalShellResolved ? integratedShell ?? defaultShell : null;
 
   return (
     <SelectionRoutingProvider value={routingApi}>

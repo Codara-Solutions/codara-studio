@@ -86,8 +86,8 @@ function parseTimestamp(value: string | undefined): number {
  * fires with the real session id on startup, `--resume`, in-TUI `/resume`,
  * and `/clear`, all of which are invisible to filesystem discovery (they
  * append to an old transcript or swap ids without creating a file). The
- * pointer remains ground truth for *restore eligibility* (`active` is the
- * agent-was-running-at-quit judgment, which hooks know nothing about).
+ * pointer keeps restore eligibility for ordinary hooks. Process tracking and
+ * the shutdown census can explicitly replace that eligibility via `active`.
  *
  * Returns the healed pointer when the record is strictly newer and changes
  * something, or null for "keep the pointer as-is" (no record, stale record,
@@ -112,9 +112,7 @@ export function mergeSessionStart(
       cwd: start.cwd,
       transcriptPath: start.transcriptPath,
       capturedAt: new Date(startTs).toISOString(),
-      // Claude hooks only identify a conversation; Codex process tracking
-      // also knows whether the session was still open.
-      active: start.runtime === "codex" && start.active === true,
+      active: start.active === true,
     };
   }
   if (startTs <= parseTimestamp(pointer.capturedAt)) return null;
@@ -122,13 +120,13 @@ export function mergeSessionStart(
     // Same session re-announced (our own `--resume`, or a compact). Identity
     // is unchanged; only fill a missing transcript path.
     if ((pointer.transcriptPath || !start.transcriptPath) &&
-        (start.runtime !== "codex" || start.active === undefined || start.active === pointer.active)) return null;
+        (start.active === undefined || start.active === pointer.active)) return null;
     return {
       ...pointer,
       nativeClaudeProfileId:
         start.runtime === "claude" ? start.nativeClaudeProfileId ?? pointer.nativeClaudeProfileId : undefined,
       transcriptPath: start.transcriptPath ?? pointer.transcriptPath,
-      active: start.runtime === "codex" ? start.active ?? pointer.active : pointer.active,
+      active: start.active ?? pointer.active,
       capturedAt: new Date(startTs).toISOString(),
     };
   }
@@ -141,9 +139,8 @@ export function mergeSessionStart(
     cwd: start.cwd ?? pointer.cwd,
     transcriptPath: start.transcriptPath,
     capturedAt: new Date(startTs).toISOString(),
-    // Eligibility judgment carries over: the pane's agent was (or wasn't)
-    // running at quit regardless of which session id it was showing.
-    active: start.runtime === "codex" ? start.active ?? pointer.active : pointer.active,
+    // Ordinary hooks preserve eligibility; a process census can replace it.
+    active: start.active ?? pointer.active,
   };
 }
 

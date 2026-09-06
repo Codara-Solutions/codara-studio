@@ -212,6 +212,8 @@ async function main() {
   const switchedCodex = mergeSessionStart(ptr(), codexRecord);
   check("merge: a Codex session replaces a stale Claude pointer without its profile", switchedCodex?.runtime === "codex" && switchedCodex.nativeClaudeProfileId === undefined && switchedCodex.nativeCodexProfileId === "personal");
   const exitedCodex = mergeSessionStart(ptr({ runtime: "codex", sessionId: "new-id", active: true }), { ...codexRecord, active: false });
+  check("shutdown census deactivates stale Claude pointers", mergeSessionStart(ptr(), rec({ active: false, source: "shutdown" })).active === false);
+  check("shutdown census recovers missing Claude pointers", mergeSessionStart(null, rec({ active: true, source: "shutdown" })).active === true);
   check("merge: process-confirmed Codex exit disables restore", exitedCodex?.active === false);
 
   if (failures > 0) {

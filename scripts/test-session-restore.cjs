@@ -59,6 +59,7 @@ async function main() {
     appendAgentTerminalToWorkspaceLayout,
     cleanupTransientTerminalState,
     markTerminalAgentSessionsActive,
+    healColdTerminalAgentSessions,
     mergeDeferredWorkspaceTerminalLayout,
     stripTransientPaneState,
     terminalTabIdForPane,
@@ -315,6 +316,15 @@ async function main() {
   check("quit-time liveness promotes the reported pane", quitMarked.a.agentSession?.active === true);
   check("quit-time liveness leaves other pointers inactive", quitMarked.b.agentSession?.active === false);
   check("quit-time liveness preserves untouched leaf identity", quitMarked.b === quitTree.b);
+  const stale = leaf("closed-pane", { agentSession: session({ active: true }) });
+  check("quit-time liveness clears a stale active flag", markTerminalAgentSessionsActive(stale, new Set()).agentSession.active === false);
+  check("ordinary scrollback saves do not change eligibility", markTerminalAgentSessionsActive(stale, null) === stale);
+  const cold = await healColdTerminalAgentSessions(split(leaf("missing"), stale), async paneId => ({
+    paneId, runtime: paneId === "missing" ? "codex" : "claude", sessionId: "11111111-1111-4111-8111-111111111111",
+    cwd: "/project", timestamp: "2026-09-06T10:00:00Z", active: paneId === "missing", restoreOnBoot: paneId === "missing",
+  }));
+  check("cold workspace recovers a missing Codex pointer", cold.a.agentSession?.runtime === "codex" && cold.a.bootResume === true);
+  check("cold workspace does not mount a closed Claude session", cold.b.agentSession?.active === false && cold.b.bootResume === false);
 
   const clean = leaf("q2", { cwd: "/clean" });
   check("persist(off) preserves clean leaf identity", stripTransientPaneState(clean) === clean);

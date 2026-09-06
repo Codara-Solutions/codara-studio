@@ -39,8 +39,9 @@ import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
-import { initAgentSessionRegistry, flushAgentSessionRegistry } from "./agent-session-registry";
-import { createCodexSessionTracker } from "./codex-session-tracker";
+import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
+import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
+import { listProcessesWithCommands } from "./owned-process-tree";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
 import { activeTerminalAgentPaneIds, manualTerminalPaneIds, noteHostResume } from "./terminal-agent-notify";
 import {
@@ -520,12 +521,13 @@ function armBootWatchdog(): void {
 // disposeAllGraceful produces — letting the renderer mark teardown and NOT
 // deactivate running agents' restore pointers as their shells die (which would
 // drop the boot-once resume and reopen panes as plain shells). Best-effort.
-function signalRendererBeforeQuit(): void {
+function signalRendererBeforeQuit(activeAgentPaneIds?: string[]): void {
   const wc = mainWindow?.webContents;
   if (!wc || wc.isDestroyed()) return;
   try {
     wc.send("app:before-quit", {
-      activeAgentPaneIds: activeTerminalAgentPaneIds(),
+      activeAgentPaneIds: activeAgentPaneIds ?? activeTerminalAgentPaneIds(),
+      authoritative: activeAgentPaneIds !== undefined,
     });
   } catch {
     /* renderer already gone; the pagehide path covers it */
@@ -1487,7 +1489,26 @@ app.on("before-quit", (event) => {
 
   void (async () => {
     try {
-      await codexSessionTracker.flush();
+      let censusDeadline: NodeJS.Timeout | undefined;
+      const [, processes] = await Promise.all([
+        codexSessionTracker.flush(),
+        Promise.race([
+          listProcessesWithCommands(),
+          new Promise<null>((resolve) => { censusDeadline = setTimeout(() => resolve(null), 1000); }),
+        ]),
+      ]);
+      if (censusDeadline) clearTimeout(censusDeadline);
+      const live = processes ? new Map<string, string>() : null;
+      if (processes && live) {
+        const manual = manualTerminalPaneIds();
+        for (const session of pty.resourceSnapshot().sessions) {
+          if (!manual.has(session.id) || session.remote) continue;
+          const agent = agentProcessForPane(session.pid, processes);
+          if (agent) live.set(session.id, agent.runtime);
+        }
+      }
+      snapshotAgentSessionsForQuit(live);
+      if (live) signalRendererBeforeQuit([...live.keys()]);
       await flushAgentSessionRegistry();
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving

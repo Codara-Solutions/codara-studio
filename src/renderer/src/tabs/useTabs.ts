@@ -44,6 +44,7 @@ import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
 import { moveTabInList } from "./tabReorder";
 import { resolveBootActiveTabId } from "./bootSelection";
+import { mergeSessionStart, type SessionStartRecord } from "../components/Terminal/resume-policy";
 import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
 import {
   DOCKABLE_KINDS,
@@ -661,24 +662,25 @@ function isSafePersistedString(value: unknown, maxLength: number): value is stri
   );
 }
 
-// Promote only explicitly identified live panes. Used by the main-process
-// raw-stream watcher at quit time to correct a visibility-poller false negative
-// before the layout is synchronously persisted.
+// A quit snapshot replaces stale renderer liveness in both directions. Null
+// means no snapshot yet, so ordinary scrollback saves preserve live state.
 export function markTerminalAgentSessionsActive(
   node: PaneNode,
-  paneIds: ReadonlySet<string>,
+  paneIds: ReadonlySet<string> | null,
 ): PaneNode {
+  if (!paneIds) return node;
   if (node.kind === "leaf") {
     const session = validatedTerminalAgentSession(node.agentSession);
-    if (!paneIds.has(node.paneId) || !session || session.active === true) return node;
-    return { ...node, agentSession: { ...session, active: true } };
+    const active = paneIds.has(node.paneId);
+    if (!session || session.active === active) return node;
+    return { ...node, agentSession: { ...session, active } };
   }
   const a = markTerminalAgentSessionsActive(node.a, paneIds);
   const b = markTerminalAgentSessionsActive(node.b, paneIds);
   return a === node.a && b === node.b ? node : { ...node, a, b };
 }
 
-function markTabAgentSessionsActive(tabs: Tab[], paneIds: ReadonlySet<string>): Tab[] {
+function markTabAgentSessionsActive(tabs: Tab[], paneIds: ReadonlySet<string> | null): Tab[] {
   let changed = false;
   const next = tabs.map((tab) => {
     if (tab.kind !== "terminal") return tab;
@@ -688,6 +690,19 @@ function markTabAgentSessionsActive(tabs: Tab[], paneIds: ReadonlySet<string>): 
     return { ...tab, root };
   });
   return changed ? next : tabs;
+}
+
+export async function healColdTerminalAgentSessions(
+  node: PaneNode,
+  lookup: (paneId: string) => Promise<SessionStartRecord | null>,
+): Promise<PaneNode> {
+  if (node.kind === "leaf") {
+    const start = await lookup(node.paneId).catch(() => null);
+    const session = mergeSessionStart(node.agentSession, start);
+    return session ? { ...node, agentSession: session, bootResume: session.active === true } : node;
+  }
+  const [a, b] = await Promise.all([healColdTerminalAgentSessions(node.a, lookup), healColdTerminalAgentSessions(node.b, lookup)]);
+  return a === node.a && b === node.b ? node : { ...node, a, b };
 }
 
 function trimTabsScrollback(tabs: Tab[], scrollbackLineLimit: number): Tab[] {
@@ -1396,7 +1411,7 @@ export function useTabs(
   terminalScrollbackLineLimitRef.current = normalizedTerminalScrollbackLineLimit;
   const persistAgentStateRef = useRef(persistAgentState);
   persistAgentStateRef.current = persistAgentState;
-  const quitActiveAgentPaneIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const quitActiveAgentPaneIdsRef = useRef<ReadonlySet<string> | null>(null);
 
   // Cold-layout prefetch. Enumerating keys is cheap; each JSON parse is placed
   // in its own idle callback so warming several large workspaces never becomes
@@ -1415,9 +1430,10 @@ export function useTabs(
     let cancelled = false;
     let idleHandle: number | null = null;
     let timeoutHandle: number | null = null;
+    const restoreAtBoot = window.spark.preferences.load().then(prefs => prefs.restoreAgentSessions === true).catch(() => false);
     const scheduleNext = () => {
       if (cancelled || pendingWorkspaceIds.length === 0) return;
-      const warmOne = () => {
+      const warmOne = async () => {
         idleHandle = null;
         timeoutHandle = null;
         if (cancelled) return;
@@ -1433,10 +1449,28 @@ export function useTabs(
           }
           const loaded = loadPersisted(candidate, normalizedTerminalScrollbackLineLimit);
           if (loaded) {
+            const state = initialTabsStateFromPersisted(loaded);
+            const restore = await restoreAtBoot;
+            if (restore) {
+              state.tabs = await Promise.all(state.tabs.map(async tab => tab.kind === "terminal"
+                ? { ...tab, root: await healColdTerminalAgentSessions(tab.root, paneId => window.spark.agentSession.latestStart(paneId)) }
+                : tab));
+            }
+            if (cancelled || quitActiveAgentPaneIdsRef.current !== null) return;
+            // A click can hydrate this workspace while the registry lookup is
+            // in flight. Its live layout always wins over the cold snapshot.
+            if (candidate === tabsWorkspaceIdRef.current || liveWorkspaceTabsRef.current.has(candidate)) continue;
             preloadedWorkspaceTabsRef.current.set(candidate, {
               scrollbackLineLimit: normalizedTerminalScrollbackLineLimit,
-              state: initialTabsStateFromPersisted(loaded),
+              state,
             });
+            if (restore && state.tabs.some(tab => tab.kind === "terminal" && collectLeaves(tab.root).some(pane => pane.agentSession?.active === true))) {
+              liveWorkspaceTabsRef.current.set(candidate, { tabs: state.tabs, activeId: state.activeId });
+              closedChatRunIdsByWorkspaceRef.current.set(candidate, new Set(state.closedChatRunIds));
+              setInactiveWorkspaceLayouts(current => upsertInactiveWorkspaceLayout(current, {
+                workspaceId: candidate, tabs: state.tabs, activeId: state.activeId,
+              }));
+            }
           }
           break;
         }
@@ -3558,12 +3592,17 @@ export function useTabs(
   const flushAgentSessionsNow = useCallback((activePaneIds: string[]) => {
     const paneIds = new Set(activePaneIds);
     quitActiveAgentPaneIdsRef.current = paneIds;
+    if (persistTimer.current !== null) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
     const limit = terminalScrollbackLineLimitRef.current;
     const currentWorkspaceId = tabsWorkspaceIdRef.current;
 
     if (currentWorkspaceId) {
       const currentTabs = tabsRef.current;
       const nextTabs = markTabAgentSessionsActive(currentTabs, paneIds);
+      persistPayloadRef.current = { workspaceId: currentWorkspaceId, tabs: nextTabs, activeId: activeIdRef.current };
       const closed = closedChatRunIdsByWorkspaceRef.current.get(currentWorkspaceId);
       persist(
         currentWorkspaceId,

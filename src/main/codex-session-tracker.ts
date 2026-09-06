@@ -4,7 +4,7 @@ import { dirname, join, relative } from "node:path";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { resolveCodexTranscriptPath, resolveCodexHomePaths, pathIsInsideCodexHome } from "./orchestration/codex-home";
-import { extractSessionUuid } from "./orchestration/codex-sessions";
+import { extractSessionUuid, readRolloutHeader } from "./orchestration/codex-sessions";
 import { latestSessionStart, recordSessionStart, type SessionStartRecord } from "./agent-session-registry";
 
 interface ProcessEntry { pid: number; parentPid: number; command: string }
@@ -16,7 +16,9 @@ export interface CodexTrackedPane {
 }
 
 // The outer CLI owns the pane. Its child agents must not replace its session.
-export function codexProcessForPane(rootPid: number, processes: readonly ProcessEntry[]): number | null {
+export function agentProcessForPane(rootPid: number, processes: readonly ProcessEntry[]): {
+  pid: number; runtime: "claude" | "codex" | "grok";
+} | null {
   let level = [rootPid];
   const seen = new Set<number>();
   while (level.length > 0) {
@@ -34,14 +36,19 @@ export function codexProcessForPane(rootPid: number, processes: readonly Process
           ? processes.find((entry) => entry.parentPid === pid && runtimeFromProcessCommand(entry.command) === "codex")
           : undefined;
         if (wrapped) { next.push(wrapped.pid); continue; }
-        return pid;
+        return { pid, runtime };
       }
-      if (runtime) continue;
+      if (runtime) return { pid, runtime };
       next.push(...processes.filter((entry) => entry.parentPid === pid).map((entry) => entry.pid));
     }
     level = next;
   }
   return null;
+}
+
+export function codexProcessForPane(rootPid: number, processes: readonly ProcessEntry[]): number | null {
+  const agent = agentProcessForPane(rootPid, processes);
+  return agent?.runtime === "codex" ? agent.pid : null;
 }
 
 export function parseCodexOpenFiles(output: string): Map<number, string[]> {
@@ -92,10 +99,7 @@ export async function sessionFromOpenRollouts(paths: readonly string[], explicit
         transcriptPath = resolveCodexTranscriptPath(join(sessionsRoot, relative(realRoot, realPath)), explicitHome);
       }
       handle = await fs.open(path, "r");
-      const bytes = Buffer.alloc(16384);
-      const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-      const first = bytes.subarray(0, bytesRead).toString("utf8").split("\n")[0];
-      const entry = JSON.parse(first);
+      const entry = await readRolloutHeader(handle) as { type?: string; payload?: { source?: unknown; cwd?: unknown; id?: string } } | null;
       const meta = entry?.payload;
       const sessionId = extractSessionUuid(path);
       if (entry?.type !== "session_meta" || meta?.source !== "cli" ||

@@ -44,6 +44,7 @@ async function main() {
     recordSessionStart,
     latestSessionStart,
     flushAgentSessionRegistry,
+    snapshotAgentSessionsForQuit,
     __resetAgentSessionRegistryForTest,
   } = require(outfile);
 
@@ -234,6 +235,27 @@ async function main() {
     }
     check("corrupt file: init survives", threw === false && latestSessionStart("pane-1") === null);
     fs.rmSync(corruptDir, { recursive: true, force: true });
+  }
+
+  {
+    const quitDir = fs.mkdtempSync(path.join(os.tmpdir(), "spark-session-quit-"));
+    __resetAgentSessionRegistryForTest();
+    await initAgentSessionRegistry({ dir: quitDir });
+    await agentSessionBackfillSettled();
+    recordSessionStart(rec({ paneId: "live-claude" }));
+    recordSessionStart(rec({ paneId: "closed-claude", active: true }));
+    recordSessionStart(rec({ paneId: "replaced-claude", active: true }));
+    recordSessionStart(rec({ paneId: "live-codex", runtime: "codex", active: true }));
+    snapshotAgentSessionsForQuit(new Map([["live-claude", "claude"], ["live-codex", "codex"], ["replaced-claude", "codex"]]));
+    recordSessionStart(rec({ paneId: "live-claude", sessionId: "teardown-hook", timestamp: "2099-01-01T00:00:00Z" }));
+    await flushAgentSessionRegistry();
+    __resetAgentSessionRegistryForTest();
+    await initAgentSessionRegistry({ dir: quitDir });
+    check("quit snapshot restores the live Claude conversation", latestSessionStart("live-claude")?.restoreOnBoot === true && latestSessionStart("live-claude")?.sessionId === "sess-a");
+    check("quit snapshot restores live Codex", latestSessionStart("live-codex")?.restoreOnBoot === true);
+    check("quit snapshot closes a stale Claude pointer", latestSessionStart("closed-claude")?.active === false);
+    check("quit snapshot cannot restore the wrong runtime", latestSessionStart("replaced-claude")?.active === false);
+    fs.rmSync(quitDir, { recursive: true, force: true });
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });

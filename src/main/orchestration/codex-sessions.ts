@@ -172,11 +172,26 @@ function extractStartedAtMs(entry: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-// Read the cwd Codex recorded in a rollout's leading `session_meta` entry.
-// Best-effort: the exact JSONL shape is version-dependent, so we scan the first
-// chunk for a `cwd` string at any of the shapes Codex has used. Reads only the
-// head of the file (session_meta is the first line) to stay cheap on long
-// transcripts. Returns null when no cwd can be found.
+// The header contains the CLI's full instructions and can exceed a single
+// read buffer. Stop at its newline so long conversations stay cheap to inspect.
+export async function readRolloutHeader(handle: Awaited<ReturnType<typeof fs.open>>): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  const limit = 8 * 1024 * 1024;
+  let position = 0;
+  while (position < limit) {
+    const buffer = Buffer.alloc(Math.min(16_384, limit - position));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+    const newline = buffer.subarray(0, bytesRead).indexOf(10);
+    chunks.push(buffer.subarray(0, newline < 0 ? bytesRead : newline));
+    position += bytesRead;
+    if (newline >= 0 || bytesRead === 0) {
+      try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+// Read only the leading metadata record, including older cwd/timestamp shapes.
 export async function readRolloutMetadata(
   path: string,
   explicitHome?: string | null,
@@ -185,25 +200,8 @@ export async function readRolloutMetadata(
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(safePath, "r");
-    const buf = Buffer.alloc(16384);
-    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
-    const text = buf.subarray(0, bytesRead).toString("utf8");
-    let cwd: string | null = null;
-    let startedAtMs: number | null = null;
-    for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let entry: unknown;
-      try {
-        entry = JSON.parse(trimmed);
-      } catch {
-        continue; // truncated tail line in the fixed-size read — skip
-      }
-      cwd ??= extractCwd(entry);
-      startedAtMs ??= extractStartedAtMs(entry);
-      if (cwd && startedAtMs != null) break;
-    }
-    return { cwd, startedAtMs };
+    const entry = await readRolloutHeader(handle);
+    return { cwd: extractCwd(entry), startedAtMs: extractStartedAtMs(entry) };
   } catch {
     return { cwd: null, startedAtMs: null };
   } finally {

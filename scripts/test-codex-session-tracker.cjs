@@ -11,7 +11,7 @@ const esbuild = require("esbuild");
   await esbuild.build({ entryPoints: [path.join(root, "src/main/codex-session-tracker.ts")],
     outfile, bundle: true, platform: "node", format: "cjs", logLevel: "silent",
     alias: { "@shared": path.join(root, "src/shared") } });
-  const { createCodexSessionTracker, codexProcessForPane, parseCodexOpenFiles, sessionFromOpenRollouts } = require(outfile);
+  const { createCodexSessionTracker, agentProcessForPane, codexProcessForPane, parseCodexOpenFiles, sessionFromOpenRollouts } = require(outfile);
   const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
   const dir = path.join(tmp, "codex", "sessions", "2026", "08", "01");
   await fs.mkdir(dir, { recursive: true });
@@ -20,6 +20,7 @@ const esbuild = require("esbuild");
     await fs.writeFile(paths[i], JSON.stringify({ type: "session_meta", payload: {
       id: ids[i], cwd: "/same/project", source: i === 2 ? { subagent: "review" } : "cli",
       timestamp: "2026-08-01T00:00:00Z",
+      base_instructions: { text: "Long CLI instructions with unicode é. ".repeat(2000) },
     } }) + "\n");
     await fs.utimes(paths[i], 100 + i, 100 + i);
   }
@@ -42,6 +43,8 @@ const esbuild = require("esbuild");
   ]), 102, "npm launchers bind through their native child without following its workers");
 
   assert.equal(codexProcessForPane(100, [{ pid: 100, parentPid: 1, command: "claude" }, ...processes.slice(1)]), null);
+  assert.deepEqual(agentProcessForPane(100, [{ pid: 100, parentPid: 1, command: "claude" }, ...processes.slice(1)]),
+    { pid: 100, runtime: "claude" }, "a nested Codex worker cannot replace the outer Claude session");
   assert.equal(codexProcessForPane(100, [processes[0],
     { pid: 101, parentPid: 100, command: "codex -p /usr/local/lib/node_modules/@openai/codex/bin/codex.js" },
     processes[2],

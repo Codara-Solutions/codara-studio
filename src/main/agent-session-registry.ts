@@ -24,7 +24,7 @@ export interface SessionStartRecord {
   paneId: string;
   runtime: "claude" | "codex";
   nativeCodexProfileId?: string;
-  /** Process-confirmed Codex presence, retained through app shutdown. */
+  /** Process-confirmed presence, retained through app shutdown. */
   active?: boolean;
   /** Computed on read, never persisted. */
   restoreOnBoot?: boolean;
@@ -56,6 +56,7 @@ interface RegistryDeps {
 let deps: RegistryDeps | null = null;
 let entries = new Map<string, SessionStartRecord>();
 let coldEntries = new Map<string, SessionStartRecord>();
+let quitting = false;
 let persistTimer: NodeJS.Timeout | null = null;
 // In-flight one-time backfill, exposed via agentSessionBackfillSettled() so
 // the test harness (and any shutdown flush) can await it — boot never does.
@@ -232,7 +233,7 @@ async function backfillFromProcessedHooks(): Promise<void> {
                   : "prompt",
             timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : "",
           };
-          if (applySessionStart(entries, rec)) applied += 1;
+          if (!quitting && applySessionStart(entries, rec)) applied += 1;
         } catch {
           /* corrupt / vanished file — skip */
         }
@@ -282,6 +283,7 @@ export function flushAgentSessionRegistry(): Promise<void> {
  */
 export async function initAgentSessionRegistry(opts: RegistryDeps): Promise<void> {
   deps = opts;
+  quitting = false;
   const hadFile = await loadFromDisk();
   coldEntries = new Map(entries);
   if (!hadFile) {
@@ -309,6 +311,7 @@ export function agentSessionBackfillSettled(): Promise<void> {
  * events re-announce the same id every turn and would otherwise be pure noise.
  */
 export function recordSessionStart(rec: SessionStartRecord): void {
+  if (quitting) return;
   const previous = entries.get(rec.paneId);
   const previousId = previous?.sessionId;
   if (!applySessionStart(entries, rec)) return;
@@ -329,7 +332,21 @@ export function recordSessionStart(rec: SessionStartRecord): void {
 export function latestSessionStart(paneId: string): SessionStartRecord | null {
   const rec = entries.get(paneId);
   if (!rec) return null;
-  return { ...rec, restoreOnBoot: rec.runtime === "codex" && rec.active === true && coldEntries.get(paneId) === rec };
+  return { ...rec, restoreOnBoot: rec.active === true && coldEntries.get(paneId) === rec };
+}
+
+// Snapshot before PTY teardown. A stale pane pointer cannot authorize a
+// different runtime, and exit hooks caused by quitting cannot undo the snapshot.
+export function snapshotAgentSessionsForQuit(live: ReadonlyMap<string, string> | null): void {
+  if (live) {
+    const timestamp = new Date().toISOString();
+    for (const rec of entries.values()) {
+      const active = live.get(rec.paneId) === rec.runtime;
+      if (!active && rec.active === false) continue;
+      recordSessionStart({ ...rec, active, source: "shutdown", timestamp });
+    }
+  }
+  quitting = true;
 }
 
 // Test-only: reset module state between harness cases.
@@ -337,6 +354,7 @@ export function __resetAgentSessionRegistryForTest(): void {
   deps = null;
   entries = new Map();
   coldEntries = new Map();
+  quitting = false;
   backfillPromise = null;
   if (persistTimer) {
     clearTimeout(persistTimer);

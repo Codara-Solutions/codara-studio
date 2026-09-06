@@ -2956,14 +2956,14 @@ export function useTerminalSession({
       let registryBootResume = false;
       if (!cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
         const start = await window.spark.agentSession.latestStart?.(sessionId).catch(() => null);
-        if (start?.runtime === "codex" && start.restoreOnBoot && start.active) {
+        if (start?.restoreOnBoot && start.active) {
           const healed = mergeSessionStart(bootSession, start);
           if (healed) {
             bootSession = healed;
             agentSessionRef.current = healed;
             onResumeFallbackRef.current?.(healed);
           }
-          registryBootResume = bootSession?.runtime === "codex" && bootSession.sessionId === start.sessionId;
+          registryBootResume = bootSession?.runtime === start.runtime && bootSession.sessionId === start.sessionId;
         }
       }
       if (

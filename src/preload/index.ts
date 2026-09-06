@@ -1254,13 +1254,14 @@ const api = {
     // deactivating running agents' restore pointers as their shells die. Returns
     // an unsubscribe function.
     onBeforeQuit: (
-      handler: (payload: { activeAgentPaneIds: string[] }) => void,
+      handler: (payload: { activeAgentPaneIds: string[]; authoritative: boolean }) => void,
     ): (() => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
-        payload?: { activeAgentPaneIds?: unknown },
+        payload?: { activeAgentPaneIds?: unknown; authoritative?: unknown },
       ) =>
         handler({
+          authoritative: payload?.authoritative === true,
           activeAgentPaneIds: Array.isArray(payload?.activeAgentPaneIds)
             ? payload.activeAgentPaneIds.filter(
                 (paneId): paneId is string => typeof paneId === "string" && paneId.length > 0,

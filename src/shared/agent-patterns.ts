@@ -557,7 +557,7 @@ export function classifyTail(
 }
 
 // A rendered Codex frame separates the live status line from editable prompt
-// text. Only the status immediately above the current composer can assert
+// text. Only the status block immediately above the current composer can assert
 // work; quoted status text inside a draft or older transcript cannot.
 export function classifyCodexScreen(tail: string): "working" | "idle" | null {
   const lines = stripAnsi(tail).split(/\r?\n/);
@@ -569,8 +569,17 @@ export function classifyCodexScreen(tail: string): "working" | "idle" | null {
     }
   }
   const above = lines.slice(0, composer < 0 ? lines.length : composer).filter((line) => line.trim());
-  const status = above[above.length - 1] ?? "";
-  if (RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))) return "working";
+  for (let i = above.length - 1; i >= 0; i--) {
+    const status = above[i];
+    if (
+      (i === above.length - 1 || /^\s*•?\s*Waiting for background terminal\b/i.test(status)) &&
+      RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))
+    ) return "working";
+    // Background-terminal waits include an indented command below the timer,
+    // sometimes wrapped over several rows. A transcript paragraph ends the
+    // live block, so an older timer cannot override a completed response.
+    if (!/^\s+(?:└|│|\S)/.test(status)) break;
+  }
   if (composer < 0) return null;
   const footer = lines.slice(composer + 1).join("\n");
   return CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer)) || /\?\s*for\s*shortcuts/i.test(footer)
