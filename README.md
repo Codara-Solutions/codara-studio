@@ -204,14 +204,17 @@ Repository layout:
 
 ## Releasing
 
-A push to `main` is a release. The GitHub Actions `Release` workflow runs the
-typechecks and the full unit registry, derives the next version from the
-conventional commits since the last `vX.Y.Z` tag (a breaking change bumps the
-major, `feat:` the minor, anything else the patch), builds and signs macOS,
-cross-builds the Windows installer, uploads both to the release bucket, and
-pushes the tag. The tracked `package.json` version is not bumped by CI; tags
-are the source of truth. `npm run release:mac|win|all` is the manual fallback
-that builds from a pristine worktree and needs the untracked `.env.releases`.
+Releases are nightly. The GitHub Actions `Release` workflow runs at 03:00 UTC
+(or on demand with `gh workflow run Release`), runs the typechecks and the
+full unit registry, derives the next version from the conventional commits
+since the last `vX.Y.Z` tag (a breaking change bumps the major, a
+`Release: minor` trailer the minor, anything else including `feat:` the
+patch), builds and signs macOS, cross-builds the Windows installer, uploads
+both to the release bucket, and pushes the tag. Everything merged since the
+last tag ships as one release; a night with nothing new is skipped. The
+tracked `package.json` version is not bumped by CI; tags are the source of
+truth. `npm run release:mac|win|all` is the manual fallback that builds from a
+pristine worktree and needs the untracked `.env.releases`.
 Details in [docs/releasing.md](./docs/releasing.md).
 
 ## License

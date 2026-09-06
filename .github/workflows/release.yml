@@ -1,16 +1,23 @@
 name: Release
 
-# Every push to main is a release, built on GitHub's free macOS runners:
-# one job builds, signs, and notarizes macOS and cross-builds the Windows
-# installer, publishes both to the release bucket (running apps hear the SSE
-# push within seconds), and pushes the vX.Y.Z tag that seeds the next
-# version computation. A push whose HEAD is a "release: vX.Y.Z" bookkeeping
-# commit (the local pipeline's bump) is skipped, so the two pipelines can
-# coexist without ever double-releasing.
+# Releases are nightly, not per push: every run ships everything merged to
+# main since the last vX.Y.Z tag as ONE release, built on GitHub's free macOS
+# runners. One job builds, signs, and notarizes macOS and cross-builds the
+# Windows installer, publishes both to the release bucket (running apps hear
+# the SSE push within seconds), and pushes the vX.Y.Z tag that seeds the next
+# version computation. A run with nothing new since the last tag, or whose
+# HEAD is a "release: vX.Y.Z" bookkeeping commit (the local pipeline's bump),
+# is skipped, so the two pipelines can coexist without ever double-releasing.
+# Batching keeps the ~20 min build off the critical path of each merge and
+# gives auto-updating users one download per day instead of one per PR.
+# Branch protection requires the CI `test` check on an up-to-date branch, so
+# the last PR merged before a run was tested on the exact tree that ships.
+# Need something out now? `gh workflow run Release`.
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    # 03:00 UTC daily (05:00 Madrid in summer, 04:00 in winter).
+    - cron: "0 3 * * *"
   workflow_dispatch: {}
 
 concurrency:

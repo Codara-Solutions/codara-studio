@@ -3,8 +3,9 @@
 // commits since the last release TAG (vX.Y.Z), write it into package.json,
 // and expose outputs for the workflow. Mirrors the rules in release.cjs:
 // breaking change -> major, an explicit "Release: minor" trailer -> minor,
-// anything else (including feat:) -> patch. Every merge ships, so the minor
-// is reserved for releases you decide to call a milestone.
+// anything else (including feat:) -> patch. Every nightly run ships whatever
+// merged since the last tag, so the minor is reserved for releases you decide
+// to call a milestone.
 //
 // Outputs (GITHUB_OUTPUT): version=<X.Y.Z> skip=<true|false>
 // Skips when HEAD is a release bookkeeping commit ("release: vX.Y.Z" from the
