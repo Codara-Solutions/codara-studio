@@ -1258,6 +1258,12 @@ function GeneralSettings({
   const { preferences, hydrated, setPreference } = usePreferences();
   return (
     <div style={{ display: "grid", gap: 18 }}>
+      <SectionTitle title="Getting started" detail="Set up local tools, connect your agent account, and explore your studio with a guided tour." />
+      <div>
+        <button className="spark-btn" style={{ padding: "10px 16px" }} onClick={() => window.dispatchEvent(new CustomEvent("spark:open-onboarding"))}>
+          Open setup and guided tour
+        </button>
+      </div>
       <SectionTitle title="Appearance" detail="Comfortable palettes people actually keep using." />
       <div
         style={{
@@ -1961,7 +1967,10 @@ interface PiInstallView {
  * profile) that the main process pairs and keeps in step, for Anthropic,
  * OpenAI and xAI alike; the card shows one account and one Use action.
  */
-function AccountsSettings() {
+export function AccountsSettings({ guided = false, onBusyChange }: {
+  guided?: boolean;
+  onBusyChange?: (busy: boolean) => void;
+} = {}) {
   const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
   // True once the first status read settled either way: a store that failed
@@ -1969,6 +1978,14 @@ function AccountsSettings() {
   const [overviewSettled, setOverviewSettled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [login, setLogin] = useState<PiLoginView | null>(null);
+  const guidedLoginRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (guided && login) guidedLoginRef.current?.scrollIntoView({ block: "nearest" });
+  }, [guided, login?.status, login?.promptId]);
+  useEffect(() => {
+    onBusyChange?.(login?.status === "running");
+    return () => onBusyChange?.(false);
+  }, [login?.status, onBusyChange]);
   const [promptValue, setPromptValue] = useState("");
   const [install, setInstall] = useState<PiInstallView | null>(null);
   const [addingProvider, setAddingProvider] = useState<PiSubscriptionProvider | null>(null);
@@ -2540,6 +2557,44 @@ function AccountsSettings() {
   // cards the other side can still build show above its error line.
   const accountsReady =
     (overview !== null || overviewSettled) && (cliInspection !== null || cliError !== null);
+
+  if (guided) return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {overview && !overview.runtimeInstalled && (
+        <div>
+          <p style={{ color: "var(--muted)", fontSize: 12 }}>First, prepare Cora's local runtime. Once it is installed, choose your account below.</p>
+          <PiRuntimeInstallRow expectedVersion={overview.runtimeExpectedVersion} runtimeError={overview.runtimeError} install={install} onInstall={installRuntime} />
+        </div>
+      )}
+      {!overview && loading && <p role="status">Checking account setup…</p>}
+      <div className="onboarding-provider-grid">
+        {providerViews.filter((view) => view.descriptor.runtime !== "grok").map((view) => {
+          const connected = overview?.profiles?.find((profile) => profile.provider === view.descriptor.provider && profile.connected && (!profile.expired || profile.canRefresh));
+          const label = view.descriptor.runtime === "codex" ? "ChatGPT" : "Claude";
+          return (
+            <div className="onboarding-card" key={view.descriptor.provider}>
+              <RuntimeMark runtime={view.descriptor.runtime} size={28} />
+              <h3>{label}</h3>
+              <p>{view.descriptor.runtime === "codex" ? "Use your ChatGPT account with Cora and Codex." : "Use your Claude account with Cora and Claude Code."}</p>
+              {connected && <p role="status" style={{ color: "var(--accent)" }}>Connected: {connected.email || connected.label}</p>}
+              <button className="spark-btn" disabled={view.disabled || view.busy || login?.status === "running"} onClick={() => addAccount(view.descriptor.provider, "")}>
+                Sign in with {label}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {login && <div ref={guidedLoginRef}><PiLoginPanel login={login} promptValue={promptValue} onPromptValue={setPromptValue} onSubmitPrompt={submitPrompt} onCancel={() => {
+        if (login.status === "running") {
+          if (login.requestId !== "starting") void window.spark.piSubscriptions.cancel(login.requestId);
+          return;
+        }
+        setLogin(null);
+      }} /></div>}
+      {error && <p role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>{error}</p>}
+      {cliError && <p role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>{cliError}</p>}
+    </div>
+  );
 
   return (
     <div style={{ display: "grid", gap: 12 }}>

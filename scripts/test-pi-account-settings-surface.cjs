@@ -144,7 +144,7 @@ assert.match(settings, /\.\.\.\(profile\.terminal \? \{ terminal: profile\.termi
 assert.match(settings, /label: personal\.label \|\| "Account 1"/);
 // No provider branch, no renderer-side pairing, no second card shape.
 const accountsSection = settings.slice(
-  settings.indexOf("function AccountsSettings()"),
+  settings.indexOf("function AccountsSettings("),
   settings.indexOf("function AgentsSettings()"),
 );
 assert.ok(accountsSection.length > 0, "the Accounts section must exist");

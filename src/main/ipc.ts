@@ -50,6 +50,7 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
   }
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { loadOnboardingProgress, saveOnboardingProgress, setupService } from "./onboarding";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
@@ -671,6 +672,11 @@ function handleOpen(channel: string, listener: InvokeListener): void {
 void handleOpen;
 
 export function registerIpc(): void {
+  handle("onboarding:load", () => loadOnboardingProgress());
+  handle("onboarding:save", (_event, value: unknown) => saveOnboardingProgress(value));
+  handle("onboarding:check", () => setupService.check());
+  handle("onboarding:install", (_event, tool: unknown) => setupService.installTool(tool));
+  handle("onboarding:install-status", () => setupService.installStatus());
   // A Codex switch is a runtime-wide transaction: Codex keeps one sign-in
   // for every terminal, so first give every Codara-owned Codex terminal the
   // normal PTY close path so transcripts flush, then close codex sessions

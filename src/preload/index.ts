@@ -233,6 +233,13 @@ interface AgentSessionStartRecord {
 }
 
 const api = {
+  onboarding: {
+    load: (): Promise<import("@shared/onboarding").OnboardingProgress> => ipcRenderer.invoke("onboarding:load"),
+    save: (value: import("@shared/onboarding").OnboardingProgress): Promise<import("@shared/onboarding").OnboardingProgress> => ipcRenderer.invoke("onboarding:save", value),
+    check: (): Promise<import("@shared/onboarding").SetupSnapshot> => ipcRenderer.invoke("onboarding:check"),
+    install: (tool: import("@shared/onboarding").SetupToolId): Promise<import("@shared/onboarding").SetupInstallStatus> => ipcRenderer.invoke("onboarding:install", tool),
+    installStatus: (): Promise<import("@shared/onboarding").SetupInstallStatus | null> => ipcRenderer.invoke("onboarding:install-status"),
+  },
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
     save: (state: AppState): Promise<void> => ipcRenderer.invoke("state:save", state),
