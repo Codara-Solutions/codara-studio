@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import SelectionRouteMenu from "./SelectionRouteMenu";
+import { useSelectionCopy } from "./useSelectionCopy";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // Transparent canvas overlay used by the browser pane's "Draw" mode. The
@@ -33,7 +34,9 @@ const STROKE_COLORS = ["#ff3b30", "#f0c419", "#35c759", "#2f80ed", "#af52de", "#
 
 type Stroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
 
-export default function DrawOverlay({ active, busy, preparePayload, onClose }: Props) {
+export default function DrawOverlay({ active, busy: captureBusy, preparePayload, onClose }: Props) {
+  const { copy, copying, copied, copyError } = useSelectionCopy();
+  const busy = captureBusy || copying;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sendButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -241,7 +244,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           fontFamily: "var(--font-sans)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
           <span
             className="spark-eyebrow"
             style={{ flex: 1, display: "inline-flex", alignItems: "baseline", gap: 6 }}
@@ -387,10 +390,22 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
             }}
           />
         </label>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          {/* The committing action: .spark-btn.is-primary earns the one accent.
-              Disabled state is opacity-based (from the utility); hover is a
-              token color-mix, not filter:brightness. */}
+        {copyError && <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>{copyError}</div>}
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
+          <button
+            type="button"
+            className="spark-btn"
+            title="Save the annotated screenshot and copy its path with your note to paste into a terminal"
+            disabled={busy || !hasStrokes}
+            onClick={() => void copy(() => {
+              const canvas = canvasRef.current;
+              return canvas ? preparePayload(canvas.toDataURL("image/png"), note.trim()) : null;
+            })}
+            aria-live="polite"
+            style={{ height: 30, padding: "0 14px" }}
+          >
+            {copied ? "Copied!" : copying ? "Copying…" : "Copy screenshot reference"}
+          </button>
           <button
             ref={sendButtonRef}
             type="button"
@@ -399,7 +414,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
             disabled={busy || !hasStrokes}
             style={{ height: 30, padding: "0 14px" }}
           >
-            {busy ? "Sending…" : "Send to…"}
+            {captureBusy && !copying ? "Preparing…" : "Send to…"}
           </button>
         </div>
       </div>

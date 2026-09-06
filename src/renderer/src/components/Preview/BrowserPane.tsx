@@ -436,22 +436,16 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const buildInspectorPayload = useCallback(
     (pick: InspectorPick, note: string): SelectionPayload => {
       const url = pick.url || currentUrl || urlRef.current;
-      let pageHint = "";
-      try {
-        if (url) {
-          const parsed = new URL(url);
-          pageHint = parsed.pathname || url;
-        }
-      } catch {
-        pageHint = url;
-      }
-      const selector = pick.selector ? ` (selector: '${pick.selector}'` : "";
-      const text = pick.text ? `, text: '${pick.text.replace(/'/g, "\\'")}')` : selector ? ")" : "";
+      const details = [
+        pick.selector ? `selector: ${JSON.stringify(pick.selector)}` : "",
+        pick.text ? `text: ${JSON.stringify(pick.text)}` : "",
+      ].filter(Boolean);
       const noteSuffix = note ? `: ${note}` : "";
       const message =
         `Regarding the <${pick.tagName}>` +
-        (pageHint ? ` at ${pageHint}` : "") +
-        `${selector}${text}${noteSuffix}`.replace(/^\s+/, "");
+        (url ? ` at ${url}` : "") +
+        (details.length ? ` (${details.join(", ")})` : "") +
+        noteSuffix;
       return { source: "inspect", text: message };
     },
     [currentUrl],

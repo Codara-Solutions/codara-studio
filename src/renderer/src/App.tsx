@@ -53,6 +53,7 @@ import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import TerminalStack from "./tabs/TerminalStack";
 import { buildDockIndex, isDockLeaf } from "./tabs/dock";
+import SplitDropOverlay from "./tabs/SplitDropOverlay";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import {
@@ -4833,12 +4834,17 @@ export default function App() {
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
       if (targetTabId) {
+        const target = tabs.tabs.find((tab) => tab.id === targetTabId);
+        if (target && target.kind !== "terminal") {
+          tabs.splitDrop(payload, targetTabId, { direction: "horizontal", position: "after" });
+          return;
+        }
         moveTerminalPane(payload.tabId, payload.paneId, targetTabId);
         return;
       }
       detachTerminalPaneToNewTab(payload.tabId, payload.paneId);
     },
-    [moveTerminalPane, detachTerminalPaneToNewTab],
+    [moveTerminalPane, detachTerminalPaneToNewTab, tabs],
   );
 
   const handlePreviewUrlChange = useCallback(
@@ -7458,6 +7464,7 @@ const Workspace = React.memo(function Workspace({
           dockIndex={dockIndex}
           onUrlChange={onPreviewUrlChange}
         />
+        <SplitDropOverlay tabs={visibleTabs} activeId={effectiveActiveId} onDrop={tabs.splitDrop} />
         {visibleTabs.some((tab) => tab.kind === "runs") && (
           <Suspense fallback={null}>
             <RunsStack

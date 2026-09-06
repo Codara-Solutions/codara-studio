@@ -1,9 +1,10 @@
 import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { dispatchDrag, settle } from "./drag";
 
 // Docking a non-terminal tab into a terminal tab's split grid. The invariant
 // that matters most: the docked content is NEVER re-parented — it stays
@@ -31,7 +32,7 @@ async function launch(): Promise<{
   // the network.
   await writeFile(
     join(workspaceDir, "probe.html"),
-    "<!doctype html><title>Dock probe</title><h1>dock-probe</h1>",
+    '<!doctype html><title>Dock probe</title><section class="probe-container"><h1>dock-probe</h1></section>',
     "utf8",
   );
   // Text file for the editor-docking case.
@@ -93,17 +94,21 @@ async function openTerminalTab(page: Page): Promise<void> {
   await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1, { timeout: 30_000 });
 }
 
-// Pane toolbar "+" → "Browser pane". A fresh browser pane opens on its empty
-// state (no guest until it has a URL), so point it at the fixture page.
+// Exercise the original browser-to-terminal drag path while preparing a split.
 async function dockBrowserPane(page: Page, url: string): Promise<void> {
-  await page.locator('button[title="Add pane…"]').first().dispatchEvent("click");
-  await page.getByText("Browser pane", { exact: true }).dispatchEvent("click");
-  await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1, { timeout: 20_000 });
+  await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+  await page.getByText("Browser", { exact: true }).dispatchEvent("click");
+  const browserId = await page.locator('[role="tab"][aria-selected="true"]').getAttribute("data-tab-id");
   const address = page.getByPlaceholder("http://localhost:3000").first();
   await expect(address).toBeVisible({ timeout: 10_000 });
   await address.fill(url);
   await address.press("Enter");
   await expect(page.locator("webview")).toHaveCount(1, { timeout: 20_000 });
+  await terminalTabPill(page).dispatchEvent("click");
+  await dispatchDrag(page, `[data-tab-id="${browserId}"]`, {
+    selector: '.spark-terminal-tab[aria-hidden="false"]', fx: 0.9,
+  });
+  await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1, { timeout: 20_000 });
 }
 
 test("a browser preview docks beside a terminal without reloading its guest", async () => {
@@ -335,10 +340,10 @@ test("a docked editor's toolbar merges into the chrome band", async () => {
     // (dockChromeSlot.tsx) rather than rendering a second row inside the
     // content frame below it.
     const band = page.locator(".spark-dock-chrome");
-    const toggle = band.getByRole("group", { name: "Markdown view mode" });
+    const toggle = band.getByRole("group", { name: "File view mode" });
     await expect(toggle).toBeVisible({ timeout: 10_000 });
     await expect(
-      page.locator("[data-dock-content-id]").getByRole("group", { name: "Markdown view mode" }),
+      page.locator("[data-dock-content-id]").getByRole("group", { name: "File view mode" }),
     ).toHaveCount(0);
 
     // A REAL click (not dispatchEvent): the band's dead space is pointer-none
@@ -526,13 +531,158 @@ test("a whiteboard splits like every other workspace surface", async () => {
   }
 });
 
-// Dragging a pill into the grid is covered only by the unit-level pieces
-// (TabBar publishes the payload on dragstart; the grid's shield turns a drop
-// into dockTabInTerminal, which scripts/test-dock-layout.cjs exercises
-// directly). An end-to-end version is skipped on purpose: Electron can't start
-// Chromium's real drag loop from synthetic input, CDP's Input.dispatchDragEvent
-// bypasses TabBar's dragstart (so the payload is never published), and
-// dispatchEvent-built DragEvents reach the drop handler without usable
-// clientX/clientY — the drop is parsed but has no point to resolve an edge
-// against. Re-enable if Playwright gains real drag support for Electron.
-test.skip("dragging a tab pill into the grid docks it at the targeted edge", () => {});
+test("a terminal tab splits an active browser at every edge without restarting either surface", async () => {
+  test.setTimeout(120_000);
+  const { app, page, pageUrl } = await launch();
+  try {
+    await openTerminalTab(page);
+    await dockBrowserPane(page, pageUrl);
+    const terminalId = await terminalTabPill(page).getAttribute("data-tab-id");
+    const paneId = await page.locator(".spark-terminal-pane").first().getAttribute("data-terminal-pane-id");
+    const guestId = await page.evaluate(() =>
+      (document.querySelector("webview") as HTMLElement & { getWebContentsId(): number }).getWebContentsId());
+    await app.evaluate(async ({ webContents }, id) => {
+      await webContents.fromId(id)!.executeJavaScript('document.body.dataset.splitProbe = "keep-page-state"');
+    }, guestId);
+    await page.locator(".spark-terminal-pane").first().evaluate((el) => { el.dataset.splitProbe = "keep-terminal"; });
+
+    for (const edge of [
+      { fx: 0.1, fy: 0.5, preview: "horizontal-before" },
+      { fx: 0.9, fy: 0.5, preview: "horizontal-after" },
+      { fx: 0.5, fy: 0.1, preview: "vertical-before" },
+      { fx: 0.5, fy: 0.9, preview: "vertical-after" },
+    ]) {
+      await page.getByTitle("Undock to tab", { exact: true }).dispatchEvent("click");
+      await expect(page.locator("[data-dock-cell-id]")).toHaveCount(0);
+      const release = await dispatchDrag(page, `[data-tab-id="${terminalId}"]`, {
+        selector: "[data-split-drop-overlay]", fx: edge.fx, fy: edge.fy,
+      }, { hold: true });
+      // Starting Chromium's native drag loop cancels the pointer stream.
+      // The HTML5 tab drag must remain live until drop or dragend.
+      await page.locator(`[data-tab-id="${terminalId}"]`).dispatchEvent("pointercancel", { pointerId: 1 });
+      await expect(page.locator(`[data-split-drop-preview="${edge.preview}"]`)).toBeVisible();
+      await release();
+      await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1);
+      await expect(terminalTabPill(page)).toHaveAttribute("aria-selected", "true");
+      const terminal = page.locator(`[data-terminal-pane-id="${paneId}"]`);
+      await expect(terminal).toHaveAttribute("data-split-probe", "keep-terminal");
+      const terminalBox = (await terminal.boundingBox())!;
+      const cellBox = (await page.locator("[data-dock-cell-id]").boundingBox())!;
+      if (edge.fx === 0.1) expect(terminalBox.x + terminalBox.width).toBeLessThanOrEqual(cellBox.x + 3);
+      if (edge.fx === 0.9) expect(cellBox.x + cellBox.width).toBeLessThanOrEqual(terminalBox.x + 3);
+      if (edge.fy === 0.1) expect(terminalBox.y + terminalBox.height).toBeLessThanOrEqual(cellBox.y + 3);
+      if (edge.fy === 0.9) expect(cellBox.y + cellBox.height).toBeLessThanOrEqual(terminalBox.y + 3);
+      expect(await app.evaluate(async ({ webContents }, id) =>
+        webContents.fromId(id)!.executeJavaScript("document.body.dataset.splitProbe"), guestId)).toBe("keep-page-state");
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("a pane can hover into a browser tab and cancel or complete a split", async () => {
+  test.setTimeout(120_000);
+  const { app, page, pageUrl } = await launch();
+  try {
+    await openTerminalTab(page);
+    await dockBrowserPane(page, pageUrl);
+    const browserId = await page.locator("[data-dock-cell-id]").getAttribute("data-dock-tab-id");
+    await page.getByTitle("Undock to tab", { exact: true }).dispatchEvent("click");
+    const start = async () => {
+      await terminalTabPill(page).dispatchEvent("click");
+      const handle = (await page.locator('.spark-terminal-tab[aria-hidden="false"] [aria-label="Drag pane"]').first().boundingBox())!;
+      await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+      await page.mouse.down();
+      const browser = page.locator(`[data-tab-id="${browserId}"]`);
+      const rect = (await browser.boundingBox())!;
+      await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2, { steps: 5 });
+      await expect(browser).toHaveAttribute("aria-selected", "true");
+      await expect(page.locator("[data-split-drop-overlay]")).toBeVisible();
+      const bounds = (await page.locator("[data-split-drop-overlay]").boundingBox())!;
+      return { pointerId: 7, clientX: bounds.x + bounds.width * 0.9, clientY: bounds.y + bounds.height * 0.5 };
+    };
+    let point = await start();
+    await page.mouse.move(point.clientX, point.clientY, { steps: 5 });
+    await expect(page.locator("[data-split-drop-preview]")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    await expect(page.locator("[data-split-drop-overlay]")).toHaveCount(0);
+    await expect(page.locator("[data-dock-cell-id]")).toHaveCount(0);
+    point = await start();
+    await page.mouse.move(point.clientX, point.clientY, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1);
+    await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});
+
+test("a split browser copies inspected elements and annotated screenshot references for terminals", async () => {
+  test.setTimeout(120_000);
+  const { app, page, pageUrl } = await launch();
+  try {
+    await openTerminalTab(page);
+    await dockBrowserPane(page, pageUrl);
+    const guestId = await page.evaluate(() =>
+      (document.querySelector("webview") as HTMLElement & { getWebContentsId(): number }).getWebContentsId());
+    await page.getByRole("button", { name: "Inspect an element", exact: true }).dispatchEvent("click");
+    await expect.poll(() => app.evaluate(async ({ webContents }, id) =>
+      webContents.fromId(id)!.executeJavaScript('document.documentElement.classList.contains("__spark-inspector-active")'), guestId)).toBe(true);
+    await app.evaluate(async ({ webContents }, id) => {
+      await webContents.fromId(id)!.executeJavaScript(`
+        const heading = document.querySelector("h1");
+        heading.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        heading.click();
+      `);
+    }, guestId);
+    await page.getByPlaceholder("Describe the change you want. Copy or send to a destination.").fill("Make the heading smaller");
+    await page.getByRole("button", { name: "Copy description", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copied!", exact: true })).toBeVisible();
+    const description = await app.evaluate(({ clipboard }) => clipboard.readText());
+    expect(description).toContain("<h1>");
+    expect(description).toContain(pageUrl);
+    expect(description).toContain("dock-probe");
+    expect(description).toContain("Make the heading smaller");
+    expect(description).not.toContain("__spark-inspector");
+    const selector = JSON.parse(description.match(/selector: ("(?:[^"\\]|\\.)*")/)![1]);
+    expect(await app.evaluate(async ({ webContents }, { id, selector }) =>
+      webContents.fromId(id)!.executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.tagName`),
+    { id: guestId, selector })).toBe("H1");
+    await page.screenshot({ path: test.info().outputPath("inspect-copy.png") });
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.getByRole("button", { name: "Draw on the page", exact: true }).dispatchEvent("click");
+    const canvas = page.locator('canvas').filter({ visible: true }).last();
+    const bounds = (await canvas.boundingBox())!;
+    const point = { pointerId: 3, pointerType: "mouse", clientX: bounds.x + 40, clientY: bounds.y + 50 };
+    await page.mouse.move(point.clientX, point.clientY);
+    await page.mouse.down();
+    await page.mouse.move(point.clientX + 100, point.clientY, { steps: 10 });
+    await page.mouse.up();
+    await page.getByPlaceholder("Add context for the agent").fill("Adjust the highlighted spacing");
+    await page.getByRole("button", { name: "Copy screenshot reference", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Copied!", exact: true })).toBeVisible();
+    const reference = await app.evaluate(({ clipboard }) => clipboard.readText());
+    expect(reference).toContain("Adjust the highlighted spacing");
+    const imagePath = reference.match(/annotated screenshot: "([^"]+)"/)?.[1];
+    expect(imagePath).toBeTruthy();
+    const png = await readFile(imagePath!);
+    expect(png.subarray(1, 4).toString()).toBe("PNG");
+    expect(png.readUInt32BE(16)).toBeGreaterThan(100);
+    expect(png.readUInt32BE(20)).toBeGreaterThan(100);
+    const redPixels = await app.evaluate(({ nativeImage }, savedPath) => {
+      const bitmap = nativeImage.createFromPath(savedPath).toBitmap();
+      let count = 0;
+      for (let i = 0; i < bitmap.length; i += 4) {
+        if (bitmap[i + 2] > 220 && bitmap[i + 1] < 100 && bitmap[i] < 100) count++;
+      }
+      return count;
+    }, imagePath!);
+    expect(redPixels).toBeGreaterThan(100);
+    await page.screenshot({ path: test.info().outputPath("annotation-copy.png") });
+    await settle(page);
+    await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});

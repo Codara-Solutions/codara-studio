@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import SelectionRouteMenu from "./SelectionRouteMenu";
+import { useSelectionCopy } from "./useSelectionCopy";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // Floating popover shown after the inspector preload reports a picked
@@ -23,6 +24,7 @@ interface Props {
 
 export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props) {
   const [note, setNote] = useState("");
+  const { copy, copying, copied, copyError } = useSelectionCopy();
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
   const [pendingPayload, setPendingPayload] = useState<SelectionPayload | null>(null);
@@ -34,6 +36,7 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
   }, []);
 
   const openMenu = () => {
+    if (copying) return;
     const button = sendButtonRef.current;
     if (!button) return;
     const rect = button.getBoundingClientRect();
@@ -103,7 +106,7 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
               onCancel();
             }
           }}
-          placeholder="Describe the change you want — Enter to pick a destination."
+          placeholder="Describe the change you want. Copy or send to a destination."
           rows={3}
           onFocus={(e) => {
             e.currentTarget.style.borderColor = "var(--accent-edge)";
@@ -132,19 +135,27 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
               "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         />
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          {/* Cancel = neutral .spark-btn; Send = the one accent on
-              .spark-btn.is-primary. Both share height, radius, tactile press,
-              token hover, and the focus ring from the utility — no
-              filter:brightness, no hand-rolled disabled. */}
+        {copyError && <div role="alert" style={{ color: "var(--danger)", fontSize: 12 }}>{copyError}</div>}
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" className="spark-btn" onClick={onCancel}>
             Cancel
+          </button>
+          <button
+            type="button"
+            className="spark-btn"
+            title="Copy the element description and note to paste into a terminal"
+            onClick={() => void copy(() => buildPayload(note.trim()))}
+            disabled={copying}
+            aria-live="polite"
+          >
+            {copied ? "Copied!" : copying ? "Copying…" : "Copy description"}
           </button>
           <button
             ref={sendButtonRef}
             type="button"
             className="spark-btn is-primary"
             onClick={openMenu}
+            disabled={copying}
           >
             Send to…
           </button>
