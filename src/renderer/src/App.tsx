@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { OnboardingProgress, StudioTourFeature } from "@shared/onboarding";
 import type {
   AppSettings,
   AppState,
@@ -157,6 +158,7 @@ function workerTabBrandColor(runtime: string | null | undefined): string | undef
 const loadSettingsDialog = () => import("./components/SettingsDialog");
 const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilitiesDialog");
 const SettingsDialog = lazy(loadSettingsDialog);
+const OnboardingDialog = lazy(() => import("./components/onboarding/OnboardingDialog"));
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"));
@@ -463,6 +465,8 @@ export default function App() {
   const [terminalShellResolved, setTerminalShellResolved] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>({ version: 1, step: "welcome", dismissed: false });
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [capabilitiesInitialTab, setCapabilitiesInitialTab] = useState<
@@ -1345,6 +1349,11 @@ export default function App() {
         setPlatform(plat);
         setHome(hm);
         setBooted(true);
+        void window.spark.onboarding?.load().then((progress) => {
+          if (cancelled) return;
+          setOnboardingProgress(progress);
+          if (!progress.dismissed && (state.workspaces.length === 0 || progress.step !== "welcome")) setOnboardingOpen(true);
+        }).catch((error) => console.warn("[onboarding] Could not load progress", error));
       } catch (err) {
         setBootError((err as Error).message);
       }
@@ -2979,6 +2988,15 @@ export default function App() {
     setSettingsOpen(true);
   }, []);
 
+  useEffect(() => {
+    const open = () => {
+      setSettingsOpen(false);
+      setOnboardingOpen(true);
+    };
+    window.addEventListener("spark:open-onboarding", open);
+    return () => window.removeEventListener("spark:open-onboarding", open);
+  }, []);
+
   // Read through tabsRef so the title bar's opener stays referentially stable
   // across App renders, like the tray's Automations handler above.
   const handleOpenUsage = useCallback(() => {
@@ -4536,6 +4554,22 @@ export default function App() {
     [newPreviewTab, setPreviewUrl, setActiveTabStable, tabs.tabs],
   );
 
+  const exploreOnboardingFeature = useCallback((feature: StudioTourFeature) => {
+    const current = tabsRef.current;
+    if (feature === "cora") current.addDraftChatTab();
+    else if (feature === "terminal") current.newTerminalTab();
+    else if (feature === "browser") current.newPreviewTab("https://studio.codarasolutions.com/");
+    else if (feature === "automations") current.openAutomationsTab();
+    else if (feature === "whiteboard") current.newWhiteboardTab();
+    else {
+      const side: PanelSide = panelsRef.current.sections.left.includes("explorer") ? "left" : "right";
+      if (compactWorkbenchRef.current) setCompactPanel(side);
+      else if (side === "left") setShowLeft(true);
+      else setShowRight(true);
+      panelsRef.current.revealSection("explorer");
+    }
+  }, []);
+
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ url?: unknown; forceNew?: unknown }>).detail;
@@ -5086,6 +5120,7 @@ export default function App() {
     // instead of triggering their currently bound command.
     isDisabled: (id, event) => {
       if (isRecording()) return true;
+      if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that
       // share the chord (the whiteboard's Ctrl+D duplicate).
@@ -6053,6 +6088,19 @@ export default function App() {
           />
         )}
         <RemoteAuthPrompt />
+
+        {onboardingOpen && (
+          <Suspense fallback={null}>
+            <OnboardingDialog
+              progress={onboardingProgress}
+              workspaceName={activeWorkspace?.name}
+              onProgress={setOnboardingProgress}
+              onClose={() => setOnboardingOpen(false)}
+              onCreateWorkspace={createWs}
+              onExplore={exploreOnboardingFeature}
+            />
+          </Suspense>
+        )}
 
         {settingsOpen && (
           <Suspense fallback={null}>

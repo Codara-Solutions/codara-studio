@@ -47,6 +47,12 @@ const SENTINEL_END = "<<SPARK_PATH_END>>";
 let cachedPath: string | null = null;
 let inflight: Promise<string> | null = null;
 
+export async function refreshEnrichedPath(): Promise<string> {
+  if (inflight) await inflight;
+  cachedPath = null;
+  return getEnrichedPath();
+}
+
 /**
  * Returns the enriched PATH for child processes. The first call computes it
  * (login-shell sourcing on POSIX, registry reads on Windows) and caches the
