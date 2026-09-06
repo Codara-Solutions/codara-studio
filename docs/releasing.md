@@ -2,9 +2,14 @@
 
 There are two pipelines. The GitHub Actions one is canonical.
 
-## CI release (every push to `main`)
+## CI release (nightly, or on demand)
 
-`.github/workflows/release.yml`:
+`.github/workflows/release.yml` runs at 03:00 UTC every day and whenever you
+run `gh workflow run Release`. Each run ships everything merged to `main`
+since the last `vX.Y.Z` tag as one release; a run with nothing new is skipped
+by the version step. Branch protection requires the CI `test` check on an
+up-to-date branch, so the last PR merged before a run was tested on the exact
+tree that ships. The workflow:
 
 1. `test` job: `npm ci`, `typecheck:node`, `typecheck:web`, `typecheck:e2e`,
    `npm run build`, Playwright Chromium install, `npm run test:all`. A red test
@@ -14,9 +19,10 @@ There are two pipelines. The GitHub Actions one is canonical.
    `vX.Y.Z` tag and the commits since it (a `!` or `BREAKING CHANGE` bumps
    the major, a `Release: minor` line in any commit body bumps the minor,
    anything else, `feat:` included, bumps the patch), and writes it into
-   `package.json` inside the runner only. Every merge to `main` ships, so
-   the minor is reserved for releases you decide to call a milestone. A HEAD
-   whose subject starts with `release:` is skipped.
+   `package.json` inside the runner only. Every run ships whatever merged
+   since the last tag, so the minor is reserved for releases you decide to
+   call a milestone. A run with no commits since the last tag, or whose HEAD
+   subject starts with `release:`, is skipped.
 3. `npm run package:mac` signs and notarizes with the Developer ID
    certificate, `scripts/publish-release.cjs mac` uploads the DMG, ZIP, and
    `latest-mac.yml` to the release bucket. `npm run package:win` cross-builds

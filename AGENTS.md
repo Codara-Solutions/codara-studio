@@ -39,10 +39,12 @@ existing code is written; when in doubt, read neighboring files and match them.
 
 ## Releases
 
-- A push to `main` IS a release: the `Release` GitHub Actions workflow tests,
-  builds, signs, and publishes the pushed commit and pushes a `vX.Y.Z` tag.
-  Tags are the version source of truth; the tracked `package.json` version is
-  not bumped by CI.
+- Releases are nightly, not per push: the `Release` GitHub Actions workflow
+  runs at 03:00 UTC (or via `gh workflow run Release`), tests, builds, signs,
+  and publishes everything merged to `main` since the last `vX.Y.Z` tag as one
+  release, then pushes the new tag. Nothing new since the last tag means no
+  release. Tags are the version source of truth; the tracked `package.json`
+  version is not bumped by CI.
 - Commits whose subject starts with `release:` are the version-bump records
   the manual `scripts/release.cjs` pipeline creates; both pipelines skip them,
   which is what prevents release loops. Do not use that prefix for ordinary
