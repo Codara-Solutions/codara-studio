@@ -221,6 +221,9 @@ async function main() {
   // window.spark.pty — stub exactly what it touches.
   await page.addInitScript(() => {
     window.spark = {
+      preferences: {
+        load: async () => ({ restoreAgentSessions: false }),
+      },
       pty: {
         dispose: async () => {},
         detach: async () => {},
@@ -234,7 +237,12 @@ async function main() {
   await page.goto("file://" + htmlPath);
   await page.evaluate(() => localStorage.clear());
   await page.addScriptTag({ path: outfile });
-  await page.waitForSelector("#state", { state: "attached" });
+  await page.waitForSelector("#state", { state: "attached" }).catch((error) => {
+    if (pageErrors.length > 0) {
+      throw new Error(`Chat surface harness failed to mount: ${pageErrors.join("; ")}`);
+    }
+    throw error;
+  });
 
   // Run a command inside the harness's real click handler, then let effects
   // (run sync, surface restore/re-enter) settle.
