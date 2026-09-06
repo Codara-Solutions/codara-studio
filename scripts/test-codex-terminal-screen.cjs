@@ -49,6 +49,15 @@ const esbuild = require("esbuild");
     await paint(busy("0s"));
     assert.equal(screen.state(), "working", "a new turn can follow an idle frame immediately");
     assert.ok(idleFrames > previousIdleFrames, "the idle boundary survives queued writes between sweeps");
+    await paint("\x1b[2J\x1b[H" + "x".repeat(60 * 10));
+    await paint("\x1b[6;1H• Working (9m 21s • esc to interrupt)\x1b[K\x1b[7;1H› Ask Codex to do anything\x1b[K\x1b[8;1Hgpt-6-astra high fast · ~/project\x1b[J");
+    assert.equal(screen.state(), "working", "repainting over wrapped transcript still recognizes the busy footer");
+    await paint("\x1b[6;1HFinal response.\x1b[K");
+    assert.equal(screen.state(), "idle", "stale wrap flags must not swallow the idle composer or its model footer");
+    await paint("\x1b[7;3HExplain this status\x1b[K\x1b[8;1HWorking (9m 21s • esc to interrupt)\x1b[K\x1b[9;1Hgpt-6-astra high fast · ~/project\x1b[J");
+    assert.equal(screen.state(), "idle", "a draft stays idle after repainting over wrapped transcript");
+    await paint("\x1b[6;1H• Working (0s • esc to interrupt)\x1b[K");
+    assert.equal(screen.state(), "working", "the next live turn is recognized after the stale-wrap completion");
     console.log("Codex terminal screen checks passed.");
   } finally {
     screen.dispose();

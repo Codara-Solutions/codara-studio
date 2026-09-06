@@ -144,7 +144,11 @@ test("Codex stays ready during draft editing and working through partial repaint
       started = true;
       out("\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project");
       setTimeout(() => out("\x1b[5;6Hking\x1b[5;16H2"), 1000);
-      setTimeout(idle, 22000);
+      setTimeout(() => {
+        out("\x1b[2J\x1b[H" + "x".repeat(process.stdout.columns * 10));
+        out("\x1b[5;1H• Working (9m 22s • esc to interrupt)\x1b[K\x1b[7;1H› Ask Codex to do anything\x1b[K\x1b[8;1Hgpt-6-astra high fast · ~/project\x1b[J");
+        setTimeout(() => out("\x1b[5;1HFinal response.\x1b[K"), 1200);
+      }, 22000);
     });
   `);
   let app: ElectronApplication | null = null;
@@ -183,6 +187,11 @@ test("Codex stays ready during draft editing and working through partial repaint
       await expect(working).toBeVisible();
     }
     await expect(ready).toBeVisible({ timeout: 15_000 });
+    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
+    await expect(count).toHaveText("1");
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    await page.waitForTimeout(3000);
+    await expect(count).toHaveText("1");
   } finally {
     await app?.close();
   }
@@ -230,6 +239,47 @@ test("silent Codex is detected without a banner or saved session", async () => {
     await expect(count).toHaveCount(0, { timeout: 15_000 });
   } finally {
     await app?.close();
+  }
+});
+
+test("Claude completion stays ready through status-line repaints and workspace changes", async () => {
+  test.setTimeout(60_000);
+  const fixture = await prepareFixture();
+  const script = join(fixture.binDir, "claude.js");
+  await writeFile(script, `
+    process.stdout.write("Claude Code v2.1.238\\r\\n✻ Working… (3s · ↓ 4 tokens)\\r\\n");
+    setTimeout(() => {
+      process.stdout.write('Agent "Verify, fix, merge PR 29" finished · 10m 56s\\r\\nPR #29 is verified, fixed and merged.\\r\\n✻ Baked for 11m 32s · done 12:00 PM\\r\\n> \\r\\n');
+      let tick = 0;
+      setInterval(() => process.stdout.write('\\rFable 5.1 · bypass permissions on · ' + ++tick), 400);
+    }, 2500);
+  `);
+  const app = await electron.launch({ args: ["."], env: {
+    ...process.env,
+    CODEX_HOME: join(fixture.userDataDir, "codex-home"), GROK_HOME: join(fixture.userDataDir, "grok-home"),
+    CLAUDE_CONFIG_DIR: fixture.claudeConfigDir,
+    SPARK_USER_DATA_DIR: fixture.userDataDir, CODARA_HOME_DIR: fixture.userDataDir, SPARK_HOME_DIR: fixture.userDataDir,
+    SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1",
+  } });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole("tab", { name: /terminals/i }).evaluate(tab => (tab as HTMLElement).click());
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially(`"${process.execPath}" "${script}"`, { delay: 2 });
+    await input.press("Enter");
+    await expect(page.getByRole("status", { name: "CLAUDE working" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 10_000 });
+    const row = page.locator('[data-workspace-id="ws-a"]');
+    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1");
+    await page.locator('[data-workspace-id="ws-b"]').evaluate(element => (element as HTMLElement).click());
+    await page.waitForTimeout(4000);
+    await expect(row.getByTestId("workspace-agent-count")).toHaveText("1");
+    await row.evaluate(element => (element as HTMLElement).click());
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible();
+    await expect(page.getByRole("status", { name: "CLAUDE working" })).toHaveCount(0);
+  } finally {
+    await app.close();
   }
 });
 

@@ -127,6 +127,7 @@ const HOOK_SUBAGENT_STALE_MS = 30 * 60_000;
 // (an MCP server the CLI started lazily mid-turn, a daemonized command) can
 // never keep a pane busy forever.
 const BACKGROUND_PROC_RECHECK_MS = 2_000;
+const BACKGROUND_PROC_START_GRACE_MS = 5_000;
 const BACKGROUND_PROC_MAX_HOLD_MS = 60 * 60_000;
 // Agent exit by process tree. Prompt markers and alt-screen leave only exist
 // when shell integration is loaded and the TUI uses the alt screen; a pane
@@ -188,6 +189,7 @@ interface PaneWatcher {
   // silence that began with the working footer still painting reads as a
   // mid-turn stall, not a finish (see TURN_QUIET_STALL_MS).
   lastChunkAssertedWorking: boolean;
+  completedTurnPending: boolean;
   codexScreen: CodexTerminalScreen | null;
   codexIdleSince: number | null;
   // Explicit outcomes outrank an old busy frame until Codex paints its composer idle.
@@ -223,6 +225,7 @@ interface PaneWatcher {
   // When the earliest still-pending background launch happened (ms epoch),
   // 0 when none. Anchors the process-tree check below.
   backgroundLaunchAt: number;
+  lastBackgroundLaunchAt: number;
   // Descendants of the pane's shell that started after backgroundLaunchAt and
   // were alive at the last check. A long-lived monitor keeps firing follow-up
   // turns (each draining the counter above) while it is still running; the
@@ -358,6 +361,7 @@ export function syncTerminalNotifyPanes(input: {
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
       lastChunkAssertedWorking: false,
+      completedTurnPending: false,
       codexScreen: null,
       codexIdleSince: null,
       codexAwaitingIdle: false,
@@ -367,6 +371,7 @@ export function syncTerminalNotifyPanes(input: {
       hookBackgroundTasks: 0,
       hookPromptSinceStop: false,
       backgroundLaunchAt: 0,
+      lastBackgroundLaunchAt: 0,
       backgroundProcs: [],
       lastBackgroundProcCheckAt: 0,
       agentProcSeen: false,
@@ -458,6 +463,7 @@ function attach(w: PaneWatcher): void {
     w.lastWorkingAt = 0;
     w.lastOscNotifyAt = 0;
     w.lastChunkAssertedWorking = false;
+    w.completedTurnPending = false;
     clearCodexScreen(w);
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;
@@ -580,7 +586,9 @@ function ensureSweep(): void {
       // Stall-aware window: silence right after a working-footer paint is a
       // mid-turn stall until proven otherwise; silence after an idle repaint
       // (no working pattern in the final chunk) is a confident finish.
-      const quietMs = w.lastChunkAssertedWorking ? TURN_QUIET_STALL_MS : TURN_QUIET_MS;
+      // A completion observed while background work was alive remains valid
+      // after that work exits, even if status-line repaints never go quiet.
+      const quietMs = w.completedTurnPending ? 0 : w.lastChunkAssertedWorking ? TURN_QUIET_STALL_MS : TURN_QUIET_MS;
       if (now - w.lastWorkingAt < quietMs) continue;
       w.state = "idle";
       tanLog(
@@ -743,6 +751,7 @@ function newMatches(re: RegExp, text: string, minEnd: number): RegExpExecArray[]
 // lives in noteTerminalUserInput() instead; the policy's same-kind dedup
 // then caps heuristic dones at one per user interaction.
 function enterWorking(w: PaneWatcher, now: number): void {
+  w.completedTurnPending = false;
   if (w.state !== "working") {
     w.workingSince = now;
     tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
@@ -805,6 +814,7 @@ function clearBackgroundWork(w: PaneWatcher): void {
   w.hookBackgroundTasks = 0;
   w.hookPromptSinceStop = false;
   w.backgroundLaunchAt = 0;
+  w.lastBackgroundLaunchAt = 0;
   w.backgroundProcs = [];
   w.lastBackgroundProcCheckAt = 0;
 }
@@ -832,6 +842,14 @@ function backgroundTasksActive(w: PaneWatcher, now: number): boolean {
       if (listed !== null) {
         const alive = w.backgroundProcs.length > 0 ? aliveProcesses(w.backgroundProcs) : listed;
         w.backgroundProcs = alive.length > 0 ? alive : listed;
+        // A background command can finish inside a subagent without a
+        // separate parent Stop. An empty process tree drains its stale
+        // counter, but a failed inspection or a pending spawn cannot.
+        if (listed.length === 0 && w.backgroundProcs.length === 0 &&
+            now - w.lastBackgroundLaunchAt >= BACKGROUND_PROC_START_GRACE_MS) {
+          clearBackgroundWork(w);
+          return false;
+        }
       }
     }
   }
@@ -878,12 +896,14 @@ export function noteTerminalHookEvent(
       if (hookLaunchesBackgroundWork(payload)) {
         w.hookBackgroundTasks += 1;
         if (w.backgroundLaunchAt === 0) w.backgroundLaunchAt = now;
+        w.lastBackgroundLaunchAt = now;
         tanLog(
           `pane=${w.paneId} hook PreToolUse ${hookToolName(payload)} in background -> ${w.hookBackgroundTasks}`,
         );
       }
       return;
     case "UserPromptSubmit":
+      w.completedTurnPending = false;
       w.hookPromptSinceStop = true;
       return;
     case "Stop":
@@ -905,6 +925,7 @@ export function noteTerminalHookEvent(
       return;
     case "SessionStart":
     case "SessionEnd":
+      w.completedTurnPending = false;
       // A new or ended CLI session owns no subagents from the previous one.
       if (w.hookSubagentsActive > 0) {
         tanLog(`pane=${w.paneId} hook ${hookName} — subagent counter reset`);
@@ -1009,6 +1030,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.workingSince = 0;
       w.lastWorkingAt = 0;
       w.lastChunkAssertedWorking = false;
+      w.completedTurnPending = false;
       tanLog(`pane=${w.paneId} runtime sniffed: ${sniffed}`);
       // An agent was just detected but no working/idle pattern has classified
       // yet — show the chip as "starting" until the first real signal. The
@@ -1231,6 +1253,17 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     } else if (cls === "working") {
       enterWorking(w, now);
       chunkAssertedWorking = true;
+    } else if (cls === "idle") {
+      w.completedTurnPending = true;
+      if (!backgroundHeld(w)) {
+        const finished = w.state === "working";
+        w.state = "idle";
+        emitPaneState(w, "idle");
+        if (finished && w.userTurnArmed && workedLongEnough(w) && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+          deliver(w, "done", null);
+        }
+        w.userTurnArmed = false;
+      }
     } else if (cls === "done") {
       // Positive completion line (e.g. "Session ended.") — alert without
       // waiting out the quiet window. Unlike the progress-clear / idle-status
@@ -1299,6 +1332,7 @@ function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
   w.workingSince = 0;
   w.lastWorkingAt = 0;
   w.lastChunkAssertedWorking = false;
+  w.completedTurnPending = false;
   w.teammatesActive = 0;
   w.hookSubagentsActive = 0;
   clearBackgroundWork(w);
@@ -1354,6 +1388,7 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
           w.workingSince = 0;
           w.lastWorkingAt = 0;
           w.lastChunkAssertedWorking = false;
+          w.completedTurnPending = false;
           tanLog(`pane=${w.paneId} runtime recovered from process tree: ${detected}`);
           emitPaneState(w, "idle");
           if (detected === "codex") {

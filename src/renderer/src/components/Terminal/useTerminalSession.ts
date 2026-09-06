@@ -1810,7 +1810,7 @@ export function useTerminalSession({
       let stateTimer: number | null = null;
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
-      let authoritativeCodexState: RuntimeState | null = null;
+      let authoritativeAgentState: { runtime: string; state: RuntimeState } | null = null;
       let idleSinceMs: number | null = null;
       // D4 (stale-footer false "working"): Claude/Codex leave their last footer
       // frame frozen on screen after a turn ends; classifyTail keeps matching
@@ -1871,11 +1871,10 @@ export function useTerminalSession({
         }
       };
       const reportRuntimeState = (state: RuntimeState) => {
-        // Main sees Codex's reconstructed screen even while this pane is hidden.
-        // Its state must not be overwritten by a frozen renderer or a partial
-        // frame sampled between two PTY writes.
-        if (activeRuntime === "codex" && authoritativeCodexState !== null && state !== "done") {
-          state = authoritativeCodexState;
+        // Main sees Codex's screen and Claude's background tasks while hidden.
+        // A local idle composer cannot override work still owned by the pane.
+        if (authoritativeAgentState?.runtime === activeRuntime && authoritativeAgentState.state !== "launching" && state !== "done") {
+          state = authoritativeAgentState.state;
         }
         // Read-only mirrors never report to main: their xterm buffer lacks the
         // canonical pane's history, so their classification can diverge and
@@ -2217,8 +2216,8 @@ export function useTerminalSession({
         } else {
           clearRecentAgentInput();
         }
-        authoritativeCodexState = null;
-        codexStateRevision += 1;
+        authoritativeAgentState = null;
+        agentStateRevision += 1;
         activeRuntime = null;
         stopStatePoller();
         agentPhase = "idle";
@@ -2305,19 +2304,20 @@ export function useTerminalSession({
       // missed clearInterval here would leak a timer for the lifetime of the
       // (now-disposed) hook.
       cleanups.push(() => stopStatePoller());
-      let codexStateRevision = 0;
-      const observeCodexState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
+      let agentStateRevision = 0;
+      const observeAgentState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
         if (disposed || state.paneId !== sessionId) return;
-        codexStateRevision += 1;
-        authoritativeCodexState = state.runtime === "codex" ? state.state : null;
+        agentStateRevision += 1;
+        authoritativeAgentState = state.runtime === "codex" || state.runtime === "claude"
+          ? { runtime: state.runtime, state: state.state } : null;
         if (activeRuntime === "codex" && state.state === "done") resetAgentPhase({ exitSignal: true });
       };
-      const offCodexState = window.spark.terminalNotify?.onState?.(observeCodexState);
-      cleanups.push(() => offCodexState?.());
-      const initialCodexStateRevision = codexStateRevision;
+      const offAgentState = window.spark.terminalNotify?.onState?.(observeAgentState);
+      cleanups.push(() => offAgentState?.());
+      const initialAgentStateRevision = agentStateRevision;
       void window.spark.terminalNotify?.snapshot?.()
         ?.then((states) => {
-          if (!disposed && codexStateRevision === initialCodexStateRevision) states.forEach(observeCodexState);
+          if (!disposed && agentStateRevision === initialAgentStateRevision) states.forEach(observeAgentState);
         })
         ?.catch(() => undefined);
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
@@ -2569,7 +2569,7 @@ export function useTerminalSession({
           cancelAltScreenExitConfirm();
           resetAgentPhase({ exitSignal: true });
         } else if (sawAltScreenLeave) {
-          if (activeRuntime === "codex" && authoritativeCodexState !== null) return;
+          if (activeRuntime === "codex" && authoritativeAgentState !== null) return;
           // Ambiguous: a real exit, or a full-screen view being closed. Decide
           // once the repaint that follows has reached the rows.
           cancelAltScreenExitConfirm();

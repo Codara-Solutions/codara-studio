@@ -36,6 +36,20 @@ function check(name, actual, expected) {
 }
 
 // ── classifyTail: working footers, with Ink-style cursor moves interleaved ──
+const CLAUDE_FINISHED = "✻ Baked for 11m 32s · done 12:00 PM";
+check("Claude completed turn is ready", ap.classifyTail("claude", CLAUDE_FINISHED), "idle");
+check("completion supersedes old work in the transcript", ap.classifyTail("claude",
+  `✻ Working… (3s · ↓ 2 tokens)\n${CLAUDE_FINISHED}\n> \nFable 5.1 · bypass permissions on`), "idle");
+check("a later turn supersedes completion", ap.classifyTail("claude",
+  `${CLAUDE_FINISHED}\n✻ Thinking… (2s · ↓ 4 tokens)`), "working");
+check("a later permission supersedes completion", ap.classifyTail("claude",
+  `${CLAUDE_FINISHED}\nDo you want to proceed?`), "blocked");
+check("old completion in carry does not end a new turn", ap.classifyTail("claude",
+  `${CLAUDE_FINISHED}\n> `, CLAUDE_FINISHED.length), null);
+check("split completion is recognized", ap.classifyTail("claude", CLAUDE_FINISHED,
+  CLAUDE_FINISHED.indexOf("done") + 2), "idle");
+check("quoted completion in prose is not a footer", ap.classifyTail("claude",
+  `The screenshot says ${CLAUDE_FINISHED}`), null);
 check(
   "claude working footer",
   ap.classifyTail("claude", "\x1b[2K\x1b[G* Cogitating… (12s · \x1b[38;5;214m4.2k tokens\x1b[39m · esc to interrupt)"),

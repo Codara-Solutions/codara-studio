@@ -40,8 +40,12 @@ export class CodexTerminalScreen {
       const line = buffer.getLine(row);
       if (!line) continue;
       const text = line.translateToString(true);
-      if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
-      else lines.push(text);
+      // Cursor-addressed repaints can leave old transcript wrap flags on the
+      // composer and footer rows. Keep the composer boundary even when xterm
+      // still considers those cells part of an earlier wrapped paragraph.
+      if (line.isWrapped && lines.length > 0 && !/^\s*›/.test(text) && !/^\s*›/.test(lines[lines.length - 1])) {
+        lines[lines.length - 1] += text;
+      } else lines.push(text);
     }
     return classifyCodexScreen(lines.join("\n"));
   }

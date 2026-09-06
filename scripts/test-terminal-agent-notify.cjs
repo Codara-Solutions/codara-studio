@@ -49,7 +49,9 @@ const harnessPlugin = {
         return {
           contents:
             init +
-            `export { aliveProcesses, descendantsStartedAfter } from ${JSON.stringify(path.join(ROOT, "src/main/owned-process-tree.ts"))};\n` +
+            `import * as real from ${JSON.stringify(path.join(ROOT, "src/main/owned-process-tree.ts"))};\n` +
+            "export function descendantsStartedAfter(pid, since){ return globalThis.__TAN.background?.has(pid) ? globalThis.__TAN.background.get(pid) : real.descendantsStartedAfter(pid, since); }\n" +
+            "export function aliveProcesses(rows){ return globalThis.__TAN.backgroundAlive ?? real.aliveProcesses(rows); }\n" +
             "export async function descendantProcessesWithCommands(pid){ return globalThis.__TAN.processes?.get(pid) ?? null; }\n",
           loader: "js",
           resolveDir: ROOT,
@@ -617,6 +619,43 @@ async function main() {
   await waitForState("p13", "error");
   await sleep(2200);
   check("a failure is not overwritten by the retained busy frame", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "error");
+
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-completion", panes: [
+    { paneId: "p-completion", tabId: "tc", excluded: false, runtimeHint: "claude" },
+  ] });
+  T.pids.set("p-completion", 990099);
+  T.background = new Map([[990099, null]]);
+  mod.noteTerminalUserInput("p-completion");
+  feed("p-completion", "Claude Code\r\n✻ Working… (3s · ↓ 4 tokens)");
+  mod.noteTerminalHookEvent("p-completion", "PreToolUse", { tool_name: "Bash", tool_input: { run_in_background: true } });
+  const completeFooter = "\r\n✻ Baked for 11m 32s · done 12:00 PM\r\n> ";
+  feed("p-completion", completeFooter);
+  await sleep(5500);
+  check("failed process inspection preserves background work", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "working");
+  T.background.set(990099, [{ pid: 990100, startedAt: "fixture" }]);
+  T.backgroundAlive = T.background.get(990099);
+  feed("p-completion", completeFooter);
+  await sleep(2500);
+  check("completion cannot end a live background command", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "working");
+  T.background.set(990099, []);
+  T.backgroundAlive = [];
+  const repaint = setInterval(() => feed("p-completion", "\r\nFable 5.1 · bypass permissions on"), 100);
+  try {
+    await waitForState("p-completion", "idle");
+  } finally {
+    clearInterval(repaint);
+  }
+  check("an exited background command drains without a parent Stop hook", true);
+  mod.noteTerminalUserInput("p-completion");
+  feed("p-completion", "\r\n✻ Thinking… (1s · ↓ 4 tokens)");
+  await waitForState("p-completion", "working");
+  feed("p-completion", completeFooter);
+  await waitForState("p-completion", "idle");
+  for (let i = 0; i < 4; i++) {
+    feed("p-completion", "\r\nFable 5.1 · main · 5h: 35% · bypass permissions on");
+    await sleep(250);
+  }
+  check("idle status repaints do not resurrect completed work", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "idle");
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

@@ -530,7 +530,20 @@ export function classifyTail(
 ): RuntimeState | null {
   const table = RUNTIME_PATTERNS[runtime];
   if (!table) return null;
-  const stripped = opts?.preStripped ? tail : stripAnsi(tail);
+  let stripped = opts?.preStripped ? tail : stripAnsi(tail);
+  let completedTurn = false;
+  if (runtime === "claude") {
+    // The completed-turn footer supersedes earlier spinner frames in the
+    // transcript. A later busy or permission footer still wins.
+    const completion = /(?:^|[\r\n])[ \t]*[✻✽✶✢✳∗✺❋*][ \t]*[A-Z][a-z]+[ \t]+for[ \t]+(?:\d+[ \t]*h[ \t]*)?(?:\d+[ \t]*m[ \t]*)?\d+(?:\.\d+)?[ \t]*s[ \t]*[·•][ \t]*done[ \t]+\d{1,2}:\d{2}(?:[ \t]*[AP]M)?/gi;
+    let end = 0;
+    for (const match of stripped.matchAll(completion)) end = match.index! + match[0].length;
+    if (end > freshFrom) {
+      stripped = stripped.slice(end);
+      freshFrom = 0;
+      completedTurn = true;
+    }
+  }
   for (const re of table.blocked) {
     if (matchEndsPast(re, stripped, freshFrom)) return "blocked";
   }
@@ -540,7 +553,7 @@ export function classifyTail(
   for (const re of table.done) {
     if (matchEndsPast(re, stripped, freshFrom)) return "done";
   }
-  return null;
+  return completedTurn ? "idle" : null;
 }
 
 // A rendered Codex frame separates the live status line from editable prompt
