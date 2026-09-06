@@ -826,7 +826,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       updateTerminalDragPositionFromPoint(event);
       const intent = updateDropIntentAtPoint(event);
       const payload = peekTerminalPaneDrag();
-      if (payload && intent) {
+      if (event.type === "pointerup" && payload && intent) {
         onPaneDrop(payload, tab.id, intent);
       }
       setDropIntent(null);

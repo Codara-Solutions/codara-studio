@@ -81,7 +81,7 @@ function buildSelector(el: Element): string {
         }
       });
       if (uniqueClass) {
-        return `.${cssEscape(uniqueClass)}`;
+        return [`.${cssEscape(uniqueClass)}`, ...parts].join(" > ");
       }
       const firstClass = Array.from(node.classList)[0];
       if (firstClass) part += `.${cssEscape(firstClass)}`;
@@ -136,13 +136,14 @@ function onClick(event: MouseEvent): void {
   event.stopPropagation();
   const target = event.target;
   if (!(target instanceof Element)) return;
+  // Remove the inspector's temporary classes before deriving a page selector.
+  deactivate();
   const payload = {
     selector: buildSelector(target),
     text: visibleText(target),
     tagName: target.tagName.toLowerCase(),
     url: window.location.href,
   };
-  deactivate();
   ipcRenderer.sendToHost(HOST_CHANNEL_PICKED, payload);
 }
 

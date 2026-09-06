@@ -112,13 +112,22 @@ export function peekTerminalPaneDragState(): TerminalPaneDragState | null {
 // it at dragend. A drag started in another window leaves this null, so the
 // strip simply declines the reorder instead of guessing.
 let activeTabReorderDrag: TabReorderDragPayload | null = null;
+const tabReorderDragListeners = new Set<(payload: TabReorderDragPayload | null) => void>();
+
+export function subscribeTabReorderDrag(listener: (payload: TabReorderDragPayload | null) => void): () => void {
+  tabReorderDragListeners.add(listener);
+  listener(activeTabReorderDrag);
+  return () => { tabReorderDragListeners.delete(listener); };
+}
 
 export function beginTabReorderDrag(payload: TabReorderDragPayload): void {
   activeTabReorderDrag = payload;
+  for (const listener of tabReorderDragListeners) listener(payload);
 }
 
 export function endTabReorderDrag(): void {
   activeTabReorderDrag = null;
+  for (const listener of tabReorderDragListeners) listener(null);
 }
 
 export function peekTabReorderDrag(): TabReorderDragPayload | null {

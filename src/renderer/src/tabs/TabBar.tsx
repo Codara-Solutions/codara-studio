@@ -469,10 +469,9 @@ function TabBar({
   // subscribe to the module-level drag state instead, then run our own
   // pointermove hit-test against each tab's bounding rect. Two outcomes while
   // the pointer is over the strip:
-  //   - over a different terminal tab → hover-activate it (so the user can
-  //     keep dragging into the now-visible TerminalStack) and, on release,
-  //     merge the pane into it;
-  //   - over empty strip space / a non-terminal tab / the pane's own tab →
+  //   - over a different splittable tab: hover-activate it so the user can
+  //     choose an edge inside its content, or release on the tab to split;
+  //   - over empty strip space / an unsupported tab / the pane's own tab:
   //     show the "new tab" affordance and, on release, detach the pane into a
   //     brand-new terminal tab.
   useEffect(() => {
@@ -553,13 +552,11 @@ function TabBar({
         }
       }
       const hoveredTab = hoveredId ? tabs.find((t) => t.id === hoveredId) : null;
-      // A different terminal tab under the pointer is a merge target: give it
-      // the hover-activate + drop-target highlight. Anything else over the
-      // strip (empty space, a non-terminal tab, or the pane's own source tab)
-      // is the new-tab drop zone.
+      // A supported destination gets hover activation and a drop highlight.
+      // Empty strip space and the source tab remain the new-tab drop zone.
       if (
         hoveredTab &&
-        hoveredTab.kind === "terminal" &&
+        (hoveredTab.kind === "terminal" || canDockTab(hoveredTab)) &&
         hoveredTab.id !== payload.tabId
       ) {
         const targetId = hoveredTab.id;
@@ -590,7 +587,7 @@ function TabBar({
       setNewTabDropActive((curr) => (curr ? curr : true));
     };
 
-    const onPointerUp = () => {
+    const onPointerUp = (event: PointerEvent) => {
       if (!dragActive) return;
       const payload = dragPayload;
       const wasOverStrip = overStrip;
@@ -599,7 +596,7 @@ function TabBar({
       resetDropTracking();
       dragActive = false;
       dragPayload = null;
-      if (!payload || !wasOverStrip) return;
+      if (event.type !== "pointerup" || !payload || !wasOverStrip) return;
       // target set → merge into that terminal tab; otherwise detach into a new
       // tab. onTerminalPaneDrop no-ops safely when the move isn't possible
       // (e.g. detaching the only pane of a single-pane tab).
@@ -1001,7 +998,7 @@ const TabItem = React.memo(function TabItem({
   useEffect(() => () => clearHoverActivate(), []);
 
   const acceptsPaneDrop = (event: React.DragEvent): boolean =>
-    tab.kind === "terminal" &&
+    (tab.kind === "terminal" || canDockTab(tab)) &&
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
 
   const tabClass = [
@@ -1054,6 +1051,16 @@ const TabItem = React.memo(function TabItem({
         clearHoverActivate();
       }}
       onDragEnter={(event) => {
+        const reordered = peekTabReorderDrag();
+        if (reordered && reordered.tabId !== tab.id) {
+          if (!active && hoverActivateTimer.current === null) {
+            hoverActivateTimer.current = window.setTimeout(() => {
+              hoverActivateTimer.current = null;
+              if (peekTabReorderDrag()?.tabId === reordered.tabId) onSelect(tab.id);
+            }, HOVER_ACTIVATE_MS);
+          }
+          return;
+        }
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -1091,7 +1098,7 @@ const TabItem = React.memo(function TabItem({
       }}
       onDrop={(event) => {
         const payload = parseTerminalPaneDrag(event.dataTransfer);
-        if (!payload || tab.kind !== "terminal") return;
+        if (!payload || !acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
         setDropActive(false);

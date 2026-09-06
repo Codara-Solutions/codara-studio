@@ -43,6 +43,7 @@ import type {
 import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
 import { moveTabInList } from "./tabReorder";
+import { applySplitDrop, type SplitDropSource, type SplitDropPlacement } from "./splitDrop";
 import { resolveBootActiveTabId } from "./bootSelection";
 import { mergeSessionStart, type SessionStartRecord } from "../components/Terminal/resume-policy";
 import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
@@ -1110,6 +1111,7 @@ export interface UseTabsApi {
   // no grid to dock into. Returns false only when the tab cannot be docked at
   // all (not dockable, or a second chat while one is already docked).
   openTabInSplit: (tabId: TabId) => boolean;
+  splitDrop: (source: SplitDropSource, targetId: TabId, placement: SplitDropPlacement) => void;
   // Give a dockable tab a cell inside a terminal tab's split grid.
   // Returns false when rejected (not dockable, unknown host, a second chat).
   dockTabInTerminal: (
@@ -2355,8 +2357,18 @@ export function useTabs(
     [],
   );
 
+  const splitDrop = useCallback((source: SplitDropSource, targetId: TabId, placement: SplitDropPlacement) => {
+    const ids = { host: makeId("term"), targetCell: makeId("dock"), sourceCell: makeId("dock") };
+    setTabs((curr) => {
+      const result = applySplitDrop(curr, source, targetId, placement, ids);
+      if (!result) return curr;
+      setActiveId(result.activeId);
+      return normalizeTerminalTitles(result.tabs);
+    });
+  }, []);
+
   // Lend a tab's content a cell in a terminal tab's split grid. The tab keeps
-  // living in the tabs array and stays mounted by its own Stack — only its rect
+  // living in the tabs array and stays mounted by its own Stack; only its rect
   // comes from here (see dockGeometry.ts). Returns false when the dock was
   // rejected, so callers can leave the drag/menu state untouched.
   const dockTabInTerminal = useCallback(
@@ -4033,6 +4045,7 @@ export function useTabs(
       ensureWorkerTerminalTab,
       detachTerminalPaneToNewTab,
       openTabInSplit,
+      splitDrop,
       dockTabInTerminal,
       undockTab,
       moveTerminalPane,

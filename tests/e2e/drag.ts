@@ -120,7 +120,8 @@ function dispatchOn(
 ): Promise<void> {
   return page.evaluate(
     ({ transfer, eventType, sourceSelector }) => {
-      const source = document.querySelector(sourceSelector);
+      // Docking removes the source pill before Chromium delivers dragend.
+      const source = document.querySelector(sourceSelector) ?? (eventType === "dragend" ? document.body : null);
       if (!source) throw new Error(`no element matching ${sourceSelector}`);
       const rect = source.getBoundingClientRect();
       source.dispatchEvent(
