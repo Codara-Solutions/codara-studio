@@ -94,14 +94,16 @@ Set-Alias -Name tp -Value spark_open -Scope Global -ErrorAction SilentlyContinue
 # is data, never dot-sourced or invoked: only CLAUDE_CONFIG_DIR and GROK_HOME
 # lines whose value sits under this Codara home's managed accounts root are
 # honored, and a variable is only ever written when it is unset or itself
-# inside that root (a value the user set elsewhere is never touched). Cost per
+# inside that root or matches the personal home supplied at spawn. A different
+# value the user sets manually is never touched. Cost per
 # prompt is one read of the header line; an unchanged revision returns before
 # anything else is parsed. Every failure (missing file, unreadable, bad
 # header) is silent and leaves the environment alone.
 function Global:__Spark-FollowVar {
-    param([string]$name, [string]$root, [string]$target, [System.StringComparison]$cmp)
+    param([string]$name, [string]$root, [string]$target, [System.StringComparison]$cmp, [string]$personal)
     $current = [System.Environment]::GetEnvironmentVariable($name)
-    if ($current -and -not $current.StartsWith($root, $cmp)) { return }
+    if ($current -and -not $current.StartsWith($root, $cmp) -and -not [string]::Equals($current, $personal, $cmp)) { return }
+    if (-not $target) { $target = $personal }
     if ($target) {
         if ($current -ne $target) { [System.Environment]::SetEnvironmentVariable($name, $target) }
     } elseif ($current) {
@@ -150,8 +152,8 @@ function Global:__Spark-FollowActiveAccount {
                 if ($value.Length -gt $grokRoot.Length -and $value.StartsWith($grokRoot, $cmp)) { $grok = $value }
             }
         }
-        __Spark-FollowVar 'CLAUDE_CONFIG_DIR' $claudeRoot $claude $cmp
-        __Spark-FollowVar 'GROK_HOME' $grokRoot $grok $cmp
+        __Spark-FollowVar 'CLAUDE_CONFIG_DIR' $claudeRoot $claude $cmp $env:SPARK_PERSONAL_CLAUDE_CONFIG_DIR
+        __Spark-FollowVar 'GROK_HOME' $grokRoot $grok $cmp $env:SPARK_PERSONAL_GROK_HOME
         $Global:__SparkActiveEnvRev = $rev
     } catch {
         # Silent by contract: the environment is left alone.

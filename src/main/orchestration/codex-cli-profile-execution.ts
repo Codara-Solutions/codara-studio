@@ -2,7 +2,8 @@ import type {
   CodexCliProfileId,
   CodexCliResolvedProfile,
 } from "./codex-cli-account-profiles";
-import { isAbsolute, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   CodexCliAccountProfileLeasedError,
   CodexCliAccountProfileStore,
@@ -34,22 +35,20 @@ export interface CodexCliExecutionProfile {
   env: NodeJS.ProcessEnv;
 }
 
-/** One shared Codex state home: strip account selectors and credential routes. */
+/** Pin launches to the same personal home used for authentication and history. */
 export function buildCodexCliSharedEnvironment(
   baseEnv: NodeJS.ProcessEnv,
+  stateHome: string,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    if (typeof value !== "string") continue;
-    const upper = key.toUpperCase();
-    if (
-      upper === "CODEX_HOME" ||
-      CODEX_CLI_CREDENTIAL_OVERRIDE_ENV_NAMES.has(upper)
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
+  const env = buildCodexCliProfileEnvironment(baseEnv, stateHome);
+  const defaultHome = resolve(join(homedir(), ".codex"));
+  const isDefaultHome =
+    process.platform === "win32"
+      ? stateHome.toLowerCase() === defaultHome.toLowerCase()
+      : stateHome === defaultHome;
+  // Keep the default implicit: some Codex versions treat an explicit default
+  // CODEX_HOME as project-local configuration. Custom homes must stay explicit.
+  if (isDefaultHome) delete env.CODEX_HOME;
   return env;
 }
 

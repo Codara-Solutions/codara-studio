@@ -4,8 +4,9 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const readSource = (...args) => fs.readFileSync(...args).replace(/\r\n/g, "\n");
 
-const source = fs.readFileSync(
+const source = readSource(
   path.join(
     __dirname,
     "..",
@@ -17,7 +18,7 @@ const source = fs.readFileSync(
   ),
   "utf8",
 );
-const settings = fs.readFileSync(
+const settings = readSource(
   path.join(
     __dirname,
     "..",
@@ -29,22 +30,22 @@ const settings = fs.readFileSync(
   ),
   "utf8",
 );
-const composer = fs.readFileSync(
+const composer = readSource(
   path.join(__dirname, "..", "src", "renderer", "src", "components", "chat", "ChatComposer.tsx"),
   "utf8",
 );
-const sidebar = fs.readFileSync(
+const sidebar = readSource(
   path.join(__dirname, "..", "src", "renderer", "src", "components", "OrchestrationSidebar.tsx"),
   "utf8",
 );
-const preload = fs.readFileSync(path.join(__dirname, "..", "src", "preload", "index.ts"), "utf8");
-const agentSync = fs.readFileSync(path.join(__dirname, "..", "src", "main", "agent-sync.ts"), "utf8");
-const ipc = fs.readFileSync(path.join(__dirname, "..", "src", "main", "ipc.ts"), "utf8");
-const profiles = fs.readFileSync(
+const preload = readSource(path.join(__dirname, "..", "src", "preload", "index.ts"), "utf8");
+const agentSync = readSource(path.join(__dirname, "..", "src", "main", "agent-sync.ts"), "utf8");
+const ipc = readSource(path.join(__dirname, "..", "src", "main", "ipc.ts"), "utf8");
+const profiles = readSource(
   path.join(__dirname, "..", "src", "main", "orchestration", "cora-profiles.ts"),
   "utf8",
 );
-const runStore = fs.readFileSync(
+const runStore = readSource(
   path.join(__dirname, "..", "src", "main", "orchestration", "run-store.ts"),
   "utf8",
 );
@@ -114,7 +115,7 @@ assert.match(
 assert.match(preload, /installAsset: \(id: string, target: "claude" \| "codex" \| "grok"\)/);
 assert.match(agentSync, /target: "claude" \| "codex" \| "grok";\n\}\): Promise<AgentAssetInstallResult>/);
 // Grok discovery reads the same user-scope TOML mcp-installer writes into.
-assert.match(agentSync, /\{ runtime: "grok", scope: "user", path: join\(home, "\.grok", "config\.toml"\) \}/);
+assert.match(agentSync, /\{ runtime: "grok", scope: "user", path: tomlRuntimeConfigPath\("grok"\) \}/);
 
 // Retired vocabulary must not come back: the boxed clusters, the badge strip,
 // and the jargon the user could not read.

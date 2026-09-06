@@ -11,7 +11,7 @@
 // take `--session-id <uuid>` so the restore pointer is deterministic.
 
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { defaultPersonalGrokHomeDir } from "../orchestration/grok-cli-account-profiles";
 
 import type { AgentEffortLevel, AgentRuntimeCapabilities, AgentRuntimeModel } from "@shared/types";
 
@@ -47,7 +47,9 @@ export const grokProvider: CliProvider = {
   id: "grok",
   displayName: "Grok Build",
   binaryName: "grok",
-  hookConfigPath: join(process.env.GROK_HOME?.trim() || join(homedir(), ".grok"), "config.toml"),
+  get hookConfigPath() {
+    return join(defaultPersonalGrokHomeDir(), "config.toml");
+  },
   capabilities: GROK_CAPABILITIES,
   versionArgs: ["--version"],
   models: GROK_MODELS,

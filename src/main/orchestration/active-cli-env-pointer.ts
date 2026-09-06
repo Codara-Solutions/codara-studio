@@ -62,8 +62,10 @@ export interface WriteActiveCliEnvPointerOptions {
 }
 
 function isInside(child: string, parent: string): boolean {
-  const inner = resolve(child).normalize("NFC");
-  const outer = resolve(parent).normalize("NFC");
+  const resolvedChild = resolve(child).normalize("NFC");
+  const resolvedParent = resolve(parent).normalize("NFC");
+  const inner = process.platform === "win32" ? resolvedChild.toLowerCase() : resolvedChild;
+  const outer = process.platform === "win32" ? resolvedParent.toLowerCase() : resolvedParent;
   return inner.startsWith(outer.endsWith(sep) ? outer : `${outer}${sep}`);
 }
 

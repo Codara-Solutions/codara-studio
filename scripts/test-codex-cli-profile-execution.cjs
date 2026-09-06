@@ -96,6 +96,43 @@ async function main() {
   }
   assert.equal("codex_access_token" in env, false);
   assert.equal("UNDEFINED_VALUE" in env, false);
+  const customHome = path.join(TMP, "custom codex home");
+  const shared = mod.buildCodexCliSharedEnvironment(
+    { ...baseEnv, CodeX_Home: "/stale/selector" },
+    customHome,
+  );
+  assert.equal(shared.CODEX_HOME, customHome);
+  assert.equal("CodeX_Home" in shared, false);
+  assert.equal(shared.HOME, baseEnv.HOME);
+  assert.equal(shared.SAFE_VALUE, baseEnv.SAFE_VALUE);
+  assert.deepEqual(baseEnv, original);
+  for (const key of Object.keys(shared)) {
+    assert.equal(
+      mod.CODEX_CLI_CREDENTIAL_OVERRIDE_ENV_NAMES.has(key.toUpperCase()),
+      false,
+    );
+  }
+  assert.equal("UNDEFINED_VALUE" in shared, false);
+  assert.equal(
+    mod.buildCodexCliSharedEnvironment({}, customHome).CODEX_HOME,
+    customHome,
+    "the resolved personal home survives even when the child environment lacks it",
+  );
+  const defaultHome = path.resolve(os.homedir(), ".codex");
+  assert.equal(
+    mod.buildCodexCliSharedEnvironment(baseEnv, defaultHome).CODEX_HOME,
+    undefined,
+  );
+  if (process.platform === "win32") {
+    assert.equal(
+      mod.buildCodexCliSharedEnvironment(baseEnv, defaultHome.toUpperCase()).CODEX_HOME,
+      undefined,
+    );
+  }
+  assert.throws(
+    () => mod.buildCodexCliSharedEnvironment(baseEnv, "relative/home"),
+    /absolute/i,
+  );
   assert.throws(
     () => mod.buildCodexCliProfileEnvironment({}, ""),
     /non-empty/i,

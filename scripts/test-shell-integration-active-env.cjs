@@ -40,6 +40,8 @@ const CLAUDE_B = path.join(CODARA, "claude-cli", "accounts", "bbbbbbbb-bbbb-4bbb
 const CLAUDE_C = path.join(CODARA, "claude-cli", "accounts", "cccccccc-cccc-4ccc-8ccc-ccccccccccc1");
 const GROK_G = path.join(CODARA, "grok-cli", "accounts", "dddddddd-dddd-4ddd-8ddd-ddddddddddd1");
 const USER_OWN = path.join(TMP, "elsewhere", "mine");
+const PERSONAL_CLAUDE = path.join(TMP, "personal", "claude home");
+const PERSONAL_GROK = path.join(TMP, "personal", "grok home");
 const STEP_TIMEOUT_MS = 15000;
 
 for (const dir of [HOME, path.dirname(POINTER), CLAUDE_A, CLAUDE_B, CLAUDE_C, GROK_G]) {
@@ -309,6 +311,31 @@ async function noFlagScenario(shell) {
   pass(`${shell.label}: a shell without SPARK_FOLLOW_ACTIVE_ACCOUNT never changes`);
 }
 
+async function customPersonalScenario(shell) {
+  writePointer({ claude: CLAUDE_A, grok: GROK_G });
+  const driver = new ShellDriver(shell.exe, shell.args, baseEnv({
+    ...shell.env,
+    SPARK_FOLLOW_ACTIVE_ACCOUNT: "1",
+    CLAUDE_CONFIG_DIR: CLAUDE_A,
+    GROK_HOME: GROK_G,
+    SPARK_PERSONAL_CLAUDE_CONFIG_DIR: PERSONAL_CLAUDE,
+    SPARK_PERSONAL_GROK_HOME: PERSONAL_GROK,
+  }));
+  try {
+    assert.deepEqual(await driver.probe("c1"), { claude: CLAUDE_A, grok: GROK_G });
+    writePointer({});
+    assert.deepEqual(await driver.probe("c2"), { claude: PERSONAL_CLAUDE, grok: PERSONAL_GROK });
+    writePointer({ claude: CLAUDE_B, grok: GROK_G });
+    assert.deepEqual(await driver.probe("c3"), { claude: CLAUDE_B, grok: GROK_G });
+    await driver.sendAndSettle(`export CLAUDE_CONFIG_DIR=${JSON.stringify(USER_OWN)}`);
+    writePointer({});
+    assert.deepEqual(await driver.probe("c4"), { claude: USER_OWN, grok: PERSONAL_GROK });
+  } finally {
+    await driver.close();
+  }
+  pass(`${shell.label}: custom personal homes survive account switches and manual overrides`);
+}
+
 // Agent panes: SPARK_NO_SHELL_INTEGRATION=1 skips every OSC emitter, but a
 // pane that carries the follow flag still follows the pointer (the shell
 // left behind after `claude` exits is where the user types the next one).
@@ -369,18 +396,21 @@ async function noIntegrationScenario(shell) {
 // bundled file, rewrites the pointer and calls Prompt between probes, so the
 // case does not depend on how a non-console host schedules prompts.
 function pwshScenario() {
+  const quote = (value) => `'${value.replace(/'/g, "''")}'`;
   const probe = (id) =>
     `Write-Output ("@@${id}:" + $(if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { 'unset' }) + "|" + $(if ($env:GROK_HOME) { $env:GROK_HOME } else { 'unset' }) + "@@")`;
   const pointer = (rev, lines) =>
-    `[System.IO.File]::WriteAllText(${JSON.stringify(POINTER)}, "codara-active-cli-env 1 ${rev}\`n${lines.map((l) => `${l}\`n`).join("")}")`;
+    `[System.IO.File]::WriteAllText(${quote(POINTER)}, "codara-active-cli-env 1 ${rev}\`n${lines.map((l) => `${l}\`n`).join("")}")`;
   const script = [
     `$ErrorActionPreference = 'Continue'`,
-    `$env:SPARK_HOME_DIR = ${JSON.stringify(CODARA)}`,
+    `Remove-Item Env:SPARK_NO_SHELL_INTEGRATION,Env:SPARK_SHELL_INTEGRATION_LOADED -ErrorAction SilentlyContinue`,
+    `$env:SPARK_HOME_DIR = ${quote(CODARA)}`,
     `$env:SPARK_FOLLOW_ACTIVE_ACCOUNT = '1'`,
-    `$env:CLAUDE_CONFIG_DIR = ${JSON.stringify(CLAUDE_A)}`,
+    `$env:CLAUDE_CONFIG_DIR = ${quote(CLAUDE_A)}`,
+    `Remove-Item Env:SPARK_PERSONAL_CLAUDE_CONFIG_DIR,Env:SPARK_PERSONAL_GROK_HOME -ErrorAction SilentlyContinue`,
     `Remove-Item Env:GROK_HOME -ErrorAction SilentlyContinue`,
     pointer(1, [`CLAUDE_CONFIG_DIR=${CLAUDE_A}`]),
-    `. ${JSON.stringify(PS1)}`,
+    `. ${quote(PS1)}`,
     `Prompt | Out-Null`,
     probe("p1"),
     pointer(2, []),
@@ -389,7 +419,7 @@ function pwshScenario() {
     pointer(3, [`CLAUDE_CONFIG_DIR=${CLAUDE_B}`, `GROK_HOME=${GROK_G}`]),
     `Prompt | Out-Null`,
     probe("p3"),
-    `$env:CLAUDE_CONFIG_DIR = ${JSON.stringify(USER_OWN)}`,
+    `$env:CLAUDE_CONFIG_DIR = ${quote(USER_OWN)}`,
     pointer(4, [`CLAUDE_CONFIG_DIR=${CLAUDE_C}`]),
     `Prompt | Out-Null`,
     probe("p4"),
@@ -399,15 +429,28 @@ function pwshScenario() {
     pointer(5, [`CLAUDE_CONFIG_DIR=/etc`, `GROK_HOME=${path.join(CODARA, "grok-cli", "accounts")}/../evil`]),
     `Prompt | Out-Null`,
     probe("p6"),
-    `[System.IO.File]::WriteAllText(${JSON.stringify(POINTER)}, "garbage\`n")`,
+    `[System.IO.File]::WriteAllText(${quote(POINTER)}, "garbage\`n")`,
     `Prompt | Out-Null`,
     probe("p7"),
-    `Remove-Item -LiteralPath ${JSON.stringify(POINTER)} -Force`,
+    `Remove-Item -LiteralPath ${quote(POINTER)} -Force`,
     `Prompt | Out-Null`,
     probe("p8"),
     pointer(6, [`GROK_HOME=${GROK_G}`]),
     `Prompt | Out-Null`,
     probe("p9"),
+    `$env:SPARK_PERSONAL_CLAUDE_CONFIG_DIR = ${quote(PERSONAL_CLAUDE)}`,
+    `$env:SPARK_PERSONAL_GROK_HOME = ${quote(PERSONAL_GROK)}`,
+    `$env:CLAUDE_CONFIG_DIR = ${quote(CLAUDE_A)}`,
+    pointer(7, []),
+    `Prompt | Out-Null`,
+    probe("p10"),
+    pointer(8, [`CLAUDE_CONFIG_DIR=${CLAUDE_B}`, `GROK_HOME=${GROK_G}`]),
+    `Prompt | Out-Null`,
+    probe("p11"),
+    `$env:CLAUDE_CONFIG_DIR = ${quote(USER_OWN)}`,
+    pointer(9, []),
+    `Prompt | Out-Null`,
+    probe("p12"),
   ].join("\n");
   const driverFile = path.join(TMP, "powershell", "drive.ps1");
   fs.writeFileSync(driverFile, `${script}\n`);
@@ -432,6 +475,9 @@ function pwshScenario() {
   assert.deepEqual(read("p7"), { claude: USER_OWN, grok: "unset" }, "corrupt header ignored");
   assert.deepEqual(read("p8"), { claude: USER_OWN, grok: "unset" }, "missing file ignored");
   assert.deepEqual(read("p9"), { claude: USER_OWN, grok: GROK_G }, "recovers once the file is back");
+  assert.deepEqual(read("p10"), { claude: PERSONAL_CLAUDE, grok: PERSONAL_GROK }, "personal restores the custom homes");
+  assert.deepEqual(read("p11"), { claude: CLAUDE_B, grok: GROK_G }, "restored personal homes can follow another switch");
+  assert.deepEqual(read("p12"), { claude: USER_OWN, grok: PERSONAL_GROK }, "manual overrides remain untouched");
   pass("pwsh: Global:Prompt follows the pointer under the same rules");
 }
 
@@ -445,6 +491,7 @@ function sourcePins() {
     "zshrc.zsh": fs.readFileSync(path.join(INTEGRATION, "zshrc.zsh"), "utf8"),
     "spark.ps1": fs.readFileSync(path.join(INTEGRATION, "spark.ps1"), "utf8"),
   };
+  for (const name of Object.keys(scripts)) scripts[name] = scripts[name].replace(/\r\n/g, "\n");
   for (const [name, text] of Object.entries(scripts)) {
     assert.ok(text.includes("SPARK_FOLLOW_ACTIVE_ACCOUNT"), `${name} gates on the follow flag`);
     assert.ok(text.includes("active-cli-env"), `${name} reads the pointer`);
@@ -494,14 +541,15 @@ function sourcePins() {
 
 async function main() {
   sourcePins();
-  assert.ok(SHELLS.length > 0, "no bash or zsh found to drive");
+  const pwsh = spawnSync(process.platform === "win32" ? "where" : "which", ["pwsh"], { encoding: "utf8" });
+  assert.ok(SHELLS.length > 0 || pwsh.status === 0, "no supported shell found to drive");
   for (const shell of SHELLS) {
     await followScenario(shell);
+    await customPersonalScenario(shell);
     await noFlagScenario(shell);
     await followOnlyScenario(shell);
     await noIntegrationScenario(shell);
   }
-  const pwsh = spawnSync(process.platform === "win32" ? "where" : "which", ["pwsh"], { encoding: "utf8" });
   if (pwsh.status === 0) {
     pwshScenario();
   } else {

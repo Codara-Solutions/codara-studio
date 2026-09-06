@@ -45,7 +45,7 @@ import {
   resolveFrozenNativeClaudeProfile,
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
-import { resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
+import { personalCliShellHomeEnvironment, resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { installClaudeHooks } from "./hook-installer";
 import {
@@ -1435,7 +1435,7 @@ function doSpawn(
     env.SPARK_AGENT_PANE_ID = opts.id;
   }
   if (opts.nativeCodexHome) {
-    const selectedEnv = buildCodexCliSharedEnvironment(env);
+    const selectedEnv = buildCodexCliSharedEnvironment(env, opts.nativeCodexHome);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1481,6 +1481,7 @@ function doSpawn(
   }
   if (opts.plainShellFollowsActiveAccount || opts.agentShellFollowsActiveAccount) {
     env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
+    Object.assign(env, personalCliShellHomeEnvironment());
   }
   }
 

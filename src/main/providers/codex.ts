@@ -19,7 +19,7 @@
 // and is intentionally untouched to keep this refactor behaviour-preserving.
 
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { defaultPersonalCodexHomeDir } from "../orchestration/codex-cli-account-profiles";
 
 import type { AgentEffortLevel, AgentRuntimeCapabilities, AgentRuntimeModel } from "@shared/types";
 import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
@@ -61,7 +61,9 @@ export const codexProvider: CliProvider = {
   // `~/.codex/config.toml` is the writable config — Codara's directory-trust
   // write targets it, and future hook ingestion will read it for hook
   // declarations.
-  hookConfigPath: join(homedir(), ".codex", "config.toml"),
+  get hookConfigPath() {
+    return join(defaultPersonalCodexHomeDir(), "config.toml");
+  },
   capabilities: CODEX_CAPABILITIES,
   versionArgs: ["--version"],
   models: CODEX_MODELS,

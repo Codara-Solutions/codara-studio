@@ -18,7 +18,8 @@
 # data, never sourced or evaluated: only CLAUDE_CONFIG_DIR and GROK_HOME lines
 # whose value sits under this Codara home's managed accounts root are
 # honored, and a variable is only ever written when it is unset or itself
-# inside that root (a value the user exported elsewhere is never touched).
+# inside that root or matches the personal home supplied at spawn. A different
+# value the user exports manually is never touched.
 # Cost per prompt is one builtin read of the header line: no fork, no stat,
 # and an unchanged revision returns before anything else is parsed. Every
 # failure (missing file, unreadable, bad header) is silent and leaves the
@@ -60,25 +61,26 @@ _spark_follow_active_account() {
       esac
     done < "$file"
   } 2>/dev/null || return 0
-  _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude"
-  _spark_follow_var GROK_HOME "$grok_root" "$grok"
+  _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude" "${SPARK_PERSONAL_CLAUDE_CONFIG_DIR-}"
+  _spark_follow_var GROK_HOME "$grok_root" "$grok" "${SPARK_PERSONAL_GROK_HOME-}"
   __SPARK_ACTIVE_ENV_REV="$rev"
 }
 
 # Write one selector: only when the current value is unset, empty, or
 # already under the managed root (the spawn-time selector and a previous
-# hook write both look like that). An empty target means "personal", so
-# the variable is unset rather than exported empty.
+# hook write both look like that), or still matches the saved personal home.
+# An empty target restores that home; an originally unset selector stays unset.
 _spark_follow_var() {
   emulate -L zsh
-  local name="$1" root="$2" target="$3" current
+  local name="$1" root="$2" target="$3" personal="${4-}" current
   current="${(P)name}"
-  if [[ -n "$current" ]]; then
+  if [[ -n "$current" && "$current" != "$personal" ]]; then
     case "$current" in
       "$root"*) ;;
       *) return 0 ;;
     esac
   fi
+  target="${target:-$personal}"
   if [[ -n "$target" ]]; then
     [[ "$current" = "$target" ]] || export "$name=$target"
   elif [[ -n "$current" ]]; then

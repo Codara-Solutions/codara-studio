@@ -51,6 +51,8 @@ function check(name, condition, detail) {
 async function main() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codara-fs-sandbox-home-"));
   process.env.CODARA_HOME_DIR = home;
+  const customCodexHome = path.join(home, "custom-codex");
+  process.env.CODEX_HOME = customCodexHome;
 
   const bundleDir = path.join(ROOT, "node_modules", ".codara-fs-sandbox-test");
   fs.mkdirSync(bundleDir, { recursive: true });
@@ -68,6 +70,8 @@ async function main() {
   });
   const sandbox = require(outfile);
   const allowed = (p) => sandbox.isAllowedReadPath(p);
+  check("custom Codex config allowed", allowed(path.join(customCodexHome, "config.toml")));
+  check("custom Codex sibling rejected", !allowed(path.join(home, "custom-codex-other", "secret")));
 
   console.log("run artifacts are readable:");
   check(

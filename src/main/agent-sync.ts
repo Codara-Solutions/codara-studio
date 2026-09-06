@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
   AgentAssetCompatibility,
   AgentSyncResult,
@@ -9,6 +9,8 @@ import type {
   WorkerRuntime,
 } from "@shared/types";
 import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
+import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
+import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
 import type {
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
@@ -65,7 +67,7 @@ const MCP_MAP_KEYS = ["mcpServers", "mcp_servers"];
 const MAX_SOURCE_LINES = 8;
 const MCP_SYNC_START = "# >>> SPARK_AGENT_MCP_SYNC";
 const MCP_SYNC_END = "# <<< SPARK_AGENT_MCP_SYNC";
-const CODEX_SYSTEM_SKILL_ROOT = `${normalizePathForMatch(join(".codex", "skills", ".system"))}`;
+const CODEX_SYSTEM_SKILL_ROOT = "/skills/.system/";
 
 export function renderAgentSyncPromptLines(input: {
   cwd: string;
@@ -177,7 +179,7 @@ export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTar
   }
   targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Every workspace, all agents"));
   targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude"));
-  targets.push(mcpTarget("codex", "user", join(home, ".codex", "config.toml"), "Every workspace, Codex"));
+  targets.push(mcpTarget("codex", "user", tomlRuntimeConfigPath("codex"), "Every workspace, Codex"));
   return targets;
 }
 
@@ -374,12 +376,12 @@ const TOML_RUNTIME_LABEL: Record<TomlCopyRuntime, string> = {
 
 function tomlRuntimeConfigPath(runtime: TomlCopyRuntime): string {
   return runtime === "grok"
-    ? join(homedir(), ".grok", "config.toml")
-    : join(homedir(), ".codex", "config.toml");
+    ? join(defaultPersonalGrokHomeDir(), "config.toml")
+    : join(defaultPersonalCodexHomeDir(), "config.toml");
 }
 
 async function installSkillAssetToRuntime(
-  asset: { name: string; path: string },
+  asset: { name: string; path: string; scope: SyncScope },
   target: "claude" | "codex",
 ): Promise<AgentAssetInstallResult> {
   const sourceDir = findSkillDirByName(asset.path, asset.name);
@@ -391,7 +393,7 @@ async function installSkillAssetToRuntime(
   }
   // Mirror the source scope: a workspace skill stays in the workspace (swap the
   // .claude/.codex segment), a user skill lands in the target's user root.
-  const destRoot = deriveSkillDestRoot(asset.path, target);
+  const destRoot = deriveSkillDestRoot(asset.path, asset.scope, target);
   const dest = join(destRoot, basename(sourceDir));
   if (pathExists(dest)) {
     return { ok: false, installed: [], error: `${target} already has skill '${asset.name}'.` };
@@ -405,18 +407,13 @@ function firstMcpMessage(result: AgentSyncResult, fallback: string): string {
   return result.mcp.errors[0] ?? result.mcp.skipped[0] ?? fallback;
 }
 
-// Map a skill-root path on one runtime to the equivalent root on `target` by
-// swapping the nearest `.claude`/`.codex` segment. Falls back to the target's
-// user-scope root when the source path has no recognizable runtime segment.
-function deriveSkillDestRoot(sourceRoot: string, target: "claude" | "codex"): string {
-  const parts = sourceRoot.split(/[\\/]/);
-  for (let i = parts.length - 1; i >= 0; i--) {
-    if (parts[i] === ".claude" || parts[i] === ".codex") {
-      parts[i] = `.${target}`;
-      return parts.join(sep);
-    }
+function deriveSkillDestRoot(sourceRoot: string, scope: SyncScope, target: "claude" | "codex"): string {
+  if (scope === "user") {
+    return join(target === "claude" ? claudeConfigDir() : defaultPersonalCodexHomeDir(), "skills");
   }
-  return join(homedir(), `.${target}`, "skills");
+  // Discovered workspace roots are <workspace>/.claude|.codex|.agents/skills.
+  // Scope, not a folder name inside a relocated user home, selects the target.
+  return join(dirname(dirname(sourceRoot)), `.${target}`, "skills");
 }
 
 /**
@@ -720,7 +717,7 @@ async function syncMcpConfigs(cwd: string | null, result: AgentSyncResult): Prom
   }
 
   const claudePath = join(cwd, ".mcp.json");
-  const codexPath = join(homedir(), ".codex", "config.toml");
+  const codexPath = tomlRuntimeConfigPath("codex");
 
   try {
     const claudeServers = readClaudeMcpServers(claudePath);
@@ -741,10 +738,9 @@ async function syncMcpConfigs(cwd: string | null, result: AgentSyncResult): Prom
 }
 
 async function syncSkillDirs(cwd: string | null, result: AgentSyncResult): Promise<void> {
-  const home = homedir();
   const rootPairs = [
     {
-      codex: join(home, ".codex", "skills"),
+      codex: join(defaultPersonalCodexHomeDir(), "skills"),
       claude: join(claudeConfigDir(), "skills"),
       label: "user",
     },
@@ -1221,8 +1217,8 @@ function mcpConfigCandidates(cwd: string): Array<{
     { runtime: "shared", scope: "user", path: join(home, ".mcp.json") },
     { runtime: "claude", scope: "user", path: claudeUserConfigFile() },
     { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "settings.json") },
-    { runtime: "codex", scope: "user", path: join(home, ".codex", "config.toml") },
-    { runtime: "grok", scope: "user", path: join(home, ".grok", "config.toml") },
+    { runtime: "codex", scope: "user", path: tomlRuntimeConfigPath("codex") },
+    { runtime: "grok", scope: "user", path: tomlRuntimeConfigPath("grok") },
   ];
 }
 
@@ -1231,12 +1227,11 @@ function skillRootCandidates(cwd: string): Array<{
   scope: SyncScope;
   path: string;
 }> {
-  const home = homedir();
   return [
     { runtime: "codex", scope: "workspace", path: join(cwd, ".codex", "skills") },
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "skills") },
     { runtime: "shared", scope: "workspace", path: join(cwd, ".agents", "skills") },
-    { runtime: "codex", scope: "user", path: join(home, ".codex", "skills") },
+    { runtime: "codex", scope: "user", path: join(defaultPersonalCodexHomeDir(), "skills") },
     { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "skills") },
   ];
 }
