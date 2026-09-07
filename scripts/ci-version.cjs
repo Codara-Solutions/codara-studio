@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // CI release versioning: derive the next semantic version from conventional
-// commits since the last release TAG (vX.Y.Z), write it into package.json,
+// commits since the last reserved release TAG (vX.Y.Z), write it into package.json,
 // and expose outputs for the workflow. Mirrors the rules in release.cjs:
 // breaking change -> major, an explicit "Release: minor" trailer -> minor,
 // anything else (including feat:) -> patch. Every nightly run ships whatever
@@ -10,6 +10,7 @@
 // Outputs (GITHUB_OUTPUT): version=<X.Y.Z> skip=<true|false>
 // Skips when HEAD is a release bookkeeping commit ("release: vX.Y.Z" from the
 // local pipeline) or when no commits landed since the last release tag.
+// Publication recovery restores the saved bundle and bypasses this script.
 
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -34,7 +35,7 @@ if (/^release: v\d/.test(headSubject)) {
   process.exit(0);
 }
 
-// Highest vX.Y.Z tag = the last shipped version.
+// Tags reserve versions before publication, so a failed upload cannot reuse one.
 const tags = git(["tag", "--list", "v[0-9]*"])
   .split("\n")
   .filter(Boolean)
