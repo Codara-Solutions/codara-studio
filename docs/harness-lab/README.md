@@ -302,3 +302,35 @@ pilots, builds, and Electron tests overlapped portions of the matrix, so the
 [recorded wall times](hard-matrix.json) cannot support an isolated speed ranking.
 One trial per contract is a coverage check; these saturated train tasks need
 repeated, harder, and holdout validation before broader reliability claims.
+
+## Direct memory and long tool loops: validation in progress
+
+Direct Cora now receives a compact `codara_remember` tool even when the task
+needs no Studio UI tools. Its writes use the calling run's workspace and profile.
+Delegated and automation workers retain their existing restrictions. The direct
+prompt no longer tells Cora to hand memory curation to a manager that is absent.
+Offline checks cover the roster, scoped run identity, existing memory guards,
+and a tool-schema size below 1,500 characters.
+
+`scripts/smoke-cora-memory.cjs` is ready for live validation. It starts fresh
+conversations to save and recall workspace/global preferences, correct a stale
+preference while retaining a user-authored line, and check workspace and profile
+isolation. It has not yet run against the new implementation.
+
+Long worker tasks now pause at a completed tool-round boundary when they cross
+the configured context threshold. The host waits for Pi to settle, requests
+compaction, and resumes the same session. Cancellation and compaction failures
+prevent continuation. Worker totals include the summary request's reported usage.
+This avoids calling Pi's aborting compact command inside an active tool round.
+
+The pinned Pi 0.85.1 integration test uses a local deterministic model and a
+side-effecting tool. It confirms a durable compaction entry, a resumed task, and
+one execution of the tool. Unit checks cover repeated compaction, duplicate
+settlements, cancellation, summary failure, and usage accounting. This proves
+runtime sequencing, not a real model's retention quality.
+
+`scripts/smoke-cora-long-context.cjs` is ready for the live retention check. Start
+a dedicated lab app with `CODARA_PI_COMPACT_AT_TOKENS=32768`; the probe reads
+eight large evidence batches exactly once and checks original instructions and
+all markers after compaction. The repeated harness comparison keeps its original
+binary and sources until it finishes, so these new live probes are pending.
