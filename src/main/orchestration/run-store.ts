@@ -299,6 +299,13 @@ import {
   type ChatBackendConfig,
   type ChatStreamEvent,
 } from "./agent-backend";
+import {
+  buildDirectTurnPrompt,
+  directCompactionInput,
+  directCompactionSnapshotStillCurrent,
+  directConversationMessages,
+  directConversationNeedsCompaction,
+} from "./direct-conversation";
 import { disposeManagerSessions, getBackend } from "./backend-registry";
 import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
 import {
@@ -1839,12 +1846,17 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
   const directInputMessages = directInputMessageIds
     .map((messageId) => run.humanMessages.find((message) => message.id === messageId))
     .filter((message): message is HumanRunMessage => Boolean(message));
-  const directPrompt =
-    directInputMessages.length > 0
-      ? renderBundledManagerInput(directInputMessages)
-      : input.prompt;
   const cwd = workspaceCwdFromRun(run);
   if (!cwd) throw new Error(`Direct run has no workspace cwd: ${input.runId}`);
+  if (!run.automationId && directConversationNeedsCompaction(run, directInputMessages)) {
+    await performAutoCompaction(run.id, cwd);
+    run = await requireRun(run.id);
+  }
+  const directPrompt = directInputMessages.length === 0
+    ? input.prompt
+    : run.automationId
+      ? renderBundledManagerInput(directInputMessages)
+      : buildDirectTurnPrompt(run, directInputMessages);
   return launchDirectIterationTask({
     runId: run.id,
     cwd,
@@ -13936,10 +13948,10 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       );
       return;
     }
-    // No provider session means there is no held context to summarize — the
-    // backend would spawn a FRESH session and "summarize" nothing. Skip;
-    // nothing durable has been recorded yet.
-    if (!chatConfig.sessionUuid) {
+    const directConversation = run.executionMode === "direct" && !run.automationId;
+    // Direct turns have no manager session; their canonical dialogue is the
+    // complete input to a fresh summary call.
+    if (!chatConfig.sessionUuid && !directConversation) {
       console.warn(
         `[run-store] auto-compaction skipped for run ${runId}: no provider session to summarize`,
       );
@@ -13991,6 +14003,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     });
     if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
     run = prepared;
+    const compactionSource = structuredClone(run);
 
     const startedMs = Date.now();
     let result: Awaited<ReturnType<typeof backend.requestManagerDecision>>;
@@ -14000,7 +14013,9 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         cwd,
         mode: "chat",
         chat: { ...chatConfig },
-        prompt: AUTO_COMPACTION_SUMMARY_PROMPT,
+        prompt: directConversation
+          ? directCompactionInput(compactionSource, AUTO_COMPACTION_SUMMARY_PROMPT)
+          : AUTO_COMPACTION_SUMMARY_PROMPT,
         inputMessageIds: [],
         conversationEpoch: epoch,
       });
@@ -14063,6 +14078,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         ) {
           return false;
         }
+        if (directConversation && !directCompactionSnapshotStillCurrent(compactionSource, draft)) return false;
         // Undelivered input queued while summarizing belongs to the old epoch;
         // cutting over would strand it, so abort and let its turn run first —
         // the ratio is still high after that turn, so compaction re-triggers.
@@ -14149,7 +14165,8 @@ export async function compactConversation(runId: string): Promise<RunState> {
   if (["paused", "blocked", "cancelled", "failed"].includes(run.status)) {
     throw new Error(`Cannot compact while this run is ${run.status}.`);
   }
-  if (!resolveChatBackendConfig(run).sessionUuid) {
+  if (!resolveChatBackendConfig(run).sessionUuid &&
+      !(run.executionMode === "direct" && !run.automationId && directConversationMessages(run).length > 0)) {
     throw new Error("There is no provider conversation to compact yet.");
   }
   const cwd = workspaceCwdFromRun(run);
