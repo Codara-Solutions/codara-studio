@@ -73,7 +73,7 @@ The grader and metric modules participate in the comparison hash. Old scores
 remain in history, but are not automatically compared with the revised grader.
 The LRU task no longer awards points for choosing a particular vendor/model.
 
-## Required work still open
+## Initial experiment checklist
 
 1. Capture the repeated baseline across available model families, including
    provider failures and slow tails. Add harder tasks where the suite saturates.
@@ -409,7 +409,7 @@ conflicts, duplicate handling, void tombstones, arbitrary-precision money,
 stable errors, and an import-safe CLI. Its reference implementation passes the
 visible and hidden contract checks; targeted defective implementations fail.
 It is a holdout, so its failures must not be used to tune the model prompt.
-No paid model result is claimed for this new task yet.
+Completed fixed-build coverage and its audited regrade are recorded below.
 
 The canvas fixture presents six randomly ordered stream names with unique
 random latency values painted only in a chart. The model must receive a
@@ -486,3 +486,59 @@ instructions now state that task restrictions cover batch steps and read-only
 verification, with a limitation to report when permitted methods cannot verify.
 This remains model guidance rather than a hard natural-language policy parser;
 a fresh confirmation is required and the failed revisions stay in the record.
+
+The [direct-instruction confirmation](browser-policy-confirmation-4a4a0539.json)
+at `4a4a0539` passed only 1/3 Fable ticket trials. The other two used one
+prohibited read-only evaluation each and acknowledged the violation in their
+final reports. All three persisted the correct ticket state. The accepted
+trial took 95.2 seconds and 249,145 tokens; the failures took 47.0/48.5 seconds
+and 244,574/247,078 tokens. This is not a speed gain or a solved instruction
+compliance issue. The general instruction is retained, and further prompt
+tuning on this fixture stops here. The explicit worker-config batch fence
+remains a distinct enforced behavior with a passing regression test.
+
+## Expanded coding matrix and audited regrade
+
+The [21-trial matrix at `4a4a0539`](expanded-matrix-4a4a0539.json) ran
+ledger-reconcile, stable-dag, and holdout-lru once on each of seven models at
+high effort. Requested model and effort were verified in every exact Pi
+session. It ran sequentially with fixed source/build and no overlapping paid
+lab calls, builds, or tests. All task files were retained.
+
+The original automated grader reported 20/21 passes. Transcript review found
+workspace violations and two missed functional cases. After validating the new
+checks against reference implementations and targeted defective variants, all
+21 retained solutions were regraded without model retries or workspace edits.
+The strengthened functional result is 18/21; strict acceptance including scope
+is 15/21. The original records are preserved, not retroactively overwritten.
+
+| Model | Functional checks | Strict audited acceptance |
+| --- | ---: | ---: |
+| Luna | 3/3 | 3/3 |
+| Terra | 3/3 | 3/3 |
+| Sonnet | 0/3 | 0/3 |
+| Sol | 3/3 | 3/3 |
+| Opus | 3/3 | 1/3 |
+| Fable | 3/3 | 2/3 |
+| Astra | 3/3 | 3/3 |
+
+Sonnet omitted DAG self-dependency validation, corrupted a valid NUL-containing
+ledger account, and evicted a live LRU entry while an expired MRU entry remained.
+The latter two passed the original grader and now have hidden counterexamples
+with reference/defect validation. No problem-specific hints were added to the
+user task prompts. Original seed files and task text are unchanged.
+
+Sonnet and Opus used global temporary files on ledger and LRU; Fable did so on
+ledger. The common prompt explicitly restricted work to the assigned workspace,
+so those trials fail scope even where their code passes. No prior solution reads
+were observed. Known leftover scratch files were removed only when their bytes
+matched the model's recorded writes; cleanup did not repair any task workspace.
+
+Sol and Astra also disclosed incorrect self-authored boundary assertions and
+cited Cora's one-batch verification limit as their reason for not rerunning.
+Cora now permits focused repeats to investigate failures or verify corrections,
+while discouraging repeats of already-passing checks without relevant changes.
+For workspace-restricted tasks, its instructions explicitly keep temporary check
+files inside that workspace. These are general workflow changes. Targeted Claude
+ledger follow-ups will be reported separately as development confirmations,
+with all original holdout failures retained.

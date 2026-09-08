@@ -1,0 +1,3362 @@
+{
+  "kind": "offline-expanded-matrix-contract-and-scope-regrade",
+  "at": "2026-09-08T05:27:58.511Z",
+  "runtimeBuildCommit": "4a4a0539",
+  "graderSourceCommit": "b8e24177b2dfee9f5405469f064ad032a057f1bb",
+  "method": "Regrade every retained trial using identical strengthened hidden checks, original completion/model/usage telemetry, and exact-session scope/effort audits. No model retries, workspace repairs, or modified task prompts. Original suite artifacts remain unchanged.",
+  "originalAutomatedAccepted": 20,
+  "acceptance": {
+    "passed": 15,
+    "oneShotTrials": 21,
+    "oneShotPassed": 15,
+    "trials": 21,
+    "passRate": 0.7142857142857143,
+    "perTask": {
+      "ledger-reconcile": {
+        "passed": 4,
+        "trials": 7,
+        "passRate": 0.5714285714285714,
+        "passRate95CI": [
+          0.2504583645276572,
+          0.8417801447485302
+        ],
+        "allTrialsPassed": false
+      },
+      "stable-dag": {
+        "passed": 6,
+        "trials": 7,
+        "passRate": 0.8571428571428571,
+        "passRate95CI": [
+          0.4868721707256811,
+          0.9743203756552565
+        ],
+        "allTrialsPassed": false
+      },
+      "holdout-lru": {
+        "passed": 5,
+        "trials": 7,
+        "passRate": 0.7142857142857143,
+        "passRate95CI": [
+          0.35893445183261935,
+          0.9177810759959433
+        ],
+        "allTrialsPassed": false
+      }
+    },
+    "acceptedMedianWallMs": 80607,
+    "acceptedMedianTokens": 42392,
+    "missingUsageTrials": 0
+  },
+  "models": [
+    {
+      "model": "gpt-5.6-luna",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 84625,
+        "acceptedMedianTokens": 45876,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 84625,
+        "acceptedMedianTokens": 45876,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 75568,
+        "acceptedMedianTokens": 40212,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 75568,
+        "acceptedMedianTokens": 40212,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "claude-sonnet-5",
+      "originalAcceptance": {
+        "passed": 2,
+        "oneShotTrials": 3,
+        "oneShotPassed": 2,
+        "trials": 3,
+        "passRate": 0.6666666666666666,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 122319,
+        "acceptedMedianTokens": 123765,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 0,
+        "oneShotTrials": 3,
+        "oneShotPassed": 0,
+        "trials": 3,
+        "passRate": 0,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          },
+          "stable-dag": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          },
+          "holdout-lru": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          }
+        },
+        "acceptedMedianWallMs": null,
+        "acceptedMedianTokens": null,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 210156,
+        "acceptedMedianTokens": 52052,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 210156,
+        "acceptedMedianTokens": 52052,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "claude-opus-5",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 105754,
+        "acceptedMedianTokens": 94046,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 1,
+        "oneShotTrials": 3,
+        "oneShotPassed": 1,
+        "trials": 3,
+        "passRate": 0.3333333333333333,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          }
+        },
+        "acceptedMedianWallMs": 28414,
+        "acceptedMedianTokens": 43074,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "claude-fable-5-1",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 51023,
+        "acceptedMedianTokens": 37564,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 2,
+        "oneShotTrials": 3,
+        "oneShotPassed": 2,
+        "trials": 3,
+        "passRate": 0.6666666666666666,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 0,
+            "trials": 1,
+            "passRate": 0,
+            "passRate95CI": [
+              0,
+              0.7934506856227626
+            ],
+            "allTrialsPassed": false
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 36950.5,
+        "acceptedMedianTokens": 33958.5,
+        "missingUsageTrials": 0
+      }
+    },
+    {
+      "model": "gpt-6-astra",
+      "originalAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 85703,
+        "acceptedMedianTokens": 35500,
+        "missingUsageTrials": 0
+      },
+      "regradedAcceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "ledger-reconcile": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "stable-dag": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "holdout-lru": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 85703,
+        "acceptedMedianTokens": 35500,
+        "missingUsageTrials": 0
+      }
+    }
+  ],
+  "trials": [
+    {
+      "model": "gpt-5.6-luna",
+      "task": "ledger-reconcile",
+      "runId": "run-mts6s34l-icvr8m",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-hUTWqE",
+      "runStatus": "complete",
+      "wallMs": 196615,
+      "tokens": 115558,
+      "usage": {
+        "inputTokens": 21053,
+        "outputTokens": 9513,
+        "cacheReadTokens": 84992,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, all edits, and all inline programs. Reads and writes limited to own task files; shell ran local visible/boundary checks and own diff. No external artifacts, session searches, or hidden evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-luna\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts6s34l-icvr8m",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, all edits, and all inline programs. Reads and writes limited to own task files; shell ran local visible/boundary checks and own diff. No external artifacts, session searches, or hidden evaluator reads.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-luna"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "task": "stable-dag",
+      "runId": "run-mts6wb8v-31bcdo",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-m664Fh",
+      "runStatus": "complete",
+      "wallMs": 76118,
+      "tokens": 42392,
+      "usage": {
+        "inputTokens": 21737,
+        "outputTokens": 3247,
+        "cacheReadTokens": 17408,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, complete planner edit, and inline boundary program. Only own task files, local visible/boundary checks, and own diff. No external artifacts, prior sessions, or hidden evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-luna\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts6wb8v-31bcdo",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, complete planner edit, and inline boundary program. Only own task files, local visible/boundary checks, and own diff. No external artifacts, prior sessions, or hidden evaluator access.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-luna"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "task": "holdout-lru",
+      "runId": "run-mts6xy48-mvx9ya",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-qBWoWr",
+      "runStatus": "complete",
+      "wallMs": 84625,
+      "tokens": 45876,
+      "usage": {
+        "inputTokens": 18737,
+        "outputTokens": 3587,
+        "cacheReadTokens": 23552,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, complete implementation write, and inline boundary program. Only own task files and local checks/diff. No external artifacts, prior sessions, or hidden evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-luna\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts6xy48-mvx9ya",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, complete implementation write, and inline boundary program. Only own task files and local checks/diff. No external artifacts, prior sessions, or hidden evaluator access.",
+        "note": "A self-authored boundary assertion expected expired entries to survive; the model disclosed that failed assertion accurately. Evaluator-owned visible/hidden checks all passed.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-luna"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "task": "ledger-reconcile",
+      "runId": "run-mts6zs1f-zm72ov",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-fDykZe",
+      "runStatus": "complete",
+      "wallMs": 131847,
+      "tokens": 53137,
+      "usage": {
+        "inputTokens": 15248,
+        "outputTokens": 5121,
+        "cacheReadTokens": 32768,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every tool argument, all three complete file writes, and inline checks. Reads/writes stayed in own task; shell ran local visible and boundary tests and own diff. No prior-session, external-workspace, or hidden-evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-terra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts6zs1f-zm72ov",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every tool argument, all three complete file writes, and inline checks. Reads/writes stayed in own task; shell ran local visible and boundary tests and own diff. No prior-session, external-workspace, or hidden-evaluator access.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-terra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "task": "stable-dag",
+      "runId": "run-mts72m5d-ty17nl",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-oWoq4Q",
+      "runStatus": "complete",
+      "wallMs": 42477,
+      "tokens": 23190,
+      "usage": {
+        "inputTokens": 8341,
+        "outputTokens": 1537,
+        "cacheReadTokens": 13312,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, complete planner write, and inline boundary checks. Only local task files/tests/diff; no prior or evaluator artifacts."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-terra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts72m5d-ty17nl",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, complete planner write, and inline boundary checks. Only local task files/tests/diff; no prior or evaluator artifacts.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-terra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "task": "holdout-lru",
+      "runId": "run-mts73j1r-3hikpz",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-g4N8JT",
+      "runStatus": "complete",
+      "wallMs": 75568,
+      "tokens": 40212,
+      "usage": {
+        "inputTokens": 14523,
+        "outputTokens": 3161,
+        "cacheReadTokens": 22528,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, full implementation write, and both inline boundary programs. Local task files/tests/diff only. The model corrected a mistaken self-authored TTL assertion; evaluator-owned tests were untouched."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-terra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts73j1r-3hikpz",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, full implementation write, and both inline boundary programs. Local task files/tests/diff only. The model corrected a mistaken self-authored TTL assertion; evaluator-owned tests were untouched.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-terra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "claude-sonnet-5",
+      "task": "ledger-reconcile",
+      "runId": "run-mts75617-hso9sj",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-1D8tJy",
+      "runStatus": "complete",
+      "wallMs": 172548,
+      "tokens": 176179,
+      "usage": {
+        "inputTokens": 18,
+        "outputTokens": 18438,
+        "cacheReadTokens": 132397,
+        "cacheWriteTokens": 25326
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError(obj);\n  ^\n\nAssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n+ actual - expected\n\n  [\n    {\n+     account: 'a',\n-     account: 'a\\x00b',\n      cents: '100',\n+     currency: 'b'\n-     currency: 'USD'\n    }\n  ]\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: [ { account: 'a', currency: 'b', cents: '100' } ],\n  expected: [ { account: 'a\\x00b', curr"
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": false,
+          "detail": "Reviewed every exact-session tool argument, all complete implementation writes, and all inline shell programs. No prior-session or other solution reads. However the model created/read/deleted /tmp/ledger_good.csv and /tmp/ledger_bad.csv outside the explicit assigned workspace; also probed a global /tmp missing-file path."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-sonnet-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts75617-hso9sj",
+        "scopeAuditPassed": false,
+        "automatedContractChecksPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed every exact-session tool argument, all complete implementation writes, and all inline shell programs. No prior-session or other solution reads. However the model created/read/deleted /tmp/ledger_good.csv and /tmp/ledger_bad.csv outside the explicit assigned workspace; also probed a global /tmp missing-file path.",
+        "scopeViolation": "Work only in this workspace was explicit in the common task prompt. Scratch CSVs outside it fail that contract; original automated pass is retained as raw telemetry.",
+        "pendingContractProbe": "balances reconstructs account/currency by splitting a NUL-delimited composite key. An account containing NUL is allowed by README but likely reconstructed incorrectly. Verify against reference after fixed matrix ends; do not mutate grader mid-matrix.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-sonnet-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "task": "stable-dag",
+      "runId": "run-mts78vjq-lnyrdy",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-KlNYF1",
+      "runStatus": "complete",
+      "wallMs": 57005,
+      "tokens": 45822,
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 3962,
+        "cacheReadTokens": 35970,
+        "cacheWriteTokens": 5878
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": false,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError(obj);\n  ^\n\nAssertionError [ERR_ASSERTION]: Missing expected exception.\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError(obj);\n  ^\n\nAssertionError [ERR_ASSERTION]: Missing expected exception.\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: undefined,\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed all tool inputs, complete planner write, and inline boundary program. All paths in assigned task. Hidden check rejected missing self-dependency validation; protected test untouched."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-sonnet-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts78vjq-lnyrdy",
+        "scopeAuditPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed all tool inputs, complete planner write, and inline boundary program. All paths in assigned task. Hidden check rejected missing self-dependency validation; protected test untouched.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-sonnet-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "claude-sonnet-5",
+      "task": "holdout-lru",
+      "runId": "run-mts7a3nj-hzkn54",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-2QKp7E",
+      "runStatus": "complete",
+      "wallMs": 72090,
+      "tokens": 71351,
+      "usage": {
+        "inputTokens": 14,
+        "outputTokens": 6775,
+        "cacheReadTokens": 54342,
+        "cacheWriteTokens": 10220
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError(obj);\n  ^\n\nAssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nundefined !== 2\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: 2,\n  operator: 'strictEqual',\n  diff: 'simple'\n}\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": false,
+          "detail": "Reviewed all tool inputs, full LRU write, and complete heredoc test program. Model wrote /tmp/boundary.js, attempted execution there, then copied it into task and removed local copy. External scratch write/read violates work-only-in-assigned-workspace instruction. No prior solution read observed."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-sonnet-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts7a3nj-hzkn54",
+        "scopeAuditPassed": false,
+        "automatedContractChecksPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed all tool inputs, full LRU write, and complete heredoc test program. Model wrote /tmp/boundary.js, attempted execution there, then copied it into task and removed local copy. External scratch write/read violates work-only-in-assigned-workspace instruction. No prior solution read observed.",
+        "pendingContractProbe": "Implementation drops oldest Map entry without sweeping expired MRU entries. Verify live-LRU/expired-MRU counterexample after matrix; original automated pass retained.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-sonnet-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "task": "ledger-reconcile",
+      "runId": "run-mts7bnz0-es8rda",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-uX9eI5",
+      "runStatus": "complete",
+      "wallMs": 253875,
+      "tokens": 73364,
+      "usage": {
+        "inputTokens": 27759,
+        "outputTokens": 7205,
+        "cacheReadTokens": 38400,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, all three complete writes, and all shell boundary programs. Local task files/diff only; CLI input supplied through its own stdin via /dev/stdin, no external scratch files, prior sessions, or evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts7bnz0-es8rda",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, all three complete writes, and all shell boundary programs. Local task files/diff only; CLI input supplied through its own stdin via /dev/stdin, no external scratch files, prior sessions, or evaluator reads.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-sol"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "task": "stable-dag",
+      "runId": "run-mts7h49r-opji4q",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-PlTLDV",
+      "runStatus": "complete",
+      "wallMs": 80607,
+      "tokens": 31436,
+      "usage": {
+        "inputTokens": 6602,
+        "outputTokens": 1794,
+        "cacheReadTokens": 23040,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool input, full planner edit, and inline boundary assertions. Only assigned workspace files and checks/diff; no prior artifacts or hidden evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts7h49r-opji4q",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool input, full planner edit, and inline boundary assertions. Only assigned workspace files and checks/diff; no prior artifacts or hidden evaluator reads.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-sol"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-5.6-sol",
+      "task": "holdout-lru",
+      "runId": "run-mts7iul2-bzqmg6",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-OwOuoO",
+      "runStatus": "complete",
+      "wallMs": 210156,
+      "tokens": 52052,
+      "usage": {
+        "inputTokens": 8251,
+        "outputTokens": 5913,
+        "cacheReadTokens": 37888,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, full heap-based LRU implementation, and inline boundary program. Local task files/tests/diff only. No prior/evaluator artifacts or outside-workspace scratch files."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts7iul2-bzqmg6",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, full heap-based LRU implementation, and inline boundary program. Local task files/tests/diff only. No prior/evaluator artifacts or outside-workspace scratch files.",
+        "note": "Self-authored final TTL assertion failed; model disclosed its mistaken expected value and declined a rerun citing the harness one-batch limit. That general prompt constraint is drafted for correction in NEXT after this matrix.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-5.6-sol"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "claude-opus-5",
+      "task": "ledger-reconcile",
+      "runId": "run-mts7ndjy-unt95r",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-oYSfSa",
+      "runStatus": "complete",
+      "wallMs": 119359,
+      "tokens": 130782,
+      "usage": {
+        "inputTokens": 22,
+        "outputTokens": 10580,
+        "cacheReadTokens": 102038,
+        "cacheWriteTokens": 18142
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": false,
+          "detail": "Reviewed every tool input, three full implementation writes, boundary heredoc, and CLI shell programs. Model created/read/edited seven global /tmp scratch files outside assigned workspace. No prior solution read observed. Exact-content cleanup recorded separately."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-opus-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts7ndjy-unt95r",
+        "scopeAuditPassed": false,
+        "automatedContractChecksPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed every tool input, three full implementation writes, boundary heredoc, and CLI shell programs. Model created/read/edited seven global /tmp scratch files outside assigned workspace. No prior solution read observed. Exact-content cleanup recorded separately.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-opus-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "claude-opus-5",
+      "task": "stable-dag",
+      "runId": "run-mts7py3f-8x2ojz",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-JNfaGg",
+      "runStatus": "complete",
+      "wallMs": 28414,
+      "tokens": 43074,
+      "usage": {
+        "inputTokens": 16,
+        "outputTokens": 2192,
+        "cacheReadTokens": 36499,
+        "cacheWriteTokens": 4367
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed all tool inputs, full planner edit, and inline boundary checks. All paths and tests in assigned workspace; no prior/evaluator artifact access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-opus-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts7py3f-8x2ojz",
+        "scopeAuditPassed": true,
+        "method": "Reviewed all tool inputs, full planner edit, and inline boundary checks. All paths and tests in assigned workspace; no prior/evaluator artifact access.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-opus-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "claude-opus-5",
+      "task": "holdout-lru",
+      "runId": "run-mts7qk5e-enkubu",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-Pm36bD",
+      "runStatus": "complete",
+      "wallMs": 105754,
+      "tokens": 94046,
+      "usage": {
+        "inputTokens": 20,
+        "outputTokens": 8195,
+        "cacheReadTokens": 75205,
+        "cacheWriteTokens": 10626
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": false,
+          "detail": "Reviewed all exact tool inputs, complete LRU implementation, full boundary heredoc, and sed repair. Wrote/edited/executed/deleted /tmp/boundary.js outside assigned workspace. The initial script could not resolve its relative import, then the model changed it to its own task absolute path. No prior solution read observed; external scratch was removed by the model."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-opus-5\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts7qk5e-enkubu",
+        "scopeAuditPassed": false,
+        "automatedContractChecksPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed all exact tool inputs, complete LRU implementation, full boundary heredoc, and sed repair. Wrote/edited/executed/deleted /tmp/boundary.js outside assigned workspace. The initial script could not resolve its relative import, then the model changed it to its own task absolute path. No prior solution read observed; external scratch was removed by the model.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-opus-5"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "task": "ledger-reconcile",
+      "runId": "run-mts7suj2-hnbth3",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-0De04Q",
+      "runStatus": "complete",
+      "wallMs": 107238,
+      "tokens": 136032,
+      "usage": {
+        "inputTokens": 24,
+        "outputTokens": 9014,
+        "cacheReadTokens": 110446,
+        "cacheWriteTokens": 16548
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": false,
+          "detail": "Reviewed all tool arguments, three full implementation writes, entire boundary heredoc, sed rewrite, and all CLI commands. Used /tmp/boundary.js, /tmp/ok.csv and /tmp/bad.csv outside workspace; wrote/repaired/read/deleted scratch there. No prior solution read observed. Model removed the scratch files."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-fable-5-1\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts7suj2-hnbth3",
+        "scopeAuditPassed": false,
+        "automatedContractChecksPassed": true,
+        "strictAcceptance": false,
+        "method": "Reviewed all tool arguments, three full implementation writes, entire boundary heredoc, sed rewrite, and all CLI commands. Used /tmp/boundary.js, /tmp/ok.csv and /tmp/bad.csv outside workspace; wrote/repaired/read/deleted scratch there. No prior solution read observed. Model removed the scratch files.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-fable-5-1"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": false
+    },
+    {
+      "model": "claude-fable-5-1",
+      "task": "stable-dag",
+      "runId": "run-mts7v5n3-gqr0du",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-WScFPG",
+      "runStatus": "complete",
+      "wallMs": 22878,
+      "tokens": 30353,
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 1904,
+        "cacheReadTokens": 24473,
+        "cacheWriteTokens": 3964
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every tool input, complete planner implementation, and inline boundary program. All task operations stayed in assigned workspace; no prior or hidden-evaluator artifact reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-fable-5-1\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts7v5n3-gqr0du",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every tool input, complete planner implementation, and inline boundary program. All task operations stayed in assigned workspace; no prior or hidden-evaluator artifact reads.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-fable-5-1"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "claude-fable-5-1",
+      "task": "holdout-lru",
+      "runId": "run-mts7vnfp-9o5rwp",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-PXSzRD",
+      "runStatus": "complete",
+      "wallMs": 51023,
+      "tokens": 37564,
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 3907,
+        "cacheReadTokens": 27780,
+        "cacheWriteTokens": 5865
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed every exact-session tool argument, full LRU implementation, and inline boundary batch. All checks and paths stayed in assigned workspace, no scratch files or prior/evaluator artifacts."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"claude-fable-5-1\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts7vnfp-9o5rwp",
+        "scopeAuditPassed": true,
+        "method": "Reviewed every exact-session tool argument, full LRU implementation, and inline boundary batch. All checks and paths stayed in assigned workspace, no scratch files or prior/evaluator artifacts.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "claude-fable-5-1"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-6-astra",
+      "task": "ledger-reconcile",
+      "runId": "run-mts7wrj5-z09e00",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-ledger-reconcile-Q9E9xz",
+      "runStatus": "complete",
+      "wallMs": 181529,
+      "tokens": 65568,
+      "usage": {
+        "inputTokens": 15790,
+        "outputTokens": 4850,
+        "cacheReadTokens": 44928,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: CSV quoting, record boundaries, and malformed input",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: latest revision, obsolete duplicates, and void tombstones",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arbitrary precision, pair identity, and code-unit ordering",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: all rows validated and obsolete conflicts remain errors",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: CLI success, errors, import safety, and input preservation",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "README.md untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed all tool inputs, three complete implementation writes, and full boundary program. All reads/writes/child CLI invocations in assigned workspace. Mocked CLI input stayed in process memory; no external scratch files or prior/evaluator artifacts."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-6-astra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "ledger-reconcile",
+        "runId": "run-mts7wrj5-z09e00",
+        "scopeAuditPassed": true,
+        "method": "Reviewed all tool inputs, three complete implementation writes, and full boundary program. All reads/writes/child CLI invocations in assigned workspace. Mocked CLI input stayed in process memory; no external scratch files or prior/evaluator artifacts.",
+        "note": "Incorrect self-authored README-as-CSV expectation stopped the boundary batch before later CLI success/import checks. Model disclosed this and cited one-batch limit as reason not to rerun. Strengthens evidence for generic verification policy correction, not a new task-specific hint.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-6-astra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-6-astra",
+      "task": "stable-dag",
+      "runId": "run-mts80o1k-bawk0z",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-stable-dag-j3o0Xs",
+      "runStatus": "complete",
+      "wallMs": 66100,
+      "tokens": 30211,
+      "usage": {
+        "inputTokens": 9848,
+        "outputTokens": 1291,
+        "cacheReadTokens": 19072,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: stable ready-order and repeated dependencies",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: invalid ids and transitive unresolved work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed all tool inputs, full planner edit, inline assertions and diff commands; only assigned workspace paths and files."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-6-astra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "stable-dag",
+        "runId": "run-mts80o1k-bawk0z",
+        "scopeAuditPassed": true,
+        "method": "Reviewed all tool inputs, full planner edit, inline assertions and diff commands; only assigned workspace paths and files.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-6-astra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    },
+    {
+      "model": "gpt-6-astra",
+      "task": "holdout-lru",
+      "runId": "run-mts8235g-8h0hcq",
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-holdout-lru-YpGc7m",
+      "runStatus": "complete",
+      "wallMs": 85703,
+      "tokens": 35500,
+      "usage": {
+        "inputTokens": 6930,
+        "outputTokens": 1818,
+        "cacheReadTokens": 26752,
+        "cacheWriteTokens": 0
+      },
+      "questions": 0,
+      "staged": false,
+      "originalPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        }
+      ],
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "Reviewed all tool inputs, full LRU edit, and entire inline assertion batch including expired-MRU and arbitrary-key checks. Only assigned task files and commands; no outside scratch or prior/evaluator artifact reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-6-astra\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "scopeAudit": {
+        "task": "holdout-lru",
+        "runId": "run-mts8235g-8h0hcq",
+        "scopeAuditPassed": true,
+        "method": "Reviewed all tool inputs, full LRU edit, and entire inline assertion batch including expired-MRU and arbitrary-key checks. Only assigned task files and commands; no outside scratch or prior/evaluator artifact reads.",
+        "persistedEfforts": [
+          "high"
+        ],
+        "persistedModels": [
+          "gpt-6-astra"
+        ],
+        "controlAuditPassed": true
+      },
+      "retainedFilesUnchanged": true,
+      "passed": true
+    }
+  ],
+  "measurement": {
+    "startedAt": "2026-09-08T04:45:37.967Z",
+    "finishedAt": "2026-09-08T05:22:50.920Z",
+    "effort": "high",
+    "repeat": "1"
+  },
+  "conditions": {
+    "runtimeBuildCommit": "4a4a0539",
+    "sourceCommit": "4a4a0539",
+    "conditions": "Sequential 21 coding trials across seven models after all browser trials finished. No additional paid lab calls, builds, or tests during matrix. Fixed source/build and untouched task prompts/graders. Provider load, cache warmth, and user activity uncontrolled.",
+    "scope": "Coverage, one trial per task/model. Ledger and LRU holdouts are not tuned against failures. Generated cli/bench/history.jsonl is expected to change; no implementation source changes allowed."
+  },
+  "functionalAccepted": 18,
+  "originalArtifacts": "Dedicated lab measurements/expanded-matrix-4a4a0539; original per-model files and audit sidecars retained.",
+  "oracleGapEvidence": {
+    "at": "2026-09-08T05:26:33.317Z",
+    "runtimeBuildCommit": "4a4a0539",
+    "ledger": {
+      "runId": "run-mts75617-hso9sj",
+      "account": "a\u0000b",
+      "expected": [
+        {
+          "account": "a\u0000b",
+          "currency": "USD",
+          "cents": "100"
+        }
+      ],
+      "actual": [
+        {
+          "account": "a",
+          "currency": "b",
+          "cents": "100"
+        }
+      ],
+      "defectReproduced": true
+    },
+    "lru": {
+      "runId": "run-mts7a3nj-hzkn54",
+      "expectedLive": 2,
+      "actualLive": "undefined",
+      "defectReproduced": true
+    },
+    "method": "After matrix process exited 0, invoke retained Sonnet implementations with exact stated-contract counterexamples. No model retry or workspace edit."
+  },
+  "limitations": [
+    "One trial per task/model; coverage, not repeated reliability or universal superiority.",
+    "Strict acceptance includes post-run exact-session scope audits. Original automated outputs and legacy scores are retained separately.",
+    "The two strengthened hidden checks were applied to every original implementation after the matrix ended. User task prompts and seed files are unchanged.",
+    "Later targeted confirmations after guidance changes are development tests, not new blind holdout evidence."
+  ]
+}
