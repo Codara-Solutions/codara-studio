@@ -345,8 +345,19 @@ eight large evidence batches exactly once and checks original instructions and
 all markers after compaction. Live probes retained all evidence and avoided
 repeating side effects, but exposed tool-restriction drift in the summaries.
 The host now replays the original task contract, path boundaries, and subsequent
-steering verbatim after compaction. Final live validation of this change is
-in progress; the earlier strict-audit failures remain recorded.
+steering verbatim after compaction. The final Luna/high trial at `8f523b85` passed every check after three
+compactions, with all eight evidence markers and the original approval code
+retained and every side effect occurring once. The two earlier strict-audit
+failures remain in the [complete revision record](long-tool-context.json).
+
+At the forced 32,768-token threshold, the accepted baseline used 469,517 tokens
+and the accepted contract-replay trial used 233,503, a 50.3% reduction including
+summary requests and cached input. Run elapsed time rose from 52.2 to 81.9
+seconds. These are single synthetic trials; production still defaults to
+256,000 tokens, so this is a demonstrated compaction tradeoff rather than a
+production-default token or speed improvement. The baseline audit was recomputed
+for a macOS `/var` versus `/private/var` path alias, with the original artifact
+retained and no model retry or workspace repair.
 
 ### Invalidated first crossover
 

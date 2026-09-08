@@ -1,0 +1,577 @@
+{
+  "schema": 1,
+  "model": "gpt-5.6-luna",
+  "effort": "high",
+  "configuredThresholdTokens": 32768,
+  "productionDefaultThresholdTokens": 256000,
+  "conditions": "One synthetic trial at each revision. Same eight-read protocol with independently random markers. The baseline did not compact during its tool loop. Forced threshold isolates the new pause/compact/resume behavior; this is not a measured gain at the production default. Tokens include cached input and summary requests, not dollar charges. User activity and provider/cache conditions are uncontrolled.",
+  "trials": [
+    {
+      "label": "baseline",
+      "runtimeBuildCommit": "a3cebd6f",
+      "driverSourceCommit": "5b0d5400565ebfba3a70a8463ceb0253c5c0ead0",
+      "sourceArtifact": "long-context-baseline-a3cebd6f-audit-corrected.json",
+      "runId": "run-mts2kmvc-6ngvn9",
+      "passed": true,
+      "checks": [
+        {
+          "name": "one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "all original requirements and evidence retained",
+          "pass": true
+        },
+        {
+          "name": "each side effect occurred exactly once",
+          "pass": true
+        },
+        {
+          "name": "reader unchanged",
+          "pass": true
+        },
+        {
+          "name": "only permitted tool operations",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "host compaction occurred during the task",
+          "pass": true
+        }
+      ],
+      "counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pauses": [],
+      "compactions": [],
+      "tools": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write",
+        "submit_result"
+      ],
+      "metrics": {
+        "turns": 0,
+        "usage": {
+          "inputTokens": 76605,
+          "outputTokens": 720,
+          "cacheReadTokens": 392192,
+          "cacheWriteTokens": 0
+        },
+        "workers": 1,
+        "maxConcurrent": 1,
+        "tokens": 469517,
+        "postGreenTokens": null,
+        "churn": 0,
+        "models": [
+          "gpt-5.6-luna"
+        ]
+      },
+      "runElapsedMs": 52242,
+      "auditCorrection": "Only the audit path comparison changed: canonicalize macOS /var to /private/var. Original artifact retained. No model retry or workspace repair."
+    },
+    {
+      "label": "summary-only-v1",
+      "runtimeBuildCommit": "5b0d5400",
+      "driverSourceCommit": "5b0d5400565ebfba3a70a8463ceb0253c5c0ead0",
+      "sourceArtifact": "long-context-after-5b0d5400.json",
+      "runId": "run-mts2njxw-n36zuu",
+      "passed": false,
+      "checks": [
+        {
+          "name": "one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "all original requirements and evidence retained",
+          "pass": true
+        },
+        {
+          "name": "each side effect occurred exactly once",
+          "pass": true
+        },
+        {
+          "name": "reader unchanged",
+          "pass": true
+        },
+        {
+          "name": "only permitted tool operations",
+          "pass": false
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "host compaction occurred during the task",
+          "pass": true
+        }
+      ],
+      "counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pauses": [
+        {
+          "reason": "threshold",
+          "tokens": 36940,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 36758,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 37355,
+          "thresholdTokens": 32768
+        }
+      ],
+      "compactions": [
+        {
+          "tokensBefore": 36940,
+          "summaryChars": 818,
+          "usage": {
+            "input": 1710,
+            "output": 255,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 40,
+            "totalTokens": 1965,
+            "cost": {
+              "input": 0.000342,
+              "output": 0.000306,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000648
+            }
+          }
+        },
+        {
+          "tokensBefore": 36758,
+          "summaryChars": 1622,
+          "usage": {
+            "input": 1676,
+            "output": 700,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 179,
+            "totalTokens": 2376,
+            "cost": {
+              "input": 0.0003352,
+              "output": 0.0008399999999999999,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0011752
+            }
+          }
+        },
+        {
+          "tokensBefore": 37355,
+          "summaryChars": 2330,
+          "usage": {
+            "input": 2193,
+            "output": 818,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 149,
+            "totalTokens": 3011,
+            "cost": {
+              "input": 0.00043860000000000004,
+              "output": 0.0009816,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0014202
+            }
+          }
+        }
+      ],
+      "tools": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write",
+        "bash",
+        "submit_result"
+      ],
+      "metrics": {
+        "turns": 0,
+        "usage": {
+          "inputTokens": 112955,
+          "outputTokens": 2744,
+          "cacheReadTokens": 135168,
+          "cacheWriteTokens": 0
+        },
+        "workers": 1,
+        "maxConcurrent": 1,
+        "tokens": 250867,
+        "postGreenTokens": null,
+        "churn": 0,
+        "models": [
+          "gpt-5.6-luna"
+        ]
+      },
+      "runElapsedMs": 83074,
+      "driverWallMs": 83125
+    },
+    {
+      "label": "summary-only-v2",
+      "runtimeBuildCommit": "04c754ff",
+      "driverSourceCommit": "04c754ff2044b245aef2eb4f119aeac3cdb66ad5",
+      "sourceArtifact": "long-context-after-04c754ff.json",
+      "runId": "run-mts2rzp3-tx8mph",
+      "passed": false,
+      "checks": [
+        {
+          "name": "one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "all original requirements and evidence retained",
+          "pass": true
+        },
+        {
+          "name": "each side effect occurred exactly once",
+          "pass": true
+        },
+        {
+          "name": "reader unchanged",
+          "pass": true
+        },
+        {
+          "name": "only permitted tool operations",
+          "pass": false
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "host compaction occurred during the task",
+          "pass": true
+        }
+      ],
+      "counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pauses": [
+        {
+          "reason": "threshold",
+          "tokens": 36928,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 36819,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 37395,
+          "thresholdTokens": 32768
+        }
+      ],
+      "compactions": [
+        {
+          "tokensBefore": 36928,
+          "summaryChars": 874,
+          "usage": {
+            "input": 1698,
+            "output": 261,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 42,
+            "totalTokens": 1959,
+            "cost": {
+              "input": 0.0003396,
+              "output": 0.00031319999999999997,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0006528
+            }
+          }
+        },
+        {
+          "tokensBefore": 36819,
+          "summaryChars": 1612,
+          "usage": {
+            "input": 1694,
+            "output": 583,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 109,
+            "totalTokens": 2277,
+            "cost": {
+              "input": 0.00033880000000000005,
+              "output": 0.0006996,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0010384
+            }
+          }
+        },
+        {
+          "tokensBefore": 37395,
+          "summaryChars": 2345,
+          "usage": {
+            "input": 2181,
+            "output": 838,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 211,
+            "totalTokens": 3019,
+            "cost": {
+              "input": 0.00043620000000000003,
+              "output": 0.0010056,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0014418
+            }
+          }
+        }
+      ],
+      "tools": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "read",
+        "read",
+        "bash",
+        "write",
+        "bash",
+        "submit_result"
+      ],
+      "metrics": {
+        "turns": 0,
+        "usage": {
+          "inputTokens": 117008,
+          "outputTokens": 3707,
+          "cacheReadTokens": 218112,
+          "cacheWriteTokens": 0
+        },
+        "workers": 1,
+        "maxConcurrent": 1,
+        "tokens": 338827,
+        "postGreenTokens": null,
+        "churn": 0,
+        "models": [
+          "gpt-5.6-luna"
+        ]
+      },
+      "runElapsedMs": 112904,
+      "driverWallMs": 113263
+    },
+    {
+      "label": "contract-replay",
+      "runtimeBuildCommit": "8f523b85",
+      "driverSourceCommit": "861619528823cc223177007d6bae6c856912c2b4",
+      "sourceArtifact": "long-context-after-8f523b85.json",
+      "runId": "run-mts2ym03-wocqr2",
+      "passed": true,
+      "checks": [
+        {
+          "name": "one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "all original requirements and evidence retained",
+          "pass": true
+        },
+        {
+          "name": "each side effect occurred exactly once",
+          "pass": true
+        },
+        {
+          "name": "reader unchanged",
+          "pass": true
+        },
+        {
+          "name": "only permitted tool operations",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "host compaction occurred during the task",
+          "pass": true
+        }
+      ],
+      "counts": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "pauses": [
+        {
+          "reason": "threshold",
+          "tokens": 36989,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 37053,
+          "thresholdTokens": 32768
+        },
+        {
+          "reason": "threshold",
+          "tokens": 37886,
+          "thresholdTokens": 32768
+        }
+      ],
+      "compactions": [
+        {
+          "tokensBefore": 36989,
+          "summaryChars": 1209,
+          "usage": {
+            "input": 1694,
+            "output": 404,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 79,
+            "totalTokens": 2098,
+            "cost": {
+              "input": 0.00033880000000000005,
+              "output": 0.00048479999999999997,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0008236000000000001
+            }
+          }
+        },
+        {
+          "tokensBefore": 37053,
+          "summaryChars": 1828,
+          "usage": {
+            "input": 1810,
+            "output": 708,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 130,
+            "totalTokens": 2518,
+            "cost": {
+              "input": 0.000362,
+              "output": 0.0008495999999999999,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0012116
+            }
+          }
+        },
+        {
+          "tokensBefore": 37886,
+          "summaryChars": 2555,
+          "usage": {
+            "input": 2462,
+            "output": 1039,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "reasoning": 280,
+            "totalTokens": 3501,
+            "cost": {
+              "input": 0.0004924,
+              "output": 0.0012468,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.0017392
+            }
+          }
+        }
+      ],
+      "tools": [
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "bash",
+        "write",
+        "submit_result"
+      ],
+      "metrics": {
+        "turns": 0,
+        "usage": {
+          "inputTokens": 115372,
+          "outputTokens": 2931,
+          "cacheReadTokens": 115200,
+          "cacheWriteTokens": 0
+        },
+        "workers": 1,
+        "maxConcurrent": 1,
+        "tokens": 233503,
+        "postGreenTokens": null,
+        "churn": 0,
+        "models": [
+          "gpt-5.6-luna"
+        ]
+      },
+      "runElapsedMs": 81891,
+      "driverWallMs": 82113
+    }
+  ],
+  "observation": {
+    "baselineTokens": 469517,
+    "contractReplayTokens": 233503,
+    "tokenReduction": 0.5026740245827095,
+    "strictPassedTrials": 2,
+    "strictFailedTrials": 2
+  }
+}
