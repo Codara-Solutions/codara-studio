@@ -144,6 +144,7 @@ export function planWorkerFailureRetry(input: {
   kind?: WorkerFailureKind;
   sameRuntimeAttempts: number;
   oppositeRuntimeAvailable: boolean;
+  allowRuntimeSwitch?: boolean;
 }): WorkerFailureRetryPlan {
   const kind = input.kind;
   if (kind === "cancelled") {
@@ -175,6 +176,14 @@ export function planWorkerFailureRetry(input: {
       action: "no_auto_retry",
       reason:
         "the account's subscription or billing state is terminal for this provider (no Extra Usage or credit for third-party harness use), so the attempt fails for the user to resolve instead of being relaunched elsewhere",
+    };
+  }
+
+  if (input.allowRuntimeSwitch === false) {
+    return {
+      kind,
+      action: "no_auto_retry",
+      reason: "the direct chat model was explicitly selected, so recovery must not switch providers",
     };
   }
 

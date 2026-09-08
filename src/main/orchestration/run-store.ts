@@ -15534,6 +15534,7 @@ async function maybeQueueCliLaunchFallback({
     kind: failureKind,
     sameRuntimeAttempts: lineage.filter((t) => t.runtimePreference === task.runtimePreference).length,
     oppositeRuntimeAvailable: oppositeAvailable,
+    allowRuntimeSwitch: run.executionMode !== "direct" || Boolean(run.automationId),
   });
   if (retryPlan.action === "no_auto_retry") return null;
   const retriesSameRuntime = retryPlan.action === "retry_same_runtime";

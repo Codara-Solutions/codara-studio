@@ -249,6 +249,14 @@ async function main() {
     "no_auto_retry",
   );
 
+  for (const kind of [undefined, "auth", "launch", "rate_limit", "provider", "transport"]) {
+    const plan = planWorkerFailureRetry({ kind, sameRuntimeAttempts: 2, oppositeRuntimeAvailable: true, allowRuntimeSwitch: false });
+    assert.equal(plan.action, "no_auto_retry", "direct chat recovery preserves the selected model");
+    assert.match(plan.reason, /explicitly selected/);
+  }
+  assert.equal(planWorkerFailureRetry({ kind: "transport", sameRuntimeAttempts: 1, oppositeRuntimeAvailable: true, allowRuntimeSwitch: false }).action,
+    "retry_same_runtime", "a pinned model still gets one transient recovery attempt");
+
   // Every plan explains itself, since the reason is persisted on the run event.
   for (const plan of [firstTransient, secondTransient, exhaustedTransient]) {
     assert.equal(typeof plan.reason, "string");
