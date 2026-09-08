@@ -24,7 +24,7 @@
 //             between "made the test pass" and "honored the contract" is
 //             exactly the headroom that keeps 100/100 out of reach.
 //   extraChecks(dir, metrics)  optional task-specific graded checks
-//             (untouched test files, stale names, model routing).
+//             (untouched test files, stale names).
 //   reference patch that solves the task — used ONLY by the offline
 //             self-test to prove every check (hidden ones included) is
 //             satisfiable. The benchmark must never be unwinnable.
@@ -39,6 +39,7 @@ const TASKS = [
     tier: "trivial",
     split: "train",
     par: { wallS: 60, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "range.js": `"use strict";
 // inRange(value, min, max) -> true when min <= value <= max (INCLUSIVE both ends).
@@ -72,10 +73,6 @@ assert.equal(inRange(-1, -3, -2), false);
 console.log("ok");`,
       },
     ],
-    extraChecks(dir) {
-      const untouched = (readFile(dir, "test.js") ?? "").includes("inRange(5, 0, 5)");
-      return [{ name: "test.js untouched", pass: untouched, weight: 1 }];
-    },
     reference: {
       "range.js": `"use strict";
 function inRange(value, min, max) {
@@ -92,6 +89,7 @@ module.exports = { inRange };
     tier: "trivial",
     split: "train",
     par: { wallS: 75, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "strings.js": `"use strict";
 function titleCase(text) {
@@ -339,6 +337,7 @@ module.exports = { count };
     tier: "hard",
     split: "train",
     par: { wallS: 240, tokensK: 50 },
+    protectedFiles: ["test.js"],
     files: {
       "eventlog.js": `"use strict";
 // Append-only event log with STABLE 1-based ids.
@@ -411,10 +410,6 @@ assert.equal(log.get(1), undefined);
 console.log("ok");`,
       },
     ],
-    extraChecks(dir) {
-      const untouched = (readFile(dir, "test.js") ?? "").includes('log.slice(1, 2)');
-      return [{ name: "test.js untouched", pass: untouched, weight: 1 }];
-    },
     reference: {
       "eventlog.js": `"use strict";
 function createLog() {
@@ -444,6 +439,7 @@ module.exports = { createLog };
     tier: "hard",
     split: "train",
     par: { wallS: 300, tokensK: 60 },
+    protectedFiles: ["test.js"],
     files: {
       "bookings.js": `"use strict";
 // mergeBookings(bookings) -> flattened schedule.
@@ -824,6 +820,7 @@ module.exports = { renderTable };
     tier: "project",
     split: "train",
     par: { wallS: 540, tokensK: 160 },
+    protectedFiles: ["test.js"],
     files: {
       "track.js": `"use strict";
 // A tiny task tracker. createTracker() returns an independent tracker:
@@ -1067,6 +1064,7 @@ module.exports = { createTracker };
     parallel: true,
     expectedParallel: 4,
     par: { wallS: 720, tokensK: 250 },
+    protectedFiles: ["test.js", "README.md"],
     files: {
       "README.md": `# mini-lang
 
@@ -1726,6 +1724,7 @@ module.exports = { lint };
     parallel: true,
     expectedParallel: 3,
     par: { wallS: 480, tokensK: 120 },
+    protectedFiles: ["test.js", "README.md", "puzzles/p1.json", "puzzles/p2.json", "puzzles/p3.json"],
     files: {
       "README.md": `# arc-triad
 
@@ -3067,6 +3066,7 @@ module.exports = { transform };
     tier: "hard",
     split: "train",
     par: { wallS: 180, tokensK: 120 },
+    protectedFiles: ["test.js"],
     files: {
       "patch.js": `"use strict";
 
@@ -3158,13 +3158,6 @@ assert.throws(
 console.log("ok");`,
       },
     ],
-    extraChecks(dir) {
-      return [{
-        name: "test.js untouched",
-        pass: (readFile(dir, "test.js") ?? "").includes("error.index === 0"),
-        weight: 1,
-      }];
-    },
     reference: {
       "patch.js": `"use strict";
 
@@ -3257,6 +3250,7 @@ module.exports = { applyPatch, PatchError };
     tier: "hard",
     split: "train",
     par: { wallS: 150, tokensK: 90 },
+    protectedFiles: ["test.js"],
     files: {
       "planner.js": `"use strict";
 
@@ -3382,6 +3376,7 @@ module.exports = { plan };
     tier: "hard",
     split: "train",
     par: { wallS: 180, tokensK: 100 },
+    protectedFiles: ["test.js"],
     files: {
       "pool.js": `"use strict";
 
@@ -3527,6 +3522,7 @@ module.exports = { mapPool };
     tier: "trivial",
     split: "holdout",
     par: { wallS: 60, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "median.js": `"use strict";
 // median(values) -> the middle value of the sorted numbers (mean of the two
@@ -3664,7 +3660,7 @@ module.exports = { uniqueSorted };
 
   {
     name: "holdout-lru",
-    brief: "holdout: subtle LRU+TTL invariants; should route to claude-fable-5",
+    brief: "holdout: subtle LRU+TTL invariants across any selected model",
     tier: "hard",
     split: "holdout",
     par: { wallS: 300, tokensK: 60 },
@@ -3743,17 +3739,6 @@ assert.equal(c.get("a"), undefined);
 console.log("ok");`,
       },
     ],
-    extraChecks(dir, metrics) {
-      const models = metrics?.models ?? [];
-      return [
-        {
-          name: "routed to claude-fable-5 (premium tier for subtle invariants)",
-          pass: models.includes("claude-fable-5"),
-          weight: 2,
-          detail: models.join(", ") || "no models recorded",
-        },
-      ];
-    },
     reference: {
       "lru.js": `"use strict";
 function createCache(capacity, ttlMs, now) {

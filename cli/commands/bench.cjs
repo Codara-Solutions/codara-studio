@@ -27,6 +27,8 @@ const { rpc, rpcRaw } = require("../lib/rpc.cjs");
 const { findRun } = require("../lib/store.cjs");
 const { TASKS, TIER_CAP_MS } = require("../bench/tasks.cjs");
 const { scoreTask, summarize } = require("../bench/score.cjs");
+const { gradeChecks, visibleSource } = require("../bench/grade.cjs");
+const { acceptanceSummary, trialPassed } = require("../bench/metrics.cjs");
 const { RIVAL_AGENTS, rivalLabel, runRivalTurn } = require("../bench/rivals.cjs");
 
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -58,7 +60,8 @@ function commandOutput(command, args, cwd = ROOT) {
 }
 
 function comparableEntry(candidate, identity) {
-  return candidate.suiteHash === identity.suiteHash &&
+  return Boolean(candidate.adopted) === Boolean(identity.adopted) &&
+    candidate.suiteHash === identity.suiteHash &&
     candidate.scorerHash === identity.scorerHash &&
     candidate.runnerHash === identity.runnerHash &&
     JSON.stringify(candidate.control) === JSON.stringify(identity.control) &&
@@ -78,8 +81,8 @@ function historyMetadata(agent, taskNames, repeat, control = {}) {
   return {
     promptHash: agent === "cora" ? promptHash() : `${agent}-cli`,
     suiteHash: sourceHash(["cli/bench/tasks.cjs"]),
-    scorerHash: sourceHash(["cli/bench/score.cjs"]),
-    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs"]),
+    scorerHash: sourceHash(["cli/bench/score.cjs", "cli/bench/grade.cjs", "cli/bench/metrics.cjs"]),
+    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs", "cli/bench/matrix.cjs"]),
     sourceCommit: commandOutput("git", ["rev-parse", "--short=12", "HEAD"]),
     sourceDirty: Boolean(commandOutput("git", ["status", "--porcelain"])),
     productVersion: PRODUCT_VERSION,
@@ -123,9 +126,9 @@ function seedWorkspace(task) {
 /** "Green" = the visible test passes AND the tree actually changed from the
  * seed (some seeds pass their tests untouched, e.g. a rename task), AND any
  * task-specific probe agrees. Runs without blocking the poller. */
-function probeGreen(dir, task) {
+function probeGreen(dir, task, stageIndex = 0) {
   return new Promise((resolve) => {
-    execFile("node", ["test.js"], { cwd: dir, timeout: 10_000 }, (err) => {
+    execFile(process.execPath, ["--input-type=commonjs", "-e", visibleSource(task, stageIndex)], { cwd: dir, timeout: 10_000 }, (err) => {
       if (err) return resolve(false);
       execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: 10_000 }, (gitErr, out) => {
         const treeChanged = Boolean(gitErr) || String(out).trim().length > 0;
@@ -138,25 +141,6 @@ function probeGreen(dir, task) {
       });
     });
   });
-}
-
-/** Run a hidden check group: written next to the tree at grade time only. */
-function runHidden(dir, index, source) {
-  const file = path.join(dir, `__bench_hidden_${index}.js`);
-  fs.writeFileSync(file, `"use strict";\n${source}\n`);
-  try {
-    execFileSync("node", [path.basename(file)], { cwd: dir, timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
-    return { ok: true, out: "" };
-  } catch (err) {
-    // Surface the assertion itself, not the stack preamble: the useful part
-    // (AssertionError message + diff) sits mid-output.
-    const raw = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    const at = raw.indexOf("AssertionError");
-    const detail = (at === -1 ? raw : raw.slice(at)).replace(/\n\s+at [^\n]+/g, "");
-    return { ok: false, out: detail.slice(0, 400) };
-  } finally {
-    fs.rmSync(file, { force: true });
-  }
 }
 
 /** Wait for the run to settle; auto-answer questions so the bench never hangs. */
@@ -218,60 +202,36 @@ async function runMetrics(flags, runId, greenAtIso, settledStatus) {
           .reduce((sum, call) => sum + usageTokens(call), 0);
   return {
     turns: (run.sparkCalls ?? []).length,
+    usage: Object.fromEntries(["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"].map((key) => [
+      key, [...(run.sparkCalls ?? []), ...(run.workerAttempts ?? [])].reduce((sum, item) => sum + (item[key] ?? 0), 0),
+    ])),
     workers: (run.workerTasks ?? []).length,
     maxConcurrent,
     tokens,
     postGreenTokens,
     churn: attempts.filter((a) => typeof a.exitCode === "number" && a.exitCode !== 0).length,
-    models: [...new Set(attempts.map((a) => a.model).filter(Boolean))],
+    models: [...new Set([...(run.sparkCalls ?? []), ...attempts].map((a) => a.model).filter(Boolean))],
   };
-}
-
-function gradeChecks(task, dir, metrics) {
-  const visible = (() => {
-    try {
-      const out = execFileSync("node", ["test.js"], {
-        cwd: dir,
-        timeout: 15_000,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      return { ok: true, out };
-    } catch (err) {
-      return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(0, 300) };
-    }
-  })();
-  const checks = [
-    { name: "visible tests pass", pass: visible.ok, weight: 5, detail: visible.ok ? "" : visible.out },
-  ];
-  for (const [index, group] of (task.hidden ?? []).entries()) {
-    const res = runHidden(dir, index, group.source);
-    checks.push({
-      name: `contract: ${group.name}`,
-      pass: res.ok,
-      weight: group.weight ?? 2,
-      hidden: true,
-      detail: res.ok ? "" : res.out,
-    });
-  }
-  if (task.extraChecks) checks.push(...task.extraChecks(dir, metrics));
-  return checks;
 }
 
 /** Green poller: the moment the task first goes green, on OUR clock. */
 function startGreenPoller(dir, task, startedAt) {
-  const state = { greenAtMs: null };
+  const state = { greenAtMs: null, stageIndex: 0 };
   let probing = false;
+  let stopped = false;
   const timer = setInterval(async () => {
     if (probing || state.greenAtMs !== null) return;
     probing = true;
+    const stageIndex = state.stageIndex;
     try {
-      if (await probeGreen(dir, task)) state.greenAtMs = Date.now() - startedAt;
+      if (await probeGreen(dir, task, stageIndex)) {
+        if (!stopped && state.stageIndex === stageIndex) state.greenAtMs = Date.now() - startedAt;
+      }
     } finally {
       probing = false;
     }
   }, 5_000);
-  return { state, stop: () => clearInterval(timer) };
+  return { state, stop: () => { stopped = true; clearInterval(timer); } };
 }
 
 async function runTask(flags, task) {
@@ -301,7 +261,8 @@ async function runTask(flags, task) {
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
-    poller.state.greenAtMs = null; // green now means THIS stage's contract
+    poller.state.stageIndex += 1;
+    poller.state.greenAtMs = null;
     await rpc(flags, "chat.send", { runId, content: stage.prompt });
     outcome = await driveToCompletion(flags, runId, startedAt + capMs);
     questionsAsked += outcome.questionsAsked;
@@ -317,7 +278,7 @@ async function runTask(flags, task) {
   }
   // One last probe so a run that went green in the final poll gap still counts.
   let greenAtMs = poller.state.greenAtMs;
-  if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
+  if (greenAtMs === null && (await probeGreen(dir, task, poller.state.stageIndex))) greenAtMs = wallMs;
 
   const greenAtIso = greenAtMs === null ? null : new Date(startedAt + greenAtMs).toISOString();
   const metrics = await runMetrics(flags, runId, greenAtIso, outcome.status);
@@ -375,7 +336,8 @@ async function runRivalTask(flags, task, agent) {
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
-    poller.state.greenAtMs = null; // green now means THIS stage's contract
+    poller.state.stageIndex += 1;
+    poller.state.greenAtMs = null;
     cli = await runRivalTurn(agent, {
       dir,
       prompt: stage.prompt,
@@ -392,7 +354,7 @@ async function runRivalTask(flags, task, agent) {
   poller.stop();
   const wallMs = Date.now() - startedAt;
   let greenAtMs = poller.state.greenAtMs;
-  if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
+  if (greenAtMs === null && (await probeGreen(dir, task, poller.state.stageIndex))) greenAtMs = wallMs;
 
   const metrics = {
     turns,
@@ -450,6 +412,7 @@ function previousEntry(split, matches = () => true) {
 }
 
 async function bench(args, flags) {
+  if (args[0] === "matrix") return require("../bench/matrix.cjs").matrix(flags);
   if (args[0] === "list") {
     for (const task of TASKS) {
       console.log(
@@ -482,6 +445,7 @@ async function bench(args, flags) {
     return;
   }
 
+  if (flags.output && fs.existsSync(path.resolve(flags.output))) fail("--output already exists; use a new artifact path");
   const split = flags.split ?? "train";
   if (!["train", "holdout", "all"].includes(split)) fail(`--split must be train, holdout, or all`);
   const requestedTasks = String(flags.task ?? "")
@@ -494,16 +458,20 @@ async function bench(args, flags) {
   const missingTasks = requestedTasks.filter((name) => !selected.some((task) => task.name === name));
   if (missingTasks.length) fail(`unknown task${missingTasks.length === 1 ? "" : "s"}: ${missingTasks.join(", ")} (see \`cora bench list\`)`);
   if (selected.length === 0) fail(`no tasks selected (see \`cora bench list\`)`);
-  const repeat = Math.max(1, Number(flags.repeat ?? 1) || 1);
+  const repeat = Number(flags.repeat ?? 1);
+  if (!Number.isSafeInteger(repeat) || repeat < 1) fail("--repeat must be a positive integer");
   const agent = flags.agent ?? "cora";
   if (agent !== "cora" && !RIVAL_AGENTS.includes(agent)) {
     fail(`--agent must be cora or ${RIVAL_AGENTS.join(", ")}`);
   }
+  const catalog = agent === "cora" ? await rpc(flags, "models.list", {}) : null;
+  const selectedModel = catalog?.models?.find((model) => model.id === (flags.model ?? DEFAULT_CONTROL_MODEL));
+  if (catalog && !selectedModel) fail("Selected model is absent from the live Studio catalog");
   const control = {
     model: flags.model ?? DEFAULT_CONTROL_MODEL,
     effort: flags.effort ?? DEFAULT_CONTROL_EFFORT,
     execution: flags.execution ?? "direct",
-    provider: "openai-codex",
+    provider: selectedModel?.provider ?? "openai-codex",
   };
   // Hash the prompt surfaces BEFORE the suite runs: a long suite invites
   // editing the prompt while it finishes, which must not relabel this entry.
@@ -536,6 +504,8 @@ async function bench(args, flags) {
     green: t.result.greenAtMs,
     wallMs: t.result.wallMs,
     tokens: t.result.tokens,
+    usage: t.result.usage ?? null,
+    staged: Boolean(t.task.stages?.length),
     postGreenTokens: t.result.postGreenTokens,
     workers: t.result.workers,
     maxConcurrent: t.result.maxConcurrent,
@@ -544,6 +514,9 @@ async function bench(args, flags) {
     models: t.result.models,
     runStatus: t.result.runStatus,
     runId: t.runId,
+    passed: trialPassed(t.result),
+    checks: t.result.checks,
+    ...(t.workspace ? { workspace: t.workspace } : {}),
   }));
   const { score, calibration } = summarize(trials);
   const baseSplit = requestedTasks.length === 1
@@ -560,6 +533,7 @@ async function bench(args, flags) {
     split: splitKey,
     score,
     calibration,
+    acceptance: acceptanceSummary(rows),
     tasks: rows,
   };
   const previous = previousEntry(splitKey, comparable);
@@ -570,6 +544,11 @@ async function bench(args, flags) {
         .filter((item) => item.entry)
     : [{ name: "cora", entry: previousEntry(baseSplit, comparable) }].filter((item) => item.entry);
   appendHistory(entry);
+  if (flags.output) {
+    const output = path.resolve(flags.output);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, `${JSON.stringify(entry, null, 2)}\n`, { flag: "wx" });
+  }
 
   if (flags.json) return console.log(JSON.stringify(entry, null, 2));
 
@@ -591,6 +570,7 @@ async function bench(args, flags) {
     ]),
   );
 
+  console.log(`\n${c.bold("ACCEPTANCE")} ${entry.acceptance.passed}/${entry.acceptance.trials} complete trials passed every check`);
   console.log(`\n${c.bold("HARNESS SCORE")} ${score >= 75 ? c.green(score) : score >= 50 ? c.yellow(score) : c.red(score)}${c.dim("/100")}`);
   const calib = Object.entries(calibration)
     .map(([tier, ratio]) => `${tier} ${ratio}x par`)
@@ -599,11 +579,11 @@ async function bench(args, flags) {
   if (repeat > 1) {
     for (const task of selected) {
       const runs = trials.filter((t) => t.task.name === task.name);
-      const greens = runs.filter((t) => t.result.greenAtMs !== null).length;
+      const passed = runs.filter((t) => trialPassed(t.result)).length;
       const scores = runs.map((t) => t.score.total);
       console.log(
         c.dim(
-          `reliability ${task.name}: green ${greens}/${runs.length} · score ${Math.min(...scores)}-${Math.max(...scores)}`,
+          `reliability ${task.name}: accepted ${passed}/${runs.length} · score ${Math.min(...scores)}-${Math.max(...scores)}`,
         ),
       );
     }

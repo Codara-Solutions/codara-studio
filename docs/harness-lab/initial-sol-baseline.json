@@ -1,0 +1,204 @@
+{
+  "kind": "initial-baseline-regraded",
+  "note": "The original live runs used the legacy evaluator. These retained workspaces were regraded after the acceptance fixes. No product harness change or after measurement is included.",
+  "sourceCommit": "d7a6bc9ed6af",
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "at": "2026-09-08T00:26:16.241Z",
+  "originalSuiteHash": "84da6a065e",
+  "originalScorerHash": "4b84c95152",
+  "graderHash": "e5e9e9ef2e1a13f5c2ecaea5c3900bd90c22d478706e7af34677feb9cb6e2044",
+  "acceptance": {
+    "passed": 3,
+    "oneShotTrials": 3,
+    "oneShotPassed": 3,
+    "trials": 3,
+    "passRate": 1,
+    "perTask": {
+      "typo-fix": {
+        "passed": 1,
+        "trials": 1,
+        "passRate": 1,
+        "passRate95CI": [
+          0.20654931437723745,
+          1
+        ],
+        "allTrialsPassed": true
+      },
+      "patch-atomic": {
+        "passed": 1,
+        "trials": 1,
+        "passRate": 1,
+        "passRate95CI": [
+          0.20654931437723745,
+          1
+        ],
+        "allTrialsPassed": true
+      },
+      "async-pool": {
+        "passed": 1,
+        "trials": 1,
+        "passRate": 1,
+        "passRate95CI": [
+          0.20654931437723745,
+          1
+        ],
+        "allTrialsPassed": true
+      }
+    },
+    "acceptedMedianWallMs": 131203,
+    "acceptedMedianTokens": 34920,
+    "missingUsageTrials": 0
+  },
+  "tasks": [
+    {
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 99.8,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 19.8,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 15479,
+      "wallMs": 30478,
+      "tokens": 15289,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxa8v1-hju6u3",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "task": "patch-atomic",
+      "tier": "hard",
+      "score": 98,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 18,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 150741,
+      "wallMs": 224107,
+      "tokens": 58087,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxawi4-rzxee2",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "task": "async-pool",
+      "tier": "hard",
+      "score": 100,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 20,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 75479,
+      "wallMs": 131203,
+      "tokens": 34920,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxfpjv-au1j41",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        }
+      ]
+    }
+  ]
+}
