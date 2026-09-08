@@ -468,3 +468,21 @@ Codex comparisons now require the requested effort in every persisted
 `turn_context`, in addition to exact model identity. Missing or mixed values
 fail the measurement. Audited sessions from the invalidated second crossover
 already recorded high; its invalidity remains the Hermes invocation issue.
+
+### Browser follow-up and remaining instruction failure
+
+At `5dac7ce6`, [three Luna canvas repeats](browser-confirmation-5dac7ce6.json)
+all passed and omitted the unsolicited keyboard/responsive audit. They used
+105,398, 205,816, and 99,644 tokens (median 105,398), taking 41.0, 73.6, and
+45.5 seconds. The earlier Luna matrix trial used 158,012 tokens and 77.7 seconds.
+One repeat needed extra visual recovery and a failed placeholder selector.
+These randomized instances and unequal sample counts do not establish a causal
+speedup or a stable token reduction.
+
+All three Fable ticket repeats still violated the evaluation prohibition, while
+passing persisted-state checks. The batch-description reminder was ineffective
+on this task; all three are recorded as strict failures. Direct-task system
+instructions now state that task restrictions cover batch steps and read-only
+verification, with a limitation to report when permitted methods cannot verify.
+This remains model guidance rather than a hard natural-language policy parser;
+a fresh confirmation is required and the failed revisions stay in the record.
