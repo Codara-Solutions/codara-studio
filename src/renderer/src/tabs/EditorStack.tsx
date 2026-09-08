@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import EditorPane from "../components/EditorPane";
 import type { EditorTab, Tab, TabId } from "./types";
 import type { DockRef } from "./dock";
-import { DockSlotTabIdContext } from "./dockChromeSlot";
+import { DockSlotTabIdContext, useDockChromeSlot } from "./dockChromeSlot";
 import {
   DOCK_CONTENT_Z,
   getDockVersion,
@@ -28,6 +29,7 @@ interface Props {
   // CodeMirror instance never moves in the DOM, so its scroll/cursor/undo
   // state survives docking.
   dockIndex: ReadonlyMap<TabId, DockRef>;
+  onActivatePane: (hostTabId: TabId, paneId: string) => void;
   onDirtyChange: (id: TabId, dirty: boolean) => void;
   onClose: (id: TabId) => void;
   // Fired after every successful save (manual or autosave). App uses it to
@@ -39,7 +41,7 @@ interface Props {
 // React.memo: with the useTabs API object now memoized, EditorStack's props
 // only change when the tab list / active id / callbacks genuinely change,
 // so an unrelated App re-render no longer walks this whole stack.
-function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSaved }: Props) {
+function EditorStack({ tabs, activeId, dockIndex, onActivatePane, onDirtyChange, onClose, onSaved }: Props) {
   // One subscription for the whole stack — hooks cannot be called per tab in
   // the map below. Fires only when a docked cell's shown-state changes.
   useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
@@ -101,6 +103,9 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
     for (const id of bundles.current.keys()) {
       if (!live.has(id)) bundles.current.delete(id);
     }
+    for (const id of dockRefs.current.keys()) {
+      if (!live.has(id)) dockRefs.current.delete(id);
+    }
   }, [editors]);
 
   if (editors.length === 0) return null;
@@ -110,7 +115,13 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
     // active inner wrapper re-enables pointer-events:auto for its own panes.
     <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {editors.map((t) => {
-        const docked = dockIndex.has(t.id);
+        const location = dockIndex.get(t.id);
+        const docked = !!location;
+        const host = location ? tabs.find((tab) => tab.id === location.hostTabId) : undefined;
+        const focused = !location || (host?.kind === "terminal" && host.activePaneId === location.leafId);
+        const activate = () => {
+          if (location && !focused) onActivatePane(location.hostTabId, location.leafId);
+        };
         // A docked editor shows whenever its host terminal tab is on screen —
         // it is no longer the active tab itself.
         const visible = docked
@@ -124,6 +135,8 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
             // Marks the element the grid positions (see PreviewStack).
             data-dock-content-id={docked ? t.id : undefined}
             aria-hidden={!visible}
+            onPointerDownCapture={activate}
+            onFocusCapture={activate}
             style={{
               position: "absolute",
               inset: 0,
@@ -149,12 +162,14 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
                 into when docked (registered only while a DockedPaneChrome for
                 this tab exists — undocked, toolbars render inline). */}
             <DockSlotTabIdContext.Provider value={t.id}>
+              <DockedFileTitle title={t.title} path={t.path} />
               <EditorPane
                 file={t.entry}
                 onDirtyChange={bundle.onDirty}
                 onSaved={bundle.onSaved}
                 onClose={bundle.onClose}
                 active={visible}
+                focused={visible && focused}
               />
             </DockSlotTabIdContext.Provider>
           </div>
@@ -162,6 +177,28 @@ function EditorStack({ tabs, activeId, dockIndex, onDirtyChange, onClose, onSave
       })}
     </div>
   );
+}
+
+function DockedFileTitle({ title, path }: { title: string; path: string }) {
+  const slot = useDockChromeSlot();
+  return slot ? createPortal(
+    <span
+      title={path}
+      className="spark-dock-file-title"
+      style={{
+        flex: 1,
+        minWidth: 40,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        color: "var(--ink)",
+        pointerEvents: "auto",
+      }}
+    >
+      {title}
+    </span>,
+    slot,
+  ) : null;
 }
 
 export default React.memo(EditorStack);

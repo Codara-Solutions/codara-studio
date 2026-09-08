@@ -168,7 +168,7 @@ interface RailProps {
   onSectionDragEnd: () => void;
   onOpenGitHubQueueItem: (item: GitHubWorkQueueItem) => Promise<void>;
   onOpenFile: (absolutePath: string) => void;
-  onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean }) => void;
+  onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean; toSide?: boolean }) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
   onRunPlan: (entry: FsEntry, backend?: ChatBackendKind) => void;

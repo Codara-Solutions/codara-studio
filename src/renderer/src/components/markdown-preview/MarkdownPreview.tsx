@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -70,7 +70,7 @@ function resolveResource(href: string, baseDir: string): string {
   return `file://${baseDir}/${trimmed}`;
 }
 
-export default function MarkdownPreview({ text, basePath }: Props) {
+function MarkdownPreview({ text, basePath }: Props) {
   const baseDir = useMemo(() => dirnameOf(basePath), [basePath]);
 
   const components = useMemo(
@@ -148,3 +148,5 @@ export default function MarkdownPreview({ text, basePath }: Props) {
     </div>
   );
 }
+
+export default memo(MarkdownPreview);

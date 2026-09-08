@@ -1,4 +1,4 @@
-import { buildDockIndex, canDockTab, dockLeaf, isDockLeaf } from "./dock";
+import { buildDockIndex, canDockTab, dockLeaf, isDockLeaf, pinDockedTabs, collectTerminalLeaves } from "./dock";
 import { collectLeaves, findLeaf, removeLeaf } from "./paneTree";
 import { isRunOwnedTab, type DockableTabKind, type PaneNode, type Tab, type TerminalTab } from "./types";
 
@@ -56,11 +56,11 @@ export function applySplitDrop(
     // Reuse the source host when all its panes move so live terminals stay
     // in the same mounted tab and retain their sessions and renderers.
     host = remaining
-      ? { id: ids.host, kind: "terminal", title: "terminals", root: moving, activePaneId: collectLeaves(moving)[0].paneId }
+      ? { id: ids.host, kind: "terminal", title: collectTerminalLeaves(moving).length ? "terminals" : "split", root: moving, activePaneId: collectLeaves(moving)[0].paneId }
       : from;
   } else {
     moving = dockLeaf(ids.sourceCell, from.id, from.kind as DockableTabKind);
-    host = { id: ids.host, kind: "terminal", title: "terminals", root: moving, activePaneId: moving.paneId };
+    host = { id: ids.host, kind: "terminal", title: "split", root: moving, activePaneId: moving.paneId };
   }
   const root: PaneNode = {
     kind: "split", direction: placement.direction, ratio: 0.5,
@@ -83,5 +83,5 @@ export function applySplitDrop(
       next.push(tab);
     }
   }
-  return { tabs: next, activeId: host.id };
+  return { tabs: pinDockedTabs(next), activeId: host.id };
 }

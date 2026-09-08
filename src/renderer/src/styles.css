@@ -5800,6 +5800,10 @@ a { color: inherit; }
   overflow: hidden;
 }
 
+.spark-dock-chrome:has(.spark-dock-file-title) > .spark-dock-chrome__label {
+  display: none;
+}
+
 .spark-dock-chrome__label {
   opacity: 0.45;
 }

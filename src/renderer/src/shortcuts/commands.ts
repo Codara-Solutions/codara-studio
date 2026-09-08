@@ -412,8 +412,7 @@ export const COMMANDS: Command[] = [
   },
   {
     // Mirrors VS Code's "Markdown: Open Preview" (Cmd/Ctrl+Shift+V). Only the
-    // active editor tab reacts — App.tsx broadcasts a window event that
-    // EditorPane filters on its own `active` prop.
+    // focused editor reacts, including files inside a split pane.
     id: "markdown.togglePreview",
     label: "Toggle markdown preview",
     group: "View",
