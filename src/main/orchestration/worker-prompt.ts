@@ -885,8 +885,8 @@ function renderDirectTaskPrompt({
       "",
       "## UI CHECK",
       previewAvailable
-        ? "Use Codara's preview tools to exercise the real UI. Check keyboard access, responsive layout, visible states, and remove any dead control."
-        : "Check keyboard access, responsive layout, visible states, and remove any dead control. Report if visual verification is unavailable.",
+        ? "For UI code changes or a requested UI audit, use Codara's preview tools to check keyboard access, responsive layout, visible states, and dead controls. For browser operations, verify the requested outcome and finish."
+        : "For UI code changes or a requested UI audit, check keyboard access, responsive layout, visible states, and dead controls. Report if visual verification is unavailable.",
     );
   }
 
