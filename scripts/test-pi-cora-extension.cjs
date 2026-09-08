@@ -644,6 +644,25 @@ const noInput = {};
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 2, "the trigger re-arms once the compaction finishes");
 
+  const hostHandlers = new Map();
+  const entries = [];
+  let aborts = 0;
+  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args) }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(hostHandlers.has("agent_end"), false, "host-owned workers must not race an asynchronous extension compaction");
+  const hostContext = { getContextUsage: () => ({ tokens: 1500, contextWindow: 1000000 }), abort: () => { aborts += 1; } };
+  const turnEnd = hostHandlers.get("turn_end");
+  turnEnd({ toolResults: [] }, hostContext);
+  turnEnd({ toolResults: [{ toolName: "submit_result" }] }, hostContext);
+  assert.equal(aborts, 0, "completed answers and submitted results do not need a continuation");
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  assert.equal(aborts, 1);
+  assert.equal(entries[0][0], "codara-context-pause");
+  assert.equal(entries[0][1].reason, "threshold");
+  hostHandlers.get("session_compact")({});
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  assert.equal(aborts, 2, "a completed compaction re-arms later tool rounds");
+
   // Both Cora extensions must actually wire the trigger up.
   for (const file of ["index.ts", "worker.ts"]) {
     const source = fs.readFileSync(

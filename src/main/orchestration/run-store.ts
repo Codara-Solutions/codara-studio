@@ -314,6 +314,8 @@ import {
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
+import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
   availableCoraWorkerModels,
@@ -19195,33 +19197,6 @@ function piWorkerEventFailure(event: PiRpcEvent): string | null {
 // Per-turn provider usage from a Pi message_end event, using the same field
 // fallbacks as pi-turn.ts: `input` EXCLUDES what came from cache; reads and
 // writes are reported apart. Returns null when the event carried no usage.
-function piWorkerMessageUsage(
-  event: PiRpcEvent,
-): { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null {
-  if (event.type !== "message_end") return null;
-  const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
-    ? event.message as Record<string, unknown>
-    : null;
-  const usage = message?.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
-    ? message.usage as Record<string, unknown>
-    : null;
-  if (!usage) return null;
-  const count = (value: unknown): number =>
-    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-  const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
-    ? usage.cost as Record<string, unknown>
-    : null;
-  return {
-    input: count(usage.input ?? usage.inputTokens ?? usage.input_tokens),
-    output: count(usage.output ?? usage.outputTokens ?? usage.output_tokens),
-    cacheRead: count(usage.cacheRead ?? usage.cache_read ?? usage.cached),
-    cacheWrite: count(usage.cacheWrite ?? usage.cache_write ?? usage.cacheCreation),
-    // Pi prices each request from its model catalog. The caller accepts this
-    // field only for OpenRouter sessions; native subscription catalog prices
-    // are API-equivalent estimates, not charges on the user's plan.
-    cost: count(cost?.total),
-  };
-}
 
 // Warm follow-up resume, restricted to the task's FIRST attempt. A retry or a
 // verifier-FEEDBACK rework of the same task launches cold on a fresh
@@ -19274,12 +19249,16 @@ async function waitForPiWorkerTurn(
   client: PiRpcClient,
   prompt: string,
   onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
+  interrupted: () => boolean = () => false,
+  onCompaction?: (phase: "compacting" | "resuming") => void,
 ): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
+  let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
+      compaction = new PiWorkerCompaction(client, { interrupted, onError: reject, onProgress: onCompaction });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
@@ -19304,6 +19283,7 @@ async function waitForPiWorkerTurn(
         ) {
           providerFailure = null;
         }
+        if (compaction?.consume(event)) return;
         if (event.type === "agent_settled") {
           if (providerFailure) reject(new Error(providerFailure));
           else resolve();
@@ -19340,6 +19320,7 @@ async function waitForPiWorkerTurn(
     await client.prompt(prompt);
     await settled;
   } finally {
+    compaction?.dispose();
     unsubscribe();
     if (poll) clearInterval(poll);
     if (timer) clearTimeout(timer);
@@ -19687,6 +19668,7 @@ async function runPiWorkerSession({
       write: (input) => {
         if (!client) return;
         if (input === ESC_KEY) {
+          interrupted = true;
           void client.abort().catch(() => undefined);
           return;
         }
@@ -19764,7 +19746,7 @@ async function runPiWorkerSession({
             }
           }
         }
-      } else if (event.type === "message_end") {
+      } else if (event.type === "message_end" || event.type === "compaction_end") {
         if (assistantLineOpen) {
           paint("\r\n");
           assistantLineOpen = false;
@@ -19780,7 +19762,10 @@ async function runPiWorkerSession({
           usageTotals.cacheWrite += usage.cacheWrite;
           if (provider === "openrouter") measuredCostTotal += usage.cost;
           // Context gauge for the reuse gate: what the newest request occupied.
-          const gauge = usage.input + usage.cacheRead + usage.cacheWrite;
+          const compacted = event.result as { estimatedTokensAfter?: number } | undefined;
+          const gauge = event.type === "compaction_end"
+            ? compacted?.estimatedTokensAfter ?? 0
+            : usage.input + usage.cacheRead + usage.cacheWrite;
           if (gauge > 0) lastContextTokens = gauge;
           reportedContextWindowTokens =
             piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
@@ -19815,7 +19800,12 @@ async function runPiWorkerSession({
     };
 
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
-    await waitForPiWorkerTurn(client, promptText, reportStall);
+    const compactionProgress = (phase: "compacting" | "resuming") => {
+      const detail = phase === "compacting" ? "Compacting context…" : "Resuming after context compaction…";
+      reportActivity(detail);
+      paint(`\r\n  ${detail}\r\n`);
+    };
+    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress);
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
@@ -19826,6 +19816,8 @@ async function runPiWorkerSession({
         `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
           "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
         reportStall,
+        () => interrupted,
+        compactionProgress,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }
