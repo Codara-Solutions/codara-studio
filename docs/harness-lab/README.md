@@ -416,7 +416,7 @@ random latency values painted only in a chart. The model must receive a
 screenshot before confirming the lowest latency, save exactly once, and reload
 the saved choice. The smoke runner checks returned image blocks, permitted
 browser tools, exact model telemetry, and persisted state. Unit tests validate
-the fixture's outcome checks; live multi-model coverage remains pending.
+the fixture's outcome checks; completed live coverage is recorded below.
 
 ## Manager compaction settlement
 
@@ -433,3 +433,38 @@ the completed answer again. Lifecycle tests cover summary failures and a newer
 turn arriving during cleanup. Worker compaction integration still passes and
 retains its separate pause-and-resume behavior. These are offline sequencing
 checks, not a new live retention or speed result.
+
+## Seven-model browser coverage
+
+The [fixed-build browser matrix](browser-matrix-e1665e3c.json) at `e1665e3c`
+passed 13 of 14 strict trials: all seven canvas tasks and six ticket workflows.
+Every requested model executed, every persisted application outcome was correct,
+and no trial asked for user intervention. All tool arguments were audited for
+workspace and browser scope. This is one trial per task/model, not a reliability
+estimate or a model speed ranking.
+
+Fable's ticket trial used JavaScript evaluation twice inside preview batches,
+despite the task explicitly prohibiting evaluation. Its correct final ticket
+state does not override that failure. The original failed result is retained.
+A separate code review reproduced a worker-policy gap: an explicitly blocked
+preview tool could still execute inside a batch. The policy now preflights all
+steps and rejects the entire batch before any earlier mutation. This enforces
+structured worker configuration; it does not turn natural-language restrictions
+in a direct chat into a hard fence. The batch description also reminds models
+that restrictions apply to every step, including read-only evaluation.
+
+All canvas models added keyboard or responsive-layout checks after completing
+the requested save and reload. Direct-task UI guidance now scopes that audit to
+UI code changes or requested audits; browser operations verify their requested
+outcome and finish. Follow-up trials must remain separate from this matrix.
+
+Screenshot results now expose CSS viewport dimensions, image pixel dimensions,
+and their scale in both individual and batched calls. The prior Sol visual
+pilot needed to recover from a Retina coordinate mismatch. The new metadata is
+covered by unit tests and two live Electron browser regressions. Randomized
+chart instances prevent treating the pilot and matrix as a matched speed test.
+
+Codex comparisons now require the requested effort in every persisted
+`turn_context`, in addition to exact model identity. Missing or mixed values
+fail the measurement. Audited sessions from the invalidated second crossover
+already recorded high; its invalidity remains the Hermes invocation issue.
