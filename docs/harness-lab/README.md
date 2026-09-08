@@ -122,3 +122,33 @@ These are one trial per task, not reliability estimates or before/after gains.
 The original legacy score was 99.3/100. It is not comparable to newly graded
 scores; the regrade records check outcomes rather than retroactively relabeling
 that score. No competitor or product improvement is measured in this artifact.
+
+## Model selection and provider compatibility findings
+
+The first multi-model attempt revealed that direct chat silently coerced Luna
+onto the delegated-worker default, Sol. The requested chat model and task hint
+said Luna while both launched attempts recorded Sol. That matrix was stopped
+and marked invalid; it is not evidence about Luna.
+
+Commit `a0187848` makes direct chat preserve the exact selected catalog ID in
+both launch and queued UI labels. Delegated workers still obey the worker
+favorites list. The benchmark now checks the launched model and cancels a
+mismatched direct trial. The subsequent [model-fidelity probe](model-fidelity-a0187848.json)
+passed the small task on Luna, Terra, Sonnet 5, Sol, Opus 5, and Astra.
+
+Fable 5.1 was rejected by the provider because Pi 0.84.4's compatibility client
+was older than the required Claude Code client version. Cora then attempted a
+Sol fallback, which the new fidelity check rejected. Updating to the published
+Pi 0.85.1 runtime resolved that provider rejection: the same task passed on
+Fable 5.1 in 14 seconds. See [the live validation artifact](fable-pi-0851.json).
+[Pi's release notes](https://github.com/earendil-works/pi/releases/tag/v0.85.1)
+also document updated Astra support and GPT-5.6+ prompt-cache request handling.
+The published 0.85.1 provider implementation uses compatibility client 2.1.251.
+No local spoof of the client version was applied.
+
+This means all seven requested representative model families have completed
+one simple live task with their intended model. It does not yet establish
+hard-task reliability, speed improvements, or superiority to another harness.
+Automatic cross-provider recovery on a direct model selection needs a separate
+policy review; the benchmark guards against labeling that recovery as success
+for the originally selected model.

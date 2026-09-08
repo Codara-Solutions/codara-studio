@@ -1,0 +1,438 @@
+{
+  "kind": "model-fidelity-after-direct-selection-fix",
+  "sourceCommit": "a0187848",
+  "runtimeVersion": "0.84.4",
+  "task": "typo-fix",
+  "effort": "high",
+  "note": "One trial per model. Measures model selection and a small fix, not broad capability. Fable 5.1 was rejected by the old Pi compatibility client; the fallback to Sol fails model fidelity.",
+  "trials": [
+    {
+      "requested": "gpt-5.6-luna",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 97.5,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 17.5,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 10437,
+      "wallMs": 31526,
+      "tokens": 20086,
+      "usage": {
+        "inputTokens": 12306,
+        "outputTokens": 612,
+        "cacheReadTokens": 7168,
+        "cacheWriteTokens": 0
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-luna"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxxses-bu024i",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-VSmWrr"
+    },
+    {
+      "requested": "gpt-5.6-terra",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 97.9,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 17.9,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 15429,
+      "wallMs": 27978,
+      "tokens": 18999,
+      "usage": {
+        "inputTokens": 6674,
+        "outputTokens": 549,
+        "cacheReadTokens": 11776,
+        "cacheWriteTokens": 0
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-terra"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxyhdk-hltvio",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-5RtRxh"
+    },
+    {
+      "requested": "claude-sonnet-5",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 96.6,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 16.6,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 5414,
+      "wallMs": 12895,
+      "tokens": 22757,
+      "usage": {
+        "inputTokens": 10,
+        "outputTokens": 1024,
+        "cacheReadTokens": 16631,
+        "cacheWriteTokens": 5092
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "claude-sonnet-5"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxz3jg-9g3qs5",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-ZEluQq"
+    },
+    {
+      "requested": "gpt-5.6-sol",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 97.9,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 17.9,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 15413,
+      "wallMs": 39495,
+      "tokens": 19032,
+      "usage": {
+        "inputTokens": 12778,
+        "outputTokens": 622,
+        "cacheReadTokens": 5632,
+        "cacheWriteTokens": 0
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtrxze1i-mltqp6",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-w0qi9P"
+    },
+    {
+      "requested": "claude-opus-5",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 96.9,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 16.9,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 5396,
+      "wallMs": 14897,
+      "tokens": 21774,
+      "usage": {
+        "inputTokens": 10,
+        "outputTokens": 836,
+        "cacheReadTokens": 16101,
+        "cacheWriteTokens": 4827
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "claude-opus-5"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtry093x-330ltp",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-opus-5; observed claude-opus-5"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-hn519g"
+    },
+    {
+      "requested": "claude-fable-5-1",
+      "passed": false,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 66.9,
+      "parts": {
+        "correctness": 48.9,
+        "efficiency": 10,
+        "discipline": 0,
+        "orchestration": 10,
+        "penalties": -2
+      },
+      "green": null,
+      "wallMs": 5348,
+      "tokens": 0,
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "staged": false,
+      "postGreenTokens": null,
+      "workers": 2,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 1,
+      "models": [
+        "claude-fable-5-1",
+        "gpt-5.6-sol"
+      ],
+      "runStatus": "model_mismatch",
+      "runId": "run-mtry0l5l-orptjg",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": false,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1, gpt-5.6-sol"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-LrhOWh"
+    },
+    {
+      "requested": "gpt-6-astra",
+      "passed": true,
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 96.7,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 16.7,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 20416,
+      "wallMs": 45501,
+      "tokens": 22546,
+      "usage": {
+        "inputTokens": 8010,
+        "outputTokens": 584,
+        "cacheReadTokens": 13952,
+        "cacheWriteTokens": 0
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "gpt-6-astra"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtry13st-oblguh",
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-6-astra; observed gpt-6-astra"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-PSwwjz"
+    }
+  ]
+}
