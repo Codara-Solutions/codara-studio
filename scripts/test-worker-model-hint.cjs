@@ -45,6 +45,7 @@ async function main() {
   const mod = require(outfile);
   const {
     sanitizeWorkerModelHint,
+    plannedWorkerModel,
     WORKER_DEFAULT_CLAUDE_MODEL,
     ALLOWED_WORKER_MODELS,
     coerceWorkerModelToRoster,
@@ -156,6 +157,19 @@ async function main() {
     "google/gemini-flash-latest",
   );
   eq("empty enabled list rejects a worker", enabledWorkerModelFor("codex", undefined, []), undefined);
+
+  for (const model of ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.4", "claude-fable-5-1", "claude-sonnet-4-6"]) {
+    const task = { runtimePreference: model.startsWith("claude-") ? "claude" : "codex", modelHint: model };
+    eq(`direct selection preserves ${model}`, plannedWorkerModel(task, {
+      isDirectRun: true, enabledModels: ["gpt-5.6-sol", "claude-opus-5"],
+    }), model);
+  }
+  eq("managed hints still honor the enabled roster", plannedWorkerModel({ runtimePreference: "codex", modelHint: "gpt-5.6-luna" }, {
+    enabledModels: ["gpt-5.6-sol"],
+  }), "gpt-5.6-sol");
+  eq("automation retains its existing legacy remap", plannedWorkerModel({ runtimePreference: "claude", modelHint: "claude-sonnet-4-6" }, {
+    isAutomationRun: true,
+  }), "claude-sonnet-5");
 
   console.log(`\nAll ${pass} worker-model-hint checks passed.`);
 }

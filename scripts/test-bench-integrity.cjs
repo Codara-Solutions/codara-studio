@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { TASKS } = require("../cli/bench/tasks.cjs");
 const { gradeChecks, visibleSource } = require("../cli/bench/grade.cjs");
-const { acceptanceSummary, trialPassed, wilsonInterval } = require("../cli/bench/metrics.cjs");
+const { acceptanceSummary, trialPassed, wilsonInterval, modelControlCheck } = require("../cli/bench/metrics.cjs");
 
 function inWorkspace(task, overrides, verify) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cora-bench-integrity-"));
@@ -50,6 +50,10 @@ inWorkspace(staged, { ...staged.reference, ...Object.assign({}, ...staged.stages
   assert.equal(gradeChecks(staged, dir, {}).every((check) => check.pass), true);
 });
 
+assert.equal(modelControlCheck(["gpt-5.6-sol"], "gpt-5.6-luna").pass, false);
+assert.equal(modelControlCheck([], "gpt-5.6-luna").pass, false);
+assert.equal(modelControlCheck(["gpt-5.6-luna", "gpt-5.6-luna"], "gpt-5.6-luna").pass, true);
+assert.equal(modelControlCheck(["gpt-5.6-luna", "gpt-5.6-sol"], "gpt-5.6-luna").pass, false);
 const passed = { task: "a", runStatus: "complete", checks: [{ pass: true }], wallMs: 1000, tokens: 500 };
 assert.equal(trialPassed(passed), true);
 for (const runStatus of ["timeout", "failed", "cancelled", "running", "error"]) {

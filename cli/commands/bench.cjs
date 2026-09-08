@@ -28,7 +28,7 @@ const { findRun } = require("../lib/store.cjs");
 const { TASKS, TIER_CAP_MS } = require("../bench/tasks.cjs");
 const { scoreTask, summarize } = require("../bench/score.cjs");
 const { gradeChecks, visibleSource } = require("../bench/grade.cjs");
-const { acceptanceSummary, trialPassed } = require("../bench/metrics.cjs");
+const { acceptanceSummary, trialPassed, modelControlCheck } = require("../bench/metrics.cjs");
 const { RIVAL_AGENTS, rivalLabel, runRivalTurn } = require("../bench/rivals.cjs");
 
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -144,13 +144,20 @@ function probeGreen(dir, task, stageIndex = 0) {
 }
 
 /** Wait for the run to settle; auto-answer questions so the bench never hangs. */
-async function driveToCompletion(flags, runId, deadline) {
+async function driveToCompletion(flags, runId, deadline, expectedModel) {
   let questionsAsked = 0;
   for (;;) {
     if (Date.now() > deadline) return { status: "timeout", questionsAsked };
+    if (expectedModel) {
+      const run = findRun(flags, runId);
+      const models = [...(run.sparkCalls ?? []), ...(run.workerAttempts ?? [])].map((item) => item.model).filter(Boolean);
+      if (models.length && !modelControlCheck(models, expectedModel).pass) {
+        return { status: "model_mismatch", questionsAsked, error: `Expected ${expectedModel}; launched ${models.join(", ")}` };
+      }
+    }
     const res = await rpcRaw(flags, "chat.wait", {
       runId,
-      timeoutMs: Math.min(60_000, deadline - Date.now()),
+      timeoutMs: Math.min(expectedModel ? 5_000 : 60_000, deadline - Date.now()),
     });
     if (res.error) return { status: "error", questionsAsked, error: res.error.message };
     const status = res.result?.run?.status ?? res.result?.status;
@@ -251,7 +258,7 @@ async function runTask(flags, task) {
   const runId = started.run.id;
   const poller = startGreenPoller(dir, task, startedAt);
 
-  let outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+  let outcome = await driveToCompletion(flags, runId, startedAt + capMs, flags.execution === "managed" ? undefined : flags.model ?? DEFAULT_CONTROL_MODEL);
   let questionsAsked = outcome.questionsAsked;
   // Checkpoint stages: evolve the workspace and continue the SAME conversation.
   // A user message into a settled run revives it (run-store transitions it
@@ -264,7 +271,7 @@ async function runTask(flags, task) {
     poller.state.stageIndex += 1;
     poller.state.greenAtMs = null;
     await rpc(flags, "chat.send", { runId, content: stage.prompt });
-    outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+    outcome = await driveToCompletion(flags, runId, startedAt + capMs, flags.execution === "managed" ? undefined : flags.model ?? DEFAULT_CONTROL_MODEL);
     questionsAsked += outcome.questionsAsked;
   }
   outcome.questionsAsked = questionsAsked;
@@ -273,8 +280,8 @@ async function runTask(flags, task) {
   // A run that outlived the bench window keeps its workers alive against a
   // workspace we are about to grade and delete: stop it before touching the
   // tree, and grade whatever state it reached.
-  if (outcome.status === "timeout") {
-    await rpcRaw(flags, "chat.cancel", { runId, reason: "bench window elapsed" }).catch(() => null);
+  if (outcome.status === "timeout" || outcome.status === "model_mismatch") {
+    await rpcRaw(flags, "chat.cancel", { runId, reason: outcome.status === "model_mismatch" ? outcome.error : "bench window elapsed" }).catch(() => null);
   }
   // One last probe so a run that went green in the final poll gap still counts.
   let greenAtMs = poller.state.greenAtMs;
@@ -283,6 +290,7 @@ async function runTask(flags, task) {
   const greenAtIso = greenAtMs === null ? null : new Date(startedAt + greenAtMs).toISOString();
   const metrics = await runMetrics(flags, runId, greenAtIso, outcome.status);
   const checks = gradeChecks(task, dir, metrics);
+  if (flags.execution !== "managed") checks.push(modelControlCheck(metrics.models, flags.model ?? DEFAULT_CONTROL_MODEL));
   // Cancel unconditionally before deleting the workspace: a settled run can
   // still revive itself (a late verifier verdict queues a manager turn) and
   // spawn workers against a directory that no longer exists.
@@ -303,6 +311,7 @@ async function runTask(flags, task) {
     ...metrics,
   };
   const score = scoreTask(task, result);
+  if (outcome.error) console.log(c.red(`  ${outcome.error}`));
 
   const paintScore = (total) =>
     total >= 75 ? c.green(String(total)) : total >= 50 ? c.yellow(String(total)) : c.red(String(total));

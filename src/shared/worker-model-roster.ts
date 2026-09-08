@@ -205,10 +205,19 @@ export function coerceWorkerModelToRoster(
  * the superseded-id remaps apply. Coercing them onto the Cora chat-worker
  * roster would silently rewrite a model the user explicitly pinned.
  */
+export interface WorkerModelOptions {
+  isAutomationRun?: boolean;
+  isDirectRun?: boolean;
+  enabledModels?: readonly string[];
+}
+
 export function plannedWorkerModel(
   task: { runtimePreference: string; modelHint?: string },
-  options: { isAutomationRun?: boolean; enabledModels?: readonly string[] } = {},
+  options: WorkerModelOptions = {},
 ): string | undefined {
+  // A direct chat selection is user-owned, not a planner hint. Preserve the
+  // exact catalog id, including older models and newly published ones.
+  if (options.isDirectRun) return task.modelHint?.trim() || undefined;
   if (options.isAutomationRun) {
     return sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   }

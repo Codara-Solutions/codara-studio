@@ -12,7 +12,7 @@ import type {
   WorkerTaskStatus,
 } from "@shared/types";
 import { isBackendFailurePark, resolveOpenRunQuestion } from "@shared/run-questions";
-import { plannedWorkerModel } from "@shared/worker-model-roster";
+import { plannedWorkerModel, type WorkerModelOptions } from "@shared/worker-model-roster";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
 import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
 
@@ -107,21 +107,16 @@ function isDeadAttempt(attempt: WorkerAttempt): boolean {
   );
 }
 
-// Loom runs launch workers on the model the automation pinned; Cora chat runs
-// coerce every hint onto the worker roster at spawn time. The renderer has to
-// know which rule applies before it can name a queued worker's model.
+// Automation and direct chats pin their models; managed workers follow the
+// enabled roster. Queued labels use the same selection as the launcher.
 export function isAutomationRun(run: RunState): boolean {
   return run.executionMode === "direct" && Boolean(run.automationId);
 }
 
-// The model a worker that has NOT launched yet will actually run on — the
-// roster-coerced hint, not the planner's raw one. A task hinted claude-sonnet-5
-// spawns on claude-opus-5, and a row that advertised "Sonnet 5" until the
-// attempt appeared was telling the user something the spawn would not honour
-// (run-ms9ikoef-mnucvq).
-function pendingAttemptModel(task: WorkerTask, automation: boolean): string {
+// A queued task has no attempt metadata yet, so derive its launch target.
+function pendingAttemptModel(task: WorkerTask, modelOptions: WorkerModelOptions): string {
   return workerModelLabel(
-    plannedWorkerModel(task, { isAutomationRun: automation }),
+    plannedWorkerModel(task, modelOptions),
     runtimeLabel(task.runtimePreference),
   );
 }
@@ -133,13 +128,13 @@ function pendingAttemptModel(task: WorkerTask, automation: boolean): string {
 function attemptModel(
   attempt: WorkerAttempt,
   worker: LogicalWorker,
-  automation: boolean,
+  modelOptions: WorkerModelOptions,
 ): string | undefined {
   if (attempt.model) return attempt.model;
   const owner = [...worker.supersededTasks, worker.task].find(
     (task) => task.id === attempt.workerTaskId,
   );
-  return owner ? plannedWorkerModel(owner, { isAutomationRun: automation }) : undefined;
+  return owner ? plannedWorkerModel(owner, modelOptions) : undefined;
 }
 
 // Worker errors arrive as provider output: multi-line, path-laden, occasionally
@@ -175,7 +170,7 @@ function workerAttemptFailureDisplay(attempt: WorkerAttempt | undefined): string
 // a corrective attempt (verifier feedback) even though the last one succeeded.
 function pendingAttemptFor(
   worker: LogicalWorker,
-  automation: boolean,
+  modelOptions: WorkerModelOptions,
 ): ChatPendingAttempt | null {
   const task = worker.task;
   if (!isPendingWorkerTask(task.status)) return null;
@@ -188,14 +183,14 @@ function pendingAttemptFor(
   if (hasSucceededAttempt && task.status !== "retry_queued") return null;
   return {
     state: task.status === "claimed" || task.status === "running" ? "starting" : "queued",
-    model: pendingAttemptModel(task, automation),
+    model: pendingAttemptModel(task, modelOptions),
     number: worker.attempts.length + 1,
   };
 }
 
 // The model a worker row should name: the surviving task's own attempt, then
 // what its replacement was hinted to run on, then the lineage's last attempt.
-function workerRowModel(worker: LogicalWorker, automation: boolean): string | undefined {
+function workerRowModel(worker: LogicalWorker, modelOptions: WorkerModelOptions): string | undefined {
   const task = worker.task;
   for (let index = worker.attempts.length - 1; index >= 0; index -= 1) {
     const attempt = worker.attempts[index];
@@ -203,8 +198,8 @@ function workerRowModel(worker: LogicalWorker, automation: boolean): string | un
   }
   // No attempt of its own yet: name the model the spawn chokepoint will pick
   // for this task, which is the coerced hint — never the raw one.
-  if (task.modelHint) return plannedWorkerModel(task, { isAutomationRun: automation });
-  return worker.latestAttempt?.model ?? plannedWorkerModel(task, { isAutomationRun: automation });
+  if (task.modelHint) return plannedWorkerModel(task, modelOptions);
+  return worker.latestAttempt?.model ?? plannedWorkerModel(task, modelOptions);
 }
 
 // One beat of a logical worker's retry lineage, for the expanded worker row:
@@ -516,11 +511,14 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   // yet still gets its row as long as the run-store owes it an attempt, so a
   // spawned wave is visible in full instead of appearing one worker at a time
   // as each attempt happens to start.
-  const automation = isAutomationRun(run);
+  const modelOptions: WorkerModelOptions = {
+    isAutomationRun: isAutomationRun(run),
+    isDirectRun: run.executionMode === "direct" && !run.automationId,
+  };
   const workers = logicalWorkers(run);
   for (const worker of workers) {
     if (worker.attempts.length > 0 || isPendingWorkerTask(worker.task.status)) {
-      items.push(logicalWorkerTimelineItem(worker, run.createdAt, automation));
+      items.push(logicalWorkerTimelineItem(worker, run.createdAt, modelOptions));
     }
   }
 
@@ -537,9 +535,9 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         status: worker.task.status,
         runtimeState: worker.latestAttempt?.runtimeState,
         attemptCount: worker.attempts.length,
-        model: workerRowModel(worker, automation),
+        model: workerRowModel(worker, modelOptions),
         diff: worker.latestAttempt?.diffSummary,
-        pending: pendingAttemptFor(worker, automation) ?? undefined,
+        pending: pendingAttemptFor(worker, modelOptions) ?? undefined,
       }));
     items.push({
       kind: "step",
@@ -811,10 +809,10 @@ function logicalWorkerKey(worker: LogicalWorker): string {
 function logicalWorkerTimelineItem(
   worker: LogicalWorker,
   fallbackAt: string,
-  automation: boolean,
+  modelOptions: WorkerModelOptions,
 ): Extract<ChatTimelineItem, { kind: "tool" }> {
   const attempts = worker.attempts;
-  const pending = pendingAttemptFor(worker, automation);
+  const pending = pendingAttemptFor(worker, modelOptions);
   // The earliest task in the chain anchors the row where the worker first
   // appeared in the conversation, even after a runtime fallback replaced it.
   const firstTask = worker.supersededTasks[0] ?? worker.task;
@@ -892,7 +890,7 @@ function logicalWorkerTimelineItem(
   // The row is named by the model that did the work, with the runtime label
   // as the fallback until the attempt or its task names one.
   const engine = workerModelLabel(
-    attemptModel(latest, worker, automation),
+    attemptModel(latest, worker, modelOptions),
     runtimeLabel(latest.runtime),
   );
   // The denominator is the main-process retry cap the run inspector prints, so
@@ -974,7 +972,10 @@ export function summarizeWorkerWait(
   run: RunState,
   taskIds: string[],
 ): WorkerWaitSummary | null {
-  const automation = isAutomationRun(run);
+  const modelOptions: WorkerModelOptions = {
+    isAutomationRun: isAutomationRun(run),
+    isDirectRun: run.executionMode === "direct" && !run.automationId,
+  };
   const workers = logicalWorkers(run);
   const byTaskId = new Map<string, LogicalWorker>();
   for (const worker of workers) {
@@ -1011,7 +1012,7 @@ export function summarizeWorkerWait(
       blocked += 1;
       continue;
     }
-    const pending = pendingAttemptFor(worker, automation);
+    const pending = pendingAttemptFor(worker, modelOptions);
     if (pending) {
       if (pending.number > 1) retrying += 1;
       else queued += 1;
@@ -1366,7 +1367,10 @@ export function deriveComposerWorkerActivity(
   run: RunState | null | undefined,
 ): ComposerWorkerActivity | null {
   if (!run) return null;
-  const automation = isAutomationRun(run);
+  const modelOptions: WorkerModelOptions = {
+    isAutomationRun: isAutomationRun(run),
+    isDirectRun: run.executionMode === "direct" && !run.automationId,
+  };
   const runPaused = run.status === "paused" || run.status === "blocked";
 
   const attemptsFor = (taskId: string): WorkerAttempt[] =>
@@ -1418,7 +1422,7 @@ export function deriveComposerWorkerActivity(
     );
     const runtime = running?.runtime ?? task.runtimePreference;
     const model =
-      running?.model ?? plannedWorkerModel(task, { isAutomationRun: automation });
+      running?.model ?? plannedWorkerModel(task, modelOptions);
     return workerModelLabel(model, runtimeLabel(runtime));
   });
 

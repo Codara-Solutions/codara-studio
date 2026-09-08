@@ -1,5 +1,15 @@
 "use strict";
 
+function modelControlCheck(models, expected) {
+  const observed = [...new Set(models.filter(Boolean))];
+  return {
+    name: "requested model executed",
+    pass: observed.length > 0 && observed.every((model) => model === expected),
+    weight: 1,
+    detail: `requested ${expected}; observed ${observed.join(", ") || "no model telemetry"}`,
+  };
+}
+
 function trialPassed(result) {
   return result.runStatus === "complete" && result.checks.length > 0 && result.checks.every((check) => check.pass === true);
 }
@@ -49,4 +59,4 @@ function acceptanceSummary(rows) {
   };
 }
 
-module.exports = { trialPassed, acceptanceSummary, wilsonInterval };
+module.exports = { modelControlCheck, trialPassed, acceptanceSummary, wilsonInterval };

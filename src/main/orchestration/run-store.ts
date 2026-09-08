@@ -13241,12 +13241,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
-  // A direct run bound to an automationId is the automation (loom) worker
-  // path: it launches on a pinned/handoff model the automation engine already
-  // validated, so the launcher passes its hint verbatim instead of running the
-  // Cora-worker roster coercion. Automation workers run on the SAME Pi harness
-  // as ordinary Cora workers. shell/manual are human-assisted escape hatches
-  // that keep a plain pty pane instead.
+  // Direct chats keep the user's exact model selection. Managed workers use
+  // the enabled roster; automation workers keep their validated model hints.
+  // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
     task.runtimePreference === "claude" ||
     task.runtimePreference === "codex" ||
@@ -13257,6 +13254,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
         task,
         isAutomationRun,
         workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+        run.executionMode === "direct" && !isAutomationRun,
       )
     : undefined;
   if (isPiWorker && !piWorkerModel) {
@@ -18988,13 +18986,11 @@ function piModelForWorker(
   task: WorkerTask,
   isAutomationRun = false,
   enabledModels?: readonly string[],
+  isDirectRun = false,
 ): string | undefined {
-  // One answer, shared with the renderer: plannedWorkerModel holds both the
-  // automation passthrough (a pinned/handoff model the automation validation
-  // layer already vetted) and the roster coercion Cora-spawned workers get.
-  // The renderer prints the same value on queued worker rows, so a row can
-  // never advertise a model this chokepoint will not launch.
-  return plannedWorkerModel(task, { isAutomationRun, enabledModels });
+  // Share selection with queued worker labels so the advertised model and
+  // the launch target agree before an attempt has started.
+  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels });
 }
 
 function piWorkerToolLabel(value: unknown): string {
