@@ -1,0 +1,54 @@
+{
+  "kind": "hermes-quiet-chat-reasoning-resume-pilot",
+  "sourceCommit": "0bc9c2991fabc0361934b6e9c8101df95515f0bd",
+  "passed": true,
+  "exactOutput": true,
+  "scopeAudit": {
+    "at": "2026-09-08T04:04:42.857447+00:00",
+    "passed": true,
+    "method": "Read all tool-call inputs in the exact recorded session. First turn had no tool calls. Second turn used one write_file to its assigned workspace answer.txt with the recalled marker, no reads or searches. Both persisted reasoning_effort values high, exact session reused, incremental usage matches cumulative difference."
+  },
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "stages": [
+    {
+      "sessionId": "20260908_060349_d6a1ae",
+      "reasoningEffort": "high",
+      "tokens": 4937,
+      "usage": {
+        "inputTokens": 4931,
+        "outputTokens": 6,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "cumulativeUsage": {
+        "inputTokens": 4931,
+        "outputTokens": 6,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "turns": 1,
+      "questions": 0
+    },
+    {
+      "sessionId": "20260908_060349_d6a1ae",
+      "reasoningEffort": "high",
+      "tokens": 10376,
+      "usage": {
+        "inputTokens": 657,
+        "outputTokens": 119,
+        "cacheReadTokens": 9600,
+        "cacheWriteTokens": 0
+      },
+      "cumulativeUsage": {
+        "inputTokens": 5588,
+        "outputTokens": 125,
+        "cacheReadTokens": 9600,
+        "cacheWriteTokens": 0
+      },
+      "turns": 2,
+      "questions": 0
+    }
+  ],
+  "limitation": "Adapter reasoning, continuation and accounting pilot; no isolated timing comparison."
+}

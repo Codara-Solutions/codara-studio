@@ -376,3 +376,60 @@ instruction to avoid other workspaces, sessions, and benchmark artifacts.
 Hermes also receives `--in` and `TERMINAL_CWD`; rival session IDs are retained
 for audit. These instructions are not an OS sandbox. A replacement comparison
 still needs session auditing before its numbers can be reported as valid.
+
+
+### Reasoning control invalidated the replacement crossover
+
+The replacement `ff5c5329` schedule was also stopped, this time after the first
+five three-task suites. Source inspection found that the installed Hermes
+fork's top-level `--oneshot` parser accepts `--reasoning high`, but the dispatch
+path never passes reasoning or resume to its agent. All six completed Hermes
+sessions persisted `reasoning_config: null`; its Codex transport defaults that
+case to medium. The schedule cannot establish matched-effort performance and
+is excluded from that ranking. Completed suites, scope audits, the stopped
+Cora run, and diagnostic history remain under `crossover-ff5c5329` in the lab.
+
+The adapter now uses `hermes chat --quiet --oneshot --query`, which forwards
+reasoning and exact-session resume. It reads only the reported session through
+`hermes sessions export --session-id`, checks its workspace and persisted effort,
+and reports usage increments for continuations. Missing effort or an unsupported
+rotated lineage fails the measurement instead of inventing telemetry. The
+installed Hermes repository was not modified.
+
+The [live two-turn adapter pilot](hermes-headless-pilot.json) at `0bc9c299`
+recorded high effort on both turns, recalled a random marker in the exact same
+session, and wrote it with one workspace-local tool call. There were no reads,
+searches, or first-turn tool calls. This validates the invocation and accounting;
+it is not a latency comparison. A fresh audited crossover is still required.
+
+## Expanded project and visual holdouts
+
+`ledger-reconcile` adds a three-file project with strict CSV parsing, revision
+conflicts, duplicate handling, void tombstones, arbitrary-precision money,
+stable errors, and an import-safe CLI. Its reference implementation passes the
+visible and hidden contract checks; targeted defective implementations fail.
+It is a holdout, so its failures must not be used to tune the model prompt.
+No paid model result is claimed for this new task yet.
+
+The canvas fixture presents six randomly ordered stream names with unique
+random latency values painted only in a chart. The model must receive a
+screenshot before confirming the lowest latency, save exactly once, and reload
+the saved choice. The smoke runner checks returned image blocks, permitted
+browser tools, exact model telemetry, and persisted state. Unit tests validate
+the fixture's outcome checks; live multi-model coverage remains pending.
+
+## Manager compaction settlement
+
+Manager sessions now finish their answer before requesting early compaction
+through the host. The host waits for summary completion and includes its input,
+output, cache, and applicable OpenRouter estimate in the turn totals. Pi's own
+completed compaction suppresses an immediate duplicate request. A failed or
+unconfirmed summary stops the runtime while preserving the completed answer,
+so a later turn can restart from the saved conversation.
+
+The pinned Pi integration test validates one completed manager answer, one
+summary, a durable compaction entry, and all reported usage without prompting
+the completed answer again. Lifecycle tests cover summary failures and a newer
+turn arriving during cleanup. Worker compaction integration still passes and
+retains its separate pause-and-resume behavior. These are offline sequencing
+checks, not a new live retention or speed result.
