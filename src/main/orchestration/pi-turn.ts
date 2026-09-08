@@ -194,6 +194,16 @@ export class PiTurnAccumulator {
       return;
     }
 
+    if (event.type === "compaction_end") {
+      const result = asRecord(event.result);
+      if (!result) return;
+      this.addUsage(asRecord(result?.usage));
+      const after = positiveCount(result?.estimatedTokensAfter);
+      if (!event.aborted && after !== null) this.contextTokens = after;
+      this.emitUsage();
+      return;
+    }
+
     if (event.type === "message_end") {
       const message = asRecord(event.message);
       if (message?.role !== "assistant") return;
@@ -203,15 +213,7 @@ export class PiTurnAccumulator {
       // not fall back to earlier streamed progress text.
       this.completedText.set(messageId, assistantText(message));
       const usage = asRecord(message.usage);
-      this.usage = {
-        inputTokens: this.usage.inputTokens + finiteCount(usage?.input),
-        outputTokens: this.usage.outputTokens + finiteCount(usage?.output),
-        cacheReadTokens: this.usage.cacheReadTokens + finiteCount(
-          usage?.cacheRead ?? usage?.cache_read ?? usage?.cached,
-        ),
-        cacheWriteTokens: this.usage.cacheWriteTokens + finiteCount(usage?.cacheWrite ?? usage?.cache_write ?? usage?.cacheCreation),
-        costUsd: this.usage.costUsd + (this.captureCost ? costTotalFrom(usage) : 0),
-      };
+      this.addUsage(usage);
       const context = contextTokensFrom(usage);
       if (context > 0) this.contextTokens = context;
       this.contextWindowTokens = contextWindowFrom(message, usage) ?? this.contextWindowTokens;
@@ -228,29 +230,7 @@ export class PiTurnAccumulator {
         // signal. The later retry event is handled too for forward compatibility.
         this.providerFailure = null;
       }
-      // An errored request reports all-zero usage; emitting that gauge would
-      // wipe every consumer's context meter to 0. No reading beats a false
-      // zero, so stay quiet until real usage accumulates.
-      if (
-        this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens + this.usage.cacheWriteTokens > 0 ||
-        this.contextTokens > 0
-      ) {
-        const { costUsd, ...tokenUsage } = this.usage;
-        this.onStream?.({
-          kind: "usage",
-          ...tokenUsage,
-          // Turn-cumulative OpenRouter catalog estimate. Emitted only once it
-          // is positive; native subscription chats never capture this field.
-          ...(costUsd > 0 ? { costUsd } : {}),
-          ...(this.contextTokens > 0 ? { contextTokens: this.contextTokens } : {}),
-          ...(this.contextWindowTokens !== null
-            ? { contextWindowTokens: this.contextWindowTokens }
-            : {}),
-          // The ceiling this session will actually compact at. Only Pi sessions
-          // carry it, which is exactly the set of chats the extension runs in.
-          compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
-        });
-      }
+      this.emitUsage();
       return;
     }
 
@@ -333,6 +313,44 @@ export class PiTurnAccumulator {
       failure: this.fatalFailure ?? this.providerFailure,
       settled: this.settled,
     };
+  }
+
+  private addUsage(usage: Record<string, unknown> | null): void {
+    this.usage = {
+      inputTokens: this.usage.inputTokens + finiteCount(usage?.input),
+      outputTokens: this.usage.outputTokens + finiteCount(usage?.output),
+      cacheReadTokens: this.usage.cacheReadTokens + finiteCount(
+        usage?.cacheRead ?? usage?.cache_read ?? usage?.cached,
+      ),
+      cacheWriteTokens: this.usage.cacheWriteTokens + finiteCount(usage?.cacheWrite ?? usage?.cache_write ?? usage?.cacheCreation),
+      costUsd: this.usage.costUsd + (this.captureCost ? costTotalFrom(usage) : 0),
+    };
+  }
+
+  private emitUsage(): void {
+    // An errored request reports all-zero usage; emitting that gauge would
+    // wipe every consumer's context meter to 0. No reading beats a false
+    // zero, so stay quiet until real usage accumulates.
+    if (
+      this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens + this.usage.cacheWriteTokens > 0 ||
+      this.contextTokens > 0
+    ) {
+      const { costUsd, ...tokenUsage } = this.usage;
+      this.onStream?.({
+        kind: "usage",
+        ...tokenUsage,
+        // Turn-cumulative OpenRouter catalog estimate. Emitted only once it
+        // is positive; native subscription chats never capture this field.
+        ...(costUsd > 0 ? { costUsd } : {}),
+        ...(this.contextTokens > 0 ? { contextTokens: this.contextTokens } : {}),
+        ...(this.contextWindowTokens !== null
+          ? { contextWindowTokens: this.contextWindowTokens }
+          : {}),
+        // The ceiling this session will actually compact at. Only Pi sessions
+        // carry it, which is exactly the set of chats the extension runs in.
+        compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+      });
+    }
   }
 
   private ensureAssistant(message: Record<string, unknown>, begin = false): string {

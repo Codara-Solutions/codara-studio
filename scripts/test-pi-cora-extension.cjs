@@ -663,6 +663,18 @@ const noInput = {};
   turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
   assert.equal(aborts, 2, "a completed compaction re-arms later tool rounds");
 
+  const managerHandlers = new Map();
+  const managerEntries = [];
+  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args) }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(managerHandlers.has("turn_end"), false);
+  managerHandlers.get("agent_end")({}, hostContext);
+  managerHandlers.get("agent_end")({}, hostContext);
+  assert.equal(managerEntries.length, 1, "manager marks one request for host settlement");
+  assert.equal(aborts, 2, "manager compaction cannot abort its completed answer");
+  managerHandlers.get("session_compact_failed")({});
+  managerHandlers.get("agent_end")({}, hostContext);
+  assert.equal(managerEntries.length, 2, "failed native compaction cannot disable the early trigger forever");
+
   // Both Cora extensions must actually wire the trigger up.
   for (const file of ["index.ts", "worker.ts"]) {
     const source = fs.readFileSync(

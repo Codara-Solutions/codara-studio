@@ -25,6 +25,7 @@ import { PiRpcClient } from "./pi-rpc-client";
 import { classifyTurnLiveness, isLongPollToolName } from "./agent-liveness";
 import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { PiTurnAccumulator } from "./pi-turn";
+import { PiManagerCompaction } from "./pi-manager-compaction";
 import {
   buildTalkReplyDecision,
   type ChatStreamHandler,
@@ -383,6 +384,7 @@ async function requestPiDecision(
   const runId = input.run.id;
   let session: PiBackendSession | undefined;
   let unsubscribe: (() => void) | undefined;
+  let compaction: PiManagerCompaction | undefined;
   // Session STARTUP is outside the turn-failure envelope on purpose. A missing
   // or expired subscription auth, an uninstalled pinned runtime, or an RPC
   // process that never came up all mean NO provider turn ever started —
@@ -444,6 +446,12 @@ async function requestPiDecision(
       return next;
     };
     let settled = armSettlement();
+    let compactionFailure: string | undefined;
+    compaction = new PiManagerCompaction(session.client, {
+      interrupted: () => session.interrupted || GENERATIONS.get(runId) !== generation,
+      onSettled: () => settle(),
+      onError: (error) => { compactionFailure = error.message; },
+    });
     unsubscribe = session.client.onEvent((event) => {
       liveness.lastEventAt = Date.now();
       if (
@@ -461,6 +469,7 @@ async function requestPiDecision(
         liveness.inFlightTools.delete(event.toolCallId);
       }
       turn.consume(event);
+      if (compaction?.consume(event)) return;
       if (event.type === "agent_settled") settle();
     });
 
@@ -491,7 +500,7 @@ async function requestPiDecision(
     // message. Never promote earlier progress prose into a fake successful
     // answer. Give it one hidden, tightly-scoped chance to produce the result
     // users should have received.
-    if (!accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
+    if (!compactionFailure && !accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
       settled = armSettlement();
       await session.client.prompt(EMPTY_FINAL_REPROMPT);
       await waitForSettled(settled, liveness);
@@ -507,6 +516,22 @@ async function requestPiDecision(
       accumulated = turn.result();
     }
 
+    if (compactionFailure) {
+      // A timed-out summary may still be running. Stop that process before
+      // returning the completed answer or allowing another turn to reuse it.
+      await stopSession(runId, session);
+      if (GENERATIONS.get(runId) !== generation) {
+        return {
+          decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          accountProfileId: session.accountProfileId,
+          turnAborted: true,
+        };
+      }
+      accumulated = turn.result();
+      onStream?.({ kind: "system_note", message: `Context compaction failed. The conversation remains saved; Cora will restart its runtime on the next turn. ${compactionFailure}` });
+    }
     // costUsd is an OpenRouter catalog-priced estimate for the whole turn.
     // Native subscription sessions never capture it, even when Pi's catalog
     // supplies an API-equivalent number.
@@ -559,7 +584,9 @@ async function requestPiDecision(
       };
     }
     if (!finalText) {
-      const detail = "Cora finished its tool work without a final response after one retry.";
+      const detail = compactionFailure
+        ? "Cora finished without a final response and context compaction failed."
+        : "Cora finished its tool work without a final response after one retry.";
       return {
         decision: buildTalkReplyDecision(detail),
         decisionAlreadyApplied: liveDecisionApplied || undefined,
@@ -606,6 +633,7 @@ async function requestPiDecision(
       turnFailed: true,
     };
   } finally {
+    compaction?.dispose();
     unsubscribe?.();
     if (session) session.settleActiveTurn = null;
   }

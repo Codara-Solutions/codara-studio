@@ -81,9 +81,9 @@ export function shouldCompactNow(input: {
   return tokens > effectiveCompactAtTokens(usage.contextWindow, input.thresholdTokens);
 }
 
-/** Workers hand a completed tool round to the host for pause/compact/resume.
- *  Other sessions retain the end-of-loop trigger. Both paths wait for a
- *  completed compaction before considering later usage. */
+/** Hosted workers pause after a tool round; managers finish their answer.
+ *  The host waits for settlement before compacting either kind of session.
+ *  Standalone extension sessions retain the end-of-loop fallback. */
 export function registerContextCompaction(
   pi: ExtensionAPI,
   env: CompactionEnv = process.env,
@@ -97,6 +97,9 @@ export function registerContextCompaction(
   pi.on("session_compact", () => {
     compactionInFlight = false;
   });
+  pi.on("session_compact_failed", () => {
+    compactionInFlight = false;
+  });
 
   if (env.CODARA_PI_HOST_COMPACTION === "1") {
     pi.on("turn_end", (event, ctx) => {
@@ -108,6 +111,16 @@ export function registerContextCompaction(
       compactionInFlight = true;
       pi.appendEntry("codara-context-pause", { reason: "threshold", tokens: usage?.tokens, thresholdTokens });
       ctx.abort();
+    });
+    return;
+  }
+
+  if (env.CODARA_PI_HOST_COMPACTION === "settled") {
+    pi.on("agent_end", (_event, ctx) => {
+      const usage = ctx.getContextUsage();
+      if (!shouldCompactNow({ usage, thresholdTokens, compactionInFlight })) return;
+      compactionInFlight = true;
+      pi.appendEntry("codara-context-pause", { reason: "threshold", tokens: usage?.tokens, thresholdTokens });
     });
     return;
   }
