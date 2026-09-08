@@ -80,7 +80,7 @@ function toolVersions() {
 function historyMetadata(agent, taskNames, repeat, control = {}) {
   return {
     promptHash: agent === "cora" ? promptHash() : `${agent}-cli`,
-    suiteHash: sourceHash(["cli/bench/tasks.cjs"]),
+    suiteHash: sourceHash(["cli/bench/tasks.cjs", "cli/bench/projects/ledger-reconcile.cjs"]),
     scorerHash: sourceHash(["cli/bench/score.cjs", "cli/bench/grade.cjs", "cli/bench/metrics.cjs"]),
     runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs", "cli/bench/headless.cjs", "cli/bench/matrix.cjs"]),
     sourceCommit: commandOutput("git", ["rev-parse", "--short=12", "HEAD"]),

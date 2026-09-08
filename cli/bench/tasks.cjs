@@ -32,6 +32,7 @@
 const TIER_CAP_MS = { trivial: 5 * 60_000, standard: 10 * 60_000, hard: 15 * 60_000, project: 30 * 60_000 };
 
 const TASKS = [
+  require("./projects/ledger-reconcile.cjs"),
   // ── train · trivial ────────────────────────────────────────────────────────
   {
     name: "typo-fix",
