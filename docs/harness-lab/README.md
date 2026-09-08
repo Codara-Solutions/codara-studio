@@ -1,7 +1,8 @@
 # Cora harness lab
 
 Work branch: `feat/cora-harness-lab`. Starting product revision: `d7a6bc9e`.
-This is an ongoing experiment, not a claim that Cora outperforms every harness.
+The measured implementation and comparison are complete. See the concise
+[results report](RESULTS.md); this is not a claim of universal superiority.
 
 The objective covers hard one-shot work across the live model catalog, short
 prompts, speed and token efficiency, integrated browsing, compaction, durable
@@ -400,7 +401,8 @@ The [live two-turn adapter pilot](hermes-headless-pilot.json) at `0bc9c299`
 recorded high effort on both turns, recalled a random marker in the exact same
 session, and wrote it with one workspace-local tool call. There were no reads,
 searches, or first-turn tool calls. This validates the invocation and accounting;
-it is not a latency comparison. A fresh audited crossover is still required.
+it is not a latency comparison. The completed corrected crossover is recorded
+below and in [the results report](RESULTS.md).
 
 ## Expanded project and visual holdouts
 
@@ -485,7 +487,7 @@ on this task; all three are recorded as strict failures. Direct-task system
 instructions now state that task restrictions cover batch steps and read-only
 verification, with a limitation to report when permitted methods cannot verify.
 This remains model guidance rather than a hard natural-language policy parser;
-a fresh confirmation is required and the failed revisions stay in the record.
+the completed confirmation below retains the failed revisions.
 
 The [direct-instruction confirmation](browser-policy-confirmation-4a4a0539.json)
 at `4a4a0539` passed only 1/3 Fable ticket trials. The other two used one
@@ -539,6 +541,79 @@ cited Cora's one-batch verification limit as their reason for not rerunning.
 Cora now permits focused repeats to investigate failures or verify corrections,
 while discouraging repeats of already-passing checks without relevant changes.
 For workspace-restricted tasks, its instructions explicitly keep temporary check
-files inside that workspace. These are general workflow changes. Targeted Claude
-ledger follow-ups will be reported separately as development confirmations,
-with all original holdout failures retained.
+files inside that workspace. These are general workflow changes.
+
+The [targeted Claude ledger development confirmations](workspace-confirmation-e9c710af.json)
+at `e9c710af` achieved 2/3 functional passes and 0/3 strict passes. Sonnet repeated
+the account-separator defect; Opus and Fable passed the strengthened grader.
+All three still used global temporary files, so no reliable scope improvement
+was demonstrated. All three investigated and recovered a failed self-authored
+check: Sonnet repaired shell quoting, Opus repaired module resolution, and
+Fable corrected its own invalid string-sort expectation before running the
+remaining assertions. None changed the supplied tests.
+
+These are one development follow-up per model on an already inspected task,
+not new blind holdouts or causal performance estimates. Original failures stay
+in the record, and further prompt tuning on this fixture stops here.
+
+## Completed corrected CLI crossover
+
+The fixed `e9c710af` app/build completed all 27 sequential Sol/high trials from
+05:43:12 to 07:26:14 UTC on September 8. Task order was atomic patch, async pool,
+and LRU. Harness order rotated Cora/Codex/Hermes, Codex/Hermes/Cora, then
+Hermes/Cora/Codex. No other paid lab calls, builds, or test suites ran alongside
+the schedule. Production compaction remained 256,000; fast mode was off.
+Only generated benchmark history changed in the primary checkout. Development
+drafts were isolated in a separate worktree.
+
+All exact sessions passed scope and persisted Sol/high audits, with zero
+questions. Original automated acceptance was Cora 9/9, Codex 9/9, Hermes 8/9.
+The installed Hermes fork exhausted three 90-second no-response attempts in
+round two's patch trial without writing an implementation. That operational
+failure is retained. Three successful Hermes trials also had unmetered timeout
+retries: round-one patch and LRU, and round-three patch. Their full elapsed time
+is usable; their token totals omit unknown usage and are marked incomplete.
+No recorded provider error events were found in the Cora or Codex sessions.
+Absence of known usage gaps is not a billing audit.
+
+Trace inspection found a missing oracle case: the task explicitly rejects `-`
+outside array add, but the reference accepted object dash paths. Its object
+addition also mishandled the valid JSON key `__proto__`. Grader `402c54ca` fixes
+the reference and adds a common hidden check, with three targeted defect tests.
+Every retained solution was regraded offline with that validated grader.
+Task prompts and seeds remained identical, all retained task-file hashes stayed
+unchanged, and no model retry or workspace repair occurred. One Codex patch
+solution changed from pass to fail. Strengthened strict acceptance is **Cora
+9/9, Codex 8/9, Hermes 8/9**. Original checks remain in the artifact and history.
+
+Across the eight identical round/task pairs accepted by Cora and Codex, Cora
+used 405,940 versus 957,733 tokens (57.6% fewer) and 1,325.7 versus 1,714.2 seconds
+(22.7% less time). Across eight pairs accepted by Cora and Hermes, Cora took
+1,344.9 versus 2,337.3 seconds (42.5% less time). The Hermes token comparison
+has five successful pairs without known usage gaps: 219,067 versus 356,060
+(38.5% fewer). It contains no patch trials. These comparisons condition on joint
+success and, for tokens, telemetry availability; they do not erase failures.
+
+The [comparison artifact](crossover-e9c710af.json) contains all 27 outcomes,
+original and strengthened checks, session hashes, full-call audit counts,
+provider retry evidence, versions, and exact matched cohorts. Codex was 0.153.4.
+Hermes was the installed 0.21.0 local fork `30478b6e` with 6,600 carried commits,
+not stock upstream. Claude Code remained unavailable, not defeated. Three
+repetitions on one machine/model, uncontrolled cache/provider conditions, and
+repeated development tasks limit generalization. The two invalidated schedules
+above remain excluded from rankings.
+
+## Final validation
+
+At final code revision `402c54ca`, all 241 registry suites passed in 292 seconds,
+all three typecheck projects passed, and the six focused benchmark/CLI suites
+passed. The last product build passed at `e9c710af`; later changes only touch
+benchmark grading, tests, and reports. Both macOS background-capture and trusted
+keyboard end-to-end tests passed at `e1665e3c`. Windows native validation remains
+unrun. [Validation provenance](validation.json) records log hashes.
+
+The final history adds exactly three targeted Claude suites and nine comparison
+suites. Each appended record was checked against its original artifact, and the
+previously committed history was preserved byte-for-byte. Dedicated lab apps
+and paid runners are stopped; retained workspaces and raw evidence remain in
+the separate lab home.

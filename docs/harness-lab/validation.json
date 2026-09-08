@@ -1,0 +1,68 @@
+{
+  "verifiedAt": "2026-09-08T07:34:15.415852+00:00",
+  "finalCodeCommit": "402c54ca0081cd39a22c68e40928e80ecb13adba",
+  "checks": {
+    "targetedBench": {
+      "command": "npm test -- 'bench-integrity|bench-ledger|bench-driver|bench-hermes|bench-headless|cora-cli'",
+      "passed": 6,
+      "total": 6
+    },
+    "typecheck": {
+      "command": "npm run typecheck",
+      "projects": [
+        "node",
+        "web",
+        "e2e"
+      ],
+      "passed": true
+    },
+    "fullRegistry": {
+      "command": "npm test",
+      "passed": 241,
+      "total": 241,
+      "seconds": 292
+    },
+    "productBuild": {
+      "sourceCommit": "e9c710af",
+      "passed": true,
+      "limitation": "Later changes only affect the benchmark grader, tests, and reports, not product runtime source."
+    },
+    "macosBrowserE2e": {
+      "sourceCommit": "e1665e3c",
+      "passed": 2,
+      "total": 2,
+      "tests": [
+        "preview-background-capture",
+        "preview-keyboard"
+      ],
+      "limitation": "Native validation on macOS only; Windows not run."
+    }
+  },
+  "localLogSha256": {
+    "targetedBench": {
+      "file": "cora-final-bench-validation.log",
+      "sha256": "e745b9eab3e5b4b784acc239d3c9f23e454b0657a0cdfcaf1ea15f658bd33918"
+    },
+    "typecheck": {
+      "file": "cora-final-typecheck.log",
+      "sha256": "d2caece31335ce88ea7fb41aa589ddfbceafc9c9ed1817382a4437303495c201"
+    },
+    "fullRegistry": {
+      "file": "cora-final-full-registry.log",
+      "sha256": "42a0016d3bf7b8ab21b307b744b1884ccd92005754b573cddab02abe4401966f"
+    },
+    "productBuild": {
+      "file": "codara-build-post-matrix.log",
+      "sha256": "3305d5bbe9db49f1fd78d0e53068a7338ae0c20990a7ce4c2960fea54d5345aa"
+    },
+    "macosBrowserE2e": {
+      "file": "codara-preview-e2e-e1665e3c.log",
+      "sha256": "6749ed048b0c4683c8379b03b26f7aced95376d0281d5e233b76c600620cb092"
+    }
+  },
+  "retainedHistory": {
+    "newOwnedSuites": 12,
+    "method": "Verified prior committed bytes remain the exact prefix and each of the 12 appended JSON records equals its corresponding original followup/comparison suite artifact before copying to the development worktree."
+  },
+  "labStatus": "Dedicated experiment app and paid runners stopped. Evidence and retained workspaces preserved."
+}
