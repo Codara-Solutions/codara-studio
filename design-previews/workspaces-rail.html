@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Workspaces Rail — Icons</title>
+<style>
+  :root {
+    --bg: #0e0d0b; --panel: #171513; --panel-2: #1c1a17; --panel-3: #211f1b;
+    --ink: #f4f3f1; --ink-dim: #bdbcb8; --muted: #7c7a75; --muted-2: #66645f;
+    --rule: #34332f; --rule-strong: #5a5853; --rule-soft: #242320;
+    --accent: #2AA298;
+    --font-sans: "Inter", "Inter Variable", -apple-system, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --fcb: #c65cf0; --internal: #3fd6b5; --personal: #f0524f; --playground: #6a6cf0;
+    --term-bg: #2a2d3a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font-sans); font-size: 13px; -webkit-font-smoothing: antialiased; }
+  .page { padding: 40px 48px 96px; max-width: 1500px; margin: 0 auto; }
+  .hero h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .hero p { margin: 0; color: var(--muted); max-width: 720px; line-height: 1.5; }
+  .hero ul { color: var(--ink-dim); margin: 12px 0 0; padding-left: 18px; line-height: 1.6; max-width: 760px; }
+  h2.sec { font-size: 15px; font-weight: 600; margin: 44px 0 6px; letter-spacing: -.01em; }
+  p.secd { color: var(--muted); margin: 0 0 16px; max-width: 720px; line-height: 1.5; }
+  .row2 { display: grid; grid-template-columns: 320px 1fr; gap: 28px; align-items: start; }
+  .row3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 28px; align-items: start; }
+  .cap { color: var(--muted); font-size: 12px; margin: 10px 0 0; line-height: 1.5; }
+
+  .ico { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .ico.sm { width: 12px; height: 12px; }
+  .ibtn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: var(--muted); cursor: pointer; }
+  .ibtn:hover { background: rgba(255,255,255,.06); color: var(--ink); }
+  .ibtn.on { background: color-mix(in oklch, var(--accent) 20%, transparent); color: var(--accent); box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 45%, transparent); }
+  .hov { opacity: 0; transition: opacity .15s; }
+  .group:hover .group__head .hov, .ws:hover .hov { opacity: 1; }
+
+  /* ---- rail ---- */
+  .frame { width: 320px; height: 600px; background: var(--panel); border: 1px solid var(--rule-soft); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 30px 60px -30px rgba(0,0,0,.8); position: relative; }
+  .frame__head { display: flex; align-items: center; gap: 8px; padding: 12px 12px 8px; }
+  .frame__head .title { font-size: 11px; font-weight: 700; letter-spacing: .12em; color: var(--ink-dim); flex: 1; }
+  .frame__head .count { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .frame__body { flex: 1; overflow: auto; padding: 2px 8px 12px; scrollbar-width: thin; scrollbar-color: var(--rule) transparent; }
+  .group { margin: 6px 0 10px; border: 1px solid var(--rule-soft); border-radius: 12px; background: var(--panel-2); padding: 4px; }
+  .group__head { display: flex; align-items: center; gap: 7px; padding: 6px 4px 6px 6px; cursor: pointer; border-radius: 8px; }
+  .group__head:hover { background: rgba(255,255,255,.03); }
+  .group__head .fold { color: var(--c); }
+  .group__label { flex: 1; font-size: 10.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--c); }
+  .ws { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 8px; color: var(--ink-dim); cursor: pointer; }
+  .ws:hover { background: rgba(255,255,255,.04); color: var(--ink); }
+  .ws.active { background: color-mix(in oklch, var(--c) 12%, transparent); color: var(--ink); }
+  .tile { width: 26px; height: 26px; border-radius: 7px; flex: none; display: grid; place-items: center; color: var(--c); background: color-mix(in oklch, var(--c) 18%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--c) 30%, transparent); }
+  .tile .ico { width: 15px; height: 15px; }
+  .ws.active .tile { background: var(--c); color: #14110d; box-shadow: 0 0 14px color-mix(in oklch, var(--c) 45%, transparent); }
+  .col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+  .sub { font-size: 10.5px; color: var(--muted); display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden; }
+  .sub .ico { width: 10px; height: 10px; }
+  .cnt { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--muted-2); white-space: nowrap; margin-right: 2px; }
+  .cnt.live { color: var(--c); } .cnt.live span { color: var(--muted-2); }
+  .dim { position: absolute; inset: 0; background: rgba(0,0,0,.3); }
+
+  /* ---- icon picker ---- */
+  .picker { position: absolute; z-index: 5; width: 272px; background: var(--panel-3); border: 1px solid var(--rule); border-radius: 12px; padding: 10px; box-shadow: 0 24px 48px -12px rgba(0,0,0,.8); }
+  .picker__search { display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,.04); border: 1px solid var(--rule-soft); border-radius: 8px; padding: 6px 9px; color: var(--muted); font-size: 12px; }
+  .picker__search span { color: var(--ink); }
+  .picker__search .cursor { width: 1px; height: 13px; background: var(--ink); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .picker__cats { display: flex; gap: 4px; margin: 10px 0 8px; flex-wrap: wrap; }
+  .picker__cats i { font-style: normal; font-size: 10.5px; padding: 3px 8px; border-radius: 999px; color: var(--muted); border: 1px solid transparent; }
+  .picker__cats i.on { color: var(--ink); background: rgba(255,255,255,.06); border-color: var(--rule-soft); }
+  .picker__grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .picker__grid b { aspect-ratio: 1; border-radius: 7px; display: grid; place-items: center; color: var(--ink-dim); cursor: pointer; }
+  .picker__grid b:hover { background: rgba(255,255,255,.06); color: var(--ink); }
+  .picker__grid b.on { background: color-mix(in oklch, var(--c) 22%, transparent); color: var(--c); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--c) 50%, transparent); }
+  .picker__grid .ico { width: 16px; height: 16px; }
+  .picker__foot { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--rule-soft); }
+  .swatches { display: flex; gap: 6px; }
+  .swatches i { width: 15px; height: 15px; border-radius: 50%; background: var(--s); cursor: pointer; }
+  .swatches i.on { box-shadow: 0 0 0 2px var(--panel-3), 0 0 0 3.5px var(--s); }
+  .picker__more { font-size: 10.5px; color: var(--muted); }
+
+  /* ---- app + switch toast ---- */
+  .app { position: relative; border: 1px solid var(--rule-soft); border-radius: 14px; background: var(--bg); overflow: hidden; height: 420px; box-shadow: 0 30px 60px -30px rgba(0,0,0,.8); }
+  .app__title { display: flex; align-items: center; gap: 14px; padding: 9px 12px; background: var(--panel); border-bottom: 1px solid var(--rule-soft); }
+  .dots { display: flex; gap: 6px; } .dots i { width: 11px; height: 11px; border-radius: 50%; background: #3c3a36; }
+  .app__tabs { display: flex; gap: 14px; font-size: 12px; color: var(--muted); } .app__tabs b { color: var(--ink); font-weight: 500; }
+  .app__body { display: flex; height: calc(100% - 38px); }
+  .app__rail { width: 280px; border-right: 1px solid var(--rule-soft); background: var(--panel); overflow: hidden; }
+  .app__main { flex: 1; padding: 28px; display: flex; flex-direction: column; gap: 12px; }
+  .app__ph { height: 12px; border-radius: 6px; background: rgba(255,255,255,.04); width: 55%; }
+  .toast { position: absolute; z-index: 6; top: 46px; left: 50%; transform: translate(-50%, -24px); opacity: 0; display: inline-flex; align-items: center; gap: 10px; padding: 6px 14px 6px 6px; border-radius: 999px; background: color-mix(in oklch, var(--c) 14%, var(--panel-3)); border: 1px solid color-mix(in oklch, var(--c) 45%, transparent); box-shadow: 0 12px 30px -8px rgba(0,0,0,.7), 0 0 20px color-mix(in oklch, var(--c) 25%, transparent); pointer-events: none; }
+  .toast .tile { width: 28px; height: 28px; border-radius: 8px; background: var(--c); color: #14110d; box-shadow: none; }
+  .toast .tile .ico { width: 16px; height: 16px; }
+  .toast__txt { display: flex; flex-direction: column; line-height: 1.15; }
+  .toast__name { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .toast__sub { font-size: 10.5px; color: var(--muted); }
+  .toast.in { animation: toast 1.3s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+  @keyframes toast { 0% { opacity: 0; transform: translate(-50%, -24px); } 12% { opacity: 1; transform: translate(-50%, 0); } 78% { opacity: 1; transform: translate(-50%, 0); } 100% { opacity: 0; transform: translate(-50%, -16px); } }
+  .btn { border: 1px solid var(--rule); background: var(--panel); color: var(--ink-dim); border-radius: 8px; padding: 7px 12px; cursor: pointer; font: inherit; font-size: 12px; }
+  .btn:hover { color: var(--ink); border-color: var(--rule-strong); }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="hero">
+    <h1>Workspaces rail · icons as identity</h1>
+    <p>Variant 1 from before, with the initials tile replaced by an icon you pick from a large library. The same icon then follows you everywhere you type, so you always know which workspace a message or command is going to.</p>
+    <ul>
+      <li>Icon + colour are set per workspace from the row's ··· menu ("Change icon…"). Library is searchable with categories, a few hundred glyphs.</li>
+      <li>Row subtitle shows only the current branch.</li>
+      <li>On switching workspace, a small pill drops in at the top of the app for about a second with the icon and name, then slides away. The CODARA intro in new terminals goes away.</li>
+      <li>Folder ··· menu keeps Add workspace here, Rename folder, Delete folder. No folder counts. Working/total census unchanged.</li>
+    </ul>
+  </div>
+
+  <h2 class="sec">1 · Rail with workspace icons</h2>
+  <p class="secd">Left: the rail. Right: the icon picker opened from the ··· menu of codara-internal-cloud.</p>
+  <div class="row2">
+    <div class="frame">
+      <div class="frame__head"><span class="ibtn"><svg class="ico sm" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span><span class="title">WORKSPACES</span><span class="count">13</span><span class="ibtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span></div>
+      <div class="frame__body" id="rail"></div>
+    </div>
+    <div style="position:relative; height:600px;">
+      <div class="frame" style="width:100%; max-width:640px;">
+        <div class="frame__head"><span class="ibtn"><svg class="ico sm" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span><span class="title">WORKSPACES</span><span class="count">13</span><span class="ibtn"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span></div>
+        <div class="frame__body" id="rail2" style="opacity:.55"></div>
+        <div class="dim"></div>
+        <div class="picker" style="top:118px; left:170px; --c:var(--internal)">
+          <div class="picker__search"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg><span>clou</span><i class="cursor"></i></div>
+          <div class="picker__cats"><i class="on">All</i><i>Dev</i><i>Cloud</i><i>Data</i><i>Product</i><i>Fun</i><i>Shapes</i></div>
+          <div class="picker__grid" id="pickgrid"></div>
+          <div class="picker__foot">
+            <div class="swatches"><i style="--s:#3fd6b5" class="on"></i><i style="--s:#4fc3e0"></i><i style="--s:#c65cf0"></i><i style="--s:#f0524f"></i><i style="--s:#6a6cf0"></i><i style="--s:#f0a04b"></i><i style="--s:#8ee0a0"></i><i style="--s:#e0d64f"></i></div>
+            <span class="picker__more">312 icons</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="sec">2 · Switch toast, top of the app</h2>
+  <p class="secd">When you change workspace, a pill drops in under the title bar for about a second and slides back out. Icon, name and branch, in the workspace colour. Press the button to replay it.</p>
+  <div class="app" id="app" style="--c:var(--internal)">
+    <div class="app__title"><div class="dots"><i></i><i></i><i></i></div><span class="app__tabs"><b>Cora</b><span>Terminal</span><span>Browser</span></span></div>
+    <div class="toast" id="toast">
+      <span class="tile"><svg class="ico" viewBox="0 0 24 24"><path d="M17.5 19a4.5 4.5 0 000-9 6 6 0 00-11.5 1.5A3.5 3.5 0 006.5 19z"/></svg></span>
+      <span class="toast__txt"><span class="toast__name">codara-internal-cloud</span><span class="toast__sub">feat/harness</span></span>
+    </div>
+    <div class="app__body">
+      <div class="app__rail"><div class="frame__body" id="rail3"></div></div>
+      <div class="app__main"><div class="app__ph"></div><div class="app__ph" style="width:70%"></div><div class="app__ph" style="width:40%"></div></div>
+    </div>
+  </div>
+  <div style="display:flex; gap:10px; margin-top:14px;">
+    <button class="btn" data-ws="0">Switch to codara-internal-cloud</button>
+    <button class="btn" data-ws="1">Switch to BraceletApp</button>
+    <button class="btn" data-ws="2">Switch to Abliterated</button>
+  </div>
+</div>
+
+<script>
+const I = {
+  cloud: '<path d="M17.5 19a4.5 4.5 0 000-9 6 6 0 00-11.5 1.5A3.5 3.5 0 006.5 19z"/>',
+  cloudUp: '<path d="M17.5 17a4.5 4.5 0 000-9 6 6 0 00-11.5 1.5A3.5 3.5 0 006.5 17"/><path d="M12 12v9M9 15l3-3 3 3"/>',
+  cloudBolt: '<path d="M17.5 16a4.5 4.5 0 000-9 6 6 0 00-11.5 1.5A3.5 3.5 0 006.5 16"/><path d="M13 12l-2 4h3l-2 4"/>',
+  server: '<rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/>',
+  db: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',
+  cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="10" y="10" width="4" height="4"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  bolt: '<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>',
+  rocket: '<path d="M5 15c-2 2-2 5-2 5s3 0 5-2M14 4c3-2 6-1 6-1s1 3-1 6l-6 6-5-5z"/><circle cx="14" cy="9" r="1.5"/>',
+  box: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+  chart: '<path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/>',
+  report: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  brand: '<path d="M4 20l4-1 10-10-3-3L5 16z"/><path d="M13 6l3 3"/>',
+  palette: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1"/><circle cx="12" cy="7" r="1"/><circle cx="16" cy="10" r="1"/><path d="M12 21c-1-3 1-4 3-4 3 0 4-2 4-3"/>',
+  ring: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/>',
+  gem: '<path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M10 3l2 6 2-6M6 9l6 12 6-12"/>',
+  heart: '<path d="M12 21s-8-5-8-11a4 4 0 018-2 4 4 0 018 2c0 6-8 11-8 11z"/>',
+  ghost: '<path d="M5 21V11a7 7 0 0114 0v10l-2.5-2-2.5 2-2-2-2 2-2.5-2z"/><circle cx="9.5" cy="11" r="1"/><circle cx="14.5" cy="11" r="1"/>',
+  bot: '<rect x="5" y="8" width="14" height="11" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M2 13h3M19 13h3"/>',
+  brain: '<path d="M9 4a3 3 0 00-3 3 3 3 0 00-2 5 3 3 0 002 5 3 3 0 003 3h3V4zM15 4a3 3 0 013 3 3 3 0 012 5 3 3 0 01-2 5 3 3 0 01-3 3h-3V4z"/>',
+  flask: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 002 3h10a2 2 0 002-3l-5-9V3"/>',
+  wrench: '<path d="M14 4a5 5 0 006 6l-9 9a2.5 2.5 0 01-4-4l9-9z"/>',
+  terminal: '<rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+  code: '<path d="M8 8l-4 4 4 4M16 8l4 4-4 4M14 4l-4 16"/>',
+  branch: '<path d="M6 3v12M18 9a3 3 0 01-3 3H9a3 3 0 00-3 3"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/>',
+  layers: '<path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5M3 17l9 5 9-5"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
+  key: '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9M16 6l2 2M13 9l2 2"/>',
+  cart: '<circle cx="9" cy="20" r="1"/><circle cx="18" cy="20" r="1"/><path d="M2 3h3l3 12h11l2-8H6"/>',
+  card: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>',
+  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+  laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
+  camera: '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3"/>',
+  music: '<path d="M9 18V5l11-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>',
+  game: '<path d="M6 8h12a4 4 0 014 4v2a4 4 0 01-7 2.6L14 16h-4l-1 .6A4 4 0 012 14v-2a4 4 0 014-4z"/><path d="M7 11v3M5.5 12.5h3M16 12h.01M18 13h.01"/>',
+  plane: '<path d="M2 12l20-8-6 18-3-7z"/>',
+  house: '<path d="M3 11l9-7 9 7v9a1 1 0 01-1 1h-5v-6h-6v6H4a1 1 0 01-1-1z"/>',
+  leaf: '<path d="M4 20c0-9 5-14 16-16-1 11-6 16-16 16z"/><path d="M4 20l8-8"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M20 14A8 8 0 1110 4a6 6 0 0010 10z"/>',
+  star: '<path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/>',
+  flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
+  puzzle: '<path d="M10 3a2 2 0 014 0v2h4v4a2 2 0 010 4v4h-4v-2a2 2 0 00-4 0v2H6v-4a2 2 0 010-4V5h4z"/>',
+  hex: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/>',
+  tri: '<path d="M12 3l10 18H2z"/>',
+  sq: '<rect x="4" y="4" width="16" height="16" rx="3"/>',
+  circ: '<circle cx="12" cy="12" r="9"/>',
+  hermes: '<path d="M12 21V8M8 12l4-4 4 4"/><path d="M6 4h12"/><path d="M4 21h16"/>',
+  skull: '<path d="M12 3a8 8 0 00-5 14v3h10v-3a8 8 0 00-5-14z"/><circle cx="9" cy="11" r="1.5"/><circle cx="15" cy="11" r="1.5"/><path d="M10 17v3M14 17v3"/>',
+  test: '<path d="M9 3v7L4 19a1 1 0 001 2h14a1 1 0 001-2l-5-9V3"/><path d="M8 3h8M7 15h10"/>',
+};
+const svg = (k, cls='ico') => `<svg class="${cls}" viewBox="0 0 24 24">${I[k]}</svg>`;
+const fold = '<svg class="ico sm" viewBox="0 0 24 24" style="color:var(--muted)"><path d="M6 9l6 6 6-6"/></svg><svg class="ico sm fold" viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>';
+const kebab = '<span class="ibtn hov"><svg class="ico sm" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span>';
+const groups = [
+  { name: 'FCB', c: 'var(--fcb)', ws: [
+    { n: 'codara-fcb-brand-report-app', i: 'report', sub: 'main', cnt: '1' } ] },
+  { name: 'Codara internal', c: 'var(--internal)', ws: [
+    { n: 'codara-internal-cloud', i: 'cloud', sub: 'feat/harness', cnt: '1', live: 3, active: true },
+    { n: 'codara-internal-subcloud', i: 'cloudUp', c: '#4fc3e0', sub: 'main' },
+    { n: 'codara-internal-company-os', i: 'cpu', c: '#8ee0a0', sub: 'main', cnt: '2' } ] },
+  { name: 'Personal', c: 'var(--personal)', ws: [
+    { n: 'BraceletApp', i: 'ring', sub: 'main' },
+    { n: 'Abliterated', i: 'skull', c: '#f0884f', sub: 'dev' },
+    { n: 'hermes-agent', i: 'hermes', c: '#f0b04f', sub: 'main' } ] },
+  { name: 'Playground', c: 'var(--playground)', ws: [
+    { n: 'testing', i: 'test', sub: 'main' } ] },
+];
+function rail(el) {
+  el.innerHTML = groups.map(g => `
+    <div class="group" style="--c:${g.c}">
+      <div class="group__head">${fold}<span class="group__label">${g.name}</span>${kebab}</div>
+      ${g.ws.map(w => `
+        <div class="ws${w.active?' active':''}" style="--c:${w.c||g.c}">
+          <span class="tile">${svg(w.i)}</span>
+          <span class="col"><span class="name">${w.n}</span><span class="sub">${w.sub}</span></span>
+          ${w.cnt ? (w.live ? `<span class="cnt live">${w.cnt}<span>/${w.live}</span></span>` : `<span class="cnt">${w.cnt}</span>`) : ''}
+          ${kebab}
+        </div>`).join('')}
+    </div>`).join('');
+}
+rail(document.getElementById('rail'));
+rail(document.getElementById('rail2'));
+rail(document.getElementById('rail3'));
+const T = [
+  { n: 'codara-internal-cloud', b: 'feat/harness', i: 'cloud', c: 'var(--internal)' },
+  { n: 'BraceletApp', b: 'main', i: 'ring', c: 'var(--personal)' },
+  { n: 'Abliterated', b: 'dev', i: 'skull', c: '#f0884f' },
+];
+const app = document.getElementById('app'), toast = document.getElementById('toast');
+function showToast(t) {
+  app.style.setProperty('--c', t.c);
+  toast.querySelector('.tile').innerHTML = svg(t.i);
+  toast.querySelector('.toast__name').textContent = t.n;
+  toast.querySelector('.toast__sub').textContent = t.b;
+  document.querySelectorAll('#rail3 .ws').forEach(el => el.classList.toggle('active', el.querySelector('.name').textContent === t.n));
+  toast.classList.remove('in'); void toast.offsetWidth; toast.classList.add('in');
+}
+document.querySelectorAll('.btn[data-ws]').forEach(b => b.addEventListener('click', () => showToast(T[+b.dataset.ws])));
+setTimeout(() => showToast(T[0]), 600);
+const grid = document.getElementById('pickgrid');
+grid.innerHTML = Object.keys(I).slice(0, 42).map(k => `<b class="${k==='cloud'?'on':''}" title="${k}">${svg(k)}</b>`).join('');
+</script>
+</body>
+</html>

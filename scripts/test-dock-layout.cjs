@@ -193,8 +193,8 @@ async function main() {
   check("previews are dockable", canDockTab(previewTab("prev1")));
   check("terminals are not dockable", !canDockTab(terminalTab("t1", leaf("p1"))));
   check(
-    "run-owned previews are not dockable",
-    !canDockTab({ ...previewTab("prev1"), runId: "run-1" }),
+    "Cora browser workspace tabs are dockable",
+    canDockTab({ ...previewTab("prev1"), runId: "run-1" }),
   );
 
   // --- "Open in split" host resolution ------------------------------------

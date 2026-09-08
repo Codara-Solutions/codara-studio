@@ -1,0 +1,3817 @@
+{
+  "schema": 1,
+  "kind": "controlled repeated CLI crossover with exact-session audits",
+  "runtimeCommit": "e9c710af",
+  "graderSourceCommit": "402c54ca0081cd39a22c68e40928e80ecb13adba",
+  "graderFileSha256": "fbf31d900d81502b5eb8f4c21860ea0ea8087d2cc3b940977236fe44158dc203",
+  "regradeMethod": "Regrade all 27 retained trials using common strengthened hidden checks, original completion/model/usage telemetry, and exact-session scope/effort audits. No model retries, workspace repairs, or modified task prompts. Original suite artifacts remain unchanged.",
+  "model": "gpt-5.6-sol",
+  "effort": "high",
+  "startedAt": "2026-09-08T05:43:12.345Z",
+  "finishedAt": "2026-09-08T07:26:14.728Z",
+  "order": [
+    [
+      "cora",
+      "codex",
+      "hermes"
+    ],
+    [
+      "codex",
+      "hermes",
+      "cora"
+    ],
+    [
+      "hermes",
+      "cora",
+      "codex"
+    ]
+  ],
+  "conditions": "Sequential crossover schedule on one machine. Each agent occupies each position once. Run no other lab provider calls, builds, or Electron tests during this schedule. User activity, provider load, and cache warmth are not controlled.",
+  "sourceConditions": "Primary app/build/source fixed at e9c710af. Only benchmark-generated history changed in the primary checkout; report drafts stayed in a separate worktree. No overlapping paid lab calls, product builds, or test suites. Default 256000 compaction threshold; fast mode off.",
+  "limitations": [
+    "The original patch oracle missed the stated dash-path restriction and own JSON __proto__ addition. A validated common grader was applied offline to all 27 retained solutions, without task prompt changes, model retries, workspace repairs, or modified task files. Original automated checks and timing/usage are preserved.",
+    "Three repetitions per task/harness, one machine, one model/effort; no universal ranking or causal reliability estimate.",
+    "Shared provider subscription, load, cache warmth, and user activity are uncontrolled. Tasks are repeated development contracts, not fresh blind holdouts.",
+    "Installed Hermes is the recorded local fork, not stock upstream. Claude Code account unavailable and excluded, not counted as a Cora win.",
+    "Acceptance retains every attempted trial, including operational failures. Performance cohorts contain identical round/task blocks where the listed harnesses all passed. Latency includes all recovered-request time; token comparisons also exclude known unmetered retries. This conditions efficiency on joint success and, for tokens, telemetry availability; failures remain in acceptance totals.",
+    "Tokens include input, output, cache reads and cache writes and are not dollar costs. Timed-out provider requests may consume unreported tokens; incomplete trial totals are explicitly marked. usageComplete means no missing usage was identified in the recorded provider/retry evidence; it is not a billing audit."
+  ],
+  "versions": {
+    "cora": "1.0.0",
+    "codex": "codex-cli 0.153.4",
+    "hermes": "Hermes Agent v0.21.0 (2026.8.31) \u00b7 upstream b36720bb \u00b7 local 30478b6e (+6600 carried commits)\nInstall directory: /Users/etienne/Documents/Projects/Nous-Research/hermes-agent\nInstall method: git\nPython: 3.11.15\nOpenAI SDK: 2.24.0"
+  },
+  "measurementHashes": {
+    "suiteHash": "fde7cde156",
+    "scorerHash": "da59fdb9e6",
+    "runnerHash": "2d6fb3ecc7"
+  },
+  "harnessPromptHashes": {
+    "cora": "ce4a6fb8b6",
+    "codex": "codex-cli",
+    "hermes": "hermes-cli"
+  },
+  "summary": {
+    "cora": {
+      "trials": 9,
+      "strictPassed": 9,
+      "functionalPassed": 9,
+      "originalAutomatedPassed": 9,
+      "wallMsAllTrials": 1535413,
+      "reportedTokensAllTrials": 455512,
+      "usageIncompleteTrials": 0,
+      "perTask": {
+        "patch-atomic": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 209679,
+          "acceptedMedianTokens": 54561
+        },
+        "async-pool": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 119260,
+          "acceptedMedianTokens": 36212
+        },
+        "holdout-lru": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 198617,
+          "acceptedMedianTokens": 57173
+        }
+      }
+    },
+    "codex": {
+      "trials": 9,
+      "strictPassed": 8,
+      "functionalPassed": 8,
+      "originalAutomatedPassed": 9,
+      "wallMsAllTrials": 2002406,
+      "reportedTokensAllTrials": 1093180,
+      "usageIncompleteTrials": 0,
+      "perTask": {
+        "patch-atomic": {
+          "trials": 3,
+          "strictPassed": 2,
+          "completeUsageAcceptedTrials": 2,
+          "acceptedMedianWallMs": 196890.0,
+          "acceptedMedianTokens": 88346.5
+        },
+        "async-pool": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 135986,
+          "acceptedMedianTokens": 87611
+        },
+        "holdout-lru": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 347277,
+          "acceptedMedianTokens": 188150
+        }
+      }
+    },
+    "hermes": {
+      "trials": 9,
+      "strictPassed": 8,
+      "functionalPassed": 8,
+      "originalAutomatedPassed": 8,
+      "wallMsAllTrials": 2629566,
+      "reportedTokensAllTrials": 671836,
+      "usageIncompleteTrials": 4,
+      "perTask": {
+        "patch-atomic": {
+          "trials": 3,
+          "strictPassed": 2,
+          "completeUsageAcceptedTrials": 0,
+          "acceptedMedianWallMs": 429008.5,
+          "acceptedMedianTokens": null
+        },
+        "async-pool": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 3,
+          "acceptedMedianWallMs": 168028,
+          "acceptedMedianTokens": 63904
+        },
+        "holdout-lru": {
+          "trials": 3,
+          "strictPassed": 3,
+          "completeUsageAcceptedTrials": 2,
+          "acceptedMedianWallMs": 284615,
+          "acceptedMedianTokens": 82024.0
+        }
+      }
+    }
+  },
+  "performanceCohorts": [
+    {
+      "agents": [
+        "cora",
+        "codex",
+        "hermes"
+      ],
+      "metric": "wallMs",
+      "matchedBlocks": [
+        [
+          1,
+          "patch-atomic"
+        ],
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          1,
+          "holdout-lru"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 7,
+      "totals": {
+        "cora": 1135217,
+        "codex": 1545489,
+        "hermes": 1861745
+      },
+      "coraRelativeReduction": {
+        "codex": 0.2654641993569673,
+        "hermes": 0.3902403390367639
+      }
+    },
+    {
+      "agents": [
+        "cora",
+        "codex",
+        "hermes"
+      ],
+      "metric": "tokens",
+      "matchedBlocks": [
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 5,
+      "totals": {
+        "cora": 219067,
+        "codex": 648271,
+        "hermes": 356060
+      },
+      "coraRelativeReduction": {
+        "codex": 0.6620749655622418,
+        "hermes": 0.38474695276077064
+      }
+    },
+    {
+      "agents": [
+        "cora",
+        "codex"
+      ],
+      "metric": "wallMs",
+      "matchedBlocks": [
+        [
+          1,
+          "patch-atomic"
+        ],
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          1,
+          "holdout-lru"
+        ],
+        [
+          2,
+          "patch-atomic"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 8,
+      "totals": {
+        "cora": 1325734,
+        "codex": 1714245
+      },
+      "coraRelativeReduction": {
+        "codex": 0.22663679929064984
+      }
+    },
+    {
+      "agents": [
+        "cora",
+        "codex"
+      ],
+      "metric": "tokens",
+      "matchedBlocks": [
+        [
+          1,
+          "patch-atomic"
+        ],
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          1,
+          "holdout-lru"
+        ],
+        [
+          2,
+          "patch-atomic"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 8,
+      "totals": {
+        "cora": 405940,
+        "codex": 957733
+      },
+      "coraRelativeReduction": {
+        "codex": 0.5761449172159673
+      }
+    },
+    {
+      "agents": [
+        "cora",
+        "hermes"
+      ],
+      "metric": "wallMs",
+      "matchedBlocks": [
+        [
+          1,
+          "patch-atomic"
+        ],
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          1,
+          "holdout-lru"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "patch-atomic"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 8,
+      "totals": {
+        "cora": 1344896,
+        "hermes": 2337346
+      },
+      "coraRelativeReduction": {
+        "hermes": 0.42460551411729375
+      }
+    },
+    {
+      "agents": [
+        "cora",
+        "hermes"
+      ],
+      "metric": "tokens",
+      "matchedBlocks": [
+        [
+          1,
+          "async-pool"
+        ],
+        [
+          2,
+          "async-pool"
+        ],
+        [
+          2,
+          "holdout-lru"
+        ],
+        [
+          3,
+          "async-pool"
+        ],
+        [
+          3,
+          "holdout-lru"
+        ]
+      ],
+      "trialsPerAgent": 5,
+      "totals": {
+        "cora": 219067,
+        "hermes": 356060
+      },
+      "coraRelativeReduction": {
+        "hermes": 0.38474695276077064
+      }
+    }
+  ],
+  "trials": [
+    {
+      "task": "patch-atomic",
+      "runId": "run-mts8u4r5-g8fl02",
+      "runStatus": "complete",
+      "wallMs": 231651,
+      "tokens": 64232,
+      "usage": {
+        "inputTokens": 16398,
+        "outputTokens": 6106,
+        "cacheReadTokens": 41728,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All nine complete tool arguments reviewed, including the full implementation edit and inline boundary program. Reads, edits, git commands, and tests remain in the assigned workspace; no external solution or evaluator reads observed."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "cora",
+      "suiteFile": "1-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "c435adc2e5026bb607c4d35bf95f5cf5bb6398ee19088ed93c7933a56dda92c2",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T05-43-14-269Z_run-mts8u4r5-g8fl02-attempt-mts8u4yb-bs4rzw.jsonl",
+      "sessionSha256": "54ac9ecadbc6c551013ce5a4c2dbd8d983e5876d2f772c55fe8791ea99210a8e",
+      "scopeReview": "All nine complete tool arguments reviewed, including the full implementation edit and inline boundary program. Reads, edits, git commands, and tests remain in the assigned workspace; no external solution or evaluator reads observed.",
+      "toolCallsReviewed": 9,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": "run-mts8z3ma-dqa5j3",
+      "runStatus": "complete",
+      "wallMs": 119260,
+      "tokens": 36212,
+      "usage": {
+        "inputTokens": 12738,
+        "outputTokens": 2866,
+        "cacheReadTokens": 20608,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight complete tool arguments reviewed, including the implementation edit and inline boundary program. Only assigned workspace files, tests, and git diff are accessed; no prior solutions or evaluator reads observed."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "cora",
+      "suiteFile": "1-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "c2cd2e30defc3c6ca2ffeba52fd081a9c2a6fe1dd1e46f6d927a0f1171bb8128",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T05-47-06-024Z_run-mts8z3ma-dqa5j3-attempt-mts8z3th-m7of60.jsonl",
+      "sessionSha256": "0f3eccad96f777295ed31b62e556c564a190be9c1424c8de1ed30a99326fc5e8",
+      "scopeReview": "All eight complete tool arguments reviewed, including the implementation edit and inline boundary program. Only assigned workspace files, tests, and git diff are accessed; no prior solutions or evaluator reads observed.",
+      "toolCallsReviewed": 8,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": "run-mts91ns0-xnr9w8",
+      "runStatus": "complete",
+      "wallMs": 198617,
+      "tokens": 68080,
+      "usage": {
+        "inputTokens": 26615,
+        "outputTokens": 5113,
+        "cacheReadTokens": 36352,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All ten complete tool arguments reviewed, including full LRU implementation, cleanup edit, and inline boundary program. Only assigned workspace reads/writes/tests/git; no outside solutions or evaluator artifacts accessed."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "cora",
+      "suiteFile": "1-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "59193f589d60f1c96d8033c37827445357feeecb2674844fa55b919aec2742ac",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T05-49-05-452Z_run-mts91ns0-xnr9w8-attempt-mts91nz1-l38dcm.jsonl",
+      "sessionSha256": "3c0fe7f17058a00f3e33fc58aa5ddefaec40ac17eac34b998453e5191764cd91",
+      "scopeReview": "All ten complete tool arguments reviewed, including full LRU implementation, cleanup edit, and inline boundary program. Only assigned workspace reads/writes/tests/git; no outside solutions or evaluator artifacts accessed.",
+      "toolCallsReviewed": 10,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 225024,
+      "tokens": 102353,
+      "usage": {
+        "inputTokens": 16255,
+        "outputTokens": 6482,
+        "cacheReadTokens": 79616,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All four exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit cwd for shell calls and absolute patch target remain in the assigned workspace. No other workspaces, prior solutions, or evaluator artifacts accessed."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "codex",
+      "suiteFile": "1-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "da7079eb6e3af6b2f48b338e78c449c67a0e59bc2c71c9e5a9b0d817c37a8e23",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T07-52-24-01a07f93-253b-74d2-8c7c-7c0ce93cf808.jsonl",
+      "sessionSha256": "a4dc71576a96d8148643e101ff5d1256d57c083a6b61bb9b5660c0c0a9396ad3",
+      "scopeReview": "All four exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit cwd for shell calls and absolute patch target remain in the assigned workspace. No other workspaces, prior solutions, or evaluator artifacts accessed.",
+      "toolCallsReviewed": 4,
+      "sessionId": "01a07f93-253b-74d2-8c7c-7c0ce93cf808",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 135986,
+      "tokens": 87611,
+      "usage": {
+        "inputTokens": 8859,
+        "outputTokens": 3488,
+        "cacheReadTokens": 75264,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All four exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit workspace cwd and absolute implementation patch path; no outside solution or evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "codex",
+      "suiteFile": "1-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "4ea915b7c884bb2646dd9a946c60e8b2b0fc468004cfe0f9bf02568accb40daa",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T07-56-09-01a07f96-9300-75a2-b2be-f2e358567c17.jsonl",
+      "sessionSha256": "07e63b452876c6694b7bf7ba78a6763f293358acd70c51f1b346cac27361c11c",
+      "scopeReview": "All four exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit workspace cwd and absolute implementation patch path; no outside solution or evaluator reads.",
+      "toolCallsReviewed": 4,
+      "sessionId": "01a07f96-9300-75a2-b2be-f2e358567c17",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 216302,
+      "tokens": 132769,
+      "usage": {
+        "inputTokens": 41033,
+        "outputTokens": 5848,
+        "cacheReadTokens": 85888,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All six exec programs reviewed, including full implementation, correction, focused checks, and randomized reference-model test. Explicit workspace cwd and absolute patch targets. No outside workspace, prior-solution, or evaluator artifact access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "codex",
+      "suiteFile": "1-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "6394535d43f0d5580dc429540f2d14b15ea062d513f024a496defffb897ed067",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T07-58-25-01a07f98-a6f3-7d33-83e0-97ad1fc45d29.jsonl",
+      "sessionSha256": "73cdcd646d125b38d82d589d24e61432e15fa428eb2a8cb91f58f795b2fcb08b",
+      "scopeReview": "All six exec programs reviewed, including full implementation, correction, focused checks, and randomized reference-model test. Explicit workspace cwd and absolute patch targets. No outside workspace, prior-solution, or evaluator artifact access.",
+      "toolCallsReviewed": 6,
+      "sessionId": "01a07f98-a6f3-7d33-83e0-97ad1fc45d29",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 382416,
+      "tokens": 84051,
+      "usage": {
+        "inputTokens": 16546,
+        "outputTokens": 8113,
+        "cacheReadTokens": 59392,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eleven complete tool arguments reviewed, including execute_code, full implementation patch, and inline boundary program. All explicit file paths and terminal workdirs are the assigned workspace. Repeated reads target its own test.js. No outside workspace, prior solutions, or evaluator artifacts accessed. Session ID discovered by a read-only exact-cwd database query, then exported using the public exact-session command; must match the completed benchmark artifact."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "hermes",
+      "suiteFile": "1-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "8981dabcf6183197e02c72b42615595feb7aae126fe4f2a01eb8833329096444",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": false,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "1-hermes-patch-atomic-session.jsonl",
+      "sessionSha256": "3c26403891e09b9f9b574717d0c6b43d7056036cc4e1930ff44143abc50159bd",
+      "scopeReview": "All eleven complete tool arguments reviewed, including execute_code, full implementation patch, and inline boundary program. All explicit file paths and terminal workdirs are the assigned workspace. Repeated reads target its own test.js. No outside workspace, prior solutions, or evaluator artifacts accessed. Session ID discovered by a read-only exact-cwd database query, then exported using the public exact-session command; must match the completed benchmark artifact.",
+      "toolCallsReviewed": 11,
+      "sessionId": "20260908_080204_6fc77f",
+      "providerRetryEvidence": [
+        "2026-09-08 08:03:47,020 WARNING [20260908_080204_6fc77f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,943 tokens. Killing connection.",
+        "2026-09-08 08:03:47,024 WARNING [20260908_080204_6fc77f] agent.conversation_loop: API call failed (attempt 1/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:03:47,024 WARNING [20260908_080204_6fc77f] agent.conversation_loop: Retrying API call in 2.0082657990483916s (attempt 1/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)"
+      ],
+      "usageLimitation": "Timed-out provider requests returned no usage. Recorded tokens omit unknown consumption from those attempts; full wall time and acceptance are retained."
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 162544,
+      "tokens": 63904,
+      "usage": {
+        "inputTokens": 14204,
+        "outputTokens": 3748,
+        "cacheReadTokens": 45952,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All ten complete tool arguments reviewed, including full implementation patch and inline strict unhandled-rejection test program. All file paths/search roots and terminal workdirs stay in the assigned workspace. No other workspace, prior solution, or evaluator artifact reads. Exact-session ID discovered by read-only exact-cwd lookup and public export; match against final suite artifact before accepting summary."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "hermes",
+      "suiteFile": "1-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "a9baf80a54bccb2a264660865e277c0254c0c8c621deb305ef7affd3410d89d0",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "1-hermes-async-pool-session.jsonl",
+      "sessionSha256": "0eafbc29de578b0d2a9af9ec8910d2dc10e40dc6e6b627ebb4127cc0baa66b2e",
+      "scopeReview": "All ten complete tool arguments reviewed, including full implementation patch and inline strict unhandled-rejection test program. All file paths/search roots and terminal workdirs stay in the assigned workspace. No other workspace, prior solution, or evaluator artifact reads. Exact-session ID discovered by read-only exact-cwd lookup and public export; match against final suite artifact before accepting summary.",
+      "toolCallsReviewed": 10,
+      "sessionId": "20260908_080826_e40b74",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 429041,
+      "tokens": 81108,
+      "usage": {
+        "inputTokens": 15221,
+        "outputTokens": 6879,
+        "cacheReadTokens": 59008,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All thirteen complete tool arguments reviewed, including full implementation patch and every inline check. Corrected an invalid self-authored TTL expectation and reran it. All file paths/search roots and terminal workdirs stay in the assigned workspace. No other workspace, prior solution, or evaluator artifact reads. Exact session exported through public command."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 1,
+      "agent": "hermes",
+      "suiteFile": "1-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "6ba2c7398d2daf0e265511c3e3e110967cc4adb1bb424be56d27c88612af25f3",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": false,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "1-hermes-holdout-lru-session.jsonl",
+      "sessionSha256": "f004b15fc27a722b3f9af872b1dabe0dd019637be6b8fcc029e624903b8bb519",
+      "scopeReview": "All thirteen complete tool arguments reviewed, including full implementation patch and every inline check. Corrected an invalid self-authored TTL expectation and reran it. All file paths/search roots and terminal workdirs stay in the assigned workspace. No other workspace, prior solution, or evaluator artifact reads. Exact session exported through public command.",
+      "toolCallsReviewed": 13,
+      "sessionId": "20260908_081109_d63a66",
+      "providerRetryEvidence": [
+        "2026-09-08 08:12:57,574 WARNING [20260908_081109_d63a66] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~9,244 tokens. Killing connection.",
+        "2026-09-08 08:12:57,583 WARNING [20260908_081109_d63a66] agent.conversation_loop: API call failed (attempt 1/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:12:57,583 WARNING [20260908_081109_d63a66] agent.conversation_loop: Retrying API call in 2.2108916913447363s (attempt 1/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:14:29,878 WARNING [20260908_081109_d63a66] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~9,244 tokens. Killing connection.",
+        "2026-09-08 08:14:29,884 WARNING [20260908_081109_d63a66] agent.conversation_loop: API call failed (attempt 2/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:14:29,885 WARNING [20260908_081109_d63a66] agent.conversation_loop: Retrying API call in 4.044519186135902s (attempt 2/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)"
+      ],
+      "usageLimitation": "Timed-out provider requests returned no usage. Recorded tokens omit unknown consumption from those attempts; full wall time and acceptance are retained."
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 168756,
+      "tokens": 74340,
+      "usage": {
+        "inputTokens": 17248,
+        "outputTokens": 4740,
+        "cacheReadTokens": 52352,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All three exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit workspace cwd and absolute implementation patch path; no outside solution or evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "codex",
+      "suiteFile": "2-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "51355928ba1e3510beba81e3c4c5f1f7f6174ae4c5c5a665c35f9e5b8fbf0eb9",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T08-18-19-01a07faa-dd32-7820-8aaa-e142aadf8eb0.jsonl",
+      "sessionSha256": "b9f31b021167e0ec91189b220831b723970ca5cfc72f33e4c3ec780fc6a767c9",
+      "scopeReview": "All three exec programs reviewed, including full apply_patch source and inline boundary assertions. Explicit workspace cwd and absolute implementation patch path; no outside solution or evaluator reads.",
+      "toolCallsReviewed": 3,
+      "sessionId": "01a07faa-dd32-7820-8aaa-e142aadf8eb0",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 141330,
+      "tokens": 68967,
+      "usage": {
+        "inputTokens": 7636,
+        "outputTokens": 3731,
+        "cacheReadTokens": 57600,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All three complete exec programs reviewed, including full implementation patch and inline strict unhandled-rejection checks. Every shell cwd and patch path stays within the assigned workspace. No prior solution, other workspace, or evaluator artifact reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "codex",
+      "suiteFile": "2-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "57ea60f20bbab2eee9b821f37dfcc197bb7bbdaa6454eaa82a1bc0caf6beca87",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T08-21-07-01a07fad-6ff3-7043-a7a8-1271db7c3a66.jsonl",
+      "sessionSha256": "22720c079f29e9eb096120e3062bdfaecf0d75660d648a81e6c57a4d64a88bb1",
+      "scopeReview": "All three complete exec programs reviewed, including full implementation patch and inline strict unhandled-rejection checks. Every shell cwd and patch path stays within the assigned workspace. No prior solution, other workspace, or evaluator artifact reads.",
+      "toolCallsReviewed": 3,
+      "sessionId": "01a07fad-6ff3-7043-a7a8-1271db7c3a66",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 347277,
+      "tokens": 215814,
+      "usage": {
+        "inputTokens": 32745,
+        "outputTokens": 9629,
+        "cacheReadTokens": 173440,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All nine complete exec programs reviewed, including both implementation patch attempts, focused checks, randomized reference-model test, and corrected self-authored TTL boundary assertion. All shell workdirs and patch targets remain inside the assigned workspace. No other workspace, prior solution, or evaluator artifact reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "codex",
+      "suiteFile": "2-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "09c52ff3dbf0fc4ee28863214376d2ee7c267d8321103187f30b23ea70b7e6c3",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T08-23-29-01a07faf-98c1-7b60-b5a6-549bce1ed4e7.jsonl",
+      "sessionSha256": "b10cd59ba0e81ddfe68ac1477945913e1be45847173a1e56a03b87d48f6a7cdb",
+      "scopeReview": "All nine complete exec programs reviewed, including both implementation patch attempts, focused checks, randomized reference-model test, and corrected self-authored TTL boundary assertion. All shell workdirs and patch targets remain inside the assigned workspace. No other workspace, prior solution, or evaluator artifact reads.",
+      "toolCallsReviewed": 9,
+      "sessionId": "01a07faf-98c1-7b60-b5a6-549bce1ed4e7",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "error",
+      "wallMs": 292220,
+      "tokens": 5951,
+      "usage": {
+        "inputTokens": 5671,
+        "outputTokens": 280,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": false,
+          "weight": 5,
+          "detail": "[eval]:6\nconst output = applyPatch(input, [\n               ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "[eval]:5\n  applyPatch(source, [{ op: \"replace\", path: \"/a~1b/m~0n\", value: 2 }]),\n  ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "[eval]:5\nconst result = applyPatch([], ops);\n               ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError [ERR_ASSERTION]: The validation function is expected to return \"true\". Received false\n\nCaught error:\n\nTypeError: applyPatch is not a function\n  generatedMessage: true,\n  code: 'ERR_ASSERTION',\n  actual: TypeError: applyPatch is not a function\n  expected: [Function (anonymous)],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All four complete tool arguments reviewed. Only own starter/test reads, workspace search, and workspace git status/log. Git status confirms unchanged seed. No outside workspace or evaluator/prior-solution reads. Match exact session ID against final suite artifact before accepting summary."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": false,
+      "round": 2,
+      "agent": "hermes",
+      "suiteFile": "2-hermes.json",
+      "originalAutomatedPassed": false,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": false,
+          "weight": 5,
+          "detail": "[eval]:6\nconst output = applyPatch(input, [\n               ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "[eval]:5\n  applyPatch(source, [{ op: \"replace\", path: \"/a~1b/m~0n\", value: 2 }]),\n  ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "[eval]:5\nconst result = applyPatch([], ops);\n               ^\n\nTypeError: applyPatch is not a function\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": false,
+      "strictPassed": false,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "65719a689e53d84732a6b7a5b67ad53c714731ddb3d1a0ec6571f3e4a3d7a862",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": false,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2-hermes-patch-atomic-session.jsonl",
+      "sessionSha256": "314628485a6f7d0ab2a12cfbdd3bbc41663efeee73c72b72b07d258dd86a0655",
+      "scopeReview": "All four complete tool arguments reviewed. Only own starter/test reads, workspace search, and workspace git status/log. Git status confirms unchanged seed. No outside workspace or evaluator/prior-solution reads. Match exact session ID against final suite artifact before accepting summary.",
+      "toolCallsReviewed": 4,
+      "sessionId": "20260908_082918_60ab1f",
+      "providerRetryEvidence": [
+        "2026-09-08 08:31:01,287 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+        "2026-09-08 08:31:01,294 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 1/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:31:01,295 WARNING [20260908_082918_60ab1f] agent.conversation_loop: Retrying API call in 2.7091866072433763s (attempt 1/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:32:34,353 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+        "2026-09-08 08:32:34,355 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 2/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:32:34,355 WARNING [20260908_082918_60ab1f] agent.conversation_loop: Retrying API call in 4.673095518040154s (attempt 2/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:34:09,166 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+        "2026-09-08 08:34:09,167 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 3/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)"
+      ],
+      "usageLimitation": "Timed-out provider requests returned no usage. Recorded tokens omit unknown consumption from those attempts; full wall time and acceptance are retained.",
+      "failure": {
+        "sessionId": "20260908_082918_60ab1f",
+        "reason": "max_retries_exhausted",
+        "error": {
+          "type": "TimeoutError",
+          "message": "Non-streaming API call timed out after 90s with no response (threshold: 90s)"
+        },
+        "sessionMatchedLogLines": [
+          "2026-09-08 08:31:01,287 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+          "2026-09-08 08:31:01,294 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 1/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+          "2026-09-08 08:31:01,295 WARNING [20260908_082918_60ab1f] agent.conversation_loop: Retrying API call in 2.7091866072433763s (attempt 1/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+          "2026-09-08 08:32:34,353 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+          "2026-09-08 08:32:34,355 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 2/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+          "2026-09-08 08:32:34,355 WARNING [20260908_082918_60ab1f] agent.conversation_loop: Retrying API call in 4.673095518040154s (attempt 2/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+          "2026-09-08 08:34:09,166 WARNING [20260908_082918_60ab1f] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,948 tokens. Killing connection.",
+          "2026-09-08 08:34:09,167 WARNING [20260908_082918_60ab1f] agent.conversation_loop: API call failed (attempt 3/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+          "2026-09-08 08:34:09,170 ERROR [20260908_082918_60ab1f] agent.conversation_loop: API call failed after 3 retries. Non-streaming API call timed out after 90s with no response (threshold: 90s) | provider=openai-codex model=gpt-5.6-sol msgs=7 tokens=~5,422"
+        ],
+        "classification": "Operational failure: installed Hermes fork exhausted three 90-second no-response timeouts after the initial tool round. No implementation written. This is an observed CLI/provider-path failure, not evidence that Sol cannot solve the task.",
+        "usageLimitation": "Session reports usage only for its completed request. Timed-out requests returned no usage; their provider-side token consumption is unknown. Do not treat the small recorded token total as the complete cost of this failed trial.",
+        "retryPolicy": "Original failed trial retained. No evaluator retry or repair."
+      }
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 168028,
+      "tokens": 56815,
+      "usage": {
+        "inputTokens": 14662,
+        "outputTokens": 4777,
+        "cacheReadTokens": 37376,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All nine complete tool arguments reviewed, including full implementation patch and strict unhandled-rejection boundary program. Every file/search path and terminal workdir stays inside the assigned workspace. No outside workspace, prior solution, or evaluator artifact reads. Match exact session ID with final suite artifact."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "hermes",
+      "suiteFile": "2-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "09104a1cd9a3075f61b6c3ecdc9a33c95ea700675b216af7b228b42cb5072dee",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2-hermes-async-pool-session.jsonl",
+      "sessionSha256": "3021231b7763293ca57b8b087068bd4d6a41b0114eb52099f7f74d08ec7a04ce",
+      "scopeReview": "All nine complete tool arguments reviewed, including full implementation patch and strict unhandled-rejection boundary program. Every file/search path and terminal workdir stays inside the assigned workspace. No outside workspace, prior solution, or evaluator artifact reads. Match exact session ID with final suite artifact.",
+      "toolCallsReviewed": 9,
+      "sessionId": "20260908_083411_3e1593",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 230819,
+      "tokens": 82573,
+      "usage": {
+        "inputTokens": 21249,
+        "outputTokens": 6668,
+        "cacheReadTokens": 54656,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eleven complete tool arguments reviewed, including full implementation patch, corrected self-authored TTL assertion, randomized reference-model check, and clock behavior check. Every file/search path and terminal workdir stays inside the assigned workspace. No other workspace, prior solution, or evaluator artifact reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "hermes",
+      "suiteFile": "2-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "02d1ac305a624c751589a8cb5a2d263da178c4db49dc37cc942db7e4012433e3",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2-hermes-holdout-lru-session.jsonl",
+      "sessionSha256": "e6edec858fc6e06f06a28d6711f27a4ad04add40bfa78a285e04726aed7014d0",
+      "scopeReview": "All eleven complete tool arguments reviewed, including full implementation patch, corrected self-authored TTL assertion, randomized reference-model check, and clock behavior check. Every file/search path and terminal workdir stays inside the assigned workspace. No other workspace, prior solution, or evaluator artifact reads.",
+      "toolCallsReviewed": 11,
+      "sessionId": "20260908_083659_13ccda",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": "run-mtsaw8j4-2t3709",
+      "runStatus": "complete",
+      "wallMs": 190517,
+      "tokens": 54561,
+      "usage": {
+        "inputTokens": 19225,
+        "outputTokens": 5128,
+        "cacheReadTokens": 30208,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight full tool arguments reviewed, including the complete implementation edit and inline boundary program. Only relative paths inside the assigned session workspace, tests and git diff. No outside workspaces, prior solutions, or evaluator reads."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "cora",
+      "suiteFile": "2-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "c00073190448551f0912c05a2409d6e745133d5832e7f895b82bba28d3e21778",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T06-40-51-737Z_run-mtsaw8j4-2t3709-attempt-mtsaw8r4-bxgbgv.jsonl",
+      "sessionSha256": "49078e71595c75a1dabe07c51730e5780ef2948be023b7cc7193c7cb00adfe39",
+      "scopeReview": "All eight full tool arguments reviewed, including the complete implementation edit and inline boundary program. Only relative paths inside the assigned session workspace, tests and git diff. No outside workspaces, prior solutions, or evaluator reads.",
+      "toolCallsReviewed": 8,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": "run-mtsb0bp7-esdfzb",
+      "runStatus": "complete",
+      "wallMs": 123355,
+      "tokens": 39349,
+      "usage": {
+        "inputTokens": 10745,
+        "outputTokens": 3132,
+        "cacheReadTokens": 25472,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight complete tool arguments reviewed, including full implementation edit and inline concurrency/failure boundary checks. Reads, edits, test commands, and git diff remain in the assigned workspace. No other workspace, prior solution, or evaluator artifact access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "cora",
+      "suiteFile": "2-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "bea292e090b12261aa015848a95a89459f1f5f48436f73e666683ab15314358a",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T06-44-02-418Z_run-mtsb0bp7-esdfzb-attempt-mtsb0bxa-epkotv.jsonl",
+      "sessionSha256": "f92c2249c763dfb38be3ec9a62b1cb87ee3320f44d2b38a48b9b93e99dc82be5",
+      "scopeReview": "All eight complete tool arguments reviewed, including full implementation edit and inline concurrency/failure boundary checks. Reads, edits, test commands, and git diff remain in the assigned workspace. No other workspace, prior solution, or evaluator artifact access.",
+      "toolCallsReviewed": 8,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": "run-mtsb2z0l-r1vxc9",
+      "runStatus": "complete",
+      "wallMs": 156945,
+      "tokens": 50805,
+      "usage": {
+        "inputTokens": 15732,
+        "outputTokens": 3969,
+        "cacheReadTokens": 31104,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All nine complete tool arguments reviewed, including full implementation edit and inline expiry/recency boundary program. File reads, edits, tests, and git commands remain inside the assigned session workspace. No other workspace, prior solution, or evaluator artifact access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 2,
+      "agent": "cora",
+      "suiteFile": "2-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "6dbe9d583f23f52f2fb247fd0563a220491331c7b92682827a77e622e5ecd7fc",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T06-46-05-894Z_run-mtsb2z0l-r1vxc9-attempt-mtsb2z7b-q6azik.jsonl",
+      "sessionSha256": "8040509e756cdd8252678093702aa09d0b4994cfba2749d90ee69429aa37b2bd",
+      "scopeReview": "All nine complete tool arguments reviewed, including full implementation edit and inline expiry/recency boundary program. File reads, edits, tests, and git commands remain inside the assigned session workspace. No other workspace, prior solution, or evaluator artifact access.",
+      "toolCallsReviewed": 9,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 475601,
+      "tokens": 144666,
+      "usage": {
+        "inputTokens": 40232,
+        "outputTokens": 11250,
+        "cacheReadTokens": 93184,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All fifteen complete tool arguments reviewed, including full initial patch, independent correction to dash-path guards, and both inline verification programs. Every read/search/patch/terminal path stays within the assigned workspace. No outside workspace, prior solution, or evaluator artifact access. Hermes independently fixed the intermediate dash issue before the final result; no evaluator intervention."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "hermes",
+      "suiteFile": "3-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "eb81213b50ce23d89f06b87504aa0baf5893af59b7ab54cd91341c8e31c91a17",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": false,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "3-hermes-patch-atomic-session.jsonl",
+      "sessionSha256": "f1cf399532dfe246875de16a834556e60595febecd2277e3da1440af3935ab37",
+      "scopeReview": "All fifteen complete tool arguments reviewed, including full initial patch, independent correction to dash-path guards, and both inline verification programs. Every read/search/patch/terminal path stays within the assigned workspace. No outside workspace, prior solution, or evaluator artifact access. Hermes independently fixed the intermediate dash issue before the final result; no evaluator intervention.",
+      "toolCallsReviewed": 15,
+      "sessionId": "20260908_084844_a3da6d",
+      "providerRetryEvidence": [
+        "2026-09-08 08:50:26,801 WARNING [20260908_084844_a3da6d] agent.chat_completion_helpers: Non-streaming API call stale for 90s (threshold 90s). model=gpt-5.6-sol context=~8,991 tokens. Killing connection.",
+        "2026-09-08 08:50:26,804 WARNING [20260908_084844_a3da6d] agent.conversation_loop: API call failed (attempt 1/3) error_type=TimeoutError thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol summary=Non-streaming API call timed out after 90s with no response (threshold: 90s)",
+        "2026-09-08 08:50:26,804 WARNING [20260908_084844_a3da6d] agent.conversation_loop: Retrying API call in 2.3748814398133318s (attempt 1/3) thread=MainThread:8425479552 provider=openai-codex base_url=https://chatgpt.com/backend-api/codex model=gpt-5.6-sol policy=default error=Non-streaming API call timed out after 90s with no response (threshold: 90s)"
+      ],
+      "usageLimitation": "A timed-out request returned no usage; its consumption is unknown. Full elapsed time retained."
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 204282,
+      "tokens": 71293,
+      "usage": {
+        "inputTokens": 14937,
+        "outputTokens": 5924,
+        "cacheReadTokens": 50432,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All nine complete tool arguments reviewed, including full implementation patch and full verify.js contents. Temporary verification file was written, executed, and removed inside the assigned workspace. All reads/searches/git commands also stay inside it; no prior solution or evaluator artifact access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "hermes",
+      "suiteFile": "3-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "0ca124eb04478d05fc4e3aaf91745f1464d658dc7e16d12ef53293d61c88f33f",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "3-hermes-async-pool-session.jsonl",
+      "sessionSha256": "2443f332bb7a8d40dae2e3ad3e53b39b4a7ef3f85be6c14672528d15eab5b6c7",
+      "scopeReview": "All nine complete tool arguments reviewed, including full implementation patch and full verify.js contents. Temporary verification file was written, executed, and removed inside the assigned workspace. All reads/searches/git commands also stay inside it; no prior solution or evaluator artifact access.",
+      "toolCallsReviewed": 9,
+      "sessionId": "20260908_085640_ab8451",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 284615,
+      "tokens": 81475,
+      "usage": {
+        "inputTokens": 21285,
+        "outputTokens": 8222,
+        "cacheReadTokens": 51968,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All twelve complete tool arguments reviewed, including full implementation and efficiency correction patches plus both full inline invariant programs. Every read, search, patch, test, and git command stays inside the assigned workspace. No prior solution or evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "hermes",
+      "suiteFile": "3-hermes.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "202e512a158cec424f4cf931adc7e9d67f40d7b2a490aa510a6b94cbc2406f2d",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "3-hermes-holdout-lru-session.jsonl",
+      "sessionSha256": "040ae5fbf8c2870850d6a41d78b63c5c97819a889b98c9c1ede2faf4647b1b18",
+      "scopeReview": "All twelve complete tool arguments reviewed, including full implementation and efficiency correction patches plus both full inline invariant programs. Every read, search, patch, test, and git command stays inside the assigned workspace. No prior solution or evaluator access.",
+      "toolCallsReviewed": 12,
+      "sessionId": "20260908_090004_099c8e",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": "run-mtsbr2y6-xfwfte",
+      "runStatus": "complete",
+      "wallMs": 209679,
+      "tokens": 49572,
+      "usage": {
+        "inputTokens": 25783,
+        "outputTokens": 5869,
+        "cacheReadTokens": 17920,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight complete tool arguments reviewed, including the complete implementation edit and inline boundary program. Reads, edits, tests, and git diff use paths inside the assigned workspace. No prior solution, evaluator, or outside workspace access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "cora",
+      "suiteFile": "3-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "d92444a82d967372602444a86215f159055358322887256fee596dd8cb8df0c1",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T07-04-50-786Z_run-mtsbr2y6-xfwfte-attempt-mtsbr361-4iqeqh.jsonl",
+      "sessionSha256": "4407cd5429d0331fe79d058f1dfdec6534cd09cf5c8162146edf46a87a7263d9",
+      "scopeReview": "All eight complete tool arguments reviewed, including the complete implementation edit and inline boundary program. Reads, edits, tests, and git diff use paths inside the assigned workspace. No prior solution, evaluator, or outside workspace access.",
+      "toolCallsReviewed": 8,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": "run-mtsbvkvv-9braso",
+      "runStatus": "complete",
+      "wallMs": 106745,
+      "tokens": 35528,
+      "usage": {
+        "inputTokens": 14961,
+        "outputTokens": 2263,
+        "cacheReadTokens": 18304,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight complete tool arguments reviewed, including the full implementation edit and inline concurrency, failure-draining, and boundary program. All paths and commands stay inside the assigned workspace. No prior solution, evaluator, or outside workspace access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "cora",
+      "suiteFile": "3-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "113818245f2a7dd796e83b0c6851519532b9943586fd12a5f83bb3670793fdd0",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T07-08-20-632Z_run-mtsbvkvv-9braso-attempt-mtsbvl38-vxjl5z.jsonl",
+      "sessionSha256": "fbc32e0849486310100dfa7fc232bbad5e03d0b79636d9aa91a6b6d2e71e37ff",
+      "scopeReview": "All eight complete tool arguments reviewed, including the full implementation edit and inline concurrency, failure-draining, and boundary program. All paths and commands stay inside the assigned workspace. No prior solution, evaluator, or outside workspace access.",
+      "toolCallsReviewed": 8,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": "run-mtsbxver-0jogi6",
+      "runStatus": "complete",
+      "wallMs": 198644,
+      "tokens": 57173,
+      "usage": {
+        "inputTokens": 25466,
+        "outputTokens": 4443,
+        "cacheReadTokens": 27264,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All ten complete tool arguments reviewed, including the full implementation edit and both complete boundary programs. The model corrected its own capacity-three eviction assertion to use capacity two and reverified successfully. Every read/write/test/git operation stays inside the assigned workspace; no prior solution or evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "cora",
+      "suiteFile": "3-cora.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "be397b1e747d467f832aac11c7aebef8cfcc0fb17761f21001dd1c4d948a1c08",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "2026-09-08T07-10-07-545Z_run-mtsbxver-0jogi6-attempt-mtsbxvlp-o5275e.jsonl",
+      "sessionSha256": "28609e661bc60e8dbd906da96b2c7d9fef119cf9d7b6bf397da1d41e285e8094",
+      "scopeReview": "All ten complete tool arguments reviewed, including the full implementation edit and both complete boundary programs. The model corrected its own capacity-three eviction assertion to use capacity two and reverified successfully. Every read/write/test/git operation stays inside the assigned workspace; no prior solution or evaluator access.",
+      "toolCallsReviewed": 10,
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "patch-atomic",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 288161,
+      "tokens": 135447,
+      "usage": {
+        "inputTokens": 17525,
+        "outputTokens": 8354,
+        "cacheReadTokens": 109568,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: object member identity and restricted dash segments",
+          "pass": false,
+          "weight": 3,
+          "hidden": true,
+          "detail": "AssertionError(obj);\n  ^\n\nAssertionError [ERR_ASSERTION]: Missing expected exception.\n  generatedMessage: false,\n  code: 'ERR_ASSERTION',\n  actual: undefined,\n  expected: [Function (anonymous)],\n  operator: 'throws',\n  diff: 'simple'\n}\n\nNode.js v24.20.0\n"
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All five complete tool programs reviewed, including the full implementation patch and full inline edge checks. Reads, writes, git, and verification stay within the assigned workspace. No prior solution, evaluator, or other workspace access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": false,
+      "round": 3,
+      "agent": "codex",
+      "suiteFile": "3-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: pointer escapes and root replacement",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: arrays, cloning, and indexed failures",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": false,
+      "strictPassed": false,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "patch.js": "c4854b02c15abb4e5168eecb2dfb21e2bfb643971ad0bbfa1647b48b66259295",
+        "test.js": "980d33587c9c9847b9eda96574ac9f38d74fb55eb687f2c28728720422785898"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T09-13-26-01a07fdd-5528-79b1-83c3-1a847516085a.jsonl",
+      "sessionSha256": "9b4e5a23bcc9591f0fa4ba03aa89f1d9917684514abc74c9148043504c730853",
+      "scopeReview": "All five complete tool programs reviewed, including the full implementation patch and full inline edge checks. Reads, writes, git, and verification stay within the assigned workspace. No prior solution, evaluator, or other workspace access.",
+      "toolCallsReviewed": 5,
+      "sessionId": "01a07fdd-5528-79b1-83c3-1a847516085a",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "async-pool",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 129592,
+      "tokens": 87729,
+      "usage": {
+        "inputTokens": 17929,
+        "outputTokens": 3368,
+        "cacheReadTokens": 66432,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All four complete tool programs reviewed, including full implementation patch and full inline strict-unhandled-rejection boundary checks. Every read, patch, test, and git operation stays within the assigned workspace. No prior solution, evaluator, or outside workspace access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "codex",
+      "suiteFile": "3-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: failure stops new starts and drains in-flight work",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: empty, invalid limit, and synchronous throw",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "pool.js": "987a03bf703196919b494ca9f5e21f01406fa1cdbd6c684c4c280e796aa4ed97",
+        "test.js": "4dda47a2f9861bc46c1a928a9b88d22ed3624bb6c89d7f03a0d73689c74dbae2"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T09-18-14-01a07fe1-ba49-7352-986c-0bd71515ecc8.jsonl",
+      "sessionSha256": "a31f9a2b75e0b954a3dd6f5d57c193fe15bedc1046291a64cb3ccd29ef2c16d2",
+      "scopeReview": "All four complete tool programs reviewed, including full implementation patch and full inline strict-unhandled-rejection boundary checks. Every read, patch, test, and git operation stays within the assigned workspace. No prior solution, evaluator, or outside workspace access.",
+      "toolCallsReviewed": 4,
+      "sessionId": "01a07fe1-ba49-7352-986c-0bd71515ecc8",
+      "providerRetryEvidence": []
+    },
+    {
+      "task": "holdout-lru",
+      "runId": null,
+      "runStatus": "complete",
+      "wallMs": 349978,
+      "tokens": 188150,
+      "usage": {
+        "inputTokens": 37794,
+        "outputTokens": 9812,
+        "cacheReadTokens": 140544,
+        "cacheWriteTokens": 0
+      },
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "questions": 0,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "exact-session workspace scope audit",
+          "pass": true,
+          "detail": "All eight complete tool programs reviewed, including both full implementation patch attempts and both randomized reference programs. A rejected delete/add patch was recovered with an update patch. The model corrected its own clock-call assertion and reverified. Every command and path stays within the assigned workspace; no prior solution or evaluator access."
+        },
+        {
+          "name": "persisted requested model and high effort",
+          "pass": true,
+          "detail": "{\"models\":[\"gpt-5.6-sol\"],\"efforts\":[\"high\"]}"
+        }
+      ],
+      "passed": true,
+      "round": 3,
+      "agent": "codex",
+      "suiteFile": "3-codex.json",
+      "originalAutomatedPassed": true,
+      "originalChecks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired entries vanish from size and eviction",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: set refreshes ttl, get does not",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "contract: expired recent entries cannot evict live LRU entries",
+          "pass": true,
+          "weight": 3,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "requested reasoning effort recorded",
+          "pass": true,
+          "detail": "requested high; recorded high"
+        }
+      ],
+      "functionalPassed": true,
+      "strictPassed": true,
+      "retainedFilesUnchanged": true,
+      "retainedFileSha256": {
+        "lru.js": "17857f5026386d660158f87a414da13ef9ce9b8f125f041c1b3b78fb2d5c00f6",
+        "test.js": "2debaa2c695190ea96c37fc479be6a0b7eacc3315163927916d55ef4a80722ec"
+      },
+      "usageComplete": true,
+      "scopeAuditPassed": true,
+      "controlAuditPassed": true,
+      "persistedEfforts": [
+        "high"
+      ],
+      "sessionFile": "sessions/2026/09/08/rollout-2026-09-08T09-20-24-01a07fe3-b536-7d10-a5ad-cad501be8f9e.jsonl",
+      "sessionSha256": "66b8e3eddd73921349b769c7a8ffa5983164b5592a7cf2c7ce6b8506b4cacb99",
+      "scopeReview": "All eight complete tool programs reviewed, including both full implementation patch attempts and both randomized reference programs. A rejected delete/add patch was recovered with an update patch. The model corrected its own clock-call assertion and reverified. Every command and path stays within the assigned workspace; no prior solution or evaluator access.",
+      "toolCallsReviewed": 8,
+      "sessionId": "01a07fe3-b536-7d10-a5ad-cad501be8f9e",
+      "providerRetryEvidence": []
+    }
+  ]
+}

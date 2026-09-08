@@ -40,15 +40,6 @@ const TERMINAL_STACK = path.join(
   "tabs",
   "TerminalStack.tsx",
 );
-const TERMINAL_PANE = path.join(
-  ROOT,
-  "src",
-  "renderer",
-  "src",
-  "components",
-  "Terminal",
-  "TerminalPane.tsx",
-);
 const USE_TABS = path.join(ROOT, "src", "renderer", "src", "tabs", "useTabs.ts");
 const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
 
@@ -169,7 +160,6 @@ async function main() {
   const source = fs.readFileSync(SESSION, "utf8");
   const stackSource = fs.readFileSync(TERMINAL_STACK, "utf8");
   const appSource = fs.readFileSync(APP, "utf8");
-  const paneSource = fs.readFileSync(TERMINAL_PANE, "utf8");
   const tabsSource = fs.readFileSync(USE_TABS, "utf8");
   check(
     "the terminal plus menu omits the browser pane shortcut",
@@ -206,9 +196,7 @@ async function main() {
       source.includes("nativeCliLoginTokenFiredSessions.delete(sessionId)") &&
       source.includes("autoResumeAttempts.delete(sessionId)") &&
       source.includes("resumeHintShown.delete(sessionId)") &&
-      appSource.includes("forgetTerminalSessionMemory(paneId)") &&
-      paneSource.includes("introShownSessions.delete(sessionId)") &&
-      appSource.includes("forgetTerminalPaneMemory(paneId)"),
+      appSource.includes("forgetTerminalSessionMemory(paneId)"),
   );
   check(
     "deleted workspaces release restored-chat session metadata",

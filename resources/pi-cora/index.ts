@@ -6,6 +6,7 @@ import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
+import { createWhiteboardReviewGuard } from "./whiteboard-review-policy";
 import {
   buildCoraPiSystemPrompt,
   type CoraPiExecutionPolicy,
@@ -97,6 +98,14 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   const bridge = loadBridge();
   const untrustedPullRequest = isUntrustedPullRequest();
   let mcp: McpBridgeHandle | null = null;
+  const whiteboardReview = createWhiteboardReviewGuard();
+  pi.on("input", () => { whiteboardReview.reset(); });
+  pi.on("agent_end", (event) => {
+    const last = event.messages.at(-1) as { stopReason?: string } | undefined;
+    if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
+    const content = whiteboardReview.followUp();
+    if (content) pi.sendMessage({ customType: "whiteboard-review", content, display: false }, { triggerTurn: true, deliverAs: "followUp" });
+  });
 
   // Keep the manager's context inside Codara's token budget instead of Pi's
   // window-sized default.
@@ -144,6 +153,10 @@ ${mcp?.promptSuffix() ?? ""}`,
       promptSnippet: tool.description,
       parameters: tool.inputSchema as never,
       async execute(_toolCallId, params) {
+        if (tool.name === "codara_complete") {
+          const reason = whiteboardReview.completionBlock();
+          if (reason) throw new Error(reason);
+        }
         const result = await bridge.callToolByName(tool.name, params);
         // Pi's extension contract represents a failed tool by rejecting the
         // execute promise; an `isError` property on the returned result is not
@@ -153,6 +166,7 @@ ${mcp?.promptSuffix() ?? ""}`,
         if (result.isError === true) {
           throw new Error(bridgeErrorMessage(result, `${tool.name} failed`));
         }
+        whiteboardReview.observe(tool.name, result);
         return {
           content: (result.content ?? [{ type: "text", text: "null" }]) as never,
           details: result.details,

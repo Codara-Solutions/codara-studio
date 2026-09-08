@@ -263,11 +263,8 @@ export interface TerminalTab extends BaseTab {
 export interface PreviewTab extends BaseTab {
   kind: "preview";
   url: string;
-  // When the preview was spawned by an orchestration run (URL detector inside
-  // a worker pane, or an orchestrator file-preview opener), this carries the
-  // owning run id so the chat panel can render the preview inside its inner
-  // tab strip. User-opened previews (TabBar picker, Codara browser) leave it
-  // unset and stay top-level.
+  // Retained as provenance and the default automation target. Browser tabs
+  // belong to the workspace and survive their originating chat/run.
   runId?: string;
 }
 
@@ -343,7 +340,7 @@ export type Tab =
   | DiffTab;
 
 // True when a tab represents content owned by an orchestration run (worker
-// terminal, Runs canvas, orchestration-spawned preview). These render inside
+// terminal or Runs canvas). These render inside
 // the chat panel's inner tab strip instead of the top tab bar — which also
 // means they have NO pill anywhere once their owning chat tab is closed, so
 // tab-close/reroute logic must never leave one of them as the active tab.
@@ -351,6 +348,5 @@ export type Tab =
 export function isRunOwnedTab(tab: Tab): boolean {
   if (tab.kind === "terminal" && tab.scope?.kind === "workers") return true;
   if (tab.kind === "runs") return true;
-  if (tab.kind === "preview" && tab.runId) return true;
   return false;
 }

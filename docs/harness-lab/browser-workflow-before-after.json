@@ -1,0 +1,659 @@
+{
+  "kind": "browser-workflow-before-after",
+  "limitation": "One sequential Sol/high trial per revision. Preliminary observation, not a reliability estimate or a competitor comparison. Total tokens include cached input; they are not monetary costs. The first revision already contains the keyboard and dropdown fixes.",
+  "control": {
+    "fixture": "cli/bench/browser/ticket-fixture.cjs",
+    "runner": "scripts/smoke-cora-browser.cjs",
+    "effort": "high",
+    "changes": "Rendered snapshots with form values, accurate dialog visibility waits, and failure propagation for browser batches."
+  },
+  "trials": [
+    {
+      "sourceCommit": "ab9d2740bd6bc9ace0dcc6d195e04354b13e3d4b",
+      "startedAt": "2026-09-08T01:08:29.959Z",
+      "model": "gpt-5.6-sol",
+      "runId": "run-mtrz0ty6-364slc",
+      "passed": true,
+      "runStatus": "complete",
+      "checks": [
+        {
+          "name": "target priority and note saved",
+          "pass": true
+        },
+        {
+          "name": "concurrent owner preserved",
+          "pass": true
+        },
+        {
+          "name": "conflict recovered with one successful write",
+          "pass": true
+        },
+        {
+          "name": "other tickets unchanged",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "integrated browser actually used",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "wallMs": 144972,
+      "tokens": 260033,
+      "usage": {
+        "inputTokens": 30166,
+        "outputTokens": 2283,
+        "cacheReadTokens": 227584,
+        "cacheWriteTokens": 0
+      },
+      "questionsAsked": 0,
+      "toolCalls": 18,
+      "trace": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:61992/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "mode": "outline",
+            "maxBytes": 16000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#search",
+                "text": "OPS-184",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr",
+                "state": "visible",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "mode": "outline",
+            "maxBytes": 10000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "state": "visible",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md"
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "mode": "outline",
+            "maxBytes": 10000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#reload"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "mode": "outline",
+            "maxBytes": 10000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_click",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "selector": "#confirm"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "mode": "outline",
+            "maxBytes": 10000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz138t-t1p4md",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 10000
+              },
+              {
+                "action": "click",
+                "selector": "#back"
+              },
+              {
+                "action": "click",
+                "selector": "#cancel"
+              }
+            ]
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Updated OPS-184 “Release checklist” to High with the exact requested note, preserving current owner Morgan after resolving an edit conflict.",
+            "checks": [
+              {
+                "command": "Reopen OPS-184 in Codara Studio",
+                "result": "passed",
+                "details": "Confirmed Platform ticket OPS-184 shows High and “Validated against staging build 42.” with owner Morgan; save reported revision 3."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "sourceCommit": "0735844ee1104d02235b19a5b7e61e725499e0f4",
+      "startedAt": "2026-09-08T01:14:59.287Z",
+      "model": "gpt-5.6-sol",
+      "runId": "run-mtrz96cq-wg6rvh",
+      "passed": true,
+      "runStatus": "complete",
+      "checks": [
+        {
+          "name": "target priority and note saved",
+          "pass": true
+        },
+        {
+          "name": "concurrent owner preserved",
+          "pass": true
+        },
+        {
+          "name": "conflict recovered with one successful write",
+          "pass": true
+        },
+        {
+          "name": "other tickets unchanged",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+        },
+        {
+          "name": "integrated browser actually used",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "wallMs": 104748,
+      "tokens": 182052,
+      "usage": {
+        "inputTokens": 25903,
+        "outputTokens": 1525,
+        "cacheReadTokens": 154624,
+        "cacheWriteTokens": 0
+      },
+      "questionsAsked": 0,
+      "toolCalls": 15,
+      "trace": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:62449/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "mode": "outline",
+            "maxBytes": 20000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#search",
+                "text": "OPS-184",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows",
+                "state": "visible",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 12000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "mode": "outline",
+            "maxBytes": 12000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "dialog",
+                "state": "visible",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#reload"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "wait_for",
+                "selector": "#reload",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 12000
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "mode": "outline",
+            "maxBytes": 12000
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mtrz9fdm-5e29mg",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "state": "visible",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot",
+                "mode": "outline",
+                "maxBytes": 16000
+              }
+            ]
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Updated Platform ticket OPS-184 “Release checklist” to High with note “Validated against staging build 42.”; resolved the edit conflict by reloading, preserved current owner Morgan, saved, and verified the values after reopening.",
+            "checks": [
+              {
+                "command": "Reopened OPS-184 in Codara Studio",
+                "result": "passed",
+                "details": "Priority High, exact note present, owner Morgan preserved; save confirmed at revision 3."
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "sameStateSnapshot": {
+    "description": "Reopened OPS-184 after successful conflict recovery, with the same other tickets on page 2.",
+    "before": "<body> name=\"Northstar support desk\\n\\nReview tickets, preserve current ownership, and confirm \"\n  <h1> name=\"Northstar support desk\"\n  <p> name=\"Review tickets, preserve current ownership, and confirm changes before saving.\"\n  <label> name=\"Search tickets\"\n    <input#search>\n  <button#refresh> name=\"Search\"\n  <p#status> role=status name=\"Saved OPS-184 at revision 3.\"\n  <table> name=\"Ticket\\tTitle\\tTeam\\tPriority\\tAction\\nOPS-184\\tRelease checklist\\tPlatform\\tHigh\\tEdit O\"\n    <thead> name=\"Ticket\\tTitle\\tTeam\\tPriority\\tAction\"\n      <tr> name=\"Ticket\\tTitle\\tTeam\\tPriority\\tAction\"\n        <th> name=\"Ticket\"\n        <th> name=\"Title\"\n        <th> name=\"Team\"\n        <th> name=\"Priority\"\n        <th> name=\"Action\"\n    <tbody#rows> name=\"OPS-184\\tRelease checklist\\tPlatform\\tHigh\\tEdit OPS-184\\nOPS-185\\tRelease checklist f\"\n      <tr> name=\"OPS-184\\tRelease checklist\\tPlatform\\tHigh\\tEdit OPS-184\"\n        <td> name=\"OPS-184\"\n        <td> name=\"Release checklist\"\n        <td> name=\"Platform\"\n        <td> name=\"High\"\n        <td> name=\"Edit OPS-184\"\n          <button> name=\"Edit OPS-184\"\n      <tr> name=\"OPS-185\\tRelease checklist follow-up 6\\tClient\\tNormal\\tEdit OPS-185\"\n        <td> name=\"OPS-185\"\n        <td> name=\"Release checklist follow-up 6\"\n        <td> name=\"Client\"\n        <td> name=\"Normal\"\n        <td> name=\"Edit OPS-185\"\n          <button> name=\"Edit OPS-185\"\n      <tr> name=\"OPS-186\\tRelease checklist follow-up 7\\tPlatform\\tNormal\\tEdit OPS-186\"\n        <td> name=\"OPS-186\"\n        <td> name=\"Release checklist follow-up 7\"\n        <td> name=\"Platform\"\n        <td> name=\"Normal\"\n        <td> name=\"Edit OPS-186\"\n          <button> name=\"Edit OPS-186\"\n      <tr> name=\"OPS-187\\tRelease checklist follow-up 8\\tClient\\tNormal\\tEdit OPS-187\"\n        <td> name=\"OPS-187\"\n        <td> name=\"Release checklist follow-up 8\"\n        <td> name=\"Client\"\n        <td> name=\"Normal\"\n        <td> name=\"Edit OPS-187\"\n          <button> name=\"Edit OPS-187\"\n  <button#previous> name=\"Previous page\"\n  <span#page> name=\"Page 2 of 4\"\n  <button#next> name=\"Next page\"\n  <dialog#editor> name=\"editor-title\"\n    <h2#editor-title> name=\"Edit OPS-184\"\n    <p#owner> name=\"Owner: Morgan\"\n    <p#error> role=alert\n    <label> name=\"Priority LowNormalHigh\"\n      <select#priority> name=\"LowNormalHigh\"\n        <option> name=\"Low\"\n        <option> name=\"Normal\"\n        <option> name=\"High\"\n    <label> name=\"Note\"\n      <textarea#note>\n    <button#reload> name=\"Reload latest ticket\"\n    <button#save> name=\"Review change\"\n    <button#cancel> name=\"Cancel\"\n  <dialog#confirmation> name=\"confirm-title\"\n    <h2#confirm-title> name=\"Confirm ticket change\"\n    <p#summary> name=\"OPS-184 / High / Validated against staging build 42. / Owner: Morgan\"\n    <button#confirm> name=\"Confirm save\"\n    <button#back> name=\"Back to edit\"",
+    "after": "<body>\n  <h1> name=\"Northstar support desk\"\n  <p> name=\"Review tickets, preserve current ownership, and confirm changes before saving.\"\n  <label> name=\"Search tickets\"\n    <input#search> name=\"Search tickets\" value=\"\"\n  <button#refresh> name=\"Search\"\n  <p#status> role=status name=\"Saved OPS-184 at revision 3.\"\n  <table>\n    <thead>\n      <tr>\n        <th> name=\"Ticket\"\n        <th> name=\"Title\"\n        <th> name=\"Team\"\n        <th> name=\"Priority\"\n        <th> name=\"Action\"\n    <tbody#rows>\n      <tr>\n        <td> name=\"OPS-184\"\n        <td> name=\"Release checklist\"\n        <td> name=\"Platform\"\n        <td> name=\"High\"\n        <td>\n          <button> name=\"Edit OPS-184\"\n      <tr>\n        <td> name=\"OPS-185\"\n        <td> name=\"Release checklist follow-up 6\"\n        <td> name=\"Client\"\n        <td> name=\"Normal\"\n        <td>\n          <button> name=\"Edit OPS-185\"\n      <tr>\n        <td> name=\"OPS-186\"\n        <td> name=\"Release checklist follow-up 7\"\n        <td> name=\"Platform\"\n        <td> name=\"Normal\"\n        <td>\n          <button> name=\"Edit OPS-186\"\n      <tr>\n        <td> name=\"OPS-187\"\n        <td> name=\"Release checklist follow-up 8\"\n        <td> name=\"Client\"\n        <td> name=\"Normal\"\n        <td>\n          <button> name=\"Edit OPS-187\"\n  <button#previous> name=\"Previous page\"\n  <span#page> name=\"Page 2 of 4\"\n  <button#next> name=\"Next page\"\n  <dialog#editor> name=\"Edit OPS-184\"\n    <h2#editor-title> name=\"Edit OPS-184\"\n    <p#owner> name=\"Owner: Morgan\"\n    <p#error> role=alert\n    <label> name=\"Priority\"\n      <select#priority> name=\"Priority\" value=\"High\" options=[{\"value\":\"Low\",\"label\":\"Low\",\"selected\":false},{\"value\":\"Normal\",\"label\":\"Normal\",\"selected\":false},{\"value\":\"High\",\"label\":\"High\",\"selected\":true}]\n    <label> name=\"Note\"\n      <textarea#note> name=\"Note\" value=\"Validated against staging build 42.\"\n    <button#save> name=\"Review change\"\n    <button#cancel> name=\"Cancel\""
+  }
+}

@@ -1,0 +1,1385 @@
+{
+  "runtimeBuildCommit": "5dac7ce6",
+  "startedAt": "2026-09-08T04:35:29.375Z",
+  "finishedAt": "2026-09-08T04:40:21.942Z",
+  "effort": "high",
+  "conditions": "Sequential dedicated-lab coverage. Three Fable ticket and three Luna randomized canvas confirmations after generic UI guidance and batch restriction reminder. Same task prompts and strict checks as prior matrix. Original failures retained. Small sample; not a matched causal ablation. Source/build fixed. No other lab paid calls, builds or Electron tests during this matrix. Provider/cache warmth and user activity uncontrolled.",
+  "kind": "browser-followup-after-ui-scope-and-batch-description",
+  "acceptance": {
+    "passed": 3,
+    "trials": 6,
+    "fableTicket": {
+      "passed": 0,
+      "trials": 3
+    },
+    "lunaCanvas": {
+      "passed": 3,
+      "trials": 3
+    }
+  },
+  "trials": [
+    {
+      "model": "claude-fable-5-1",
+      "runId": "run-mts6f0w6-58yrmb",
+      "passed": false,
+      "wallMs": 44467,
+      "tokens": 247764,
+      "usage": {
+        "inputTokens": 32,
+        "outputTokens": 2475,
+        "cacheReadTokens": 221903,
+        "cacheWriteTokens": 23354
+      },
+      "checks": [
+        {
+          "name": "target priority and note saved",
+          "pass": true
+        },
+        {
+          "name": "concurrent owner preserved",
+          "pass": true
+        },
+        {
+          "name": "conflict recovered with one successful write",
+          "pass": true
+        },
+        {
+          "name": "other tickets unchanged",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "integrated browser actually used",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": false,
+          "detail": "codara_preview_evaluate"
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "ticket-conflict",
+      "repetition": 1,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:58965/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#search",
+                "text": "OPS-184",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows tr button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "form, dialog, [role=dialog]",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#reload"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#save:not([disabled])",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "wait_for",
+                "selector": "#status",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr button",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "click",
+                "selector": "#rows tr button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#cancel"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "evaluate",
+                "code": "document.querySelector('#status').textContent + ' | ' + Array.from(document.querySelectorAll('#rows tr')).map(r => r.textContent.trim().replace(/\\s+/g,' ')).join(' ; ')"
+              }
+            ]
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Updated OPS-184 (Release checklist, Platform) to priority High with note \"Validated against staging build 42.\"; the first save hit a concurrent-edit conflict (owner changed Avery \u2192 Morgan), so I reloaded the latest ticket, reapplied the changes preserving owner Morgan, saved, and verified by reopening the ticket.",
+            "checks": [
+              {
+                "command": "codara_preview: search OPS-184 \u2192 Edit \u2192 set High + note \u2192 Review \u2192 Confirm",
+                "result": "failed",
+                "details": "First save rejected: 'This ticket changed while you were editing' (owner had changed to Morgan)."
+              },
+              {
+                "command": "codara_preview: Reload latest ticket \u2192 reapply High + note \u2192 Review (summary: OPS-184 / High / Validated against staging build 42. / Owner: Morgan) \u2192 Confirm",
+                "result": "passed",
+                "details": "Editor closed, list refreshed."
+              },
+              {
+                "command": "codara_preview: reopen OPS-184 after refresh",
+                "result": "passed",
+                "details": "Priority=High, Note='Validated against staging build 42.', Owner: Morgan; list row shows High. Closed via Cancel with no further changes."
+              }
+            ],
+            "files_changed": [],
+            "risks": [
+              "Only OPS-184 was edited; no other tickets were opened or modified."
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "claude-fable-5-1"
+      ]
+    },
+    {
+      "model": "claude-fable-5-1",
+      "runId": "run-mts6fz9o-mc0e3b",
+      "passed": false,
+      "wallMs": 43997,
+      "tokens": 243515,
+      "usage": {
+        "inputTokens": 32,
+        "outputTokens": 2484,
+        "cacheReadTokens": 228015,
+        "cacheWriteTokens": 12984
+      },
+      "checks": [
+        {
+          "name": "target priority and note saved",
+          "pass": true
+        },
+        {
+          "name": "concurrent owner preserved",
+          "pass": true
+        },
+        {
+          "name": "conflict recovered with one successful write",
+          "pass": true
+        },
+        {
+          "name": "other tickets unchanged",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "integrated browser actually used",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": false,
+          "detail": "codara_preview_evaluate"
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "ticket-conflict",
+      "repetition": 2,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:59021/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#search",
+                "text": "OPS-184",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "form, dialog, [role=dialog]",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#reload"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#save:not([disabled])",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "evaluate",
+                "code": "document.querySelector('#summary').textContent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ],
+            "continueOnError": true
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "wait_for",
+                "selector": "#status",
+                "timeoutMs": 3000
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "click",
+                "selector": "#rows button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_click",
+          "arguments": {
+            "selector": "#cancel"
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Updated OPS-184 \"Release checklist\" (Platform) to priority High with note \"Validated against staging build 42.\"; a concurrent edit conflict was detected on the first save, so I reloaded the latest ticket (owner had changed from Avery to Morgan), reapplied the changes preserving owner Morgan, confirmed the save, and verified the persisted values by reopening the ticket.",
+            "checks": [
+              {
+                "command": "codara_preview: search OPS-184 \u2192 Edit \u2192 set High + note \u2192 Review change \u2192 Confirm save",
+                "result": "failed",
+                "details": "First save rejected: 'This ticket changed while you were editing.' Reload required."
+              },
+              {
+                "command": "codara_preview: Reload latest ticket \u2192 reapply High + note \u2192 Review change (summary: OPS-184 / High / Validated against staging build 42. / Owner: Morgan) \u2192 Confirm save",
+                "result": "passed",
+                "details": "Editor closed, list refreshed."
+              },
+              {
+                "command": "codara_preview: reopen OPS-184 after save",
+                "result": "passed",
+                "details": "Priority=High, Note='Validated against staging build 42.', Owner: Morgan; list row shows High. Closed via Cancel with no further edits."
+              }
+            ],
+            "files_changed": [],
+            "risks": [
+              "Owner preserved as Morgan (the current owner after the concurrent edit), not the originally displayed Avery, per the reload-and-reapply instruction."
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "claude-fable-5-1"
+      ]
+    },
+    {
+      "model": "claude-fable-5-1",
+      "runId": "run-mts6gxai-8mogut",
+      "passed": false,
+      "wallMs": 43465,
+      "tokens": 243161,
+      "usage": {
+        "inputTokens": 32,
+        "outputTokens": 2492,
+        "cacheReadTokens": 227721,
+        "cacheWriteTokens": 12916
+      },
+      "checks": [
+        {
+          "name": "target priority and note saved",
+          "pass": true
+        },
+        {
+          "name": "concurrent owner preserved",
+          "pass": true
+        },
+        {
+          "name": "conflict recovered with one successful write",
+          "pass": true
+        },
+        {
+          "name": "other tickets unchanged",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        },
+        {
+          "name": "integrated browser actually used",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": false,
+          "detail": "codara_preview_evaluate, codara_preview_evaluate"
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "ticket-conflict",
+      "repetition": 3,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:59080/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#search",
+                "text": "OPS-184",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#refresh"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#rows tr",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#rows tr:first-child button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "form, dialog, [role=dialog], select",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#reload"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#save:not([disabled])",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "type",
+                "selector": "#priority",
+                "text": "High"
+              },
+              {
+                "action": "type",
+                "selector": "#note",
+                "text": "Validated against staging build 42.",
+                "clearFirst": true
+              },
+              {
+                "action": "click",
+                "selector": "#save"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "evaluate",
+                "code": "document.querySelector('#summary').textContent"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "click",
+                "selector": "#confirm"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#confirmation",
+                "state": "hidden",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "steps": [
+              {
+                "action": "wait_for",
+                "selector": "#status",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "evaluate",
+                "code": "new Promise(r => setTimeout(() => r(document.querySelector('#status').textContent + ' | ' + document.querySelector('#rows tr:first-child').textContent), 1500))",
+                "awaitPromise": true
+              },
+              {
+                "action": "click",
+                "selector": "#rows tr:first-child button"
+              },
+              {
+                "action": "wait_for",
+                "selector": "#editor",
+                "timeoutMs": 5000
+              },
+              {
+                "action": "snapshot"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_click",
+          "arguments": {
+            "selector": "#cancel"
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Updated OPS-184 (Release checklist, Platform) to priority High with note \"Validated against staging build 42.\"; a concurrent edit conflict was handled by reloading the latest ticket (owner changed Avery \u2192 Morgan), reapplying the changes, and saving at revision 3 while preserving the current owner Morgan. Reopening the ticket confirmed the saved values.",
+            "checks": [
+              {
+                "command": "codara_preview: search OPS-184 \u2192 Edit \u2192 set High + note \u2192 Review change \u2192 Confirm save",
+                "result": "passed",
+                "details": "First save hit a conflict ('ticket changed while you were editing'); clicked Reload latest ticket, which showed owner Morgan, reapplied priority/note, confirmation summary read 'OPS-184 / High / Validated against staging build 42. / Owner: Morgan', saved \u2192 status 'Saved OPS-184 at revision 3.'"
+              },
+              {
+                "command": "codara_preview: reopen Edit OPS-184 after save",
+                "result": "passed",
+                "details": "Editor showed Owner: Morgan, Priority High, Note 'Validated against staging build 42.'; list row shows priority High. Closed via Cancel with no further edits."
+              }
+            ],
+            "files_changed": [],
+            "risks": [
+              "The concurrent edit changed the ticket's owner from Avery to Morgan before my save; I preserved the current (post-reload) owner Morgan as instructed rather than restoring Avery."
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "claude-fable-5-1"
+      ]
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "runId": "run-mts6huwe-d82fju",
+      "passed": true,
+      "wallMs": 40967,
+      "tokens": 105398,
+      "usage": {
+        "inputTokens": 18084,
+        "outputTokens": 786,
+        "cacheReadTokens": 86528,
+        "cacheWriteTokens": 0
+      },
+      "checks": [
+        {
+          "name": "lowest displayed latency selected",
+          "pass": true
+        },
+        {
+          "name": "exactly one confirmation saved",
+          "pass": true
+        },
+        {
+          "name": "saved selection reloaded",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "screenshot invoked and image returned to the model",
+          "pass": true
+        },
+        {
+          "name": "screenshot image received before confirmation",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "canvas-vision",
+      "repetition": 1,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:59129/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj"
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "action": "click",
+            "x": 175,
+            "y": 180
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "mode": "outline"
+          }
+        },
+        {
+          "name": "codara_preview_click",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "selector": "#confirm"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "mode": "outline"
+          }
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "url": "http://127.0.0.1:59129/"
+          }
+        },
+        {
+          "name": "codara_preview_snapshot",
+          "arguments": {
+            "tabId": "preview-mts6i0id-ymh5rj",
+            "mode": "outline"
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Selected River, the lowest-p95 stream at 8 ms, confirmed it once, reloaded the page, and verified it remains confirmed.",
+            "checks": [
+              {
+                "command": "Integrated browser screenshot and post-reload UI snapshot",
+                "result": "passed",
+                "details": "Status shows \u201cConfirmed: River\u201d after reload."
+              }
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "gpt-5.6-luna"
+      ]
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "runId": "run-mts6iqku-3vw8yi",
+      "passed": true,
+      "wallMs": 73627,
+      "tokens": 205816,
+      "usage": {
+        "inputTokens": 44367,
+        "outputTokens": 1449,
+        "cacheReadTokens": 160000,
+        "cacheWriteTokens": 0
+      },
+      "checks": [
+        {
+          "name": "lowest displayed latency selected",
+          "pass": true
+        },
+        {
+          "name": "exactly one confirmation saved",
+          "pass": true
+        },
+        {
+          "name": "saved selection reloaded",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "screenshot invoked and image returned to the model",
+          "pass": true
+        },
+        {
+          "name": "screenshot image received before confirmation",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "canvas-vision",
+      "repetition": 2,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:59183/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "action": "click",
+            "x": 210,
+            "y": 364
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "action": "click",
+            "x": 239,
+            "y": 502
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "url": "http://127.0.0.1:59183/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "codara_preview_run",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "steps": [
+              {
+                "action": "click",
+                "selector": "???",
+                "label": "placeholder"
+              }
+            ]
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "action": "click",
+            "x": 210,
+            "y": 364
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "action": "click",
+            "x": 120,
+            "y": 502
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq",
+            "url": "http://127.0.0.1:59183/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6iymd-wffkuq"
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Selected River (p95 28 ms), confirmed it once, reloaded, and visually verified \u201cConfirmed: River\u201d persisted.",
+            "checks": [
+              {
+                "command": "Visual browser verification via integrated preview screenshots",
+                "result": "passed",
+                "details": "River was the lowest displayed p95 and remained confirmed after reload."
+              }
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "gpt-5.6-luna"
+      ]
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "runId": "run-mts6kbgy-s8y0a8",
+      "passed": true,
+      "wallMs": 45491,
+      "tokens": 99644,
+      "usage": {
+        "inputTokens": 29036,
+        "outputTokens": 848,
+        "cacheReadTokens": 69760,
+        "cacheWriteTokens": 0
+      },
+      "checks": [
+        {
+          "name": "lowest displayed latency selected",
+          "pass": true
+        },
+        {
+          "name": "exactly one confirmation saved",
+          "pass": true
+        },
+        {
+          "name": "saved selection reloaded",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "screenshot invoked and image returned to the model",
+          "pass": true
+        },
+        {
+          "name": "screenshot image received before confirmation",
+          "pass": true
+        },
+        {
+          "name": "only permitted browser interaction tools used",
+          "pass": true,
+          "detail": ""
+        },
+        {
+          "name": "no user intervention",
+          "pass": true
+        }
+      ],
+      "task": "canvas-vision",
+      "repetition": 3,
+      "toolCalls": [
+        {
+          "name": "codara_preview_list",
+          "arguments": {}
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "url": "http://127.0.0.1:59279/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1"
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1",
+            "action": "click",
+            "x": 190,
+            "y": 319
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1"
+          }
+        },
+        {
+          "name": "codara_preview_mouse",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1",
+            "action": "click",
+            "x": 150,
+            "y": 500
+          }
+        },
+        {
+          "name": "codara_preview_navigate",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1",
+            "url": "http://127.0.0.1:59279/"
+          }
+        },
+        {
+          "name": "codara_preview_screenshot",
+          "arguments": {
+            "tabId": "preview-mts6kimv-gn3mg1"
+          }
+        },
+        {
+          "name": "submit_result",
+          "arguments": {
+            "status": "complete",
+            "summary": "Selected Cedar (p95 19 ms), confirmed it once, reloaded the page, and verified it remains confirmed.",
+            "checks": [
+              {
+                "command": "Integrated browser screenshot verification",
+                "result": "passed",
+                "details": "Cedar was the lowest displayed p95 and the reloaded page showed \u201cConfirmed: Cedar\u201d."
+              }
+            ]
+          }
+        }
+      ],
+      "actualModels": [
+        "gpt-5.6-luna"
+      ]
+    }
+  ],
+  "lunaCanvasMedian": {
+    "wallMs": 45491,
+    "tokens": 105398
+  },
+  "audit": {
+    "allWorkspaceScopesPassed": true,
+    "allPermittedToolChecksPassed": false,
+    "method": "Every tool argument and batch action manually reviewed. Fable evaluation violations retained as failures. Raw artifacts and per-model audit sidecars remain in the dedicated lab."
+  },
+  "limitations": [
+    "Three repeats each, not broad reliability.",
+    "One earlier Luna trial versus three randomized follow-ups is not a matched causal ablation.",
+    "Batch tool-description reminder did not resolve Fable direct-chat instruction failures. Explicit worker-config hard fencing is a separate tested behavior."
+  ]
+}

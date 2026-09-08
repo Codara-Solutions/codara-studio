@@ -105,6 +105,7 @@ export interface ManagerCallResult {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   promptTokens?: number;
   completionTokens?: number;
   /** Provider response ids observed during the call, when the backend exposes
@@ -188,6 +189,7 @@ export type ChatStreamEvent =
       inputTokens?: number;
       outputTokens?: number;
       cacheReadTokens?: number;
+      cacheWriteTokens?: number;
       /** Turn-cumulative OpenRouter catalog-priced estimate in USD (Pi
        *  message_end usage.cost totals). Present only once positive and only
        *  for OpenRouter sessions; native subscription turns omit it. */

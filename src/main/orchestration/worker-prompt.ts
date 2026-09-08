@@ -114,9 +114,11 @@ function renderWorkerMemorySection(run: RunState): string[] {
   if (!memory) return [];
   return [
     "",
-    "## READ-ONLY CORA CONTEXT",
+    run.executionMode === "direct" ? "## CORA MEMORY" : "## READ-ONLY CORA CONTEXT",
     memory,
-    "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+    run.executionMode === "direct"
+      ? "Use codara_remember for durable corrections or lessons. Do not edit memory files directly."
+      : "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
   ];
 }
 
@@ -592,10 +594,10 @@ function renderUiQualityGuidance(
     lines.push(
       "- The `codara-studio` MCP server is available in this session. It drives the actual <preview> tab inside Codara, same DOM the user sees, no separate browser window. Call `codara_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Codara will open one automatically. Capture the final snapshot or `codara_preview_screenshot` evidence in `proof[]`.",
       "- BATCH your interaction probes with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `codara_preview_run`. A calculator should need only a handful of `codara_preview_run` calls total, NOT 50+ individual `codara_preview_press_key` calls.",
-      "- You probe in your own run's preview tab, never the user's. `codara_preview_navigate` WITHOUT a `tabId` reuses the tab your run already opened, or opens a fresh one; it never touches a pre-existing tab. Every other preview tool with no `tabId` acts on that same run-owned tab (it errors if you have not opened one yet, so navigate first). Only pass an explicit `tabId` for a tab your own run created. Still do NOT bind a scratch dev server to a port an existing preview tab points at: check `codara_preview_list` and pick a free port.",
+      "- For an existing browser the user asks you to use, call `codara_preview_list`, match its title/URL or last-viewed marker, and pass its explicit `tabId`. Otherwise omit `tabId` to reuse or open your own run's browser. Browser tabs remain open after completion. Check the list before choosing a dev-server port; never replace an unrelated tab or server.",
       "- Reserve the single-shot `codara_preview_click` / `codara_preview_type` / `codara_preview_press_key` tools only for probes that must isolate ONE real key/click event (e.g. the focus double-activation guard: focus equals, press Enter once, read the display).",
       "- Do NOT substitute an inline Node VM + JSDOM probe for the `codara_preview_run` batch. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
-      "- If `codara_preview_screenshot` returns an error or a 0-size/blank frame, this preview tab is not in the foreground, do NOT retry the screenshot in a loop. Treat the pixels as unavailable and immediately fall back to `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text content) for your evidence, noting the limitation in proof[]. A failed screenshot is a signal to switch tools, not to keep shooting.",
+      "- If `codara_preview_screenshot` returns an error or a 0-size/blank frame, do NOT retry the screenshot in a loop. Treat the pixels as unavailable and immediately fall back to `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text content) for your evidence, noting the limitation in proof[]. A failed screenshot is a signal to switch tools, not to keep shooting.",
       "- The same `codara-studio` server also gives you `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read` / `codara_terminal_close`: open an agent-owned terminal tab (visually tinted so the user knows an agent is driving it) to run a command the user should SEE, a dev server, a build watcher, or another long-running task. Pass an explicit valid `cwd` to `codara_terminal_create` (it defaults to the workspace root, and a non-existent cwd makes the terminal fail to spawn). Temporary panes are auto-closed when the run settles; still close them explicitly before final verification. Only when the user explicitly needs a live service afterward, create it with `retention='service'` and record its pane id in `followups[]`; service panes are closed when the run is deleted. Prefer your own Bash tool for quick one-shot commands.",
     );
   } else {
@@ -635,7 +637,7 @@ function renderUiVerifierGuidance(
       "- The `codara-studio` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Codara, the same pixels the user sees. Call `codara_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Codara will open one automatically. Take a `codara_preview_snapshot` for the accessibility-flavored outline.",
       "- BATCH verification with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to exercise a whole flow in ONE round-trip instead of dozens of single calls. Each step fires the identical real event. Reserve single-shot `codara_preview_click` / `codara_preview_press_key` only for probes that must isolate one real key/click (e.g. focus double-activation). Attach the snapshot or `codara_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
       "- Treat the absence of a `codara_preview_snapshot` for any behavioral UI claim as `unsure`, not `verified`. Static DOM grep alone cannot prove rendering, event wiring, or focus behavior.",
-      "- If `codara_preview_screenshot` errors or returns a 0-size/blank frame, the preview tab simply isn't foregrounded, do not retry it repeatedly. Base the visual verdict on `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text) and record that pixels were unavailable; do not mark a claim failed solely because a screenshot could not be captured.",
+      "- If `codara_preview_screenshot` errors or returns a 0-size/blank frame, do not retry it repeatedly. Base the visual verdict on `codara_preview_snapshot` + `codara_preview_evaluate` (computed styles, geometry, text) and record that pixels were unavailable; do not mark a claim failed solely because a screenshot could not be captured.",
       "- The same `codara-studio` server also exposes `codara_terminal_create` / `codara_terminal_write` / `codara_terminal_read` / `codara_terminal_close`: open an agent-owned terminal tab (visually tinted) to start a dev server or run a check the user should watch, then read its output with `codara_terminal_read`. Pass an explicit valid `cwd` (a non-existent cwd makes the terminal fail to spawn). Temporary panes are auto-closed when the run settles; still close them explicitly before final verification. Only when the user explicitly needs a live service afterward, create it with `retention='service'` and record its pane id in `followups[]`; service panes are closed when the run is deleted. For quick one-shot verification commands your own Bash tool is simpler.",
     );
   } else {
@@ -848,7 +850,7 @@ function renderDirectTaskPrompt({
     "Complete this task directly in the workspace.",
     "Move quickly: inspect only the relevant files and run the named check once, then implement as soon as the contract is clear. Do not inspect repository history or unrelated files unless the task requires it.",
     "Honor exact names and behavior, make the smallest cohesive change, and preserve unrelated or pre-existing work.",
-    "After the named check passes, run at most one compact batch of explicit boundary checks plus a final diff check. Do not repeat unchanged tests. Never weaken tests or invent evidence.",
+    "After the named check passes, run one compact batch of explicit boundary checks plus a final diff check. Repeat checks only to investigate a failure or verify a correction. Never weaken tests or invent evidence.",
     "Do not commit, push, install packages, or delete data unless the task explicitly asks. If blocked or only partly complete, say so honestly.",
     "",
     "## TASK",
@@ -877,14 +879,18 @@ function renderDirectTaskPrompt({
     lines.push("", "## VERIFY", ...task.verificationCommands.map((command) => `- ${command}`));
   }
 
+  if (/\b(browser|tab|page|website|screenshot)\b/i.test(task.description)) {
+    lines.push("", "## BROWSER", "Use `codara_preview_list` to identify an existing workspace browser by title, URL, or last-viewed marker when the user refers to it; pass its tabId and ask if ambiguous. Otherwise navigate without tabId to use your own browser. Use `codara_preview_screenshot` to see the page before visual interaction and to verify the result; screenshots include CSS viewport and image scale. Browser tabs remain open when you finish.");
+  }
+
   if (taskLooksLikeVisibleUi(step, task)) {
     const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
     lines.push(
       "",
       "## UI CHECK",
       previewAvailable
-        ? "Use Codara's preview tools to exercise the real UI. Check keyboard access, responsive layout, visible states, and remove any dead control."
-        : "Check keyboard access, responsive layout, visible states, and remove any dead control. Report if visual verification is unavailable.",
+        ? "For UI code changes or a requested UI audit, use Codara's preview tools to check keyboard access, responsive layout, visible states, and dead controls. For browser operations, verify the requested outcome and finish."
+        : "For UI code changes or a requested UI audit, check keyboard access, responsive layout, visible states, and dead controls. Report if visual verification is unavailable.",
     );
   }
 

@@ -1805,6 +1805,17 @@ export function registerIpc(): void {
     return getGitStatus(cwd);
   });
 
+  // Cheap current-branch read for the workspace rail: one rev-parse, no file
+  // walk. Detached HEAD reports the short hash; non-repos report null.
+  handle("git:currentBranch", async (_e, cwd: string): Promise<string | null> => {
+    const { readGitText } = await import("./git-exec");
+    const name = await readGitText(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (!name) return null;
+    if (name !== "HEAD") return name;
+    const short = await readGitText(cwd, ["rev-parse", "--short", "HEAD"]);
+    return short || null;
+  });
+
   handle("git:log", async (_e, cwd: string): Promise<GitLog> => {
     const { getGitLog } = await getGitOps();
     return getGitLog(cwd);

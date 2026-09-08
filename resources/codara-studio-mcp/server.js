@@ -96,13 +96,13 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_list",
     description:
-      "List the preview tabs currently open in Codara. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
+      "List browser tabs in the calling workspace, including id, live title, URL, isActive, and isLastViewed. When the user refers to an existing tab, match it here and pass its tabId to subsequent tools. isLastViewed identifies the browser most recently viewed before returning to chat. Ask if the reference is ambiguous.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_preview_url",
     description:
-      "Return the current URL and title of a Codara preview tab. Defaults to the active preview tab when tabId is omitted.",
+      "Return the current URL and title of a browser tab. Pass an existing tabId from codara_preview_list; without it, target this run's browser.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string", description: "Optional tab id from codara_preview_list." } },
@@ -112,7 +112,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_navigate",
     description:
-      "Navigate the target Codara preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
+      "Navigate a browser workspace tab to a URL (http://, https://, or file://). With tabId, reuse that existing tab; without it, reuse or create a tab for this run. Tabs remain open after completion. Waits briefly for dom-ready before returning.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -126,7 +126,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_snapshot",
     description:
-      "Return a compact outline of the current preview DOM (tag, id, class, role, accessible name). Use to find selectors and inspect structure without burning the full HTML into your context.",
+      "Return a compact outline of rendered preview content with selectors, accessible labels, current form values, and control states. Hidden content is omitted. Use to inspect and verify the page without reading full HTML.",
     inputSchema: {
       type: "object",
       properties: {
@@ -154,7 +154,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_type",
     description:
-      "Type text into an input/textarea/contentEditable inside the target preview tab. Optionally clears the existing value first.",
+      "Type text into an input/textarea/contentEditable, or select a native dropdown option by its exact value. clearFirst clears text fields before typing; dropdown selection always replaces the current value.",
     inputSchema: {
       type: "object",
       required: ["selector", "text"],
@@ -216,7 +216,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_screenshot",
     description:
-      "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Codara.",
+      "Capture the current preview tab as a PNG image. Returns viewport size in CSS pixels, imageSize in image pixels, and scale. For coordinate input, divide screenshot X by scale.x and Y by scale.y.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string" } },
@@ -375,7 +375,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_run",
     description:
-      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical, you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical, you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Every step must obey the task's tool restrictions, including read-only evaluate calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
     inputSchema: {
       type: "object",
       required: ["steps"],
@@ -572,7 +572,7 @@ const WHITEBOARD_TOOLS = [
   {
     name: "codara_whiteboard_update",
     description:
-      "Create, replace, extend, or clear this chat's persisted infinite whiteboard. First call codara_whiteboard_get, preserve the user's edits, and pass its revision as baseRevision so a concurrent human edit cannot be overwritten. Coordinates are unbounded logical canvas positions. " +
+      "Create, replace, extend, or clear this chat's persisted infinite whiteboard. First call codara_whiteboard_get, preserve the user's edits, and pass its revision as baseRevision so a concurrent human edit cannot be overwritten. Every edit creates a draft. Inspect the rendered revision with codara_whiteboard_inspect, correct issues, then call codara_whiteboard_review before finishing. Coordinates are unbounded logical canvas positions. " +
       "Design for legibility, not density: lay nodes out left-to-right in stages (columns roughly 380px apart, ~40px vertical gaps, card widths 240-320). Cluster related nodes inside a 'group' node drawn behind them (give the group generous width/height and place members fully inside its bounds) instead of connecting everything with edges. Keep titles under ~6 words and bodies to 1-2 short sentences. Prefer few, meaningful edges over exhaustive wiring; label an edge only when the relationship is not obvious; use style 'dashed' for soft/optional relations. Model if/case decisions with a condition node and clearly labeled outgoing edges.",
     inputSchema: {
       type: "object",
@@ -598,9 +598,11 @@ const WHITEBOARD_TOOLS = [
           maxItems: 500,
           items: {
             type: "object",
-            required: ["id", "kind", "title", "x", "y"],
+            required: ["id"],
             properties: {
-              id: { type: "string", description: "Stable node id used by edges and future merges." },
+              sources: { type: "array", maxItems: 8, items: { type: "string" }, description: "Repository-relative path:line references supporting this card or connection, for example src/main/ipc.ts:120." },
+              confidence: { type: "string", enum: ["confirmed", "inferred"], description: "confirmed requires inspected source evidence; inferred means a hypothesis, not an established dependency." },
+              id: { type: "string", description: "Stable node id. New cards need kind, title, x, and y; merge updates may omit fields to preserve them." },
               kind: {
                 type: "string",
                 enum: ["topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note"],
@@ -627,10 +629,12 @@ const WHITEBOARD_TOOLS = [
           maxItems: 1000,
           items: {
             type: "object",
-            required: ["id", "from", "to"],
+            required: ["id"],
             properties: {
+              sources: { type: "array", maxItems: 8, items: { type: "string" }, description: "Repository-relative path:line references supporting this card or connection, for example src/main/ipc.ts:120." },
+              confidence: { type: "string", enum: ["confirmed", "inferred"], description: "confirmed requires inspected source evidence; inferred means a hypothesis, not an established dependency." },
               id: { type: "string" },
-              from: { type: "string", description: "Source node id." },
+              from: { type: "string", description: "Source node id, required for a new connection; omitted merge fields are preserved." },
               to: { type: "string", description: "Target node id." },
               label: { type: "string" },
               tone: { type: "string", enum: ["default", "accent", "success", "warning", "danger"] },
@@ -648,6 +652,29 @@ const WHITEBOARD_TOOLS = [
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: "codara_whiteboard_arrange",
+    description: "Arrange the current board with a directed graph layout engine. Keeps card text and connections, lays out modules separately, and preserves existing geometric group membership. Moves cards, so use only for a new draft or when the user asks for layout improvements; preserve intentional manual placement. Inspect the new revision afterward.",
+    inputSchema: { type: "object", required: ["baseRevision"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+    }, additionalProperties: false },
+  },
+  {
+    name: "codara_whiteboard_inspect",
+    description: "Render this chat's current whiteboard with the real canvas and return a PNG image plus overlap, text clipping, connection, and source-reference diagnostics. Works while the board is closed or in a background workspace. Pass nodeIds for readable detail crops when detailNeeded is true. Read the image, verify semantic connections against source code, fix problems, and inspect again. File existence alone does not prove a claim.",
+    inputSchema: { type: "object", required: ["baseRevision"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      nodeIds: { type: "array", maxItems: 50, items: { type: "string" }, description: "Optional card/group IDs to frame a detail crop. Omit for an overview." },
+    }, additionalProperties: false },
+  },
+  {
+    name: "codara_whiteboard_review",
+    description: "Record Cora's review of the exact inspected revision. Requires a recent readable image inspection covering all cards, no overlap/clipping errors, and a summary of the source and visual checks actually performed. Record unresolved warnings or uncertain connections in limitations. Any later edit invalidates the review. This is your assessment, not automatic proof of correctness.",
+    inputSchema: { type: "object", required: ["baseRevision", "summary"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      summary: { type: "string", maxLength: 700 }, limitations: { type: "array", maxItems: 20, items: { type: "string", maxLength: 400 } },
+    }, additionalProperties: false },
   },
 ];
 
@@ -1590,6 +1617,9 @@ const EXECUTE_TOOL_TO_RPC = {
 const WHITEBOARD_TOOL_TO_RPC = {
   codara_whiteboard_get: "orchestrator.whiteboard_get",
   codara_whiteboard_update: "orchestrator.whiteboard_update",
+  codara_whiteboard_arrange: "orchestrator.whiteboard_arrange",
+  codara_whiteboard_inspect: "orchestrator.whiteboard_inspect",
+  codara_whiteboard_review: "orchestrator.whiteboard_review",
 };
 
 const BOARD_TOOL_TO_RPC = {
@@ -1626,6 +1656,23 @@ const STUDIO_TOOL_TO_RPC = {
   ...BOARD_TOOL_TO_RPC,
 };
 
+const DIRECT_MEMORY_TOOL = {
+  name: "codara_remember",
+  description: "Save a durable user preference or verified workspace lesson for later chats. Use workspace scope for repo-specific facts and global scope only for user/machine facts. Never store secrets, task status, or guesses. Prefer one short bullet. Use replace to correct or consolidate existing memory, preserving all still-valid facts and user-authored lines. Each scope is capped at 4096 bytes.",
+  inputSchema: {
+    type: "object",
+    required: ["scope", "action"],
+    properties: {
+      scope: { type: "string", enum: ["workspace", "global"] },
+      action: { type: "string", enum: ["add", "replace"] },
+      bullets: { type: "array", minItems: 1, maxItems: 5, items: { type: "string" }, description: "For add: plain facts without dates or provenance tags." },
+      body: { type: "string", description: "For replace: the complete new memory file, retaining user-authored lines." },
+      confirm_drop_user_lines: { type: "boolean", description: "Only true when the user explicitly authorized dropping their own lines." },
+    },
+    additionalProperties: false,
+  },
+};
+
 // Worker mode: the studio surface a headless automation worker may drive
 // (whiteboard and board stay read-only; the board is the calling chat's own
 // kanban and its edits are the manager's call) plus
@@ -1633,7 +1680,8 @@ const STUDIO_TOOL_TO_RPC = {
 // (blocked on a genuinely human decision) and codara_request_next_iteration
 // (agent-loop continuation). Deliberately NO manager orchestration tools, a
 // worker never spawns, steers, messages, or completes.
-const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_board_update"];
+
+const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
   ...STUDIO_TOOLS.filter((tool) => !WORKER_READ_ONLY_STUDIO_TOOL_NAMES.includes(tool.name)),
@@ -1678,6 +1726,9 @@ if (IS_AUTOMATION_MODE) {
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
+} else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL];
+  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_remember: "orchestrator.remember" };
 } else {
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
@@ -2006,8 +2057,10 @@ async function callTool(params) {
     // stamp: any model-supplied runId is discarded, and the schemas expose no
     // runId field. Direct socket callers holding the bearer token can still
     // pass any runId; that is a pre-existing trust class shared by every
-    // orchestrator RPC.
-    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update") {
+    // orchestrator RPC. Direct memory uses the same stamp so a task cannot
+    // write another workspace or profile by supplying a different run id.
+    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update" ||
+        (rpc === "orchestrator.remember" && process.env.CODARA_PI_DIRECT_TASK === "1")) {
       const envRunId = (process.env.SPARK_RUN_ID || "").trim();
       if (envRunId) args.runId = envRunId;
       else delete args.runId;
@@ -2107,11 +2160,12 @@ async function callRunBatch(args) {
     if (label) entry.label = label;
     try {
       const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS);
+      if (result && result.ok === false) throw new Error(result.error || `${action} failed`);
       entry.ok = true;
       if (action === "screenshot" && result && typeof result.dataUrl === "string") {
         const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
         if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
-        entry.result = { url: result.url ?? null, captured: Boolean(m) };
+        entry.result = { ...screenshotMetadata(result), captured: Boolean(m) };
       } else {
         entry.result = result;
       }
@@ -2131,6 +2185,12 @@ async function callRunBatch(args) {
   };
 }
 
+function screenshotMetadata(value) {
+  return { url: value.url ?? null, ...Object.fromEntries(
+    ["tabId", "title", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+  ) };
+}
+
 function toToolResult(value) {
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
@@ -2140,12 +2200,13 @@ function toToolResult(value) {
       return {
         content: [
           { type: "image", mimeType: m[1], data: m[2] },
-          { type: "text", text: JSON.stringify({ url: value.url ?? null }) },
+          { type: "text", text: JSON.stringify(screenshotMetadata(value)) },
         ],
       };
     }
   }
   return {
+    ...(value && value.ok === false ? { isError: true } : {}),
     content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
   };
 }

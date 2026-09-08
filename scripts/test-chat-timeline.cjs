@@ -234,6 +234,18 @@ async function main() {
   const digestRun = (id, status, extra = {}) =>
     run([], { id, title: id, status, steps: [], seen: true, ...extra });
 
+  test("queued direct work displays the exact user-selected model", () => {
+    const state = run([], {
+      executionMode: "direct",
+      status: "running",
+      workerTasks: [task("task-direct-luna", {
+        runtimePreference: "codex", modelHint: "gpt-5.6-luna", status: "queued",
+      })],
+      workerAttempts: [],
+    });
+    assert.deepEqual(T.deriveComposerWorkerActivity(state)?.engines, ["Luna"]);
+  });
+
   test("a direct message with a matching worker is delivered, not queued", () => {
     const message = {
       id: "msg-direct",

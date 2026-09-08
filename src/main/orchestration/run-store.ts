@@ -120,6 +120,7 @@ import {
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
+  normalizeWhiteboardEvidence,
 } from "@shared/cora-whiteboard-file";
 import { CODEX_MODEL_BY_TIER, loomRuntimeForModel, normalizeCodexModelId } from "@shared/model-catalog";
 import {
@@ -299,6 +300,13 @@ import {
   type ChatBackendConfig,
   type ChatStreamEvent,
 } from "./agent-backend";
+import {
+  buildDirectTurnPrompt,
+  directCompactionInput,
+  directCompactionSnapshotStillCurrent,
+  directConversationMessages,
+  directConversationNeedsCompaction,
+} from "./direct-conversation";
 import { disposeManagerSessions, getBackend } from "./backend-registry";
 import { createRunRuntimeShutdown } from "./run-runtime-shutdown";
 import {
@@ -307,6 +315,8 @@ import {
   resolveCodaraPiExecutionAccount,
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
+import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
   availableCoraWorkerModels,
@@ -1839,12 +1849,17 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
   const directInputMessages = directInputMessageIds
     .map((messageId) => run.humanMessages.find((message) => message.id === messageId))
     .filter((message): message is HumanRunMessage => Boolean(message));
-  const directPrompt =
-    directInputMessages.length > 0
-      ? renderBundledManagerInput(directInputMessages)
-      : input.prompt;
   const cwd = workspaceCwdFromRun(run);
   if (!cwd) throw new Error(`Direct run has no workspace cwd: ${input.runId}`);
+  if (!run.automationId && directConversationNeedsCompaction(run, directInputMessages)) {
+    await performAutoCompaction(run.id, cwd);
+    run = await requireRun(run.id);
+  }
+  const directPrompt = directInputMessages.length === 0
+    ? input.prompt
+    : run.automationId
+      ? renderBundledManagerInput(directInputMessages)
+      : buildDirectTurnPrompt(run, directInputMessages);
   return launchDirectIterationTask({
     runId: run.id,
     cwd,
@@ -6247,6 +6262,7 @@ async function askManagerBackend(
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
       if (typeof result.cacheReadTokens === "number") targetCall.cacheReadTokens = result.cacheReadTokens;
+      if (typeof result.cacheWriteTokens === "number") targetCall.cacheWriteTokens = result.cacheWriteTokens;
       if (result.providerResponseIds?.length) {
         targetCall.providerResponseIds = [...new Set(result.providerResponseIds)];
       }
@@ -12023,6 +12039,28 @@ export async function updateCoraWhiteboard(
   });
 }
 
+export async function reviewCoraWhiteboard(input: {
+  runId: string; baseRevision: number; summary: string; limitations: string[];
+}): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  return commitRunChange(run, {
+    type: "run.whiteboard_updated",
+    message: "Reviewed Cora whiteboard",
+    mutate: (draft, timestamp) => {
+      if (!draft.whiteboard || (draft.whiteboard.revision ?? 0) !== input.baseRevision) {
+        throw new Error("Whiteboard changed during review. Read and inspect the current revision again.");
+      }
+      draft.whiteboard.review = {
+        revision: input.baseRevision,
+        reviewedAt: timestamp,
+        summary: sanitizeWhiteboardText(input.summary, 700),
+        limitations: input.limitations.slice(0, 20).map((value) => sanitizeWhiteboardText(value, 400)),
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // ── Cora Board (the per-chat kanban) ────────────────────────────────────────
 // Persisted on RunState.board exactly like the whiteboard: every write is one
 // commitRunChange with the baseRevision guard evaluated inside the mutate (so
@@ -12354,7 +12392,7 @@ const WHITEBOARD_TONES: readonly NonNullable<CoraWhiteboardEdge["tone"]>[] = [
  * strings still clear a field.
  */
 function normalizeWhiteboardNode(
-  node: CoraWhiteboardNode,
+  node: Pick<CoraWhiteboardNode, "id"> & Partial<CoraWhiteboardNode>,
   prior?: CoraWhiteboardNode,
 ): CoraWhiteboardNode {
   const id = sanitizeWhiteboardId(node?.id);
@@ -12363,7 +12401,7 @@ function normalizeWhiteboardNode(
   const allowedKinds: CoraWhiteboardNode["kind"][] = [
     "topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note",
   ];
-  const kind = allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
+  const kind = node.kind && allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
   const defaultSize = CORA_WHITEBOARD_NODE_DEFAULT_SIZES[kind];
   const limits = whiteboardNodeSizeLimits(kind);
   const body = node.body === undefined
@@ -12373,6 +12411,7 @@ function normalizeWhiteboardNode(
     ? prior?.tone
     : WHITEBOARD_TONES.includes(node.tone) ? node.tone : undefined;
   return {
+    ...normalizeWhiteboardEvidence({ ...prior, ...node }),
     id,
     kind,
     title,
@@ -12406,12 +12445,12 @@ function normalizeWhiteboardNode(
 }
 
 function normalizeWhiteboardEdge(
-  edge: CoraWhiteboardEdge,
+  edge: Pick<CoraWhiteboardEdge, "id"> & Partial<CoraWhiteboardEdge>,
   prior?: CoraWhiteboardEdge,
 ): CoraWhiteboardEdge {
   const id = sanitizeWhiteboardId(edge?.id);
-  const from = sanitizeWhiteboardId(edge?.from);
-  const to = sanitizeWhiteboardId(edge?.to);
+  const from = sanitizeWhiteboardId(edge?.from ?? prior?.from);
+  const to = sanitizeWhiteboardId(edge?.to ?? prior?.to);
   if (!id || !from || !to) throw new Error("Every whiteboard edge needs id, from, and to fields.");
   const label = edge.label === undefined
     ? prior?.label
@@ -12422,7 +12461,7 @@ function normalizeWhiteboardEdge(
   const style = edge.style === undefined
     ? prior?.style
     : edge.style === "dashed" ? "dashed" : undefined;
-  return { id, from, to, label, tone, style };
+  return { ...normalizeWhiteboardEvidence({ ...prior, ...edge }), id, from, to, label, tone, style };
 }
 
 /** Stored-response outcome for the call-scoped codara_complete application. */
@@ -13241,12 +13280,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
-  // A direct run bound to an automationId is the automation (loom) worker
-  // path: it launches on a pinned/handoff model the automation engine already
-  // validated, so the launcher passes its hint verbatim instead of running the
-  // Cora-worker roster coercion. Automation workers run on the SAME Pi harness
-  // as ordinary Cora workers. shell/manual are human-assisted escape hatches
-  // that keep a plain pty pane instead.
+  // Direct chats keep the user's exact model selection. Managed workers use
+  // the enabled roster; automation workers keep their validated model hints.
+  // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
     task.runtimePreference === "claude" ||
     task.runtimePreference === "codex" ||
@@ -13257,6 +13293,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
         task,
         isAutomationRun,
         workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
+        run.executionMode === "direct" && !isAutomationRun,
       )
     : undefined;
   if (isPiWorker && !piWorkerModel) {
@@ -13938,10 +13975,10 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       );
       return;
     }
-    // No provider session means there is no held context to summarize — the
-    // backend would spawn a FRESH session and "summarize" nothing. Skip;
-    // nothing durable has been recorded yet.
-    if (!chatConfig.sessionUuid) {
+    const directConversation = run.executionMode === "direct" && !run.automationId;
+    // Direct turns have no manager session; their canonical dialogue is the
+    // complete input to a fresh summary call.
+    if (!chatConfig.sessionUuid && !directConversation) {
       console.warn(
         `[run-store] auto-compaction skipped for run ${runId}: no provider session to summarize`,
       );
@@ -13993,6 +14030,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
     });
     if (!prepared.sparkCalls.some((entry) => entry.id === callId)) return;
     run = prepared;
+    const compactionSource = structuredClone(run);
 
     const startedMs = Date.now();
     let result: Awaited<ReturnType<typeof backend.requestManagerDecision>>;
@@ -14001,8 +14039,12 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         run: structuredClone(run),
         cwd,
         mode: "chat",
-        chat: { ...chatConfig },
-        prompt: AUTO_COMPACTION_SUMMARY_PROMPT,
+        chat: directConversation
+          ? { ...chatConfig, sessionUuid: undefined, sessionMode: undefined }
+          : { ...chatConfig },
+        prompt: directConversation
+          ? directCompactionInput(compactionSource, AUTO_COMPACTION_SUMMARY_PROMPT)
+          : AUTO_COMPACTION_SUMMARY_PROMPT,
         inputMessageIds: [],
         conversationEpoch: epoch,
       });
@@ -14065,6 +14107,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         ) {
           return false;
         }
+        if (directConversation && !directCompactionSnapshotStillCurrent(compactionSource, draft)) return false;
         // Undelivered input queued while summarizing belongs to the old epoch;
         // cutting over would strand it, so abort and let its turn run first —
         // the ratio is still high after that turn, so compaction re-triggers.
@@ -14081,6 +14124,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         if (typeof result.inputTokens === "number") call.inputTokens = result.inputTokens;
         if (typeof result.outputTokens === "number") call.outputTokens = result.outputTokens;
         if (typeof result.cacheReadTokens === "number") call.cacheReadTokens = result.cacheReadTokens;
+        if (typeof result.cacheWriteTokens === "number") call.cacheWriteTokens = result.cacheWriteTokens;
         if (typeof result.promptTokens === "number") call.promptTokens = result.promptTokens;
         if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
           call.contextWindowTokens = result.contextWindowTokens;
@@ -14151,7 +14195,8 @@ export async function compactConversation(runId: string): Promise<RunState> {
   if (["paused", "blocked", "cancelled", "failed"].includes(run.status)) {
     throw new Error(`Cannot compact while this run is ${run.status}.`);
   }
-  if (!resolveChatBackendConfig(run).sessionUuid) {
+  if (!resolveChatBackendConfig(run).sessionUuid &&
+      !(run.executionMode === "direct" && !run.automationId && directConversationMessages(run).length > 0)) {
     throw new Error("There is no provider conversation to compact yet.");
   }
   const cwd = workspaceCwdFromRun(run);
@@ -15536,6 +15581,7 @@ async function maybeQueueCliLaunchFallback({
     kind: failureKind,
     sameRuntimeAttempts: lineage.filter((t) => t.runtimePreference === task.runtimePreference).length,
     oppositeRuntimeAvailable: oppositeAvailable,
+    allowRuntimeSwitch: run.executionMode !== "direct" || Boolean(run.automationId),
   });
   if (retryPlan.action === "no_auto_retry") return null;
   const retriesSameRuntime = retryPlan.action === "retry_same_runtime";
@@ -16567,6 +16613,12 @@ function normalizeRun(run: RunState): RunState {
     run.whiteboard = {
       version: 1,
       revision: Math.max(0, Math.floor(run.whiteboard.revision ?? 0)),
+      review: run.whiteboard.review?.revision === (run.whiteboard.revision ?? 0)
+        && typeof run.whiteboard.review.summary === "string"
+        && typeof run.whiteboard.review.reviewedAt === "string"
+        && Array.isArray(run.whiteboard.review.limitations)
+        ? { ...run.whiteboard.review, limitations: run.whiteboard.review.limitations.filter((value): value is string => typeof value === "string").slice(0, 20) }
+        : undefined,
       lastEditedBy:
         run.whiteboard.lastEditedBy === "user" ||
         run.whiteboard.lastEditedBy === "import" ||
@@ -18988,13 +19040,11 @@ function piModelForWorker(
   task: WorkerTask,
   isAutomationRun = false,
   enabledModels?: readonly string[],
+  isDirectRun = false,
 ): string | undefined {
-  // One answer, shared with the renderer: plannedWorkerModel holds both the
-  // automation passthrough (a pinned/handoff model the automation validation
-  // layer already vetted) and the roster coercion Cora-spawned workers get.
-  // The renderer prints the same value on queued worker rows, so a row can
-  // never advertise a model this chokepoint will not launch.
-  return plannedWorkerModel(task, { isAutomationRun, enabledModels });
+  // Share selection with queued worker labels so the advertised model and
+  // the launch target agree before an attempt has started.
+  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels });
 }
 
 function piWorkerToolLabel(value: unknown): string {
@@ -19177,33 +19227,6 @@ function piWorkerEventFailure(event: PiRpcEvent): string | null {
 // Per-turn provider usage from a Pi message_end event, using the same field
 // fallbacks as pi-turn.ts: `input` EXCLUDES what came from cache; reads and
 // writes are reported apart. Returns null when the event carried no usage.
-function piWorkerMessageUsage(
-  event: PiRpcEvent,
-): { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number } | null {
-  if (event.type !== "message_end") return null;
-  const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
-    ? event.message as Record<string, unknown>
-    : null;
-  const usage = message?.usage && typeof message.usage === "object" && !Array.isArray(message.usage)
-    ? message.usage as Record<string, unknown>
-    : null;
-  if (!usage) return null;
-  const count = (value: unknown): number =>
-    typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
-  const cost = usage.cost && typeof usage.cost === "object" && !Array.isArray(usage.cost)
-    ? usage.cost as Record<string, unknown>
-    : null;
-  return {
-    input: count(usage.input ?? usage.inputTokens ?? usage.input_tokens),
-    output: count(usage.output ?? usage.outputTokens ?? usage.output_tokens),
-    cacheRead: count(usage.cacheRead ?? usage.cache_read ?? usage.cached),
-    cacheWrite: count(usage.cacheWrite ?? usage.cache_write ?? usage.cacheCreation),
-    // Pi prices each request from its model catalog. The caller accepts this
-    // field only for OpenRouter sessions; native subscription catalog prices
-    // are API-equivalent estimates, not charges on the user's plan.
-    cost: count(cost?.total),
-  };
-}
 
 // Warm follow-up resume, restricted to the task's FIRST attempt. A retry or a
 // verifier-FEEDBACK rework of the same task launches cold on a fresh
@@ -19256,12 +19279,17 @@ async function waitForPiWorkerTurn(
   client: PiRpcClient,
   prompt: string,
   onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
+  interrupted: () => boolean = () => false,
+  onCompaction?: (phase: "compacting" | "resuming") => void,
+  taskContract?: () => string,
 ): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
+  let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
+      compaction = new PiWorkerCompaction(client, { interrupted, taskContract, onError: reject, onProgress: onCompaction });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
@@ -19286,6 +19314,7 @@ async function waitForPiWorkerTurn(
         ) {
           providerFailure = null;
         }
+        if (compaction?.consume(event)) return;
         if (event.type === "agent_settled") {
           if (providerFailure) reject(new Error(providerFailure));
           else resolve();
@@ -19322,6 +19351,7 @@ async function waitForPiWorkerTurn(
     await client.prompt(prompt);
     await settled;
   } finally {
+    compaction?.dispose();
     unsubscribe();
     if (poll) clearInterval(poll);
     if (timer) clearTimeout(timer);
@@ -19414,6 +19444,13 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  const taskSteering: string[] = [];
+  const taskContract = () => [
+    task.description.trim(),
+    ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
+    ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+    ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+  ].join("\n\n");
   // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
@@ -19586,7 +19623,7 @@ async function runPiWorkerSession({
           ? {
               finalReportPath: paths.finalReportJson,
               studioTools:
-                /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|browser|preview)\b/i.test(
+                /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|browser|preview|tabs?|website|screenshot)\b/i.test(
                   `${task.title}\n${task.description}`,
                 ),
             }
@@ -19669,11 +19706,15 @@ async function runPiWorkerSession({
       write: (input) => {
         if (!client) return;
         if (input === ESC_KEY) {
+          interrupted = true;
           void client.abort().catch(() => undefined);
           return;
         }
         const steering = input.replace(/[\r\n]+$/g, "").trim();
-        if (steering) void client.prompt(steering, "steer").catch(() => undefined);
+        if (steering) {
+          taskSteering.push(steering);
+          void client.prompt(steering, "steer").catch(() => undefined);
+        }
       },
       kill: () => {
         interrupted = true;
@@ -19746,7 +19787,7 @@ async function runPiWorkerSession({
             }
           }
         }
-      } else if (event.type === "message_end") {
+      } else if (event.type === "message_end" || event.type === "compaction_end") {
         if (assistantLineOpen) {
           paint("\r\n");
           assistantLineOpen = false;
@@ -19762,7 +19803,10 @@ async function runPiWorkerSession({
           usageTotals.cacheWrite += usage.cacheWrite;
           if (provider === "openrouter") measuredCostTotal += usage.cost;
           // Context gauge for the reuse gate: what the newest request occupied.
-          const gauge = usage.input + usage.cacheRead + usage.cacheWrite;
+          const compacted = event.result as { estimatedTokensAfter?: number } | undefined;
+          const gauge = event.type === "compaction_end"
+            ? compacted?.estimatedTokensAfter ?? 0
+            : usage.input + usage.cacheRead + usage.cacheWrite;
           if (gauge > 0) lastContextTokens = gauge;
           reportedContextWindowTokens =
             piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
@@ -19797,7 +19841,12 @@ async function runPiWorkerSession({
     };
 
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
-    await waitForPiWorkerTurn(client, promptText, reportStall);
+    const compactionProgress = (phase: "compacting" | "resuming") => {
+      const detail = phase === "compacting" ? "Compacting context…" : "Resuming after context compaction…";
+      reportActivity(detail);
+      paint(`\r\n  ${detail}\r\n`);
+    };
+    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
@@ -19808,6 +19857,9 @@ async function runPiWorkerSession({
         `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
           "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
         reportStall,
+        () => interrupted,
+        compactionProgress,
+        taskContract,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }

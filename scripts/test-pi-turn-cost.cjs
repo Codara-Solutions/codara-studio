@@ -144,4 +144,23 @@ assert.match(
   "run and step manager-cost rollups discard historical native catalog cost",
 );
 
+
+
+const compactEvents = [];
+const compactTurn = new PiTurnAccumulator(event => compactEvents.push(event), { captureCost: true });
+compactTurn.consume({ type: "message_end", message: { role: "assistant", id: "done", content: [{ type: "text", text: "Completed answer" }], usage: { input: 100, output: 10, cacheRead: 200, cost: { total: 0.5 } } } });
+compactTurn.consume({ type: "compaction_end", aborted: false, result: { estimatedTokensAfter: 30, usage: { input: 50, output: 5, cacheRead: 10, cacheWrite: 20, cost: { total: 0.25 } } } });
+assert.deepEqual(compactTurn.result().usage, { inputTokens: 150, outputTokens: 15, cacheReadTokens: 210, cacheWriteTokens: 20, costUsd: 0.75 });
+assert.equal(compactTurn.result().contextTokens, 30, "the gauge follows compacted context, not summary request input");
+assert.equal(compactTurn.result().finalText, "Completed answer");
+assert.equal(compactTurn.result().assistantMessageCount, 1, "summaries are not assistant answers");
+assert.equal(compactEvents.at(-1).costUsd, 0.75);
+const countBeforeFailure = compactEvents.length;
+compactTurn.consume({ type: "compaction_end", aborted: true });
+assert.equal(compactEvents.length, countBeforeFailure, "a failed summary without telemetry emits no extra usage event");
+const subscriptionSummary = new PiTurnAccumulator();
+subscriptionSummary.consume({ type: "compaction_end", result: { usage: { input: 10, output: 2, cacheWrite: 3, cost: { total: 9 } } } });
+assert.equal(subscriptionSummary.result().usage.costUsd, 0);
+assert.equal(subscriptionSummary.result().usage.cacheWriteTokens, 3);
+
 console.log("pi-turn OpenRouter-cost capture: all assertions passed");

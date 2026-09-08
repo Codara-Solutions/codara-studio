@@ -70,7 +70,7 @@ async function main() {
   // ── runOwnedTabRunId ───────────────────────────────────────────────────────
   check("worker terminal maps to its run", runOwnedTabRunId(workerTerminal("t1", "run-b")) === "run-b");
   check("runs tab maps to its run", runOwnedTabRunId(runsTab("r1", "run-b")) === "run-b");
-  check("run-tagged preview maps to its run", runOwnedTabRunId(preview("p1", "run-b")) === "run-b");
+  check("run-tagged browser is a workspace tab", runOwnedTabRunId(preview("p1", "run-b")) === null);
   check("plain preview is not run-owned", runOwnedTabRunId(preview("p2")) === null);
   check("chat tab is not run-owned", runOwnedTabRunId(chat("run-a")) === null);
 
@@ -88,7 +88,7 @@ async function main() {
     const previewB = preview("p-b", "run-b");
     const visible = [...chats, previewB];
     const got = resolveTopStripActiveId("p-b", visible, chats);
-    check("second chat's preview highlights the second chat tab", got === "run-b", got);
+    check("browser highlights its own workspace tab", got === "p-b", got);
   }
   {
     const workersA = workerTerminal("wt-a", "run-a");
@@ -119,20 +119,19 @@ async function main() {
     );
   }
   {
-    // Chat closed, orphaned run-owned preview first in list: the fallback must
-    // skip it and land on the plain terminal.
+    // Closing a chat leaves its browser available in the workspace.
     const visible = [preview("p-b", "run-b"), plainTerminal("t-plain")];
     const got = resolveEffectiveActiveId(null, visible);
-    check("fallback skips run-owned tabs", got === "t-plain", got);
+    check("fallback can select a retained browser", got === "p-b", got);
     check(
-      "an invalid stored id also falls through to the non-run-owned tab",
-      resolveEffectiveActiveId("gone", visible) === "t-plain",
+      "an invalid stored id falls through to the retained browser",
+      resolveEffectiveActiveId("gone", visible) === "p-b",
     );
   }
   {
     // ONLY orphaned run-owned tabs left (the reported case: close the sole
     // Cora chat while it has a Cora-opened browser): nothing is eligible.
-    const visible = [preview("p-b", "run-b"), runsTab("runs-1", "run-b"), workerTerminal("wt", "run-b")];
+    const visible = [runsTab("runs-1", "run-b"), workerTerminal("wt", "run-b")];
     const got = resolveEffectiveActiveId(null, visible);
     check("only run-owned tabs left resolves to null (empty state)", got === null, got);
   }

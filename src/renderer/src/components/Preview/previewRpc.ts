@@ -9,9 +9,12 @@
 // that does the DOM work — this gives us click/type/snapshot without
 // pulling in Playwright or a CDP layer.
 
-import { ensurePreviewTab, listPreviewTabs, pickPreviewTab } from "./registry";
+import type { CoraWhiteboard } from "@shared/types";
+import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
 
 type PreviewOpName =
+  | "whiteboard_inspect"
+  | "activity"
   | "list"
   | "navigate"
   | "snapshot"
@@ -66,8 +69,17 @@ export function registerPreviewRpcHandler(): void {
 
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
+    case "whiteboard_inspect": {
+      const { inspectWhiteboard } = await import("../whiteboard/inspect-whiteboard");
+      return inspectWhiteboard(req.params.board as CoraWhiteboard, req.params.nodeIds as string[] | undefined);
+    }
     case "list":
-      return { tabs: listPreviewTabs() };
+      return { tabs: listPreviewTabs(readString(req.params, "workspaceId")) };
+    case "activity": {
+      const tab = requireTab(req.params);
+      showPreviewControl(tab, { action: readString(req.params, "action") ?? "Working", runId: readString(req.params, "runId"), ...(typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : {}) });
+      return { ok: true };
+    }
     case "navigate":
       return navigate(req.params);
     case "url":
@@ -98,9 +110,9 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 // Implicit tab picking is scoped to the calling run: params.runId is stamped by
 // the MCP server from SPARK_RUN_ID, so an agent op with no explicit tabId only
 // ever lands on a tab that run opened. An explicit tabId is still honored.
-function requireTab(params: { tabId?: string | null; runId?: unknown }) {
+function requireTab(params: Record<string, unknown>) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
-  const tab = pickPreviewTab(params.tabId ?? null, runId);
+  const tab = pickPreviewTab(readString(params, "tabId"), runId, readString(params, "workspaceId"));
   if (!tab) {
     if (runId && !params.tabId) {
       throw new Error(
@@ -111,6 +123,7 @@ function requireTab(params: { tabId?: string | null; runId?: unknown }) {
       "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
     );
   }
+  showPreviewControl(tab, { action: "Working", runId });
   return tab;
 }
 
@@ -145,20 +158,21 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   let tab;
   let opened = false;
   if (params.tabId) {
-    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null);
+    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null, null, readString(params, "workspaceId"));
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
   } else {
     // runId is the calling run's identity, stamped by the MCP server; the
     // reused-or-opened tab must belong to that run, not the selected one and
     // never one the user opened.
     const runId = readString(params, "runId");
-    const before = pickPreviewTab(null, runId);
-    tab = await ensurePreviewTab(url, runId);
+    const before = pickPreviewTab(null, runId, readString(params, "workspaceId"));
+    tab = await ensurePreviewTab(url, runId, readString(params, "workspaceId"));
     opened = !before;
   }
   // ensurePreviewTab created the tab with the target URL, so loadURL is a
   // redundant nav in that case but cheap. For an existing tab it's the real
   // navigation.
+  showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
   tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
   return { url: tab.handle.getURL(), tabId: tab.id, opened };
@@ -233,7 +247,9 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })})`;
-  return runGuestScript(tab.handle, code);
+  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
+  showPreviewControl(tab, { action: "Clicking", runId: readString(params, "runId"), x: result.x, y: result.y });
+  return result;
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -244,7 +260,9 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })})`;
-  return runGuestScript(tab.handle, code);
+  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
+  showPreviewControl(tab, { action: "Typing", runId: readString(params, "runId"), x: result.x, y: result.y });
+  return result;
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -268,8 +286,19 @@ async function waitFor(params: Record<string, unknown>): Promise<unknown> {
 
 async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   const tab = requireTab(params);
-  const dataUrl = await tab.handle.capturePngDataUrl();
-  return { dataUrl, url: tab.handle.getURL() };
+  const [dataUrl, viewport] = await Promise.all([
+    tab.handle.capturePngDataUrl(),
+    runGuestScript(tab.handle, "({ width: window.innerWidth, height: window.innerHeight })")
+      .catch(() => null) as Promise<{ width: number; height: number } | null>,
+  ]);
+  // PNG dimensions describe the returned pixels; devicePixelRatio alone can
+  // differ from the encoded image scale under zoom or display changes.
+  const header = Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(",") + 1, dataUrl.indexOf(",") + 33)), (char) => char.charCodeAt(0));
+  const dimensions = new DataView(header.buffer);
+  const imageSize = { width: dimensions.getUint32(16), height: dimensions.getUint32(20) };
+  const scale = viewport && viewport.width > 0 && viewport.height > 0
+    ? { x: imageSize.width / viewport.width, y: imageSize.height / viewport.height } : null;
+  return { dataUrl, tabId: tab.id, url: tab.handle.getURL(), title: tab.handle.getTitle(), viewport, imageSize, scale };
 }
 
 async function resize(params: Record<string, unknown>): Promise<unknown> {
@@ -286,6 +315,8 @@ async function resize(params: Record<string, unknown>): Promise<unknown> {
 // coordinates can be mapped against capturePage screenshots.
 async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
   const tab = requireTab(params);
+  // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
+  if (params.focus === true) tab.handle.focusContent();
   const webContentsId = tab.handle.getWebContentsId();
   if (webContentsId === null) {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -342,54 +373,63 @@ function readBool(params: Record<string, unknown>, key: string): boolean | null 
 // ---------------------------------------------------------------------------
 
 function snapshotProbe(opts: { mode: string; maxBytes: number }) {
+  const encoder = new TextEncoder();
+  const limit = Number.isFinite(opts.maxBytes) ? Math.max(1, Math.floor(opts.maxBytes)) : 12_000;
+  const lines: string[] = [];
+  let bytes = 0;
+  let truncated = false;
   function describe(el: Element, depth: number): string {
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute("role") || "";
-    const name =
-      el.getAttribute("aria-label") ||
-      el.getAttribute("aria-labelledby") ||
-      el.getAttribute("title") ||
-      (el as HTMLElement).innerText?.trim().slice(0, 80) ||
-      "";
+    const labelledBy = (el.getAttribute("aria-labelledby") || "").split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(" ");
+    const labels = "labels" in el ? Array.from((el as HTMLInputElement).labels ?? [])
+      .map((label) => Array.from(label.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ").trim()).filter(Boolean).join(" ") : "";
+    const ownText = Array.from(el.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ");
+    const semanticText = /^(a|button|summary|h[1-6]|option)$/.test(tag) || role;
+    const name = (el.getAttribute("aria-label") || labelledBy || labels || el.getAttribute("title") ||
+      (semanticText ? (el as HTMLElement).innerText : ownText) || "").replace(/\s+/g, " ").trim().slice(0, 160);
     const id = el.id ? `#${el.id}` : "";
-    const cls = el.className && typeof el.className === "string"
-      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}`
-      : "";
+    const cls = el.className && typeof el.className === "string" && el.className.trim()
+      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}` : "";
     const meta: string[] = [];
     if (role) meta.push(`role=${role}`);
     if (name) meta.push(`name=${JSON.stringify(name)}`);
-    const head = `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
-    return head;
-  }
-  function walk(el: Element, depth: number, lines: string[], budget: { left: number }): void {
-    if (budget.left <= 0) return;
-    const line = describe(el, depth);
-    if (line.length + 1 > budget.left) {
-      lines.push(line.slice(0, budget.left));
-      budget.left = 0;
-      return;
+    for (const attr of ["name", "data-testid", "aria-expanded", "aria-checked", "aria-selected"]) {
+      if (el.hasAttribute(attr)) meta.push(`${attr}=${JSON.stringify(el.getAttribute(attr))}`);
     }
-    lines.push(line);
-    budget.left -= line.length + 1;
-    const children = Array.from(el.children);
-    for (const child of children) {
-      if (budget.left <= 0) break;
-      const skip = ["script", "style", "noscript", "meta", "link"].includes(child.tagName.toLowerCase());
-      if (skip) continue;
-      walk(child, depth + 1, lines, budget);
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      meta.push(`value=${JSON.stringify(el instanceof HTMLInputElement && el.type === "password" ? "[redacted]" : el.value)}`);
+      if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) meta.push(`checked=${el.checked}`);
+      if ("readOnly" in el && el.readOnly) meta.push("readonly");
     }
+    if (el.matches(":disabled")) meta.push("disabled");
+    if (el instanceof HTMLSelectElement) {
+      meta.push(`options=${JSON.stringify(Array.from(el.options).map((option) => ({
+        value: option.value, label: option.label, selected: option.selected,
+        ...(option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled) ? { disabled: true } : {}),
+      })))}`);
+    }
+    return `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
   }
-  const lines: string[] = [];
-  const budget = { left: Math.max(1000, opts.maxBytes) };
-  if (document.body) walk(document.body, 0, lines, budget);
-  const truncated = budget.left <= 0;
-  return {
-    url: location.href,
-    title: document.title,
-    mode: opts.mode,
-    snapshot: lines.join("\n"),
-    truncated,
-  };
+  function walk(el: Element, depth: number): void {
+    if (truncated || /^(SCRIPT|STYLE|NOSCRIPT|META|LINK|OPTION|OPTGROUP)$/.test(el.tagName)) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none") return;
+    // display:contents has no box of its own; its children can still be visible.
+    const rendered = style.visibility !== "hidden" && style.visibility !== "collapse" && el.getClientRects().length > 0;
+    if (rendered) {
+      const line = describe(el, depth);
+      const addition = (lines.length ? "\n" : "") + line;
+      const size = encoder.encode(addition).length;
+      if (bytes + size > limit) { truncated = true; return; }
+      lines.push(line);
+      bytes += size;
+    }
+    for (const child of Array.from(el.children)) walk(child, depth + (rendered ? 1 : 0));
+  }
+  if (document.body) walk(document.body, 0);
+  return { url: location.href, title: document.title, mode: opts.mode, snapshot: lines.join("\n"), truncated };
 }
 
 function clickProbe(opts: { selector: string }) {
@@ -411,6 +451,23 @@ function clickProbe(opts: { selector: string }) {
 function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }) {
   const el = document.querySelector(opts.selector) as HTMLElement | null;
   if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
+  el.scrollIntoView({ block: "nearest" });
+  const rect = el.getBoundingClientRect();
+  const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  if (el instanceof HTMLSelectElement) {
+    if (el.disabled) return { ok: false, error: "select is disabled" };
+    if (el.multiple) return { ok: false, error: "multiple selection is not supported by type" };
+    const option = Array.from(el.options).find((option) => option.value === opts.text);
+    if (!option) return { ok: false, error: `select has no option with value: ${opts.text}` };
+    if (option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled)) {
+      return { ok: false, error: "select option is disabled" };
+    }
+    el.focus();
+    el.value = option.value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, value: el.value, ...point };
+  }
   const input = el as HTMLInputElement | HTMLTextAreaElement;
   el.focus();
   if (opts.clearFirst && "value" in input) input.value = "";
@@ -423,7 +480,7 @@ function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }
   } else {
     return { ok: false, error: "element is not an input, textarea, or contentEditable" };
   }
-  return { ok: true, value: "value" in input ? input.value : undefined };
+  return { ok: true, value: "value" in input ? input.value : undefined, ...point };
 }
 
 function pressKeyProbe(opts: { key: string; selector: string | null }) {
@@ -446,8 +503,12 @@ function waitForProbe(opts: { selector: string; state: string; timeoutMs: number
       const el = document.querySelector(opts.selector) as HTMLElement | null;
       let match = false;
       if (opts.state === "attached") match = el !== null;
-      else if (opts.state === "hidden") match = !el || (el.offsetParent === null && el.tagName !== "BODY");
-      else match = !!el && el.offsetParent !== null;
+      else {
+        const rect = el?.getBoundingClientRect();
+        const style = el ? getComputedStyle(el) : null;
+        const visible = !!rect && rect.width > 0 && rect.height > 0 && style?.visibility !== "hidden" && style?.visibility !== "collapse";
+        match = opts.state === "hidden" ? !visible : visible;
+      }
       if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
       if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
       setTimeout(check, 75);

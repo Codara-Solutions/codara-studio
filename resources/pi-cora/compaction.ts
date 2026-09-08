@@ -22,7 +22,7 @@ export type CompactionEnv = Record<string, string | undefined>;
  *  is the fallback when a session is started without it. */
 export const DEFAULT_COMPACT_AT_TOKENS = 256000;
 
-/** Pi 0.84.4 fires its own threshold compaction at contextWindow minus this. */
+/** Pi 0.85.1 fires its own threshold compaction at contextWindow minus this. */
 export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16384;
 
 /** Guidance appended to Pi's summary prompt. This is the fallback for direct
@@ -30,9 +30,10 @@ export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16384;
  * run-store's durable conversation cutover. */
 export const CORA_COMPACTION_INSTRUCTIONS = [
   "Write a dense continuation handoff. Preserve the newest user intent, requirements,",
-  "decisions, exact files/symbols/commands/IDs, completed work and verification, current",
+  "explicit prohibitions, permitted tools and paths, decisions, exact files/symbols/commands/IDs,",
+  "completed work and verification, current",
   "state, failures, blockers, pending tasks, and next actions. Remove repetition and stale",
-  "exploration. Do not invent. Use concise structured Markdown.",
+  "exploration. Do not invent requirements or broaden permissions. Use concise structured Markdown.",
 ].join(" ");
 
 /** Read the configured trigger. Absurd values (empty, 0, negative, NaN, an
@@ -80,9 +81,9 @@ export function shouldCompactNow(input: {
   return tokens > effectiveCompactAtTokens(usage.contextWindow, input.thresholdTokens);
 }
 
-/** Wire the trigger onto a Pi session. Checked once per agent loop end, so a
- *  compaction is never requested mid-turn and the next check reads the usage
- *  the compaction actually produced instead of looping on a stale number. */
+/** Hosted workers pause after a tool round; managers finish their answer.
+ *  The host waits for settlement before compacting either kind of session.
+ *  Standalone extension sessions retain the end-of-loop fallback. */
 export function registerContextCompaction(
   pi: ExtensionAPI,
   env: CompactionEnv = process.env,
@@ -96,6 +97,33 @@ export function registerContextCompaction(
   pi.on("session_compact", () => {
     compactionInFlight = false;
   });
+  pi.on("session_compact_failed", () => {
+    compactionInFlight = false;
+  });
+
+  if (env.CODARA_PI_HOST_COMPACTION === "1") {
+    pi.on("turn_end", (event, ctx) => {
+      if (!event.toolResults.length || event.toolResults.some((result) => result.toolName === "submit_result")) return;
+      const usage = ctx.getContextUsage();
+      if (!shouldCompactNow({ usage, thresholdTokens, compactionInFlight })) return;
+      // Every tool result is durable at turn_end. The host waits for the
+      // resulting agent_settled before compacting and resuming this session.
+      compactionInFlight = true;
+      pi.appendEntry("codara-context-pause", { reason: "threshold", tokens: usage?.tokens, thresholdTokens });
+      ctx.abort();
+    });
+    return;
+  }
+
+  if (env.CODARA_PI_HOST_COMPACTION === "settled") {
+    pi.on("agent_end", (_event, ctx) => {
+      const usage = ctx.getContextUsage();
+      if (!shouldCompactNow({ usage, thresholdTokens, compactionInFlight })) return;
+      compactionInFlight = true;
+      pi.appendEntry("codara-context-pause", { reason: "threshold", tokens: usage?.tokens, thresholdTokens });
+    });
+    return;
+  }
 
   pi.on("agent_end", (_event, ctx) => {
     if (

@@ -31,7 +31,9 @@ function createHarness() {
     events: [],
     launches: 0,
     nextStart: null,
+    nextStop: null,
     nextPromptError: null,
+    nextCompaction: null,
     promptReplies: [],
     turnOptions: [],
     // Stands in for AppSettings.openAiFastMode, which the composer's flash
@@ -133,6 +135,9 @@ async function loadBackend() {
             this.stopCalls += 1;
             this.phase = "stopped";
             h().events.push("stop:" + this.id);
+            const gate = h().nextStop;
+            h().nextStop = null;
+            if (gate) await gate.promise;
           }
           async abort() {
             this.abortCalls += 1;
@@ -160,10 +165,19 @@ async function loadBackend() {
                   content: reply ? [{ type: "text", text: reply }] : [],
                 },
               });
+              if (h().nextCompaction) listener({ type: "entry_appended", entry: { type: "custom", customType: "codara-context-pause", data: { reason: "threshold" } } });
               listener({ type: "agent_settled" });
             }
           }
-          async request() { return { text: "ok" }; }
+          async request(command) {
+            if (command.type !== "compact") return { text: "ok" };
+            const gate = h().nextCompaction;
+            h().nextCompaction = null;
+            h().events.push("compact:" + this.id);
+            const result = await gate.promise;
+            for (const listener of [...this.listeners]) listener({ type: "compaction_end", result, aborted: false });
+            return result;
+          }
           diagnostics() { return { stderr: "" }; }
         },
       };`,
@@ -194,7 +208,7 @@ async function loadBackend() {
               toolCalls: [],
               successfulToolCalls: [],
               providerResponseIds: [],
-              usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 },
+              usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
               contextTokens: 0,
               contextWindowTokens: null,
               failure: null,
@@ -559,6 +573,62 @@ async function testCostCaptureUsesProviderBoundary(backend, harness) {
   await backend.disposeChat("run-openrouter-cost-boundary");
 }
 
+async function testCompactionWaitsWithoutRepeatingAnswer(backend, harness) {
+  const gate = deferred();
+  harness.nextCompaction = gate;
+  harness.promptReplies.push("Completed once.");
+  let returned = false;
+  const resultPromise = backend.requestManagerDecision(requestInput("run-manager-compaction")).then(result => { returned = true; return result; });
+  await waitFor(() => harness.events.some(event => event.startsWith("compact:")), "manager should request compaction after settlement");
+  const client = harness.clients.at(-1);
+  assert.equal(returned, false, "manager result waits for summary telemetry");
+  assert.equal(client.prompts.length, 1);
+  gate.resolve({ estimatedTokensAfter: 20, usage: { input: 10, output: 2 } });
+  const result = await resultPromise;
+  assert.equal(result.decision.reply, "Completed once.");
+  assert.equal(result.turnFailed, undefined);
+  assert.equal(client.prompts.length, 1);
+  await backend.disposeChat("run-manager-compaction");
+}
+
+async function testFailedCompactionPreservesAnswerAndStopsRuntime(backend, harness) {
+  const gate = deferred();
+  harness.nextCompaction = gate;
+  harness.promptReplies.push("The completed answer survives.");
+  const notes = [];
+  const count = harness.events.filter(event => event.startsWith("compact:")).length;
+  const resultPromise = backend.requestManagerDecision(requestInput("run-manager-compaction-failure"), event => notes.push(event));
+  await waitFor(() => harness.events.filter(event => event.startsWith("compact:")).length > count, "summary should start");
+  const client = harness.clients.at(-1);
+  gate.reject(new Error("summary timed out"));
+  const result = await resultPromise;
+  assert.equal(result.decision.reply, "The completed answer survives.");
+  assert.equal(result.turnFailed, undefined);
+  assert.equal(client.stopCalls, 1, "unconfirmed compaction must not survive after its turn returns");
+  assert.ok(notes.some(event => event.kind === "system_note" && /compaction failed/.test(event.message)));
+  await backend.requestManagerDecision(requestInput("run-manager-compaction-failure"));
+  assert.notEqual(harness.clients.at(-1), client, "next turn must use a fresh process");
+  await backend.disposeChat("run-manager-compaction-failure");
+}
+
+async function testCompactionCleanupCannotReturnStaleAnswer(backend, harness) {
+  const summary = deferred(), shutdown = deferred();
+  harness.nextCompaction = summary;
+  harness.nextStop = shutdown;
+  harness.promptReplies.push("Stale answer.");
+  const count = harness.events.filter(event => event.startsWith("compact:")).length;
+  const stale = backend.requestManagerDecision(requestInput("run-manager-compaction-race"));
+  await waitFor(() => harness.events.filter(event => event.startsWith("compact:")).length > count, "summary should start");
+  const oldClient = harness.clients.at(-1);
+  summary.reject(new Error("summary timeout"));
+  await waitFor(() => oldClient.stopCalls === 1, "old runtime should begin shutdown");
+  const fresh = await backend.requestManagerDecision(requestInput("run-manager-compaction-race"));
+  assert.equal(fresh.turnAborted, undefined);
+  shutdown.resolve();
+  assert.equal((await stale).turnAborted, true, "a newer turn supersedes an answer still awaiting compaction cleanup");
+  await backend.disposeChat("run-manager-compaction-race");
+}
+
 async function main() {
   const harness = createHarness();
   globalThis[HARNESS_KEY] = harness;
@@ -572,6 +642,9 @@ async function main() {
   await testEmptyFinalGetsOneRecoveryPrompt(backend, harness);
   await testRepeatedEmptyFinalFailsClearly(backend, harness);
   await testCostCaptureUsesProviderBoundary(backend, harness);
+  await testCompactionWaitsWithoutRepeatingAnswer(backend, harness);
+  await testFailedCompactionPreservesAnswerAndStopsRuntime(backend, harness);
+  await testCompactionCleanupCannotReturnStaleAnswer(backend, harness);
   console.log(
     "PASS Pi ownership, lease rotation, fast-mode identity, and empty-final recovery",
   );

@@ -490,6 +490,10 @@ export interface Workspace {
   // main process routes fs/git/pty/search on this prefix.
   cwd: string;
   color: string;
+  // Optional glyph id from the workspace icon library (see
+  // renderer/components/workspace-icons.tsx). Absent = the default folder
+  // glyph. Presentation-only; never affects cwd or ownership.
+  icon?: string;
   workers: Worker[];
   // Optional logical folder in the workspace rail. This never changes cwd or
   // filesystem ownership; it is presentation-only organization persisted in
@@ -1193,9 +1197,15 @@ export interface AppPreferences {
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
   toastDurationMs?: number;
+  // How long the workspace-switch badge (icon + name under the title bar)
+  // stays on screen after activating another workspace, in ms. 0 = never
+  // show it. Capped at 10s.
+  workspaceSwitchHudMs?: number;
 }
 
 export const DEFAULT_TOAST_DURATION_MS = 6_000;
+export const DEFAULT_WORKSPACE_SWITCH_HUD_MS = 1_000;
+export const MAX_WORKSPACE_SWITCH_HUD_MS = 10_000;
 
 export const TOAST_DURATION_PRESETS: ReadonlyArray<{
   value: number;
@@ -1365,6 +1375,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   notifyTeammatePushes: true,
   notifyPullRequests: true,
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
+  workspaceSwitchHudMs: DEFAULT_WORKSPACE_SWITCH_HUD_MS,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the
@@ -3912,6 +3923,7 @@ export interface SparkCall {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   /** Provider response ids captured by the backend for support correlation. */
   providerResponseIds?: string[];
   error?: string;
@@ -3995,7 +4007,13 @@ export type CoraWhiteboardEdgeTone = "default" | "accent" | "success" | "warning
 export type CoraWhiteboardEdgeStyle = "solid" | "dashed";
 export type CoraWhiteboardEditor = "cora" | "user" | "import";
 
-export interface CoraWhiteboardNode {
+export interface CoraWhiteboardEvidence {
+  /** Repository-relative path:line references supporting this claim. */
+  sources?: string[];
+  confidence?: "confirmed" | "inferred";
+}
+
+export interface CoraWhiteboardNode extends CoraWhiteboardEvidence {
   id: string;
   kind: CoraWhiteboardNodeKind;
   title: string;
@@ -4012,7 +4030,7 @@ export interface CoraWhiteboardNode {
   tone?: CoraWhiteboardEdgeTone;
 }
 
-export interface CoraWhiteboardEdge {
+export interface CoraWhiteboardEdge extends CoraWhiteboardEvidence {
   id: string;
   from: string;
   to: string;
@@ -4022,11 +4040,19 @@ export interface CoraWhiteboardEdge {
   style?: CoraWhiteboardEdgeStyle;
 }
 
+export interface CoraWhiteboardReview {
+  revision: number;
+  reviewedAt: string;
+  summary: string;
+  limitations: string[];
+}
+
 export interface CoraWhiteboard {
   version: 1;
   /** Monotonic edit revision used to prevent Cora and a human overwriting each other. */
   revision?: number;
   lastEditedBy?: CoraWhiteboardEditor;
+  review?: CoraWhiteboardReview;
   title: string;
   summary?: string;
   nodes: CoraWhiteboardNode[];
@@ -4042,8 +4068,8 @@ export interface UpdateCoraWhiteboardInput {
   editor?: CoraWhiteboardEditor;
   title?: string;
   summary?: string;
-  nodes?: CoraWhiteboardNode[];
-  edges?: CoraWhiteboardEdge[];
+  nodes?: Array<Pick<CoraWhiteboardNode, "id"> & Partial<CoraWhiteboardNode>>;
+  edges?: Array<Pick<CoraWhiteboardEdge, "id"> & Partial<CoraWhiteboardEdge>>;
   removeNodeIds?: string[];
   removeEdgeIds?: string[];
 }

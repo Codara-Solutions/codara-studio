@@ -31,6 +31,8 @@ import {
   AUTOSAVE_DELAY_PRESETS,
   DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   DEFAULT_TOAST_DURATION_MS,
+  DEFAULT_WORKSPACE_SWITCH_HUD_MS,
+  MAX_WORKSPACE_SWITCH_HUD_MS,
   GIT_AUTO_FETCH_INTERVAL_PRESETS,
   TOAST_DURATION_PRESETS,
   INLINE_AI_DELAY_PRESETS,
@@ -1380,6 +1382,51 @@ function GeneralSettings({
             checked={Boolean(preferences.autoOpenPreview)}
             onChange={(v) => void setPreference("autoOpenPreview", v)}
           />
+          <div style={{ display: "grid", gap: 7, marginTop: 4 }}>
+            <span className="spark-eyebrow" style={{ fontSize: 11 }}>
+              Workspace switch badge
+            </span>
+            <div style={{ color: "var(--muted)", fontSize: 11 }}>
+              After switching workspaces, a badge with the workspace icon, name and branch
+              drops in under the title bar so you can see where your next message goes. Set
+              to 0 to turn it off.
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gap: 10,
+                alignItems: "center",
+              }}
+            >
+              <input
+                aria-label="Workspace switch badge duration"
+                type="range"
+                min={0}
+                max={MAX_WORKSPACE_SWITCH_HUD_MS}
+                step={250}
+                value={preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS}
+                onChange={(event) =>
+                  void setPreference("workspaceSwitchHudMs", Number(event.currentTarget.value))
+                }
+                style={{ width: "100%", accentColor: "var(--accent)" }}
+              />
+              <span
+                style={{
+                  color: "var(--muted)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  minWidth: 44,
+                  textAlign: "right",
+                }}
+              >
+                {(() => {
+                  const ms = preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS;
+                  return ms === 0 ? "Off" : `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 2).replace(/\.?0+$/, "")}s`;
+                })()}
+              </span>
+            </div>
+          </div>
         </div>
       ) : null}
 

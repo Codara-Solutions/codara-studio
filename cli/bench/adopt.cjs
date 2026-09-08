@@ -12,6 +12,7 @@ const path = require("node:path");
 const ROOT = path.join(__dirname, "..", "..");
 const { rpcRaw } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
 const { TASKS, TIER_CAP_MS } = require(path.join(ROOT, "cli/bench/tasks.cjs"));
+const { acceptanceSummary, trialPassed } = require("./metrics.cjs");
 const { scoreTask } = require(path.join(ROOT, "cli/bench/score.cjs"));
 const { gradeChecks, probeGreen, driveToCompletion, runMetrics, appendHistory, historyMetadata } = require(path.join(ROOT, "cli/commands/bench.cjs"));
 const { findRun } = require(path.join(ROOT, "cli/lib/store.cjs"));
@@ -32,11 +33,6 @@ const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
   const run = findRun(flags, runId);
   const startedAt = Date.parse(run.createdAt);
   const capMs = TIER_CAP_MS[task.tier] ?? 10 * 60_000;
-  const state = { greenAtMs: null };
-  const poller = setInterval(async () => {
-    if (state.greenAtMs === null && (await probeGreen(dir, task))) state.greenAtMs = Date.now() - startedAt;
-  }, 5_000);
-  let outcome = await driveToCompletion(flags, runId, startedAt + capMs);
   // Staged task: figure out which stage the workspace is on and continue.
   const stages = task.stages ?? [];
   const currentTest = fs.readFileSync(path.join(dir, "test.js"), "utf8");
@@ -44,12 +40,18 @@ const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
   stages.forEach((stage, i) => {
     if (stage.files?.["test.js"] === currentTest) startIdx = i + 1;
   });
+  const state = { greenAtMs: null };
+  const poller = setInterval(async () => {
+    if (state.greenAtMs === null && (await probeGreen(dir, task, startIdx))) state.greenAtMs = Date.now() - startedAt;
+  }, 5_000);
+  let outcome = await driveToCompletion(flags, runId, startedAt + capMs);
   let questionsAsked = outcome.questionsAsked;
   for (const stage of stages.slice(startIdx)) {
     if (outcome.status !== "complete") break;
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
+    startIdx += 1;
     state.greenAtMs = null;
     await rpc(flags, "chat.send", { runId, content: stage.prompt });
     outcome = await driveToCompletion(flags, runId, startedAt + capMs);
@@ -63,7 +65,7 @@ const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
   if (outcome.status === "timeout") {
     await rpcRaw(flags, "chat.cancel", { runId, reason: "bench window elapsed" }).catch(() => null);
   }
-  if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
+  if (greenAtMs === null && (await probeGreen(dir, task, startIdx))) greenAtMs = wallMs;
   const greenAtIso = greenAtMs === null ? null : new Date(startedAt + greenAtMs).toISOString();
   const metrics = await runMetrics(flags, runId, greenAtIso, outcome.status);
   const checks = gradeChecks(task, dir, metrics);
@@ -71,6 +73,7 @@ const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
   const result = { checks, wallMs, greenAtMs, runStatus: outcome.status, questionsAsked: outcome.questionsAsked, ...metrics };
   const score = scoreTask(task, result);
   const row = {
+    checks, passed: trialPassed(result), staged: Boolean(task.stages?.length), usage: metrics.usage ?? null,
     task: task.name, tier: task.tier, score: score.total, parts: score.parts,
     green: greenAtMs, wallMs, tokens: result.tokens, postGreenTokens: result.postGreenTokens,
     workers: result.workers, maxConcurrent: result.maxConcurrent, questions: result.questionsAsked,
@@ -80,7 +83,7 @@ const { rpc } = require(path.join(ROOT, "cli/lib/rpc.cjs"));
     at: new Date().toISOString(), ...historyMetadata("cora", [task.name], 1, control), agent: "cora",
     split: `task:${task.name}`, score: score.total,
     calibration: { [task.tier]: Math.round((wallMs / 1000 / task.par.wallS) * 10) / 10 },
-    tasks: [row], adopted: true,
+    tasks: [row], acceptance: acceptanceSummary([row]), adopted: true,
   });
   fs.rmSync(dir, { recursive: true, force: true });
   await rpcRaw(flags, "workspace.prune", { cwds: [dir] }).catch(() => null);

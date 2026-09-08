@@ -100,12 +100,21 @@ assert.deepEqual(turn.result(), {
   toolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   successfulToolCalls: [{ toolName: "codara_complete", toolUseId: "call-1", input: { summary: "Verified" } }],
   providerResponseIds: [],
-  usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80, costUsd: 0 },
+  usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 80, cacheWriteTokens: 0, costUsd: 0 },
   contextTokens: 180,
   contextWindowTokens: null,
   failure: null,
   settled: true,
 });
+
+const cacheEvents = [];
+const cacheWrites = new PiTurnAccumulator((event) => cacheEvents.push(event));
+for (const [timestamp, usage] of [[1, { input: 5, output: 2, cacheRead: 11, cacheWrite: 23 }], [2, { input: 7, output: 3, cacheRead: 13, cacheCreation: 29 }]]) {
+  cacheWrites.consume({ type: "message_end", message: { role: "assistant", timestamp, content: [], usage } });
+}
+assert.deepEqual(cacheWrites.result().usage, { inputTokens: 12, outputTokens: 5, cacheReadTokens: 24, cacheWriteTokens: 52, costUsd: 0 });
+assert.equal(cacheWrites.result().contextTokens, 49, "occupancy is the latest prompt including cache writes, not cumulative usage");
+assert.equal(cacheEvents.filter((event) => event.kind === "usage").at(-1).cacheWriteTokens, 52);
 
 // Only the newest assistant message is the final answer. Progress prose from
 // an earlier tool-loop round must never be promoted when the actual final
@@ -154,7 +163,7 @@ gauge.consume({
     usage: { input: 40, output: 7, cacheRead: 300, contextWindow: 200000 },
   },
 });
-assert.deepEqual(gauge.result().usage, { inputTokens: 140, outputTokens: 12, cacheReadTokens: 320, costUsd: 0 });
+assert.deepEqual(gauge.result().usage, { inputTokens: 140, outputTokens: 12, cacheReadTokens: 320, cacheWriteTokens: 0, costUsd: 0 });
 assert.equal(gauge.result().contextTokens, 340);
 assert.equal(gauge.result().contextWindowTokens, 200000);
 // A production-shaped stream (no contextWindow anywhere) must leave the

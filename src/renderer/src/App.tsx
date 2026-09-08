@@ -25,6 +25,7 @@ import type {
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   DEFAULT_TOAST_DURATION_MS,
+  DEFAULT_WORKSPACE_SWITCH_HUD_MS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
 } from "@shared/types";
 import type {
@@ -44,6 +45,7 @@ import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
+import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
 import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
@@ -55,17 +57,17 @@ import TerminalStack from "./tabs/TerminalStack";
 import { buildDockIndex, isDockLeaf } from "./tabs/dock";
 import SplitDropOverlay from "./tabs/SplitDropOverlay";
 import PreviewStack from "./tabs/PreviewStack";
-import { setOpenPreviewTabFn } from "./components/Preview/registry";
+import { clearPreviewControl, setOpenPreviewTabFn } from "./components/Preview/registry";
 import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
   setListShareableStudioTerminalsFn,
 } from "./components/Terminal/terminalRegistry";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
-import { forgetTerminalPaneMemory } from "./components/Terminal/TerminalPane";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
+import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
@@ -79,7 +81,6 @@ import type { ActiveNotificationView } from "./notifications/viewed";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
   PaneNode,
-  PreviewTab,
   RunsTab,
   Tab,
   TabId,
@@ -683,6 +684,20 @@ export default function App() {
   // tabs from a single source of truth (was GitPanel's private poll).
   const sharedGit = useSharedGitStatus(activeWorkspace?.cwd ?? null);
 
+  // Branch subtitle for every rail row. The per-row cache is slow on its own,
+  // so the shared status (fs-watched, 10s poll) acts as its trigger: whenever
+  // the active workspace's branch changes there, every row re-reads. The
+  // shared status itself is never copied across, because right after a
+  // switch it still describes the previous workspace.
+  const branchByWorkspaceId = useWorkspaceBranches(
+    workspaces,
+    `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
+  );
+
+  // Switch HUD: bumps once per real workspace change (never on first load),
+  // see WorkspaceSwitchHud for the hold/exit timing.
+  const [switchSignal, setSwitchSignal] = useState(0);
+
   // Evict frozen terminal layouts for deleted workspaces so they don't linger
   // in state. Render already prunes them (the validWorkspaceIds gate in
   // terminalWorkspaceLayers), but useTabs' switch effect alone can't catch an
@@ -711,7 +726,6 @@ export default function App() {
     for (const paneId of knownTerminalPaneIdsRef.current) {
       if (!livePaneIds.has(paneId)) {
         forgetTerminalSessionMemory(paneId);
-        forgetTerminalPaneMemory(paneId);
       }
     }
     knownTerminalPaneIdsRef.current = livePaneIds;
@@ -1596,35 +1610,6 @@ export default function App() {
     });
   }, [runs]);
 
-  // One-time repair for layouts saved by the short-lived build that removed a
-  // runId from Cora browser tabs during hydration. Those tabs then appeared as
-  // ordinary browsers in unrelated workbench strips. Match only local files
-  // recorded in a settled run's result manifest; genuine user browser tabs and
-  // network pages are untouched. New layouts never need this because useTabs
-  // now drops run-owned previews instead of promoting them.
-  useEffect(() => {
-    if (
-      !booted ||
-      !activeId ||
-      runsWorkspaceId !== activeId ||
-      tabs.tabsWorkspaceId !== activeId
-    ) {
-      return;
-    }
-    const migrationKey = `spark.migration:cora-preview-ownership-v1:${activeId}`;
-    if (window.localStorage.getItem(migrationKey) === "done") return;
-    const orphanIds = tabs.tabs
-      .filter(
-        (tab): tab is PreviewTab =>
-          tab.kind === "preview" &&
-          !tab.runId &&
-          legacyCoraPreviewOwner(tab.url, runs) !== null,
-      )
-      .map((tab) => tab.id);
-    window.localStorage.setItem(migrationKey, "done");
-    for (const id of orphanIds) tabsRef.current.closeTab(id);
-  }, [activeId, booted, runs, runsWorkspaceId, tabs.tabs, tabs.tabsWorkspaceId]);
-
   useEffect(() => {
     if (!booted) return undefined;
 
@@ -1683,18 +1668,11 @@ export default function App() {
       runRefreshPendingRef.current.add(event.workspaceId);
       armRunRefresh();
 
-      // Browser tabs opened through Cora's preview bridge are tool surfaces.
-      // Tear their webviews down as soon as the owning run settles, including
-      // when that run finishes in a background workspace. User-opened browser
-      // tabs have no runId and are deliberately untouched.
       if (event.type === "run.status_updated" && event.runId) {
         const payload = event.payload as Record<string, unknown> | undefined;
         const status = payload?.status ?? payload?.nextStatus;
         if (status === "complete" || status === "failed" || status === "cancelled") {
-          tabsRef.current.closePreviewTabsForInWorkspace(
-            event.workspaceId,
-            event.runId,
-          );
+          clearPreviewControl(event.runId);
         }
       }
 
@@ -1706,15 +1684,7 @@ export default function App() {
         if (event.runId) {
           tabsRef.current.closeRunsTabFor(event.runId);
           tabsRef.current.closeWorkerTerminalTabFor(event.runId);
-          // Previews spawned by the deleted run must close too: they're listed
-          // only in the run's inner tab strip, which a deleted run can never
-          // show again — leaving them would strand invisible browser tabs (and
-          // if one was active, a fullscreen browser with no way to close it).
-          tabsRef.current.closePreviewTabsFor(event.runId);
-          // The three closers above only touch the ACTIVE workspace's store.
-          // The Settings run manager can delete a background workspace's run;
-          // its frozen snapshot would restore the dead run's tabs verbatim on
-          // switch-back (stranded browser again). Prune those stores too.
+          clearPreviewControl(event.runId);
           tabsRef.current.pruneDeletedRunTabsFromInactiveWorkspaces(event.runId);
           // Drop the chat tab too, so the active selection can't keep pointing
           // at a deleted run until the debounced refresh catches up. Unlike the
@@ -2867,6 +2837,9 @@ export default function App() {
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
     }
+    if (currentWorkspaceId && currentWorkspaceId !== id) {
+      setSwitchSignal((n) => n + 1);
+    }
     activeIdRef.current = id;
     setActiveId(id);
   }, []);
@@ -3247,9 +3220,16 @@ export default function App() {
     [workspaces, removeWorkspaceFromState],
   );
 
-  const createWs = useCallback(async () => {
+  // `groupId` (from a folder's "Add workspace here…") files the new workspace
+  // straight into that folder; its shade is then assigned by the folder
+  // family like any other member.
+  const createWs = useCallback(async (groupId?: string) => {
     const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
     if (!path) return;
+    const targetGroupId =
+      typeof groupId === "string" && workspaceGroupsRef.current.some((g) => g.id === groupId)
+        ? groupId
+        : undefined;
     const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), path);
     const ws: Workspace = {
       id: makeId("ws"),
@@ -3257,6 +3237,7 @@ export default function App() {
       cwd: path,
       color,
       workers: [],
+      ...(targetGroupId ? { groupId: targetGroupId } : {}),
     };
     // Part A — push the new root onto the main read-sandbox allowlist BEFORE we
     // make the workspace active. Otherwise FileTree mounts and fires
@@ -3272,7 +3253,11 @@ export default function App() {
     await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => {
       /* sandbox push is best-effort; the parent effect re-sends on state change */
     });
-    setWorkspaces((list) => [...list, ws]);
+    setWorkspaces((list) =>
+      targetGroupId
+        ? applyWorkspaceGroupShades([...list, ws], workspaceGroupsRef.current, [targetGroupId])
+        : [...list, ws],
+    );
     activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
     setEditingId(ws.id);
@@ -3316,9 +3301,16 @@ export default function App() {
   // SSH remote workspace: the connect dialog resolves a host + POSIX folder,
   // and we mint a workspace whose cwd is the ssh:// virtual path. The main
   // process routes every fs/git/pty/search call on that prefix.
+  // Folder the next SSH workspace should land in, set by the folder menu's
+  // "Add SSH workspace here…" before the connect dialog opens.
+  const pendingRemoteGroupIdRef = useRef<string | null>(null);
   const createRemoteWs = useCallback(
     async (host: RemoteHostConfig, remotePath: string) => {
       const cwd = makeRemotePath(host.id, remotePath);
+      const groupId = pendingRemoteGroupIdRef.current;
+      pendingRemoteGroupIdRef.current = null;
+      const targetGroupId =
+        groupId && workspaceGroupsRef.current.some((g) => g.id === groupId) ? groupId : undefined;
       const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), cwd);
       const ws: Workspace = {
         id: makeId("ws"),
@@ -3327,12 +3319,17 @@ export default function App() {
         color,
         workers: [],
         remote: { hostId: host.id },
+        ...(targetGroupId ? { groupId: targetGroupId } : {}),
       };
       const existingCwds = workspaces
         .map((w) => w.cwd)
         .filter((c): c is string => typeof c === "string" && c.length > 0);
       await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => undefined);
-      setWorkspaces((list) => [...list, ws]);
+      setWorkspaces((list) =>
+        targetGroupId
+          ? applyWorkspaceGroupShades([...list, ws], workspaceGroupsRef.current, [targetGroupId])
+          : [...list, ws],
+      );
       activeRunIdsByWorkspaceRef.current[ws.id] = null;
       setActiveId(ws.id);
       setRemoteConnectOpen(false);
@@ -3768,7 +3765,10 @@ export default function App() {
 
   // Stable identity: an inline arrow here would defeat WorkspaceRail's
   // React.memo on both rails.
-  const handleCreateRemote = useCallback(() => setRemoteConnectOpen(true), []);
+  const handleCreateRemote = useCallback((groupId?: string) => {
+    pendingRemoteGroupIdRef.current = typeof groupId === "string" ? groupId : null;
+    setRemoteConnectOpen(true);
+  }, []);
 
   const confirmCopyDelete = useCallback(
     async (opts: { deleteBranch: boolean; force: boolean }) => {
@@ -4588,19 +4588,10 @@ export default function App() {
   // the new tab id; the bridge then waits for PreviewStack to mount its
   // BrowserPaneHandle and drives the navigation.
   useEffect(() => {
-    // MCP-driven preview spawns are tagged with the CALLING run's id (threaded
-    // from the MCP server's SPARK_RUN_ID stamp through previewRpc.navigate) so
-    // another run/workspace being selected can't adopt — or, on its deletion,
-    // destroy — a preview a background run is driving. Only when no run
-    // identity arrives (user-facing agents) does the tab inherit the active
-    // run; reading the ref at call time avoids rebinding the registry hook on
-    // every activeRunId change.
-    // focus:false — an agent-driven preview spawns in the background (it
-    // surfaces in the owning run's inner tab strip) instead of pulling the
-    // user off their chat mid-run. The bridge drives navigation by tab id, so
-    // the preview need not be the active tab.
-    setOpenPreviewTabFn((url: string, runId?: string | null) =>
-      newPreviewTab(url, { runId: runId ?? activeRunIdRef.current, focus: false }),
+    // Background opens preserve the user's current selection. The caller's
+    // workspace and run identity must not follow whichever chat is selected.
+    setOpenPreviewTabFn((url, runId, workspaceId) =>
+      newPreviewTab(url, { runId, workspaceId, focus: false }),
     );
     return () => setOpenPreviewTabFn(null);
   }, [newPreviewTab]);
@@ -5893,6 +5884,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            branchByWorkspaceId={branchByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -6037,6 +6029,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            branchByWorkspaceId={branchByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -6091,7 +6084,10 @@ export default function App() {
 
         {remoteConnectOpen && (
           <SshManagerDialog
-            onClose={() => setRemoteConnectOpen(false)}
+            onClose={() => {
+              pendingRemoteGroupIdRef.current = null;
+              setRemoteConnectOpen(false);
+            }}
             onPick={(host, remotePath) => void createRemoteWs(host, remotePath)}
           />
         )}
@@ -6189,6 +6185,12 @@ export default function App() {
           onOpenFile={handleSearchOpenFile}
         />
 
+        <WorkspaceSwitchHud
+          workspace={activeWorkspace}
+          branch={activeWorkspace ? branchByWorkspaceId[activeWorkspace.id] ?? null : null}
+          signal={switchSignal}
+          holdMs={preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS}
+        />
         <ToastHost
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}
@@ -6474,45 +6476,8 @@ function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
   );
 }
 
-function legacyCoraPreviewOwner(url: string, runs: RunState[]): RunState | null {
-  let filePath: string;
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== "file:") return null;
-    filePath = decodeURIComponent(parsed.pathname).replace(/\\/g, "/");
-    if (/^\/[A-Za-z]:\//.test(filePath)) filePath = filePath.slice(1);
-  } catch {
-    return null;
-  }
-  const normalize = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
-  for (const run of runs) {
-    if (!run.resultManifest || !["complete", "failed", "cancelled"].includes(run.status)) {
-      continue;
-    }
-    const manifestCwd = run.resultManifest.workspace.cwd;
-    const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
-    const cwd = normalize(
-      typeof manifestCwd === "string"
-        ? manifestCwd
-        : typeof snapshotCwd === "string"
-          ? snapshotCwd
-          : "",
-    );
-    if (!cwd) continue;
-    const owns = run.resultManifest.workspaceDelta.some((entry) => {
-      const path = normalize(entry.path);
-      const absolute = path.startsWith("/") || /^[A-Za-z]:\//.test(path)
-        ? path
-        : `${cwd}/${path}`;
-      return absolute === normalize(filePath);
-    });
-    if (owns) return run;
-  }
-  return null;
-}
-
 // Filter for what the top tab strip displays. Top strip = chat + workspace
-// tabs (editors, plain user terminals, user-opened previews). Anything
+// tabs (editors, plain user terminals, browsers). Anything
 // run-owned moves inside the chat panel.
 function isTopStripTab(tab: Tab): boolean {
   return !isRunOwnedTab(tab);
@@ -6667,7 +6632,6 @@ const Workspace = React.memo(function Workspace({
     dockTabInTerminal,
     undockTab,
     toggleTerminalPaneZoom,
-    openEditorTab,
     registerDispose,
     setLeafAgentSession,
     setLeafBootResumeConsumed,
@@ -6741,8 +6705,15 @@ const Workspace = React.memo(function Workspace({
     liveTerminalWorkspaceIds,
   ]);
 
+  const browserWorkspaceLayers = [
+    ...(tabs.tabsWorkspaceId ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: visibleTabs, active: true }] : []),
+    ...tabs.inactiveWorkspaceLayouts
+      .filter((layout) => validWorkspaceIds.has(layout.workspaceId) && layout.workspaceId !== tabs.tabsWorkspaceId)
+      .map((layout) => ({ ...layout, active: false })),
+  ];
+
   // Tabs the top strip renders: chat + workspace-level tabs only. Run-owned
-  // tabs (workers, Runs, run-tagged previews) are surfaced inside the chat
+  // tabs (workers and Runs) are surfaced inside the chat
   // panel's inner tab strip instead.
   // tabId -> the terminal cell lending it geometry. Derived from the pane
   // trees (the only source of truth), so a docked tab can never drift out of
@@ -6779,48 +6750,12 @@ const Workspace = React.memo(function Workspace({
   // consumed by exactly that restore pass (inside useChatSurfaces).
   const pendingBoardViewRef = useRef(false);
 
-  // Tabs owned by the active run, grouped by kind. These power the inner tab
-  // strip: Runs section and preview entries. Worker terminals stay run-owned,
-  // but are entered directly from the worker nodes on the Runs canvas.
-  const runOwnedTabs = useMemo(() => {
-    if (!activeRunId) {
-      return { runs: null as RunsTab | null, previews: [] as PreviewTab[] };
-    }
-    let runsTab: RunsTab | null = null;
-    const previews: PreviewTab[] = [];
-    for (const tab of tabs.tabs) {
-      if (tab.kind === "runs" && tab.runId === activeRunId) {
-        runsTab = tab;
-      } else if (tab.kind === "preview" && tab.runId === activeRunId) {
-        previews.push(tab);
-      }
-    }
-    return { runs: runsTab, previews };
-  }, [tabs.tabs, activeRunId]);
+  const runOwnedTabs = useMemo(() => ({
+    runs: tabs.tabs.find((tab): tab is RunsTab => tab.kind === "runs" && tab.runId === activeRunId) ?? null,
+  }), [tabs.tabs, activeRunId]);
 
-  // Is there anything to show in the inner tab strip? The Chat / Terminal
-  // toggle appears once the chat has at least one message (its backend PTY
-  // session id is known). Runs / preview pills appear when the active run has
-  // spawned that artifact. When none of these is true the
-  // inner strip stays hidden.
-  //
-  // But artifacts existing is not enough: the strip is the chat tab's own
-  // sub-navigation, so it must only render while the active view actually
-  // belongs to the run. activeRunId stays pinned to a background run when the
-  // user switches to a plain terminal/editor/preview tab (selecting those tabs
-  // doesn't clear it), so gating on activeRunId alone leaked the strip under
-  // every unrelated tab. Require the active tab to be the run's own chat tab
-  // (its id equals the run id) or one of its run-owned children (worker
-  // terminal / Runs canvas / run preview) that belongs to THIS run — a
-  // run-owned tab owned by a different run (reachable by keyboard tab-cycling,
-  // since previews/Runs tabs aren't run-filtered out of visibleTabs) must not
-  // show the active run's strip over another run's surface.
-  //
-  // activeChatTabId is the chat tab whose run owns the current view —
-  // either the chat tab whose id matches activeRunId, or (if no run is
-  // selected and the user is on a draft) the active draft chat tab. The
-  // inner strip uses this to route "Chat" / "Terminal" pill clicks back to
-  // the right chat tab regardless of which run-owned sub-tab is active.
+  // The inner strip belongs to the selected chat or one of its run surfaces.
+  // Workspace browsers keep their own tab and never inherit chat navigation.
   const activeChatTabId = useMemo(() => {
     if (activeRunId) {
       const matching = topStripTabs.find(
@@ -7267,23 +7202,9 @@ const Workspace = React.memo(function Workspace({
     },
     [setLeafBootResumeConsumed],
   );
-  // First save of an untitled whiteboard draft: rebind by swapping the draft
-  // tab for a regular editor tab on the saved .coraboard file (openEditorTab
-  // dedupes by path, so a later explorer click lands on this same tab). The
-  // swap runs on a fresh tick: openEditorTab captures the new tab's id inside
-  // its setTabs updater, which React only evaluates eagerly when it is the
-  // FIRST queued update — the save path has already queued dirty/git updates
-  // this tick, and a missed capture would leave the new tab unfocused and let
-  // closeTab reroute to an unrelated neighbor. Open before close so the
-  // editor is already active when the draft goes away (no reroute flicker).
   const handleWhiteboardSavedAs = useCallback(
-    (id: TabId, path: string) => {
-      window.setTimeout(() => {
-        openEditorTab(entryFromPath(path));
-        closeTab(id);
-      }, 0);
-    },
-    [openEditorTab, closeTab],
+    (id: TabId, path: string) => tabs.saveWhiteboardTabAs(id, entryFromPath(path)),
+    [tabs.saveWhiteboardTabAs],
   );
 
   return (
@@ -7327,7 +7248,6 @@ const Workspace = React.memo(function Workspace({
           whiteboardCreatable={Boolean(activeRunForStrip)}
           whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
-          previews={runOwnedTabs.previews}
           onChatClick={handleInnerChatClick}
           onWhiteboardClick={handleInnerWhiteboardClick}
           onBoardClick={handleInnerBoardClick}
@@ -7355,7 +7275,6 @@ const Workspace = React.memo(function Workspace({
                 whiteboardCreatable={Boolean(activeRunForStrip)}
                 whiteboardAttention={whiteboardAttention}
                 runsTab={runOwnedTabs.runs}
-                previews={runOwnedTabs.previews}
                 onChatClick={handleDockedChatClick}
                 onWhiteboardClick={handleDockedWhiteboardClick}
                 onBoardClick={handleDockedBoardClick}
@@ -7461,12 +7380,17 @@ const Workspace = React.memo(function Workspace({
             </div>
           );
         })}
-        <PreviewStack
-          tabs={visibleTabs}
-          activeId={effectiveActiveId}
-          dockIndex={dockIndex}
-          onUrlChange={onPreviewUrlChange}
-        />
+        {browserWorkspaceLayers.map((layer) => (
+          <PreviewStack
+            key={layer.workspaceId}
+            workspaceId={layer.workspaceId}
+            workspaceActive={layer.active}
+            tabs={layer.tabs}
+            activeId={layer.active ? effectiveActiveId : null}
+            dockIndex={dockIndex}
+            onUrlChange={onPreviewUrlChange}
+          />
+        ))}
         <SplitDropOverlay tabs={visibleTabs} activeId={effectiveActiveId} onDrop={tabs.splitDrop} />
         {visibleTabs.some((tab) => tab.kind === "runs") && (
           <Suspense fallback={null}>

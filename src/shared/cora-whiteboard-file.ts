@@ -57,6 +57,7 @@ function parseNode(value: unknown): CoraWhiteboardNode | null {
     : "note";
   const defaultSize = CORA_WHITEBOARD_NODE_DEFAULT_SIZES[kind];
   return {
+    ...normalizeWhiteboardEvidence(source),
     id: source.id,
     kind,
     title: source.title,
@@ -80,6 +81,7 @@ function parseEdge(value: unknown): CoraWhiteboardEdge | null {
     typeof source.to !== "string"
   ) return null;
   return {
+    ...normalizeWhiteboardEvidence(source),
     id: source.id,
     from: source.from,
     to: source.to,
@@ -155,4 +157,13 @@ export function whiteboardFileName(title: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 70) || "cora-whiteboard";
   return `${stem}.coraboard`;
+}
+
+export function normalizeWhiteboardEvidence(value: { sources?: unknown; confidence?: unknown }) {
+  return {
+    sources: Array.isArray(value.sources)
+      ? [...new Set(value.sources.filter((source): source is string => typeof source === "string").map((source) => source.trim().slice(0, 400)).filter(Boolean))].slice(0, 8)
+      : undefined,
+    confidence: value.confidence === "confirmed" || value.confidence === "inferred" ? value.confidence : undefined,
+  } as { sources?: string[]; confidence?: "confirmed" | "inferred" };
 }

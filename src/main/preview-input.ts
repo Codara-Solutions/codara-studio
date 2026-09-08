@@ -23,6 +23,7 @@
 
 import { ipcMain, webContents, type WebContents } from "electron";
 
+import { previewKeyEvents } from "./preview-keyboard";
 import { requestPreviewOp } from "./preview-bridge";
 import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
 
@@ -143,13 +144,14 @@ interface GuestInfo {
 
 async function resolveGuest(
   params: Record<string, unknown>,
+  focus = false,
 ): Promise<{ wc: WebContents; info: GuestInfo }> {
   const tabId = typeof params.tabId === "string" ? params.tabId : null;
   // Forward the caller's run identity: without an explicit tabId the renderer
   // scopes its pick to the tabs that run owns, so trusted-input ops resolve the
   // same guest the DOM ops would — never the user's own preview tab.
   const runId = typeof params.runId === "string" ? params.runId : null;
-  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId })) as GuestInfo;
+  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId, workspaceId: params.workspaceId, focus })) as GuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -372,14 +374,19 @@ export async function handlePreviewInputOp(
   }
 }
 
+async function showCursor(info: GuestInfo, params: Record<string, unknown>, action: string, point?: { x: number; y: number }): Promise<void> {
+  await requestPreviewOp("activity", { tabId: info.tabId, workspaceId: params.workspaceId, runId: params.runId, action, ...point });
+}
+
 async function opScroll(params: Record<string, unknown>): Promise<unknown> {
-  const { wc } = await resolveGuest(params);
+  const { wc, info } = await resolveGuest(params);
   const deltaX = typeof params.deltaX === "number" ? params.deltaX : 0;
   const deltaY = typeof params.deltaY === "number" ? params.deltaY : 0;
   if (deltaX === 0 && deltaY === 0) throw new Error("scroll requires a non-zero deltaX or deltaY");
   // For scroll, do NOT scrollIntoView the selector — the point is only the
   // wheel origin; centering it would fight the scroll the caller asked for.
   const { x, y } = await resolvePoint(wc, params, { scrollIntoView: false });
+  await showCursor(info, params, "Scrolling", { x, y });
   wc.sendInputEvent({
     type: "mouseWheel",
     x: Math.round(x),
@@ -392,16 +399,18 @@ async function opScroll(params: Record<string, unknown>): Promise<unknown> {
 }
 
 async function opHover(params: Record<string, unknown>): Promise<unknown> {
-  const { wc } = await resolveGuest(params);
+  const { wc, info } = await resolveGuest(params);
   const { x, y } = await resolvePoint(wc, params);
+  await showCursor(info, params, "Moving", { x, y });
   wc.sendInputEvent({ type: "mouseMove", x: Math.round(x), y: Math.round(y) });
   return { ok: true, x, y };
 }
 
 async function opMouse(params: Record<string, unknown>): Promise<unknown> {
   const action = typeof params.action === "string" ? params.action : "click";
-  const { wc } = await resolveGuest(params);
+  const { wc, info } = await resolveGuest(params);
   const { x, y } = await resolvePoint(wc, params);
+  await showCursor(info, params, "Clicking", { x, y });
   const modifiers = normalizeModifiers(params.modifiers);
   const px = Math.round(x);
   const py = Math.round(y);
@@ -442,7 +451,7 @@ async function opMouse(params: Record<string, unknown>): Promise<unknown> {
 }
 
 async function opDrag(params: Record<string, unknown>): Promise<unknown> {
-  const { wc } = await resolveGuest(params);
+  const { wc, info } = await resolveGuest(params);
   const from = (params.from && typeof params.from === "object" ? params.from : {}) as Record<
     string,
     unknown
@@ -451,6 +460,7 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
   const start = await resolvePoint(wc, from);
   const end = await resolvePoint(wc, to);
   const steps = Math.max(1, Math.min(typeof params.steps === "number" ? params.steps | 0 : 12, 100));
+  await showCursor(info, params, "Dragging", start);
   const sx = Math.round(start.x);
   const sy = Math.round(start.y);
   wc.sendInputEvent({ type: "mouseMove", x: sx, y: sy });
@@ -461,6 +471,7 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
     const t = i / steps;
     const mx = Math.round(start.x + (end.x - start.x) * t);
     const my = Math.round(start.y + (end.y - start.y) * t);
+    await showCursor(info, params, "Dragging", { x: mx, y: my });
     wc.sendInputEvent({ type: "mouseMove", x: mx, y: my, button: "left" } as Parameters<
       WebContents["sendInputEvent"]
     >[0]);
@@ -531,10 +542,10 @@ async function opNetwork(params: Record<string, unknown>): Promise<unknown> {
 async function opKey(params: Record<string, unknown>): Promise<unknown> {
   const key = typeof params.key === "string" ? params.key : null;
   if (!key) throw new Error("key requires 'key'");
-  const { wc } = await resolveGuest(params);
+  const { wc } = await resolveGuest(params, true);
   const text = typeof params.text === "string" ? params.text : null;
   const modifiers = normalizeModifiers(params.modifiers);
-  dispatchKey(wc, key, modifiers, text);
+  await dispatchKey(wc, key, modifiers, text);
   return { ok: true, key, modifiers };
 }
 
@@ -547,53 +558,41 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
   if (!key) throw new Error("press_key requires 'key'");
   let wc: WebContents;
   try {
-    ({ wc } = await resolveGuest(params));
+    ({ wc } = await resolveGuest(params, true));
   } catch {
     return requestPreviewOp("press_key", {
       tabId: (params.tabId as string) ?? null,
       runId: typeof params.runId === "string" ? params.runId : null,
+      workspaceId: params.workspaceId,
       key,
       selector: (params.selector as string) ?? null,
     });
   }
-  // If a selector was supplied, focus it first so the trusted key lands there.
   if (typeof params.selector === "string" && params.selector) {
-    try {
-      await wc.executeJavaScript(
-        `(() => { const el = document.querySelector(${JSON.stringify(
-          params.selector,
-        )}); if (el && el.focus) el.focus(); return !!el; })()`,
-        false,
-      );
-    } catch {
-      /* focus is best-effort */
-    }
+    const focused = await wc.executeJavaScript(
+      `(() => { const el = document.querySelector(${JSON.stringify(params.selector)});
+        if (!el || typeof el.focus !== "function") return false;
+        el.focus(); return document.activeElement === el || el.contains(document.activeElement); })()`,
+      false,
+    );
+    if (!focused) throw new Error(`preview key target is missing or not focusable: ${params.selector}`);
   }
-  dispatchKey(wc, key, [], null);
+  await dispatchKey(wc, key, [], null);
   return { ok: true, key, trusted: true };
 }
 
-// Electron sendInputEvent accepts a key string for `keyCode` (named keys like
-// Enter/Tab/Escape/Backspace/ArrowUp or a single character). For printable
-// input we also emit a `char` event so the character is inserted.
-function dispatchKey(
+// CDP dispatch remains trusted when the app or preview is in the background.
+// sendInputEvent silently drops keys when its BrowserWindow lacks OS focus.
+async function dispatchKey(
   wc: WebContents,
   key: string,
   modifiers: string[],
   text: string | null,
-): void {
-  const printable = text ?? (key.length === 1 ? key : null);
-  wc.sendInputEvent({ type: "keyDown", keyCode: key, modifiers } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
-  if (printable) {
-    wc.sendInputEvent({ type: "char", keyCode: printable, modifiers } as Parameters<
-      WebContents["sendInputEvent"]
-    >[0]);
-  }
-  wc.sendInputEvent({ type: "keyUp", keyCode: key, modifiers } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+): Promise<void> {
+  const events = previewKeyEvents(key, modifiers, text);
+  ensureDebugger(wc);
+  await wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+  for (const event of events) await wc.debugger.sendCommand("Input.dispatchKeyEvent", event);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 import React from "react";
-import type { PreviewTab, RunsTab, TabId } from "./types";
+import type { RunsTab, TabId } from "./types";
 import type { CoraView } from "../components/chat/cora-view";
 
 // The strip below the top TabBar that gives every real Cora run a stable
 // workbench: Chat | Runs | Board, plus the optional surfaces that exist for
-// this run — the Whiteboard and agent-opened previews.
+// this run, including the Whiteboard. Browsers use the workspace tab bar.
 // Board is per-chat (each run owns its kanban; a draft chat shows an empty
 // one whose first card mints the run), and its pill is unconditional — the
 // surface always exists.
@@ -48,7 +48,6 @@ interface Props {
   // renders a small attention dot on the pill until the surface is visited.
   whiteboardAttention: boolean;
   runsTab: RunsTab | null;
-  previews: PreviewTab[];
   onChatClick: () => void;
   onWhiteboardClick: () => void;
   // Flips the chat panel to this chat's Cora Board sub-view (chatView
@@ -65,7 +64,6 @@ export default function InnerTabStrip({
   whiteboardCreatable,
   whiteboardAttention,
   runsTab,
-  previews,
   onChatClick,
   onWhiteboardClick,
   onBoardClick,
@@ -120,15 +118,6 @@ export default function InnerTabStrip({
           icon={<WhiteboardGlyph />}
         />
       )}
-      {previews.map((preview) => (
-        <Pill
-          key={preview.id}
-          label={preview.title || "preview"}
-          active={activeId === preview.id}
-          onClick={() => onSelectTab(preview.id)}
-          title={preview.url}
-        />
-      ))}
       {/* Right-aligned slot the worker terminal guard portals its controls
           into (TerminalStack). Docking them here uses the strip's empty right
           half instead of floating over the top-right pane's title. */}

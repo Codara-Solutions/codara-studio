@@ -1,0 +1,346 @@
+{
+  "kind": "direct-context-continuity-probes",
+  "limitation": "One trial per probe, covering explicit conversation facts and corrections. The original baseline helper repeatedly attempted to auto-answer a blocked result; its questionsAsked value counts loop iterations, not distinct model questions; it was then cancelled after the missing-context failure was inspected. These runs are not latency comparisons. Protocol 2 adds a post-compaction owner correction and detects CLI truncation.",
+  "results": [
+    {
+      "sourceCommit": "9025530cd52fb4890cc01795d2218b067b7901e9",
+      "protocolVersion": null,
+      "model": "claude-sonnet-5",
+      "shouldCompact": true,
+      "automatic": null,
+      "runId": "run-mtrzp4h3-xler66",
+      "passed": false,
+      "checks": [
+        {
+          "name": "three completed turns",
+          "pass": false
+        },
+        {
+          "name": "exact settings with latest correction",
+          "pass": false
+        },
+        {
+          "name": "context was not persisted through tools before final request",
+          "pass": true
+        },
+        {
+          "name": "no questions auto-answered",
+          "pass": false
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        },
+        {
+          "name": "durable compaction advanced the epoch",
+          "pass": false
+        }
+      ],
+      "expected": {
+        "jobId": "job-685c83fcd8bb",
+        "region": "eu-west-3",
+        "retryLimit": 4,
+        "owner": "team-685c83fcd8bb"
+      },
+      "actual": null,
+      "compaction": {
+        "beforeEpoch": 0,
+        "error": "There is no provider conversation to compact yet."
+      },
+      "stages": [
+        {
+          "stage": 1,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 2,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 3,
+          "outcome": {
+            "status": "cancelled",
+            "questionsAsked": 56983
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "bash",
+            "read",
+            "bash",
+            "bash",
+            "bash",
+            "bash",
+            "bash",
+            "bash",
+            "bash",
+            "submit_result"
+          ]
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9ec49d8520cd112e7b5189dffe62dfc3bb807aed",
+      "protocolVersion": null,
+      "model": "claude-sonnet-5",
+      "shouldCompact": true,
+      "automatic": null,
+      "runId": "run-mtrzzdyu-sha6kl",
+      "passed": true,
+      "checks": [
+        {
+          "name": "three completed turns",
+          "pass": true
+        },
+        {
+          "name": "exact settings with latest correction",
+          "pass": true
+        },
+        {
+          "name": "context was not persisted through tools before final request",
+          "pass": true
+        },
+        {
+          "name": "no questions auto-answered",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+        },
+        {
+          "name": "durable compaction advanced the epoch",
+          "pass": true
+        }
+      ],
+      "expected": {
+        "jobId": "job-b06fc1a231a0",
+        "region": "eu-west-3",
+        "retryLimit": 4,
+        "owner": "team-b06fc1a231a0"
+      },
+      "actual": {
+        "jobId": "job-b06fc1a231a0",
+        "region": "eu-west-3",
+        "retryLimit": 4,
+        "owner": "team-b06fc1a231a0"
+      },
+      "compaction": {
+        "beforeEpoch": 0,
+        "afterEpoch": 1
+      },
+      "stages": [
+        {
+          "stage": 1,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 2,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 3,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": null,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "write",
+            "bash",
+            "submit_result"
+          ]
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9ec49d8520cd112e7b5189dffe62dfc3bb807aed",
+      "protocolVersion": 2,
+      "model": "gpt-5.6-luna",
+      "shouldCompact": false,
+      "automatic": true,
+      "runId": "run-mts05778-auk4si",
+      "passed": true,
+      "checks": [
+        {
+          "name": "all requested turns completed",
+          "pass": true
+        },
+        {
+          "name": "exact settings with latest correction",
+          "pass": true
+        },
+        {
+          "name": "context was not persisted through tools before final request",
+          "pass": true
+        },
+        {
+          "name": "no questions auto-answered",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "automatic compaction completed",
+          "pass": true
+        }
+      ],
+      "expected": {
+        "jobId": "job-e7ffa1d1f20d",
+        "region": "eu-west-3",
+        "retryLimit": 4,
+        "owner": "team-final-e7ffa1d1f20d"
+      },
+      "actual": {
+        "jobId": "job-e7ffa1d1f20d",
+        "region": "eu-west-3",
+        "retryLimit": 4,
+        "owner": "team-final-e7ffa1d1f20d"
+      },
+      "compaction": null,
+      "stages": [
+        {
+          "stage": 1,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 0,
+          "tools": [
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 2,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 0,
+          "tools": [
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 3,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 0,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 4,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 0,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 5,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 1,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 6,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 1,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result"
+          ]
+        },
+        {
+          "stage": 7,
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "conversationEpoch": 1,
+          "tools": [
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "submit_result",
+            "write",
+            "read",
+            "submit_result"
+          ]
+        }
+      ]
+    }
+  ]
+}

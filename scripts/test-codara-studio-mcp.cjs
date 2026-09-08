@@ -52,7 +52,7 @@ const TERMINAL_TOOLS = [
   "codara_terminal_read",
   "codara_terminal_close",
 ];
-const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
+const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
 const EXECUTE_TOOLS = [
@@ -86,9 +86,9 @@ const AUTOMATION_TOOLS = [
 
 // Drive one server process: send initialize + tools/list, resolve the tool
 // names it reports plus the serverInfo.name from initialize.
-function listTools(mode) {
+function listTools(mode, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, SPARK_HOME_DIR: HOME };
+    const env = { ...process.env, SPARK_HOME_DIR: HOME, ...extraEnv };
     if (mode) env.SPARK_MCP_MODE = mode;
     else delete env.SPARK_MCP_MODE;
     const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
@@ -280,6 +280,14 @@ function sortedEqual(actual, expected, label) {
       "codara_remember must tell the manager to copy relevant memory into worker descriptions",
     );
 
+    const directMemory = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1" });
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");
+    const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
+    assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
+    assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
+    const untrustedDirect = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
+    assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
+
     // Automation mode: memory is a manager-of-a-coding-run concept, an
     // automation loop has no user conversation to learn a durable fact from.
     const automation = await listTools("automation");
@@ -351,6 +359,7 @@ function sortedEqual(actual, expected, label) {
     // the shared local socket.
     const received = [];
     const receivedAuthorization = [];
+    let mockResult = { ok: true };
     mockAgentSocket = http.createServer((req, res) => {
       receivedAuthorization.push(req.headers.authorization);
       let body = "";
@@ -359,7 +368,7 @@ function sortedEqual(actual, expected, label) {
       req.on("end", () => {
         received.push(JSON.parse(body));
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: mockResult }));
       });
     });
     await new Promise((resolve, reject) => {
@@ -459,6 +468,14 @@ function sortedEqual(actual, expected, label) {
       "an unmarked trusted caller must adopt a rewritten handshake on its next call",
     );
 
+    process.env.CODARA_PI_DIRECT_TASK = "1";
+    delete require.cache[require.resolve(SERVER)];
+    const directMemoryBridge = require(SERVER);
+    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"], runId: "run-spoofed" });
+    assert.strictEqual(received.at(-1).method, "orchestrator.remember");
+    assert.strictEqual(received.at(-1).params.runId, "run-trusted", "direct memory stays in the calling workspace/profile");
+    delete process.env.CODARA_PI_DIRECT_TASK;
+
     await directBridge.callToolByName("codara_terminal_close", {
       paneId: "pane-owned",
       runId: "run-spoofed",
@@ -543,6 +560,40 @@ function sortedEqual(actual, expected, label) {
     });
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
+
+    const geometry = { url: "http://127.0.0.1:4173/", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
+    mockResult = { ...geometry, dataUrl: "data:image/png;base64,cGl4ZWxz" };
+    const screenshot = await directBridge.callToolByName("codara_preview_screenshot", {});
+    assert.strictEqual(screenshot.content[0].type, "image");
+    assert.deepStrictEqual(JSON.parse(screenshot.content[1].text), geometry);
+    const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
+    assert.strictEqual(screenshotBatch.content[0].type, "image");
+    assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+
+    mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
+    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { runId: "run-map", baseRevision: 4 });
+    assert.strictEqual(received.at(-1).method, "orchestrator.whiteboard_inspect");
+    assert.strictEqual(whiteboardImage.content[0].type, "image");
+    assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
+    assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
+
+    mockResult = { ok: false, error: "selector did not become visible" };
+    const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });
+    assert.strictEqual(failedSingle.isError, true, "DOM failures must become tool errors");
+    const beforeBatch = received.length;
+    const failedBatch = await directBridge.callToolByName("codara_preview_run", {
+      steps: [{ action: "wait_for", selector: "#missing" }, { action: "click", selector: "#submit" }],
+    });
+    assert.strictEqual(failedBatch.isError, true);
+    assert.strictEqual(received.length - beforeBatch, 1, "a failed wait must prevent the following mutation");
+    assert.match(failedBatch.content[0].text, /selector did not become visible/);
+    const continuedBatch = await directBridge.callToolByName("codara_preview_run", {
+      continueOnError: true,
+      steps: [{ action: "wait_for", selector: "#missing" }, { action: "snapshot" }],
+    });
+    assert.strictEqual(continuedBatch.isError, true);
+    assert.strictEqual(JSON.parse(continuedBatch.content[0].text).ran, 2);
+    mockResult = { ok: true };
 
     // The batched step schema is additionalProperties:false, so every field the
     // single-shot tool accepts must also be spelled out on the step items or a

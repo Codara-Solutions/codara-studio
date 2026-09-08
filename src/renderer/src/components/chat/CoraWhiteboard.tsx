@@ -7,6 +7,7 @@ import { renderBoardSvg, svgToPngDataUrl } from "../whiteboard/board-image";
 interface Props {
   run: RunState;
   workspacePath?: string;
+  visible?: boolean;
   onAskCora: (prompt: string) => void;
 }
 
@@ -28,6 +29,7 @@ function emptyBoard(): CoraWhiteboard {
 export default function CoraWhiteboardSurface({
   run,
   workspacePath,
+  visible = true,
   onAskCora,
 }: Props) {
   // Memoized so a run snapshot without a board doesn't mint a fresh object
@@ -237,10 +239,12 @@ export default function CoraWhiteboardSurface({
         onImport={() => void importBoard()}
         onExportBoard={() => void exportBoard()}
         onExportImage={(format) => void exportImage(format)}
+        onReview={() => onAskCora("Review and improve this whiteboard. Read my edits first, check its claims and connections against source code, inspect its rendered image, fix issues, and review the final revision. Preserve my manual choices and state any remaining uncertainty.")}
       />
       <div className="cora-whiteboard-surface__canvas">
         <CoraWhiteboardCanvas
           board={board}
+          visible={visible}
           editable
           onCommit={persist}
           onAskCora={onAskCora}
@@ -266,12 +270,14 @@ function WhiteboardHeader({
   onImport,
   onExportBoard,
   onExportImage,
+  onReview,
 }: {
   board: CoraWhiteboard;
   saveState: SaveState;
   onImport: () => void;
   onExportBoard: () => void;
   onExportImage: (format: "svg" | "png") => void;
+  onReview: () => void;
 }) {
   const editedBy = board.lastEditedBy === "user"
     ? "you"
@@ -286,7 +292,7 @@ function WhiteboardHeader({
   return (
     <header className="cora-whiteboard-header">
       <div className="cora-whiteboard-header__heading">
-        <h2>{board.title}</h2>
+        <h2 title={board.title}>{board.title}</h2>
         {board.summary && <p title={board.summary}>{board.summary}</p>}
       </div>
       <div
@@ -295,6 +301,11 @@ function WhiteboardHeader({
       >
         <span className={`cora-whiteboard-header__dot is-${saveState}`} aria-hidden />
         <span className={`cora-whiteboard-header__state is-${saveState}`}>{stateLabel}</span>
+        <span className="cora-whiteboard-review" title={board.review && board.review.revision === board.revision
+          ? [board.review.summary, ...board.review.limitations].join("\n")
+          : "Cora has not reviewed this revision yet."}>
+          {board.review && board.review.revision === board.revision ? "Cora reviewed" : "Draft · needs review"}
+        </span>
         <span className="cora-whiteboard-header__facts">
           {board.nodes.length} {board.nodes.length === 1 ? "card" : "cards"}
           {" · "}
@@ -304,6 +315,7 @@ function WhiteboardHeader({
         </span>
       </div>
       <div className="cora-whiteboard-header__actions">
+        {board.nodes.length > 0 && <button type="button" onClick={onReview}>Review & improve</button>}
         <button type="button" onClick={onImport}>Import</button>
         <ExportMenu onExportBoard={onExportBoard} onExportImage={onExportImage} />
       </div>

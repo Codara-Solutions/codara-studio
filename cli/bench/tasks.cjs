@@ -24,7 +24,7 @@
 //             between "made the test pass" and "honored the contract" is
 //             exactly the headroom that keeps 100/100 out of reach.
 //   extraChecks(dir, metrics)  optional task-specific graded checks
-//             (untouched test files, stale names, model routing).
+//             (untouched test files, stale names).
 //   reference patch that solves the task — used ONLY by the offline
 //             self-test to prove every check (hidden ones included) is
 //             satisfiable. The benchmark must never be unwinnable.
@@ -32,6 +32,7 @@
 const TIER_CAP_MS = { trivial: 5 * 60_000, standard: 10 * 60_000, hard: 15 * 60_000, project: 30 * 60_000 };
 
 const TASKS = [
+  require("./projects/ledger-reconcile.cjs"),
   // ── train · trivial ────────────────────────────────────────────────────────
   {
     name: "typo-fix",
@@ -39,6 +40,7 @@ const TASKS = [
     tier: "trivial",
     split: "train",
     par: { wallS: 60, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "range.js": `"use strict";
 // inRange(value, min, max) -> true when min <= value <= max (INCLUSIVE both ends).
@@ -72,10 +74,6 @@ assert.equal(inRange(-1, -3, -2), false);
 console.log("ok");`,
       },
     ],
-    extraChecks(dir) {
-      const untouched = (readFile(dir, "test.js") ?? "").includes("inRange(5, 0, 5)");
-      return [{ name: "test.js untouched", pass: untouched, weight: 1 }];
-    },
     reference: {
       "range.js": `"use strict";
 function inRange(value, min, max) {
@@ -92,6 +90,7 @@ module.exports = { inRange };
     tier: "trivial",
     split: "train",
     par: { wallS: 75, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "strings.js": `"use strict";
 function titleCase(text) {
@@ -339,6 +338,7 @@ module.exports = { count };
     tier: "hard",
     split: "train",
     par: { wallS: 240, tokensK: 50 },
+    protectedFiles: ["test.js"],
     files: {
       "eventlog.js": `"use strict";
 // Append-only event log with STABLE 1-based ids.
@@ -411,10 +411,6 @@ assert.equal(log.get(1), undefined);
 console.log("ok");`,
       },
     ],
-    extraChecks(dir) {
-      const untouched = (readFile(dir, "test.js") ?? "").includes('log.slice(1, 2)');
-      return [{ name: "test.js untouched", pass: untouched, weight: 1 }];
-    },
     reference: {
       "eventlog.js": `"use strict";
 function createLog() {
@@ -444,6 +440,7 @@ module.exports = { createLog };
     tier: "hard",
     split: "train",
     par: { wallS: 300, tokensK: 60 },
+    protectedFiles: ["test.js"],
     files: {
       "bookings.js": `"use strict";
 // mergeBookings(bookings) -> flattened schedule.
@@ -824,6 +821,7 @@ module.exports = { renderTable };
     tier: "project",
     split: "train",
     par: { wallS: 540, tokensK: 160 },
+    protectedFiles: ["test.js"],
     files: {
       "track.js": `"use strict";
 // A tiny task tracker. createTracker() returns an independent tracker:
@@ -1067,6 +1065,7 @@ module.exports = { createTracker };
     parallel: true,
     expectedParallel: 4,
     par: { wallS: 720, tokensK: 250 },
+    protectedFiles: ["test.js", "README.md"],
     files: {
       "README.md": `# mini-lang
 
@@ -1726,6 +1725,7 @@ module.exports = { lint };
     parallel: true,
     expectedParallel: 3,
     par: { wallS: 480, tokensK: 120 },
+    protectedFiles: ["test.js", "README.md", "puzzles/p1.json", "puzzles/p2.json", "puzzles/p3.json"],
     files: {
       "README.md": `# arc-triad
 
@@ -3067,6 +3067,7 @@ module.exports = { transform };
     tier: "hard",
     split: "train",
     par: { wallS: 180, tokensK: 120 },
+    protectedFiles: ["test.js"],
     files: {
       "patch.js": `"use strict";
 
@@ -3157,14 +3158,32 @@ assert.throws(
 );
 console.log("ok");`,
       },
+      {
+        name: "object member identity and restricted dash segments",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { applyPatch, PatchError } = require("./patch.js");
+for (const [document, operation] of [
+  [{}, { op: "add", path: "/-", value: 1 }],
+  [{ "-": 1 }, { op: "replace", path: "/-", value: 2 }],
+  [{ "-": 1 }, { op: "remove", path: "/-" }],
+  [{ "-": { x: 1 } }, { op: "replace", path: "/-/x", value: 2 }],
+]) {
+  const before = structuredClone(document);
+  assert.throws(
+    () => applyPatch(document, [operation]),
+    (error) => error instanceof PatchError && error.index === 0,
+  );
+  assert.deepEqual(document, before);
+}
+assert.deepEqual(applyPatch([], [{ op: "add", path: "/-", value: 1 }]), [1]);
+assert.deepEqual(
+  applyPatch({}, [{ op: "add", path: "/__proto__", value: { safe: true } }]),
+  JSON.parse('{"__proto__":{"safe":true}}'),
+);
+console.log("ok");`,
+      },
     ],
-    extraChecks(dir) {
-      return [{
-        name: "test.js untouched",
-        pass: (readFile(dir, "test.js") ?? "").includes("error.index === 0"),
-        weight: 1,
-      }];
-    },
     reference: {
       "patch.js": `"use strict";
 
@@ -3212,6 +3231,7 @@ function applyPatch(document, operations) {
       }
       let parent = output;
       for (const part of parts.slice(0, -1)) {
+        if (part === "-") throw new Error("dash is only valid for array add");
         if (parent === null || typeof parent !== "object") throw new Error("missing parent");
         if (Array.isArray(parent)) {
           parent = parent[arrayIndex(part, parent.length, false)];
@@ -3222,6 +3242,7 @@ function applyPatch(document, operations) {
       }
       if (parent === null || typeof parent !== "object") throw new Error("missing parent");
       const key = parts.at(-1);
+      if (key === "-" && !(Array.isArray(parent) && operation.op === "add")) throw new Error("dash is only valid for array add");
       if (Array.isArray(parent)) {
         if (operation.op === "add") {
           const at = key === "-" ? parent.length : arrayIndex(key, parent.length, true);
@@ -3233,7 +3254,7 @@ function applyPatch(document, operations) {
           else parent.splice(at, 1);
         }
       } else if (operation.op === "add") {
-        parent[key] = clone(operation.value);
+        Object.defineProperty(parent, key, { value: clone(operation.value), writable: true, enumerable: true, configurable: true });
       } else {
         if (!Object.hasOwn(parent, key)) throw new Error("missing key");
         if (operation.op === "replace") parent[key] = clone(operation.value);
@@ -3257,6 +3278,7 @@ module.exports = { applyPatch, PatchError };
     tier: "hard",
     split: "train",
     par: { wallS: 150, tokensK: 90 },
+    protectedFiles: ["test.js"],
     files: {
       "planner.js": `"use strict";
 
@@ -3382,6 +3404,7 @@ module.exports = { plan };
     tier: "hard",
     split: "train",
     par: { wallS: 180, tokensK: 100 },
+    protectedFiles: ["test.js"],
     files: {
       "pool.js": `"use strict";
 
@@ -3527,6 +3550,7 @@ module.exports = { mapPool };
     tier: "trivial",
     split: "holdout",
     par: { wallS: 60, tokensK: 15 },
+    protectedFiles: ["test.js"],
     files: {
       "median.js": `"use strict";
 // median(values) -> the middle value of the sorted numbers (mean of the two
@@ -3664,7 +3688,7 @@ module.exports = { uniqueSorted };
 
   {
     name: "holdout-lru",
-    brief: "holdout: subtle LRU+TTL invariants; should route to claude-fable-5",
+    brief: "holdout: subtle LRU+TTL invariants across any selected model",
     tier: "hard",
     split: "holdout",
     par: { wallS: 300, tokensK: 60 },
@@ -3742,18 +3766,24 @@ t = 200;
 assert.equal(c.get("a"), undefined);
 console.log("ok");`,
       },
+      {
+        name: "expired recent entries cannot evict live LRU entries",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { createCache } = require("./lru.js");
+let t = 0;
+const c = createCache(2, 100, () => t);
+c.set("expired", 1);
+t = 50; c.set("live", 2);
+t = 75; assert.equal(c.get("expired"), 1);
+t = 120; c.set("new", 3);
+assert.equal(c.get("live"), 2);
+assert.equal(c.get("expired"), undefined);
+assert.equal(c.get("new"), 3);
+assert.equal(c.size(), 2);
+console.log("ok");`,
+      },
     ],
-    extraChecks(dir, metrics) {
-      const models = metrics?.models ?? [];
-      return [
-        {
-          name: "routed to claude-fable-5 (premium tier for subtle invariants)",
-          pass: models.includes("claude-fable-5"),
-          weight: 2,
-          detail: models.join(", ") || "no models recorded",
-        },
-      ];
-    },
     reference: {
       "lru.js": `"use strict";
 function createCache(capacity, ttlMs, now) {

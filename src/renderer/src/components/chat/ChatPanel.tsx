@@ -249,6 +249,7 @@ export default function ChatPanel({
                   key={activeRun.id}
                   run={activeRun}
                   workspacePath={workspace?.cwd}
+                  visible={chatView === "whiteboard" && suspendGlobalEvents !== true}
                   onAskCora={(prompt) => {
                     setChatView("chat");
                     window.requestAnimationFrame(() => {

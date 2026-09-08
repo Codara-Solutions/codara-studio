@@ -10,7 +10,7 @@ import { familyForModelId, familyForSubscription } from "../../shared/agent-fami
 import { resolveCompactAtTokens } from "@shared/context-compaction";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
-export const CODARA_PI_VERSION = "0.84.4";
+export const CODARA_PI_VERSION = "0.85.1";
 /** Vendored Pi extension that registers the provider-native web_search tool.
  * It is a normal dependency of this repo, never the user's own pi packages. */
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
@@ -442,11 +442,13 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   // the compaction trigger is stamped once here rather than at each call site.
   // buildPiSubscriptionEnvironment drops CODARA_PI_* from the inherited
   // environment, which makes this the only source the extension can read.
+  // Worker launchers replace this with the tool-round pause mode.
+  env.CODARA_PI_HOST_COMPACTION = "settled";
   env.CODARA_PI_COMPACT_AT_TOKENS = String(
     resolvePiCompactAtTokens(options.baseEnv ?? process.env),
   );
   // Service-tier policy inputs. The extension's before_provider_request hook
-  // is the only seam Pi 0.84.4 gives us for the request body, and it needs to
+  // is the only seam Pi 0.85.1 gives us for the request body, and it needs to
   // know which provider this process talks to and whether Settings enabled the
   // faster OpenAI tier. Fast mode is stamped only for OpenAI providers: an
   // Anthropic plan never carries the flag at all, which is the first of the

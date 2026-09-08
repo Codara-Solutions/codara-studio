@@ -25,6 +25,7 @@ import type {
   ChatTab,
   DiffTab,
   DockableTabKind,
+  EditorTab,
   PaneNode,
   PreviewTab,
   RunsTab,
@@ -439,12 +440,6 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             // empty husk. Saved boards come back as editor tabs instead.
             tab.kind !== "whiteboard" &&
             tab.kind !== "chat" &&
-            // A Cora-owned browser is a live tool surface, not durable
-            // workspace furniture. If the renderer reloads mid-run, Cora can
-            // reopen it through the preview bridge; if the run already ended,
-            // restoring it would promote an orphaned inner tab into a normal
-            // top-level browser and keep a Chromium process alive forever.
-            !(tab.kind === "preview" && Boolean(tab.runId)) &&
             !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
         ),
     );
@@ -518,6 +513,25 @@ function persist(
     window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
     // Quota exceeded or storage unavailable; persistence is best-effort.
+  }
+}
+
+function persistBackgroundPreviews(workspaceId: string, tabs: Tab[]): void {
+  const key = storageKey(workspaceId);
+  if (!key) return;
+  try {
+    const raw = window.localStorage.getItem(key);
+    const saved = raw ? migratePersisted(JSON.parse(raw) as PersistedShape) : null;
+    const previews = tabs.filter((tab) => tab.kind === "preview");
+    const ids = new Set(previews.map((tab) => tab.id));
+    // A never-visited workspace has only its bridge tabs mounted. Preserve
+    // the rest of its saved layout without hydrating unrelated terminals.
+    window.localStorage.setItem(key, JSON.stringify({
+      ...(saved ?? { v: TAB_VERSION, activeId: null }),
+      tabs: [...(saved?.tabs ?? []).filter((tab) => !ids.has(tab.id)), ...previews],
+    }));
+  } catch {
+    // Match normal layout persistence when storage is unavailable or full.
   }
 }
 
@@ -961,7 +975,10 @@ export function mergeDeferredWorkspaceTerminalLayout(
 ): WorkspaceTerminalLayout {
   return {
     workspaceId: cold.workspaceId,
-    tabs: normalizeTerminalTitles([...cold.tabs, ...deferred.tabs]),
+    tabs: normalizeTerminalTitles([
+      ...cold.tabs.filter((tab) => !deferred.tabs.some((live) => live.id === tab.id)),
+      ...deferred.tabs,
+    ]),
     activeId: cold.activeId,
   };
 }
@@ -1250,8 +1267,8 @@ export interface UseTabsApi {
   // ("+ New preview", openInSparkBrowser) select the new tab. Automated
   // openers (dev-server URL auto-detect, the MCP preview bridge) pass
   // focus:false so a preview never yanks the user off their chat — the tab
-  // still appears in the strip / inner strip to click into.
-  newPreviewTab: (url: string, options?: { runId?: string | null; focus?: boolean }) => TabId;
+  // still appears in the workspace tab strip to click into.
+  newPreviewTab: (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean }) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
   // false for the background "ensure the active chat has a tab" effect.
@@ -1268,6 +1285,7 @@ export interface UseTabsApi {
   // Append a fresh untitled whiteboard tab and focus it (one draft per call,
   // not a singleton). See WhiteboardTab in types.ts for the draft contract.
   newWhiteboardTab: () => TabId;
+  saveWhiteboardTabAs: (id: TabId, entry: FsEntry) => void;
   // Open (or focus) the diff tab for a changed file. Identity is
   // (path, staged) — the same file can have a Working Tree tab and a Staged
   // tab open side by side, exactly like VS Code's separate diff editors.
@@ -1285,12 +1303,6 @@ export interface UseTabsApi {
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
-  // Close every preview tab spawned by a run (used when the run is deleted —
-  // a deleted run can never re-surface them via its inner tab strip, so
-  // leaving them would strand invisible, uncloseable browser tabs).
-  closePreviewTabsFor: (runId: string) => void;
-  /** Close Cora-owned browsers even when their workspace is in the background. */
-  closePreviewTabsForInWorkspace: (workspaceId: string, runId: string) => void;
   // run.deleted cleanup for background workspaces: purge the dead run's owned
   // tabs from the frozen live-snapshot map and the inactive-layout mirror so
   // switching back can't restore a stranded (pill-less) active tab.
@@ -2634,8 +2646,7 @@ export function useTabs(
             // last pane doesn't strand the active id on a hidden worker/runs tab.
             const isRunOwned = (t: Tab) =>
               (t.kind === "terminal" && t.scope?.kind === "workers") ||
-              t.kind === "runs" ||
-              (t.kind === "preview" && Boolean(t.runId));
+              t.kind === "runs";
             const topStrip = next.filter((t) => !isRunOwned(t));
             return topStrip[topStrip.length - 1]?.id ?? next[next.length - 1]?.id ?? null;
           });
@@ -3182,21 +3193,12 @@ export function useTabs(
       // chat-history popover; the closedChatRunIds marker added above keeps
       // syncChatTabsToRuns from resurrecting the tab on the next runs refresh.
       //
-      // The run's PREVIEW tabs close WITH the chat tab: their only pills live
-      // in this chat's inner strip, so once the chat is gone each one is an
-      // invisible, uncloseable <webview> whose Chromium renderer (~40-80MB,
-      // background throttling off) keeps running forever — and if one was (or
-      // later became) the active tab, the user stared at a fullscreen browser
-      // with no tab anywhere (the reported leak). The run's ephemeral Runs tab
-      // goes the same way; both re-materialize when the run is reopened from
-      // history (openRunsTab / Cora reopening its preview). Worker TERMINAL
-      // tabs stay: they host live PTYs of possibly still-running workers, are
-      // hidden by the run-visibility filter, and resurface on reopen.
+      // Browser tabs remain workspace surfaces when their originating chat
+      // closes. Only the chat's ephemeral Runs surface goes away with it.
       const doomedIds = new Set<TabId>(
         curr
           .filter(
             (t) =>
-              (t.kind === "preview" && t.runId === runId) ||
               (t.kind === "runs" && t.runId === runId),
           )
           .map((t) => t.id),
@@ -3208,11 +3210,10 @@ export function useTabs(
       // worker terminals (pill-less once the owning chat is gone). NEVER fall
       // back onto a run-owned tab either; empty state beats a stranding.
       // Scoped to THIS run's tabs: closing an unrelated chat while viewing
-      // another (still-open) run's worker/preview must not yank the view.
+      // another (still-open) run's worker must not yank the view.
       const ownedByClosedRun = (t: Tab) =>
         (t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId) ||
-        (t.kind === "runs" && t.runId === runId) ||
-        (t.kind === "preview" && t.runId === runId);
+        (t.kind === "runs" && t.runId === runId);
       setActiveId((active) => {
         if (!active) return active;
         const activeTab = next.find((t) => t.id === active);
@@ -3237,7 +3238,7 @@ export function useTabs(
   }, []);
 
   const newPreviewTab = useCallback(
-    (url: string, options?: { runId?: string | null; focus?: boolean }): TabId => {
+    (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean }): TabId => {
       const id = makeId("preview");
       const tab: PreviewTab = {
         id,
@@ -3246,6 +3247,20 @@ export function useTabs(
         url,
         ...(options?.runId ? { runId: options.runId } : {}),
       };
+      const targetWorkspaceId = options?.workspaceId;
+      if (targetWorkspaceId && targetWorkspaceId !== tabsWorkspaceIdRef.current) {
+        let live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+        if (!live) {
+          live = { tabs: [], activeId: null };
+          deferredColdWorkspaceIdsRef.current.add(targetWorkspaceId);
+        }
+        const next = { tabs: [...live.tabs, tab], activeId: live.activeId };
+        liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
+        persistBackgroundPreviews(targetWorkspaceId, next.tabs);
+        preloadedWorkspaceTabsRef.current.delete(targetWorkspaceId);
+        setInactiveWorkspaceLayouts((current) => upsertInactiveWorkspaceLayout(current, { workspaceId: targetWorkspaceId, ...next }));
+        return id;
+      }
       setTabs((curr) => [...curr, tab]);
       // Only steal the active tab for explicit user opens. Automated openers
       // (auto-detect, MCP bridge) pass focus:false so the preview appears in
@@ -3744,98 +3759,13 @@ export function useTabs(
     });
   }, []);
 
-  // Close every preview tab a run spawned (run.deleted cleanup, alongside
-  // closeRunsTabFor/closeWorkerTerminalTabFor). Run-tagged previews are listed
-  // only in the deleted run's inner tab strip, so any left behind would be
-  // invisible and uncloseable forever. A run can own several previews, hence
-  // the filter (unlike the single runs/workers tabs). No PTYs to dispose —
-  // fireDispose covers any registered per-tab teardown. Same reseed contract
-  // as the sibling closers: never reseed a chat tab on an emptied workspace.
-  const closePreviewTabsFor = useCallback(
-    (runId: string) => {
-      setTabs((curr) => {
-        const doomed = curr.filter(
-          (t): t is PreviewTab => t.kind === "preview" && t.runId === runId,
-        );
-        if (doomed.length === 0) return curr;
-        const doomedIds = new Set<TabId>(doomed.map((t) => t.id));
-        const next = curr.filter((t) => !doomedIds.has(t.id));
-        for (const id of doomedIds) fireDispose(id);
-        if (next.length === 0) {
-          const seed = createTerminalTab(defaultCwdRef.current);
-          setActiveId(seed.id);
-          return [seed];
-        }
-        setActiveId((active) => {
-          if (!active || !doomedIds.has(active)) return active;
-          const fallbackChat = next.find((t) => t.kind === "chat");
-          const fallbackFree = next.find((t) => !isRunOwnedTab(t));
-          // Same rule as closeChatTabForRun: NEVER fall back onto a run-owned
-          // tab (it may itself be pill-less) — empty state beats a stranding.
-          return fallbackChat?.id ?? fallbackFree?.id ?? null;
-        });
-        return next;
-      });
-    },
-    [fireDispose],
-  );
-
-  const closePreviewTabsForInWorkspace = useCallback(
-    (targetWorkspaceId: string, runId: string) => {
-      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
-        closePreviewTabsFor(runId);
-        return;
-      }
-      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
-      if (!live) return;
-      const doomed = live.tabs.filter(
-        (tab): tab is PreviewTab => tab.kind === "preview" && tab.runId === runId,
-      );
-      if (doomed.length === 0) return;
-      const doomedIds = new Set(doomed.map((tab) => tab.id));
-      const nextTabs = live.tabs.filter((tab) => !doomedIds.has(tab.id));
-      let nextActiveId = live.activeId;
-      if (nextActiveId && doomedIds.has(nextActiveId)) {
-        nextActiveId =
-          nextTabs.find((tab) => tab.kind === "chat" && tab.id === runId)?.id
-          ?? nextTabs.find((tab) => !isRunOwnedTab(tab))?.id
-          ?? null;
-      }
-      const next = { tabs: nextTabs, activeId: nextActiveId };
-      liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
-      setInactiveWorkspaceLayouts((current) => {
-        let changed = false;
-        const layouts = current.map((layout) => {
-          if (layout.workspaceId !== targetWorkspaceId) return layout;
-          changed = true;
-          return { ...layout, ...next };
-        });
-        return changed ? layouts : current;
-      });
-    },
-    [closePreviewTabsFor],
-  );
-
-  // run.deleted cleanup for workspaces that are NOT the active one. The
-  // closers above only mutate the active workspace's tab store; a run living
-  // in a background workspace keeps its owned tabs (chat, workers terminal,
-  // Runs canvas, previews) frozen inside the live in-memory snapshot and the
-  // inactive-layout mirror. Switching back restores that snapshot VERBATIM —
-  // the loadPersisted runId-strip only runs on boot / first entry — so a
-  // deleted run's preview could come back as a fullscreen active tab with no
-  // pill anywhere (the stranded-browser bug, via the Settings run manager's
-  // cross-workspace delete). Prune every tab the dead run owned from both
-  // stores, rerouting a stranded frozen activeId the same way the closers do.
-  // The chat tab is pruned too (its run no longer exists; the sync effect
-  // would drop it on switch-in anyway, but without any activeId reroute) —
-  // closedChatRunIds is deliberately NOT touched: that set belongs to
-  // explicit user closes, and a deleted run can never re-sync regardless.
+  // Background layouts need the same chat/worker cleanup as the active store.
+  // Browser tabs survive because their ownership is workspace-level.
   const pruneDeletedRunTabsFromInactiveWorkspaces = useCallback((runId: string) => {
     const ownedByRun = (t: Tab) =>
       (t.kind === "chat" && t.id === runId) ||
       (t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId) ||
-      (t.kind === "runs" && t.runId === runId) ||
-      (t.kind === "preview" && t.runId === runId);
+      (t.kind === "runs" && t.runId === runId);
     const prune = (
       layout: { tabs: Tab[]; activeId: TabId | null },
     ): { tabs: Tab[]; activeId: TabId | null } | null => {
@@ -3873,6 +3803,25 @@ export function useTabs(
       return changed ? next : prev;
     });
   }, []);
+
+  const saveWhiteboardTabAs = useCallback((id: TabId, entry: FsEntry) => {
+    setTabs((current) => {
+      if (!current.some((tab) => tab.id === id && tab.kind === "whiteboard")) return current;
+      const existing = current.find((tab): tab is EditorTab => tab.kind === "editor" && tab.path === entry.path);
+      fireDispose(id);
+      if (existing) {
+        setActiveId((active) => active === id ? existing.id : active);
+        return pruneDockCellsFor(current.filter((tab) => tab.id !== id).map((tab) =>
+          tab.id === existing.id ? { ...tab, preview: false } : tab), id);
+      }
+      // Keep the draft's identity and selection through the save. Separate
+      // open/close updates can reroute focus before React evaluates the open.
+      return current.map((tab): Tab => tab.id === id ? {
+        id, kind: "editor", title: basename(entry.path), path: entry.path,
+        entry, dirty: false, preview: false,
+      } : tab);
+    });
+  }, [fireDispose]);
 
   const openEditorTab = useCallback((entry: FsEntry, options: OpenEditorOptions = {}): TabId => {
     const ids = { editor: makeId("editor"), host: makeId("term"), targetCell: makeId("dock"), sourceCell: makeId("dock") };
@@ -3936,13 +3885,19 @@ export function useTabs(
   }, []);
 
   const setPreviewUrl = useCallback((id: TabId, url: string) => {
-    setTabs((curr) =>
-      curr.map((t) =>
-        t.id === id && t.kind === "preview"
-          ? { ...t, url, title: titleFromUrl(url) }
-          : t,
-      ),
-    );
+    const update = (tabs: Tab[]) => {
+      if (!tabs.some((tab) => tab.id === id && tab.kind === "preview" && tab.url !== url)) return tabs;
+      return tabs.map((tab) => tab.id === id && tab.kind === "preview" ? { ...tab, url, title: titleFromUrl(url) } : tab);
+    };
+    setTabs(update);
+    for (const [workspaceId, live] of liveWorkspaceTabsRef.current) {
+      if (workspaceId === tabsWorkspaceIdRef.current || !live.tabs.some((tab) => tab.id === id)) continue;
+      const next = { ...live, tabs: update(live.tabs) };
+      liveWorkspaceTabsRef.current.set(workspaceId, next);
+      persistBackgroundPreviews(workspaceId, next.tabs);
+      preloadedWorkspaceTabsRef.current.delete(workspaceId);
+      setInactiveWorkspaceLayouts((current) => upsertInactiveWorkspaceLayout(current, { workspaceId, ...next }));
+    }
   }, []);
 
   // Compatibility helper for older callers: null hides Runs entirely; an id
@@ -4036,12 +3991,11 @@ export function useTabs(
       openAutomationsTab,
       openUsageTab,
       newWhiteboardTab,
+      saveWhiteboardTabAs,
       openDiffTab,
       openCommitDiffTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
-      closePreviewTabsFor,
-      closePreviewTabsForInWorkspace,
       pruneDeletedRunTabsFromInactiveWorkspaces,
       openEditorTab,
       pinEditorTab,

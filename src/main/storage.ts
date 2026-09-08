@@ -129,6 +129,7 @@ function normalize(w: Workspace): Workspace {
     ...(typeof w.groupId === "string" && w.groupId.trim()
       ? { groupId: w.groupId.trim() }
       : {}),
+    ...(typeof w.icon === "string" && w.icon.trim() ? { icon: w.icon.trim() } : {}),
   };
   // Carry copy-branch provenance through verbatim when it is a well-formed
   // object; without this the field is silently dropped on every state:save and

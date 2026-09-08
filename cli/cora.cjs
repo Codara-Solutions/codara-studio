@@ -59,8 +59,11 @@ ${c.bold("BENCH")}
                                harness benchmark via the live app: 0-100 score
                                (correctness, par efficiency, post-green
                                discipline, orchestration); appends history.jsonl
-  bench --agent hermes [--model M --effort E]
+  bench --agent hermes|codex|claude [--model M --effort E]
                                same-model comparison through Hermes Agent
+  bench matrix --models all|M1,M2 --output DIR [--task NAME --repeat N]
+                               run a model matrix with per-model artifacts
+  bench --output FILE          save a new JSON artifact with every check
   bench list                   show the suite's tasks (tier, split)
   bench history                score trajectory across runs
   ws prune                     remove workspaces whose directory is gone

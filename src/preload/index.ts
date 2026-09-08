@@ -651,6 +651,8 @@ const api = {
   },
   git: {
     status: (cwd: string): Promise<GitStatus> => ipcRenderer.invoke("git:status", cwd),
+    currentBranch: (cwd: string): Promise<string | null> =>
+      ipcRenderer.invoke("git:currentBranch", cwd),
     log: (cwd: string): Promise<GitLog> => ipcRenderer.invoke("git:log", cwd),
     diff: (
       cwd: string,

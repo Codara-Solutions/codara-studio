@@ -66,7 +66,7 @@ async function main() {
   assert.equal(drop([term, browser], { tabId: term.id, paneId: "missing" }), null);
   assert.equal(drop([term], { tabId: term.id }), null, "closed target rejected");
   assert.equal(drop([{ ...term, scope: { kind: "workers", runId: "run" } }, browser], { tabId: term.id }), null);
-  assert.equal(drop([term, { ...browser, runId: "run" }], { tabId: term.id }), null);
+  assert.ok(drop([term, { ...browser, runId: "run" }], { tabId: term.id }), "run-linked browsers remain workspace surfaces");
   assert.equal(drop([docked, editor, browser], { tabId: term.id }, place, editor.id), null, "already docked target rejected");
   const chats = [{ id: "c1", kind: "chat" }, { id: "c2", kind: "chat" }];
   assert.equal(drop(chats, { tabId: "c1" }, place, "c2"), null, "two docked chats rejected");

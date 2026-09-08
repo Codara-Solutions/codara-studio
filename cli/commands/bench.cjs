@@ -4,7 +4,7 @@
 //
 // Per task: seed a throwaway git workspace, `chat.create` a real Cora run,
 // poll the visible test every few seconds to catch the moment it first goes
-// green, wait for the run to settle (auto-answering any question), then grade:
+// green, wait for the run to settle or block, then grade:
 // visible tests + hidden contract checks + task-specific checks, scored by
 // bench/score.cjs into a 0-100 HARNESS score (correctness, efficiency against
 // par, post-green discipline, orchestration, penalties).
@@ -23,10 +23,12 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile, execFileSync } = require("node:child_process");
 
-const { rpc, rpcRaw } = require("../lib/rpc.cjs");
+const { rpc, rpcRaw, homeDir } = require("../lib/rpc.cjs");
 const { findRun } = require("../lib/store.cjs");
 const { TASKS, TIER_CAP_MS } = require("../bench/tasks.cjs");
 const { scoreTask, summarize } = require("../bench/score.cjs");
+const { gradeChecks, visibleSource } = require("../bench/grade.cjs");
+const { acceptanceSummary, trialPassed, modelControlCheck } = require("../bench/metrics.cjs");
 const { RIVAL_AGENTS, rivalLabel, runRivalTurn } = require("../bench/rivals.cjs");
 
 const round1 = (n) => Math.round(n * 10) / 10;
@@ -58,7 +60,8 @@ function commandOutput(command, args, cwd = ROOT) {
 }
 
 function comparableEntry(candidate, identity) {
-  return candidate.suiteHash === identity.suiteHash &&
+  return Boolean(candidate.adopted) === Boolean(identity.adopted) &&
+    candidate.suiteHash === identity.suiteHash &&
     candidate.scorerHash === identity.scorerHash &&
     candidate.runnerHash === identity.runnerHash &&
     JSON.stringify(candidate.control) === JSON.stringify(identity.control) &&
@@ -77,9 +80,9 @@ function toolVersions() {
 function historyMetadata(agent, taskNames, repeat, control = {}) {
   return {
     promptHash: agent === "cora" ? promptHash() : `${agent}-cli`,
-    suiteHash: sourceHash(["cli/bench/tasks.cjs"]),
-    scorerHash: sourceHash(["cli/bench/score.cjs"]),
-    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs"]),
+    suiteHash: sourceHash(["cli/bench/tasks.cjs", "cli/bench/projects/ledger-reconcile.cjs"]),
+    scorerHash: sourceHash(["cli/bench/score.cjs", "cli/bench/grade.cjs", "cli/bench/metrics.cjs"]),
+    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs", "cli/bench/headless.cjs", "cli/bench/hermes.cjs", "cli/bench/matrix.cjs"]),
     sourceCommit: commandOutput("git", ["rev-parse", "--short=12", "HEAD"]),
     sourceDirty: Boolean(commandOutput("git", ["status", "--porcelain"])),
     productVersion: PRODUCT_VERSION,
@@ -123,9 +126,9 @@ function seedWorkspace(task) {
 /** "Green" = the visible test passes AND the tree actually changed from the
  * seed (some seeds pass their tests untouched, e.g. a rename task), AND any
  * task-specific probe agrees. Runs without blocking the poller. */
-function probeGreen(dir, task) {
+function probeGreen(dir, task, stageIndex = 0) {
   return new Promise((resolve) => {
-    execFile("node", ["test.js"], { cwd: dir, timeout: 10_000 }, (err) => {
+    execFile(process.execPath, ["--input-type=commonjs", "-e", visibleSource(task, stageIndex)], { cwd: dir, timeout: 10_000 }, (err) => {
       if (err) return resolve(false);
       execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: 10_000 }, (gitErr, out) => {
         const treeChanged = Boolean(gitErr) || String(out).trim().length > 0;
@@ -140,44 +143,26 @@ function probeGreen(dir, task) {
   });
 }
 
-/** Run a hidden check group: written next to the tree at grade time only. */
-function runHidden(dir, index, source) {
-  const file = path.join(dir, `__bench_hidden_${index}.js`);
-  fs.writeFileSync(file, `"use strict";\n${source}\n`);
-  try {
-    execFileSync("node", [path.basename(file)], { cwd: dir, timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
-    return { ok: true, out: "" };
-  } catch (err) {
-    // Surface the assertion itself, not the stack preamble: the useful part
-    // (AssertionError message + diff) sits mid-output.
-    const raw = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    const at = raw.indexOf("AssertionError");
-    const detail = (at === -1 ? raw : raw.slice(at)).replace(/\n\s+at [^\n]+/g, "");
-    return { ok: false, out: detail.slice(0, 400) };
-  } finally {
-    fs.rmSync(file, { force: true });
-  }
-}
-
-/** Wait for the run to settle; auto-answer questions so the bench never hangs. */
-async function driveToCompletion(flags, runId, deadline) {
+/** A blocked run fails the one-shot contract; do not manufacture follow-ups. */
+async function driveToCompletion(flags, runId, deadline, expectedModel) {
   let questionsAsked = 0;
   for (;;) {
     if (Date.now() > deadline) return { status: "timeout", questionsAsked };
+    if (expectedModel) {
+      const run = findRun(flags, runId);
+      const models = [...(run.sparkCalls ?? []), ...(run.workerAttempts ?? [])].map((item) => item.model).filter(Boolean);
+      if (models.length && !modelControlCheck(models, expectedModel).pass) {
+        return { status: "model_mismatch", questionsAsked, error: `Expected ${expectedModel}; launched ${models.join(", ")}` };
+      }
+    }
     const res = await rpcRaw(flags, "chat.wait", {
       runId,
-      timeoutMs: Math.min(60_000, deadline - Date.now()),
+      timeoutMs: Math.min(expectedModel ? 5_000 : 60_000, deadline - Date.now()),
     });
     if (res.error) return { status: "error", questionsAsked, error: res.error.message };
     const status = res.result?.run?.status ?? res.result?.status;
     if (["complete", "failed", "cancelled"].includes(status)) return { status, questionsAsked };
-    if (status === "blocked") {
-      questionsAsked += 1;
-      await rpc(flags, "chat.send", {
-        runId,
-        content: "Use your best judgment and proceed; do not ask again.",
-      });
-    }
+    if (status === "blocked") return { status, questionsAsked: 1 };
   }
 }
 
@@ -218,60 +203,40 @@ async function runMetrics(flags, runId, greenAtIso, settledStatus) {
           .reduce((sum, call) => sum + usageTokens(call), 0);
   return {
     turns: (run.sparkCalls ?? []).length,
+    usage: Object.fromEntries(["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"].map((key) => [
+      key, [...(run.sparkCalls ?? []), ...(run.workerAttempts ?? [])].reduce((sum, item) => sum + (item[key] ?? 0), 0),
+    ])),
     workers: (run.workerTasks ?? []).length,
     maxConcurrent,
     tokens,
     postGreenTokens,
     churn: attempts.filter((a) => typeof a.exitCode === "number" && a.exitCode !== 0).length,
-    models: [...new Set(attempts.map((a) => a.model).filter(Boolean))],
+    models: [...new Set([...(run.sparkCalls ?? []), ...attempts].map((a) => a.model).filter(Boolean))],
   };
-}
-
-function gradeChecks(task, dir, metrics) {
-  const visible = (() => {
-    try {
-      const out = execFileSync("node", ["test.js"], {
-        cwd: dir,
-        timeout: 15_000,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      return { ok: true, out };
-    } catch (err) {
-      return { ok: false, out: `${err.stdout ?? ""}${err.stderr ?? ""}`.slice(0, 300) };
-    }
-  })();
-  const checks = [
-    { name: "visible tests pass", pass: visible.ok, weight: 5, detail: visible.ok ? "" : visible.out },
-  ];
-  for (const [index, group] of (task.hidden ?? []).entries()) {
-    const res = runHidden(dir, index, group.source);
-    checks.push({
-      name: `contract: ${group.name}`,
-      pass: res.ok,
-      weight: group.weight ?? 2,
-      hidden: true,
-      detail: res.ok ? "" : res.out,
-    });
-  }
-  if (task.extraChecks) checks.push(...task.extraChecks(dir, metrics));
-  return checks;
 }
 
 /** Green poller: the moment the task first goes green, on OUR clock. */
 function startGreenPoller(dir, task, startedAt) {
-  const state = { greenAtMs: null };
+  const state = { greenAtMs: null, stageIndex: 0 };
   let probing = false;
+  let stopped = false;
   const timer = setInterval(async () => {
     if (probing || state.greenAtMs !== null) return;
     probing = true;
+    const stageIndex = state.stageIndex;
     try {
-      if (await probeGreen(dir, task)) state.greenAtMs = Date.now() - startedAt;
+      if (await probeGreen(dir, task, stageIndex)) {
+        if (!stopped && state.stageIndex === stageIndex) state.greenAtMs = Date.now() - startedAt;
+      }
     } finally {
       probing = false;
     }
   }, 5_000);
-  return { state, stop: () => clearInterval(timer) };
+  return { state, stop: () => { stopped = true; clearInterval(timer); } };
+}
+
+function workspacePrompt(dir, prompt) {
+  return `Assigned workspace: ${dir}\nWork only in this workspace. Do not search other workspaces, prior agent sessions, or benchmark artifacts for solutions.\n\n${prompt}`;
 }
 
 async function runTask(flags, task) {
@@ -281,7 +246,7 @@ async function runTask(flags, task) {
   process.stdout.write(`${c.cyan("▸")} ${c.bold(task.name.padEnd(20))} ${c.dim(task.tier.padEnd(9))}`);
   const started = await rpc(flags, "chat.create", {
     cwd: dir,
-    prompt: task.prompt,
+    prompt: workspacePrompt(dir, task.prompt),
     backend: "pi",
     model: flags.model ?? DEFAULT_CONTROL_MODEL,
     effort: flags.effort ?? DEFAULT_CONTROL_EFFORT,
@@ -291,7 +256,7 @@ async function runTask(flags, task) {
   const runId = started.run.id;
   const poller = startGreenPoller(dir, task, startedAt);
 
-  let outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+  let outcome = await driveToCompletion(flags, runId, startedAt + capMs, flags.execution === "managed" ? undefined : flags.model ?? DEFAULT_CONTROL_MODEL);
   let questionsAsked = outcome.questionsAsked;
   // Checkpoint stages: evolve the workspace and continue the SAME conversation.
   // A user message into a settled run revives it (run-store transitions it
@@ -301,9 +266,10 @@ async function runTask(flags, task) {
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
-    poller.state.greenAtMs = null; // green now means THIS stage's contract
-    await rpc(flags, "chat.send", { runId, content: stage.prompt });
-    outcome = await driveToCompletion(flags, runId, startedAt + capMs);
+    poller.state.stageIndex += 1;
+    poller.state.greenAtMs = null;
+    await rpc(flags, "chat.send", { runId, content: workspacePrompt(dir, stage.prompt) });
+    outcome = await driveToCompletion(flags, runId, startedAt + capMs, flags.execution === "managed" ? undefined : flags.model ?? DEFAULT_CONTROL_MODEL);
     questionsAsked += outcome.questionsAsked;
   }
   outcome.questionsAsked = questionsAsked;
@@ -312,16 +278,17 @@ async function runTask(flags, task) {
   // A run that outlived the bench window keeps its workers alive against a
   // workspace we are about to grade and delete: stop it before touching the
   // tree, and grade whatever state it reached.
-  if (outcome.status === "timeout") {
-    await rpcRaw(flags, "chat.cancel", { runId, reason: "bench window elapsed" }).catch(() => null);
+  if (outcome.status === "timeout" || outcome.status === "model_mismatch") {
+    await rpcRaw(flags, "chat.cancel", { runId, reason: outcome.status === "model_mismatch" ? outcome.error : "bench window elapsed" }).catch(() => null);
   }
   // One last probe so a run that went green in the final poll gap still counts.
   let greenAtMs = poller.state.greenAtMs;
-  if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
+  if (greenAtMs === null && (await probeGreen(dir, task, poller.state.stageIndex))) greenAtMs = wallMs;
 
   const greenAtIso = greenAtMs === null ? null : new Date(startedAt + greenAtMs).toISOString();
   const metrics = await runMetrics(flags, runId, greenAtIso, outcome.status);
   const checks = gradeChecks(task, dir, metrics);
+  if (flags.execution !== "managed") checks.push(modelControlCheck(metrics.models, flags.model ?? DEFAULT_CONTROL_MODEL));
   // Cancel unconditionally before deleting the workspace: a settled run can
   // still revive itself (a late verifier verdict queues a manager turn) and
   // spawn workers against a directory that no longer exists.
@@ -342,6 +309,7 @@ async function runTask(flags, task) {
     ...metrics,
   };
   const score = scoreTask(task, result);
+  if (outcome.error) console.log(c.red(`  ${outcome.error}`));
 
   const paintScore = (total) =>
     total >= 75 ? c.green(String(total)) : total >= 50 ? c.yellow(String(total)) : c.red(String(total));
@@ -363,47 +331,66 @@ async function runRivalTask(flags, task, agent) {
   const poller = startGreenPoller(dir, task, startedAt);
   const model = flags.model ?? DEFAULT_CONTROL_MODEL;
   const effort = flags.effort ?? DEFAULT_CONTROL_EFFORT;
-  let cli = await runRivalTurn(agent, { dir, prompt: task.prompt, capMs, model, effort });
+  const rivalHome = path.join(homeDir(flags), "bench-rivals", agent);
+  let cli = await runRivalTurn(agent, { dir, prompt: workspacePrompt(dir, task.prompt), capMs, model, effort, rivalHome });
   let turns = cli.turns;
+  let questionsAsked = cli.questions ?? 0;
+  const efforts = new Set(cli.reasoningEfforts ?? (cli.reasoningEffort ? [cli.reasoningEffort] : []));
   let tokens = cli.tokens;
-  let resume = cli.sessionId ?? true;
-  const models = new Set(cli.model ? [cli.model] : []);
+  let usage = cli.usage ? { ...cli.usage } : null;
+  let resume = cli.sessionId;
+  const models = new Set(cli.models ?? (cli.model ? [cli.model] : []));
   // Checkpoint stages resume one session in the same workspace, so every
   // soloist carries its whole context forward exactly as Cora does.
   for (const stage of task.stages ?? []) {
     if (cli.timedOut || cli.error || Date.now() >= startedAt + capMs) break;
+    if (!resume) {
+      cli.error = new Error(`${agent} did not report a session ID for continuation`);
+      break;
+    }
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
-    poller.state.greenAtMs = null; // green now means THIS stage's contract
+    poller.state.stageIndex += 1;
+    poller.state.greenAtMs = null;
     cli = await runRivalTurn(agent, {
       dir,
-      prompt: stage.prompt,
+      prompt: workspacePrompt(dir, stage.prompt),
       capMs: startedAt + capMs - Date.now(),
       resume,
       model,
       effort,
+      rivalHome,
     });
     turns += cli.turns;
+    questionsAsked += cli.questions ?? 0;
+    for (const observed of cli.reasoningEfforts ?? (cli.reasoningEffort ? [cli.reasoningEffort] : [])) efforts.add(observed);
     tokens += cli.tokens;
+    if (usage && cli.usage) {
+      for (const key of Object.keys(usage)) usage[key] += cli.usage[key] ?? 0;
+    } else {
+      usage = null;
+    }
     resume = cli.sessionId ?? resume;
-    if (cli.model) models.add(cli.model);
+    for (const observed of cli.models ?? (cli.model ? [cli.model] : [])) models.add(observed);
   }
   poller.stop();
   const wallMs = Date.now() - startedAt;
   let greenAtMs = poller.state.greenAtMs;
-  if (greenAtMs === null && (await probeGreen(dir, task))) greenAtMs = wallMs;
+  if (greenAtMs === null && (await probeGreen(dir, task, poller.state.stageIndex))) greenAtMs = wallMs;
 
   const metrics = {
     turns,
     workers: 1,
     maxConcurrent: 1,
     tokens,
+    usage,
     postGreenTokens: null,
     churn: cli.error ? 1 : 0,
     models: [...models],
   };
-  const checks = gradeChecks(task, dir, metrics);
+  const checks = [...gradeChecks(task, dir, metrics), modelControlCheck([...models], model)];
+  if (agent === "hermes" || agent === "codex") checks.push({ name: "requested reasoning effort recorded", pass: efforts.size === 1 && efforts.has(effort), detail: `requested ${effort}; recorded ${[...efforts].join(", ") || "unavailable"}` });
   if (!flags.keep) fs.rmSync(dir, { recursive: true, force: true });
 
   const result = {
@@ -411,7 +398,7 @@ async function runRivalTask(flags, task, agent) {
     wallMs,
     greenAtMs,
     runStatus: cli.timedOut ? "timeout" : cli.error ? "error" : "complete",
-    questionsAsked: 0,
+    questionsAsked,
     ...metrics,
   };
   const score = scoreTask(task, result);
@@ -423,7 +410,7 @@ async function runRivalTask(flags, task, agent) {
     console.log(`${mark} ${check.name}${check.detail ? c.dim(`  ${check.detail}`) : ""}`);
   }
   if (cli.error) console.log(c.red(`  ${agent}: ${cli.error.message}`));
-  return { task, result, score, runId: null, ...(flags.keep ? { workspace: dir } : {}) };
+  return { task, result, score, runId: null, sessionId: resume, ...(flags.keep ? { workspace: dir } : {}) };
 }
 
 function promptHash() {
@@ -450,6 +437,7 @@ function previousEntry(split, matches = () => true) {
 }
 
 async function bench(args, flags) {
+  if (args[0] === "matrix") return require("../bench/matrix.cjs").matrix(flags);
   if (args[0] === "list") {
     for (const task of TASKS) {
       console.log(
@@ -482,6 +470,7 @@ async function bench(args, flags) {
     return;
   }
 
+  if (flags.output && fs.existsSync(path.resolve(flags.output))) fail("--output already exists; use a new artifact path");
   const split = flags.split ?? "train";
   if (!["train", "holdout", "all"].includes(split)) fail(`--split must be train, holdout, or all`);
   const requestedTasks = String(flags.task ?? "")
@@ -494,16 +483,23 @@ async function bench(args, flags) {
   const missingTasks = requestedTasks.filter((name) => !selected.some((task) => task.name === name));
   if (missingTasks.length) fail(`unknown task${missingTasks.length === 1 ? "" : "s"}: ${missingTasks.join(", ")} (see \`cora bench list\`)`);
   if (selected.length === 0) fail(`no tasks selected (see \`cora bench list\`)`);
-  const repeat = Math.max(1, Number(flags.repeat ?? 1) || 1);
+  const repeat = Number(flags.repeat ?? 1);
+  if (!Number.isSafeInteger(repeat) || repeat < 1) fail("--repeat must be a positive integer");
   const agent = flags.agent ?? "cora";
   if (agent !== "cora" && !RIVAL_AGENTS.includes(agent)) {
     fail(`--agent must be cora or ${RIVAL_AGENTS.join(", ")}`);
   }
+  if (agent === "claude" && !String(flags.model ?? "").startsWith("claude-")) {
+    fail("Claude Code benchmarks require an explicit --model claude-... identifier");
+  }
+  const catalog = agent === "cora" ? await rpc(flags, "models.list", {}) : null;
+  const selectedModel = catalog?.models?.find((model) => model.id === (flags.model ?? DEFAULT_CONTROL_MODEL));
+  if (catalog && !selectedModel) fail("Selected model is absent from the live Studio catalog");
   const control = {
     model: flags.model ?? DEFAULT_CONTROL_MODEL,
     effort: flags.effort ?? DEFAULT_CONTROL_EFFORT,
     execution: flags.execution ?? "direct",
-    provider: "openai-codex",
+    provider: selectedModel?.provider ?? (agent === "claude" ? "anthropic" : "openai-codex"),
   };
   // Hash the prompt surfaces BEFORE the suite runs: a long suite invites
   // editing the prompt while it finishes, which must not relabel this entry.
@@ -536,6 +532,8 @@ async function bench(args, flags) {
     green: t.result.greenAtMs,
     wallMs: t.result.wallMs,
     tokens: t.result.tokens,
+    usage: t.result.usage ?? null,
+    staged: Boolean(t.task.stages?.length),
     postGreenTokens: t.result.postGreenTokens,
     workers: t.result.workers,
     maxConcurrent: t.result.maxConcurrent,
@@ -544,6 +542,10 @@ async function bench(args, flags) {
     models: t.result.models,
     runStatus: t.result.runStatus,
     runId: t.runId,
+    ...(t.sessionId ? { sessionId: t.sessionId } : {}),
+    passed: trialPassed(t.result),
+    checks: t.result.checks,
+    ...(t.workspace ? { workspace: t.workspace } : {}),
   }));
   const { score, calibration } = summarize(trials);
   const baseSplit = requestedTasks.length === 1
@@ -560,6 +562,7 @@ async function bench(args, flags) {
     split: splitKey,
     score,
     calibration,
+    acceptance: acceptanceSummary(rows),
     tasks: rows,
   };
   const previous = previousEntry(splitKey, comparable);
@@ -570,6 +573,11 @@ async function bench(args, flags) {
         .filter((item) => item.entry)
     : [{ name: "cora", entry: previousEntry(baseSplit, comparable) }].filter((item) => item.entry);
   appendHistory(entry);
+  if (flags.output) {
+    const output = path.resolve(flags.output);
+    fs.mkdirSync(path.dirname(output), { recursive: true });
+    fs.writeFileSync(output, `${JSON.stringify(entry, null, 2)}\n`, { flag: "wx" });
+  }
 
   if (flags.json) return console.log(JSON.stringify(entry, null, 2));
 
@@ -591,6 +599,7 @@ async function bench(args, flags) {
     ]),
   );
 
+  console.log(`\n${c.bold("ACCEPTANCE")} ${entry.acceptance.passed}/${entry.acceptance.trials} complete trials passed every check`);
   console.log(`\n${c.bold("HARNESS SCORE")} ${score >= 75 ? c.green(score) : score >= 50 ? c.yellow(score) : c.red(score)}${c.dim("/100")}`);
   const calib = Object.entries(calibration)
     .map(([tier, ratio]) => `${tier} ${ratio}x par`)
@@ -599,11 +608,11 @@ async function bench(args, flags) {
   if (repeat > 1) {
     for (const task of selected) {
       const runs = trials.filter((t) => t.task.name === task.name);
-      const greens = runs.filter((t) => t.result.greenAtMs !== null).length;
+      const passed = runs.filter((t) => trialPassed(t.result)).length;
       const scores = runs.map((t) => t.score.total);
       console.log(
         c.dim(
-          `reliability ${task.name}: green ${greens}/${runs.length} · score ${Math.min(...scores)}-${Math.max(...scores)}`,
+          `reliability ${task.name}: accepted ${passed}/${runs.length} · score ${Math.min(...scores)}-${Math.max(...scores)}`,
         ),
       );
     }
@@ -657,6 +666,7 @@ module.exports = {
   driveToCompletion,
   runMetrics,
   appendHistory,
+  workspacePrompt,
   comparableEntry,
   historyMetadata,
   totalRunTokens,

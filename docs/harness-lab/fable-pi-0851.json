@@ -1,0 +1,117 @@
+{
+  "at": "2026-09-08T00:46:25.216Z",
+  "promptHash": "b9b05781a0",
+  "suiteHash": "7952d64b5c",
+  "scorerHash": "da59fdb9e6",
+  "runnerHash": "088061715c",
+  "sourceCommit": "a0187848784f",
+  "sourceDirty": true,
+  "productVersion": "1.0.0",
+  "agentVersion": "1.0.0",
+  "toolVersions": {
+    "cora": "1.0.0",
+    "hermes": "Hermes Agent v0.21.0 (2026.8.31) · upstream b36720bb · local 30478b6e (+6600 carried commits)\nInstall directory: /Users/etienne/Documents/Projects/Nous-Research/hermes-agent\nInstall method: git\nPython: 3.11.15\nOpenAI SDK: 2.24.0"
+  },
+  "control": {
+    "model": "claude-fable-5-1",
+    "effort": "high",
+    "execution": "direct",
+    "provider": "anthropic"
+  },
+  "repeat": 1,
+  "taskNames": [
+    "typo-fix"
+  ],
+  "agent": "cora",
+  "split": "task:typo-fix",
+  "score": 97.1,
+  "calibration": {
+    "trivial": 0.2
+  },
+  "acceptance": {
+    "passed": 1,
+    "oneShotTrials": 1,
+    "oneShotPassed": 1,
+    "trials": 1,
+    "passRate": 1,
+    "perTask": {
+      "typo-fix": {
+        "passed": 1,
+        "trials": 1,
+        "passRate": 1,
+        "passRate95CI": [
+          0.20654931437723745,
+          1
+        ],
+        "allTrialsPassed": true
+      }
+    },
+    "acceptedMedianWallMs": 13969,
+    "acceptedMedianTokens": 21232,
+    "missingUsageTrials": 0
+  },
+  "tasks": [
+    {
+      "task": "typo-fix",
+      "tier": "trivial",
+      "score": 97.1,
+      "parts": {
+        "correctness": 55,
+        "efficiency": 17.1,
+        "discipline": 15,
+        "orchestration": 10,
+        "penalties": 0
+      },
+      "green": 10471,
+      "wallMs": 13969,
+      "tokens": 21232,
+      "usage": {
+        "inputTokens": 12,
+        "outputTokens": 696,
+        "cacheReadTokens": 15912,
+        "cacheWriteTokens": 4612
+      },
+      "staged": false,
+      "postGreenTokens": 0,
+      "workers": 1,
+      "maxConcurrent": 1,
+      "questions": 0,
+      "churn": 0,
+      "models": [
+        "claude-fable-5-1"
+      ],
+      "runStatus": "complete",
+      "runId": "run-mtry84x7-o79t94",
+      "passed": true,
+      "checks": [
+        {
+          "name": "visible tests pass",
+          "pass": true,
+          "weight": 5,
+          "detail": ""
+        },
+        {
+          "name": "contract: inclusive bounds hold everywhere",
+          "pass": true,
+          "weight": 2,
+          "hidden": true,
+          "detail": ""
+        },
+        {
+          "name": "test.js untouched",
+          "pass": true,
+          "weight": 1
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+        }
+      ],
+      "workspace": "/var/folders/xt/zct85k1107sfr31qsfny__zm0000gn/T/codara-bench-typo-fix-V0MzIy"
+    }
+  ],
+  "runtimeVersion": "0.85.1",
+  "note": "One live validation trial after the Pi runtime upgrade, against the same typo-fix task. This does not establish broader task quality."
+}

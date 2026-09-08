@@ -569,6 +569,7 @@ export async function createCodaraPiWorkerLaunchPlan(
       codaraHomeDir: codaraHome(),
       processExecutable: electronAsNodeInterpreter(),
     });
+    plan.env.CODARA_PI_HOST_COMPACTION = "1";
     // Frozen contract with resources/pi-cora/worker.ts: parallel-batch workers
     // read exactly these two env names to reach the run's peer-comms mailbox
     // without shelling out to the CLI helper. Both or neither.

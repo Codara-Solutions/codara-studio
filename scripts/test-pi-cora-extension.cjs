@@ -224,6 +224,13 @@ assert.equal(policy.isWorkerSafeBridgeTool("codara_request_next_iteration", fals
 assert.equal(policy.isWorkerSafeBridgeTool("codara_board_get", false), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_board_update", false), false);
 
+for (const automation of [false, true]) {
+  assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, {}), false);
+  assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
+}
+assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
+assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember"/);
+
 // Automation worker roster: lifecycle pair + board read appear; manager
 // orchestration and mutating board/whiteboard tools stay out.
 assert.equal(policy.isWorkerSafeBridgeTool("codara_ask_user", true), true);
@@ -367,6 +374,19 @@ const noInput = {};
     "no preset means no write containment",
   );
   assert.match(blocked("write").reason, /blocked by its worker config/);
+}
+
+{
+  const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: "codara_preview_evaluate,codara_preview_type" };
+  const fence = policy.fencedToolNames(env);
+  const decide = (steps) => policy.fenceDecision("codara_preview_run", { steps }, fence, env);
+  assert.equal(decide([{ action: "snapshot" }, { action: "click", selector: "#open" }]), undefined);
+  for (const action of ["evaluate", "type"]) {
+    const result = decide([{ action: "click", selector: "#submit" }, { action }, { action: "snapshot" }]);
+    assert.equal(result?.block, true, `a blocked ${action} must veto the whole batch before its earlier mutation`);
+    assert.match(result.reason, /step 2/);
+    assert.match(result.reason, /No batch steps were run/);
+  }
 }
 {
   // No fence env at all: empty set, nothing vetoed.
@@ -636,6 +656,37 @@ const noInput = {};
   handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 2, "the trigger re-arms once the compaction finishes");
+
+  const hostHandlers = new Map();
+  const entries = [];
+  let aborts = 0;
+  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args) }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(hostHandlers.has("agent_end"), false, "host-owned workers must not race an asynchronous extension compaction");
+  const hostContext = { getContextUsage: () => ({ tokens: 1500, contextWindow: 1000000 }), abort: () => { aborts += 1; } };
+  const turnEnd = hostHandlers.get("turn_end");
+  turnEnd({ toolResults: [] }, hostContext);
+  turnEnd({ toolResults: [{ toolName: "submit_result" }] }, hostContext);
+  assert.equal(aborts, 0, "completed answers and submitted results do not need a continuation");
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  assert.equal(aborts, 1);
+  assert.equal(entries[0][0], "codara-context-pause");
+  assert.equal(entries[0][1].reason, "threshold");
+  hostHandlers.get("session_compact")({});
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  assert.equal(aborts, 2, "a completed compaction re-arms later tool rounds");
+
+  const managerHandlers = new Map();
+  const managerEntries = [];
+  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args) }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(managerHandlers.has("turn_end"), false);
+  managerHandlers.get("agent_end")({}, hostContext);
+  managerHandlers.get("agent_end")({}, hostContext);
+  assert.equal(managerEntries.length, 1, "manager marks one request for host settlement");
+  assert.equal(aborts, 2, "manager compaction cannot abort its completed answer");
+  managerHandlers.get("session_compact_failed")({});
+  managerHandlers.get("agent_end")({}, hostContext);
+  assert.equal(managerEntries.length, 2, "failed native compaction cannot disable the early trigger forever");
 
   // Both Cora extensions must actually wire the trigger up.
   for (const file of ["index.ts", "worker.ts"]) {
