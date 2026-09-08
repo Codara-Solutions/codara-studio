@@ -209,3 +209,44 @@ average, causal contribution of each fix, or superiority to another harness.
 The deterministic snapshot comparison is 32% smaller for the same application
 state, while adding the saved field values. The baseline already includes the
 keyboard and native dropdown fixes. See the [check outcomes and tool traces](browser-workflow-before-after.json).
+
+
+## Direct conversation continuity and compaction
+
+The live baseline exposed a missing handoff: direct follow-ups launched cold
+with only the newest request. In a three-turn Sonnet probe, Cora acknowledged
+settings and a region correction, then could not recover the settings needed
+to write the final file. `/compact` also rejected the run because direct chats
+have no manager session.
+
+The direct path now carries canonical user/Cora dialogue into follow-ups.
+A successful compaction replaces older dialogue with a durable summary while
+later corrections continue to be replayed. Compaction can summarize a direct
+conversation in a fresh provider session. Follow-ups automatically request that
+summary when prior dialogue reaches 48,000 characters; summary failure retains
+the original dialogue. Existing epoch checks and additional direct-run guards
+prevent cutover over newly arrived user input or active workers.
+
+Live validation so far:
+
+- Sonnet: the original three-turn task passes with manual compaction, an epoch
+  advance, exact settings, and no questions.
+- Luna: a seven-turn task accumulates more than 48,000 characters of valid-sized
+  messages, triggers actual automatic compaction, applies another correction
+  afterward, and writes the exact settings. No files, commands, or memory tools
+  were used to persist settings before the final request.
+
+The first oversized auto-compaction probe was invalid: the CLI truncated its
+initial prompt to 16,000 characters, so the threshold was never reached. The
+runner now rejects truncation and accumulates history through multiple turns.
+The [recorded checks](context-continuity.json) separate the failure reproduction,
+manual-compaction validation, and expanded automatic-compaction validation.
+They do not establish arbitrary long-task retention or persistent-memory quality.
+
+```sh
+CODARA_CONTEXT_SMOKE_HOME="$HOME/.codara-harness-context-lab" \
+CODARA_CONTEXT_SMOKE_MODEL=gpt-5.6-luna \
+CODARA_CONTEXT_SMOKE_AUTO=1 \
+CODARA_CONTEXT_SMOKE_OUTPUT=/tmp/cora-context-auto.json \
+node scripts/smoke-cora-context.cjs
+```

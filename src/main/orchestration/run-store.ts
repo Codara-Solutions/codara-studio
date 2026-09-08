@@ -14012,7 +14012,9 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         run: structuredClone(run),
         cwd,
         mode: "chat",
-        chat: { ...chatConfig },
+        chat: directConversation
+          ? { ...chatConfig, sessionUuid: undefined, sessionMode: undefined }
+          : { ...chatConfig },
         prompt: directConversation
           ? directCompactionInput(compactionSource, AUTO_COMPACTION_SUMMARY_PROMPT)
           : AUTO_COMPACTION_SUMMARY_PROMPT,
