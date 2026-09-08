@@ -219,6 +219,17 @@ export function fenceDecision(
         "Use the remaining tools, or note the limitation in your final report.",
     };
   }
+  // Preflight the whole batch so a later denied step cannot hide behind an
+  // earlier permitted mutation or a continueOnError request.
+  if (name === "codara_preview_run" && input && typeof input === "object") {
+    const steps = (input as { steps?: unknown }).steps;
+    if (Array.isArray(steps)) {
+      const index = steps.findIndex((step) => typeof step?.action === "string" && fence.has(`codara_preview_${step.action.toLowerCase()}`));
+      if (index >= 0) {
+        return { block: true, reason: `Preview batch step ${index + 1} uses a tool disabled by this worker's config. No batch steps were run. Use the remaining tools or report the limitation.` };
+      }
+    }
+  }
   // Containment applies only when a preset armed the fence; blockedTools-only
   // workers keep full path reach on the tools they still have. Read/search
   // tools are contained as well: a pull request must not turn a worker into a

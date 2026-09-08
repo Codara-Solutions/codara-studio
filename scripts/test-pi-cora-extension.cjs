@@ -375,6 +375,19 @@ const noInput = {};
   );
   assert.match(blocked("write").reason, /blocked by its worker config/);
 }
+
+{
+  const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: "codara_preview_evaluate,codara_preview_type" };
+  const fence = policy.fencedToolNames(env);
+  const decide = (steps) => policy.fenceDecision("codara_preview_run", { steps }, fence, env);
+  assert.equal(decide([{ action: "snapshot" }, { action: "click", selector: "#open" }]), undefined);
+  for (const action of ["evaluate", "type"]) {
+    const result = decide([{ action: "click", selector: "#submit" }, { action }, { action: "snapshot" }]);
+    assert.equal(result?.block, true, `a blocked ${action} must veto the whole batch before its earlier mutation`);
+    assert.match(result.reason, /step 2/);
+    assert.match(result.reason, /No batch steps were run/);
+  }
+}
 {
   // No fence env at all: empty set, nothing vetoed.
   assert.equal(policy.fencedToolNames({}).size, 0);
