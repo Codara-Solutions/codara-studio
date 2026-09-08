@@ -850,7 +850,7 @@ function renderDirectTaskPrompt({
     "Complete this task directly in the workspace.",
     "Move quickly: inspect only the relevant files and run the named check once, then implement as soon as the contract is clear. Do not inspect repository history or unrelated files unless the task requires it.",
     "Honor exact names and behavior, make the smallest cohesive change, and preserve unrelated or pre-existing work.",
-    "After the named check passes, run at most one compact batch of explicit boundary checks plus a final diff check. Do not repeat unchanged tests. Never weaken tests or invent evidence.",
+    "After the named check passes, run one compact batch of explicit boundary checks plus a final diff check. Repeat checks only to investigate a failure or verify a correction. Never weaken tests or invent evidence.",
     "Do not commit, push, install packages, or delete data unless the task explicitly asks. If blocked or only partly complete, say so honestly.",
     "",
     "## TASK",
