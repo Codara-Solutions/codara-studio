@@ -144,3 +144,14 @@ export function planOpenInSplit(
   if (fallback) return { kind: "dock", hostTabId: fallback.id };
   return { kind: "new-terminal" };
 }
+
+// A split is an explicit layout choice. Browsing another file must not replace
+// a preview that the user has placed in that layout.
+export function pinDockedTabs(tabs: Tab[]): Tab[] {
+  const docked = buildDockIndex(tabs);
+  return tabs.map((tab) =>
+    docked.has(tab.id) && (tab.kind === "editor" || tab.kind === "diff") && tab.preview
+      ? { ...tab, preview: false }
+      : tab,
+  );
+}

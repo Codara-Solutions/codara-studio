@@ -42,6 +42,7 @@ import type {
 } from "./types";
 import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
+import { openEditor, type OpenEditorOptions } from "./openEditor";
 import { moveTabInList } from "./tabReorder";
 import { applySplitDrop, type SplitDropSource, type SplitDropPlacement } from "./splitDrop";
 import { resolveBootActiveTabId } from "./bootSelection";
@@ -56,6 +57,7 @@ import {
   dockLeaf,
   isDockLeaf,
   planOpenInSplit,
+  pinDockedTabs,
 } from "./dock";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
@@ -1305,7 +1307,7 @@ export interface UseTabsApi {
   // tabs from the frozen live-snapshot map and the inactive-layout mirror so
   // switching back can't restore a stranded (pill-less) active tab.
   pruneDeletedRunTabsFromInactiveWorkspaces: (runId: string) => void;
-  openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
+  openEditorTab: (entry: FsEntry, options?: OpenEditorOptions) => TabId;
   pinEditorTab: (id: TabId) => void;
   // Promote a preview commit-diff tab to persistent (double-click its pill).
   pinDiffTab: (id: TabId) => void;
@@ -2463,11 +2465,11 @@ export function useTabs(
         // setActiveId pattern the pane close/reseed paths already use.
         setActiveId(hostTabId);
         return normalizeTerminalTitles(
-          working.map((t) =>
+          pinDockedTabs(working.map((t) =>
             t.id === hostTabId && t.kind === "terminal"
               ? { ...t, root, activePaneId: cell.paneId, zoomedPaneId: null }
               : t,
-          ),
+          )),
         );
       });
       return docked;
@@ -3821,60 +3823,16 @@ export function useTabs(
     });
   }, [fireDispose]);
 
-  const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
-    // The setter is invoked synchronously by React, so reading `outId`
-    // back after `setTabs` returns is safe. TypeScript can't see through
-    // the closure on its own, hence the unknown-cast at the end.
-    let outId: TabId | null = null;
-    const usePreview = options?.preview !== false;
+  const openEditorTab = useCallback((entry: FsEntry, options: OpenEditorOptions = {}): TabId => {
+    const ids = { editor: makeId("editor"), host: makeId("term"), targetCell: makeId("dock"), sourceCell: makeId("dock") };
+    let editorId = ids.editor;
     setTabs((curr) => {
-      const existing = curr.find(
-        (t): t is EditorTab => t.kind === "editor" && t.path === entry.path,
-      );
-      if (existing) {
-        outId = existing.id;
-        if (usePreview || !existing.preview) return curr;
-        return curr.map((t) =>
-          t.id === existing.id && t.kind === "editor"
-            ? { ...t, preview: false }
-            : t,
-        );
-      }
-      const reusablePreview = usePreview
-        ? curr.find(
-            (t): t is EditorTab => t.kind === "editor" && Boolean(t.preview) && !t.dirty,
-          )
-        : null;
-      if (reusablePreview) {
-        outId = reusablePreview.id;
-        return curr.map((t) =>
-          t.id === reusablePreview.id && t.kind === "editor"
-            ? {
-                ...t,
-                title: basename(entry.path),
-                path: entry.path,
-                entry,
-                dirty: false,
-                preview: true,
-              }
-            : t,
-        );
-      }
-      const id = makeId("editor");
-      outId = id;
-      const tab: EditorTab = {
-        id,
-        kind: "editor",
-        title: basename(entry.path),
-        path: entry.path,
-        entry,
-        dirty: false,
-        preview: usePreview,
-      };
-      return [...curr, tab];
+      const result = openEditor(curr, activeIdRef.current, entry, options, ids);
+      editorId = result.editorId;
+      setActiveId(result.activeId);
+      return normalizeTerminalTitles(result.tabs);
     });
-    if (outId) setActiveId(outId);
-    return (outId ?? makeId("editor")) as TabId;
+    return editorId;
   }, []);
 
   const pinEditorTab = useCallback((id: TabId) => {

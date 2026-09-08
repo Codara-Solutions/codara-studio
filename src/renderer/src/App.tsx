@@ -5079,10 +5079,12 @@ export default function App() {
         });
       },
       "markdown.togglePreview": () => {
-        // Filter at dispatch time so the chord stays a no-op on terminal,
-        // chat, and non-MD editor tabs. EditorPane re-checks `active` so the
-        // event safely reaches only the currently visible editor.
-        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+        let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+        if (active?.kind === "terminal") {
+          const pane = findLeafByPaneId(active.root, active.activePaneId);
+          const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
+          active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
+        }
         if (!active || active.kind !== "editor") return;
         if (!/\.(md|markdown|mdown|mkd|mkdn)$/i.test(active.path)) return;
         window.dispatchEvent(new CustomEvent("spark:markdown.togglePreview"));
@@ -7300,6 +7302,7 @@ const Workspace = React.memo(function Workspace({
               tabs={visibleTabs}
               activeId={effectiveActiveId}
               dockIndex={dockIndex}
+              onActivatePane={setActiveTerminalPane}
               onDirtyChange={handleEditorDirty}
               onClose={handleTabClose}
               onSaved={onFileSaved}

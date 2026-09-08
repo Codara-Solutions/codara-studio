@@ -39,6 +39,7 @@ async function launch(): Promise<{
   await writeFile(join(workspaceDir, "notes.txt"), "docked editor fixture\n", "utf8");
   // Markdown file for the merged-toolbar case: its Preview/Edit toggle must
   // portal into the dock chrome band instead of stacking a second bar.
+  await writeFile(join(workspaceDir, "second.md"), "# Second document\n\nA separate Markdown file.\n", "utf8");
   await writeFile(join(workspaceDir, "guide.md"), "# Dock Band Fixture\n\nhello band\n", "utf8");
   await writeFile(
     join(userDataDir, "spark-state.json"),
@@ -682,6 +683,50 @@ test("a split browser copies inspected elements and annotated screenshot referen
     await page.screenshot({ path: test.info().outputPath("annotation-copy.png") });
     await settle(page);
     await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
+  } finally {
+    await app.close();
+  }
+});
+
+
+test("Explorer pins on double-click and opens two Markdown files side by side", async () => {
+  test.setTimeout(120_000);
+  const { app, page, workspaceDir } = await launch();
+  try {
+    const row = (name: string) => page.locator(`[data-fs-path="${join(workspaceDir, name).replace(/\\/g, "\\\\")}"]`);
+    await expect(row("guide.md")).toBeVisible({ timeout: 30_000 });
+    await row("guide.md").dblclick();
+    const guideTab = page.getByRole("tab", { name: /guide\.md/i }).first();
+    await expect(guideTab.locator(".spark-tab__label--preview")).toHaveCount(0);
+    await row("notes.txt").click();
+    await expect(guideTab).toBeVisible();
+    await guideTab.click();
+    await row("second.md").click({ button: "right" });
+    await page.getByText("Open to Side", { exact: true }).click();
+    await expect(page.locator("[data-dock-cell-id]")).toHaveCount(2);
+    await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(0);
+    const guideBand = page.locator(".spark-dock-chrome").filter({ hasText: "guide.md" });
+    const secondBand = page.locator(".spark-dock-chrome").filter({ hasText: "second.md" });
+    await guideBand.getByRole("button", { name: "Preview", exact: true }).click();
+    await secondBand.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Dock Band Fixture" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Second document" })).toBeVisible();
+    const previews = page.locator(".spark-markdown:visible");
+    const boxes = await previews.evaluateAll((nodes) => nodes.map((node) => {
+      const rect = node.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, overflow: node.scrollWidth > node.clientWidth };
+    }));
+    expect(boxes).toHaveLength(2);
+    expect(boxes[0].right).toBeLessThanOrEqual(boxes[1].left);
+    expect(boxes.every((box) => box.width > 200 && !box.overflow)).toBe(true);
+    await page.screenshot({ path: "test-results/markdown-split.png" });
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+v" : "Control+Shift+v");
+    await expect(page.getByRole("heading", { name: "Dock Band Fixture" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Second document" })).toBeHidden();
+    await row("notes.txt").click();
+    await row("second.md").click();
+    await expect(page.locator("[data-dock-cell-id]:visible")).toHaveCount(2);
+    await expect(page.getByRole("heading", { name: "Dock Band Fixture" })).toBeVisible();
   } finally {
     await app.close();
   }
