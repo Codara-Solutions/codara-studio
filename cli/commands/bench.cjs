@@ -335,7 +335,7 @@ async function runRivalTask(flags, task, agent) {
   let cli = await runRivalTurn(agent, { dir, prompt: workspacePrompt(dir, task.prompt), capMs, model, effort, rivalHome });
   let turns = cli.turns;
   let questionsAsked = cli.questions ?? 0;
-  const efforts = new Set(cli.reasoningEffort ? [cli.reasoningEffort] : []);
+  const efforts = new Set(cli.reasoningEfforts ?? (cli.reasoningEffort ? [cli.reasoningEffort] : []));
   let tokens = cli.tokens;
   let usage = cli.usage ? { ...cli.usage } : null;
   let resume = cli.sessionId;
@@ -364,7 +364,7 @@ async function runRivalTask(flags, task, agent) {
     });
     turns += cli.turns;
     questionsAsked += cli.questions ?? 0;
-    if (cli.reasoningEffort) efforts.add(cli.reasoningEffort);
+    for (const observed of cli.reasoningEfforts ?? (cli.reasoningEffort ? [cli.reasoningEffort] : [])) efforts.add(observed);
     tokens += cli.tokens;
     if (usage && cli.usage) {
       for (const key of Object.keys(usage)) usage[key] += cli.usage[key] ?? 0;
@@ -390,7 +390,7 @@ async function runRivalTask(flags, task, agent) {
     models: [...models],
   };
   const checks = [...gradeChecks(task, dir, metrics), modelControlCheck([...models], model)];
-  if (agent === "hermes") checks.push({ name: "requested reasoning effort recorded", pass: efforts.size === 1 && efforts.has(effort), detail: `requested ${effort}; recorded ${[...efforts].join(", ") || "unavailable"}` });
+  if (agent === "hermes" || agent === "codex") checks.push({ name: "requested reasoning effort recorded", pass: efforts.size === 1 && efforts.has(effort), detail: `requested ${effort}; recorded ${[...efforts].join(", ") || "unavailable"}` });
   if (!flags.keep) fs.rmSync(dir, { recursive: true, force: true });
 
   const result = {

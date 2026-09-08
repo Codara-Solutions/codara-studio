@@ -65,15 +65,19 @@ function parseClaudeOutput(stdout) {
   };
 }
 
-function codexSessionModels(home, sessionId) {
-  if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) return [];
+function codexSessionControl(home, sessionId) {
+  const missing = { models: [], reasoningEfforts: [] };
+  if (!sessionId || !/^[a-f0-9-]{36}$/i.test(sessionId)) return missing;
   const root = path.join(home, "sessions");
-  if (!fs.existsSync(root)) return [];
+  if (!fs.existsSync(root)) return missing;
   const file = fs.readdirSync(root, { recursive: true }).find((file) => typeof file === "string" && file.endsWith(`-${sessionId}.jsonl`));
-  if (!file) return [];
-  return [...new Set(jsonLines(fs.readFileSync(path.join(root, file), "utf8"))
-    .filter((event) => event.type === "turn_context")
-    .map((event) => event.payload?.model).filter(Boolean))];
+  if (!file) return missing;
+  const contexts = jsonLines(fs.readFileSync(path.join(root, file), "utf8"))
+    .filter((event) => event.type === "turn_context");
+  return {
+    models: [...new Set(contexts.map((event) => event.payload?.model ?? "unset"))],
+    reasoningEfforts: [...new Set(contexts.map((event) => event.payload?.effort ?? "unset"))],
+  };
 }
 
-module.exports = { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionModels };
+module.exports = { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionControl };

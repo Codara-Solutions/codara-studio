@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
-const { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionModels } = require("./headless.cjs");
+const { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionControl } = require("./headless.cjs");
 
 const { hermesSessionId, exportHermesSession } = require("./hermes.cjs");
 
@@ -110,7 +110,13 @@ async function runRivalTurn(agent, {
   } else {
     parsed = agent === "codex" ? parseCodexOutput(processResult.stdout) : parseClaudeOutput(processResult.stdout);
   }
-  if (agent === "codex") parsed.models = codexSessionModels(rivalHome, parsed.sessionId);
+  if (agent === "codex") {
+    Object.assign(parsed, codexSessionControl(rivalHome, parsed.sessionId));
+    if (parsed.reasoningEfforts.length !== 1 || parsed.reasoningEfforts[0] !== effort) {
+      parsed.failed = true;
+      parsed.errorMessage ??= `Codex reasoning effort mismatch: requested ${effort}; recorded ${parsed.reasoningEfforts.join(", ") || "unavailable"}`;
+    }
+  }
   parsed.models ??= parsed.model ? [parsed.model] : [];
   parsed.model ??= parsed.models[0] ?? null;
 

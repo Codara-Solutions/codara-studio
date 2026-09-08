@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionModels } = require("../cli/bench/headless.cjs");
+const { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionControl } = require("../cli/bench/headless.cjs");
 
 const codex = parseCodexOutput([
   { type: "thread.started", thread_id: "12345678-1234-1234-1234-123456789abc" },
@@ -34,11 +34,13 @@ try {
   fs.mkdirSync(path.join(root, "sessions", "day"), { recursive: true });
   fs.writeFileSync(path.join(root, "sessions", "day", `rollout-${codex.sessionId}.jsonl`), [
     { type: "session_meta", payload: {} },
-    { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
-    { type: "turn_context", payload: { model: "unexpected-fallback" } },
+    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "high" } },
+    { type: "turn_context", payload: { model: "unexpected-fallback", effort: "medium" } },
   ].map(JSON.stringify).join("\n"));
-  assert.deepEqual(codexSessionModels(root, codex.sessionId), ["gpt-5.6-sol", "unexpected-fallback"]);
-  assert.deepEqual(codexSessionModels(root, "../../elsewhere"), []);
+  assert.deepEqual(codexSessionControl(root, codex.sessionId), { models: ["gpt-5.6-sol", "unexpected-fallback"], reasoningEfforts: ["high", "medium"] });
+  assert.deepEqual(codexSessionControl(root, "../../elsewhere"), { models: [], reasoningEfforts: [] });
+  fs.appendFileSync(path.join(root, "sessions", "day", `rollout-${codex.sessionId}.jsonl`), '\n{"type":"turn_context","payload":{"model":"gpt-5.6-sol"}}\n');
+  assert.deepEqual(codexSessionControl(root, codex.sessionId).reasoningEfforts, ["high", "medium", "unset"], "a missing effort must not masquerade as the earlier reported value");
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 console.log("headless CLI command and telemetry tests passed");
 
