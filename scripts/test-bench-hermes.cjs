@@ -1,0 +1,35 @@
+"use strict";
+const assert = require("node:assert/strict");
+const { hermesSessionId, parseHermesSession } = require("../cli/bench/hermes.cjs");
+const { buildRivalCommand } = require("../cli/bench/rivals.cjs");
+const options = { sessionId: "20260908_000001_trial", dir: process.cwd(), effort: "high" };
+const session = { id: options.sessionId, cwd: options.dir, model: "gpt-5.6-sol", billing_provider: "openai-codex",
+  model_config: { reasoning_config: { enabled: true, effort: "high" } },
+  input_tokens: 50, output_tokens: 20, cache_read_tokens: 100, cache_write_tokens: 5, api_call_count: 2, messages: [] };
+const parse = (overrides, extra = {}) => parseHermesSession(JSON.stringify({ ...session, ...overrides }), { ...options, ...extra });
+assert.equal(hermesSessionId("noise\nsession_id: 20260908_000001_trial\n"), session.id);
+assert.equal(hermesSessionId("model text session_id: guessed"), null);
+assert.equal(hermesSessionId("session_id: ../../other"), null);
+const first = parse({});
+assert.equal(first.tokens, 175);
+assert.equal(first.turns, 2);
+assert.equal(first.reasoningEffort, "high");
+const next = parse({ input_tokens: 70, output_tokens: 30, api_call_count: 3, messages: [{tool_calls:[{function:{name:"clarify"}}]}] }, { before: first });
+assert.equal(next.tokens, 30, "continuation reports the delta, not cumulative session usage twice");
+assert.equal(next.turns, 1);
+assert.equal(next.questions, 1);
+assert.equal(parse({model_config:JSON.stringify(session.model_config)}).reasoningEffort, "high");
+assert.throws(() => parse({model_config:{reasoning_config:null}}), /reasoning effort mismatch/);
+assert.throws(() => parse({model_config:{reasoning_config:{effort:"medium"}}}), /reasoning effort mismatch/);
+assert.throws(() => parse({id:"other"}), /exact benchmark session/);
+assert.throws(() => parse({cwd:"/outside-benchmark"}), /workspace/);
+assert.throws(() => parse({parent_session_id:"older"}), /lineage/);
+assert.throws(() => parse({input_tokens:undefined}), /usage is missing/);
+assert.throws(() => parse({input_tokens:40}, {before:first}), /counters decreased/);
+assert.throws(() => parse({}, {before:{...first,sessionId:"other"}}), /changed session ID/);
+const invocation = buildRivalCommand("hermes", {dir:options.dir,prompt:"literal $(text)",effort:"high",model:session.model,resume:session.id});
+assert.equal(invocation.args.at(-2), "--query");
+assert.ok(invocation.args.indexOf("chat") < invocation.args.indexOf("--oneshot"));
+assert.ok(invocation.args.includes(session.id));
+assert.ok(!invocation.args.includes("--usage-file"));
+console.log("Hermes quiet-chat session, reasoning and usage evidence checks passed");

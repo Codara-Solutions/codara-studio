@@ -492,12 +492,10 @@ assert.match(benchList, /holdout/);
 
 const {
   buildRivalCommand,
-  readHermesUsage,
 } = require(path.join(ROOT, "cli", "bench", "rivals.cjs"));
 const hermesCommand = buildRivalCommand("hermes", {
   prompt: "fix",
   resume: "session-1",
-  usageFile: "/tmp/hermes-usage.json",
   model: "gpt-5.6-sol",
   effort: "high",
 });
@@ -509,24 +507,9 @@ assert.deepEqual(hermesCommand.args.slice(hermesCommand.args.indexOf("--model"),
 assert.deepEqual(hermesCommand.args.slice(hermesCommand.args.indexOf("--reasoning"), hermesCommand.args.indexOf("--reasoning") + 2), [
   "--reasoning", "high",
 ]);
-const hermesUsageFile = path.join(home, "hermes-usage.json");
-fs.writeFileSync(hermesUsageFile, JSON.stringify({
-  session_id: "session-1",
-  api_calls: 4,
-  total_tokens: 321,
-  model: "test-model",
-  provider: "openai-codex",
-  failed: false,
-}));
-assert.deepEqual(readHermesUsage(hermesUsageFile), {
-  usage: null,
-  sessionId: "session-1",
-  turns: 4,
-  tokens: 321,
-  model: "test-model",
-  provider: "openai-codex",
-  failed: false,
-});
+assert.ok(hermesCommand.args.indexOf("chat") < hermesCommand.args.indexOf("--oneshot"), "quiet chat forwards reasoning and resume, unlike top-level oneshot");
+assert.equal(hermesCommand.args.at(-2), "--query");
+assert.ok(!hermesCommand.args.includes("--usage-file"));
 
 const { TASKS } = require(path.join(ROOT, "cli", "bench", "tasks.cjs"));
 const { gradeChecks, comparableEntry, totalRunTokens } = require(path.join(ROOT, "cli", "commands", "bench.cjs"));
