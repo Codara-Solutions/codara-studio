@@ -1,34 +1,29 @@
-// Module-level registry of live preview tabs. PreviewStack registers each
-// mounted <BrowserPane>'s handle here; the previewRpc handler resolves a
-// target tab from incoming bridge requests by id or "active".
-//
-// We can't reach React state from main → ipcRenderer.send dispatch paths
-// without a hidden context dance, so a plain module singleton is the
-// cheapest correct option. Lives for the renderer process lifetime.
-
 import type { BrowserPaneHandle } from "./BrowserPane";
+import type { PreviewControl } from "./PreviewCursor";
 
 interface RegistryEntry {
   id: string;
   handle: BrowserPaneHandle;
   url: string;
-  // Owning run id for agent-spawned previews; null for tabs the user opened
-  // (TabBar picker, Codara browser, restored-from-disk previews — useTabs
-  // strips runId on persist). Ownership is what keeps a run's probes off the
-  // user's own preview tabs.
   runId: string | null;
+  workspaceId: string | null;
+  controlRunId?: string | null;
 }
 
 const entries = new Map<string, RegistryEntry>();
 let activeId: string | null = null;
+let activeWorkspaceId: string | null = null;
+const lastViewed = new Map<string | null, string>();
 
 export function registerPreviewTab(input: {
   id: string;
   handle: BrowserPaneHandle;
   url: string;
   runId?: string | null;
+  workspaceId?: string | null;
 }): void {
-  entries.set(input.id, { ...input, runId: input.runId ?? null });
+  const previous = entries.get(input.id);
+  entries.set(input.id, { ...previous, ...input, runId: input.runId ?? null, workspaceId: input.workspaceId ?? null });
 }
 
 export function updatePreviewTabUrl(id: string, url: string, runId?: string | null): void {
@@ -41,75 +36,75 @@ export function updatePreviewTabUrl(id: string, url: string, runId?: string | nu
 export function unregisterPreviewTab(id: string): void {
   entries.delete(id);
   if (activeId === id) activeId = null;
+  for (const [workspace, tabId] of lastViewed) if (tabId === id) lastViewed.delete(workspace);
 }
 
-export function setActivePreviewTab(id: string | null): void {
-  activeId = id && entries.has(id) ? id : null;
+export function setActivePreviewTab(id: string | null, workspaceId: string | null = null): void {
+  activeWorkspaceId = workspaceId;
+  activeId = id;
+  if (id && entries.get(id)?.workspaceId === workspaceId) lastViewed.set(workspaceId, id);
 }
 
-// `tabId` is trusted: an explicit target is honored whoever asks for it.
-// Without one, a caller that carries a run identity may only be given a tab
-// that RUN owns — implicit picking must never hand a run the user's preview
-// tab (or another run's). Callers with no run identity (user-facing agents)
-// keep the historical "active, else first" behavior.
-export function pickPreviewTab(tabId?: string | null, runId?: string | null): RegistryEntry | null {
-  if (tabId) return entries.get(tabId) ?? null;
-  if (runId) {
-    const active = activeId ? entries.get(activeId) : undefined;
-    if (active && active.runId === runId) return active;
-    for (const entry of entries.values()) {
-      if (entry.runId === runId) return entry;
-    }
-    return null;
+// Explicit IDs can select an existing user tab in the caller's workspace.
+// Implicit run targeting never commandeers another run's or the user's tab.
+export function pickPreviewTab(tabId?: string | null, runId?: string | null, workspaceId?: string | null): RegistryEntry | null {
+  const workspace = workspaceId ?? activeWorkspaceId;
+  const eligible = (entry: RegistryEntry) => entry.workspaceId === workspace;
+  if (tabId) {
+    const entry = entries.get(tabId);
+    return entry && eligible(entry) ? entry : null;
   }
-  if (activeId) return entries.get(activeId) ?? null;
-  // Fall back to the first registered tab — better to drive *something*
-  // than to fail because the user clicked away from the preview.
-  return entries.values().next().value ?? null;
+  const active = activeId ? entries.get(activeId) : undefined;
+  if (active && eligible(active) && (!runId || active.runId === runId)) return active;
+  for (const entry of entries.values()) {
+    if (eligible(entry) && (!runId || entry.runId === runId)) return entry;
+  }
+  return null;
 }
 
-export function listPreviewTabs(): Array<{ id: string; url: string; isActive: boolean }> {
-  return [...entries.values()].map((entry) => ({
+export function listPreviewTabs(workspaceId?: string | null) {
+  const workspace = workspaceId ?? activeWorkspaceId;
+  return [...entries.values()].filter((entry) => entry.workspaceId === workspace).map((entry) => ({
     id: entry.id,
-    url: entry.url,
-    isActive: entry.id === activeId,
+    title: entry.handle.getTitle() || entry.url,
+    url: entry.handle.getURL() || entry.url,
+    workspaceId: entry.workspaceId,
+    isLastViewed: lastViewed.get(workspace) === entry.id,
+    isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
   }));
 }
 
-// Adapter injected by App.tsx so the spark-preview MCP bridge can spawn a
-// preview tab without a manual user action. Returns the new tab id. `runId` is
-// the CALLING run's id (threaded from the MCP server's SPARK_RUN_ID stamp) so
-// the minted tab is attributed to the run that is driving it, not whichever
-// run the user has selected.
-type OpenPreviewTabFn = (url: string, runId?: string | null) => Promise<string> | string;
+export function showPreviewControl(tab: RegistryEntry, control: PreviewControl): void {
+  tab.controlRunId = control.runId;
+  tab.handle.showAgentCursor(control);
+}
+
+export function clearPreviewControl(runId: string): void {
+  for (const entry of entries.values()) {
+    if (entry.controlRunId !== runId) continue;
+    entry.handle.showAgentCursor(null);
+    entry.controlRunId = null;
+  }
+}
+
+type OpenPreviewTabFn = (url: string, runId?: string | null, workspaceId?: string | null) => Promise<string> | string;
 let openPreviewTabFn: OpenPreviewTabFn | null = null;
 
 export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
   openPreviewTabFn = fn;
 }
 
-// Resolve the preview tab a navigate should drive, minting one when needed,
-// and wait briefly for PreviewStack to register its BrowserPaneHandle. Used by
-// previewRpc.navigate so a sub-agent doesn't have to ask the user to "please
-// open a preview tab".
-//
-// With a runId, only that run's own tab is reusable: a run gets a fresh tab
-// rather than commandeering the user's (or a sibling run's) preview. Without
-// one, any open preview is fair game, as before.
-export async function ensurePreviewTab(url: string, runId?: string | null): Promise<RegistryEntry> {
-  const existing = pickPreviewTab(null, runId ?? null);
+export async function ensurePreviewTab(url: string, runId?: string | null, workspaceId?: string | null): Promise<RegistryEntry> {
+  const workspace = workspaceId ?? activeWorkspaceId;
+  const existing = pickPreviewTab(null, runId, workspace);
   if (existing) return existing;
-  if (!openPreviewTabFn) {
-    throw new Error(
-      "Codara is not ready to open browser tabs yet (renderer not mounted). Retry in a moment.",
-    );
-  }
-  const id = await Promise.resolve(openPreviewTabFn(url, runId));
+  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
+  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace));
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const entry = entries.get(id);
-    if (entry) return entry;
+    if (entry && entry.workspaceId === workspace) return entry;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Timed out waiting for the new preview tab ${id} to register.`);
+  throw new Error(`Timed out waiting for the new browser tab ${id} to register.`);
 }

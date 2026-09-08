@@ -162,6 +162,17 @@ async function main() {
     "first desktop visit keeps the normal cold selection instead of focusing phone",
     mergedColdLayout.activeId === "draft:cold",
   );
+  const savedBrowser = { id: "browser-cold", kind: "preview", title: "Saved", url: "https://example.com" };
+  const liveBrowser = { ...savedBrowser, url: "https://example.com/current" };
+  const mergedBrowserLayout = mergeDeferredWorkspaceTerminalLayout(
+    { ...normalColdLayout, tabs: [...normalColdLayout.tabs, savedBrowser] },
+    { workspaceId: "ws-phone", tabs: [liveBrowser], activeId: null },
+  );
+  check(
+    "a persisted background browser merges once and keeps its live navigation",
+    mergedBrowserLayout.tabs.filter((tab) => tab.id === savedBrowser.id).length === 1 &&
+      mergedBrowserLayout.tabs.find((tab) => tab.id === savedBrowser.id).url === liveBrowser.url,
+  );
 
   const movedPaneTabs = [
     {

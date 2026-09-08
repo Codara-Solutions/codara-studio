@@ -992,6 +992,12 @@ async function handleTerminalClose(
   }
 }
 
+async function scopePreviewWorkspace(params: Record<string, unknown>): Promise<void> {
+  if (typeof params.runId !== "string" || !params.runId) return;
+  const run = await (await getRunStore()).getRun(params.runId);
+  if (run?.workspaceId) params.workspaceId = run.workspaceId;
+}
+
 async function handlePreviewOp(
   method: string,
   params: Record<string, unknown>,
@@ -1000,6 +1006,7 @@ async function handlePreviewOp(
   const op = method.replace(/^preview\./, "") as PreviewOpName;
   const previewParams: PreviewOpParams = { ...params };
   try {
+    await scopePreviewWorkspace(previewParams);
     if (op === "navigate" && typeof previewParams.url === "string") {
       const reachable = await waitForLoopbackPreviewServer(previewParams.url);
       if (!reachable) {
@@ -1024,6 +1031,7 @@ async function handlePreviewInputRpc(
 ): Promise<JsonRpcResponse> {
   const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
+    await scopePreviewWorkspace(params);
     const result = await handlePreviewInputOp(op, params);
     return successResponse(id, result);
   } catch (err) {

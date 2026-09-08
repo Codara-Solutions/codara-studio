@@ -67,7 +67,7 @@ export function buildDockIndex(tabs: Tab[]): ReadonlyMap<TabId, DockRef> {
   return index;
 }
 
-// Run-owned tabs (worker terminals, run canvases, orchestration previews) live
+// Run-owned tabs (worker terminals and run canvases) live
 // in the chat panel's inner strip and are excluded: docking one would strand it
 // with no pill to undock from once its owning chat closes.
 export function canDockTab(tab: Tab): boolean {

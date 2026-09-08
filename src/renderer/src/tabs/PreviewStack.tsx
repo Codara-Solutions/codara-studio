@@ -36,6 +36,8 @@ import {
 // acceptable on modern machines for the persistence guarantee.
 
 interface Props {
+  workspaceId: string | null;
+  workspaceActive: boolean;
   tabs: Tab[];
   activeId: TabId | null;
   // Previews docked into a terminal tab's split grid are positioned by that
@@ -48,7 +50,7 @@ interface Props {
 
 // React.memo: the useTabs API object is memoized, so PreviewStack only
 // re-renders when the tab list / active id / callback genuinely change.
-function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
+function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, workspaceActive }: Props) {
   // One subscription for the whole stack (hooks can't be called per-tab inside
   // the map below). Only flips when a docked cell's shown-state changes —
   // never on a rect write, which goes straight to the element's style.
@@ -98,15 +100,26 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
     url: string,
     runId: string | null,
   ) => {
+    // React replaces imperative handles during navigation. Keep control
+    // ownership until the replacement arrives; closed tabs are removed below.
     if (h) {
       handles.current.set(id, h);
-      registerPreviewTab({ id, handle: h, url, runId });
+      registerPreviewTab({ id, handle: h, url, runId, workspaceId });
       lastRegisteredUrl.current.set(id, url);
-    } else {
-      handles.current.delete(id);
-      unregisterPreviewTab(id);
-      lastRegisteredUrl.current.delete(id);
     }
+  };
+  useEffect(() => () => {
+    for (const id of handles.current.keys()) unregisterPreviewTab(id);
+  }, []);
+
+  const handleRefs = useRef(new Map<TabId, (handle: BrowserPaneHandle | null) => void>());
+  const getHandleRef = (tab: PreviewTab) => {
+    let callback = handleRefs.current.get(tab.id);
+    if (!callback) {
+      callback = (handle) => setHandle(tab.id, handle, tab.url, tab.runId ?? null);
+      handleRefs.current.set(tab.id, callback);
+    }
+    return callback;
   };
 
   // GC for tabs that have been closed entirely (no longer in the previews
@@ -114,6 +127,9 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
   // up stale state.
   useEffect(() => {
     const live = new Set(previews.map((t) => t.id));
+    for (const id of handleRefs.current.keys()) {
+      if (!live.has(id)) handleRefs.current.delete(id);
+    }
     for (const id of callbacks.current.keys()) {
       if (!live.has(id)) callbacks.current.delete(id);
     }
@@ -126,13 +142,11 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
     }
   }, [previews]);
 
-  // Sync the active preview tab into the module registry so the spark-preview
-  // MCP bridge picks the right webview by default. activeId may belong to a
-  // non-preview tab; passing it through is safe — the registry only honors
-  // ids it already knows about.
+  // Only the visible workspace supplies the default scope. Selecting chat
+  // preserves the last-viewed browser marker for references such as "this tab".
   useEffect(() => {
-    setActivePreviewTab(activeId ?? null);
-  }, [activeId]);
+    if (workspaceActive) setActivePreviewTab(activeId ?? null, workspaceId);
+  }, [activeId, workspaceId, workspaceActive]);
 
   // Keep the registry's per-tab URL in sync with the live tab list (covers
   // address-bar navigations the parent didn't drive).
@@ -156,7 +170,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
         const docked = dockIndex.has(t.id);
         // A docked preview shows whenever its host terminal tab is on screen —
         // it is no longer the active tab itself.
-        const visible = docked
+        const visible = !workspaceActive ? false : docked
           ? (peekDockPlacementSnapshot(t.id)?.shown ?? false)
           : t.id === activeId;
         return (
@@ -192,7 +206,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange }: Props) {
             }
           >
             <BrowserPane
-              ref={(h) => setHandle(t.id, h, t.url, t.runId ?? null)}
+              ref={getHandleRef(t)}
               url={t.url}
               visible={visible}
               onUrlChange={getUrlCallback(t.id)}

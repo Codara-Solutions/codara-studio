@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { withPreviewCapturePaint } from "./capturePaint";
+import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
@@ -76,6 +77,7 @@ type WebviewElement = HTMLElement &
   };
 
 export interface BrowserPaneHandle {
+  showAgentCursor: (control: PreviewControl | null) => void;
   // `ignoreCache: true` calls Chromium's `reloadIgnoringCache` (hard reload).
   // Default is the normal cache-respecting reload — existing callers stay
   // unchanged.
@@ -127,6 +129,14 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [inspectorPick, setInspectorPick] = useState<InspectorPick | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [drawingBusy, setDrawingBusy] = useState(false);
+  const [control, setControl] = useState<PreviewControl | null>(null);
+  const cursorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showAgentCursor = useCallback((next: PreviewControl | null) => {
+    if (cursorTimer.current) clearTimeout(cursorTimer.current);
+    setControl((previous) => next ? { ...previous, ...next } : null);
+    if (next) cursorTimer.current = setTimeout(() => setControl(null), next.runId ? 30_000 : 4000);
+  }, []);
+  useEffect(() => () => { if (cursorTimer.current) clearTimeout(cursorTimer.current); }, []);
 
   // `domReady` mirrored into a ref so the navigation effect below can gate
   // on it without taking it as a dependency (which would re-run that effect
@@ -491,6 +501,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
+      showAgentCursor,
       reload: (opts) => {
         try {
           const wv = getLiveWebview();
@@ -777,6 +788,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             </div>
           </>
         ) : null}
+        <PreviewCursor control={control} />
         <DrawOverlay
           active={drawing}
           busy={drawingBusy}

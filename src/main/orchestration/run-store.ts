@@ -19593,7 +19593,7 @@ async function runPiWorkerSession({
           ? {
               finalReportPath: paths.finalReportJson,
               studioTools:
-                /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|browser|preview)\b/i.test(
+                /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|browser|preview|tabs?|website|screenshot)\b/i.test(
                   `${task.title}\n${task.description}`,
                 ),
             }

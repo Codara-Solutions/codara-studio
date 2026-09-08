@@ -6,28 +6,20 @@
 import type { Tab, TabId } from "./types";
 import { isRunOwnedTab } from "./types";
 
-// The run a run-owned tab belongs to, or null for non-run-owned tabs. Unlike
-// isRunOwnedTab (which is run-agnostic), this lets callers reject a run-owned
-// tab that belongs to a DIFFERENT run than the one on screen — the run-scoped
-// runs canvas and previews are not filtered out of visibleTabs, so keyboard
-// tab-cycling can land on another run's preview/Runs tab, and only the owning
-// run's inner strip should follow.
+// Keyboard cycling can reach another run's Runs canvas. Only its owning
+// chat's inner strip should follow; browsers have independent workspace tabs.
 export function runOwnedTabRunId(tab: Tab): string | null {
   if (tab.kind === "terminal" && tab.scope?.kind === "workers") return tab.scope.runId;
   if (tab.kind === "runs") return tab.runId;
-  if (tab.kind === "preview" && tab.runId) return tab.runId;
   return null;
 }
 
 /**
  * The tab the workbench actually renders as active. The stored activeId wins
  * while it points at a visible tab; otherwise fall back to the first tab that
- * is NOT run-owned. Run-owned tabs (worker terminals, Runs canvas, run-tagged
- * previews) are never auto-promoted: their only pills live in the owning
- * chat's inner strip, so promoting one whose chat tab is closed would strand
- * the user on a fullscreen surface (a Cora-opened browser, most visibly) with
- * no tab anywhere to leave or close it. Null means "nothing eligible" and the
- * caller renders the empty-workbench state instead.
+ * is not run-owned. Workers and Runs depend on their owning chat for
+ * navigation, so promoting one whose chat is closed could strand the user.
+ * Null means nothing eligible and the caller renders the empty workbench.
  */
 export function resolveEffectiveActiveId(
   activeId: TabId | null,

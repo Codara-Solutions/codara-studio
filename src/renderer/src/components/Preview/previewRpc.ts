@@ -9,9 +9,10 @@
 // that does the DOM work — this gives us click/type/snapshot without
 // pulling in Playwright or a CDP layer.
 
-import { ensurePreviewTab, listPreviewTabs, pickPreviewTab } from "./registry";
+import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
 
 type PreviewOpName =
+  | "activity"
   | "list"
   | "navigate"
   | "snapshot"
@@ -67,7 +68,12 @@ export function registerPreviewRpcHandler(): void {
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
     case "list":
-      return { tabs: listPreviewTabs() };
+      return { tabs: listPreviewTabs(readString(req.params, "workspaceId")) };
+    case "activity": {
+      const tab = requireTab(req.params);
+      showPreviewControl(tab, { action: readString(req.params, "action") ?? "Working", runId: readString(req.params, "runId"), ...(typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : {}) });
+      return { ok: true };
+    }
     case "navigate":
       return navigate(req.params);
     case "url":
@@ -98,9 +104,9 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 // Implicit tab picking is scoped to the calling run: params.runId is stamped by
 // the MCP server from SPARK_RUN_ID, so an agent op with no explicit tabId only
 // ever lands on a tab that run opened. An explicit tabId is still honored.
-function requireTab(params: { tabId?: string | null; runId?: unknown }) {
+function requireTab(params: Record<string, unknown>) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
-  const tab = pickPreviewTab(params.tabId ?? null, runId);
+  const tab = pickPreviewTab(readString(params, "tabId"), runId, readString(params, "workspaceId"));
   if (!tab) {
     if (runId && !params.tabId) {
       throw new Error(
@@ -111,6 +117,7 @@ function requireTab(params: { tabId?: string | null; runId?: unknown }) {
       "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
     );
   }
+  showPreviewControl(tab, { action: "Working", runId });
   return tab;
 }
 
@@ -145,20 +152,21 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   let tab;
   let opened = false;
   if (params.tabId) {
-    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null);
+    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null, null, readString(params, "workspaceId"));
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
   } else {
     // runId is the calling run's identity, stamped by the MCP server; the
     // reused-or-opened tab must belong to that run, not the selected one and
     // never one the user opened.
     const runId = readString(params, "runId");
-    const before = pickPreviewTab(null, runId);
-    tab = await ensurePreviewTab(url, runId);
+    const before = pickPreviewTab(null, runId, readString(params, "workspaceId"));
+    tab = await ensurePreviewTab(url, runId, readString(params, "workspaceId"));
     opened = !before;
   }
   // ensurePreviewTab created the tab with the target URL, so loadURL is a
   // redundant nav in that case but cheap. For an existing tab it's the real
   // navigation.
+  showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
   tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
   return { url: tab.handle.getURL(), tabId: tab.id, opened };
@@ -233,7 +241,9 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })})`;
-  return runGuestScript(tab.handle, code);
+  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
+  showPreviewControl(tab, { action: "Clicking", runId: readString(params, "runId"), x: result.x, y: result.y });
+  return result;
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -244,7 +254,9 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })})`;
-  return runGuestScript(tab.handle, code);
+  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
+  showPreviewControl(tab, { action: "Typing", runId: readString(params, "runId"), x: result.x, y: result.y });
+  return result;
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -280,7 +292,7 @@ async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   const imageSize = { width: dimensions.getUint32(16), height: dimensions.getUint32(20) };
   const scale = viewport && viewport.width > 0 && viewport.height > 0
     ? { x: imageSize.width / viewport.width, y: imageSize.height / viewport.height } : null;
-  return { dataUrl, url: tab.handle.getURL(), viewport, imageSize, scale };
+  return { dataUrl, tabId: tab.id, url: tab.handle.getURL(), title: tab.handle.getTitle(), viewport, imageSize, scale };
 }
 
 async function resize(params: Record<string, unknown>): Promise<unknown> {
@@ -433,6 +445,9 @@ function clickProbe(opts: { selector: string }) {
 function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }) {
   const el = document.querySelector(opts.selector) as HTMLElement | null;
   if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
+  el.scrollIntoView({ block: "nearest" });
+  const rect = el.getBoundingClientRect();
+  const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   if (el instanceof HTMLSelectElement) {
     if (el.disabled) return { ok: false, error: "select is disabled" };
     if (el.multiple) return { ok: false, error: "multiple selection is not supported by type" };
@@ -445,7 +460,7 @@ function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }
     el.value = option.value;
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, value: el.value };
+    return { ok: true, value: el.value, ...point };
   }
   const input = el as HTMLInputElement | HTMLTextAreaElement;
   el.focus();
@@ -459,7 +474,7 @@ function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }
   } else {
     return { ok: false, error: "element is not an input, textarea, or contentEditable" };
   }
-  return { ok: true, value: "value" in input ? input.value : undefined };
+  return { ok: true, value: "value" in input ? input.value : undefined, ...point };
 }
 
 function pressKeyProbe(opts: { key: string; selector: string | null }) {

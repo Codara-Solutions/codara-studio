@@ -28,6 +28,7 @@ import { randomBytes } from "node:crypto";
 import { isTrustedOnSender } from "./main-window-trust";
 
 export type PreviewOpName =
+  | "activity"
   | "list"
   | "navigate"
   | "snapshot"

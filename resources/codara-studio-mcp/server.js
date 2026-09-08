@@ -96,13 +96,13 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_list",
     description:
-      "List the preview tabs currently open in Codara. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
+      "List browser tabs in the calling workspace, including id, live title, URL, isActive, and isLastViewed. When the user refers to an existing tab, match it here and pass its tabId to subsequent tools. isLastViewed identifies the browser most recently viewed before returning to chat. Ask if the reference is ambiguous.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_preview_url",
     description:
-      "Return the current URL and title of a Codara preview tab. Defaults to the active preview tab when tabId is omitted.",
+      "Return the current URL and title of a browser tab. Pass an existing tabId from codara_preview_list; without it, target this run's browser.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string", description: "Optional tab id from codara_preview_list." } },
@@ -112,7 +112,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_navigate",
     description:
-      "Navigate the target Codara preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
+      "Navigate a browser workspace tab to a URL (http://, https://, or file://). With tabId, reuse that existing tab; without it, reuse or create a tab for this run. Tabs remain open after completion. Waits briefly for dom-ready before returning.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -2157,7 +2157,7 @@ async function callRunBatch(args) {
 
 function screenshotMetadata(value) {
   return { url: value.url ?? null, ...Object.fromEntries(
-    ["viewport", "imageSize", "scale"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+    ["tabId", "title", "viewport", "imageSize", "scale"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
   ) };
 }
 

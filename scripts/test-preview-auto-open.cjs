@@ -144,27 +144,11 @@ function testCoraPreviewLifetime() {
     path.join(ROOT, "src/renderer/src/App.tsx"),
     "utf8",
   );
-  assert.match(
-    tabsSource,
-    /!\(tab\.kind === "preview" && Boolean\(tab\.runId\)\)/,
-    "cold restore must discard Cora-owned preview tabs",
-  );
-  assert.doesNotMatch(
-    tabsSource,
-    /const \{ runId: _runId, \.\.\.rest \} = tab/,
-    "cold restore must never promote a Cora preview to a normal browser tab",
-  );
-  assert.match(
-    appSource,
-    /event\.type === "run\.status_updated"[\s\S]*closePreviewTabsForInWorkspace/,
-    "settled runs must close their webviews in active and background workspaces",
-  );
-  assert.match(
-    appSource,
-    /legacyCoraPreviewOwner\(tab\.url, runs\)/,
-    "the one-time migration must remove previews already orphaned by the old build",
-  );
-  console.log("PASS Cora browser tabs stay ephemeral and run-owned");
+  assert.doesNotMatch(tabsSource, /!\(tab\.kind === "preview" && Boolean\(tab\.runId\)\)/,
+    "cold restore preserves Cora browser tabs");
+  assert.doesNotMatch(appSource, /closePreviewTabsFor|legacyCoraPreviewOwner/,
+    "run completion or deletion cannot destroy workspace browsers");
+  console.log("PASS Cora browsers persist as workspace tabs");
 }
 
 async function testLivenessProbe(isLoopbackPreviewServerUp) {
