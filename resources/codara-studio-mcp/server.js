@@ -126,7 +126,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_snapshot",
     description:
-      "Return a compact outline of the current preview DOM (tag, id, class, role, accessible name). Use to find selectors and inspect structure without burning the full HTML into your context.",
+      "Return a compact outline of rendered preview content with selectors, accessible labels, current form values, and control states. Hidden content is omitted. Use to inspect and verify the page without reading full HTML.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2107,6 +2107,7 @@ async function callRunBatch(args) {
     if (label) entry.label = label;
     try {
       const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS);
+      if (result && result.ok === false) throw new Error(result.error || `${action} failed`);
       entry.ok = true;
       if (action === "screenshot" && result && typeof result.dataUrl === "string") {
         const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
@@ -2146,6 +2147,7 @@ function toToolResult(value) {
     }
   }
   return {
+    ...(value && value.ok === false ? { isError: true } : {}),
     content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
   };
 }

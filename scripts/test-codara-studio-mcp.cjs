@@ -351,6 +351,7 @@ function sortedEqual(actual, expected, label) {
     // the shared local socket.
     const received = [];
     const receivedAuthorization = [];
+    let mockResult = { ok: true };
     mockAgentSocket = http.createServer((req, res) => {
       receivedAuthorization.push(req.headers.authorization);
       let body = "";
@@ -359,7 +360,7 @@ function sortedEqual(actual, expected, label) {
       req.on("end", () => {
         received.push(JSON.parse(body));
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: mockResult }));
       });
     });
     await new Promise((resolve, reject) => {
@@ -543,6 +544,24 @@ function sortedEqual(actual, expected, label) {
     });
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
+
+    mockResult = { ok: false, error: "selector did not become visible" };
+    const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });
+    assert.strictEqual(failedSingle.isError, true, "DOM failures must become tool errors");
+    const beforeBatch = received.length;
+    const failedBatch = await directBridge.callToolByName("codara_preview_run", {
+      steps: [{ action: "wait_for", selector: "#missing" }, { action: "click", selector: "#submit" }],
+    });
+    assert.strictEqual(failedBatch.isError, true);
+    assert.strictEqual(received.length - beforeBatch, 1, "a failed wait must prevent the following mutation");
+    assert.match(failedBatch.content[0].text, /selector did not become visible/);
+    const continuedBatch = await directBridge.callToolByName("codara_preview_run", {
+      continueOnError: true,
+      steps: [{ action: "wait_for", selector: "#missing" }, { action: "snapshot" }],
+    });
+    assert.strictEqual(continuedBatch.isError, true);
+    assert.strictEqual(JSON.parse(continuedBatch.content[0].text).ran, 2);
+    mockResult = { ok: true };
 
     // The batched step schema is additionalProperties:false, so every field the
     // single-shot tool accepts must also be spelled out on the step items or a

@@ -344,54 +344,63 @@ function readBool(params: Record<string, unknown>, key: string): boolean | null 
 // ---------------------------------------------------------------------------
 
 function snapshotProbe(opts: { mode: string; maxBytes: number }) {
+  const encoder = new TextEncoder();
+  const limit = Number.isFinite(opts.maxBytes) ? Math.max(1, Math.floor(opts.maxBytes)) : 12_000;
+  const lines: string[] = [];
+  let bytes = 0;
+  let truncated = false;
   function describe(el: Element, depth: number): string {
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute("role") || "";
-    const name =
-      el.getAttribute("aria-label") ||
-      el.getAttribute("aria-labelledby") ||
-      el.getAttribute("title") ||
-      (el as HTMLElement).innerText?.trim().slice(0, 80) ||
-      "";
+    const labelledBy = (el.getAttribute("aria-labelledby") || "").split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(" ");
+    const labels = "labels" in el ? Array.from((el as HTMLInputElement).labels ?? [])
+      .map((label) => Array.from(label.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ").trim()).filter(Boolean).join(" ") : "";
+    const ownText = Array.from(el.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ");
+    const semanticText = /^(a|button|summary|h[1-6]|option)$/.test(tag) || role;
+    const name = (el.getAttribute("aria-label") || labelledBy || labels || el.getAttribute("title") ||
+      (semanticText ? (el as HTMLElement).innerText : ownText) || "").replace(/\s+/g, " ").trim().slice(0, 160);
     const id = el.id ? `#${el.id}` : "";
-    const cls = el.className && typeof el.className === "string"
-      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}`
-      : "";
+    const cls = el.className && typeof el.className === "string" && el.className.trim()
+      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}` : "";
     const meta: string[] = [];
     if (role) meta.push(`role=${role}`);
     if (name) meta.push(`name=${JSON.stringify(name)}`);
-    const head = `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
-    return head;
-  }
-  function walk(el: Element, depth: number, lines: string[], budget: { left: number }): void {
-    if (budget.left <= 0) return;
-    const line = describe(el, depth);
-    if (line.length + 1 > budget.left) {
-      lines.push(line.slice(0, budget.left));
-      budget.left = 0;
-      return;
+    for (const attr of ["name", "data-testid", "aria-expanded", "aria-checked", "aria-selected"]) {
+      if (el.hasAttribute(attr)) meta.push(`${attr}=${JSON.stringify(el.getAttribute(attr))}`);
     }
-    lines.push(line);
-    budget.left -= line.length + 1;
-    const children = Array.from(el.children);
-    for (const child of children) {
-      if (budget.left <= 0) break;
-      const skip = ["script", "style", "noscript", "meta", "link"].includes(child.tagName.toLowerCase());
-      if (skip) continue;
-      walk(child, depth + 1, lines, budget);
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      meta.push(`value=${JSON.stringify(el instanceof HTMLInputElement && el.type === "password" ? "[redacted]" : el.value)}`);
+      if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) meta.push(`checked=${el.checked}`);
+      if ("readOnly" in el && el.readOnly) meta.push("readonly");
     }
+    if (el.matches(":disabled")) meta.push("disabled");
+    if (el instanceof HTMLSelectElement) {
+      meta.push(`options=${JSON.stringify(Array.from(el.options).map((option) => ({
+        value: option.value, label: option.label, selected: option.selected,
+        ...(option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled) ? { disabled: true } : {}),
+      })))}`);
+    }
+    return `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
   }
-  const lines: string[] = [];
-  const budget = { left: Math.max(1000, opts.maxBytes) };
-  if (document.body) walk(document.body, 0, lines, budget);
-  const truncated = budget.left <= 0;
-  return {
-    url: location.href,
-    title: document.title,
-    mode: opts.mode,
-    snapshot: lines.join("\n"),
-    truncated,
-  };
+  function walk(el: Element, depth: number): void {
+    if (truncated || /^(SCRIPT|STYLE|NOSCRIPT|META|LINK|OPTION|OPTGROUP)$/.test(el.tagName)) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none") return;
+    // display:contents has no box of its own; its children can still be visible.
+    const rendered = style.visibility !== "hidden" && style.visibility !== "collapse" && el.getClientRects().length > 0;
+    if (rendered) {
+      const line = describe(el, depth);
+      const addition = (lines.length ? "\n" : "") + line;
+      const size = encoder.encode(addition).length;
+      if (bytes + size > limit) { truncated = true; return; }
+      lines.push(line);
+      bytes += size;
+    }
+    for (const child of Array.from(el.children)) walk(child, depth + (rendered ? 1 : 0));
+  }
+  if (document.body) walk(document.body, 0);
+  return { url: location.href, title: document.title, mode: opts.mode, snapshot: lines.join("\n"), truncated };
 }
 
 function clickProbe(opts: { selector: string }) {
@@ -462,8 +471,12 @@ function waitForProbe(opts: { selector: string; state: string; timeoutMs: number
       const el = document.querySelector(opts.selector) as HTMLElement | null;
       let match = false;
       if (opts.state === "attached") match = el !== null;
-      else if (opts.state === "hidden") match = !el || (el.offsetParent === null && el.tagName !== "BODY");
-      else match = !!el && el.offsetParent !== null;
+      else {
+        const rect = el?.getBoundingClientRect();
+        const style = el ? getComputedStyle(el) : null;
+        const visible = !!rect && rect.width > 0 && rect.height > 0 && style?.visibility !== "hidden" && style?.visibility !== "collapse";
+        match = opts.state === "hidden" ? !visible : visible;
+      }
       if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
       if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
       setTimeout(check, 75);
