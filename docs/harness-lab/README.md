@@ -183,3 +183,29 @@ and dropdown selection while every application window remains hidden. Native
 macOS dropdown popups do not reliably respond to these background keystrokes;
 `codara_preview_type` selects their exact option value directly and rejects an
 unknown or disabled option without clearing the previous selection.
+
+
+## First browser before/after observation
+
+The same Sol/high prompt and state evaluator passed at both `ab9d2740` and
+`0735844e`. The latter fixes false dialog visibility timeouts and swallowed
+batch failures, and exposes current form values in smaller rendered snapshots.
+No browser task prompt tuning was applied between these trials.
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| Full acceptance | pass | pass |
+| Wall time | 145.0 s | 104.7 s |
+| Total provider tokens | 260,033 | 182,052 |
+| Uncached input tokens | 30,166 | 25,903 |
+| Cache-read tokens | 227,584 | 154,624 |
+| Output tokens | 2,283 | 1,525 |
+| Tool calls, including batches and completion | 18 | 15 |
+| Reopened-ticket snapshot bytes | 2,836 | 1,926 |
+
+These are **one trial per revision**, with approximately 28% lower wall time and
+30% fewer total provider tokens in this pair. They do not establish a stable
+average, causal contribution of each fix, or superiority to another harness.
+The deterministic snapshot comparison is 32% smaller for the same application
+state, while adding the saved field values. The baseline already includes the
+keyboard and native dropdown fixes. See the [check outcomes and tool traces](browser-workflow-before-after.json).
