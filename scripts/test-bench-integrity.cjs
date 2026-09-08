@@ -40,6 +40,12 @@ inWorkspace(lru, lru.reference, (dir) => {
   const checks = gradeChecks(lru, dir, { models: ["gpt-5.6-luna"] });
   assert.equal(checks.every((check) => check.pass), true, "correctness is independent of model selection");
 });
+const staleEviction = lru.reference["lru.js"].replace("      sweep();\n", "");
+assert.notEqual(staleEviction, lru.reference["lru.js"], "mutation removes the insertion expiry sweep");
+inWorkspace(lru, { "lru.js": staleEviction }, (dir) => {
+  const checks = gradeChecks(lru, dir, {});
+  assert.equal(checks.find((check) => check.name.includes("expired recent entries")).pass, false);
+});
 
 const staged = TASKS.find((task) => task.name === "checkpoint-tracker");
 assert.equal(visibleSource(staged), staged.files["test.js"]);

@@ -3739,6 +3739,23 @@ t = 200;
 assert.equal(c.get("a"), undefined);
 console.log("ok");`,
       },
+      {
+        name: "expired recent entries cannot evict live LRU entries",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { createCache } = require("./lru.js");
+let t = 0;
+const c = createCache(2, 100, () => t);
+c.set("expired", 1);
+t = 50; c.set("live", 2);
+t = 75; assert.equal(c.get("expired"), 1);
+t = 120; c.set("new", 3);
+assert.equal(c.get("live"), 2);
+assert.equal(c.get("expired"), undefined);
+assert.equal(c.get("new"), 3);
+assert.equal(c.size(), 2);
+console.log("ok");`,
+      },
     ],
     reference: {
       "lru.js": `"use strict";

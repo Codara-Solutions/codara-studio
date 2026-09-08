@@ -18,6 +18,7 @@ assert.equal(grade({}).find((check) => check.name === "visible tests pass").pass
 const cases = [
   ["CSV", "csv.js", 'if (!recordEnded) flushRow();', 'flushRow();', "CSV quoting"],
   ["precision", "ledger.js", 'cents: cents.toString()', 'cents: String(Number(cents))', "arbitrary precision"],
+  ["account separator", "ledger.js", 'balances.push({ account, currency, cents: cents.toString() })', 'balances.push({ account: account.split("\\u0000")[0], currency, cents: cents.toString() })', "pair identity"],
   ["obsolete validation", "ledger.js", 'const row = rows[i];', 'const row = rows[i]; if (latest.has(row[0]) && latest.get(row[0]).revision > Number(row[1])) continue;', "all rows validated"],
   ["duplicate counting", "ledger.js", 'duplicates++;', 'duplicates += 0;', "latest revision"],
   ["CLI output", "cli.js", 'process.exitCode = 2;', 'process.exitCode = 1;', "CLI success"],

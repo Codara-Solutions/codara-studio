@@ -243,6 +243,9 @@ assert.equal(result.entries[1].note, "one,\ntwo");
 assert.deepEqual(result.balances, [{account:"__proto__",currency:"USD",cents:"90071992547409931234600"},{account:"a",currency:"EUR",cents:"-100"},{account:"a",currency:"USD",cents:"100"}]);
 const spaced = reconcile(H + 'i,1, a ,USD,0.10,posted,\nj,1,a,USD,0.20,posted,');
 assert.deepEqual(spaced.balances.map(x=>x.account), [" a ","a"]);
+const account = "a\u0000b";
+const embedded = reconcile(H + 'i,1,' + account + ',USD,1.00,posted,n\n');
+assert.deepEqual(embedded.balances, [{account,currency:"USD",cents:"100"}]);
 console.log("ok");`,
     },
     {
