@@ -279,3 +279,26 @@ tabs, fresh content after the OS window is hidden, unchanged tab selection,
 restored visibility, and an unfocused/hidden app after capture. Keyboard and
 form-state regressions also pass. This is local macOS validation; Windows still
 needs a native run.
+
+## Seven-model coding coverage
+
+The frozen `9025530c` run passed all 21 model/task pairs: the interpreter, atomic
+JSON patch, and asynchronous pool contracts on all seven requested models at
+high effort. Every trial completed without a question and reported its requested
+model. The evaluator also verified protected files remained unchanged.
+
+| Model | Accepted one-shots | Median tokens across three tasks |
+| --- | ---: | ---: |
+| gpt-5.6-luna | 3/3 | 78,543 |
+| gpt-5.6-terra | 3/3 | 57,272 |
+| claude-sonnet-5 | 3/3 | 93,874 |
+| gpt-5.6-sol | 3/3 | 61,074 |
+| claude-opus-5 | 3/3 | 44,534 |
+| claude-fable-5-1 | 3/3 | 33,423 |
+| gpt-6-astra | 3/3 | 51,717 |
+
+Tokens include cached input and are not dollar costs. Context probes, adapter
+pilots, builds, and Electron tests overlapped portions of the matrix, so the
+[recorded wall times](hard-matrix.json) cannot support an isolated speed ranking.
+One trial per contract is a coverage check; these saturated train tasks need
+repeated, harder, and holdout validation before broader reliability claims.

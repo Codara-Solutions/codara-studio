@@ -1,0 +1,1642 @@
+{
+  "kind": "seven-model-hard-matrix",
+  "conditions": {
+    "note": "This matrix measures task acceptance and model fidelity on frozen Cora product/benchmark sources at 9025530c. Context probes, headless adapter pilots, builds, and Electron regression tests overlapped portions of the matrix. Wall times are not isolated latency comparisons.",
+    "contextProbeLog": "/tmp/codara-context-baseline-9025530c.log",
+    "recordedAt": "2026-09-08T01:27:38.536Z"
+  },
+  "limitation": "One trial per model/task pair; three train tasks per model. This establishes coverage on these contracts, not a broad reliability estimate, an isolated speed ranking, or a competitor comparison.",
+  "results": [
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "gpt-5.6-luna",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "openai-codex"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 173957,
+        "acceptedMedianTokens": 78543,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-luna"
+          ],
+          "wallMs": 288540,
+          "tokens": 204511,
+          "usage": {
+            "inputTokens": 39676,
+            "outputTokens": 13795,
+            "cacheReadTokens": 151040,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+            }
+          ],
+          "runId": "run-mtrzd7dk-ya9bwb"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-luna"
+          ],
+          "wallMs": 173957,
+          "tokens": 78543,
+          "usage": {
+            "inputTokens": 25440,
+            "outputTokens": 7535,
+            "cacheReadTokens": 45568,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+            }
+          ],
+          "runId": "run-mtrzje7e-nuvlcw"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-luna"
+          ],
+          "wallMs": 98157,
+          "tokens": 64459,
+          "usage": {
+            "inputTokens": 17817,
+            "outputTokens": 3634,
+            "cacheReadTokens": 43008,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+            }
+          ],
+          "runId": "run-mtrzn4ke-yyrc75"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "gpt-5.6-terra",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "openai-codex"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 120762,
+        "acceptedMedianTokens": 57272,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-terra"
+          ],
+          "wallMs": 174320,
+          "tokens": 108103,
+          "usage": {
+            "inputTokens": 33158,
+            "outputTokens": 7873,
+            "cacheReadTokens": 67072,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+            }
+          ],
+          "runId": "run-mtrzp967-skndy4"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-terra"
+          ],
+          "wallMs": 120762,
+          "tokens": 57272,
+          "usage": {
+            "inputTokens": 20743,
+            "outputTokens": 5297,
+            "cacheReadTokens": 31232,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+            }
+          ],
+          "runId": "run-mtrzszvv-x0wjjq"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-terra"
+          ],
+          "wallMs": 69218,
+          "tokens": 28916,
+          "usage": {
+            "inputTokens": 13826,
+            "outputTokens": 2802,
+            "cacheReadTokens": 12288,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-terra; observed gpt-5.6-terra"
+            }
+          ],
+          "runId": "run-mtrzvl8m-vx7pw8"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "claude-sonnet-5",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "anthropic"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 119708,
+        "acceptedMedianTokens": 93874,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-sonnet-5"
+          ],
+          "wallMs": 208149,
+          "tokens": 273150,
+          "usage": {
+            "inputTokens": 30,
+            "outputTokens": 21063,
+            "cacheReadTokens": 225981,
+            "cacheWriteTokens": 26076
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+            }
+          ],
+          "runId": "run-mtrzx3gi-eb63oo"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-sonnet-5"
+          ],
+          "wallMs": 119708,
+          "tokens": 93874,
+          "usage": {
+            "inputTokens": 14,
+            "outputTokens": 11562,
+            "cacheReadTokens": 68838,
+            "cacheWriteTokens": 13460
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+            }
+          ],
+          "runId": "run-mts01kaa-h9t6yl"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-sonnet-5"
+          ],
+          "wallMs": 44470,
+          "tokens": 42703,
+          "usage": {
+            "inputTokens": 14,
+            "outputTokens": 2911,
+            "cacheReadTokens": 35119,
+            "cacheWriteTokens": 4659
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-sonnet-5; observed claude-sonnet-5"
+            }
+          ],
+          "runId": "run-mts044ru-1orj6j"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "openai-codex"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 244742,
+        "acceptedMedianTokens": 61074,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-sol"
+          ],
+          "wallMs": 368795,
+          "tokens": 110429,
+          "usage": {
+            "inputTokens": 31786,
+            "outputTokens": 10675,
+            "cacheReadTokens": 67968,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+            }
+          ],
+          "runId": "run-mts053w5-lcit1t"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-sol"
+          ],
+          "wallMs": 244742,
+          "tokens": 61074,
+          "usage": {
+            "inputTokens": 15770,
+            "outputTokens": 6648,
+            "cacheReadTokens": 38656,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+            }
+          ],
+          "runId": "run-mts0d0nr-24km11"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-5.6-sol"
+          ],
+          "wallMs": 105675,
+          "tokens": 37664,
+          "usage": {
+            "inputTokens": 16625,
+            "outputTokens": 2479,
+            "cacheReadTokens": 18560,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-5.6-sol; observed gpt-5.6-sol"
+            }
+          ],
+          "runId": "run-mts0i9m9-fesgvq"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "claude-opus-5",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "anthropic"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 50463,
+        "acceptedMedianTokens": 44534,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-opus-5"
+          ],
+          "wallMs": 122837,
+          "tokens": 178669,
+          "usage": {
+            "inputTokens": 30,
+            "outputTokens": 10761,
+            "cacheReadTokens": 148392,
+            "cacheWriteTokens": 19486
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-opus-5; observed claude-opus-5"
+            }
+          ],
+          "runId": "run-mts0kjsi-yhefl4"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-opus-5"
+          ],
+          "wallMs": 50463,
+          "tokens": 43917,
+          "usage": {
+            "inputTokens": 14,
+            "outputTokens": 4418,
+            "cacheReadTokens": 32862,
+            "cacheWriteTokens": 6623
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-opus-5; observed claude-opus-5"
+            }
+          ],
+          "runId": "run-mts0n6se-j2ecup"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-opus-5"
+          ],
+          "wallMs": 41485,
+          "tokens": 44534,
+          "usage": {
+            "inputTokens": 16,
+            "outputTokens": 3115,
+            "cacheReadTokens": 35963,
+            "cacheWriteTokens": 5440
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-opus-5; observed claude-opus-5"
+            }
+          ],
+          "runId": "run-mts0o9v6-mqhml5"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "claude-fable-5-1",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "anthropic"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 36961,
+        "acceptedMedianTokens": 33423,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-fable-5-1"
+          ],
+          "wallMs": 126765,
+          "tokens": 159435,
+          "usage": {
+            "inputTokens": 26,
+            "outputTokens": 11906,
+            "cacheReadTokens": 128007,
+            "cacheWriteTokens": 19496
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+            }
+          ],
+          "runId": "run-mts0p6j7-5bs5h2"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-fable-5-1"
+          ],
+          "wallMs": 36961,
+          "tokens": 33423,
+          "usage": {
+            "inputTokens": 12,
+            "outputTokens": 3275,
+            "cacheReadTokens": 24704,
+            "cacheWriteTokens": 5432
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+            }
+          ],
+          "runId": "run-mts0rwkn-2w69sj"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "claude-fable-5-1"
+          ],
+          "wallMs": 24407,
+          "tokens": 26054,
+          "usage": {
+            "inputTokens": 12,
+            "outputTokens": 1848,
+            "cacheReadTokens": 20731,
+            "cacheWriteTokens": 3463
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested claude-fable-5-1; observed claude-fable-5-1"
+            }
+          ],
+          "runId": "run-mts0sp7h-2pch60"
+        }
+      ]
+    },
+    {
+      "sourceCommit": "9025530cd52f",
+      "promptHash": "b9b05781a0",
+      "suiteHash": "7952d64b5c",
+      "scorerHash": "da59fdb9e6",
+      "runnerHash": "088061715c",
+      "control": {
+        "model": "gpt-6-astra",
+        "effort": "high",
+        "execution": "direct",
+        "provider": "openai-codex"
+      },
+      "acceptance": {
+        "passed": 3,
+        "oneShotTrials": 3,
+        "oneShotPassed": 3,
+        "trials": 3,
+        "passRate": 1,
+        "perTask": {
+          "mini-lang": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "patch-atomic": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          },
+          "async-pool": {
+            "passed": 1,
+            "trials": 1,
+            "passRate": 1,
+            "passRate95CI": [
+              0.20654931437723745,
+              1
+            ],
+            "allTrialsPassed": true
+          }
+        },
+        "acceptedMedianWallMs": 135818,
+        "acceptedMedianTokens": 51717,
+        "missingUsageTrials": 0
+      },
+      "tasks": [
+        {
+          "task": "mini-lang",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-6-astra"
+          ],
+          "wallMs": 245198,
+          "tokens": 98997,
+          "usage": {
+            "inputTokens": 22335,
+            "outputTokens": 6134,
+            "cacheReadTokens": 70528,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: parser precedence, associativity, and error positions",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: formatter minimal parens and the round-trip law",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: positions thread lexer -> parser -> eval errors",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: eval: short-circuit, shadowing, strict equality",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: linter: shadowing, unused, innermost constant, order",
+              "pass": true,
+              "weight": 2,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "README.md untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-6-astra; observed gpt-6-astra"
+            }
+          ],
+          "runId": "run-mts0t8sw-cilg6n"
+        },
+        {
+          "task": "patch-atomic",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-6-astra"
+          ],
+          "wallMs": 135818,
+          "tokens": 51717,
+          "usage": {
+            "inputTokens": 16468,
+            "outputTokens": 3121,
+            "cacheReadTokens": 32128,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: pointer escapes and root replacement",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: arrays, cloning, and indexed failures",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-6-astra; observed gpt-6-astra"
+            }
+          ],
+          "runId": "run-mts0yi76-lqo0a2"
+        },
+        {
+          "task": "async-pool",
+          "runStatus": "complete",
+          "passed": true,
+          "models": [
+            "gpt-6-astra"
+          ],
+          "wallMs": 80653,
+          "tokens": 27725,
+          "usage": {
+            "inputTokens": 9261,
+            "outputTokens": 1696,
+            "cacheReadTokens": 16768,
+            "cacheWriteTokens": 0
+          },
+          "checks": [
+            {
+              "name": "visible tests pass",
+              "pass": true,
+              "weight": 5,
+              "detail": ""
+            },
+            {
+              "name": "contract: failure stops new starts and drains in-flight work",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "contract: empty, invalid limit, and synchronous throw",
+              "pass": true,
+              "weight": 3,
+              "hidden": true,
+              "detail": ""
+            },
+            {
+              "name": "test.js untouched",
+              "pass": true,
+              "weight": 1
+            },
+            {
+              "name": "requested model executed",
+              "pass": true,
+              "weight": 1,
+              "detail": "requested gpt-6-astra; observed gpt-6-astra"
+            }
+          ],
+          "runId": "run-mts11f43-g7gob5"
+        }
+      ]
+    }
+  ]
+}
