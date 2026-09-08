@@ -104,15 +104,17 @@ const PI_MODELS: ChatModelOption[] = [
 // stronger (it holds no matter how these ranks are tuned, and no matter which
 // group ends up first) and honest about being a spend guard rather than taste.
 const TIER_RANK = {
-  recommended: 0,
-  premium: 1,
-  flagship: 2,
-  balanced: 3,
-  fast: 4,
-  unknown: 5,
+  latest: 0,
+  recommended: 1,
+  premium: 2,
+  flagship: 3,
+  balanced: 4,
+  fast: 5,
+  unknown: 6,
 } as const;
 
 const MODEL_RANK: Array<{ match: RegExp; rank: number }> = [
+  { match: /^gpt-6-astra$/i, rank: TIER_RANK.latest },
   { match: /^gpt-5\.6-sol$/i, rank: TIER_RANK.recommended },
   { match: /fable/i, rank: TIER_RANK.premium },
   { match: /opus/i, rank: TIER_RANK.flagship },
@@ -222,17 +224,16 @@ export function buildVisibleGroups({
   // pretending it is one of the native worker CLIs.
   // Pi spans both providers, so each side is trimmed against its own rule and
   // the survivors are then re-read in the ORIGINAL row order. Concatenating the
-  // two filtered lists instead would reorder the group, and the first row of
-  // this group is the default chat model — that alone would silently move the
-  // default off Sol.
+  // two filtered lists instead would reorder the group before its deliberate
+  // presentation sort.
   const piMerged = mergePiModels(PI_MODELS, piCatalog);
   const modelsFor = (family: "claude" | "codex" | "grok") =>
     keepCurrentGeneration(
       piMerged.filter((model) => familyForModelId(decomposeModelId(model.id).baseId) === family),
       family === "codex" ? "openai" : family === "claude" ? "anthropic" : "xai",
     );
-  // Split by model family rather than listed flat. Codex leads because the
-  // default chat model is the first row of the first group and Sol is rank 0.
+  // Split by model family rather than listing one flat model collection.
+  // OpenAI leads the picker while the default is resolved independently.
   groups.push({
     key: "pi-openai",
     backend: "pi",
@@ -314,13 +315,9 @@ function mergeCatalogModels(
 
 /**
  * Order a group deliberately instead of inheriting whatever order the vendor
- * catalog happened to emit. Rank comes from MODEL_RANK, so the recommended
- * default leads, premium follows, and the rest descend by capability; ties
- * break on label so the list can never reshuffle between refreshes.
- *
- * Sort is STABLE with respect to rank, and the recommended row is rank 0 , 
- * both matter, because several call sites take `groups[0].models[0]` as the
- * default chat model for a new session.
+ * catalog happened to emit. Rank comes from MODEL_RANK, so the latest model
+ * leads its vendor group and the rest descend by capability. Ties break on
+ * label so the list cannot reshuffle between refreshes.
  */
 function sortByRank(models: ChatModelOption[]): ChatModelOption[] {
   return [...models].sort((a, b) => {
@@ -509,16 +506,38 @@ function isPremiumTier(option: ChatModelOption): boolean {
  * row in the leading group. Previously this was implied by ranking premium
  * last, which broke the moment the ordering was tuned for presentation.
  *
- * Scans groups in order and takes the first non-premium row. Falls back to the
- * very first row only when EVERY available model is premium, since offering
- * nothing would be worse than offering the one model that exists.
+ * Prefers the configured default even when a newer model leads the picker.
+ * When that row is unavailable, scans groups for the first non-premium row.
+ * Falls back to the first row only when every available model is premium.
  */
 export function defaultChatModel(groups: ChatBackendGroup[]): ChatModelOption | null {
+  for (const group of groups) {
+    const configuredDefault = group.models.find(
+      (model) => decomposeModelId(model.id).baseId === DEFAULT_CHAT_MODEL,
+    );
+    if (configuredDefault) return configuredDefault;
+  }
   for (const group of groups) {
     const affordable = group.models.find((model) => !isPremiumTier(model));
     if (affordable) return affordable;
   }
   return groups.find((group) => group.models.length > 0)?.models[0] ?? null;
+}
+
+/** Use a saved explicit choice only while the current picker still offers it. */
+export function resolvePreferredChatModel(
+  groups: ChatBackendGroup[],
+  preferredModel: string | undefined,
+): ChatModelOption | null {
+  if (preferredModel) {
+    for (const group of groups) {
+      const preferred = group.models.find(
+        (model) => decomposeModelId(model.id).baseId === preferredModel,
+      );
+      if (preferred) return preferred;
+    }
+  }
+  return defaultChatModel(groups);
 }
 
 // The effort cycle for a model: its pinned list when it has one, otherwise
