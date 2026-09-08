@@ -514,6 +514,7 @@ async function requestPiDecision(
       inputTokens: accumulated.usage.inputTokens,
       outputTokens: accumulated.usage.outputTokens,
       cacheReadTokens: accumulated.usage.cacheReadTokens,
+      cacheWriteTokens: accumulated.usage.cacheWriteTokens,
       ...(accumulated.usage.costUsd > 0 ? { costUsd: accumulated.usage.costUsd } : {}),
     };
     // Context occupancy is a gauge, so it is the newest request's prompt size

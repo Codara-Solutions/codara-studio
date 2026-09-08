@@ -6259,6 +6259,7 @@ async function askManagerBackend(
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
       if (typeof result.cacheReadTokens === "number") targetCall.cacheReadTokens = result.cacheReadTokens;
+      if (typeof result.cacheWriteTokens === "number") targetCall.cacheWriteTokens = result.cacheWriteTokens;
       if (result.providerResponseIds?.length) {
         targetCall.providerResponseIds = [...new Set(result.providerResponseIds)];
       }
@@ -14097,6 +14098,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         if (typeof result.inputTokens === "number") call.inputTokens = result.inputTokens;
         if (typeof result.outputTokens === "number") call.outputTokens = result.outputTokens;
         if (typeof result.cacheReadTokens === "number") call.cacheReadTokens = result.cacheReadTokens;
+        if (typeof result.cacheWriteTokens === "number") call.cacheWriteTokens = result.cacheWriteTokens;
         if (typeof result.promptTokens === "number") call.promptTokens = result.promptTokens;
         if (typeof result.contextWindowTokens === "number" && result.contextWindowTokens > 0) {
           call.contextWindowTokens = result.contextWindowTokens;

@@ -12,6 +12,7 @@ export interface PiTurnUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   /** OpenRouter catalog-priced estimate for every request in this turn,
    *  summed. Captured only for an OpenRouter-backed session; native
    *  subscription sessions intentionally remain 0 even if Pi's catalog
@@ -152,7 +153,7 @@ export class PiTurnAccumulator {
   private readonly assistantOrder: string[] = [];
   private assistantSequence = 0;
   private currentAssistantId: string | null = null;
-  private usage: PiTurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, costUsd: 0 };
+  private usage: PiTurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
   // Context occupancy is a gauge, not a counter: the newest assistant message
   // carries the whole conversation so far, so a tool loop's later rounds
   // supersede the earlier ones instead of adding to them.
@@ -208,6 +209,7 @@ export class PiTurnAccumulator {
         cacheReadTokens: this.usage.cacheReadTokens + finiteCount(
           usage?.cacheRead ?? usage?.cache_read ?? usage?.cached,
         ),
+        cacheWriteTokens: this.usage.cacheWriteTokens + finiteCount(usage?.cacheWrite ?? usage?.cache_write ?? usage?.cacheCreation),
         costUsd: this.usage.costUsd + (this.captureCost ? costTotalFrom(usage) : 0),
       };
       const context = contextTokensFrom(usage);
@@ -230,7 +232,7 @@ export class PiTurnAccumulator {
       // wipe every consumer's context meter to 0. No reading beats a false
       // zero, so stay quiet until real usage accumulates.
       if (
-        this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens > 0 ||
+        this.usage.inputTokens + this.usage.outputTokens + this.usage.cacheReadTokens + this.usage.cacheWriteTokens > 0 ||
         this.contextTokens > 0
       ) {
         const { costUsd, ...tokenUsage } = this.usage;
