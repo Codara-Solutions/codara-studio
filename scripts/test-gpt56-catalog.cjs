@@ -212,8 +212,12 @@ async function main() {
   for (const live of [astraCatalog, [...astraCatalog].reverse()]) {
     const openai = composer.buildVisibleGroups({ piCatalog: live })[0].models;
     check(
-      "Astra coexists with Sol, Terra, and Luna without duplicate or retired rows",
-      openai.map(model => model.id).join(",") === [...ids, "gpt-6-astra"].join(","),
+      "Astra leads Sol, Terra, and Luna without duplicate or retired rows",
+      openai.map(model => model.id).join(",") === ["gpt-6-astra", ...ids].join(","),
+    );
+    check(
+      "Astra ordering does not change the no-preference default",
+      composer.defaultChatModel([{ ...composer.buildVisibleGroups({ piCatalog: live })[0], models: openai }])?.id === "gpt-5.6-sol",
     );
     check(
       "the restored variants retain their supported reasoning levels",

@@ -59,7 +59,7 @@ export function sanitizeWorkerModelHint(hint: string | undefined): string | unde
 // The Capability Center also offers the providers' other current worker-capable
 // models. They stay opt-in for existing/fresh settings, but once the user
 // enables one it is a real launch target rather than a decorative checkbox:
-//   gpt-5.6-terra, gpt-5.6-luna
+//   gpt-6-astra, gpt-5.6-terra, gpt-5.6-luna
 //   claude-sonnet-5
 //
 // TIERS ARE THE CONTRACT; IDS ARE A DETAIL. Nothing downstream should ever
@@ -92,6 +92,7 @@ export const DEFAULT_CORA_WORKER_MODELS: readonly string[] = [
  * the user selects them. Keep this list aligned with the provider catalogs. */
 export const OPTIONAL_CORA_WORKER_MODELS = [
   "claude-sonnet-5",
+  "gpt-6-astra",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
 ] as const;

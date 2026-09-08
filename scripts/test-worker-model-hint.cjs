@@ -47,6 +47,7 @@ async function main() {
     sanitizeWorkerModelHint,
     WORKER_DEFAULT_CLAUDE_MODEL,
     ALLOWED_WORKER_MODELS,
+    WORKER_MODEL_ROSTER,
     coerceWorkerModelToRoster,
     enabledWorkerModelFor,
     rosterModelFor,
@@ -87,7 +88,7 @@ async function main() {
   // ── the worker roster ──
   // The recommended tier mapping stays small, while the picker/launch boundary
   // also offers the providers' current opt-in models.
-  eq("roster exposes seven native worker choices", ALLOWED_WORKER_MODELS.length, 7);
+  eq("roster exposes eight native worker choices", ALLOWED_WORKER_MODELS.length, 8);
   for (const id of [
     "claude-opus-5",
     "claude-fable-5",
@@ -95,6 +96,7 @@ async function main() {
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
+    "gpt-6-astra",
     "grok-4.6",
   ]) {
     check(`roster contains ${id}`, ALLOWED_WORKER_MODELS.includes(id));
@@ -102,12 +104,18 @@ async function main() {
   eq("claude standard tier is Opus", rosterModelFor("claude", "standard"), "claude-opus-5");
   eq("claude premium tier is Fable", rosterModelFor("claude", "premium"), "claude-fable-5");
   eq("codex tier default remains Sol", rosterModelFor("codex", "premium"), "gpt-5.6-sol");
+  check("Astra is allowed as an opt-in model", ALLOWED_WORKER_MODELS.includes("gpt-6-astra"));
+  check(
+    "Astra is not enabled by default",
+    !Object.values(WORKER_MODEL_ROSTER).flatMap(Object.values).includes("gpt-6-astra"),
+  );
 
   // Coercion never rejects, an off-roster hint lands on the nearest allowed
   // model so a bad planner hint degrades instead of failing the spawn.
   eq("Sonnet survives opt-in coercion", coerceWorkerModelToRoster("claude", "claude-sonnet-5"), "claude-sonnet-5");
   eq("Terra survives opt-in coercion", coerceWorkerModelToRoster("codex", "gpt-5.6-terra"), "gpt-5.6-terra");
   eq("Luna survives opt-in coercion", coerceWorkerModelToRoster("codex", "gpt-5.6-luna"), "gpt-5.6-luna");
+  eq("Astra survives opt-in coercion", coerceWorkerModelToRoster("codex", "gpt-6-astra"), "gpt-6-astra");
   eq("haiku coerces to Opus", coerceWorkerModelToRoster("claude", "claude-haiku-4-5"), "claude-opus-5");
   eq("an omitted hint pins the standard tier", coerceWorkerModelToRoster("claude", undefined), "claude-opus-5");
   eq("an omitted codex hint pins Sol", coerceWorkerModelToRoster("codex", undefined), "gpt-5.6-sol");

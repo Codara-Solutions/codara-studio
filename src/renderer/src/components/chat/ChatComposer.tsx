@@ -37,12 +37,12 @@ import {
   EFFORT_LABELS,
   buildVisibleGroups,
   composeModelId,
-  defaultChatModel,
   clampEffort,
   decomposeModelId,
   effortsFor,
   findOptionInCatalog,
   nextEffort as nextEffortInLadder,
+  resolvePreferredChatModel,
   type ChatModelOption,
 } from "./composer/types";
 import {
@@ -51,6 +51,11 @@ import {
   chatBackendMutationScopeMatchesRun,
 } from "./chat-backend-mutation-barrier";
 import { emitLocalToast } from "../../notifications/local-toast";
+import {
+  loadPreferredChatModel,
+  peekPreferredChatModel,
+  persistPreferredChatModel,
+} from "./composer/chat-model-preference";
 
 // Per-chat selector bag forwarded from the draft composer chip into the
 // new-chat creation call so the chip's choice survives draft→live. Once a run
@@ -200,6 +205,9 @@ export default function ChatComposer({
   onForcePauseRun,
 }: Props) {
   const restoredDraft = draftKey ? chatComposerDrafts.get(draftKey) : undefined;
+  const preferredDraftModel = !run && !restoredDraft
+    ? peekPreferredChatModel()
+    : undefined;
   const [draft, setDraft] = useState(() => restoredDraft?.draft ?? "");
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>(() =>
     restoredDraft?.images ? [...restoredDraft.images] : [],
@@ -224,7 +232,7 @@ export default function ChatComposer({
     run?.chatBackend ?? restoredDraft?.backend ?? DEFAULT_CHAT_BACKEND,
   );
   const [draftChatModel, setDraftChatModel] = useState<string>(
-    run?.chatModel ?? restoredDraft?.model ?? DEFAULT_CHAT_MODEL,
+    run?.chatModel ?? restoredDraft?.model ?? preferredDraftModel ?? DEFAULT_CHAT_MODEL,
   );
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
     run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
@@ -388,29 +396,29 @@ export default function ChatComposer({
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, [suspendGlobalEvents]);
 
-  // Resolve the draft default from the runtime diagnostics. The hardcoded
-  // fallback above (Pi + GPT-5.6 Sol/high) only matters before this
-  // resolves: once we know what's actually available we land on the first
-  // visible model, so the bar never opens on a model the user can't see in
-  // the dropdown. Runs once per mount; an active run uses
-  // run.chatBackend/run.chatModel and is unaffected.
+  // Resolve a new draft from the saved explicit choice and the current model
+  // catalog. The synchronous seed above handles another draft opened after a
+  // pick in this process. This pass handles app relaunches and rejects a saved
+  // model that is no longer available. Existing runs and restored drafts skip
+  // it because their own selector state is authoritative.
   useEffect(() => {
     if (draftDefaultsResolved.current) return;
     let cancelled = false;
-    void window.spark.agents
-      .runtimes()
-      .then(() => {
+    void Promise.all([
+      window.spark.piSubscriptions.catalog().catch(() => [] as PiCatalogModel[]),
+      window.spark.openRouter.coraModels().catch(() => [] as string[]),
+      loadPreferredChatModel().catch(() => undefined),
+    ])
+      .then(([piCatalog, openRouterModels, preferredModel]) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
-        // A pick that landed while this was in flight outranks the default.
-        // The chords make that ordinary: opening a chat and immediately
-        // pressing Ctrl+M used to look like a dead key, because this late
-        // resolution overwrote the choice a moment after it was made.
+        piCatalogRef.current = piCatalog;
+        openRouterModelsRef.current = openRouterModels;
+        // A pick that landed while this was in flight outranks every loaded
+        // default, including an older preference read.
         if (selectorsChosenRef.current) return;
-        const groups = buildVisibleGroups({});
-        // Not groups[0].models[0]: that would open a new chat on the premium
-        // tier whenever premium happens to lead the first group.
-        const first = defaultChatModel(groups);
+        const groups = buildVisibleGroups({ piCatalog, openRouterModels });
+        const first = resolvePreferredChatModel(groups, preferredModel);
         if (!first) return;
         const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
@@ -420,7 +428,7 @@ export default function ChatComposer({
         if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
       })
       .catch(() => {
-        /* keep hardcoded defaults; the combined picker will surface the empty state */
+        /* keep the synchronous seed; the combined picker can still refresh */
       });
     return () => {
       cancelled = true;
@@ -1071,6 +1079,9 @@ export default function ChatComposer({
   const onPickModel = (model: ChatModelOption) => {
     // Virtual `:1m` ids decompose down to the real id the backend sees.
     const { baseId } = decomposeModelId(model.id);
+    void persistPreferredChatModel(baseId).catch(() => {
+      if (mountedRef.current) setError("Could not save the model preference.");
+    });
     const backendChanged = model.backend !== activeChatBackend;
     // The row's own ladder when it pins one, else the full list, exactly what
     // the picker's second step offers once the model lands.

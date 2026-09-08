@@ -1122,6 +1122,9 @@ export interface AppPreferences {
   // OpenRouter model id used for inline ghost-text autocomplete. Free-text
   // input — OpenRouter has hundreds of models, no dropdown.
   inlineAutocompleteModelId: string;
+  // Last model explicitly selected in Cora's manager picker. Dynamic catalog
+  // ids are valid, so availability is checked when a new draft is created.
+  coraChatModel?: string;
   keybindings: KeybindingOverridesPref;
   // When true, middle-clicking (mouse wheel button) on a tab in the strip
   // closes it — same effect as clicking the tab's × button. Applies to every

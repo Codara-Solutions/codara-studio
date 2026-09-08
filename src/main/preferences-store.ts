@@ -220,6 +220,9 @@ function normalize(
         : DEFAULT_PREFERENCES.inlineAutocompleteEnabled,
     inlineAutocompleteDelayMs: normalizeInlineDelay(src.inlineAutocompleteDelayMs),
     inlineAutocompleteModelId: inlineModel,
+    ...(typeof src.coraChatModel === "string" && src.coraChatModel.trim()
+      ? { coraChatModel: src.coraChatModel.trim() }
+      : {}),
     keybindings: normalizeKeybindings(src.keybindings),
     closeTabsOnMiddleClick:
       typeof src.closeTabsOnMiddleClick === "boolean"
