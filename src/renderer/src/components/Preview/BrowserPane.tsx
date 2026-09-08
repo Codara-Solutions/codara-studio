@@ -86,6 +86,7 @@ export interface BrowserPaneHandle {
   getTitle: () => string;
   openDevTools: () => void;
   focusAddressBar: () => void;
+  focusContent: () => void;
   // Surface area used by the spark-preview MCP bridge. None of these throw
   // when the webview isn't yet dom-ready — they reject with a descriptive
   // error the bridge can forward to the calling sub-agent.
@@ -541,6 +542,11 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }
       },
       focusAddressBar: () => addressRef.current?.focus(),
+      focusContent: () => {
+        const wv = getLiveWebview();
+        if (!wv) throw new Error("preview tab is not ready");
+        wv.focus();
+      },
       getTitle: () => {
         try {
           return getLiveWebview()?.getTitle?.() ?? "";

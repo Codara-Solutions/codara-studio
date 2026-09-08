@@ -23,6 +23,7 @@
 
 import { ipcMain, webContents, type WebContents } from "electron";
 
+import { previewKeyEvents } from "./preview-keyboard";
 import { requestPreviewOp } from "./preview-bridge";
 import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
 
@@ -143,13 +144,14 @@ interface GuestInfo {
 
 async function resolveGuest(
   params: Record<string, unknown>,
+  focus = false,
 ): Promise<{ wc: WebContents; info: GuestInfo }> {
   const tabId = typeof params.tabId === "string" ? params.tabId : null;
   // Forward the caller's run identity: without an explicit tabId the renderer
   // scopes its pick to the tabs that run owns, so trusted-input ops resolve the
   // same guest the DOM ops would — never the user's own preview tab.
   const runId = typeof params.runId === "string" ? params.runId : null;
-  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId })) as GuestInfo;
+  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId, focus })) as GuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -531,10 +533,10 @@ async function opNetwork(params: Record<string, unknown>): Promise<unknown> {
 async function opKey(params: Record<string, unknown>): Promise<unknown> {
   const key = typeof params.key === "string" ? params.key : null;
   if (!key) throw new Error("key requires 'key'");
-  const { wc } = await resolveGuest(params);
+  const { wc } = await resolveGuest(params, true);
   const text = typeof params.text === "string" ? params.text : null;
   const modifiers = normalizeModifiers(params.modifiers);
-  dispatchKey(wc, key, modifiers, text);
+  await dispatchKey(wc, key, modifiers, text);
   return { ok: true, key, modifiers };
 }
 
@@ -547,7 +549,7 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
   if (!key) throw new Error("press_key requires 'key'");
   let wc: WebContents;
   try {
-    ({ wc } = await resolveGuest(params));
+    ({ wc } = await resolveGuest(params, true));
   } catch {
     return requestPreviewOp("press_key", {
       tabId: (params.tabId as string) ?? null,
@@ -556,44 +558,31 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
       selector: (params.selector as string) ?? null,
     });
   }
-  // If a selector was supplied, focus it first so the trusted key lands there.
   if (typeof params.selector === "string" && params.selector) {
-    try {
-      await wc.executeJavaScript(
-        `(() => { const el = document.querySelector(${JSON.stringify(
-          params.selector,
-        )}); if (el && el.focus) el.focus(); return !!el; })()`,
-        false,
-      );
-    } catch {
-      /* focus is best-effort */
-    }
+    const focused = await wc.executeJavaScript(
+      `(() => { const el = document.querySelector(${JSON.stringify(params.selector)});
+        if (!el || typeof el.focus !== "function") return false;
+        el.focus(); return document.activeElement === el || el.contains(document.activeElement); })()`,
+      false,
+    );
+    if (!focused) throw new Error(`preview key target is missing or not focusable: ${params.selector}`);
   }
-  dispatchKey(wc, key, [], null);
+  await dispatchKey(wc, key, [], null);
   return { ok: true, key, trusted: true };
 }
 
-// Electron sendInputEvent accepts a key string for `keyCode` (named keys like
-// Enter/Tab/Escape/Backspace/ArrowUp or a single character). For printable
-// input we also emit a `char` event so the character is inserted.
-function dispatchKey(
+// CDP dispatch remains trusted when the app or preview is in the background.
+// sendInputEvent silently drops keys when its BrowserWindow lacks OS focus.
+async function dispatchKey(
   wc: WebContents,
   key: string,
   modifiers: string[],
   text: string | null,
-): void {
-  const printable = text ?? (key.length === 1 ? key : null);
-  wc.sendInputEvent({ type: "keyDown", keyCode: key, modifiers } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
-  if (printable) {
-    wc.sendInputEvent({ type: "char", keyCode: printable, modifiers } as Parameters<
-      WebContents["sendInputEvent"]
-    >[0]);
-  }
-  wc.sendInputEvent({ type: "keyUp", keyCode: key, modifiers } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
+): Promise<void> {
+  const events = previewKeyEvents(key, modifiers, text);
+  ensureDebugger(wc);
+  await wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+  for (const event of events) await wc.debugger.sendCommand("Input.dispatchKeyEvent", event);
 }
 
 // ---------------------------------------------------------------------------

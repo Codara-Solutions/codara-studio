@@ -286,6 +286,8 @@ async function resize(params: Record<string, unknown>): Promise<unknown> {
 // coordinates can be mapped against capturePage screenshots.
 async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
   const tab = requireTab(params);
+  // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
+  if (params.focus === true) tab.handle.focusContent();
   const webContentsId = tab.handle.getWebContentsId();
   if (webContentsId === null) {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -411,6 +413,20 @@ function clickProbe(opts: { selector: string }) {
 function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }) {
   const el = document.querySelector(opts.selector) as HTMLElement | null;
   if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
+  if (el instanceof HTMLSelectElement) {
+    if (el.disabled) return { ok: false, error: "select is disabled" };
+    if (el.multiple) return { ok: false, error: "multiple selection is not supported by type" };
+    const option = Array.from(el.options).find((option) => option.value === opts.text);
+    if (!option) return { ok: false, error: `select has no option with value: ${opts.text}` };
+    if (option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled)) {
+      return { ok: false, error: "select option is disabled" };
+    }
+    el.focus();
+    el.value = option.value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return { ok: true, value: el.value };
+  }
   const input = el as HTMLInputElement | HTMLTextAreaElement;
   el.focus();
   if (opts.clearFirst && "value" in input) input.value = "";

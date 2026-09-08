@@ -149,6 +149,37 @@ No local spoof of the client version was applied.
 This means all seven requested representative model families have completed
 one simple live task with their intended model. It does not yet establish
 hard-task reliability, speed improvements, or superiority to another harness.
-Automatic cross-provider recovery on a direct model selection needs a separate
-policy review; the benchmark guards against labeling that recovery as success
-for the originally selected model.
+Direct chats now retain the selected model during failure recovery as well.
+Transient failures can retry the same runtime; automatic cross-provider
+fallback remains available to managed workers and automations. The benchmark
+also guards against labeling a different model as the requested one.
+
+
+## Browser workflow fixture
+
+`cli/bench/browser/ticket-fixture.cjs` serves a local ticket application with
+pagination, asynchronous reads, native form controls, a confirmation dialog,
+and an injected concurrent owner change. The evaluator checks persisted state,
+conflict recovery, exactly one successful write, and untouched neighboring
+tickets. The agent cannot read the evaluator through a fixture endpoint.
+
+```sh
+CODARA_BROWSER_SMOKE_HOME="$HOME/.codara-harness-lab" \
+CODARA_BROWSER_SMOKE_MODEL=gpt-5.6-sol \
+CODARA_BROWSER_SMOKE_OUTPUT=/tmp/cora-browser-sol.json \
+node scripts/smoke-cora-browser.cjs
+```
+
+The runner retains actual tool calls and model IDs from Pi transcripts, rejects
+shell/HTTP/evaluation shortcuts, and checks outcomes rather than trusting the
+agent's completion message. Batch browser actions are inspected individually.
+`smoke-browser-reference.cjs` executes the same workflow deterministically to
+check the fixture and browser transport before a paid trial.
+
+This exposed dropped keyboard input when the app lacked OS focus. The keyboard
+path now focuses the embedded browser frame and dispatches trusted CDP events.
+The isolated Electron regression checks typing, newlines, native Tab navigation,
+and dropdown selection while every application window remains hidden. Native
+macOS dropdown popups do not reliably respond to these background keystrokes;
+`codara_preview_type` selects their exact option value directly and rejects an
+unknown or disabled option without clearing the previous selection.

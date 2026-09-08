@@ -154,7 +154,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_type",
     description:
-      "Type text into an input/textarea/contentEditable inside the target preview tab. Optionally clears the existing value first.",
+      "Type text into an input/textarea/contentEditable, or select a native dropdown option by its exact value. clearFirst clears text fields before typing; dropdown selection always replaces the current value.",
     inputSchema: {
       type: "object",
       required: ["selector", "text"],
