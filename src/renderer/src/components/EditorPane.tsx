@@ -79,11 +79,10 @@ interface Props {
   onDirtyChange?: (path: string, dirty: boolean) => void;
   onSaved?: (path: string) => void;
   onClose?: (path: string) => void;
-  // EditorStack mounts every editor tab and toggles visibility for the
-  // inactive ones. `active` lets MD panes decide whether to react to the
-  // global `spark:markdown.togglePreview` event — without it, every mounted
-  // MD pane would flip view mode on a single shortcut press.
+  // Visibility controls autosave and fullscreen lifetime. A split can show
+  // several editors, but only its focused pane receives global shortcuts.
   active?: boolean;
+  focused?: boolean;
 }
 
 function formatBytes(n: number): string {
@@ -93,7 +92,7 @@ function formatBytes(n: number): string {
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
-  { file, onDirtyChange, onSaved, onClose, active = true },
+  { file, onDirtyChange, onSaved, onClose, active = true, focused = active },
   ref,
 ) {
   const path = file.path;
@@ -303,19 +302,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (!active) flushRef.current();
   }, [active]);
 
-  // Preview toggle — dispatched globally by the keyboard handler in App.tsx.
-  // Every mounted toggle-capable pane (markdown/SVG/HTML) listens, but only
-  // the active tab acts; other panes ignore it entirely.
+  // Hidden and unfocused split siblings must ignore the global shortcut.
   useEffect(() => {
     if (!hasViewToggle) return;
     const onToggle = () => {
-      if (!active) return;
+      if (!focused) return;
       setViewMode((m) => (m === "edit" ? "preview" : "edit"));
     };
     window.addEventListener("spark:markdown.togglePreview", onToggle);
     return () =>
       window.removeEventListener("spark:markdown.togglePreview", onToggle);
-  }, [hasViewToggle, active]);
+  }, [hasViewToggle, focused]);
 
   // Copy raw markdown source to the system clipboard. The 1200ms badge is
   // long enough to confirm but short enough not to linger if the user

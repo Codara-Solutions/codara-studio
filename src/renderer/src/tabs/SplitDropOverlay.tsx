@@ -33,7 +33,7 @@ export default function SplitDropOverlay({ tabs, activeId, onDrop }: Props) {
       if (!state) setPlacement(null);
     });
     const pointerMove = (event: PointerEvent) => {
-      if (peekTerminalPaneDrag()) setPlacement(atPoint(event));
+      if (peekTerminalPaneDrag()) updatePlacement(atPoint(event));
     };
     const pointerUp = (event: PointerEvent) => {
       const payload = peekTerminalPaneDrag();
@@ -68,6 +68,10 @@ export default function SplitDropOverlay({ tabs, activeId, onDrop }: Props) {
       window.removeEventListener("blur", cancel);
     };
   }, []);
+
+  function updatePlacement(next: SplitDropPlacement | null) {
+    setPlacement((current) => current?.direction === next?.direction && current?.position === next?.position ? current : next);
+  }
 
   function atPoint(point: { clientX: number; clientY: number }): SplitDropPlacement | null {
     const rect = overlayRef.current?.getBoundingClientRect();
@@ -104,7 +108,7 @@ export default function SplitDropOverlay({ tabs, activeId, onDrop }: Props) {
         if (!peekTabReorderDrag()) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
-        setPlacement(atPoint(event));
+        updatePlacement(atPoint(event));
       }}
       onDragLeave={(event) => {
         if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setPlacement(null);

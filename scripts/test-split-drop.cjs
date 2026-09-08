@@ -54,6 +54,9 @@ async function main() {
   const pair = drop([editor, browser], { tabId: editor.id });
   assert.equal(pair.tabs[1].root.b.content.tabId, editor.id);
   assert.equal(pair.tabs[1].root.a.content.tabId, browser.id);
+  const previewPair = drop([{ ...editor, preview: true }, browser], { tabId: editor.id });
+  assert.equal(previewPair.tabs.find((tab) => tab.id === editor.id).preview, false, "dragging pins replaceable files");
+  assert.equal(previewPair.tabs.find((tab) => tab.id === ids.host).title, "split");
   const docked = { ...term, root: { kind: "leaf", paneId: "dock-editor", content: { type: "tab", tabId: editor.id, tabKind: "editor" } } };
   const movedDock = drop([docked, editor, browser], { tabId: term.id, paneId: "dock-editor" });
   assert.equal(movedDock.tabs[0].root.b, docked.root);

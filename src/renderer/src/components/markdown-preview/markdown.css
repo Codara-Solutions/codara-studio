@@ -19,7 +19,10 @@
   );
   font-size: 14px;
   line-height: 1.6;
-  padding: 24px 32px 80px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 24px clamp(12px, 4%, 32px) 80px;
   max-width: 900px;
   margin: 0 auto;
   word-wrap: break-word;

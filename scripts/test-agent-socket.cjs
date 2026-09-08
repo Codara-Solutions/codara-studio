@@ -183,7 +183,7 @@ async function main() {
     { mode: 0o600 },
   );
 
-  const electron = path.join(ROOT, "node_modules", ".bin", "electron");
+  const electron = require("electron");
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
     // Isolate both Codara's durable home and Electron's Chromium userData.
     // Without the latter this integration process can contend with a running
@@ -191,15 +191,22 @@ async function main() {
     env: {
       ...process.env,
       CODARA_HOME_DIR: HOME,
+      SPARK_HOME_DIR: HOME,
       SPARK_USER_DATA_DIR: HOME,
+      SPARK_SKIP_LEGACY_MIGRATION: "1",
       SPARK_NO_SHELL_INTEGRATION: "1",
     },
     stdio: "ignore",
   });
+  const appClosed = new Promise((resolve) => app.once("close", resolve));
+  let launchError = null;
+  app.on("error", (error) => { launchError = error; });
 
   try {
     let handshake = null;
     for (let i = 0; i < 120 && !handshake; i++) {
+      if (launchError) throw launchError;
+      if (app.exitCode !== null || app.signalCode !== null) throw new Error("Electron exited before writing the handshake");
       if (fs.existsSync(HANDSHAKE)) handshake = JSON.parse(fs.readFileSync(HANDSHAKE, "utf8"));
       else await sleep(500);
     }
@@ -1533,9 +1540,15 @@ async function main() {
       JSON.stringify(big).slice(0, 100),
     );
   } finally {
-    app.kill("SIGTERM");
-    await sleep(800);
-    try { app.kill("SIGKILL"); } catch { /* already gone */ }
+    // Launch the binary directly and await its exit: killing Electron's Node
+    // CLI wrapper leaves the app writing into the directory being removed.
+    const forceStop = setTimeout(() => app.kill("SIGKILL"), 5_000);
+    try {
+      app.kill("SIGTERM");
+      await appClosed;
+    } finally {
+      clearTimeout(forceStop);
+    }
     // Chromium helpers can release their last userData file a few milliseconds
     // after the parent process exits. Let Node retry transient ENOTEMPTY/EPERM
     // teardown races so a fully-passing socket run does not report an abort.

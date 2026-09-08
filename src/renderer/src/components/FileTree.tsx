@@ -213,7 +213,7 @@ function rememberFileTree(cwd: string, root: DirNode & { kind: "dir" }): void {
 interface Props {
   cwd: string;
   activePath?: string | null;
-  onOpenFile: (entry: FsEntry, options?: { preview?: boolean }) => void;
+  onOpenFile: (entry: FsEntry, options?: { preview?: boolean; toSide?: boolean }) => void;
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
   // Right-click a .md/.html file to hand it to the orchestrator as a plan.
@@ -1312,7 +1312,7 @@ export default function FileTree({
 
       setSelectedFilePaths(new Set([path]));
       setSelectionAnchorPath(path);
-      onOpenFile(node.entry);
+      onOpenFile(node.entry, { preview: event.detail < 2, toSide: event.altKey });
     },
     [onOpenFile, toggleDir],
   );
@@ -1863,6 +1863,15 @@ export default function FileTree({
                   const preview = contextMenuEntries.length === 1;
                   for (const entry of contextMenuEntries) onOpenFile(entry, { preview });
                 }
+          }
+          onOpenToSide={
+            contextMenuEntries.length === 1 && !contextMenu.entry.isDir
+              ? () => {
+                  const entry = contextMenu.entry;
+                  setContextMenu(null);
+                  onOpenFile(entry, { toSide: true });
+                }
+              : null
           }
           openLabel={
             contextMenuEntries.length > 1
@@ -2631,6 +2640,7 @@ function FileMenu({
   entries,
   runPlan,
   onOpen,
+  onOpenToSide,
   openLabel,
   onNewFile,
   onNewFolder,
@@ -2650,6 +2660,7 @@ function FileMenu({
   entries: FsEntry[];
   runPlan: { engines: EngineOption[]; onPick: (backend?: ChatBackendKind) => void } | null;
   onOpen: (() => void) | null;
+  onOpenToSide: (() => void) | null;
   openLabel: string;
   onNewFile: () => void;
   onNewFolder: () => void;
@@ -2762,6 +2773,9 @@ function FileMenu({
         <MenuButton onClick={onOpen} hint={multiple ? undefined : "Enter"}>
           {openLabel}
         </MenuButton>
+      )}
+      {onOpenToSide && (
+        <MenuButton onClick={onOpenToSide} hint="Alt+click">Open to Side</MenuButton>
       )}
       {onOpenChanges && (
         <MenuButton onClick={onOpenChanges}>
