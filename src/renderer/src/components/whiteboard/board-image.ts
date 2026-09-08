@@ -368,18 +368,25 @@ function renderCard(
   const titleLineHeight = isTopic ? 19 : 17;
   const titleLines = wrapLines(node.title, titleSize, maxWidth, 2);
   const body = node.body?.trim() ?? "";
+  const evidence = node.sources?.length || node.confidence === "inferred"
+    ? `${node.confidence === "inferred" ? "Inferred · " : ""}${node.sources?.[0] ?? "Needs confirmation"}${(node.sources?.length ?? 0) > 1 ? ` +${node.sources!.length - 1}` : ""}`
+    : "";
+  if (evidence) {
+    const line = wrapLines(evidence, 10, maxWidth, 1)[0];
+    parts.push(textEl(geom.x + 12, geom.y + geom.h - 12, line, { size: 10, color: palette.inkDim }));
+  }
 
   if (isTopic) {
     // Topic cards are hubs: the whole block centers in the card.
     const bodyBudget = Math.min(
       4,
-      Math.floor((geom.h - 21 - 18 - titleLines.length * titleLineHeight - (body ? 5 : 0)) / 16),
+      Math.floor((geom.h - (evidence ? 21 : 0) - 21 - 18 - titleLines.length * titleLineHeight - (body ? 5 : 0)) / 16),
     );
     const bodyLines = body ? wrapLines(body, 11, maxWidth, Math.max(0, bodyBudget)) : [];
     const blockH =
       12 + 6 + titleLines.length * titleLineHeight + (bodyLines.length > 0 ? 5 + bodyLines.length * 16 : 0);
     const cx = geom.x + geom.w / 2;
-    let top = geom.y + Math.max(10, (geom.h - blockH) / 2);
+    let top = geom.y + Math.max(10, (geom.h - (evidence ? 21 : 0) - blockH) / 2);
     parts.push(
       textEl(cx, baseline(top, 10, 12), label, {
         size: 10,
@@ -433,7 +440,7 @@ function renderCard(
   }
   if (body) {
     top += 5;
-    const bodyBudget = Math.min(4, Math.floor((geom.y + geom.h - 11 - top) / 16));
+    const bodyBudget = Math.min(4, Math.floor((geom.y + geom.h - (evidence ? 21 : 0) - 11 - top) / 16));
     for (const line of wrapLines(body, 11, maxWidth, Math.max(0, bodyBudget))) {
       parts.push(textEl(textX, baseline(top, 11, 16), line, { size: 11, color: palette.muted }));
       top += 16;
@@ -469,7 +476,7 @@ function renderEdge(
   const p3: [number, number] = [endX, endY];
 
   const parts: string[] = [];
-  const dash = edge.style === "dashed" ? ' stroke-dasharray="6 5"' : "";
+  const dash = (edge.style === "dashed" || edge.confidence === "inferred") ? ' stroke-dasharray="6 5"' : "";
   parts.push(
     `<path d="M ${fmt(p0[0])} ${fmt(p0[1])} C ${fmt(c1[0])} ${fmt(c1[1])}, ${fmt(c2[0])} ${fmt(c2[1])}, ${fmt(p3[0])} ${fmt(p3[1])}" ` +
       `fill="none" stroke="${stroke}" stroke-opacity="${strokeOpacity}" stroke-width="${width}"${dash}/>`,

@@ -572,7 +572,7 @@ const WHITEBOARD_TOOLS = [
   {
     name: "codara_whiteboard_update",
     description:
-      "Create, replace, extend, or clear this chat's persisted infinite whiteboard. First call codara_whiteboard_get, preserve the user's edits, and pass its revision as baseRevision so a concurrent human edit cannot be overwritten. Coordinates are unbounded logical canvas positions. " +
+      "Create, replace, extend, or clear this chat's persisted infinite whiteboard. First call codara_whiteboard_get, preserve the user's edits, and pass its revision as baseRevision so a concurrent human edit cannot be overwritten. Every edit creates a draft. Inspect the rendered revision with codara_whiteboard_inspect, correct issues, then call codara_whiteboard_review before finishing. Coordinates are unbounded logical canvas positions. " +
       "Design for legibility, not density: lay nodes out left-to-right in stages (columns roughly 380px apart, ~40px vertical gaps, card widths 240-320). Cluster related nodes inside a 'group' node drawn behind them (give the group generous width/height and place members fully inside its bounds) instead of connecting everything with edges. Keep titles under ~6 words and bodies to 1-2 short sentences. Prefer few, meaningful edges over exhaustive wiring; label an edge only when the relationship is not obvious; use style 'dashed' for soft/optional relations. Model if/case decisions with a condition node and clearly labeled outgoing edges.",
     inputSchema: {
       type: "object",
@@ -598,9 +598,11 @@ const WHITEBOARD_TOOLS = [
           maxItems: 500,
           items: {
             type: "object",
-            required: ["id", "kind", "title", "x", "y"],
+            required: ["id"],
             properties: {
-              id: { type: "string", description: "Stable node id used by edges and future merges." },
+              sources: { type: "array", maxItems: 8, items: { type: "string" }, description: "Repository-relative path:line references supporting this card or connection, for example src/main/ipc.ts:120." },
+              confidence: { type: "string", enum: ["confirmed", "inferred"], description: "confirmed requires inspected source evidence; inferred means a hypothesis, not an established dependency." },
+              id: { type: "string", description: "Stable node id. New cards need kind, title, x, and y; merge updates may omit fields to preserve them." },
               kind: {
                 type: "string",
                 enum: ["topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note"],
@@ -627,10 +629,12 @@ const WHITEBOARD_TOOLS = [
           maxItems: 1000,
           items: {
             type: "object",
-            required: ["id", "from", "to"],
+            required: ["id"],
             properties: {
+              sources: { type: "array", maxItems: 8, items: { type: "string" }, description: "Repository-relative path:line references supporting this card or connection, for example src/main/ipc.ts:120." },
+              confidence: { type: "string", enum: ["confirmed", "inferred"], description: "confirmed requires inspected source evidence; inferred means a hypothesis, not an established dependency." },
               id: { type: "string" },
-              from: { type: "string", description: "Source node id." },
+              from: { type: "string", description: "Source node id, required for a new connection; omitted merge fields are preserved." },
               to: { type: "string", description: "Target node id." },
               label: { type: "string" },
               tone: { type: "string", enum: ["default", "accent", "success", "warning", "danger"] },
@@ -648,6 +652,29 @@ const WHITEBOARD_TOOLS = [
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: "codara_whiteboard_arrange",
+    description: "Arrange the current board with a directed graph layout engine. Keeps card text and connections, lays out modules separately, and preserves existing geometric group membership. Moves cards, so use only for a new draft or when the user asks for layout improvements; preserve intentional manual placement. Inspect the new revision afterward.",
+    inputSchema: { type: "object", required: ["baseRevision"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+    }, additionalProperties: false },
+  },
+  {
+    name: "codara_whiteboard_inspect",
+    description: "Render this chat's current whiteboard with the real canvas and return a PNG image plus overlap, text clipping, connection, and source-reference diagnostics. Works while the board is closed or in a background workspace. Pass nodeIds for readable detail crops when detailNeeded is true. Read the image, verify semantic connections against source code, fix problems, and inspect again. File existence alone does not prove a claim.",
+    inputSchema: { type: "object", required: ["baseRevision"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      nodeIds: { type: "array", maxItems: 50, items: { type: "string" }, description: "Optional card/group IDs to frame a detail crop. Omit for an overview." },
+    }, additionalProperties: false },
+  },
+  {
+    name: "codara_whiteboard_review",
+    description: "Record Cora's review of the exact inspected revision. Requires a recent readable image inspection covering all cards, no overlap/clipping errors, and a summary of the source and visual checks actually performed. Record unresolved warnings or uncertain connections in limitations. Any later edit invalidates the review. This is your assessment, not automatic proof of correctness.",
+    inputSchema: { type: "object", required: ["baseRevision", "summary"], properties: {
+      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      summary: { type: "string", maxLength: 700 }, limitations: { type: "array", maxItems: 20, items: { type: "string", maxLength: 400 } },
+    }, additionalProperties: false },
   },
 ];
 
@@ -1590,6 +1617,9 @@ const EXECUTE_TOOL_TO_RPC = {
 const WHITEBOARD_TOOL_TO_RPC = {
   codara_whiteboard_get: "orchestrator.whiteboard_get",
   codara_whiteboard_update: "orchestrator.whiteboard_update",
+  codara_whiteboard_arrange: "orchestrator.whiteboard_arrange",
+  codara_whiteboard_inspect: "orchestrator.whiteboard_inspect",
+  codara_whiteboard_review: "orchestrator.whiteboard_review",
 };
 
 const BOARD_TOOL_TO_RPC = {
@@ -1651,7 +1681,7 @@ const DIRECT_MEMORY_TOOL = {
 // (agent-loop continuation). Deliberately NO manager orchestration tools, a
 // worker never spawns, steers, messages, or completes.
 
-const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_board_update"];
+const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
   ...STUDIO_TOOLS.filter((tool) => !WORKER_READ_ONLY_STUDIO_TOOL_NAMES.includes(tool.name)),
@@ -2157,7 +2187,7 @@ async function callRunBatch(args) {
 
 function screenshotMetadata(value) {
   return { url: value.url ?? null, ...Object.fromEntries(
-    ["tabId", "title", "viewport", "imageSize", "scale"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+    ["tabId", "title", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
   ) };
 }
 

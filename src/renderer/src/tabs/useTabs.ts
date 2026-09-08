@@ -1283,6 +1283,7 @@ export interface UseTabsApi {
   // Append a fresh untitled whiteboard tab and focus it (one draft per call,
   // not a singleton). See WhiteboardTab in types.ts for the draft contract.
   newWhiteboardTab: () => TabId;
+  saveWhiteboardTabAs: (id: TabId, entry: FsEntry) => void;
   // Open (or focus) the diff tab for a changed file. Identity is
   // (path, staged) — the same file can have a Working Tree tab and a Staged
   // tab open side by side, exactly like VS Code's separate diff editors.
@@ -3801,6 +3802,25 @@ export function useTabs(
     });
   }, []);
 
+  const saveWhiteboardTabAs = useCallback((id: TabId, entry: FsEntry) => {
+    setTabs((current) => {
+      if (!current.some((tab) => tab.id === id && tab.kind === "whiteboard")) return current;
+      const existing = current.find((tab): tab is EditorTab => tab.kind === "editor" && tab.path === entry.path);
+      fireDispose(id);
+      if (existing) {
+        setActiveId((active) => active === id ? existing.id : active);
+        return pruneDockCellsFor(current.filter((tab) => tab.id !== id).map((tab) =>
+          tab.id === existing.id ? { ...tab, preview: false } : tab), id);
+      }
+      // Keep the draft's identity and selection through the save. Separate
+      // open/close updates can reroute focus before React evaluates the open.
+      return current.map((tab): Tab => tab.id === id ? {
+        id, kind: "editor", title: basename(entry.path), path: entry.path,
+        entry, dirty: false, preview: false,
+      } : tab);
+    });
+  }, [fireDispose]);
+
   const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
     // back after `setTabs` returns is safe. TypeScript can't see through
@@ -4013,6 +4033,7 @@ export function useTabs(
       openAutomationsTab,
       openUsageTab,
       newWhiteboardTab,
+      saveWhiteboardTabAs,
       openDiffTab,
       openCommitDiffTab,
       closeRunsTabFor,

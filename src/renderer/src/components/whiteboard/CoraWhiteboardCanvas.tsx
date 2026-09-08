@@ -15,6 +15,7 @@ import {
   applyEdgeChanges,
   applyNodeChanges,
   useReactFlow,
+  useNodesInitialized,
 } from "@xyflow/react";
 import type {
   Connection,
@@ -26,6 +27,7 @@ import type {
   Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { arrangeWhiteboard } from "@shared/whiteboard-layout";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CoraWhiteboard,
@@ -54,7 +56,9 @@ type BoardFlowEdge = Edge<BoardEdgeData, "default">;
 interface Props {
   board: CoraWhiteboard;
   editable?: boolean;
+  visible?: boolean;
   onCommit?: (board: CoraWhiteboard) => void;
+  onReady?: () => void;
   onAskCora?: (prompt: string) => void;
 }
 
@@ -311,7 +315,7 @@ function flowEdges(board: CoraWhiteboard): BoardFlowEdge[] {
       style: {
         stroke,
         strokeWidth: edge.tone && edge.tone !== "default" ? 1.8 : 1.5,
-        ...(edge.style === "dashed" ? { strokeDasharray: "6 5" } : {}),
+        ...((edge.style === "dashed" || edge.confidence === "inferred") ? { strokeDasharray: "6 5" } : {}),
       },
       labelStyle: {
         fill: "var(--ink-dim)",
@@ -389,151 +393,6 @@ function boardSignature(board: CoraWhiteboard): string {
   });
 }
 
-// ── Auto-arrange ─────────────────────────────────────────────────────────────
-// A dependency-free layered layout: cards flow left-to-right by edge direction
-// (Kahn layering, cycle-tolerant), rows within a column are ordered by the
-// barycenter of their neighbors, and groups are re-fitted around the members
-// they geometrically contained before the pass — so Cora's clustering intent
-// survives a tidy-up.
-
-const ARRANGE_COL_GAP = 150;
-const ARRANGE_ROW_GAP = 56;
-const GROUP_PAD = { top: 56, right: 28, bottom: 28, left: 28 };
-
-function arrangePositions(
-  items: CoraWhiteboardNode[],
-  links: CoraWhiteboardEdge[],
-): Map<string, { x: number; y: number; width?: number; height?: number }> {
-  const result = new Map<string, { x: number; y: number; width?: number; height?: number }>();
-  const cards = items.filter((item) => item.kind !== "group");
-  const groups = items.filter((item) => item.kind === "group");
-  if (cards.length === 0) return result;
-
-  // Geometric membership before anything moves.
-  const membership = new Map<string, string[]>();
-  for (const group of groups) {
-    const size = nodeSize(group);
-    const inside = cards.filter((card) => {
-      const cardSize = nodeSize(card);
-      const cx = card.x + cardSize.width / 2;
-      const cy = card.y + cardSize.height / 2;
-      return cx >= group.x && cx <= group.x + size.width && cy >= group.y && cy <= group.y + size.height;
-    });
-    membership.set(group.id, inside.map((card) => card.id));
-  }
-
-  const cardIds = new Set(cards.map((card) => card.id));
-  const outgoing = new Map<string, string[]>();
-  const incoming = new Map<string, string[]>();
-  for (const link of links) {
-    if (!cardIds.has(link.from) || !cardIds.has(link.to) || link.from === link.to) continue;
-    outgoing.set(link.from, [...(outgoing.get(link.from) ?? []), link.to]);
-    incoming.set(link.to, [...(incoming.get(link.to) ?? []), link.from]);
-  }
-
-  // Kahn layering; nodes trapped in cycles fall back to one past their
-  // deepest already-layered predecessor.
-  const layer = new Map<string, number>();
-  const degree = new Map(cards.map((card) => [card.id, incoming.get(card.id)?.length ?? 0]));
-  const queue = cards.filter((card) => (degree.get(card.id) ?? 0) === 0).map((card) => card.id);
-  queue.forEach((id) => layer.set(id, 0));
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    for (const next of outgoing.get(current) ?? []) {
-      layer.set(next, Math.max(layer.get(next) ?? 0, (layer.get(current) ?? 0) + 1));
-      const remaining = (degree.get(next) ?? 0) - 1;
-      degree.set(next, remaining);
-      if (remaining === 0) queue.push(next);
-    }
-  }
-  for (const card of cards) {
-    if (layer.has(card.id)) continue;
-    const preds = incoming.get(card.id) ?? [];
-    const known = preds.map((id) => layer.get(id)).filter((value): value is number => value !== undefined);
-    layer.set(card.id, known.length > 0 ? Math.max(...known) + 1 : 0);
-  }
-
-  const byId = new Map(cards.map((card) => [card.id, card]));
-  const columns = new Map<number, string[]>();
-  for (const card of cards) {
-    const index = layer.get(card.id) ?? 0;
-    columns.set(index, [...(columns.get(index) ?? []), card.id]);
-  }
-  const columnIndexes = [...columns.keys()].sort((a, b) => a - b);
-  // Initial in-column order: current y keeps whatever intent the author had.
-  for (const index of columnIndexes) {
-    columns.get(index)!.sort((a, b) => (byId.get(a)?.y ?? 0) - (byId.get(b)?.y ?? 0));
-  }
-  // Two barycenter sweeps reduce crossings without a heavyweight solver.
-  const rowOf = new Map<string, number>();
-  const refreshRows = () => {
-    for (const index of columnIndexes) {
-      columns.get(index)!.forEach((id, row) => rowOf.set(id, row));
-    }
-  };
-  refreshRows();
-  for (let sweep = 0; sweep < 2; sweep++) {
-    for (const index of columnIndexes) {
-      const ids = columns.get(index)!;
-      const keyed = ids.map((id) => {
-        const neighbors = [...(incoming.get(id) ?? []), ...(outgoing.get(id) ?? [])]
-          .map((neighbor) => rowOf.get(neighbor))
-          .filter((value): value is number => value !== undefined);
-        const key = neighbors.length > 0
-          ? neighbors.reduce((sum, value) => sum + value, 0) / neighbors.length
-          : rowOf.get(id) ?? 0;
-        return { id, key };
-      });
-      keyed.sort((a, b) => a.key - b.key);
-      columns.set(index, keyed.map((entry) => entry.id));
-      refreshRows();
-    }
-  }
-
-  let x = 0;
-  for (const index of columnIndexes) {
-    const ids = columns.get(index)!;
-    const width = Math.max(...ids.map((id) => nodeSize(byId.get(id)!).width));
-    const totalHeight = ids.reduce((sum, id) => sum + nodeSize(byId.get(id)!).height, 0)
-      + ARRANGE_ROW_GAP * Math.max(0, ids.length - 1);
-    let y = -totalHeight / 2;
-    for (const id of ids) {
-      const size = nodeSize(byId.get(id)!);
-      result.set(id, { x: x + (width - size.width) / 2, y });
-      y += size.height + ARRANGE_ROW_GAP;
-    }
-    x += width + ARRANGE_COL_GAP;
-  }
-
-  // Re-fit each group around where its members landed.
-  for (const group of groups) {
-    const memberIds = (membership.get(group.id) ?? []).filter((id) => result.has(id));
-    if (memberIds.length === 0) continue;
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const id of memberIds) {
-      const placed = result.get(id)!;
-      const size = nodeSize(byId.get(id)!);
-      minX = Math.min(minX, placed.x);
-      minY = Math.min(minY, placed.y);
-      maxX = Math.max(maxX, placed.x + size.width);
-      maxY = Math.max(maxY, placed.y + size.height);
-    }
-    const groupLimits = whiteboardNodeSizeLimits("group");
-    result.set(group.id, {
-      x: minX - GROUP_PAD.left,
-      y: minY - GROUP_PAD.top,
-      width: Math.min(groupLimits.maxWidth,
-        Math.round(maxX - minX + GROUP_PAD.left + GROUP_PAD.right)),
-      height: Math.min(groupLimits.maxHeight,
-        Math.round(maxY - minY + GROUP_PAD.top + GROUP_PAD.bottom)),
-    });
-  }
-  return result;
-}
-
 // ── Node component ───────────────────────────────────────────────────────────
 
 // One universal handle per side; ConnectionMode.Loose lets any of them start
@@ -582,6 +441,12 @@ function BoardCard({ data, selected }: NodeProps<BoardFlowNode>) {
       </div>
       <div className="cora-board-card__title">{item.title}</div>
       {!isGroup && item.body && <div className="cora-board-card__body">{item.body}</div>}
+      {!isGroup && (item.sources?.length || item.confidence === "inferred") ? (
+        <div className="cora-board-card__evidence" title={item.sources?.join("\n")}>
+          {item.confidence === "inferred" ? "Inferred · " : ""}{item.sources?.[0] ?? "Needs confirmation"}
+          {(item.sources?.length ?? 0) > 1 ? ` +${item.sources!.length - 1}` : ""}
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -609,8 +474,10 @@ function zoomBandFor(zoom: number): ZoomBand {
 function WhiteboardCanvasInner({
   board,
   editable = false,
+  visible = true,
   onCommit,
   onAskCora,
+  onReady,
 }: Props) {
   const [nodes, setNodes] = useState<BoardFlowNode[]>(() => flowNodes(board, editable));
   const [edges, setEdges] = useState<BoardFlowEdge[]>(() => flowEdges(board));
@@ -629,6 +496,20 @@ function WhiteboardCanvasInner({
     future: [],
   });
   const { fitView, screenToFlowPosition, getViewport, setViewport } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+  const initiallyFramed = useRef(false);
+  const userMovedViewport = useRef(false);
+  useEffect(() => {
+    if (!visible || !nodesInitialized || !nodes.length || initiallyFramed.current) return;
+    // Hidden chat layers can mount before cards exist. Frame the measured
+    // draft when shown; Cora may reframe later geometry until the user pans.
+    const timer = window.setTimeout(() => {
+      void fitView({ padding: 0.18, maxZoom: 1, duration: 0 }).then((fitted) => {
+        if (fitted) initiallyFramed.current = true;
+      });
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [visible, nodesInitialized, nodes, fitView]);
 
   useEffect(() => {
     const current = boardRef.current;
@@ -653,6 +534,12 @@ function WhiteboardCanvasInner({
     if (board.lastEditedBy !== "user") {
       historyRef.current = { past: [], future: [] };
       setHistoryState({ undo: 0, redo: 0 });
+      if (!userMovedViewport.current && (
+        board.nodes.length !== current.nodes.length || board.nodes.some((node) => {
+          const prior = current.nodes.find((item) => item.id === node.id);
+          return !prior || prior.x !== node.x || prior.y !== node.y || prior.width !== node.width || prior.height !== node.height;
+        })
+      )) initiallyFramed.current = false;
     }
     boardRef.current = cloneBoard(board);
     const selectedNodeIds = new Set(
@@ -712,6 +599,8 @@ function WhiteboardCanvasInner({
         label: cleanText(label, 100) || undefined,
         tone: item?.tone,
         style: item?.style,
+        sources: item?.sources,
+        confidence: item?.confidence,
       };
     });
     return {
@@ -1180,19 +1069,7 @@ function WhiteboardCanvasInner({
     const links = edgesRef.current
       .map((edge) => edge.data?.item)
       .filter((item): item is CoraWhiteboardEdge => Boolean(item));
-    const placed = arrangePositions(items, links);
-    if (placed.size === 0) return;
-    const nextItems = items.map((item) => {
-      const target = placed.get(item.id);
-      if (!target) return item;
-      return {
-        ...item,
-        x: Math.round(target.x),
-        y: Math.round(target.y),
-        ...(target.width !== undefined ? { width: target.width } : {}),
-        ...(target.height !== undefined ? { height: target.height } : {}),
-      };
-    });
+    const nextItems = arrangeWhiteboard(items, links);
     const nextBoardShape = { ...boardRef.current, nodes: nextItems, edges: links };
     const nextNodes = flowNodes(nextBoardShape, true);
     const nextEdges = flowEdges(nextBoardShape);
@@ -1400,6 +1277,7 @@ function WhiteboardCanvasInner({
   }, [nodes, query]);
 
   const handleMove = useCallback((_event: unknown, viewport: Viewport) => {
+    if (_event) userMovedViewport.current = true;
     const band = zoomBandFor(viewport.zoom);
     setZoomBand((current) => (current === band ? current : band));
   }, []);
@@ -1711,7 +1589,7 @@ function WhiteboardCanvasInner({
           <button
             type="button"
             onClick={() => onAskCora(
-              "Read the current whiteboard, including every manual edit I made, and explain what changed or improve it without overwriting my choices.",
+              "Review and improve this whiteboard. Read my edits first, verify its claims and connections against the project, inspect the rendered board, fix issues, then review the final revision without overwriting my choices.",
             )}
             title="Ask Cora about this board in chat"
             aria-label="Ask Cora"
@@ -1724,6 +1602,7 @@ function WhiteboardCanvasInner({
 
       <div ref={canvasRef} className="cora-board-editor__flow">
         <ReactFlow<BoardFlowNode, BoardFlowEdge>
+          onInit={() => onReady?.()}
           nodes={displayNodes}
           edges={displayEdges}
           nodeTypes={NODE_TYPES}

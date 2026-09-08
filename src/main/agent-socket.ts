@@ -67,6 +67,9 @@ import {
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { DEFAULT_PREFERENCES } from "@shared/types";
+import { whiteboardIssues } from "@shared/whiteboard-quality";
+import type { WhiteboardIssue } from "@shared/whiteboard-quality";
+import { rememberWhiteboardInspection, requireWhiteboardInspection, whiteboardSourceIssues } from "./whiteboard-review";
 import {
   authorizeAgentSocketCapability,
   setAgentSocketCapabilityEndpoint,
@@ -460,6 +463,8 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "orchestrator.message_workers",
   "orchestrator.name_chat",
   "orchestrator.whiteboard_update",
+  "orchestrator.whiteboard_arrange",
+  "orchestrator.whiteboard_review",
   "orchestrator.board_update",
   "automation.create",
   "automation.update",
@@ -668,6 +673,10 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.whiteboard_inspect":
+      case "orchestrator.whiteboard_arrange":
+      case "orchestrator.whiteboard_review":
+        return await handleOrchestratorWhiteboardQuality(method, params, id);
       case "orchestrator.whiteboard_get":
         return await handleOrchestratorWhiteboardGet(params, id);
       case "orchestrator.whiteboard_update":
@@ -5287,6 +5296,7 @@ async function handleOrchestratorWhiteboardGet(
   return successResponse(id, {
     run_id: run.id,
     whiteboard: run.whiteboard ?? null,
+    issues: run.whiteboard ? whiteboardIssues(run.whiteboard) : [],
   });
 }
 
@@ -5330,9 +5340,55 @@ async function handleOrchestratorWhiteboardUpdate(
       ok: true,
       run_id: updated.id,
       whiteboard: updated.whiteboard ?? null,
+      issues: updated.whiteboard ? whiteboardIssues(updated.whiteboard) : [],
+      next: updated.whiteboard ? "Draft saved. Inspect the rendered board, fix issues, and review the final revision before finishing." : undefined,
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorWhiteboardQuality(
+  method: string, params: Record<string, unknown>, id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    const runId = stringParam(params, "runId");
+    if (!runId) throw new Error("runId is required");
+    const store = await getRunStore();
+    const run = await store.getRun(runId);
+    const board = run?.whiteboard;
+    if (!run || !board) throw new Error("No whiteboard exists for this chat. Create a draft first.");
+    const revision = board.revision ?? 0;
+    if (params.baseRevision !== revision) throw new Error(`Whiteboard changed or baseRevision is missing. Read revision ${revision} first.`);
+    if (method === "orchestrator.whiteboard_arrange") {
+      const { arrangeWhiteboard } = await import("@shared/whiteboard-layout");
+      const nodes = arrangeWhiteboard(board.nodes, board.edges);
+      const updated = await store.updateCoraWhiteboard({ runId, action: "merge", editor: "cora", baseRevision: revision, nodes });
+      return successResponse(id, { ok: true, whiteboard: updated.whiteboard, issues: whiteboardIssues(updated.whiteboard!), next: "Inspect the arranged revision before reviewing it." });
+    }
+    if (method === "orchestrator.whiteboard_review") {
+      const issues = requireWhiteboardInspection(runId, board);
+      const summary = stringParam(params, "summary");
+      if (!summary?.trim()) throw new Error("Summarize the source and visual checks you actually performed.");
+      const limitations = Array.isArray(params.limitations) ? params.limitations.filter((value): value is string => typeof value === "string" && Boolean(value.trim())) : [];
+      if (issues.some((issue) => issue.severity === "warning") && !limitations.length) throw new Error("Record unresolved inspection warnings as limitations, or fix them and inspect again.");
+      const updated = await store.reviewCoraWhiteboard({ runId, baseRevision: revision, summary, limitations });
+      return successResponse(id, { ok: true, whiteboard: updated.whiteboard });
+    }
+    const nodeIds = Array.isArray(params.nodeIds) ? params.nodeIds.filter((value): value is string => typeof value === "string").slice(0, 50) : [];
+    const result = await requestPreviewOp<{
+      dataUrl: string; issues: WhiteboardIssue[]; nodeIds: string[]; detailNeeded: boolean;
+      [key: string]: unknown;
+    }>("whiteboard_inspect", { board, nodeIds });
+    if (!result.dataUrl?.startsWith("data:image/png;base64,")) throw new Error("Whiteboard inspection returned no image.");
+    const sourceIssues = await whiteboardSourceIssues(board, run.settingsSnapshot?.workspaceCwd as string | undefined);
+    result.issues.push(...sourceIssues);
+    const current = await store.getRun(runId);
+    if (current?.whiteboard?.revision !== board.revision || current?.whiteboard?.updatedAt !== board.updatedAt) throw new Error("Whiteboard changed while capturing. Read and inspect the current revision again.");
+    rememberWhiteboardInspection(runId, board, result.issues, result.detailNeeded ? [] : result.nodeIds);
+    return successResponse(id, { ...result, run_id: runId });
+  } catch (error) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (error as Error).message);
   }
 }
 

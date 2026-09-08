@@ -34,6 +34,7 @@ export function isWorkerSafeBridgeTool(
     name.startsWith("codara_preview_") ||
     name.startsWith("codara_terminal_") ||
     name === "codara_whiteboard_get" ||
+    name === "codara_whiteboard_inspect" ||
     name === "codara_board_get"
   ) {
     return true;

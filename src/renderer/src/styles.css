@@ -5937,3 +5937,39 @@ a { color: inherit; }
   border-bottom: 1px solid var(--rule-soft);
   color: var(--muted-2);
 }
+
+.cora-board-card__evidence {
+  margin-top: auto;
+  padding-top: 7px;
+  color: var(--ink-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cora-board-editor[data-zoom="far"] .cora-board-card__evidence {
+  display: none;
+}
+
+.cora-whiteboard-review {
+  color: var(--ink-dim);
+  font-size: 11px;
+}
+
+@container (max-width: 900px) {
+  .cora-whiteboard-header {
+    flex-wrap: wrap;
+    gap: 8px 12px;
+  }
+  .cora-whiteboard-header__heading {
+    flex-basis: 100%;
+  }
+  .cora-whiteboard-header__heading h2 {
+    flex-shrink: 0;
+    max-width: 55%;
+  }
+  .cora-whiteboard-header__actions {
+    margin-left: auto;
+  }
+}

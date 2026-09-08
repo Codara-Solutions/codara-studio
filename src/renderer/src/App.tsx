@@ -6574,7 +6574,6 @@ const Workspace = React.memo(function Workspace({
     dockTabInTerminal,
     undockTab,
     toggleTerminalPaneZoom,
-    openEditorTab,
     registerDispose,
     setLeafAgentSession,
     setLeafBootResumeConsumed,
@@ -7145,23 +7144,9 @@ const Workspace = React.memo(function Workspace({
     },
     [setLeafBootResumeConsumed],
   );
-  // First save of an untitled whiteboard draft: rebind by swapping the draft
-  // tab for a regular editor tab on the saved .coraboard file (openEditorTab
-  // dedupes by path, so a later explorer click lands on this same tab). The
-  // swap runs on a fresh tick: openEditorTab captures the new tab's id inside
-  // its setTabs updater, which React only evaluates eagerly when it is the
-  // FIRST queued update — the save path has already queued dirty/git updates
-  // this tick, and a missed capture would leave the new tab unfocused and let
-  // closeTab reroute to an unrelated neighbor. Open before close so the
-  // editor is already active when the draft goes away (no reroute flicker).
   const handleWhiteboardSavedAs = useCallback(
-    (id: TabId, path: string) => {
-      window.setTimeout(() => {
-        openEditorTab(entryFromPath(path));
-        closeTab(id);
-      }, 0);
-    },
-    [openEditorTab, closeTab],
+    (id: TabId, path: string) => tabs.saveWhiteboardTabAs(id, entryFromPath(path)),
+    [tabs.saveWhiteboardTabAs],
   );
 
   return (

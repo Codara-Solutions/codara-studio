@@ -120,6 +120,7 @@ import {
 import {
   CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
   whiteboardNodeSizeLimits,
+  normalizeWhiteboardEvidence,
 } from "@shared/cora-whiteboard-file";
 import { CODEX_MODEL_BY_TIER, loomRuntimeForModel, normalizeCodexModelId } from "@shared/model-catalog";
 import {
@@ -12038,6 +12039,28 @@ export async function updateCoraWhiteboard(
   });
 }
 
+export async function reviewCoraWhiteboard(input: {
+  runId: string; baseRevision: number; summary: string; limitations: string[];
+}): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  return commitRunChange(run, {
+    type: "run.whiteboard_updated",
+    message: "Reviewed Cora whiteboard",
+    mutate: (draft, timestamp) => {
+      if (!draft.whiteboard || (draft.whiteboard.revision ?? 0) !== input.baseRevision) {
+        throw new Error("Whiteboard changed during review. Read and inspect the current revision again.");
+      }
+      draft.whiteboard.review = {
+        revision: input.baseRevision,
+        reviewedAt: timestamp,
+        summary: sanitizeWhiteboardText(input.summary, 700),
+        limitations: input.limitations.slice(0, 20).map((value) => sanitizeWhiteboardText(value, 400)),
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // ── Cora Board (the per-chat kanban) ────────────────────────────────────────
 // Persisted on RunState.board exactly like the whiteboard: every write is one
 // commitRunChange with the baseRevision guard evaluated inside the mutate (so
@@ -12369,7 +12392,7 @@ const WHITEBOARD_TONES: readonly NonNullable<CoraWhiteboardEdge["tone"]>[] = [
  * strings still clear a field.
  */
 function normalizeWhiteboardNode(
-  node: CoraWhiteboardNode,
+  node: Pick<CoraWhiteboardNode, "id"> & Partial<CoraWhiteboardNode>,
   prior?: CoraWhiteboardNode,
 ): CoraWhiteboardNode {
   const id = sanitizeWhiteboardId(node?.id);
@@ -12378,7 +12401,7 @@ function normalizeWhiteboardNode(
   const allowedKinds: CoraWhiteboardNode["kind"][] = [
     "topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note",
   ];
-  const kind = allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
+  const kind = node.kind && allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
   const defaultSize = CORA_WHITEBOARD_NODE_DEFAULT_SIZES[kind];
   const limits = whiteboardNodeSizeLimits(kind);
   const body = node.body === undefined
@@ -12388,6 +12411,7 @@ function normalizeWhiteboardNode(
     ? prior?.tone
     : WHITEBOARD_TONES.includes(node.tone) ? node.tone : undefined;
   return {
+    ...normalizeWhiteboardEvidence({ ...prior, ...node }),
     id,
     kind,
     title,
@@ -12421,12 +12445,12 @@ function normalizeWhiteboardNode(
 }
 
 function normalizeWhiteboardEdge(
-  edge: CoraWhiteboardEdge,
+  edge: Pick<CoraWhiteboardEdge, "id"> & Partial<CoraWhiteboardEdge>,
   prior?: CoraWhiteboardEdge,
 ): CoraWhiteboardEdge {
   const id = sanitizeWhiteboardId(edge?.id);
-  const from = sanitizeWhiteboardId(edge?.from);
-  const to = sanitizeWhiteboardId(edge?.to);
+  const from = sanitizeWhiteboardId(edge?.from ?? prior?.from);
+  const to = sanitizeWhiteboardId(edge?.to ?? prior?.to);
   if (!id || !from || !to) throw new Error("Every whiteboard edge needs id, from, and to fields.");
   const label = edge.label === undefined
     ? prior?.label
@@ -12437,7 +12461,7 @@ function normalizeWhiteboardEdge(
   const style = edge.style === undefined
     ? prior?.style
     : edge.style === "dashed" ? "dashed" : undefined;
-  return { id, from, to, label, tone, style };
+  return { ...normalizeWhiteboardEvidence({ ...prior, ...edge }), id, from, to, label, tone, style };
 }
 
 /** Stored-response outcome for the call-scoped codara_complete application. */
@@ -16589,6 +16613,12 @@ function normalizeRun(run: RunState): RunState {
     run.whiteboard = {
       version: 1,
       revision: Math.max(0, Math.floor(run.whiteboard.revision ?? 0)),
+      review: run.whiteboard.review?.revision === (run.whiteboard.revision ?? 0)
+        && typeof run.whiteboard.review.summary === "string"
+        && typeof run.whiteboard.review.reviewedAt === "string"
+        && Array.isArray(run.whiteboard.review.limitations)
+        ? { ...run.whiteboard.review, limitations: run.whiteboard.review.limitations.filter((value): value is string => typeof value === "string").slice(0, 20) }
+        : undefined,
       lastEditedBy:
         run.whiteboard.lastEditedBy === "user" ||
         run.whiteboard.lastEditedBy === "import" ||

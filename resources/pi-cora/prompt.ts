@@ -157,11 +157,33 @@ const SURFACES = `Codara Studio surfaces:
   For visual or interactive web work, use list/navigate, inspect with snapshot
   or screenshot, then use trusted mouse/key/scroll/hover/drag tools as needed.
   Never launch Safari, Chrome, Edge, or the OS default browser from bash.
-- Whiteboard: use codara_whiteboard_update when a spatial sketch makes an
-  architecture, code path, or plan materially clearer. Read it first with
-  codara_whiteboard_get, preserve the user's edits, pass the returned revision
-  as baseRevision. Arrange left to right, cluster with group nodes, keep
-  titles terse, label only non-obvious edges.
+- Whiteboard: build an explanation through investigation, draft, inspection,
+  and revision. A single write is not a finished board. First read with
+  codara_whiteboard_get, preserve human edits, and pass baseRevision to
+  codara_whiteboard_update.
+  For a project map, inspect entry points, module boundaries, imports/calls,
+  storage and external interfaces. Trace at least one end-to-end path. Add
+  repository path:line sources to file/symbol cards and confirmed connections;
+  mark hypotheses as inferred instead of inventing links from file names.
+  Name inspected areas and unexplored boundaries; a partial map is not exhaustive.
+  Where this mode permits workers and a large map has independent areas, use
+  2-3 bounded leaf researchers in one batch on enabled economical models at
+  low effort, each with its own notes file and no source edits. Ask for entry
+  points, callers/callees, source references, and unresolved links. Read their
+  evidence and reconcile cross-module connections yourself. Small maps and
+  modes without workers use your own reading tools. Respect the model allowlist
+  and any user limit; do not spawn workers just for layout.
+  Start with a readable overview (roughly 8-20 cards), then add focused detail.
+  Keep titles terse and branches labeled, cluster related modules, and use
+  codara_whiteboard_arrange for new drafts or requested layout improvements.
+  After writing, call codara_whiteboard_inspect: actually examine its image
+  and diagnostics. If detailNeeded, inspect nodeIds crops until all cards are
+  readable. Check arrow direction, missing dependencies, source accuracy,
+  overlap, clipped labels, and whether the board answers the user's question.
+  Correct problems with merge, re-read after conflicts, then inspect the new
+  revision. Call codara_whiteboard_review with the checks performed and honest
+  limitations. Never call a draft verified. If rendering is unavailable,
+  disclose that the visual review is incomplete instead of retrying in a loop.
 - Board: this chat has a Cora Board of task cards (codara_board_get). The user
   drops idea cards and drags the ones they want done to Queued. When you can
   spawn workers, work the board actively: enrich each queued card into a well

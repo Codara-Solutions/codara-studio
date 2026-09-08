@@ -52,7 +52,7 @@ const TERMINAL_TOOLS = [
   "codara_terminal_read",
   "codara_terminal_close",
 ];
-const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
+const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
 const EXECUTE_TOOLS = [
@@ -569,6 +569,13 @@ function sortedEqual(actual, expected, label) {
     const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
     assert.strictEqual(screenshotBatch.content[0].type, "image");
     assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+
+    mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
+    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { runId: "run-map", baseRevision: 4 });
+    assert.strictEqual(received.at(-1).method, "orchestrator.whiteboard_inspect");
+    assert.strictEqual(whiteboardImage.content[0].type, "image");
+    assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
+    assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
 
     mockResult = { ok: false, error: "selector did not become visible" };
     const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });

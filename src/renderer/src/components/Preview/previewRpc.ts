@@ -9,9 +9,11 @@
 // that does the DOM work — this gives us click/type/snapshot without
 // pulling in Playwright or a CDP layer.
 
+import type { CoraWhiteboard } from "@shared/types";
 import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
 
 type PreviewOpName =
+  | "whiteboard_inspect"
   | "activity"
   | "list"
   | "navigate"
@@ -67,6 +69,10 @@ export function registerPreviewRpcHandler(): void {
 
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
+    case "whiteboard_inspect": {
+      const { inspectWhiteboard } = await import("../whiteboard/inspect-whiteboard");
+      return inspectWhiteboard(req.params.board as CoraWhiteboard, req.params.nodeIds as string[] | undefined);
+    }
     case "list":
       return { tabs: listPreviewTabs(readString(req.params, "workspaceId")) };
     case "activity": {
