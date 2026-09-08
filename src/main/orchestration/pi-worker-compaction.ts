@@ -17,6 +17,7 @@ export class PiWorkerCompaction {
     private readonly client: CompactionClient,
     private readonly options: {
       interrupted: () => boolean;
+      taskContract?: () => string;
       onError: (error: Error) => void;
       onProgress?: (phase: "compacting" | "resuming") => void;
     },
@@ -59,6 +60,9 @@ export class PiWorkerCompaction {
     // Arm the next settlement before prompt(): a mocked or very short turn
     // can settle before the prompt acknowledgement reaches the host.
     this.inFlight = false;
-    await this.client.prompt(CONTINUE);
+    const contract = this.options.taskContract?.().trim();
+    await this.client.prompt(contract
+      ? `${CONTINUE}\n\nOriginal task contract and subsequent steering (later steering supersedes earlier instructions; completed work stays completed):\n${contract}`
+      : CONTINUE);
   }
 }

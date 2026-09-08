@@ -19251,6 +19251,7 @@ async function waitForPiWorkerTurn(
   onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
   interrupted: () => boolean = () => false,
   onCompaction?: (phase: "compacting" | "resuming") => void,
+  taskContract?: () => string,
 ): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
@@ -19258,7 +19259,7 @@ async function waitForPiWorkerTurn(
   let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
-      compaction = new PiWorkerCompaction(client, { interrupted, onError: reject, onProgress: onCompaction });
+      compaction = new PiWorkerCompaction(client, { interrupted, taskContract, onError: reject, onProgress: onCompaction });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
@@ -19413,6 +19414,13 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  const taskSteering: string[] = [];
+  const taskContract = () => [
+    task.description.trim(),
+    ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
+    ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+    ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+  ].join("\n\n");
   // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
@@ -19673,7 +19681,10 @@ async function runPiWorkerSession({
           return;
         }
         const steering = input.replace(/[\r\n]+$/g, "").trim();
-        if (steering) void client.prompt(steering, "steer").catch(() => undefined);
+        if (steering) {
+          taskSteering.push(steering);
+          void client.prompt(steering, "steer").catch(() => undefined);
+        }
       },
       kill: () => {
         interrupted = true;
@@ -19805,7 +19816,7 @@ async function runPiWorkerSession({
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
     };
-    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress);
+    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
@@ -19818,6 +19829,7 @@ async function runPiWorkerSession({
         reportStall,
         () => interrupted,
         compactionProgress,
+        taskContract,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }

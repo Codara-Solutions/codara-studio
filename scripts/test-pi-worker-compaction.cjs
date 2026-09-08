@@ -21,13 +21,14 @@ const pause = { type: "entry_appended", entry: { type: "custom", customType: "co
 const settled = { type: "agent_settled" };
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 function harness() {
-  const calls = [], errors = [];
+  const calls = [], errors = [], prompts = [];
+  let contract = "Use only read and write. Exact marker: original-42.";
   let finish, reject, interrupted = false;
   const coordinator = new PiWorkerCompaction({
     request(command) { calls.push(command.type); return new Promise((resolve, fail) => { finish = resolve; reject = fail; }); },
-    async prompt(message) { calls.push("prompt"); assert.match(message, /do not repeat successful actions/); },
-  }, { interrupted: () => interrupted, onError: (error) => errors.push(error.message) });
-  return { coordinator, calls, errors, finish: () => finish({}), reject: () => reject(new Error("summary failed")), interrupt: () => { interrupted = true; } };
+    async prompt(message) { calls.push("prompt"); prompts.push(message); assert.match(message, /do not repeat successful actions/); },
+  }, { taskContract: () => contract, interrupted: () => interrupted, onError: (error) => errors.push(error.message) });
+  return { coordinator, calls, errors, prompts, steer: () => { contract += "\nLater steering: use marker corrected-99."; }, finish: () => finish({}), reject: () => reject(new Error("summary failed")), interrupt: () => { interrupted = true; } };
 }
 (async () => {
   const h = harness();
@@ -40,7 +41,10 @@ function harness() {
   h.finish(); await tick();
   assert.deepEqual(h.calls, ["compact", "prompt"]);
   assert.equal(h.coordinator.consume(settled), false, "the resumed task may settle normally");
+  assert.ok(h.prompts[0].includes("Use only read and write. Exact marker: original-42."));
+  h.steer();
   h.coordinator.consume(pause); h.coordinator.consume(settled); h.finish(); await tick();
+  assert.ok(h.prompts[1].includes("Later steering: use marker corrected-99."), "each resume retains the newest steering verbatim");
   assert.deepEqual(h.calls, ["compact", "prompt", "compact", "prompt"], "later context pressure may compact again");
   for (const method of ["interrupt", "dispose", "reject"]) {
     const h = harness(); h.coordinator.consume(pause); h.coordinator.consume(settled);
