@@ -519,6 +519,7 @@ fs.writeFileSync(hermesUsageFile, JSON.stringify({
   failed: false,
 }));
 assert.deepEqual(readHermesUsage(hermesUsageFile), {
+  usage: null,
   sessionId: "session-1",
   turns: 4,
   tokens: 321,

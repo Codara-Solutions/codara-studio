@@ -250,3 +250,32 @@ CODARA_CONTEXT_SMOKE_AUTO=1 \
 CODARA_CONTEXT_SMOKE_OUTPUT=/tmp/cora-context-auto.json \
 node scripts/smoke-cora-context.cjs
 ```
+
+## Headless adapter pilots
+
+The Codex and Hermes Sol/high pilots passed the same typo-fix checks, including
+model telemetry. These were adapter validation runs that overlapped other lab
+work, not isolated speed comparisons. Codex reports actual turn models through
+its isolated session log; Claude reports model usage in JSON; Hermes reports a
+model in its aggregate usage artifact, which cannot establish every intermediate
+request's model. Exact session IDs are required for staged continuations.
+
+Claude Code 2.1.263 could not run with the current CLI account: its JSON result
+reported that the organization disabled Claude subscription access for Claude
+Code. This is an unavailable competitor, not a model-quality failure or a Cora
+win. The first Codex pilot had open stdin and the first Claude pilot had a
+variadic-argument parsing error; both are excluded from capability comparisons.
+
+## Background screenshots
+
+Inactive preview tabs can now supply screenshots without selecting their tab.
+Temporary CSS attributes let Chromium compose the guest through transparent
+ancestors; reference-counted cleanup supports overlapping captures and preserves
+React visibility changes. Captures have a bounded wait and release their paint
+state on success or error.
+
+The Electron regression verifies distinct pixels from two concurrent background
+tabs, fresh content after the OS window is hidden, unchanged tab selection,
+restored visibility, and an unfocused/hidden app after capture. Keyboard and
+form-state regressions also pass. This is local macOS validation; Windows still
+needs a native run.

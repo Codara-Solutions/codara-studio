@@ -49,7 +49,7 @@ without spending CPU repainting idle screens.
   contract checks and reference solutions; `bench/score.cjs` is the scorer;
   `bench/adopt.cjs` re-attaches to a live bench run whose bench process was
   killed (resumes green polling, drives remaining checkpoint stages, grades,
-  appends a history row flagged `adopted`); `bench/rivals.cjs` is the Hermes
+  appends a history row flagged `adopted`); `bench/rivals.cjs` is the headless CLI
   adapter for same-model comparisons; `bench/history.jsonl` is the committed
   score history.
 
@@ -135,15 +135,21 @@ offline self-test grades to prove the hidden checks are satisfiable.
 `cora bench list` shows the suite; `--split train|holdout|all` picks the
 split (default train); `--task NAME[,NAME]` runs a focused suite; `--repeat N` measures
 reliability (green k/k + score spread); `--keep` keeps workspaces;
-`--agent hermes` sends the same workspace through Hermes Agent. Cora and
-Hermes are both pinned to the requested `--model` and `--effort` through the
-`openai-codex` provider, so the benchmark compares agent harnesses rather than
-different underlying models. After grading, Cora runs are cancelled
-(a settled run can revive on a late verifier verdict) and their temporary
-workspaces are deleted and pruned from the app. Each suite appends to
-`cli/bench/history.jsonl`, stamped with the live prompt plus task, scorer,
-runner/adapter, source commit, product, and agent versions. Comparisons require
-the same task set, scorer, runner, repeat count, model/provider/effort control,
-and installed Cora/Hermes versions.
+`--agent hermes|codex|claude` sends the same seeded workspace through a native
+headless CLI. Select an explicit model and effort; Claude Code requires a
+`claude-...` model. Cora and every adapter must report the requested model for a
+trial to pass. Codex uses an isolated session home with a link to existing auth;
+all adapters disable custom rules and skills using their native clean-run flags.
+Staged tasks resume an exact session ID. A blocked Cora run stops immediately
+without the evaluator answering for the user.
+
+Cora runs are cancelled after grading and their temporary workspaces are deleted
+and pruned unless `--keep` is set. Each suite appends to `cli/bench/history.jsonl`,
+stamped with the live prompt plus task, scorer, runner/adapter, source commit,
+product, and agent versions. Comparisons require the same task set, scorer,
+runner, repeat count, model/provider/effort control, and installed agent versions.
+Usage separates uncached input, output, cache reads, and cache writes when the
+CLI reports them. Codex's cached input is a subset of its input total and is not
+counted twice. Missing telemetry remains missing.
 
 Tests: `npm run test:cora-cli` (offline, no app needed).

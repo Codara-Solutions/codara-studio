@@ -4,7 +4,7 @@
 //
 // Per task: seed a throwaway git workspace, `chat.create` a real Cora run,
 // poll the visible test every few seconds to catch the moment it first goes
-// green, wait for the run to settle (auto-answering any question), then grade:
+// green, wait for the run to settle or block, then grade:
 // visible tests + hidden contract checks + task-specific checks, scored by
 // bench/score.cjs into a 0-100 HARNESS score (correctness, efficiency against
 // par, post-green discipline, orchestration, penalties).
@@ -23,7 +23,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFile, execFileSync } = require("node:child_process");
 
-const { rpc, rpcRaw } = require("../lib/rpc.cjs");
+const { rpc, rpcRaw, homeDir } = require("../lib/rpc.cjs");
 const { findRun } = require("../lib/store.cjs");
 const { TASKS, TIER_CAP_MS } = require("../bench/tasks.cjs");
 const { scoreTask, summarize } = require("../bench/score.cjs");
@@ -82,7 +82,7 @@ function historyMetadata(agent, taskNames, repeat, control = {}) {
     promptHash: agent === "cora" ? promptHash() : `${agent}-cli`,
     suiteHash: sourceHash(["cli/bench/tasks.cjs"]),
     scorerHash: sourceHash(["cli/bench/score.cjs", "cli/bench/grade.cjs", "cli/bench/metrics.cjs"]),
-    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs", "cli/bench/matrix.cjs"]),
+    runnerHash: sourceHash(["cli/commands/bench.cjs", "cli/bench/rivals.cjs", "cli/bench/headless.cjs", "cli/bench/matrix.cjs"]),
     sourceCommit: commandOutput("git", ["rev-parse", "--short=12", "HEAD"]),
     sourceDirty: Boolean(commandOutput("git", ["status", "--porcelain"])),
     productVersion: PRODUCT_VERSION,
@@ -143,7 +143,7 @@ function probeGreen(dir, task, stageIndex = 0) {
   });
 }
 
-/** Wait for the run to settle; auto-answer questions so the bench never hangs. */
+/** A blocked run fails the one-shot contract; do not manufacture follow-ups. */
 async function driveToCompletion(flags, runId, deadline, expectedModel) {
   let questionsAsked = 0;
   for (;;) {
@@ -162,13 +162,7 @@ async function driveToCompletion(flags, runId, deadline, expectedModel) {
     if (res.error) return { status: "error", questionsAsked, error: res.error.message };
     const status = res.result?.run?.status ?? res.result?.status;
     if (["complete", "failed", "cancelled"].includes(status)) return { status, questionsAsked };
-    if (status === "blocked") {
-      questionsAsked += 1;
-      await rpc(flags, "chat.send", {
-        runId,
-        content: "Use your best judgment and proceed; do not ask again.",
-      });
-    }
+    if (status === "blocked") return { status, questionsAsked: 1 };
   }
 }
 
@@ -333,15 +327,21 @@ async function runRivalTask(flags, task, agent) {
   const poller = startGreenPoller(dir, task, startedAt);
   const model = flags.model ?? DEFAULT_CONTROL_MODEL;
   const effort = flags.effort ?? DEFAULT_CONTROL_EFFORT;
-  let cli = await runRivalTurn(agent, { dir, prompt: task.prompt, capMs, model, effort });
+  const rivalHome = path.join(homeDir(flags), "bench-rivals", agent);
+  let cli = await runRivalTurn(agent, { dir, prompt: task.prompt, capMs, model, effort, rivalHome });
   let turns = cli.turns;
   let tokens = cli.tokens;
-  let resume = cli.sessionId ?? true;
-  const models = new Set(cli.model ? [cli.model] : []);
+  let usage = cli.usage ? { ...cli.usage } : null;
+  let resume = cli.sessionId;
+  const models = new Set(cli.models ?? (cli.model ? [cli.model] : []));
   // Checkpoint stages resume one session in the same workspace, so every
   // soloist carries its whole context forward exactly as Cora does.
   for (const stage of task.stages ?? []) {
     if (cli.timedOut || cli.error || Date.now() >= startedAt + capMs) break;
+    if (!resume) {
+      cli.error = new Error(`${agent} did not report a session ID for continuation`);
+      break;
+    }
     for (const [file, content] of Object.entries(stage.files ?? {})) {
       fs.writeFileSync(path.join(dir, file), content);
     }
@@ -354,11 +354,17 @@ async function runRivalTask(flags, task, agent) {
       resume,
       model,
       effort,
+      rivalHome,
     });
     turns += cli.turns;
     tokens += cli.tokens;
+    if (usage && cli.usage) {
+      for (const key of Object.keys(usage)) usage[key] += cli.usage[key] ?? 0;
+    } else {
+      usage = null;
+    }
     resume = cli.sessionId ?? resume;
-    if (cli.model) models.add(cli.model);
+    for (const observed of cli.models ?? (cli.model ? [cli.model] : [])) models.add(observed);
   }
   poller.stop();
   const wallMs = Date.now() - startedAt;
@@ -370,11 +376,12 @@ async function runRivalTask(flags, task, agent) {
     workers: 1,
     maxConcurrent: 1,
     tokens,
+    usage,
     postGreenTokens: null,
     churn: cli.error ? 1 : 0,
     models: [...models],
   };
-  const checks = gradeChecks(task, dir, metrics);
+  const checks = [...gradeChecks(task, dir, metrics), modelControlCheck([...models], model)];
   if (!flags.keep) fs.rmSync(dir, { recursive: true, force: true });
 
   const result = {
@@ -473,6 +480,9 @@ async function bench(args, flags) {
   if (agent !== "cora" && !RIVAL_AGENTS.includes(agent)) {
     fail(`--agent must be cora or ${RIVAL_AGENTS.join(", ")}`);
   }
+  if (agent === "claude" && !String(flags.model ?? "").startsWith("claude-")) {
+    fail("Claude Code benchmarks require an explicit --model claude-... identifier");
+  }
   const catalog = agent === "cora" ? await rpc(flags, "models.list", {}) : null;
   const selectedModel = catalog?.models?.find((model) => model.id === (flags.model ?? DEFAULT_CONTROL_MODEL));
   if (catalog && !selectedModel) fail("Selected model is absent from the live Studio catalog");
@@ -480,7 +490,7 @@ async function bench(args, flags) {
     model: flags.model ?? DEFAULT_CONTROL_MODEL,
     effort: flags.effort ?? DEFAULT_CONTROL_EFFORT,
     execution: flags.execution ?? "direct",
-    provider: selectedModel?.provider ?? "openai-codex",
+    provider: selectedModel?.provider ?? (agent === "claude" ? "anthropic" : "openai-codex"),
   };
   // Hash the prompt surfaces BEFORE the suite runs: a long suite invites
   // editing the prompt while it finishes, which must not relabel this entry.

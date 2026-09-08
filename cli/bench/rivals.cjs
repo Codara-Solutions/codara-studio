@@ -1,18 +1,18 @@
 "use strict";
 
-// Hermes is Cora's model-controlled benchmark rival. Seeding, clocks, hidden
-// checks, scoring, and cleanup live in commands/bench.cjs; this file owns only
-// Hermes CLI syntax and usage-report parsing.
+// Model-controlled CLI rivals share the evaluator and task workspaces. This
+// module owns their process launch and telemetry normalization.
 
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
+const { headlessCommand, parseCodexOutput, parseClaudeOutput, codexSessionModels } = require("./headless.cjs");
 
-const RIVAL_AGENTS = ["hermes"];
+const RIVAL_AGENTS = ["hermes", "codex", "claude"];
 
-function rivalLabel(_agent, model = "gpt-5.6-sol", effort = "high") {
-  return `Hermes Agent (${model}, ${effort})`;
+function rivalLabel(agent, model = "gpt-5.6-sol", effort = "high") {
+  return `${{ hermes: "Hermes Agent", codex: "Codex CLI", claude: "Claude Code" }[agent] ?? agent} (${model}, ${effort})`;
 }
 
 function buildRivalCommand(agent, {
@@ -22,8 +22,10 @@ function buildRivalCommand(agent, {
   model = "gpt-5.6-sol",
   effort = "high",
 }) {
+  if (agent === "codex" || agent === "claude") return headlessCommand(agent, { prompt, resume, model, effort });
   if (agent !== "hermes") throw new Error(`unknown rival agent: ${agent}`);
-  const resumeArgs = typeof resume === "string" ? ["--resume", resume] : resume ? ["--continue"] : [];
+  if (resume && typeof resume !== "string") throw new Error("hermes continuation requires an exact session ID");
+  const resumeArgs = resume ? ["--resume", resume] : [];
   return {
     command: "hermes",
     args: [
@@ -56,6 +58,12 @@ function readHermesUsage(file) {
         (usage.cache_read_tokens ?? 0) +
         (usage.cache_write_tokens ?? 0);
     return {
+      usage: Number.isFinite(usage.input_tokens) && Number.isFinite(usage.output_tokens) ? {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        cacheReadTokens: usage.cache_read_tokens ?? 0,
+        cacheWriteTokens: usage.cache_write_tokens ?? 0,
+      } : null,
       sessionId: usage.session_id ?? null,
       turns: usage.api_calls ?? 0,
       tokens,
@@ -75,13 +83,14 @@ function readHermesUsage(file) {
   }
 }
 
-function execute(command, args, cwd, capMs) {
+function execute(command, args, cwd, capMs, env = process.env) {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       command,
       args,
       {
         cwd,
+        env,
         timeout: Math.max(1, capMs),
         killSignal: "SIGKILL",
         maxBuffer: 16 * 1024 * 1024,
@@ -96,6 +105,8 @@ function execute(command, args, cwd, capMs) {
         });
       },
     );
+    // Headless CLIs may read piped stdin before starting, even with a prompt argv.
+    child.stdin?.end();
   });
 }
 
@@ -106,21 +117,36 @@ async function runRivalTurn(agent, {
   resume,
   model = "gpt-5.6-sol",
   effort = "high",
+  rivalHome,
 }) {
+  let env = process.env;
+  if (agent === "codex") {
+    if (!rivalHome) throw new Error("Codex benchmarks require an isolated rival home");
+    fs.mkdirSync(rivalHome, { recursive: true });
+    const auth = path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "auth.json");
+    const target = path.join(rivalHome, "auth.json");
+    if (!fs.existsSync(target) && fs.existsSync(auth)) fs.symlinkSync(auth, target);
+    env = { ...process.env, CODEX_HOME: rivalHome };
+  }
   const usageFile = path.join(
     os.tmpdir(),
     `cora-bench-hermes-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
   const invocation = buildRivalCommand(agent, { prompt, resume, usageFile, model, effort });
-  const processResult = await execute(invocation.command, invocation.args, dir, capMs);
-  const parsed = readHermesUsage(usageFile);
+  const processResult = await execute(invocation.command, invocation.args, dir, capMs, env);
+  const parsed = agent === "codex" ? parseCodexOutput(processResult.stdout)
+    : agent === "claude" ? parseClaudeOutput(processResult.stdout)
+      : readHermesUsage(usageFile);
+  if (agent === "codex") parsed.models = codexSessionModels(rivalHome, parsed.sessionId);
+  parsed.models ??= parsed.model ? [parsed.model] : [];
+  parsed.model ??= parsed.models[0] ?? null;
   fs.rmSync(usageFile, { force: true });
 
   return {
     ...parsed,
     timedOut: processResult.timedOut,
     error:
-      processResult.error ??
+      (parsed.errorMessage ? new Error(parsed.errorMessage) : processResult.error) ??
       (parsed.failed ? new Error(`${agent} reported a failed one-shot run`) : null),
     stderr: processResult.stderr,
   };
