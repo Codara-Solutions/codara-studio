@@ -30,9 +30,10 @@ export const PI_BUILTIN_COMPACT_HEADROOM_TOKENS = 16384;
  * run-store's durable conversation cutover. */
 export const CORA_COMPACTION_INSTRUCTIONS = [
   "Write a dense continuation handoff. Preserve the newest user intent, requirements,",
-  "decisions, exact files/symbols/commands/IDs, completed work and verification, current",
+  "explicit prohibitions, permitted tools and paths, decisions, exact files/symbols/commands/IDs,",
+  "completed work and verification, current",
   "state, failures, blockers, pending tasks, and next actions. Remove repetition and stale",
-  "exploration. Do not invent. Use concise structured Markdown.",
+  "exploration. Do not invent requirements or broaden permissions. Use concise structured Markdown.",
 ].join(" ");
 
 /** Read the configured trigger. Absurd values (empty, 0, negative, NaN, an

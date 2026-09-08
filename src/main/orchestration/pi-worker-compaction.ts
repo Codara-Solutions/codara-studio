@@ -5,8 +5,8 @@ interface CompactionClient {
   prompt(message: string): Promise<unknown>;
 }
 
-const HANDOFF = "Preserve the current user objective, exact requirements and identifiers, confirmed facts, completed work and verification, failures, pending tasks, and next actions. Keep a concise continuation handoff. Do not invent or retain stale exploration.";
-const CONTINUE = "Continue the current task from the compacted context. Preserve completed work and prior tool effects; do not repeat successful actions. Finish the original requested work and its verification, then submit the required result.";
+const HANDOFF = "Preserve the current user objective, exact requirements and identifiers, explicit prohibitions, permitted tools and paths, confirmed facts, completed work and verification, failures, pending tasks, and next actions. Keep a concise continuation handoff. Do not invent new requirements, broaden permissions, or retain stale exploration.";
+const CONTINUE = "Continue the original task from the compacted context under the same user constraints, tool restrictions, and permissions. Preserve completed work and prior tool effects; do not repeat successful actions. Complete only the remaining requested work, verify only as permitted by the original instructions, then submit the required result.";
 
 export class PiWorkerCompaction {
   private pending = false;

@@ -26,7 +26,7 @@ async function main() {
   };
   const info = await request("app.info");
   if (path.resolve(info.homeDir) !== flags.home) throw new Error("Connected app is not the requested long-context lab");
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "cora-long-context-"));
+  const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cora-long-context-")));
   execFileSync("git", ["init", "-q"], { cwd });
   const approvalCode = `release-${randomBytes(6).toString("hex")}`;
   const records = Array.from({ length: 8 }, (_, id) => ({ id, marker: randomBytes(8).toString("hex") }));
@@ -34,6 +34,7 @@ async function main() {
   fs.writeFileSync(path.join(cwd, "read.js"), reader);
   fs.writeFileSync(path.join(cwd, "README.md"), "# Long-context tool protocol\n");
   const prompt = `The release approval code is ${approvalCode}; retain it until the final result. Collect eight evidence records by running exactly one command per bash tool call: node read.js N, for N=0 through 7 in order, once each. These reads have a side effect, so do not repeat any successful read even after compaction. Keep each required evidence id/marker, ignore archived telemetry in handoffs. After all eight reads, write answers.json with exactly {approvalCode, evidence: [{id,marker}, ...]} in id order. Use only bash for those exact reader commands, then write for answers.json and submit_result. Do not inspect or modify read.js, combine reads in one command, save notes through tools, or write intermediate files yourself. Finish without questions.`;
+  const startedAt = Date.now();
   let runId;
   try {
     runId = (await request("chat.create", { cwd, prompt, backend: "pi", execution: "direct", model, effort: "high", title: "context lab: one-shot evidence across tool-round compaction" })).run.id;
@@ -56,7 +57,7 @@ async function main() {
       modelControlCheck(trace.models, model),
       { name: "host compaction occurred during the task", pass: !expectCompaction || (pauses.length > 0 && compactions.length >= pauses.length) },
     ];
-    const artifact = { kind: "long-one-shot-context", sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), model, runId, cwd, expectCompaction, expected, actual, counts, pauses, compactions, checks, trace, metrics: await runMetrics(flags, runId, null, outcome.status), readerHash: createHash("sha256").update(reader).digest("hex"), passed: checks.every((check) => check.pass) };
+    const artifact = { kind: "long-one-shot-context", sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), runtimeBuildCommit: process.env.CODARA_LONG_CONTEXT_RUNTIME_COMMIT ?? null, wallMs: Date.now() - startedAt, model, runId, cwd, expectCompaction, expected, actual, counts, pauses, compactions, checks, trace, metrics: await runMetrics(flags, runId, null, outcome.status), readerHash: createHash("sha256").update(reader).digest("hex"), passed: checks.every((check) => check.pass) };
     fs.writeFileSync(output, JSON.stringify(artifact, null, 2) + "\n");
     console.log(JSON.stringify({ passed: artifact.passed, checks, pauses, output }, null, 2));
     if (!artifact.passed) process.exitCode = 1;
