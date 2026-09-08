@@ -1,0 +1,5 @@
+[data-preview-capture-paint] {
+  visibility: visible !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}

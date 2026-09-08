@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { withPreviewCapturePaint } from "./capturePaint";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
@@ -584,84 +585,29 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         if (!wv || !wv.capturePage) {
           throw new Error("preview tab is not ready");
         }
-        // Hidden preview panes do not own a composited surface. Calling
-        // capturePage anyway makes Electron reject GUEST_VIEW_MANAGER_CALL with
-        // UnknownVizError before our renderer-side catch can translate it.
-        if (!visible) {
-          throw new Error(
-            "preview screenshot unavailable: this preview tab is not visible, so the browser has no painted frame to capture. Bring the preview tab to the foreground, or verify with codara_preview_snapshot / codara_preview_evaluate (DOM) instead of retrying the screenshot.",
-          );
-        }
-        // One capture attempt. A 0-size frame is Chromium telling us the guest
-        // has no painted surface to read; a too-short data URL means the frame
-        // came back empty. We distinguish the two so the fallback below — and
-        // the agent — can react to the right cause.
-        const attemptCapture = async (): Promise<{
-          dataUrl: string;
-          zeroSize: boolean;
-          retryable: boolean;
-          reason: string;
-        }> => {
-          let img: CapturedImage | undefined;
-          try {
-            img = await wv.capturePage?.();
-          } catch (err) {
-            return {
-              dataUrl: "",
-              zeroSize: false,
-              retryable: false,
-              reason: (err as Error)?.message || String(err),
-            };
+        return withPreviewCapturePaint(wv, async () => {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let img: CapturedImage | undefined;
+            try {
+              img = await Promise.race([
+                wv.capturePage?.(),
+                new Promise<never>((_, reject) => {
+                  timer = setTimeout(() => reject(new Error("capture timed out")), 4_000);
+                }),
+              ]);
+            } catch (err) {
+              throw new Error(`preview screenshot failed: ${(err as Error)?.message || String(err)}`);
+            } finally {
+              clearTimeout(timer);
+            }
+            const size = img?.getSize?.();
+            const dataUrl = size?.width && size?.height ? img?.toDataURL?.() : "";
+            if (dataUrl && dataUrl.length > 256) return dataUrl;
+            if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
           }
-          if (!img) {
-            return {
-              dataUrl: "",
-              zeroSize: false,
-              retryable: false,
-              reason: "capturePage returned no image",
-            };
-          }
-          const size = img.getSize?.();
-          const zeroSize = Boolean(size && (size.width === 0 || size.height === 0));
-          const dataUrl = zeroSize ? "" : img.toDataURL?.() ?? "";
-          if (dataUrl && dataUrl.length > 256) {
-            return { dataUrl, zeroSize: false, retryable: false, reason: "" };
-          }
-          return {
-            dataUrl: "",
-            zeroSize,
-            retryable: true,
-            reason: zeroSize
-              ? "captured a 0-size frame (page not painted yet)"
-              : "captured an empty frame",
-          };
-        };
-
-        let result = await attemptCapture();
-        if (result.dataUrl) return result.dataUrl;
-        if (!result.retryable) {
-          throw new Error(`preview screenshot failed: ${result.reason}`);
-        }
-
-        // A visible guest can briefly return a blank/0-size frame just after
-        // navigation. Let it paint two frames and retry once. Hard compositor
-        // rejections are not retried: doing so only duplicates Electron's
-        // GUEST_VIEW_MANAGER_CALL error without making a surface appear.
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-        );
-        await new Promise((resolve) => setTimeout(resolve, 120));
-        result = await attemptCapture();
-        if (result.dataUrl) return result.dataUrl;
-
-        // Fail fast and actionable: tell the agent exactly why and what to do
-        // instead, so it pivots to DOM probes rather than burning round-trips
-        // (and context window) re-shooting a tab that cannot paint.
-        throw new Error(
-          result.zeroSize
-            ? "preview screenshot unavailable: this preview tab is not visible, so the browser produced no painted frame to capture (capturePage returned a 0-size image). Bring the preview tab to the foreground, or verify with codara_preview_snapshot / codara_preview_evaluate (DOM) instead of retrying the screenshot."
-            : `preview screenshot failed: ${result.reason}`,
-        );
+          throw new Error("preview screenshot unavailable: the browser returned an empty frame. Check navigation with codara_preview_snapshot before retrying.");
+        });
       },
     }),
     [currentUrl, getLiveWebview, url, visible],
