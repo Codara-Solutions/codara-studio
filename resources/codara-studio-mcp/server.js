@@ -216,7 +216,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_screenshot",
     description:
-      "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Codara.",
+      "Capture the current preview tab as a PNG image. Returns viewport size in CSS pixels, imageSize in image pixels, and scale. For coordinate input, divide screenshot X by scale.x and Y by scale.y.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string" } },
@@ -2135,7 +2135,7 @@ async function callRunBatch(args) {
       if (action === "screenshot" && result && typeof result.dataUrl === "string") {
         const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
         if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
-        entry.result = { url: result.url ?? null, captured: Boolean(m) };
+        entry.result = { ...screenshotMetadata(result), captured: Boolean(m) };
       } else {
         entry.result = result;
       }
@@ -2155,6 +2155,12 @@ async function callRunBatch(args) {
   };
 }
 
+function screenshotMetadata(value) {
+  return { url: value.url ?? null, ...Object.fromEntries(
+    ["viewport", "imageSize", "scale"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+  ) };
+}
+
 function toToolResult(value) {
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
@@ -2164,7 +2170,7 @@ function toToolResult(value) {
       return {
         content: [
           { type: "image", mimeType: m[1], data: m[2] },
-          { type: "text", text: JSON.stringify({ url: value.url ?? null }) },
+          { type: "text", text: JSON.stringify(screenshotMetadata(value)) },
         ],
       };
     }

@@ -50,6 +50,11 @@ test("background screenshots capture the correct guest without selecting or reve
     const assertCapture = async (tabId: string, expectedBgra: number[]) => {
       const capture = await request("preview.screenshot", { tabId });
       expect(capture.url).toBe(fixture.url);
+      const encoded = Buffer.from(capture.dataUrl.split(",")[1], "base64");
+      expect(capture.imageSize).toEqual({ width: encoded.readUInt32BE(16), height: encoded.readUInt32BE(20) });
+      expect(capture.viewport.width).toBeGreaterThan(0);
+      expect(capture.viewport.height).toBeGreaterThan(0);
+      expect(capture.scale).toEqual({ x: capture.imageSize.width / capture.viewport.width, y: capture.imageSize.height / capture.viewport.height });
       const pixels = await app.evaluate(({ nativeImage }, dataUrl: string) => {
         const image = nativeImage.createFromDataURL(dataUrl);
         return { size: image.getSize(), bgra: [...image.crop({ x: 10, y: 10, width: 1, height: 1 }).toBitmap()] };

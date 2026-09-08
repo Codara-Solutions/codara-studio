@@ -268,8 +268,19 @@ async function waitFor(params: Record<string, unknown>): Promise<unknown> {
 
 async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   const tab = requireTab(params);
-  const dataUrl = await tab.handle.capturePngDataUrl();
-  return { dataUrl, url: tab.handle.getURL() };
+  const [dataUrl, viewport] = await Promise.all([
+    tab.handle.capturePngDataUrl(),
+    runGuestScript(tab.handle, "({ width: window.innerWidth, height: window.innerHeight })")
+      .catch(() => null) as Promise<{ width: number; height: number } | null>,
+  ]);
+  // PNG dimensions describe the returned pixels; devicePixelRatio alone can
+  // differ from the encoded image scale under zoom or display changes.
+  const header = Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(",") + 1, dataUrl.indexOf(",") + 33)), (char) => char.charCodeAt(0));
+  const dimensions = new DataView(header.buffer);
+  const imageSize = { width: dimensions.getUint32(16), height: dimensions.getUint32(20) };
+  const scale = viewport && viewport.width > 0 && viewport.height > 0
+    ? { x: imageSize.width / viewport.width, y: imageSize.height / viewport.height } : null;
+  return { dataUrl, url: tab.handle.getURL(), viewport, imageSize, scale };
 }
 
 async function resize(params: Record<string, unknown>): Promise<unknown> {

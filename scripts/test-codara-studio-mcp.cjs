@@ -561,6 +561,15 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
 
+    const geometry = { url: "http://127.0.0.1:4173/", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
+    mockResult = { ...geometry, dataUrl: "data:image/png;base64,cGl4ZWxz" };
+    const screenshot = await directBridge.callToolByName("codara_preview_screenshot", {});
+    assert.strictEqual(screenshot.content[0].type, "image");
+    assert.deepStrictEqual(JSON.parse(screenshot.content[1].text), geometry);
+    const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
+    assert.strictEqual(screenshotBatch.content[0].type, "image");
+    assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+
     mockResult = { ok: false, error: "selector did not become visible" };
     const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });
     assert.strictEqual(failedSingle.isError, true, "DOM failures must become tool errors");
