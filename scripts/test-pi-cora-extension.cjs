@@ -224,6 +224,13 @@ assert.equal(policy.isWorkerSafeBridgeTool("codara_request_next_iteration", fals
 assert.equal(policy.isWorkerSafeBridgeTool("codara_board_get", false), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_board_update", false), false);
 
+for (const automation of [false, true]) {
+  assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, {}), false);
+  assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
+}
+assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
+assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember"/);
+
 // Automation worker roster: lifecycle pair + board read appear; manager
 // orchestration and mutating board/whiteboard tools stay out.
 assert.equal(policy.isWorkerSafeBridgeTool("codara_ask_user", true), true);

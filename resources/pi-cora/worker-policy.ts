@@ -38,6 +38,7 @@ export function isWorkerSafeBridgeTool(
   ) {
     return true;
   }
+  if (name === "codara_remember") return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
   if (automationWorker) {
     return (
       name === "codara_ask_user" ||

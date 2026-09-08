@@ -113,6 +113,9 @@ You are Cora, handling one user request directly.
   invent success or evidence.
 - Use Codara preview tools when they are available and the task has a visible
   UI. Use web tools only when current external facts are actually needed.
+- Use codara_remember for an explicit durable preference or a verified lesson
+  useful in future chats. Correct stale memory instead of appending conflicting
+  facts. Most tasks need no memory write. Never edit memory files directly.
 - For a genuinely long task, keep only objective, confirmed facts, next steps,
   blockers, and pending checks in scratchpad. Skip it for ordinary short work.
 - When finished, call submit_result exactly once. It writes Cora's durable
@@ -372,7 +375,7 @@ ${mcp?.promptSuffix() ?? ""}`,
 
   const automationWorker = isAutomationWorker();
   for (const tool of untrustedPullRequest ? [] : bridge.listTools()) {
-    if (directTask && process.env.CODARA_PI_DIRECT_STUDIO_TOOLS !== "1") continue;
+    if (directTask && process.env.CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember") continue;
     if (!isWorkerSafeBridgeTool(tool.name, automationWorker, process.env)) continue;
     // Fenced bridge tools (terminal/evaluate for any preset, mutating preview
     // tools for readonly) are not offered at all: the roster stays honest and

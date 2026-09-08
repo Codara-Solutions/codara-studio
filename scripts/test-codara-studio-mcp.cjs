@@ -86,9 +86,9 @@ const AUTOMATION_TOOLS = [
 
 // Drive one server process: send initialize + tools/list, resolve the tool
 // names it reports plus the serverInfo.name from initialize.
-function listTools(mode) {
+function listTools(mode, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, SPARK_HOME_DIR: HOME };
+    const env = { ...process.env, SPARK_HOME_DIR: HOME, ...extraEnv };
     if (mode) env.SPARK_MCP_MODE = mode;
     else delete env.SPARK_MCP_MODE;
     const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
@@ -280,6 +280,14 @@ function sortedEqual(actual, expected, label) {
       "codara_remember must tell the manager to copy relevant memory into worker descriptions",
     );
 
+    const directMemory = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1" });
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");
+    const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
+    assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
+    assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
+    const untrustedDirect = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
+    assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
+
     // Automation mode: memory is a manager-of-a-coding-run concept, an
     // automation loop has no user conversation to learn a durable fact from.
     const automation = await listTools("automation");
@@ -459,6 +467,14 @@ function sortedEqual(actual, expected, label) {
       `Bearer ${"b".repeat(64)}`,
       "an unmarked trusted caller must adopt a rewritten handshake on its next call",
     );
+
+    process.env.CODARA_PI_DIRECT_TASK = "1";
+    delete require.cache[require.resolve(SERVER)];
+    const directMemoryBridge = require(SERVER);
+    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"], runId: "run-spoofed" });
+    assert.strictEqual(received.at(-1).method, "orchestrator.remember");
+    assert.strictEqual(received.at(-1).params.runId, "run-trusted", "direct memory stays in the calling workspace/profile");
+    delete process.env.CODARA_PI_DIRECT_TASK;
 
     await directBridge.callToolByName("codara_terminal_close", {
       paneId: "pane-owned",

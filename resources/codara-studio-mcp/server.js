@@ -1626,6 +1626,23 @@ const STUDIO_TOOL_TO_RPC = {
   ...BOARD_TOOL_TO_RPC,
 };
 
+const DIRECT_MEMORY_TOOL = {
+  name: "codara_remember",
+  description: "Save a durable user preference or verified workspace lesson for later chats. Use workspace scope for repo-specific facts and global scope only for user/machine facts. Never store secrets, task status, or guesses. Prefer one short bullet. Use replace to correct or consolidate existing memory, preserving all still-valid facts and user-authored lines. Each scope is capped at 4096 bytes.",
+  inputSchema: {
+    type: "object",
+    required: ["scope", "action"],
+    properties: {
+      scope: { type: "string", enum: ["workspace", "global"] },
+      action: { type: "string", enum: ["add", "replace"] },
+      bullets: { type: "array", minItems: 1, maxItems: 5, items: { type: "string" }, description: "For add: plain facts without dates or provenance tags." },
+      body: { type: "string", description: "For replace: the complete new memory file, retaining user-authored lines." },
+      confirm_drop_user_lines: { type: "boolean", description: "Only true when the user explicitly authorized dropping their own lines." },
+    },
+    additionalProperties: false,
+  },
+};
+
 // Worker mode: the studio surface a headless automation worker may drive
 // (whiteboard and board stay read-only; the board is the calling chat's own
 // kanban and its edits are the manager's call) plus
@@ -1633,6 +1650,7 @@ const STUDIO_TOOL_TO_RPC = {
 // (blocked on a genuinely human decision) and codara_request_next_iteration
 // (agent-loop continuation). Deliberately NO manager orchestration tools, a
 // worker never spawns, steers, messages, or completes.
+
 const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_board_update"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
@@ -1678,6 +1696,9 @@ if (IS_AUTOMATION_MODE) {
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
+} else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL];
+  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_remember: "orchestrator.remember" };
 } else {
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
@@ -2006,8 +2027,10 @@ async function callTool(params) {
     // stamp: any model-supplied runId is discarded, and the schemas expose no
     // runId field. Direct socket callers holding the bearer token can still
     // pass any runId; that is a pre-existing trust class shared by every
-    // orchestrator RPC.
-    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update") {
+    // orchestrator RPC. Direct memory uses the same stamp so a task cannot
+    // write another workspace or profile by supplying a different run id.
+    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update" ||
+        (rpc === "orchestrator.remember" && process.env.CODARA_PI_DIRECT_TASK === "1")) {
       const envRunId = (process.env.SPARK_RUN_ID || "").trim();
       if (envRunId) args.runId = envRunId;
       else delete args.runId;

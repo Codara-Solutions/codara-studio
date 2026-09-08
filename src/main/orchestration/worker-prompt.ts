@@ -114,9 +114,11 @@ function renderWorkerMemorySection(run: RunState): string[] {
   if (!memory) return [];
   return [
     "",
-    "## READ-ONLY CORA CONTEXT",
+    run.executionMode === "direct" ? "## CORA MEMORY" : "## READ-ONLY CORA CONTEXT",
     memory,
-    "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+    run.executionMode === "direct"
+      ? "Use codara_remember for durable corrections or lessons. Do not edit memory files directly."
+      : "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
   ];
 }
 

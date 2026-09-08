@@ -31,10 +31,10 @@ import {
 // the byte cap. Tagged bullets belong to Cora and may be pruned, rewritten, or
 // expired.
 //
-// Writers: only Cora (via the codara_remember RPC) and the run-completion
-// auto-emitters (workspace-lessons.ts -> appendAutoMemories). Workers never
-// write and never receive automatic injection; Cora copies applicable lines
-// into worker task descriptions.
+// Writers: manager and direct Cora chats (via codara_remember), plus the
+// run-completion auto-emitters (workspace-lessons.ts -> appendAutoMemories).
+// Delegated workers receive read-only injection and report new lessons for
+// Cora to curate; automation workers receive no memory injection.
 //
 // run-memory.ts is untouched and never merged into this module: that file is
 // the episodic outcome ledger (distilled fingerprints of finished runs), this
