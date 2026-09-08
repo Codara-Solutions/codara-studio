@@ -303,7 +303,7 @@ pilots, builds, and Electron tests overlapped portions of the matrix, so the
 One trial per contract is a coverage check; these saturated train tasks need
 repeated, harder, and holdout validation before broader reliability claims.
 
-## Direct memory and long tool loops: validation in progress
+## Direct memory, skills, and long tool loops
 
 Direct Cora now receives a compact `codara_remember` tool even when the task
 needs no Studio UI tools. Its writes use the calling run's workspace and profile.
@@ -312,10 +312,20 @@ prompt no longer tells Cora to hand memory curation to a manager that is absent.
 Offline checks cover the roster, scoped run identity, existing memory guards,
 and a tool-schema size below 1,500 characters.
 
-`scripts/smoke-cora-memory.cjs` is ready for live validation. It starts fresh
-conversations to save and recall workspace/global preferences, correct a stale
-preference while retaining a user-authored line, and check workspace and profile
-isolation. It has not yet run against the new implementation.
+`scripts/smoke-cora-memory.cjs` passed all six live Luna/high stages on build
+`5b0d5400`: save preferences, recall in a fresh conversation, correct a stale
+preference while retaining a user-authored line, recall the correction, then
+check workspace and profile isolation. Recall stages could use only the memory
+already supplied to the new chat, with no reads of files or prior sessions.
+The [checks and tool rosters](live-memory-skills.json) record each stage.
+
+`scripts/smoke-cora-skills.cjs` also passed all three Luna/high stages on build
+`04c754ff`: discover and apply the relevant project skill, update it on explicit
+request, and apply the revision in a fresh chat. The irrelevant skill was neither
+read nor changed. This validates existing Pi project-skill discovery and a
+user-directed update workflow; it does not add autonomous skill rewriting or
+prove that automatic learned revisions improve performance. Both feature probes
+are single synthetic sequences, not broad reliability estimates.
 
 Long worker tasks now pause at a completed tool-round boundary when they cross
 the configured context threshold. The host waits for Pi to settle, requests
@@ -332,8 +342,11 @@ runtime sequencing, not a real model's retention quality.
 `scripts/smoke-cora-long-context.cjs` is ready for the live retention check. Start
 a dedicated lab app with `CODARA_PI_COMPACT_AT_TOKENS=32768`; the probe reads
 eight large evidence batches exactly once and checks original instructions and
-all markers after compaction. The repeated harness comparison keeps its original
-binary and sources until it finishes, so these new live probes are pending.
+all markers after compaction. Live probes retained all evidence and avoided
+repeating side effects, but exposed tool-restriction drift in the summaries.
+The host now replays the original task contract, path boundaries, and subsequent
+steering verbatim after compaction. Final live validation of this change is
+in progress; the earlier strict-audit failures remain recorded.
 
 ### Invalidated first crossover
 

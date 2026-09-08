@@ -1,0 +1,521 @@
+{
+  "schema": 1,
+  "conditions": "Synthetic fixtures in dedicated lab homes. One Luna/high sequence per feature, not a reliability estimate. Short unit checks, typechecks, and builds overlapped some stages; timings are diagnostic, not speed comparisons.",
+  "features": {
+    "memory": {
+      "runtimeBuildCommit": "5b0d5400",
+      "sourceArtifact": "memory-after-5b0d5400.json",
+      "passed": true,
+      "model": "gpt-5.6-luna",
+      "checks": [
+        {
+          "name": "save preferences: completed",
+          "pass": true
+        },
+        {
+          "name": "save preferences: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "fresh conversation: completed",
+          "pass": true
+        },
+        {
+          "name": "fresh conversation: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "fresh conversation: exact scoped recall",
+          "pass": true,
+          "expected": {
+            "workspacePrefix": "pack-48e20aa1f7f1",
+            "globalStyle": "signature-48e20aa1f7f1"
+          },
+          "actual": {
+            "workspacePrefix": "pack-48e20aa1f7f1",
+            "globalStyle": "signature-48e20aa1f7f1"
+          }
+        },
+        {
+          "name": "correct stale preference: completed",
+          "pass": true
+        },
+        {
+          "name": "correct stale preference: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "stale preference removed and user-authored line retained",
+          "pass": true
+        },
+        {
+          "name": "corrected fresh conversation: completed",
+          "pass": true
+        },
+        {
+          "name": "corrected fresh conversation: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "corrected fresh conversation: exact scoped recall",
+          "pass": true,
+          "expected": {
+            "workspacePrefix": "dist-48e20aa1f7f1",
+            "globalStyle": "signature-48e20aa1f7f1"
+          },
+          "actual": {
+            "workspacePrefix": "dist-48e20aa1f7f1",
+            "globalStyle": "signature-48e20aa1f7f1"
+          }
+        },
+        {
+          "name": "different workspace: completed",
+          "pass": true
+        },
+        {
+          "name": "different workspace: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "different workspace: exact scoped recall",
+          "pass": true,
+          "expected": {
+            "workspacePrefix": null,
+            "globalStyle": "signature-48e20aa1f7f1"
+          },
+          "actual": {
+            "workspacePrefix": null,
+            "globalStyle": "signature-48e20aa1f7f1"
+          }
+        },
+        {
+          "name": "different profile: completed",
+          "pass": true
+        },
+        {
+          "name": "different profile: allowed tools only",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "different profile: exact scoped recall",
+          "pass": true,
+          "expected": {
+            "workspacePrefix": null,
+            "globalStyle": null
+          },
+          "actual": {
+            "workspacePrefix": null,
+            "globalStyle": null
+          }
+        }
+      ],
+      "stages": [
+        {
+          "name": "save preferences",
+          "runId": "run-mts2pjzn-xb89ro",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "codara_remember",
+            "codara_remember",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 7132,
+              "outputTokens": 266,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 12518,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        },
+        {
+          "name": "fresh conversation",
+          "runId": "run-mts2pvp7-0s2tkw",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 4999,
+              "outputTokens": 174,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 10293,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        },
+        {
+          "name": "correct stale preference",
+          "runId": "run-mts2q5ib-l3oasr",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "codara_remember",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 5056,
+              "outputTokens": 194,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 10370,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        },
+        {
+          "name": "corrected fresh conversation",
+          "runId": "run-mts2qfp8-1w1h79",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 5044,
+              "outputTokens": 177,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 10341,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        },
+        {
+          "name": "different workspace",
+          "runId": "run-mts2qoqj-50luvp",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 4342,
+              "outputTokens": 191,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 9653,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        },
+        {
+          "name": "different profile",
+          "runId": "run-mts2qy8l-9mh6qo",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 3878,
+              "outputTokens": 210,
+              "cacheReadTokens": 5120,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 9208,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          }
+        }
+      ]
+    },
+    "skills": {
+      "runtimeBuildCommit": "04c754ff",
+      "sourceArtifact": "skills-after-04c754ff.json",
+      "passed": true,
+      "model": "gpt-5.6-luna",
+      "checks": [
+        {
+          "name": "discover and apply: one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "discover and apply: relevant skill read",
+          "pass": true
+        },
+        {
+          "name": "discover and apply: scoped operations only",
+          "pass": true
+        },
+        {
+          "name": "discover and apply: exact envelope",
+          "pass": true,
+          "actual": {
+            "build": "build-c0daaf64",
+            "seal": "seal-e92aaf1b8685",
+            "format": 2
+          },
+          "expected": {
+            "build": "build-c0daaf64",
+            "seal": "seal-e92aaf1b8685",
+            "format": 2
+          }
+        },
+        {
+          "name": "update on request: one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "update on request: relevant skill read",
+          "pass": true
+        },
+        {
+          "name": "update on request: scoped operations only",
+          "pass": true
+        },
+        {
+          "name": "skill revision replaces stale seal",
+          "pass": true
+        },
+        {
+          "name": "apply revised skill in fresh chat: one-shot completed",
+          "pass": true
+        },
+        {
+          "name": "requested model executed",
+          "pass": true,
+          "weight": 1,
+          "detail": "requested gpt-5.6-luna; observed gpt-5.6-luna"
+        },
+        {
+          "name": "apply revised skill in fresh chat: relevant skill read",
+          "pass": true
+        },
+        {
+          "name": "apply revised skill in fresh chat: scoped operations only",
+          "pass": true
+        },
+        {
+          "name": "apply revised skill in fresh chat: exact envelope",
+          "pass": true,
+          "actual": {
+            "build": "build-4e04c37f",
+            "seal": "seal-46c42b545989",
+            "format": 2
+          },
+          "expected": {
+            "build": "build-4e04c37f",
+            "seal": "seal-46c42b545989",
+            "format": 2
+          }
+        },
+        {
+          "name": "irrelevant skill unchanged",
+          "pass": true
+        }
+      ],
+      "stages": [
+        {
+          "name": "discover and apply",
+          "runId": "run-mts2weoi-2v1530",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "read",
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 5067,
+              "outputTokens": 347,
+              "cacheReadTokens": 7680,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 13094,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          },
+          "wallMs": 16324
+        },
+        {
+          "name": "update on request",
+          "runId": "run-mts2wr9j-ngqw69",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "read",
+            "edit",
+            "read",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 8789,
+              "outputTokens": 436,
+              "cacheReadTokens": 7680,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 16905,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          },
+          "wallMs": 19227
+        },
+        {
+          "name": "apply revised skill in fresh chat",
+          "runId": "run-mts2x63t-w8trhl",
+          "outcome": {
+            "status": "complete",
+            "questionsAsked": 0
+          },
+          "tools": [
+            "read",
+            "write",
+            "submit_result"
+          ],
+          "metrics": {
+            "turns": 0,
+            "usage": {
+              "inputTokens": 3542,
+              "outputTokens": 340,
+              "cacheReadTokens": 9216,
+              "cacheWriteTokens": 0
+            },
+            "workers": 1,
+            "maxConcurrent": 1,
+            "tokens": 13098,
+            "postGreenTokens": null,
+            "churn": 0,
+            "models": [
+              "gpt-5.6-luna"
+            ]
+          },
+          "wallMs": 16825
+        }
+      ]
+    }
+  }
+}
