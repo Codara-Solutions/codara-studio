@@ -3158,6 +3158,31 @@ assert.throws(
 );
 console.log("ok");`,
       },
+      {
+        name: "object member identity and restricted dash segments",
+        weight: 3,
+        source: `const assert = require("node:assert/strict");
+const { applyPatch, PatchError } = require("./patch.js");
+for (const [document, operation] of [
+  [{}, { op: "add", path: "/-", value: 1 }],
+  [{ "-": 1 }, { op: "replace", path: "/-", value: 2 }],
+  [{ "-": 1 }, { op: "remove", path: "/-" }],
+  [{ "-": { x: 1 } }, { op: "replace", path: "/-/x", value: 2 }],
+]) {
+  const before = structuredClone(document);
+  assert.throws(
+    () => applyPatch(document, [operation]),
+    (error) => error instanceof PatchError && error.index === 0,
+  );
+  assert.deepEqual(document, before);
+}
+assert.deepEqual(applyPatch([], [{ op: "add", path: "/-", value: 1 }]), [1]);
+assert.deepEqual(
+  applyPatch({}, [{ op: "add", path: "/__proto__", value: { safe: true } }]),
+  JSON.parse('{"__proto__":{"safe":true}}'),
+);
+console.log("ok");`,
+      },
     ],
     reference: {
       "patch.js": `"use strict";
@@ -3206,6 +3231,7 @@ function applyPatch(document, operations) {
       }
       let parent = output;
       for (const part of parts.slice(0, -1)) {
+        if (part === "-") throw new Error("dash is only valid for array add");
         if (parent === null || typeof parent !== "object") throw new Error("missing parent");
         if (Array.isArray(parent)) {
           parent = parent[arrayIndex(part, parent.length, false)];
@@ -3216,6 +3242,7 @@ function applyPatch(document, operations) {
       }
       if (parent === null || typeof parent !== "object") throw new Error("missing parent");
       const key = parts.at(-1);
+      if (key === "-" && !(Array.isArray(parent) && operation.op === "add")) throw new Error("dash is only valid for array add");
       if (Array.isArray(parent)) {
         if (operation.op === "add") {
           const at = key === "-" ? parent.length : arrayIndex(key, parent.length, true);
@@ -3227,7 +3254,7 @@ function applyPatch(document, operations) {
           else parent.splice(at, 1);
         }
       } else if (operation.op === "add") {
-        parent[key] = clone(operation.value);
+        Object.defineProperty(parent, key, { value: clone(operation.value), writable: true, enumerable: true, configurable: true });
       } else {
         if (!Object.hasOwn(parent, key)) throw new Error("missing key");
         if (operation.op === "replace") parent[key] = clone(operation.value);

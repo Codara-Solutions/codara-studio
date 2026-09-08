@@ -47,6 +47,23 @@ inWorkspace(lru, { "lru.js": staleEviction }, (dir) => {
   assert.equal(checks.find((check) => check.name.includes("expired recent entries")).pass, false);
 });
 
+const patch = TASKS.find((task) => task.name === "patch-atomic");
+inWorkspace(patch, patch.reference, (dir) => {
+  assert.equal(gradeChecks(patch, dir, {}).every((check) => check.pass), true);
+});
+for (const [original, replacement] of [
+  ['        if (part === "-") throw new Error("dash is only valid for array add");\n', ""],
+  ['      if (key === "-" && !(Array.isArray(parent) && operation.op === "add")) throw new Error("dash is only valid for array add");\n', ""],
+  ['        Object.defineProperty(parent, key, { value: clone(operation.value), writable: true, enumerable: true, configurable: true });', '        parent[key] = clone(operation.value);'],
+]) {
+  const mutated = patch.reference["patch.js"].replace(original, replacement);
+  assert.notEqual(mutated, patch.reference["patch.js"], "mutation changes the reference");
+  inWorkspace(patch, { "patch.js": mutated }, (dir) => {
+    const checks = gradeChecks(patch, dir, {});
+    assert.equal(checks.find((check) => check.name.includes("object member identity")).pass, false);
+  });
+}
+
 const staged = TASKS.find((task) => task.name === "checkpoint-tracker");
 assert.equal(visibleSource(staged), staged.files["test.js"]);
 for (let stage = 1; stage <= staged.stages.length; stage += 1) {
