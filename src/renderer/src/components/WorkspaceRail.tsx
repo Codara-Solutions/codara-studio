@@ -11,6 +11,8 @@ import { PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
+import WorkspaceIconPicker from "./WorkspaceIconPicker";
+import { WorkspaceIconGlyph } from "./workspace-icons";
 import { resolveWorkspaceAccent } from "../lib/workspace-accent";
 import { useTheme } from "../theme/theme-context";
 import {
@@ -138,6 +140,8 @@ interface RailProps {
   // the quiet count at the row's right edge; zero hides it. Memoized by App
   // like the maps above.
   agentsByWorkspaceId?: Record<string, { total: number; working: number }>;
+  // Current git branch per workspace for the row subtitle; null/absent hides it.
+  branchByWorkspaceId?: Record<string, string | null>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -158,9 +162,11 @@ interface RailProps {
   onReorderWorkspaceRailItem: (id: string, beforeItemId: string | null) => void;
   onDeleteWorkspaceGroup: (id: string) => void;
   onCloseEditor: () => void;
-  onCreate: () => void;
-  // Opens the SSH connect dialog to add a remote (VPS) workspace.
-  onCreateRemote: () => void;
+  // Optional folder id: the new workspace lands inside that folder.
+  onCreate: (groupId?: string) => void;
+  // Opens the SSH connect dialog to add a remote (VPS) workspace, optionally
+  // straight into a folder.
+  onCreateRemote: (groupId?: string) => void;
   onSplitChange: (ratio: number) => void;
   onToggleSection: (section: PanelSectionKey) => void;
   onMoveSection: (section: PanelSectionKey, side: PanelSide, index: number) => void;
@@ -168,7 +174,7 @@ interface RailProps {
   onSectionDragEnd: () => void;
   onOpenGitHubQueueItem: (item: GitHubWorkQueueItem) => Promise<void>;
   onOpenFile: (absolutePath: string) => void;
-  onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean }) => void;
+  onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean; toSide?: boolean }) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
   onRunPlan: (entry: FsEntry, backend?: ChatBackendKind) => void;
@@ -764,6 +770,7 @@ function WorkspaceRail(props: RailProps) {
         working={props.workingByWorkspaceId?.[w.id] ?? false}
         agentTotal={props.agentsByWorkspaceId?.[w.id]?.total ?? 0}
         agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
+        branch={props.branchByWorkspaceId?.[w.id] ?? null}
         missing={missingWorkspaceIds.has(w.id)}
         folderColorManaged={groupId !== null}
         menuBoundaryRef={wsScrollRef}
@@ -928,6 +935,8 @@ function WorkspaceRail(props: RailProps) {
                             }}
                             onStartRename={() => setEditingGroupId(group.id)}
                             onCancelRename={() => setEditingGroupId(null)}
+                            onAddWorkspace={() => onCreate(group.id)}
+                            onAddRemoteWorkspace={() => props.onCreateRemote(group.id)}
                             onDelete={() => {
                               props.onDeleteWorkspaceGroup(group.id);
                               setEditingGroupId(null);
@@ -1260,6 +1269,8 @@ function WorkspaceFolder({
   onChangeColor,
   onStartRename,
   onCancelRename,
+  onAddWorkspace,
+  onAddRemoteWorkspace,
   onDelete,
   children,
 }: {
@@ -1297,6 +1308,10 @@ function WorkspaceFolder({
   onChangeColor?: (color: string) => void;
   onStartRename?: () => void;
   onCancelRename?: () => void;
+  /** Create a local workspace directly inside this folder. */
+  onAddWorkspace?: () => void;
+  /** Create an SSH workspace directly inside this folder. */
+  onAddRemoteWorkspace?: () => void;
   onDelete?: () => void;
   children: React.ReactNode;
 }) {
@@ -1570,9 +1585,6 @@ function WorkspaceFolder({
             {name}
           </span>
         )}
-        <span style={{ fontSize: 10, color: "var(--muted-2)", fontVariantNumeric: "tabular-nums" }}>
-          {count}
-        </span>
         {group && !editing && (
           <div style={{ flex: "0 0 18px" }}>
             <button
@@ -1667,6 +1679,21 @@ function WorkspaceFolder({
                     // kill the picker on the user's first interaction.
                     setMenuOpen(false);
                     colorInputRef.current?.click();
+                  }}
+                />
+                <div style={{ height: 1, margin: "3px 5px", background: "var(--rule-soft)" }} />
+                <RowMenuItem
+                  label="Add workspace here…"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onAddWorkspace?.();
+                  }}
+                />
+                <RowMenuItem
+                  label="Add SSH workspace here…"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onAddRemoteWorkspace?.();
                   }}
                 />
                 <div style={{ height: 1, margin: "3px 5px", background: "var(--rule-soft)" }} />
@@ -1938,6 +1965,8 @@ interface RowProps {
   agentTotal?: number;
   /** How many of those are mid-turn; brightens the count. */
   agentWorking?: number;
+  /** Current git branch (or short hash when detached); null hides the subtitle. */
+  branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
   /** Folder members inherit their ordered shade from the folder family. */
@@ -1965,6 +1994,7 @@ function WorkspaceRow({
   working = false,
   agentTotal = 0,
   agentWorking = 0,
+  branch = null,
   missing = false,
   folderColorManaged = false,
   menuBoundaryRef,
@@ -1987,6 +2017,7 @@ function WorkspaceRow({
   const [moreHover, setMoreHover] = useState(false);
   const [moreFocus, setMoreFocus] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
@@ -2162,73 +2193,61 @@ function WorkspaceRow({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>
-        {ws.copyBranch && !editing ? (
-          <BranchGlyph color={accent} active={active} working={working} />
-        ) : (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (editing && !folderColorManaged) colorRef.current?.click();
-            }}
-            tabIndex={editing && !folderColorManaged ? 0 : -1}
-            title={
-              editing
-                ? folderColorManaged
-                  ? "This workspace's shade follows its folder color and position"
-                  : "Change color"
-                : working
-                  ? `${ws.name} — agent working`
-                  : undefined
-            }
-            style={{
-              appearance: "none",
-              border: "none",
-              padding: 0,
-              // Constant 8px advance in every state so toggling active /
-              // editing never nudges the label. Active reads purely through
-              // the glow (box-shadow), never a size bump. BranchGlyph shares
-              // this exact 8px advance so the copy-branch swap never reflows.
-              // While `working`, the dot keeps its 8px slot but hollows to a
-              // faint core and grows the spinning comet ring below — the ring's
-              // asymmetric arc, not the recoloured core, is what reads as motion.
-              width: 8,
-              height: 8,
-              borderRadius: 999,
-              background: working
-                ? `color-mix(in oklab, ${accent} 30%, transparent)`
-                : accent,
-              flex: "0 0 8px",
-              cursor: "default",
-              position: "relative",
-              overflow: "visible",
-              // No resting ink ring — the idle list settles flat. The active /
-              // editing dot earns a SOFT COLORED GLOW RING in its own color so
-              // the eye lands on it; the 8px advance never changes (glow only).
-              boxShadow: editing
-                ? `0 0 0 3px color-mix(in oklab, ${accent} 26%, transparent)`
-                : active
-                  ? `0 0 0 3px color-mix(in oklab, ${accent} 22%, transparent), 0 0 10px color-mix(in oklab, ${accent} 50%, transparent)`
-                  : "none",
-            }}
-          >
-            {working && (
-              <span
-                aria-hidden
-                className="spark-activity-spin"
-                style={{
-                  position: "absolute",
-                  inset: -2, // 12px visual ring over the 8px slot
-                  borderRadius: 999,
-                  background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${accent} 35%, transparent) 120deg, ${accent} 330deg, transparent 330deg 360deg)`,
-                  WebkitMask:
-                    "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-                  mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
-                }}
-              />
-            )}
-          </button>
-        )}
+        <button
+          type="button"
+          data-testid="workspace-icon-tile"
+          className={working ? "spark-workspace-tile is-working" : "spark-workspace-tile"}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (editing && !folderColorManaged) colorRef.current?.click();
+          }}
+          tabIndex={editing && !folderColorManaged ? 0 : -1}
+          title={
+            editing
+              ? folderColorManaged
+                ? "This workspace's shade follows its folder color and position"
+                : "Change color"
+              : working
+                ? `${ws.name} — agent working`
+                : undefined
+          }
+          style={{
+            appearance: "none",
+            position: "relative",
+            // A fixed 20px tile in every state. Active flips to a solid fill
+            // with dark ink; resting keeps a faint tinted well. No glow: the
+            // fill is the whole selection cue. While an agent works, a thin
+            // ring in the workspace color breathes just outside the tile
+            // (see .spark-workspace-tile.is-working) — quiet, not a spinner.
+            width: 20,
+            height: 20,
+            flex: "0 0 20px",
+            padding: 0,
+            border: "none",
+            borderRadius: 6,
+            display: "grid",
+            placeItems: "center",
+            color: active ? "var(--accent-ink, #14110d)" : accent,
+            background: active
+              ? accent
+              : `color-mix(in oklab, ${accent} 14%, transparent)`,
+            boxShadow: editing
+              ? `0 0 0 2px color-mix(in oklab, ${accent} 30%, transparent)`
+              : active
+                ? "none"
+                : `inset 0 0 0 1px color-mix(in oklab, ${accent} 24%, transparent)`,
+            ["--tile-accent" as string]: accent,
+            cursor: "default",
+            overflow: "visible",
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          <WorkspaceIconGlyph
+            icon={ws.icon ?? (ws.copyBranch ? "branch" : undefined)}
+            size={12}
+          />
+        </button>
         <StatusDot tone={tone} workingRingShown={working} />
         {editing && !folderColorManaged && (
           <input
@@ -2312,7 +2331,7 @@ function WorkspaceRow({
             }}
           />
         ) : (
-          <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 1 }}>
             <span
               // A workspace whose folder was moved, renamed, or unmounted is
               // struck through and dimmed rather than removed: the entry may
@@ -2335,6 +2354,23 @@ function WorkspaceRow({
             >
               {ws.name}
             </span>
+            {branch && !missing && (
+              <span
+                data-testid="workspace-branch"
+                title={`On branch ${branch}`}
+                style={{
+                  fontSize: 10.5,
+                  lineHeight: "13px",
+                  color: active ? "var(--ink-dim)" : "var(--muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {branch}
+              </span>
+            )}
           </div>
         )}
 
@@ -2424,7 +2460,14 @@ function WorkspaceRow({
           >
             <div style={{ minWidth: 168, maxWidth: 240, padding: 4, display: "grid", gap: 2 }}>
               <RowMenuItem
-                label="Edit"
+                label="Change icon…"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setIconPickerOpen(true);
+                }}
+              />
+              <RowMenuItem
+                label="Rename"
                 onClick={() => {
                   setMenuOpen(false);
                   onEdit();
@@ -2448,6 +2491,30 @@ function WorkspaceRow({
                 }}
               />
             </div>
+          </AnchoredMenu>
+          <AnchoredMenu
+            anchorRef={menuBtnRef}
+            open={iconPickerOpen && !editing}
+            onClose={() => setIconPickerOpen(false)}
+            className="spark-menu"
+            role="dialog"
+            ariaLabel="Change workspace icon"
+            placement="below"
+            // Viewport-bounded, unlike the row menu: the picker is taller than
+            // the rail's scroll box, and flipping inside that box pushed it
+            // off the top of the window.
+            align="end"
+          >
+            <WorkspaceIconPicker
+              icon={ws.icon}
+              color={normalizeHex(ws.color)}
+              colorLocked={folderColorManaged}
+              onPickIcon={(icon) => {
+                onChange({ icon });
+                setIconPickerOpen(false);
+              }}
+              onPickColor={(color) => onChange({ color })}
+            />
           </AnchoredMenu>
         </div>
       </div>
@@ -2674,98 +2741,6 @@ function StatusDot(props: { tone?: ChatStatusTone | null; workingRingShown?: boo
         boxShadow: `0 0 0 2px color-mix(in oklab, ${color} 18%, transparent)`,
       }}
     />
-  );
-}
-
-// Branch glyph shown in place of the color dot on copy-branch workspace rows,
-// tinted with the inherited (parent) color so the row reads as a branch of it.
-//
-// Geometry note: the glyph is positioned absolutely, exactly like the working
-// ring, never via grid centering. A 13px item in this 8px track is start-
-// aligned by grid overflow alignment, which put the glyph 2.5px right of the
-// ring's center and made the working state look like two colliding icons.
-// Absolute centering keeps both on one axis in every state.
-function BranchGlyph({
-  color,
-  active,
-  working = false,
-}: {
-  color: string;
-  active: boolean;
-  working?: boolean;
-}) {
-  return (
-    <span
-      aria-hidden
-      title={working ? "Copy branch — agent working" : "Copy branch"}
-      style={{
-        // Shares the color dot's exact 8px advance so toggling copyBranch
-        // never reflows the row's leading cluster. The 13px glyph is centered
-        // over the slot and overflows it symmetrically (visible overflow), so
-        // it reads clearly without widening the row's text origin.
-        flex: "0 0 8px",
-        display: "inline-block",
-        width: 8,
-        height: 13,
-        overflow: "visible",
-        position: "relative",
-        // Mirrors the color dot's active treatment: a soft glow in the row's
-        // own color so the branch glyph reads as the selected mark, no halo.
-        filter: active
-          ? `drop-shadow(0 0 6px color-mix(in oklab, ${color} 50%, transparent))`
-          : "none",
-      }}
-    >
-      {working && (
-        <span
-          aria-hidden
-          className="spark-activity-spin"
-          style={{
-            // A ring must be SQUARE to rotate cleanly — inset on this 8×13
-            // slot would spin a wobbling ellipse. Centered via margins, not
-            // transform: spark-spin animates `transform`, so a translate here
-            // would be overwritten on the animation's first frame. 20px outer
-            // with a 1.5px stroke leaves a ~8px clear core radius, just past
-            // the glyph's ~7px corner-circle reach: the full-size glyph sits
-            // inside with clear water, the softened comet orbits it.
-            position: "absolute",
-            left: "50%",
-            top: "50%",
-            width: 20,
-            height: 20,
-            marginLeft: -10,
-            marginTop: -10,
-            borderRadius: 999,
-            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${color} 30%, transparent) 120deg, color-mix(in oklab, ${color} 80%, transparent) 330deg, transparent 330deg 360deg)`,
-            WebkitMask:
-              "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
-            mask: "radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px))",
-          }}
-        />
-      )}
-      <svg
-        width="13"
-        height="13"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke={color}
-        strokeWidth="2.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: "50%",
-          marginLeft: -6.5,
-          marginTop: -6.5,
-        }}
-      >
-        <line x1="6" x2="6" y1="3" y2="15" />
-        <circle cx="18" cy="6" r="3" />
-        <circle cx="6" cy="18" r="3" />
-        <path d="M18 9a9 9 0 0 1-9 9" />
-      </svg>
-    </span>
   );
 }
 

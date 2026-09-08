@@ -490,6 +490,10 @@ export interface Workspace {
   // main process routes fs/git/pty/search on this prefix.
   cwd: string;
   color: string;
+  // Optional glyph id from the workspace icon library (see
+  // renderer/components/workspace-icons.tsx). Absent = the default folder
+  // glyph. Presentation-only; never affects cwd or ownership.
+  icon?: string;
   workers: Worker[];
   // Optional logical folder in the workspace rail. This never changes cwd or
   // filesystem ownership; it is presentation-only organization persisted in
@@ -1190,9 +1194,15 @@ export interface AppPreferences {
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
   toastDurationMs?: number;
+  // How long the workspace-switch badge (icon + name under the title bar)
+  // stays on screen after activating another workspace, in ms. 0 = never
+  // show it. Capped at 10s.
+  workspaceSwitchHudMs?: number;
 }
 
 export const DEFAULT_TOAST_DURATION_MS = 6_000;
+export const DEFAULT_WORKSPACE_SWITCH_HUD_MS = 1_000;
+export const MAX_WORKSPACE_SWITCH_HUD_MS = 10_000;
 
 export const TOAST_DURATION_PRESETS: ReadonlyArray<{
   value: number;
@@ -1362,6 +1372,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   notifyTeammatePushes: true,
   notifyPullRequests: true,
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
+  workspaceSwitchHudMs: DEFAULT_WORKSPACE_SWITCH_HUD_MS,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the

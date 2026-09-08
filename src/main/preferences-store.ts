@@ -5,6 +5,8 @@ import {
   DEFAULT_AUTOSAVE_DELAY_MS,
   DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   DEFAULT_TOAST_DURATION_MS,
+  DEFAULT_WORKSPACE_SWITCH_HUD_MS,
+  MAX_WORKSPACE_SWITCH_HUD_MS,
   DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
@@ -286,7 +288,16 @@ function normalize(
         ? src.notifyPullRequests
         : DEFAULT_PREFERENCES.notifyPullRequests,
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
+    workspaceSwitchHudMs: normalizeWorkspaceSwitchHud(src.workspaceSwitchHudMs),
   };
+}
+
+// Workspace-switch badge on-screen time: 0 (off) to 10s.
+function normalizeWorkspaceSwitchHud(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_WORKSPACE_SWITCH_HUD_MS;
+  }
+  return Math.max(0, Math.min(MAX_WORKSPACE_SWITCH_HUD_MS, Math.round(value)));
 }
 
 // Toast on-screen time: 0 (sticky) or 1s to 60s.

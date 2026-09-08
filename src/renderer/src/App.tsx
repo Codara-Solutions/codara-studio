@@ -25,6 +25,7 @@ import type {
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   DEFAULT_TOAST_DURATION_MS,
+  DEFAULT_WORKSPACE_SWITCH_HUD_MS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
 } from "@shared/types";
 import type {
@@ -44,6 +45,7 @@ import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
+import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
 import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
@@ -62,10 +64,10 @@ import {
   setListShareableStudioTerminalsFn,
 } from "./components/Terminal/terminalRegistry";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
-import { forgetTerminalPaneMemory } from "./components/Terminal/TerminalPane";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
+import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
@@ -682,6 +684,20 @@ export default function App() {
   // tabs from a single source of truth (was GitPanel's private poll).
   const sharedGit = useSharedGitStatus(activeWorkspace?.cwd ?? null);
 
+  // Branch subtitle for every rail row. The per-row cache is slow on its own,
+  // so the shared status (fs-watched, 10s poll) acts as its trigger: whenever
+  // the active workspace's branch changes there, every row re-reads. The
+  // shared status itself is never copied across, because right after a
+  // switch it still describes the previous workspace.
+  const branchByWorkspaceId = useWorkspaceBranches(
+    workspaces,
+    `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
+  );
+
+  // Switch HUD: bumps once per real workspace change (never on first load),
+  // see WorkspaceSwitchHud for the hold/exit timing.
+  const [switchSignal, setSwitchSignal] = useState(0);
+
   // Evict frozen terminal layouts for deleted workspaces so they don't linger
   // in state. Render already prunes them (the validWorkspaceIds gate in
   // terminalWorkspaceLayers), but useTabs' switch effect alone can't catch an
@@ -710,7 +726,6 @@ export default function App() {
     for (const paneId of knownTerminalPaneIdsRef.current) {
       if (!livePaneIds.has(paneId)) {
         forgetTerminalSessionMemory(paneId);
-        forgetTerminalPaneMemory(paneId);
       }
     }
     knownTerminalPaneIdsRef.current = livePaneIds;
@@ -2822,6 +2837,9 @@ export default function App() {
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
     }
+    if (currentWorkspaceId && currentWorkspaceId !== id) {
+      setSwitchSignal((n) => n + 1);
+    }
     activeIdRef.current = id;
     setActiveId(id);
   }, []);
@@ -3202,9 +3220,16 @@ export default function App() {
     [workspaces, removeWorkspaceFromState],
   );
 
-  const createWs = useCallback(async () => {
+  // `groupId` (from a folder's "Add workspace here…") files the new workspace
+  // straight into that folder; its shade is then assigned by the folder
+  // family like any other member.
+  const createWs = useCallback(async (groupId?: string) => {
     const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
     if (!path) return;
+    const targetGroupId =
+      typeof groupId === "string" && workspaceGroupsRef.current.some((g) => g.id === groupId)
+        ? groupId
+        : undefined;
     const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), path);
     const ws: Workspace = {
       id: makeId("ws"),
@@ -3212,6 +3237,7 @@ export default function App() {
       cwd: path,
       color,
       workers: [],
+      ...(targetGroupId ? { groupId: targetGroupId } : {}),
     };
     // Part A — push the new root onto the main read-sandbox allowlist BEFORE we
     // make the workspace active. Otherwise FileTree mounts and fires
@@ -3227,7 +3253,11 @@ export default function App() {
     await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => {
       /* sandbox push is best-effort; the parent effect re-sends on state change */
     });
-    setWorkspaces((list) => [...list, ws]);
+    setWorkspaces((list) =>
+      targetGroupId
+        ? applyWorkspaceGroupShades([...list, ws], workspaceGroupsRef.current, [targetGroupId])
+        : [...list, ws],
+    );
     activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
     setEditingId(ws.id);
@@ -3271,9 +3301,16 @@ export default function App() {
   // SSH remote workspace: the connect dialog resolves a host + POSIX folder,
   // and we mint a workspace whose cwd is the ssh:// virtual path. The main
   // process routes every fs/git/pty/search call on that prefix.
+  // Folder the next SSH workspace should land in, set by the folder menu's
+  // "Add SSH workspace here…" before the connect dialog opens.
+  const pendingRemoteGroupIdRef = useRef<string | null>(null);
   const createRemoteWs = useCallback(
     async (host: RemoteHostConfig, remotePath: string) => {
       const cwd = makeRemotePath(host.id, remotePath);
+      const groupId = pendingRemoteGroupIdRef.current;
+      pendingRemoteGroupIdRef.current = null;
+      const targetGroupId =
+        groupId && workspaceGroupsRef.current.some((g) => g.id === groupId) ? groupId : undefined;
       const color = pickWorkspaceColor(workspaces.map((workspace) => workspace.color), cwd);
       const ws: Workspace = {
         id: makeId("ws"),
@@ -3282,12 +3319,17 @@ export default function App() {
         color,
         workers: [],
         remote: { hostId: host.id },
+        ...(targetGroupId ? { groupId: targetGroupId } : {}),
       };
       const existingCwds = workspaces
         .map((w) => w.cwd)
         .filter((c): c is string => typeof c === "string" && c.length > 0);
       await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => undefined);
-      setWorkspaces((list) => [...list, ws]);
+      setWorkspaces((list) =>
+        targetGroupId
+          ? applyWorkspaceGroupShades([...list, ws], workspaceGroupsRef.current, [targetGroupId])
+          : [...list, ws],
+      );
       activeRunIdsByWorkspaceRef.current[ws.id] = null;
       setActiveId(ws.id);
       setRemoteConnectOpen(false);
@@ -3723,7 +3765,10 @@ export default function App() {
 
   // Stable identity: an inline arrow here would defeat WorkspaceRail's
   // React.memo on both rails.
-  const handleCreateRemote = useCallback(() => setRemoteConnectOpen(true), []);
+  const handleCreateRemote = useCallback((groupId?: string) => {
+    pendingRemoteGroupIdRef.current = typeof groupId === "string" ? groupId : null;
+    setRemoteConnectOpen(true);
+  }, []);
 
   const confirmCopyDelete = useCallback(
     async (opts: { deleteBranch: boolean; force: boolean }) => {
@@ -3752,7 +3797,7 @@ export default function App() {
   // ── File / editor tab integration ──────────────────────────────────────────
 
   const openEditorFile = useCallback(
-    (entry: FsEntry, options?: { preview?: boolean }) => {
+    (entry: FsEntry, options?: { preview?: boolean; toSide?: boolean }) => {
       openEditorTab(entry, options);
     },
     [openEditorTab],
@@ -5837,6 +5882,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            branchByWorkspaceId={branchByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -5981,6 +6027,7 @@ export default function App() {
             toneByWorkspaceId={toneByWorkspaceId}
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
+            branchByWorkspaceId={branchByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -6035,7 +6082,10 @@ export default function App() {
 
         {remoteConnectOpen && (
           <SshManagerDialog
-            onClose={() => setRemoteConnectOpen(false)}
+            onClose={() => {
+              pendingRemoteGroupIdRef.current = null;
+              setRemoteConnectOpen(false);
+            }}
             onPick={(host, remotePath) => void createRemoteWs(host, remotePath)}
           />
         )}
@@ -6133,6 +6183,12 @@ export default function App() {
           onOpenFile={handleSearchOpenFile}
         />
 
+        <WorkspaceSwitchHud
+          workspace={activeWorkspace}
+          branch={activeWorkspace ? branchByWorkspaceId[activeWorkspace.id] ?? null : null}
+          signal={switchSignal}
+          holdMs={preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS}
+        />
         <ToastHost
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}

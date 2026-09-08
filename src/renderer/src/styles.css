@@ -1056,34 +1056,6 @@ a { color: inherit; }
   container-type: inline-size;
 }
 
-.codara-terminal-intro {
-  position: absolute;
-  z-index: 4;
-  top: 50%;
-  left: 50%;
-  max-width: calc(100% - 40px);
-  margin: 0;
-  transform: translate(-50%, -50%);
-  overflow: hidden;
-  color: var(--accent-text);
-  font-family: var(--font-mono);
-  font-size: clamp(6px, 1.9cqw, 14px);
-  font-weight: 600;
-  line-height: 1.18;
-  letter-spacing: -0.04em;
-  white-space: pre;
-  text-shadow: 0 0 18px var(--accent-glow);
-  opacity: 0.88;
-  pointer-events: none;
-  user-select: none;
-  transition: opacity 400ms var(--ease-out), transform 400ms var(--ease-out);
-}
-
-.codara-terminal-intro.is-fading {
-  opacity: 0;
-  transform: translate(-50%, calc(-50% - 4px));
-}
-
 /* Cora worker terminals open as observation surfaces. The veil makes the
    safety state unmistakable while staying transparent enough to watch live
    output; pointer events pass through so protected panes can still be
@@ -1183,10 +1155,6 @@ a { color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .codara-terminal-intro {
-    transition: none;
-  }
-
   .cora-worker-terminal-veil {
     animation: none;
   }
@@ -5971,5 +5939,102 @@ a { color: inherit; }
   }
   .cora-whiteboard-header__actions {
     margin-left: auto;
+  }
+}
+
+/* ── Workspace switch HUD ────────────────────────────────────────────────────
+   The one-second pill under the title bar that names the workspace you just
+   switched to (icon + name + branch, in the workspace color). Enter slides
+   down from the bar; exit lifts back up. Pointer events off: it is a glance
+   surface, never a control. */
+.spark-workspace-switch-hud {
+  position: fixed;
+  z-index: 60;
+  top: 44px;
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px 5px 5px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--hud-accent) 45%, transparent);
+  background: color-mix(in oklab, var(--hud-accent) 14%, var(--panel-2));
+  box-shadow:
+    0 12px 30px -8px rgba(0, 0, 0, 0.55),
+    0 0 20px color-mix(in oklab, var(--hud-accent) 25%, transparent);
+  pointer-events: none;
+  user-select: none;
+  transform: translate(-50%, 0);
+  animation: spark-workspace-switch-hud-in 260ms var(--ease-out) both;
+}
+.spark-workspace-switch-hud.is-leaving {
+  animation: spark-workspace-switch-hud-out 260ms var(--ease-out) both;
+}
+.spark-workspace-switch-hud__tile {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--hud-accent);
+  color: var(--accent-ink, #14110d);
+}
+.spark-workspace-switch-hud__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+.spark-workspace-switch-hud__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.spark-workspace-switch-hud__branch {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+@keyframes spark-workspace-switch-hud-in {
+  from { opacity: 0; transform: translate(-50%, -22px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+@keyframes spark-workspace-switch-hud-out {
+  from { opacity: 1; transform: translate(-50%, 0); }
+  to { opacity: 0; transform: translate(-50%, -16px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-workspace-switch-hud,
+  .spark-workspace-switch-hud.is-leaving {
+    animation: none;
+  }
+  .spark-workspace-switch-hud.is-leaving {
+    opacity: 0;
+  }
+}
+
+/* ── Workspace rail icon tile ────────────────────────────────────────────────
+   Working state: a 1.5px ring in the tile's own color that breathes — slow
+   scale + opacity, no rotation, no glow. It sits 3px outside the tile so the
+   glyph itself never moves. */
+.spark-workspace-tile.is-working::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 8px;
+  border: 1.5px solid var(--tile-accent);
+  pointer-events: none;
+  animation: spark-workspace-tile-breathe 1.6s ease-in-out infinite;
+}
+@keyframes spark-workspace-tile-breathe {
+  0%, 100% { opacity: 0.25; transform: scale(0.96); }
+  50% { opacity: 0.95; transform: scale(1.04); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-workspace-tile.is-working::after {
+    animation: none;
+    opacity: 0.7;
   }
 }

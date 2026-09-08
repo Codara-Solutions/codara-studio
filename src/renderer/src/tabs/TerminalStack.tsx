@@ -1245,14 +1245,6 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialCwd={leaf.cwd}
               initialCommand={leaf.autorun}
               nativeCliLoginToken={leaf.nativeCliLoginToken}
-              showCodaraIntro={
-                !leaf.autorun &&
-                !leaf.nativeCliLoginToken &&
-                !leaf.worker &&
-                !leaf.agentSession &&
-                tab.scope?.kind !== "workers" &&
-                !tab.color
-              }
               agentSession={leaf.agentSession}
               nativeCodexProfileId={
                 leaf.agentSession?.nativeCodexProfileId ??
