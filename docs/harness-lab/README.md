@@ -334,3 +334,21 @@ a dedicated lab app with `CODARA_PI_COMPACT_AT_TOKENS=32768`; the probe reads
 eight large evidence batches exactly once and checks original instructions and
 all markers after compaction. The repeated harness comparison keeps its original
 binary and sources until it finishes, so these new live probes are pending.
+
+### Invalidated first crossover
+
+The first sequential Sol/high crossover at `cedf3b8c` was stopped during
+round 2. In round 1, Hermes's async-pool session lost track of its assigned
+workspace, searched unrelated directories and prior session artifacts, then
+read and verified the previous Codex trial's solution. Its own starter file
+remained unchanged. This is cross-trial contamination, so the schedule is
+excluded from harness rankings, including its apparently successful trials.
+The raw suite artifacts and a scoped incident record remain in the dedicated
+lab's `measurements/crossover-cedf3b8c` directory. Raw personal search results
+are not exported.
+
+The next protocol gives every harness the same explicit workspace path and
+instruction to avoid other workspaces, sessions, and benchmark artifacts.
+Hermes also receives `--in` and `TERMINAL_CWD`; rival session IDs are retained
+for audit. These instructions are not an OS sandbox. A replacement comparison
+still needs session auditing before its numbers can be reported as valid.

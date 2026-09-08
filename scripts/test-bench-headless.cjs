@@ -41,3 +41,9 @@ try {
   assert.deepEqual(codexSessionModels(root, "../../elsewhere"), []);
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 console.log("headless CLI command and telemetry tests passed");
+
+const { buildRivalCommand } = require("../cli/bench/rivals.cjs");
+const hermes = buildRivalCommand("hermes", { dir: "/tmp/assigned workspace", prompt: "task", usageFile: "/tmp/usage.json" });
+assert.equal(hermes.args[hermes.args.indexOf("--in") + 1], "/tmp/assigned workspace");
+const { workspacePrompt } = require("../cli/commands/bench.cjs");
+assert.equal(workspacePrompt("/tmp/assigned", "literal `task` $HOME"), "Assigned workspace: /tmp/assigned\nWork only in this workspace. Do not search other workspaces, prior agent sessions, or benchmark artifacts for solutions.\n\nliteral `task` $HOME");

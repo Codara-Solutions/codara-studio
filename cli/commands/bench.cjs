@@ -235,6 +235,10 @@ function startGreenPoller(dir, task, startedAt) {
   return { state, stop: () => { stopped = true; clearInterval(timer); } };
 }
 
+function workspacePrompt(dir, prompt) {
+  return `Assigned workspace: ${dir}\nWork only in this workspace. Do not search other workspaces, prior agent sessions, or benchmark artifacts for solutions.\n\n${prompt}`;
+}
+
 async function runTask(flags, task) {
   const dir = seedWorkspace(task);
   const capMs = TIER_CAP_MS[task.tier] ?? 10 * 60_000;
@@ -242,7 +246,7 @@ async function runTask(flags, task) {
   process.stdout.write(`${c.cyan("▸")} ${c.bold(task.name.padEnd(20))} ${c.dim(task.tier.padEnd(9))}`);
   const started = await rpc(flags, "chat.create", {
     cwd: dir,
-    prompt: task.prompt,
+    prompt: workspacePrompt(dir, task.prompt),
     backend: "pi",
     model: flags.model ?? DEFAULT_CONTROL_MODEL,
     effort: flags.effort ?? DEFAULT_CONTROL_EFFORT,
@@ -264,7 +268,7 @@ async function runTask(flags, task) {
     }
     poller.state.stageIndex += 1;
     poller.state.greenAtMs = null;
-    await rpc(flags, "chat.send", { runId, content: stage.prompt });
+    await rpc(flags, "chat.send", { runId, content: workspacePrompt(dir, stage.prompt) });
     outcome = await driveToCompletion(flags, runId, startedAt + capMs, flags.execution === "managed" ? undefined : flags.model ?? DEFAULT_CONTROL_MODEL);
     questionsAsked += outcome.questionsAsked;
   }
@@ -328,7 +332,7 @@ async function runRivalTask(flags, task, agent) {
   const model = flags.model ?? DEFAULT_CONTROL_MODEL;
   const effort = flags.effort ?? DEFAULT_CONTROL_EFFORT;
   const rivalHome = path.join(homeDir(flags), "bench-rivals", agent);
-  let cli = await runRivalTurn(agent, { dir, prompt: task.prompt, capMs, model, effort, rivalHome });
+  let cli = await runRivalTurn(agent, { dir, prompt: workspacePrompt(dir, task.prompt), capMs, model, effort, rivalHome });
   let turns = cli.turns;
   let tokens = cli.tokens;
   let usage = cli.usage ? { ...cli.usage } : null;
@@ -349,7 +353,7 @@ async function runRivalTask(flags, task, agent) {
     poller.state.greenAtMs = null;
     cli = await runRivalTurn(agent, {
       dir,
-      prompt: stage.prompt,
+      prompt: workspacePrompt(dir, stage.prompt),
       capMs: startedAt + capMs - Date.now(),
       resume,
       model,
@@ -401,7 +405,7 @@ async function runRivalTask(flags, task, agent) {
     console.log(`${mark} ${check.name}${check.detail ? c.dim(`  ${check.detail}`) : ""}`);
   }
   if (cli.error) console.log(c.red(`  ${agent}: ${cli.error.message}`));
-  return { task, result, score, runId: null, ...(flags.keep ? { workspace: dir } : {}) };
+  return { task, result, score, runId: null, sessionId: resume, ...(flags.keep ? { workspace: dir } : {}) };
 }
 
 function promptHash() {
@@ -533,6 +537,7 @@ async function bench(args, flags) {
     models: t.result.models,
     runStatus: t.result.runStatus,
     runId: t.runId,
+    ...(t.sessionId ? { sessionId: t.sessionId } : {}),
     passed: trialPassed(t.result),
     checks: t.result.checks,
     ...(t.workspace ? { workspace: t.workspace } : {}),
@@ -656,6 +661,7 @@ module.exports = {
   driveToCompletion,
   runMetrics,
   appendHistory,
+  workspacePrompt,
   comparableEntry,
   historyMetadata,
   totalRunTokens,

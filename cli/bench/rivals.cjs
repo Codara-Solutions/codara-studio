@@ -17,6 +17,7 @@ function rivalLabel(agent, model = "gpt-5.6-sol", effort = "high") {
 
 function buildRivalCommand(agent, {
   prompt,
+  dir,
   resume,
   usageFile,
   model = "gpt-5.6-sol",
@@ -31,6 +32,7 @@ function buildRivalCommand(agent, {
     args: [
       "--safe-mode",
       "--yolo",
+      ...(dir ? ["--in", dir] : []),
       "--model",
       model,
       "--provider",
@@ -119,7 +121,7 @@ async function runRivalTurn(agent, {
   effort = "high",
   rivalHome,
 }) {
-  let env = process.env;
+  let env = agent === "hermes" ? { ...process.env, TERMINAL_CWD: dir } : process.env;
   if (agent === "codex") {
     if (!rivalHome) throw new Error("Codex benchmarks require an isolated rival home");
     fs.mkdirSync(rivalHome, { recursive: true });
@@ -132,7 +134,7 @@ async function runRivalTurn(agent, {
     os.tmpdir(),
     `cora-bench-hermes-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
-  const invocation = buildRivalCommand(agent, { prompt, resume, usageFile, model, effort });
+  const invocation = buildRivalCommand(agent, { prompt, dir, resume, usageFile, model, effort });
   const processResult = await execute(invocation.command, invocation.args, dir, capMs, env);
   const parsed = agent === "codex" ? parseCodexOutput(processResult.stdout)
     : agent === "claude" ? parseClaudeOutput(processResult.stdout)
