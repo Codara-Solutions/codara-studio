@@ -204,7 +204,7 @@ Repository layout:
 
 ## Releasing
 
-Releases are nightly. The GitHub Actions `Release` workflow runs at 03:00 UTC
+Releases are nightly. The GitHub Actions `Release` workflow runs at 02:17 UTC
 (or on demand with `gh workflow run Release`), runs the typechecks and the
 full unit registry, derives the next version from the conventional commits
 since the last `vX.Y.Z` tag (a breaking change bumps the major, a
