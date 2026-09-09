@@ -4,7 +4,7 @@ There are two pipelines. The GitHub Actions one is canonical.
 
 ## CI release (nightly, or on demand)
 
-`.github/workflows/release.yml` runs at 03:00 UTC every day and whenever you
+`.github/workflows/release.yml` runs at 02:17 UTC every day and whenever you
 run `gh workflow run Release`. Each run ships everything merged to `main`
 since the last `vX.Y.Z` tag as one release; a run with nothing new is skipped
 by the version step. Branch protection requires the CI `test` check on an

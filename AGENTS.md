@@ -40,7 +40,7 @@ existing code is written; when in doubt, read neighboring files and match them.
 ## Releases
 
 - Releases are nightly, not per push: the `Release` GitHub Actions workflow
-  runs at 03:00 UTC (or via `gh workflow run Release`), tests, builds, signs,
+  runs at 02:17 UTC (or via `gh workflow run Release`), tests, builds, signs,
   and saves both platforms before a dedicated GitHub App tags the built
   commit. Only then are binaries and update feeds published. Nothing new
   since the last tag means no new release. Tags reserve versions; recover a

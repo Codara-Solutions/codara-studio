@@ -194,7 +194,7 @@ test("recovery accepts only the original main Release artifact", async () => {
 
 test("workflow isolates the App key and gates publication on a verified tag", () => {
   const workflow = yaml.load(fs.readFileSync(path.join(__dirname, "../.github/workflows/release.yml"), "utf8"));
-  assert.deepEqual(workflow.on.schedule, [{ cron: "0 3 * * *" }]);
+  assert.deepEqual(workflow.on.schedule, [{ cron: "17 2 * * *" }]);
   assert.equal(workflow.on.pull_request_target, undefined);
   assert.equal(workflow.permissions.contents, "read");
   assert.equal(workflow.concurrency["cancel-in-progress"], false);
