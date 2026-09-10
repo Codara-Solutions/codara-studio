@@ -38,6 +38,8 @@ import {
 } from "./editor-cm/autocomplete/inlineExtension";
 import { usePreferences } from "../preferences/usePreferences";
 const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"));
+const CsvPreview = lazy(() => import("./file-preview/CsvPreview"));
+import { isCsvPath } from "./file-preview/csv";
 import FilePreview from "./file-preview/FilePreview";
 import { DockablePaneBar } from "../tabs/dockChromeSlot";
 import { previewKindForPath } from "./file-preview/previewKind";
@@ -97,6 +99,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 ) {
   const path = file.path;
   const isMarkdown = useMemo(() => isMarkdownPath(path), [path]);
+  const isCsv = isCsvPath(path);
   const previewKind = useMemo(() => previewKindForPath(path), [path]);
   // Image/pdf/media panes never mount CodeMirror or read text over IPC —
   // FilePreview loads them via file:// URLs. SVG and HTML are real markup,
@@ -104,13 +107,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   // markdown.
   const toggleKind = previewKind === "svg" || previewKind === "html";
   const previewOnly = previewKind !== null && !toggleKind;
-  const hasViewToggle = isMarkdown || toggleKind;
+  const hasViewToggle = isMarkdown || toggleKind || isCsv;
 
-  // View mode applies to markdown + SVG/HTML panes. Markdown defaults to
-  // "edit" to match VS Code; SVG and HTML default to "preview" (you open a
-  // mockup to look at it). Mode is intentionally NOT persisted; reopening a
-  // tab returns the user to the view they expect.
-  const [viewMode, setViewMode] = useState<ViewMode>(toggleKind ? "preview" : "edit");
+  // Data and visual documents open in preview; markdown opens in the editor.
+  // Mode is intentionally not persisted, so reopening restores that default.
+  const [viewMode, setViewMode] = useState<ViewMode>(toggleKind || isCsv ? "preview" : "edit");
+  useEffect(() => {
+    setViewMode(toggleKind || isCsv ? "preview" : "edit");
+  }, [path, toggleKind, isCsv]);
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -133,6 +137,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }),
     onAutosaved: (savedPath) => onSavedRef.current?.(savedPath),
     skip: previewOnly,
+    syncContent: isCsv,
   });
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
@@ -412,6 +417,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onSetMode={setViewMode}
             fullscreenAction={viewMode === "preview" ? fullscreenAction : null}
             forceLocalToolbar={fullscreen}
+            table={isCsv}
           />
         )}
         {previewOnly && (
@@ -484,6 +490,23 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <Suspense fallback={null}>
             <MarkdownPreview text={doc.content} basePath={path} />
           </Suspense>
+        )}
+        {doc.status === "ready" && isCsv && (
+          <div style={{ display: viewMode === "preview" ? "flex" : "none", flex: 1, minHeight: 0, minWidth: 0 }}>
+            <Suspense fallback={<EditorMessage text="Preparing table..." />}>
+              <CsvPreview
+                key={path}
+                path={path}
+                text={doc.content}
+                onChange={onChange}
+                dirty={dirty}
+                onSave={async () => {
+                  await saveRef.current();
+                  onSavedRef.current?.(pathRef.current);
+                }}
+              />
+            </Suspense>
+          </div>
         )}
         {doc.status === "ready" && (!hasViewToggle || viewMode === "edit") && (
           <CodeMirror
@@ -697,6 +720,7 @@ function MarkdownToolbar({
   onSetMode,
   fullscreenAction,
   forceLocalToolbar,
+  table = false,
 }: {
   mode: ViewMode;
   copied: boolean;
@@ -704,18 +728,21 @@ function MarkdownToolbar({
   onSetMode: (next: ViewMode) => void;
   fullscreenAction?: React.ReactNode;
   forceLocalToolbar?: boolean;
+  table?: boolean;
 }) {
   return (
     <DockablePaneBar style={{ gap: 8 }} forceLocal={forceLocalToolbar}>
-      <button
-        type="button"
-        onClick={onCopy}
-        title={copied ? "Copied" : "Copy source"}
-        aria-label="Copy source"
-        style={toolbarIconButton}
-      >
-        {copied ? <CheckIcon /> : <CopyIcon />}
-      </button>
+      {!table && (
+        <button
+          type="button"
+          onClick={onCopy}
+          title={copied ? "Copied" : "Copy source"}
+          aria-label="Copy source"
+          style={toolbarIconButton}
+        >
+          {copied ? <CheckIcon /> : <CopyIcon />}
+        </button>
+      )}
       <div
         role="group"
         aria-label="File view mode"
@@ -724,16 +751,16 @@ function MarkdownToolbar({
         <SegmentedButton
           active={mode === "preview"}
           onClick={() => onSetMode("preview")}
-          title="Show rendered preview (⌘⇧V)"
+          title={table ? "Show table (⌘⇧V)" : "Show rendered preview (⌘⇧V)"}
         >
-          Preview
+          {table ? "Table" : "Preview"}
         </SegmentedButton>
         <SegmentedButton
           active={mode === "edit"}
           onClick={() => onSetMode("edit")}
           title="Return to editor (⌘⇧V)"
         >
-          Edit
+          {table ? "Source" : "Edit"}
         </SegmentedButton>
       </div>
       {fullscreenAction}

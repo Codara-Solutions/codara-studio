@@ -24,6 +24,8 @@ interface Options {
   // text-read IPC round-trip is skipped entirely and `doc` stays "loading",
   // which no preview-only render branch ever consults.
   skip?: boolean;
+  // Table and source editors share the live buffer instead of a load snapshot.
+  syncContent?: boolean;
 }
 
 export interface UseDocumentResult {
@@ -57,6 +59,7 @@ export function useDocument({
   getAutosavePrefs,
   onAutosaved,
   skip = false,
+  syncContent = false,
 }: Options): UseDocumentResult {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
@@ -206,6 +209,9 @@ export function useDocument({
   const onChange = useCallback(
     (next: string) => {
       bufferRef.current = next;
+      if (syncContent) {
+        setDoc((current) => current.status === "ready" ? { ...current, content: next } : current);
+      }
       const isDirty = next !== savedRef.current;
       dirtyRef.current = isDirty;
       setDirty(isDirty);
@@ -216,7 +222,7 @@ export function useDocument({
         clearAutosaveTimer();
       }
     },
-    [scheduleAutosave, clearAutosaveTimer],
+    [scheduleAutosave, clearAutosaveTimer, syncContent],
   );
 
   // Manual save: unconditional (no expectedMtimeMs) — explicit user intent
