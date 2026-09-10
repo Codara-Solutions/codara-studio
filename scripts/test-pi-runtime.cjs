@@ -688,7 +688,7 @@ async function main() {
       runId: "run-direct-task",
       attemptId: "attempt-direct-task",
       cwd: directory,
-      directTask: { finalReportPath: directReport, studioTools: true },
+      directTask: { finalReportPath: directReport },
     });
     assert.equal(directWorkerPlan.env.CODARA_PI_DIRECT_TASK, "1");
     assert.equal(directWorkerPlan.env.CODARA_PI_FINAL_REPORT, path.resolve(directReport));

@@ -108,6 +108,18 @@ async function main() {
     "remote-cora-run-context-test.cjs",
   );
 
+  const authoredOption = {
+    id: "computer", label: "On the computer", description: "Use Studio's Browser",
+    answer: "Open YouTube on the connected computer", recommended: true,
+  };
+  assert.deepEqual(projector.projectRemoteCoraQuestionOptions({
+    message: "Where should I open it?", questionOptions: [authoredOption],
+  }), [authoredOption]);
+  assert.deepEqual(projector.projectRemoteCoraQuestionOptions({ message: "Which URL?" }), []);
+  assert.deepEqual(projector.projectRemoteCoraQuestionOptions({
+    message: "Where?", questionOptions: [{ ...authoredOption, answer: "x".repeat(16 * 1024 + 1) }],
+  }), [], "oversized answers must not be silently changed");
+
   assert.equal(contract.CORA_HISTORY_RUNS_JSON_MAX_BYTES, 72 * 1024);
   assert.equal(contract.CORA_RUN_JSON_MAX_BYTES, 400 * 1024);
   assert.equal(contract.CORA_RUN_RESULT_JSON_MAX_BYTES, 404 * 1024);

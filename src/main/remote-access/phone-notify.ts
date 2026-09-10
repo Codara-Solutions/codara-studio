@@ -21,14 +21,33 @@ export interface PhoneNotificationRegistration {
 
 interface PhoneNotificationFile {
   devices: Record<string, PhoneNotificationRegistration>;
+  history: Record<string, RemotePhoneNotification[]>;
 }
 
 const STORE_FILE = "phone-notifications.json";
+const HISTORY_CAPACITY = 200;
+
+function validHistoryEntry(value: unknown): value is RemotePhoneNotification {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    ["blocked", "completed", "failed", "automation", "github"].includes(entry.kind as string) &&
+    ["id", "computerId", "title", "body", "workspaceId", "createdAt"].every(
+      (key) => typeof entry[key] === "string",
+    ) &&
+    ["workspaceName", "runId", "automationId", "terminalPaneId"].every(
+      (key) => entry[key] === undefined || typeof entry[key] === "string",
+    ) &&
+    (entry.sourceView === undefined || entry.sourceView === "queue" || entry.sourceView === "history") &&
+    Number.isFinite(Date.parse(entry.createdAt as string))
+  );
+}
 
 export function phoneNotificationKindAllowed(
   kind: RemotePhoneNotificationKind,
   prefs: RemotePhoneNotificationPrefs,
 ): boolean {
+  if (kind === "github") return prefs.github === true;
   if (kind === "blocked") return prefs.needsAnswer;
   if (kind === "automation") return prefs.automations;
   return prefs.completed;
@@ -61,12 +80,23 @@ export class PhoneNotificationStore {
       try {
         const raw = await fs.readFile(this.path, "utf8");
         const parsed = JSON.parse(raw) as Partial<PhoneNotificationFile>;
+        const history: PhoneNotificationFile["history"] = {};
+        if (parsed.history && typeof parsed.history === "object") {
+          for (const [key, entries] of Object.entries(parsed.history)) {
+            if (Array.isArray(entries)) {
+              history[key] = entries.filter(validHistoryEntry)
+                .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+                .slice(0, HISTORY_CAPACITY);
+            }
+          }
+        }
         this.cache = {
+          history,
           devices:
             parsed.devices && typeof parsed.devices === "object" ? parsed.devices : {},
         };
       } catch {
-        this.cache = { devices: {} };
+        this.cache = { devices: {}, history: {} };
       }
       return this.cache;
     })();
@@ -74,12 +104,12 @@ export class PhoneNotificationStore {
   }
 
   private async persist(): Promise<void> {
-    const snapshot = JSON.stringify(this.cache ?? { devices: {} }, null, 2);
+    const snapshot = JSON.stringify(this.cache ?? { devices: {}, history: {} }, null, 2);
     this.writing = this.writing
       .then(async () => {
         const tmp = `${this.path}.tmp`;
         await fs.mkdir(this.dir, { recursive: true });
-        await fs.writeFile(tmp, snapshot, "utf8");
+        await fs.writeFile(tmp, snapshot, { encoding: "utf8", mode: 0o600 });
         await fs.rename(tmp, this.path);
       })
       .catch((err) => {
@@ -100,9 +130,31 @@ export class PhoneNotificationStore {
 
   async remove(publicKeyB64: string): Promise<void> {
     const file = await this.load();
-    if (!(publicKeyB64 in file.devices)) return;
+    if (!(publicKeyB64 in file.devices) && !(publicKeyB64 in file.history)) return;
     delete file.devices[publicKeyB64];
+    delete file.history[publicKeyB64];
     await this.persist();
+  }
+
+  async record(publicKeyB64: string, notification: RemotePhoneNotification): Promise<void> {
+    if (!validHistoryEntry(notification)) return;
+    const file = await this.load();
+    const registration = file.devices[publicKeyB64];
+    if (registration && (
+      !registration.enabled || !phoneNotificationKindAllowed(notification.kind, registration.prefs)
+    )) return;
+    const previous = file.history[publicKeyB64] ?? [];
+    if (previous.some((entry) =>
+      entry.id === notification.id && entry.computerId === notification.computerId
+    )) return;
+    file.history[publicKeyB64] = [{ ...notification }, ...previous]
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, HISTORY_CAPACITY);
+    await this.persist();
+  }
+
+  async listHistory(publicKeyB64: string): Promise<RemotePhoneNotification[]> {
+    return ((await this.load()).history[publicKeyB64] ?? []).map((entry) => ({ ...entry }));
   }
 
   // Expo said the token is dead (app removed, token rotated); keep the prefs.
@@ -140,8 +192,9 @@ export interface ExpoPushOutcome {
 
 // Every notification transiting Expo/APNs leaves the E2E-encrypted channel
 // every other byte of Remote Access uses, so the push payload carries only
-// generic per-kind copy and routing IDS — never run question text, automation
-// names, or workspace names. The live relay event keeps the full text.
+// generic per-kind copy and delivery/routing metadata, never run question
+// text, automation names, or workspace names. Live events and authenticated
+// history reads keep the full text inside that encrypted channel.
 const EXPO_GENERIC_COPY: Record<
   RemotePhoneNotificationKind,
   { title: string; body: string }
@@ -149,6 +202,7 @@ const EXPO_GENERIC_COPY: Record<
   blocked: { title: "Needs your answer", body: "A run is waiting on your answer." },
   completed: { title: "Run complete", body: "A run finished." },
   failed: { title: "Run failed", body: "A run failed." },
+  github: { title: "GitHub activity", body: "There is new activity in a watched repository." },
   automation: { title: "Automation update", body: "An automation finished or stopped." },
 };
 
@@ -166,15 +220,27 @@ export async function sendExpoPushMessages(
   fetchImpl: typeof fetch = fetch,
 ): Promise<ExpoPushOutcome[]> {
   if (targets.length === 0) return [];
-  const copy = EXPO_GENERIC_COPY[notification.kind];
+  const terminalCopy = {
+    blocked: { title: "Terminal needs you", body: "A terminal agent is waiting for input." },
+    completed: { title: "Terminal finished", body: "A terminal agent finished its turn." },
+    failed: { title: "Terminal stopped", body: "A terminal agent needs attention." },
+    automation: EXPO_GENERIC_COPY.automation,
+    github: EXPO_GENERIC_COPY.github,
+  };
+  const copy = notification.terminalPaneId ? terminalCopy[notification.kind] : EXPO_GENERIC_COPY[notification.kind];
   const messages = targets.map((target) => ({
     to: target.token,
     title: copy.title,
     body: copy.body,
     sound: "default",
     data: {
+      id: notification.id,
+      createdAt: notification.createdAt,
+      ...(notification.computerId ? { computerId: notification.computerId } : {}),
       kind: notification.kind,
       workspaceId: notification.workspaceId,
+      ...(notification.sourceView ? { sourceView: notification.sourceView } : {}),
+      ...(notification.terminalPaneId ? { terminalPaneId: notification.terminalPaneId } : {}),
       ...(notification.runId ? { runId: notification.runId } : {}),
       ...(notification.automationId ? { automationId: notification.automationId } : {}),
     },

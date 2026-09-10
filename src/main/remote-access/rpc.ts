@@ -1,3 +1,4 @@
+import { validGitHubAutoMergeInput, type GitHubAutoMergeInput, type GitHubAutoMergeStatus, type GitHubAutoMergeResult } from "@shared/github-auto-merge";
 // RPC v1 for phone Remote Access: versioned, length-prefixed JSON over the
 // Noise-encrypted stream (docs/remote-access.md, "Application protocol").
 //
@@ -20,6 +21,7 @@
 // RemoteRpcServices, which is what lets the unit tests and the e2e harness
 // drive a real RpcSession without booting the app.
 
+import { validGitHubReviewDiscussionRequest, type GitHubReviewDiscussionRequest, type GitHubReviewDiscussionPage, validGitHubReviewInput, validGitHubReviewTarget, type GitHubReviewTarget, type GitHubReviewInput, type GitHubReviewPage, type GitHubReviewResult } from "@shared/github-review";
 import { createHash, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -88,6 +90,9 @@ export interface RemoteWorkspaceInfo {
   path: string;
   groupId?: string;
   color?: string;
+  // Glyph id from Studio's workspace icon library (`Workspace.icon`). The
+  // phone draws it in the workspace colour tile; absent = the folder glyph.
+  icon?: string;
   branch?: string;
   sessionCount?: number;
   lastActiveAt?: number;
@@ -97,6 +102,7 @@ export interface RemoteFleetWorkspaceOverview {
   id: string;
   name: string;
   color: string;
+  icon?: string;
   branch?: string;
   /** Ordinary Cora conversations only; automation-owned runs are excluded. */
   conversationCount: number;
@@ -189,6 +195,161 @@ export interface RemoteWorkspaceOrganization {
   groups: RemoteWorkspaceGroupInfo[];
   // Mixed top-level ordering for ungrouped workspaces and workspace groups.
   railOrder: string[];
+}
+
+// The Capability Center, projected for the phone. Names, ids and one-line
+// summaries only: no config file contents, commands, env or URLs leave the
+// desktop. Assignment, memory and policy controls share Studio settings.
+export type RemoteCapabilityModelGroup =
+  | "Claude"
+  | "Codex"
+  | "Grok"
+  | "OpenRouter"
+  | "Other";
+
+export interface RemoteCapabilityWorkerModel {
+  id: string;
+  group: RemoteCapabilityModelGroup;
+  enabled: boolean;
+  premium: boolean;
+}
+
+export interface RemoteCapabilityAsset {
+  id: string;
+  kind: "mcp" | "skill";
+  name: string;
+  runtime: string;
+  scope: "user" | "workspace";
+  enabled: boolean;
+  sessionKey?: string;
+  cora?: boolean;
+  workers?: boolean;
+  detail?: string;
+  canDelete?: boolean;
+  canEdit?: boolean;
+  installableRuntimes?: RemoteCapabilityRuntime[];
+}
+
+export type RemoteCapabilityRuntime = "claude" | "codex" | "grok";
+
+export interface RemoteMcpDraft {
+  name: string;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+export interface RemoteMcpTarget {
+  id: string;
+  label: string;
+  runtime: string;
+  scope: "user" | "workspace";
+  format: "json" | "toml";
+}
+
+export interface RemoteMcpEditor {
+  targets: RemoteMcpTarget[];
+  detail?: { assetId: string; targetId: string; server: RemoteMcpDraft; revision: string };
+}
+
+export type RemoteAssetUpdate = { workspaceId?: string } & (
+  { action: "saveMcp"; targetId: string; server: RemoteMcpDraft; replaceId?: string; revision?: string } |
+  { action: "install"; assetId: string; runtime: RemoteCapabilityRuntime } |
+  { action: "remove"; assetId: string } |
+  { action: "builtin"; builtinId: "codara-studio"; runtime: RemoteCapabilityRuntime; installed: boolean }
+);
+
+export interface RemoteCapabilityBuiltin {
+  id: string;
+  name: string;
+  summary: string;
+  toolCount: number;
+  autoManaged: boolean;
+  installed: { claude: boolean; codex: boolean; grok: boolean };
+  states?: Record<RemoteCapabilityRuntime, "installed" | "user-managed" | "available" | "unavailable">;
+}
+
+export interface RemoteCapabilityMemoryTier {
+  enabled: boolean;
+  available: boolean;
+  bytesUsed: number;
+  bytesCap: number;
+  overCap: boolean;
+  counts: { user: number; cora: number; auto: number };
+}
+
+export interface RemoteCapabilityMemory {
+  profile: { id: string; name: string };
+  editable?: boolean;
+  global: RemoteCapabilityMemoryTier;
+  workspace: RemoteCapabilityMemoryTier;
+}
+
+export interface RemoteMemoryDocument {
+  content: string;
+  revision: string;
+  bytesCap: number;
+}
+
+export interface RemoteMemoryTarget {
+  workspaceId?: string;
+  profileId: string;
+  scope: "global" | "workspace";
+}
+
+export type RemoteMemoryUpdate = RemoteMemoryTarget & { revision: string } & (
+  { action: "save"; content: string } | { action: "clear"; includeUserLines: boolean }
+);
+
+export interface RemoteCoraProfile {
+  id: string;
+  name: string;
+  description: string;
+  isDefault: boolean;
+  createdAt: string;
+}
+
+export interface RemoteProfileDocument {
+  content: string;
+  revision: string;
+  maxChars: number;
+}
+
+export type RemoteProfileUpdate = { workspaceId?: string } & (
+  { action: "create"; name: string; description?: string; instructions?: string } |
+  { action: "use"; profileId: string } |
+  { action: "save"; profileId: string; revision: string; content: string } |
+  { action: "delete"; profileId: string; createdAt: string }
+);
+
+export interface RemoteCapabilities {
+  workspaceId?: string;
+  workerModels: RemoteCapabilityWorkerModel[];
+  policy: {
+    mcpAwareness: boolean;
+    skillAwareness: boolean;
+    autoInstallStudioMcp: boolean;
+  };
+  mcp: RemoteCapabilityAsset[];
+  skills: RemoteCapabilityAsset[];
+  builtins: RemoteCapabilityBuiltin[];
+  memory?: RemoteCapabilityMemory;
+  profiles?: RemoteCoraProfile[];
+  assetManagement?: boolean;
+  nextAssetOffset?: number;
+}
+
+export interface RemoteCapabilitiesUpdate {
+  workspaceId?: string;
+  asset?: { sessionKey: string; target: "cora" | "workers" | "skill"; enabled: boolean };
+  memory?: { scope: "global" | "workspace"; enabled: boolean; profileId?: string };
+  enabledWorkerModels?: string[];
+  mcpAwareness?: boolean;
+  skillAwareness?: boolean;
+  autoInstallStudioMcp?: boolean;
 }
 
 export interface RemoteDirectoryInfo {
@@ -310,10 +471,12 @@ export type RemoteCoraThinkingLevel =
   | "xhigh"
   | "max";
 
+export type RemoteCoraModelProvider = RemoteSubscriptionProvider | "openrouter";
+
 export interface RemoteCoraModel {
   id: string;
   label: string;
-  provider: RemoteSubscriptionProvider;
+  provider: RemoteCoraModelProvider;
   thinkingLevels: RemoteCoraThinkingLevel[];
 }
 
@@ -431,9 +594,18 @@ export interface RemoteCoraWorker {
 // The one question currently blocking a run. cora.send to a blocked run
 // already answers it desktop-side; this exists so the phone can show what is
 // being asked instead of a bare "blocked" pill.
+export interface RemoteCoraQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+  answer: string;
+  recommended: boolean;
+}
+
 export interface RemoteCoraBlockedQuestion {
   messageId: string;
   message: string;
+  options?: RemoteCoraQuestionOption[];
 }
 
 export type RemoteCoraStepStatus =
@@ -795,11 +967,13 @@ export interface RemoteWorkerSessionDeleteResult {
 
 // Mirrors the desktop notify pipeline's run/automation alerts for the phone:
 // blocked = a run needs an answer, completed/failed = run outcomes, and
-// automation = loom lifecycle (needs an answer, finished, failed).
+// automation = loom lifecycle, github = repository activity and PR checks.
 export type RemotePhoneNotificationKind =
-  "blocked" | "completed" | "failed" | "automation";
+  "blocked" | "completed" | "failed" | "automation" | "github";
 
 export interface RemotePhoneNotification {
+  /** Sending Studio public key; optional for older remote peers. */
+  computerId?: string;
   // Journal event id; the phone dedupes on it because a device briefly
   // holding two sessions receives the event on both.
   id: string;
@@ -808,6 +982,8 @@ export interface RemotePhoneNotification {
   body: string;
   workspaceId: string;
   workspaceName?: string;
+  terminalPaneId?: string;
+  sourceView?: "queue" | "history";
   runId?: string;
   automationId?: string;
   createdAt: string;
@@ -828,6 +1004,7 @@ export interface RemoteCoraChangedEvent {
 // are always sent and filtered on the phone, so a stale registration can
 // never mute the in-app experience.
 export interface RemotePhoneNotificationPrefs {
+  github?: boolean;
   needsAnswer: boolean;
   completed: boolean;
   automations: boolean;
@@ -1046,6 +1223,7 @@ export class FrameDecoder {
 export interface RemoteTerminalHandle {
   // Renderer-owned tab metadata for a terminal shared with the desktop.
   desktopTabId?: string;
+  desktopPaneId?: string;
   // Stable server-derived identity for an automation worker PTY. It is never
   // sent by the phone and is required before the control registry will write.
   controlTargetId?: string;
@@ -1068,7 +1246,7 @@ export interface RemoteTerminalCreateRequest {
   cols: number;
   rows: number;
   cwd?: string;
-  profile: "shell" | "claude" | "codex";
+  profile: "shell" | "claude" | "codex" | "grok";
   resumeSessionId?: string;
   title?: string;
   // Stamped by the authenticated desktop session; never supplied by the phone.
@@ -1100,6 +1278,14 @@ export interface RemoteRpcServices {
   getFleetOverview?(): Promise<RemoteFleetOverviewProjection>;
   listSubscriptionProfiles?(): Promise<RemoteSubscriptionProfile[]>;
   listCoraModels?(): Promise<RemoteCoraModel[]>;
+  getCapabilities?(input: { workspaceId?: string; assetOffset?: number }): Promise<RemoteCapabilities>;
+  updateCapabilities?(input: RemoteCapabilitiesUpdate): Promise<RemoteCapabilities>;
+  readCapabilityMemory?(input: RemoteMemoryTarget): Promise<RemoteMemoryDocument>;
+  updateCapabilityMemory?(input: RemoteMemoryUpdate): Promise<RemoteMemoryDocument>;
+  readCapabilityProfile?(profileId: string): Promise<RemoteProfileDocument>;
+  updateCapabilityProfile?(input: RemoteProfileUpdate): Promise<{ capabilities: RemoteCapabilities; message: string }>;
+  readCapabilityMcp?(input: { workspaceId?: string; assetId?: string }): Promise<RemoteMcpEditor>;
+  updateCapabilityAsset?(input: RemoteAssetUpdate): Promise<{ capabilities: RemoteCapabilities; message: string }>;
   listNativeCliAccounts?(): Promise<RemoteNativeCliAccount[]>;
   listWorkspaceOrganization?(): Promise<RemoteWorkspaceOrganization>;
   listDirectories?(path?: string): Promise<RemoteDirectoryListing>;
@@ -1167,6 +1353,11 @@ export interface RemoteRpcServices {
   getGitHubWorkQueue?(input: {
     refresh: boolean;
   }): Promise<GitHubWorkQueueStatus>;
+  readGitHubAutoMerge?(input: { workspaceId: string; target: GitHubReviewTarget }): Promise<GitHubAutoMergeStatus>;
+  updateGitHubAutoMerge?(input: { workspaceId: string; requestId: string; input: GitHubAutoMergeInput }): Promise<GitHubAutoMergeResult>;
+  readGitHubReviewDiscussions?(input: GitHubReviewDiscussionRequest & { workspaceId: string }): Promise<GitHubReviewDiscussionPage>;
+  readGitHubReview?(input: { workspaceId: string; target: GitHubReviewTarget; page?: number }): Promise<GitHubReviewPage>;
+  submitGitHubReview?(input: { workspaceId: string; requestId: string; review: GitHubReviewInput }): Promise<GitHubReviewResult>;
   publishGitHub?(input: {
     workspaceId: string;
     requestId: string;
@@ -1308,6 +1499,7 @@ export interface RemoteRpcServices {
   // The session's peer identity is bound by the service wiring (index.ts), so
   // a registration can never name another device.
   registerNotifications?(input: RemoteNotificationRegistration): Promise<void>;
+  listNotificationHistory?(): Promise<RemotePhoneNotification[]>;
   beginImageUpload?(
     input: RemoteImageUploadRequest,
   ): Promise<RemoteImageUploadHandle>;
@@ -1861,6 +2053,235 @@ export class RpcSession {
           } else {
             this.reply(id, { profiles, revision });
           }
+          return;
+        }
+        case "capabilities.get": {
+          if (!this.services.getCapabilities) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "The Capability Center is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; assetOffset?: unknown };
+          if (
+            (p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) ||
+            (p.assetOffset !== undefined && (!Number.isSafeInteger(p.assetOffset) || (p.assetOffset as number) < 0))
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "Choose a valid workspace and inventory offset.",
+            );
+            return;
+          }
+          const capabilities = await this.services.getCapabilities({
+            ...(typeof p.assetOffset === "number" ? { assetOffset: p.assetOffset } : {}),
+            ...(typeof p.workspaceId === "string"
+              ? { workspaceId: p.workspaceId }
+              : {}),
+          });
+          this.reply(id, { capabilities });
+          return;
+        }
+        case "capabilities.mcp.read": {
+          if (!this.services.readCapabilityMcp) {
+            this.replyError(id, "unknown-method", "Update Studio to edit MCP servers.");
+            return;
+          }
+          const p = (params ?? {}) as { workspaceId?: unknown; assetId?: unknown };
+          if ((p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) ||
+              (p.assetId !== undefined && (typeof p.assetId !== "string" || !/^[a-f0-9]{64}$/.test(p.assetId)))) {
+            this.replyError(id, "invalid-params", "Choose a valid workspace and MCP server.");
+            return;
+          }
+          const editor = await this.services.readCapabilityMcp({
+            ...(typeof p.workspaceId === "string" ? { workspaceId: p.workspaceId } : {}),
+            ...(typeof p.assetId === "string" ? { assetId: p.assetId } : {}),
+          });
+          this.reply(id, { editor });
+          return;
+        }
+        case "capabilities.assets.update": {
+          if (!this.services.updateCapabilityAsset) {
+            this.replyError(id, "unknown-method", "Update Studio to manage MCP servers and skills.");
+            return;
+          }
+          const input = parseRemoteAssetUpdate(params);
+          if (!input) {
+            this.replyError(id, "invalid-params", "This capability change has missing or invalid fields.");
+            return;
+          }
+          this.reply(id, await this.services.updateCapabilityAsset(input));
+          return;
+        }
+        case "capabilities.profile.read": {
+          if (!this.services.readCapabilityProfile) {
+            this.replyError(id, "unknown-method", "Update Studio to manage Cora profiles.");
+            return;
+          }
+          const p = (params ?? {}) as { profileId?: unknown };
+          if (!isBoundedString(p.profileId, 64) || !/^[a-z0-9_-]+$/.test(p.profileId)) {
+            this.replyError(id, "invalid-params", "Choose a valid Cora profile.");
+            return;
+          }
+          this.reply(id, { document: await this.services.readCapabilityProfile(p.profileId) });
+          return;
+        }
+        case "capabilities.profile.update": {
+          if (!this.services.updateCapabilityProfile) {
+            this.replyError(id, "unknown-method", "Update Studio to manage Cora profiles.");
+            return;
+          }
+          const p = (params ?? {}) as Record<string, unknown>;
+          const validText = (value: unknown, max: number) => typeof value === "string" && value.length <= max;
+          if (
+            (p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) ||
+            !["create", "use", "save", "delete"].includes(p.action as string) ||
+            (p.action === "create" ? (
+              !isBoundedString(p.name, 80) || !p.name.trim() ||
+              (p.description !== undefined && !validText(p.description, 300)) ||
+              (p.instructions !== undefined && !validText(p.instructions, 3500))
+            ) : !isBoundedString(p.profileId, 64) || !/^[a-z0-9_-]+$/.test(p.profileId)) ||
+            (p.action === "save" && (
+              !validText(p.content, 4000) || typeof p.revision !== "string" || !/^[a-f0-9]{64}$/.test(p.revision)
+            )) ||
+            (p.action === "delete" && (
+              p.profileId === "default" || !isBoundedString(p.createdAt, 40) || !Number.isFinite(Date.parse(p.createdAt))
+            ))
+          ) {
+            this.replyError(id, "invalid-params", "Choose a valid profile and provide the required fields for this change.");
+            return;
+          }
+          const input: RemoteProfileUpdate = {
+            ...(typeof p.workspaceId === "string" ? { workspaceId: p.workspaceId } : {}),
+            ...(p.action === "create" ? {
+              action: "create", name: p.name as string,
+              ...(typeof p.description === "string" ? { description: p.description } : {}),
+              ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}),
+            } : p.action === "use" ? { action: "use", profileId: p.profileId as string }
+              : p.action === "save" ? { action: "save", profileId: p.profileId as string, revision: p.revision as string, content: p.content as string }
+                : { action: "delete", profileId: p.profileId as string, createdAt: p.createdAt as string }),
+          };
+          this.reply(id, await this.services.updateCapabilityProfile(input));
+          return;
+        }
+        case "capabilities.memory.read":
+        case "capabilities.memory.update": {
+          const writing = method === "capabilities.memory.update";
+          if (!this.services.readCapabilityMemory || (writing && !this.services.updateCapabilityMemory)) {
+            this.replyError(id, "unknown-method", "Update Studio to edit memory on the phone.");
+            return;
+          }
+          const p = (params ?? {}) as Record<string, unknown>;
+          if (
+            !isBoundedString(p.profileId, 64) || !/^[a-z0-9_-]+$/.test(p.profileId) ||
+            (p.scope !== "global" && p.scope !== "workspace") ||
+            (p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) ||
+            (p.scope === "workspace" && !isBoundedString(p.workspaceId, 256)) ||
+            (writing && (
+              typeof p.revision !== "string" || !/^[a-f0-9]{64}$/.test(p.revision) ||
+              (p.action !== "save" && p.action !== "clear") ||
+              (p.action === "save" && (typeof p.content !== "string" || Buffer.byteLength(p.content, "utf8") > 64 * 1024)) ||
+              (p.action === "clear" && typeof p.includeUserLines !== "boolean")
+            ))
+          ) {
+            this.replyError(id, "invalid-params", "Memory needs a valid scope, profile and revision for changes.");
+            return;
+          }
+          const target: RemoteMemoryTarget = {
+            profileId: p.profileId, scope: p.scope,
+            ...(typeof p.workspaceId === "string" ? { workspaceId: p.workspaceId } : {}),
+          };
+          const document = writing
+            ? await this.services.updateCapabilityMemory!({
+                ...target, revision: p.revision as string,
+                ...(p.action === "save"
+                  ? { action: "save", content: p.content as string }
+                  : { action: "clear", includeUserLines: p.includeUserLines as boolean }),
+              })
+            : await this.services.readCapabilityMemory(target);
+          this.reply(id, { document });
+          return;
+        }
+        case "capabilities.update": {
+          if (!this.services.updateCapabilities) {
+            this.replyError(
+              id,
+              "unknown-method",
+              "The Capability Center is not available.",
+            );
+            return;
+          }
+          const p = (params ?? {}) as {
+            workspaceId?: unknown;
+            asset?: RemoteCapabilitiesUpdate["asset"];
+            memory?: RemoteCapabilitiesUpdate["memory"];
+            enabledWorkerModels?: unknown;
+            mcpAwareness?: unknown;
+            skillAwareness?: unknown;
+            autoInstallStudioMcp?: unknown;
+          };
+          const models = p.enabledWorkerModels;
+          const validModels =
+            models === undefined ||
+            (Array.isArray(models) &&
+              models.length <= 64 &&
+              models.every((entry) => isBoundedString(entry, 240)));
+          const validFlag = (value: unknown) =>
+            value === undefined || typeof value === "boolean";
+          if (
+            (p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) ||
+            (p.asset !== undefined && (
+              !p.asset || !isBoundedString(p.asset.sessionKey, 256) ||
+              !["cora", "workers", "skill"].includes(p.asset.target) ||
+              typeof p.asset.enabled !== "boolean"
+            )) ||
+            (p.memory !== undefined && (
+              !p.memory || !["global", "workspace"].includes(p.memory.scope) ||
+              typeof p.memory.enabled !== "boolean" ||
+              (p.memory.profileId !== undefined && (
+                !isBoundedString(p.memory.profileId, 64) || !/^[a-z0-9_-]+$/.test(p.memory.profileId)
+              )) ||
+              (p.memory.scope === "workspace" && !isBoundedString(p.workspaceId, 256))
+            )) ||
+            !validModels ||
+            !validFlag(p.mcpAwareness) ||
+            !validFlag(p.skillAwareness) ||
+            !validFlag(p.autoInstallStudioMcp) ||
+            (p.asset === undefined && p.memory === undefined && models === undefined &&
+              p.mcpAwareness === undefined &&
+              p.skillAwareness === undefined &&
+              p.autoInstallStudioMcp === undefined)
+          ) {
+            this.replyError(
+              id,
+              "invalid-params",
+              "capabilities.update needs a valid model, assignment, memory or policy change.",
+            );
+            return;
+          }
+          const capabilities = await this.services.updateCapabilities({
+            ...(typeof p.workspaceId === "string" ? { workspaceId: p.workspaceId } : {}),
+            ...(p.asset ? { asset: { sessionKey: p.asset.sessionKey, target: p.asset.target, enabled: p.asset.enabled } } : {}),
+            ...(p.memory ? { memory: { scope: p.memory.scope, enabled: p.memory.enabled,
+              ...(p.memory.profileId ? { profileId: p.memory.profileId } : {}),
+            } } : {}),
+            ...(Array.isArray(models)
+              ? { enabledWorkerModels: models as string[] }
+              : {}),
+            ...(typeof p.mcpAwareness === "boolean"
+              ? { mcpAwareness: p.mcpAwareness }
+              : {}),
+            ...(typeof p.skillAwareness === "boolean"
+              ? { skillAwareness: p.skillAwareness }
+              : {}),
+            ...(typeof p.autoInstallStudioMcp === "boolean"
+              ? { autoInstallStudioMcp: p.autoInstallStudioMcp }
+              : {}),
+          });
+          this.reply(id, { capabilities });
           return;
         }
         case "cora.models": {
@@ -2527,6 +2948,81 @@ export class RpcSession {
                 : {}),
             });
           }
+          return;
+        }
+        case "github.autoMerge.status": {
+          if (!this.services.readGitHubAutoMerge) {
+            this.replyError(id, "unknown-method", "Update Studio to manage automatic merge from the phone."); return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, ["workspaceId", "target"]) || !isBoundedString(params.workspaceId, 256) || !validGitHubReviewTarget(params.target)) {
+            this.replyError(id, "invalid-params", "Choose a valid workspace and pull request."); return;
+          }
+          const { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid } = params.target;
+          this.reply(id, { status: await this.services.readGitHubAutoMerge({ workspaceId: params.workspaceId,
+            target: { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, ...(expectedBaseCommitOid ? { expectedBaseCommitOid } : {}) } }) });
+          return;
+        }
+        case "github.autoMerge.update": {
+          if (!this.services.updateGitHubAutoMerge) {
+            this.replyError(id, "unknown-method", "Update Studio to manage automatic merge from the phone."); return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, ["workspaceId", "requestId", "input"]) || !isBoundedString(params.workspaceId, 256) ||
+              typeof params.requestId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{7,127}$/.test(params.requestId) || !validGitHubAutoMergeInput(params.input)) {
+            this.replyError(id, "invalid-params", "Choose a valid automatic merge action and confirmation."); return;
+          }
+          const { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid } = params.input.target;
+          const { action, strategy, expectedRevision } = params.input;
+          this.reply(id, { result: await this.services.updateGitHubAutoMerge({ workspaceId: params.workspaceId, requestId: params.requestId,
+            input: { action, strategy, expectedRevision, target: { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, ...(expectedBaseCommitOid ? { expectedBaseCommitOid } : {}) } } }) });
+          return;
+        }
+        case "github.review.discussions": {
+          if (!this.services.readGitHubReviewDiscussions) {
+            this.replyError(id, "unknown-method", "Update Studio to read review discussions on the phone.");
+            return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, ["workspaceId", "target"], ["cursor", "threadId"]) ||
+              !isBoundedString(params.workspaceId, 256) || !validGitHubReviewDiscussionRequest(params)) {
+            this.replyError(id, "invalid-params", "Choose a valid workspace, pull request and discussion page.");
+            return;
+          }
+          const { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid } = params.target;
+          this.reply(id, { discussions: await this.services.readGitHubReviewDiscussions({ workspaceId: params.workspaceId,
+            target: { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, ...(expectedBaseCommitOid ? { expectedBaseCommitOid } : {}) },
+            ...(typeof params.cursor === "string" ? { cursor: params.cursor } : {}),
+            ...(typeof params.threadId === "string" ? { threadId: params.threadId } : {}) }) });
+          return;
+        }
+        case "github.review.diff": {
+          if (!this.services.readGitHubReview) {
+            this.replyError(id, "unknown-method", "Update Studio to review pull requests on the phone.");
+            return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, ["workspaceId", "target"], ["page"]) ||
+              !isBoundedString(params.workspaceId, 256) || !validGitHubReviewTarget(params.target) ||
+              (params.page !== undefined && (!Number.isSafeInteger(params.page) || (params.page as number) < 1 || (params.page as number) > 300))) {
+            this.replyError(id, "invalid-params", "Choose a valid workspace, pull request, commit and diff page.");
+            return;
+          }
+          const { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid } = params.target;
+          this.reply(id, { diff: await this.services.readGitHubReview({ workspaceId: params.workspaceId,
+            target: { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, ...(expectedBaseCommitOid ? { expectedBaseCommitOid } : {}) }, ...(typeof params.page === "number" ? { page: params.page } : {}) }) });
+          return;
+        }
+        case "github.review.submit": {
+          if (!this.services.submitGitHubReview) {
+            this.replyError(id, "unknown-method", "Update Studio to submit reviews from the phone.");
+            return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, ["workspaceId", "requestId", "review"]) ||
+              !isBoundedString(params.workspaceId, 256) || (typeof params.requestId !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{7,127}$/.test(params.requestId)) || !validGitHubReviewInput(params.review)) {
+            this.replyError(id, "invalid-params", "Check the review text, line comments, commit and retry identity.");
+            return;
+          }
+          const { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid, event, body, comments } = params.review;
+          this.reply(id, { result: await this.services.submitGitHubReview({ workspaceId: params.workspaceId, requestId: params.requestId,
+            review: { repositoryUrl, pullRequestNumber, expectedHeadCommitOid, expectedBaseCommitOid, event, body,
+              comments: comments.map(({ path, line, side, body }) => ({ path, line, side, body })) } }) });
           return;
         }
         case "github.publish": {
@@ -3525,6 +4021,18 @@ export class RpcSession {
           this.reply(id, {});
           return;
         }
+        case "notifications.history": {
+          if (!this.services.listNotificationHistory) {
+            this.replyError(id, "unknown-method", "Phone notification history is not available.");
+            return;
+          }
+          if (!isPlainRecord(params) || !hasExactlyKeys(params, [])) {
+            this.replyError(id, "invalid-params", "notifications.history does not accept parameters.");
+            return;
+          }
+          this.reply(id, { notifications: await this.services.listNotificationHistory() });
+          return;
+        }
         case "notifications.register": {
           if (!this.services.registerNotifications) {
             this.replyError(
@@ -3564,16 +4072,28 @@ export class RpcSession {
             );
             return;
           }
+          // Studio's own terminals ride along with the phone's leases. A
+          // failure reading them must not take the phone's own terminals
+          // down with it, so that half degrades to empty on its own.
+          const studioLeases = this.services.studioTerminalLeases;
+          const shared = studioLeases
+            ? await Promise.resolve()
+                .then(() => studioLeases.list(this.terminalLeaseOwnerKey()))
+                .catch((err: unknown) => {
+                  this.log(
+                    `terminal.list: shared Studio terminals unavailable: ${
+                      err instanceof Error ? err.message : String(err)
+                    }`,
+                  );
+                  return [];
+                })
+            : [];
           this.reply(id, {
             terminals: [
               ...(await this.services.terminalLeases.list(
                 this.terminalLeaseOwnerKey(),
               )),
-              ...(this.services.studioTerminalLeases
-                ? await this.services.studioTerminalLeases.list(
-                    this.terminalLeaseOwnerKey(),
-                  )
-                : []),
+              ...shared,
             ],
           });
           return;
@@ -4544,7 +5064,8 @@ export class RpcSession {
       p.profile !== undefined &&
       p.profile !== "shell" &&
       p.profile !== "claude" &&
-      p.profile !== "codex"
+      p.profile !== "codex" &&
+      p.profile !== "grok"
     ) {
       this.replyError(
         id,
@@ -4638,6 +5159,7 @@ export class RpcSession {
         );
         this.reply(id, {
           terminalId: descriptor.terminalId,
+          ...(descriptor.desktopPaneId ? { desktopPaneId: descriptor.desktopPaneId } : {}),
           ...(descriptor.desktopTabId
             ? { desktopTabId: descriptor.desktopTabId }
             : {}),
@@ -4763,6 +5285,7 @@ export class RpcSession {
     this.reply(id, {
       terminalId,
       ...(handle.desktopTabId ? { desktopTabId: handle.desktopTabId } : {}),
+      ...(handle.desktopPaneId ? { desktopPaneId: handle.desktopPaneId } : {}),
       ...(handle.title ? { title: handle.title } : {}),
     });
     // The response above must be the first frame that mentions this terminal:
@@ -4945,12 +5468,14 @@ function parseNotificationRegistration(
     needsAnswer?: unknown;
     completed?: unknown;
     automations?: unknown;
+    github?: unknown;
   };
   if (
     typeof p.enabled !== "boolean" ||
     typeof prefs.needsAnswer !== "boolean" ||
     typeof prefs.completed !== "boolean" ||
     typeof prefs.automations !== "boolean" ||
+    (prefs.github !== undefined && typeof prefs.github !== "boolean") ||
     (p.token !== undefined &&
       (typeof p.token !== "string" ||
         p.token.length === 0 ||
@@ -4966,6 +5491,7 @@ function parseNotificationRegistration(
       needsAnswer: prefs.needsAnswer,
       completed: prefs.completed,
       automations: prefs.automations,
+      ...(typeof prefs.github === "boolean" ? { github: prefs.github } : {}),
     },
     ...(typeof p.token === "string" ? { token: p.token } : {}),
     ...(typeof p.deviceName === "string" && p.deviceName.trim()
@@ -4980,6 +5506,45 @@ const ACCOUNT_PROFILE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NATIVE_CLI_PROFILE_ID_PATTERN =
   /^(?:personal|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+
+function parseRemoteAssetUpdate(params: unknown): RemoteAssetUpdate | null {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return null;
+  const p = params as Record<string, unknown>;
+  if (p.workspaceId !== undefined && !isBoundedString(p.workspaceId, 256)) return null;
+  const scope = typeof p.workspaceId === "string" ? { workspaceId: p.workspaceId } : {};
+  const opaqueId = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const runtime = (value: unknown): value is RemoteCapabilityRuntime => value === "claude" || value === "codex" || value === "grok";
+  if (p.action === "remove" && opaqueId(p.assetId)) return { ...scope, action: "remove", assetId: p.assetId };
+  if (p.action === "install" && opaqueId(p.assetId) && runtime(p.runtime)) return { ...scope, action: "install", assetId: p.assetId, runtime: p.runtime };
+  if (p.action === "builtin" && p.builtinId === "codara-studio" && runtime(p.runtime) && typeof p.installed === "boolean") {
+    return { ...scope, action: "builtin", builtinId: p.builtinId, runtime: p.runtime, installed: p.installed };
+  }
+  if (p.action !== "saveMcp" || !opaqueId(p.targetId) || !p.server || typeof p.server !== "object" || Array.isArray(p.server)) return null;
+  if (p.replaceId !== undefined ? !opaqueId(p.replaceId) || !opaqueId(p.revision) : p.revision !== undefined) return null;
+  const server = p.server as Record<string, unknown>;
+  const text = (value: unknown, max: number) => typeof value === "string" && value.length <= max;
+  const pairs = (value: unknown) => value === undefined || (value !== null && typeof value === "object" && !Array.isArray(value) &&
+    Object.entries(value).length <= 64 && Object.entries(value).every(([key, item]) =>
+      key.length > 0 && key.length <= 256 && !["__proto__", "constructor", "prototype"].includes(key) && text(item, 8192)));
+  if (!isBoundedString(server.name, 120) || (server.transport !== "stdio" && server.transport !== "http") ||
+      (server.command !== undefined && !text(server.command, 4096)) ||
+      (server.url !== undefined && !text(server.url, 8192)) ||
+      (server.args !== undefined && (!Array.isArray(server.args) || server.args.length > 128 || !server.args.every((arg) => text(arg, 4096)))) ||
+      !pairs(server.env) || !pairs(server.headers)) return null;
+  if (Buffer.byteLength(JSON.stringify(server), "utf8") > 64 * 1024) return null;
+  return {
+    ...scope, action: "saveMcp", targetId: p.targetId,
+    ...(typeof p.replaceId === "string" ? { replaceId: p.replaceId, revision: p.revision as string } : {}),
+    server: {
+      name: server.name, transport: server.transport,
+      ...(typeof server.command === "string" ? { command: server.command } : {}),
+      ...(typeof server.url === "string" ? { url: server.url } : {}),
+      ...(Array.isArray(server.args) ? { args: server.args as string[] } : {}),
+      ...(server.env ? { env: Object.fromEntries(Object.entries(server.env)) as Record<string, string> } : {}),
+      ...(server.headers ? { headers: Object.fromEntries(Object.entries(server.headers)) as Record<string, string> } : {}),
+    },
+  };
+}
 
 function isBoundedString(value: unknown, maxLength: number): value is string {
   return (
@@ -4996,12 +5561,14 @@ const REMOTE_CORA_THINKING_LEVELS: readonly RemoteCoraThinkingLevel[] = [
   "max",
 ];
 
-// The provider is derived from this prefix downstream, so the shape is pinned
-// here; the service still rejects a well-formed id it cannot route.
+// Native IDs route by family; provider/model IDs require verified OpenRouter
+// configuration in the service before a run can start.
 function isRemoteCoraModelId(value: unknown): value is string {
   return (
     isBoundedString(value, 128) &&
-    /^(?:claude|gpt)-[a-zA-Z0-9._:-]+$/.test(value)
+    (/^(?:claude|gpt|grok)-[a-zA-Z0-9._:-]+$/.test(value) ||
+      /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/:+-]*$/i.test(value)) &&
+    !value.split("/").some((part) => part === "." || part === "..")
   );
 }
 

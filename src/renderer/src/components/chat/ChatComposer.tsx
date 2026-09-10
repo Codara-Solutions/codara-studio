@@ -297,8 +297,15 @@ export default function ChatComposer({
   useEffect(() => {
     void refreshProfiles();
     const onProfilesChanged = () => void refreshProfiles();
+    // A hot-reloaded renderer can still be attached to an older preload.
+    const unsubscribe = typeof window.spark.coraProfiles.onChanged === "function"
+      ? window.spark.coraProfiles.onChanged(onProfilesChanged)
+      : undefined;
     window.addEventListener("spark:cora-profiles-changed", onProfilesChanged);
-    return () => window.removeEventListener("spark:cora-profiles-changed", onProfilesChanged);
+    return () => {
+      unsubscribe?.();
+      window.removeEventListener("spark:cora-profiles-changed", onProfilesChanged);
+    };
   }, [refreshProfiles]);
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a

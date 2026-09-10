@@ -108,6 +108,30 @@ async function main() {
     console.log(`  PASS ${name}`);
   };
 
+  test("questions without authored choices stay free text", () => {
+    for (const message of ["Open YouTube", "Which export format?", "What should I remove?"]) {
+      assert.deepEqual(Q.normalizeQuestionOptionsForMessage(message, undefined), []);
+      assert.deepEqual(Q.normalizeQuestionOptionsForMessage(message, []), []);
+    }
+    const choice = { id: "youtube", label: " YouTube ", answer: " Open YouTube on the computer ", description: "", recommended: false };
+    assert.deepEqual(Q.normalizeQuestionOptionsForMessage("Where?", [choice]), [{
+      id: "youtube", label: "YouTube", answer: "Open YouTube on the computer",
+      description: "Open YouTube on the computer", recommended: true,
+    }]);
+  });
+
+  test("saved generic fallback choices are removed without discarding authored choices", () => {
+    const message = "I can't open a browser from this session.";
+    const options = [
+      { id: "safe_default", label: "Safe default", answer: `Use the safest conservative default for this question: ${message}` },
+      { id: "fast_path", label: "Fast path", answer: `Choose the fastest narrow implementation that still satisfies the request: ${message}` },
+      { id: "thorough_path", label: "Thorough path", answer: `Choose the more thorough implementation and include relevant edge cases: ${message}` },
+    ];
+    assert.deepEqual(Q.normalizeQuestionOptionsForMessage(message, options), []);
+    options[0].answer = "Open YouTube in Studio";
+    assert.equal(Q.normalizeQuestionOptionsForMessage(message, options).length, 3);
+  });
+
   test("answer draft scope changes on run, question, and external resolution", () => {
     const current = Q.runQuestionDraftScopeKey("run-1", "q1");
     assert.notEqual(Q.runQuestionDraftScopeKey("run-2", "q1"), current);

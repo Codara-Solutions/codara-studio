@@ -1,3 +1,10 @@
+import { startGitHubCheckNotifications } from "./github-check-notifications";
+import { readGitHubAutoMerge, updateGitHubAutoMerge } from "../github-auto-merge";
+import { subscribeDeliveredNotifications } from "../notify/subscribers";
+import { phoneNotificationFromGitEvent } from "./git-notifications";
+import { phoneNotificationFromTerminalEvent } from "./terminal-notifications";
+import { readGitHubReviewDiscussions } from "../github-review-discussions";
+import { readGitHubReviewPage, submitGitHubReview } from "../github-review";
 // Production wiring for Remote Access: builds the RemoteAccessService's
 // dependencies from the real main process (codaraHome, storage, pty-manager,
 // shells) and owns the process-wide singleton. This is the only module in
@@ -12,7 +19,14 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, extname, join, posix, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { TextDecoder } from "node:util";
-import { subscriptionForModelId } from "../../shared/agent-families";
+import { AGENT_FAMILIES, familyForModelId, subscriptionForModelId } from "../../shared/agent-families";
+import { CORA_WORKER_MODEL_CHOICES } from "../../shared/worker-model-roster";
+import { buildVisibleGroups, effortsFor } from "../../shared/chat-models";
+import type { PiCatalogModel } from "../../shared/types";
+import { configuredOpenRouterCoraModels } from "../openrouter-config";
+import { listAgentAssets } from "../agent-sync";
+import { readRemoteMcpEditor, remoteCapabilityId, remoteCapabilityPage, REMOTE_BUILTIN_MCP_NAMES, updateRemoteAgentAsset } from "../remote-capabilities";
+import { detectAgentRuntimes } from "../agent-runtimes";
 import { makeId } from "@shared/ids";
 import type {
   GitHubMarkReadyInput,
@@ -77,6 +91,7 @@ import {
   getRunBoard,
   listRuns,
   onRunDeleted,
+  reassignCoraProfileRuns,
   resumeManagerTurnRecovery,
   resumeRun,
   startAutopilot,
@@ -144,7 +159,7 @@ import { repairCoraRetryFromRunWindow } from "./cora-retry-repair";
 import { CoraSendReceiptIndex } from "./cora-send-receipts";
 import { normalizeCoraMessage } from "./cora-message-policy";
 import { remoteCoraRunContext } from "./cora-run-context";
-import { projectBoundedRemoteCoraRun } from "./cora-run-projection";
+import { projectBoundedRemoteCoraRun, projectRemoteCoraQuestionOptions } from "./cora-run-projection";
 import {
   CORA_HISTORY_RUNS_JSON_MAX_BYTES,
   isOneOf,
@@ -222,7 +237,17 @@ import type {
   RemoteCoraResumeAccount,
   RemoteCoraResumeResult,
   RemoteCoraThinkingLevel,
-  } from "./rpc";
+  RemoteCapabilities,
+  RemoteCapabilityAsset,
+  RemoteCapabilityBuiltin,
+  RemoteCapabilityModelGroup,
+  RemoteCapabilityWorkerModel,
+  RemoteCapabilitiesUpdate,
+  RemoteMemoryTarget,
+  RemoteMemoryUpdate,
+  RemoteProfileUpdate,
+  RemoteAssetUpdate,
+} from "./rpc";
 import { createCoraChangedCoalescer } from "./cora-change-coalescer";
 import { projectRemoteFleetOverview } from "./fleet-overview";
 import { projectRemoteNativeCliAccounts } from "./native-cli-account-projection";
@@ -239,6 +264,7 @@ let workspaceMutation: Promise<void> = Promise.resolve();
 // another merely because they arrived over different RPC methods.
 const coraRunMutations = new KeyedSerialQueue();
 const fileMutations = new KeyedSerialQueue();
+const capabilityMutations = new KeyedSerialQueue();
 let lastRemoteImagePruneAt = 0;
 
 // DTO budgets deliberately leave generous headroom under the 1 MiB frame
@@ -296,6 +322,19 @@ export function getRemoteAccessService(): RemoteAccessService {
       getFleetOverview: getFleetOverviewForRemote,
       listSubscriptionProfiles: listSubscriptionProfilesForRemote,
       listCoraModels: listCoraModelsForRemote,
+      getCapabilities: getCapabilitiesForRemote,
+      updateCapabilities: updateCapabilitiesForRemote,
+      readCapabilityMemory: readCapabilityMemoryForRemote,
+      updateCapabilityMemory: updateCapabilityMemoryForRemote,
+      readCapabilityProfile: async (profileId) => {
+        const { readCoraProfileDocument } = await import("../orchestration/cora-profiles");
+        return readCoraProfileDocument(profileId);
+      },
+      updateCapabilityProfile: updateCapabilityProfileForRemote,
+      readCapabilityMcp: async (input) => readRemoteMcpEditor({
+        cwd: await workspaceCwdForRemote(input.workspaceId), settings: await loadSettings(),
+      }, input.assetId),
+      updateCapabilityAsset: updateCapabilityAssetForRemote,
       listNativeCliAccounts: listNativeCliAccountsForRemote,
       listWorkspaceOrganization: listWorkspaceOrganizationForRemote,
       listDirectories: listDirectoriesForRemote,
@@ -316,6 +355,26 @@ export function getRemoteAccessService(): RemoteAccessService {
       getGitCommitDetail: getGitCommitDetailForRemote,
       getGitHubStatus: getGitHubStatusForRemote,
       getGitHubWorkQueue: getGitHubWorkQueueForRemote,
+      readGitHubAutoMerge: async ({ workspaceId, target }) => {
+        const { root } = await requireLocalWorkspace(workspaceId);
+        return readGitHubAutoMerge(root, target);
+      },
+      updateGitHubAutoMerge: async ({ workspaceId, input }) => {
+        const { root } = await requireLocalWorkspace(workspaceId);
+        return updateGitHubAutoMerge(root, input);
+      },
+      readGitHubReviewDiscussions: async (input) => {
+        const { root } = await requireLocalWorkspace(input.workspaceId);
+        return readGitHubReviewDiscussions(root, input);
+      },
+      readGitHubReview: async ({ workspaceId, target, page }) => {
+        const { root } = await requireLocalWorkspace(workspaceId);
+        return readGitHubReviewPage(root, { ...target, page });
+      },
+      submitGitHubReview: async ({ workspaceId, review }) => {
+        const { root } = await requireLocalWorkspace(workspaceId);
+        return submitGitHubReview(root, review);
+      },
       publishGitHub: publishGitHubForRemote,
       markGitHubReady: markGitHubReadyForRemote,
       mergeGitHub: mergeGitHubForRemote,
@@ -344,10 +403,12 @@ export function getRemoteAccessService(): RemoteAccessService {
       resumeAutomation: resumeAutomationForRemote,
       setAutomationEnabled: setAutomationEnabledForRemote,
       registerNotifications: registerNotificationsForRemote,
+      listNotificationHistory: (devicePublicKey) => getPhoneNotifyStore().listHistory(devicePublicKey),
       beginImageUpload: beginImageUploadForRemote,
       attachWorkerTerminal: attachRemoteWorkerTerminal,
       studioTerminalLeases: new StudioTerminalShareStore({
         onTerminalsChanged: scheduleTerminalsChangedPush,
+        log: (line) => logMain("remote-access", line),
       }),
       createTerminal: createRemoteTerminal,
       log: (line) => logMain("remote-access", line),
@@ -472,65 +533,309 @@ const REMOTE_CORA_THINKING_LEVELS = new Set<RemoteCoraThinkingLevel>([
   "max",
 ]);
 
+// ── Capability Center ───────────────────────────────────────────────────────
+
+function capabilityModelGroup(modelId: string): RemoteCapabilityModelGroup {
+  // OpenRouter ids are vendor/model paths; native Pi ids never contain "/".
+  if (modelId.includes("/")) return "OpenRouter";
+  const family = familyForModelId(modelId);
+  if (!family) return "Other";
+  const name = AGENT_FAMILIES[family].displayName;
+  return name === "Claude" || name === "Codex" || name === "Grok" ? name : "Other";
+}
+
+async function workspaceCwdForRemote(workspaceId: string | undefined): Promise<string | null> {
+  if (!workspaceId) return null;
+  const { workspace } = await requireLocalWorkspace(workspaceId);
+  return workspace.cwd;
+}
+
+async function getCapabilitiesForRemote(input: {
+  workspaceId?: string;
+  assetOffset?: number;
+}): Promise<RemoteCapabilities> {
+  const settings = await loadSettings();
+  const { listCoraProfiles } = await import("../orchestration/cora-profiles");
+  const cwd = await workspaceCwdForRemote(input.workspaceId);
+  const enabled = new Set(settings.coraWorkerModels.map((id) => id.trim()).filter(Boolean));
+  const choices = [
+    ...new Set([
+      ...CORA_WORKER_MODEL_CHOICES,
+      ...settings.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
+      ...enabled,
+    ]),
+  ];
+  const workerModels: RemoteCapabilityWorkerModel[] = choices.map((id) => ({
+    id: truncateUtf8(id, 240),
+    group: capabilityModelGroup(id),
+    enabled: enabled.has(id),
+    premium: /fable/i.test(id),
+  }));
+
+  // Configuration contents are loaded only when the paired phone opens an
+  // editor. Inventory polling needs names and summaries, never credentials.
+  const inventory = listAgentAssets({ cwd, settings });
+  const asset = (item: (typeof inventory.mcp)[number]): RemoteCapabilityAsset => ({
+    id: remoteCapabilityId(item.id),
+    sessionKey: truncateUtf8(item.sessionKey, 256),
+    ...(item.kind === "mcp" ? {
+      cora: item.enabledForSessions && item.enabledForCoraManager,
+      workers: item.enabledForSessions && item.enabledForPiWorkers,
+    } : {}),
+    kind: item.kind,
+    name: truncateUtf8(item.name, 120),
+    runtime: item.runtime,
+    scope: item.scope,
+    enabled: item.enabledForSessions,
+    canDelete: item.canDelete,
+    canEdit: item.kind === "mcp" && !!item.mcpTransport,
+    installableRuntimes: item.syncable ? (["claude", "codex", "grok"] as const)
+      .filter((runtime) => runtime !== item.runtime && !(item.kind === "skill" && runtime === "grok")) : [],
+    ...(item.mcpSummary ? { detail: truncateUtf8(item.mcpSummary, 160) } : {}),
+  });
+
+  let builtins: RemoteCapabilityBuiltin[] = [];
+  try {
+    const [{ getSparkBuiltinStatus }, runtimes] = await Promise.all([
+      import("../mcp-installer"),
+      detectAgentRuntimes(false),
+    ]);
+    const isAvailable = (kind: "claude" | "codex" | "grok") =>
+      runtimes.some((runtime) => runtime.kind === kind && runtime.installed);
+    const status = await getSparkBuiltinStatus({
+      claudeRuntimeAvailable: isAvailable("claude"),
+      codexRuntimeAvailable: isAvailable("codex"),
+      grokRuntimeAvailable: isAvailable("grok"),
+      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+    });
+    builtins = status.map((entry) => ({
+      id: entry.id,
+      name: truncateUtf8(entry.name, 120),
+      summary: truncateUtf8(entry.summary, 200),
+      toolCount: entry.tools.length,
+      autoManaged: entry.autoManaged,
+      installed: {
+        claude: entry.claude.state === "installed",
+        codex: entry.codex.state === "installed",
+        grok: entry.grok.state === "installed",
+      },
+      states: { claude: entry.claude.state, codex: entry.codex.state, grok: entry.grok.state },
+    }));
+  } catch {
+    // The built-in status probes the CLIs on disk; a probe failure leaves the
+    // rest of the Capability Center readable rather than failing the call.
+  }
+
+  return {
+    ...(cwd && input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+    workerModels,
+    policy: {
+      mcpAwareness: settings.agentMcpSyncEnabled,
+      skillAwareness: settings.agentSkillSyncEnabled,
+      autoInstallStudioMcp: settings.playwrightMcpAutoInstall !== false,
+    },
+    ...remoteCapabilityPage(
+      inventory.mcp.filter((item) => !REMOTE_BUILTIN_MCP_NAMES.has(item.name)).map(asset),
+      inventory.skills.map(asset), input.assetOffset,
+    ),
+    builtins,
+    memory: await getCapabilityMemory(input.workspaceId),
+    profiles: listCoraProfiles().map(({ id, name, description, isDefault, createdAt }) => ({ id, name, description, isDefault, createdAt })),
+    assetManagement: true,
+  };
+}
+
+async function getCapabilityMemory(workspaceId?: string) {
+  const [{ getMemoryStatus }, { resolveCoraProfile }] = await Promise.all([
+    import("../orchestration/cora-memory"),
+    import("../orchestration/cora-profiles"),
+  ]);
+  const status = await getMemoryStatus(workspaceId ?? null, resolveCoraProfile().id);
+  const tier = (value: typeof status.global) => ({
+    enabled: value.enabled, available: !!value.path,
+    bytesUsed: value.bytesUsed, bytesCap: value.bytesCap,
+    overCap: value.overCap, counts: value.counts,
+  });
+  return {
+    profile: { id: status.profile.id, name: status.profile.name },
+    editable: true,
+    global: tier(status.global), workspace: tier(status.workspace),
+  };
+}
+
+async function updateCapabilityAssetForRemote(input: RemoteAssetUpdate) {
+  return capabilityMutations.run("settings", async () => {
+    const cwd = await workspaceCwdForRemote(input.workspaceId);
+    const settings = await loadSettings();
+    let message: string;
+    if (input.action === "builtin") {
+      const { getSparkBuiltinStatus, installSparkBuiltin, uninstallSparkBuiltin } = await import("../mcp-installer");
+      const runtimes = await detectAgentRuntimes(false);
+      const available = (kind: string) => runtimes.some((runtime) => runtime.kind === kind && runtime.installed);
+      const status = await getSparkBuiltinStatus({
+        claudeRuntimeAvailable: available("claude"), codexRuntimeAvailable: available("codex"),
+        grokRuntimeAvailable: available("grok"), autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+      });
+      const state = status.find((item) => item.id === input.builtinId)?.[input.runtime].state;
+      if (state === "user-managed") throw new Error("This server entry is user-managed. Codara will not replace or remove it.");
+      if (state === "unavailable" || !state) throw new Error(`Install ${input.runtime} in Studio before managing its built-in server.`);
+      const result = await (input.installed ? installSparkBuiltin : uninstallSparkBuiltin)(input.builtinId, input.runtime);
+      if (!result.ok) throw new Error(result.error ?? "Could not update the built-in server.");
+      message = `Codara Studio MCP was ${input.installed ? "installed" : "removed"} for ${input.runtime}.`;
+    } else {
+      message = await updateRemoteAgentAsset({ cwd, settings }, input);
+    }
+    broadcastSettingsChanged(settings);
+    return { capabilities: await getCapabilitiesForRemote({ workspaceId: input.workspaceId }), message };
+  });
+}
+
+async function updateCapabilityProfileForRemote(input: RemoteProfileUpdate) {
+  return capabilityMutations.run("settings", async () => {
+    await workspaceCwdForRemote(input.workspaceId);
+    const profiles = await import("../orchestration/cora-profiles");
+    let message: string;
+    if (input.action === "create") {
+      const profile = await profiles.createCoraProfile(input);
+      message = `${profile.name} was created. Choose Use for new chats to make it the default.`;
+    } else if (input.action === "use") {
+      const profile = await profiles.setDefaultCoraProfile(input.profileId);
+      message = `${profile.name} is the default for new Cora chats. Existing chats keep their profile.`;
+    } else if (input.action === "save") {
+      await profiles.saveCoraProfileDocument(input.profileId, input.revision, input.content);
+      message = "Profile instructions saved to Studio.";
+    } else {
+      const { deleteCoraProfileWithChats } = await import("../orchestration/delete-cora-profile");
+      const result = await deleteCoraProfileWithChats(input.profileId, {
+        reassignRuns: reassignCoraProfileRuns, trashItem: (path) => shell.trashItem(path),
+        expectedCreatedAt: input.createdAt,
+      });
+      message = `${result.deletedProfile.name} was deleted. ${result.reassignedRunCount} existing chats moved to built-in Cora.`;
+    }
+    for (const window of BrowserWindow.getAllWindows()) {
+      const contents = window.webContents;
+      if (contents.isDestroyed()) continue;
+      try {
+        contents.send("cora-profiles:changed");
+      } catch {
+        // Closing a window must not turn a saved profile change into a failure.
+      }
+    }
+    return { capabilities: await getCapabilitiesForRemote({ workspaceId: input.workspaceId }), message };
+  });
+}
+
+async function readCapabilityMemoryForRemote(input: RemoteMemoryTarget) {
+  await workspaceCwdForRemote(input.workspaceId);
+  const { readMemoryDocument } = await import("../orchestration/cora-memory");
+  return readMemoryDocument(input.scope, input.workspaceId ?? null, input.profileId);
+}
+
+async function updateCapabilityMemoryForRemote(input: RemoteMemoryUpdate) {
+  await workspaceCwdForRemote(input.workspaceId);
+  const { updateMemoryDocument } = await import("../orchestration/cora-memory");
+  return updateMemoryDocument(input.scope, input.workspaceId ?? null, input.profileId, input.revision, input);
+}
+
+async function updateCapabilitiesForRemote(
+  input: RemoteCapabilitiesUpdate,
+): Promise<RemoteCapabilities> {
+  return capabilityMutations.run("settings", async () => {
+    const cwd = await workspaceCwdForRemote(input.workspaceId);
+    const settings = await loadSettings();
+    if (input.asset) {
+      const { sessionKey, target, enabled } = input.asset;
+      const inventory = listAgentAssets({ cwd, settings });
+      const assets = target === "skill" ? inventory.skills : inventory.mcp;
+      if (!assets.some((item) => item.sessionKey === sessionKey)) {
+        throw new Error("This capability is no longer available. Refresh the list.");
+      }
+      const field = target === "skill" ? "agentDisabledSkillIds"
+        : target === "cora" ? "agentMcpCoraManagerIds" : "agentMcpPiWorkerIds";
+      const values = new Set(settings[field]);
+      if (target === "skill" ? !enabled : enabled) values.add(sessionKey);
+      else values.delete(sessionKey);
+      settings[field] = [...values];
+      if (target !== "skill" && enabled) {
+        settings.agentDisabledMcpIds = settings.agentDisabledMcpIds.filter((id) => id !== sessionKey);
+      }
+    }
+    if (input.memory) {
+      const [{ setMemoryEnabled }, { resolveCoraProfile }] = await Promise.all([
+        import("../orchestration/cora-memory"), import("../orchestration/cora-profiles"),
+      ]);
+      await setMemoryEnabled(input.memory.scope, input.workspaceId ?? null, input.memory.enabled, resolveCoraProfile(input.memory.profileId).id);
+    }
+    const saved = await saveSettings({
+      ...settings,
+      ...(input.enabledWorkerModels
+        ? {
+            coraWorkerModels: Array.from(
+              new Set(
+                input.enabledWorkerModels
+                  .map((id) => id.trim())
+                  .filter((id): id is string => id.length > 0),
+              ),
+            ),
+          }
+        : {}),
+      ...(input.mcpAwareness !== undefined
+        ? { agentMcpSyncEnabled: input.mcpAwareness }
+        : {}),
+      ...(input.skillAwareness !== undefined
+        ? { agentSkillSyncEnabled: input.skillAwareness }
+        : {}),
+      ...(input.autoInstallStudioMcp !== undefined
+        ? { playwrightMcpAutoInstall: input.autoInstallStudioMcp }
+        : {}),
+    });
+    broadcastSettingsChanged(saved);
+    return getCapabilitiesForRemote({ workspaceId: input.workspaceId });
+  });
+}
+
 async function listCoraModelsForRemote(): Promise<RemoteCoraModel[]> {
-  const live = await inspectPiModelCatalog();
-  const models = live.length > 0
-    ? live
-    : [
-        {
-          id: "claude-fable-5",
-          label: "Claude Fable 5",
-          provider: "anthropic" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-        {
-          id: "claude-opus-5",
-          label: "Claude Opus 5",
-          provider: "anthropic" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-        {
-          id: "claude-sonnet-5",
-          label: "Claude Sonnet 5",
-          provider: "anthropic" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-        {
-          id: "gpt-5.6-sol",
-          label: "GPT-5.6 Sol",
-          provider: "openai-codex" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-        {
-          id: "gpt-5.6-terra",
-          label: "GPT-5.6 Terra",
-          provider: "openai-codex" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-        {
-          id: "gpt-5.6-luna",
-          label: "GPT-5.6 Luna",
-          provider: "openai-codex" as const,
-          thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
-        },
-      ];
-  return models
-    .map((model) => ({
-      id: truncateUtf8(model.id, 128),
-      label: truncateUtf8(model.label, 160),
-      provider: model.provider,
-      thinkingLevels: model.thinkingLevels.filter(
-        (level): level is RemoteCoraThinkingLevel =>
-          REMOTE_CORA_THINKING_LEVELS.has(level as RemoteCoraThinkingLevel),
-      ),
-    }))
-    // Claude is deliberately first on every client surface.
-    .sort(
-      (left, right) =>
-        (left.provider === "anthropic" ? 0 : 1) -
-          (right.provider === "anthropic" ? 0 : 1) ||
-        left.label.localeCompare(right.label),
-    );
+  // The phone shows exactly the picker Studio shows: the curated rows merged
+  // with the live Pi catalog, divided by vendor in Studio's order, with the
+  // user's verified OpenRouter favourites after them. One function builds
+  // both menus, so a model that appears on the desktop appears on the phone.
+  const [live, settings] = await Promise.all([
+    inspectPiModelCatalog().catch(() => [] as PiCatalogModel[]),
+    loadSettings(),
+  ]);
+  const groups = buildVisibleGroups({
+    piCatalog: live,
+    openRouterModels: configuredOpenRouterCoraModels(settings),
+  });
+  const providerForGroup = (key: string): RemoteCoraModel["provider"] | null => {
+    if (key === "pi-openai") return "openai-codex";
+    if (key === "pi-anthropic") return "anthropic";
+    if (key === "pi-xai") return "xai";
+    if (key === "pi-openrouter") return "openrouter";
+    return null;
+  };
+  const models: RemoteCoraModel[] = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    const provider = providerForGroup(group.key);
+    if (!provider) continue;
+    for (const option of group.models) {
+      // The ":1m" virtual rows are a composer-side context toggle; the
+      // backend never sees them, and neither should the phone.
+      if (option.isOneMillion || seen.has(option.id)) continue;
+      seen.add(option.id);
+      models.push({
+        id: truncateUtf8(option.id, 128),
+        label: truncateUtf8(option.label, 160),
+        provider,
+        thinkingLevels: effortsFor(option).filter(
+          (level): level is RemoteCoraThinkingLevel =>
+            REMOTE_CORA_THINKING_LEVELS.has(level as RemoteCoraThinkingLevel),
+        ),
+      });
+    }
+  }
+  return models;
 }
 
 async function listNativeCliAccountsForRemote(): Promise<
@@ -661,6 +966,7 @@ async function workspaceInfo(
     path: workspace.cwd,
     ...(workspace.groupId ? { groupId: workspace.groupId } : {}),
     color: workspace.color,
+    ...(workspace.icon ? { icon: workspace.icon } : {}),
     ...(branch ? { branch } : {}),
   };
 }
@@ -1684,8 +1990,8 @@ async function sendCoraMessageForRemote(input: {
   }
   const model = input.model?.trim();
   const provider = providerForRemoteModel(model);
-  if (model && !provider) {
-    throw new Error("That Cora model is not supported.");
+  if (model && !provider && !configuredOpenRouterCoraModels(await loadSettings()).includes(model)) {
+    throw new Error("That Cora model is not available. Refresh the model list or configure it in Studio.");
   }
 
   const mutationKey = input.runId
@@ -2427,6 +2733,7 @@ function toRemoteRun(
           blockedQuestion: {
             messageId: projectedBlockedMessage.id,
             message: projectedBlockedMessage.message,
+            options: projectRemoteCoraQuestionOptions(blockedMessage!),
           },
         }
       : {}),
@@ -3270,16 +3577,22 @@ async function deliverPhoneNotification(
   service: RemoteAccessService,
   notification: RemotePhoneNotification,
 ): Promise<void> {
+  const computerId = service.getComputerPublicKey();
+  if (!computerId) return;
+  notification = { ...notification, computerId };
   const store = getPhoneNotifyStore();
   const pushTargets: ExpoPushTarget[] = [];
   for (const devicePublicKey of service.pairedDeviceKeys()) {
+    const registration = await store.get(devicePublicKey);
+    // Older phones route unknown kinds into Cora. Registration advertises support.
+    if (notification.kind === "github" && typeof registration?.prefs.github !== "boolean") continue;
+    await store.record(devicePublicKey, notification);
     // A push-live phone gets the live event and filters by its own local
     // preferences; the registered prefs gate only server-initiated push.
     // Stale-but-open sessions still receive the event (the phone dedupes by
     // event id), but only recent inbound activity counts as delivered.
     if (service.pushPhoneNotificationToDevice(devicePublicKey, notification))
       continue;
-    const registration = await store.get(devicePublicKey);
     if (!registration?.enabled || !registration.token) continue;
     if (!phoneNotificationKindAllowed(notification.kind, registration.prefs))
       continue;
@@ -3326,6 +3639,28 @@ async function pollExpoReceipts(): Promise<void> {
 function startPhoneNotificationBridge(service: RemoteAccessService): void {
   if (phoneNotifyStarted) return;
   phoneNotifyStarted = true;
+  subscribeDeliveredNotifications(async (event) => {
+    const notification = phoneNotificationFromTerminalEvent(event) ?? phoneNotificationFromGitEvent(event);
+    if (notification) await deliverPhoneNotification(service, notification);
+  });
+  startGitHubCheckNotifications({
+    enabled: async () => {
+      if (service.getStatus().state !== "reachable") return false;
+      const paired = new Set(service.pairedDeviceKeys());
+      return (await getPhoneNotifyStore().entries()).some(([key, registration]) =>
+        paired.has(key) && registration.enabled && registration.prefs.github === true,
+      );
+    },
+    read: () => readGitHubWorkQueue(),
+    muted: () => getPreferenceCached("notificationsDnd") === true,
+    deliver: (notification) => deliverPhoneNotification(service, notification),
+    schedule: (callback, delay) => {
+      const timer = setTimeout(callback, delay);
+      timer.unref?.();
+      return () => clearTimeout(timer);
+    },
+    log: (message) => logMain("remote-access", message),
+  });
   const changedCoalescer = createCoraChangedCoalescer<RemoteCoraChangedEvent>(
     (changed) => service.broadcastCoraChanged(changed),
   );
@@ -3511,13 +3846,17 @@ async function createRemoteTerminal(
         ? resumeSession
           ? `codex resume ${resumeSession.sessionId} --yolo`
           : "codex --yolo"
-        : undefined;
+        : request.profile === "grok"
+          ? "grok --yolo"
+          : undefined;
   const profileLabel =
     request.profile === "claude"
       ? "Claude"
       : request.profile === "codex"
         ? "Codex"
-        : "Terminal";
+        : request.profile === "grok"
+          ? "Grok"
+          : "Terminal";
   const title =
     request.title?.trim() ||
     `${truncateUtf8(request.origin.deviceName, 80)} · ${profileLabel}`;
@@ -3647,6 +3986,7 @@ async function createRemoteTerminal(
 
   return {
     desktopTabId: result.tabId,
+    desktopPaneId: result.paneId,
     title: truncateUtf8(title, 240),
     write: (data) => pty.write(result.paneId, data),
     resize: async (cols, rows) => {

@@ -274,18 +274,28 @@ export default function AgentCapabilitiesDialog({
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all([window.spark.memory.get(workspaceId), window.spark.coraProfiles.list()])
-      .then(([nextMemory, nextProfiles]) => {
-        if (!cancelled) {
-          setMemory(nextMemory);
-          setProfiles(nextProfiles);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) setStatus((err as Error).message);
-      });
+    let generation = 0;
+    const refresh = () => {
+      const request = ++generation;
+      void Promise.all([window.spark.memory.get(workspaceId), window.spark.coraProfiles.list()])
+        .then(([nextMemory, nextProfiles]) => {
+          if (!cancelled && request === generation) {
+            setMemory(nextMemory);
+            setProfiles(nextProfiles);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled && request === generation) setStatus((err as Error).message);
+        });
+    };
+    refresh();
+    // A hot-reloaded renderer can still be attached to an older preload.
+    const unsubscribe = typeof window.spark.coraProfiles.onChanged === "function"
+      ? window.spark.coraProfiles.onChanged(refresh)
+      : undefined;
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
   }, [workspaceId]);
 

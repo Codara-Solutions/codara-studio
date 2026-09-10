@@ -879,7 +879,7 @@ function renderDirectTaskPrompt({
     lines.push("", "## VERIFY", ...task.verificationCommands.map((command) => `- ${command}`));
   }
 
-  if (/\b(browser|tab|page|website|screenshot)\b/i.test(task.description)) {
+  if (sparkPreviewToolsAvailable(run, task, cwd, settings)) {
     lines.push("", "## BROWSER", "Use `codara_preview_list` to identify an existing workspace browser by title, URL, or last-viewed marker when the user refers to it; pass its tabId and ask if ambiguous. Otherwise navigate without tabId to use your own browser. Use `codara_preview_screenshot` to see the page before visual interaction and to verify the result; screenshots include CSS viewport and image scale. Browser tabs remain open when you finish.");
   }
 

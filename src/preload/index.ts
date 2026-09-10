@@ -461,6 +461,11 @@ const api = {
       ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
   },
   coraProfiles: {
+    onChanged: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("cora-profiles:changed", listener);
+      return () => ipcRenderer.off("cora-profiles:changed", listener);
+    },
     list: (): Promise<CoraProfile[]> => ipcRenderer.invoke("cora-profiles:list"),
     create: (input: CoraProfileCreateInput): Promise<CoraProfile[]> =>
       ipcRenderer.invoke("cora-profiles:create", input),

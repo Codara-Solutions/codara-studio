@@ -69,6 +69,7 @@ function fakeTerminal(request, overrides = {}) {
     writeError: null,
     resizeImpl: null,
     desktopTabId: overrides.desktopTabId ?? "tab-test",
+    desktopPaneId: overrides.desktopPaneId ?? "pane-test",
     title: overrides.title ?? "Test terminal",
     write(data) {
       this.writes.push(data);
@@ -191,6 +192,8 @@ async function main() {
         ]);
         assert.equal(terminals.length, 1);
         assert.equal(joined.terminalId, first.terminalId);
+        assert.equal(first.desktopPaneId, "pane-test");
+        assert.equal(joined.desktopPaneId, "pane-test");
 
         const connection = attach(
           registry,

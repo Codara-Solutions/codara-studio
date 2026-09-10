@@ -1291,46 +1291,12 @@ export function registerIpc(): void {
   handle(
     "cora-profiles:delete",
     async (_e, reference: string): Promise<CoraProfileDeleteResult> => {
-      const {
-        DEFAULT_CORA_PROFILE_ID,
-        deleteCoraProfile,
-        listCoraProfiles,
-        resolveCoraProfile,
-      } = await import("./orchestration/cora-profiles");
-      const target = resolveCoraProfile(reference);
-      if (target.id === DEFAULT_CORA_PROFILE_ID) {
-        throw new Error("The built-in Cora profile cannot be deleted.");
-      }
-
+      const { deleteCoraProfileWithChats } = await import("./orchestration/delete-cora-profile");
       const runStore = await getRunStore();
-      const firstPass = await runStore.reassignCoraProfileRuns(
-        target.id,
-        DEFAULT_CORA_PROFILE_ID,
-      );
-      const deleted = await deleteCoraProfile(target.id);
-      // A run may have started after the first list but before profiles.json
-      // committed. Now that the id cannot be selected, one final pass closes
-      // that race before the isolated data directory leaves the machine.
-      const secondPass = await runStore.reassignCoraProfileRuns(
-        target.id,
-        DEFAULT_CORA_PROFILE_ID,
-      );
-      await coraMemory.deleteProfileMemoryState(target.id);
-      if (deleted.stagedDataPath) {
-        try {
-          await shell.trashItem(deleted.stagedDataPath);
-        } catch (err) {
-          // The registry and runs are already safe. Preserve the staged folder
-          // for manual recovery/cleanup rather than reporting that the profile
-          // still exists or permanently deleting it as a fallback.
-          console.warn("[cora-profiles] could not move deleted profile data to trash", err);
-        }
-      }
-      return {
-        profiles: listCoraProfiles(),
-        deletedProfile: { id: deleted.profile.id, name: deleted.profile.name },
-        reassignedRunCount: firstPass + secondPass,
-      };
+      return deleteCoraProfileWithChats(reference, {
+        reassignRuns: runStore.reassignCoraProfileRuns,
+        trashItem: (path) => shell.trashItem(path),
+      });
     },
   );
 

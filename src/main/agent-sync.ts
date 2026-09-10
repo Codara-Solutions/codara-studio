@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import type {
   AgentAssetCompatibility,
@@ -180,6 +181,7 @@ export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTar
   targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Every workspace, all agents"));
   targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude"));
   targets.push(mcpTarget("codex", "user", tomlRuntimeConfigPath("codex"), "Every workspace, Codex"));
+  targets.push(mcpTarget("grok", "user", tomlRuntimeConfigPath("grok"), "Every workspace, Grok"));
   return targets;
 }
 
@@ -204,6 +206,18 @@ export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail
   };
 }
 
+let assetMutationTail: Promise<void> = Promise.resolve();
+
+function withAssetMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  const operation = assetMutationTail.then(mutation);
+  assetMutationTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+export function mcpServerRevision(detail: AgentMcpServerDetail | null): string {
+  return createHash("sha256").update(JSON.stringify(detail)).digest("hex");
+}
+
 /**
  * Create or update a user-authored MCP server. Unlike writeClaudeMcpServers,
  * which is additive and skips an existing name, this overwrites in place so an
@@ -211,12 +225,22 @@ export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail
  * different name, that entry is removed after the new one is written, so an
  * edit that changes location moves rather than forks.
  */
-export async function saveMcpServer(input: {
+export function saveMcpServer(input: Parameters<typeof saveMcpServerUnlocked>[0]): Promise<AgentMcpSaveResult> {
+  return withAssetMutation(() => saveMcpServerUnlocked(input));
+}
+
+async function saveMcpServerUnlocked(input: {
   cwd?: string | null;
   targetId: string;
   server: AgentMcpServerDraft;
   replaceId?: string | null;
+  expectedRevision?: string;
 }): Promise<AgentMcpSaveResult> {
+  if (input.expectedRevision !== undefined && (
+    !input.replaceId || mcpServerRevision(readMcpServerDetail({ id: input.replaceId })) !== input.expectedRevision
+  )) {
+    return { ok: false, error: "This server changed in Studio. Reload its current configuration before saving." };
+  }
   const previous = input.replaceId ? parseAssetId(input.replaceId) : null;
   let target = listMcpWriteTargets({ cwd: input.cwd ?? null }).find((item) => item.id === input.targetId);
   // Editing in place: an entry's own file is always a legal destination, even
@@ -232,7 +256,7 @@ export async function saveMcpServer(input: {
   if ("error" in validated) return { ok: false, error: validated.error };
   const server = validated.server;
   if (target.format === "toml" && server.headers) {
-    return { ok: false, error: "Codex config.toml cannot carry request headers. Save this server to a JSON config instead." };
+    return { ok: false, error: `${target.runtime === "grok" ? "Grok" : "Codex"} config.toml cannot carry request headers. Save this server to a JSON config instead.` };
   }
 
   // Editing an entry that already lives in this file: the write rewrites it
@@ -259,7 +283,11 @@ export async function saveMcpServer(input: {
   }
 }
 
-export async function deleteAgentAsset(input: { id: string }): Promise<AgentAssetDeleteResult> {
+export function deleteAgentAsset(input: { id: string }): Promise<AgentAssetDeleteResult> {
+  return withAssetMutation(() => deleteAgentAssetUnlocked(input));
+}
+
+async function deleteAgentAssetUnlocked(input: { id: string }): Promise<AgentAssetDeleteResult> {
   const parsed = parseAssetId(input.id);
   if (!parsed) return { ok: false, deleted: [], error: "Invalid agent asset id." };
   try {
@@ -274,7 +302,11 @@ export async function deleteAgentAsset(input: { id: string }): Promise<AgentAsse
   }
 }
 
-export async function syncAgentAssets(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+export function syncAgentAssets(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+  return withAssetMutation(() => syncAgentAssetsUnlocked(input));
+}
+
+async function syncAgentAssetsUnlocked(input: { cwd?: string | null }): Promise<AgentSyncResult> {
   const startedAt = new Date().toISOString();
   const result: AgentSyncResult = {
     startedAt,
@@ -293,7 +325,11 @@ export async function syncAgentAssets(input: { cwd?: string | null }): Promise<A
 // Copy a single discovered asset into the runtime that was missing it. Powers
 // the per-cell "Add to Claude/Codex/Grok" action in the Capability Center, so
 // the user can spread one MCP server or skill without running a full sync.
-export async function installAgentAssetToRuntime(input: {
+export function installAgentAssetToRuntime(input: Parameters<typeof installAgentAssetToRuntimeUnlocked>[0]): Promise<AgentAssetInstallResult> {
+  return withAssetMutation(() => installAgentAssetToRuntimeUnlocked(input));
+}
+
+async function installAgentAssetToRuntimeUnlocked(input: {
   id: string;
   target: "claude" | "codex" | "grok";
 }): Promise<AgentAssetInstallResult> {
@@ -926,7 +962,9 @@ async function writeClaudeMcpServers(
   if (sourceServers.length === 0) return [];
   let parsed: Record<string, unknown> = {};
   try {
-    parsed = JSON.parse(await fs.readFile(path, "utf8")) as Record<string, unknown>;
+    const value: unknown = JSON.parse(await fs.readFile(path, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+    parsed = value as Record<string, unknown>;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       result.mcp.errors.push(`Could not read ${path}: ${(err as Error).message}`);
@@ -951,7 +989,7 @@ async function writeClaudeMcpServers(
   if (added.length === 0) return [];
   parsed.mcpServers = existing;
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(path, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+  await writeMcpFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
   return added;
 }
 
@@ -1003,7 +1041,7 @@ function validateMcpDraft(draft: AgentMcpServerDraft): { server: McpServerConfig
   }
   const command = (draft.command ?? "").trim();
   if (!command) return { error: "Command is required for a stdio server." };
-  const args = (draft.args ?? []).map((arg) => arg.trim()).filter(Boolean);
+  const args = (draft.args ?? []).slice();
   const env = normalizeMcpPairs(draft.env);
   if ("error" in env) return { error: `Environment variable ${env.error}` };
   return {
@@ -1020,9 +1058,23 @@ function normalizeMcpPairs(
     const key = rawKey.trim();
     if (!key) continue;
     if (/[\s=:]/.test(key)) return { error: `name '${key}' cannot contain spaces, '=' or ':'.` };
-    out[key] = String(rawValue ?? "").trim();
+    out[key] = String(rawValue ?? "");
   }
   return { value: Object.keys(out).length > 0 ? out : undefined };
+}
+
+async function writeMcpFileAtomic(path: string, content: string): Promise<void> {
+  let target = path;
+  let mode = 0o600;
+  try {
+    target = await fs.realpath(path);
+    mode = (await fs.stat(target)).mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  // Dotfile managers often symlink these files. Preserve that link and the
+  // existing permissions while atomically replacing the actual target.
+  await writeFileAtomic(target, content, { mode });
 }
 
 // Upsert, unlike writeClaudeMcpServers: an existing name is overwritten so an
@@ -1040,9 +1092,8 @@ async function upsertClaudeMcpServer(
   let parsed: Record<string, unknown> = {};
   try {
     const value = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      parsed = value as Record<string, unknown>;
-    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+    parsed = value as Record<string, unknown>;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
       throw new Error(`Could not read ${path}: ${(err as Error).message}`);
@@ -1054,7 +1105,7 @@ async function upsertClaudeMcpServer(
   if (located && replaceName && replaceName !== server.name) delete located.container[replaceName];
   container[server.name] = renderUserMcpServer(server);
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(path, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+  await writeMcpFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
 }
 
 function ensureTopLevelJsonMcpMap(parsed: Record<string, unknown>): Record<string, unknown> {
@@ -1076,7 +1127,7 @@ async function upsertCodexMcpServer(path: string, server: McpServerConfig): Prom
   const base = removeCodexMcpServerBlock(existing, server.name).trimEnd();
   const block = renderCodexMcpServer(server).join("\n").trimStart();
   await fs.mkdir(dirname(path), { recursive: true });
-  await fs.writeFile(path, [base, block].filter(Boolean).join("\n\n") + "\n", "utf8");
+  await writeMcpFileAtomic(path, [base, block].filter(Boolean).join("\n\n") + "\n");
 }
 
 // renderClaudeMcpServer is shared with sync, which deliberately never copies
@@ -1108,7 +1159,9 @@ function describeMcpServer(server: McpServerConfig): string {
 async function deleteClaudeMcpServer(path: string, name: string): Promise<void> {
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(await fs.readFile(path, "utf8")) as Record<string, unknown>;
+    const value: unknown = JSON.parse(await fs.readFile(path, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+    parsed = value as Record<string, unknown>;
   } catch {
     return;
   }

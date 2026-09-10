@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { codaraHome } from "../codara-home";
@@ -88,20 +88,64 @@ function readRegistry(): ProfileRegistry {
 
 let registryMutationTail: Promise<void> = Promise.resolve();
 
-function mutateRegistry<T>(
-  mutation: (registry: ProfileRegistry) => Promise<T> | T,
-): Promise<T> {
+function withRegistryLock<T>(mutation: () => Promise<T> | T): Promise<T> {
+  const operation = registryMutationTail.then(mutation);
+  registryMutationTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+function mutateRegistry<T>(mutation: (registry: ProfileRegistry) => Promise<T> | T): Promise<T> {
   // Serialize the whole read-modify-write transaction, not only the final
   // write. Two simultaneous profile creations must not lose one another.
-  const operation = registryMutationTail.then(async () => {
+  return withRegistryLock(async () => {
     const registry = readRegistry();
     const result = await mutation(registry);
     await mkdir(memoryRoot(), { recursive: true });
     await writeFileAtomic(registryPath(), `${JSON.stringify(registry, null, 2)}\n`);
     return result;
   });
-  registryMutationTail = operation.then(() => undefined, () => undefined);
-  return operation;
+}
+
+export interface CoraProfileDocument {
+  content: string;
+  revision: string;
+  maxChars: number;
+}
+
+function readProfileDocument(profile: CoraProfile): CoraProfileDocument {
+  let content = "";
+  try {
+    content = readFileSync(profile.identityPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (Buffer.byteLength(content, "utf8") > 64 * 1024) {
+    throw new Error("This profile is too large to edit on the phone. Trim it in Studio first.");
+  }
+  return {
+    content,
+    revision: createHash("sha256").update(profile.createdAt).update("\0").update(content).digest("hex"),
+    maxChars: PROFILE_INSTRUCTIONS_MAX_CHARS,
+  };
+}
+
+export function readCoraProfileDocument(reference: string): Promise<CoraProfileDocument> {
+  return withRegistryLock(() => readProfileDocument(resolveCoraProfile(reference)));
+}
+
+export function saveCoraProfileDocument(reference: string, revision: string, content: string): Promise<CoraProfileDocument> {
+  return withRegistryLock(async () => {
+    const profile = resolveCoraProfile(reference);
+    if (content.length > PROFILE_INSTRUCTIONS_MAX_CHARS) {
+      throw new Error("Profile instructions are limited to 4,000 characters. Shorten the text and try again.");
+    }
+    if (readProfileDocument(profile).revision !== revision) {
+      throw new Error("This profile changed in Studio. Reload the latest version before saving.");
+    }
+    await mkdir(coraProfileRoot(profile.id), { recursive: true });
+    await writeFileAtomic(profile.identityPath, content);
+    return readProfileDocument(profile);
+  });
 }
 
 function materializeProfile(item: StoredProfile, defaultProfileId: string): CoraProfile {
@@ -147,6 +191,7 @@ export async function createCoraProfile(input: CoraProfileCreateInput): Promise<
   if (!name) throw new Error("Profile name is required.");
   const id = normalizeCoraProfileId(name);
   if (id === DEFAULT_CORA_PROFILE_ID) throw new Error('The profile id "default" is reserved.');
+  if (id === "cora") throw new Error('The name "Cora" is reserved for the built-in profile. Choose another name.');
   const instructions = input.instructions?.trim().slice(0, PROFILE_INSTRUCTIONS_MAX_CHARS) ?? "";
   return mutateRegistry(async (registry) => {
     if (registry.profiles.some((profile) => profile.id === id || profile.name.toLowerCase() === name.toLowerCase())) {
@@ -196,7 +241,7 @@ export interface DeletedCoraProfile {
   stagedDataPath?: string;
 }
 
-export async function deleteCoraProfile(reference: string): Promise<DeletedCoraProfile> {
+export async function deleteCoraProfile(reference: string, expectedCreatedAt?: string): Promise<DeletedCoraProfile> {
   let stagedDataPath: string | undefined;
   let originalDataPath: string | undefined;
   try {
@@ -211,6 +256,9 @@ export async function deleteCoraProfile(reference: string): Promise<DeletedCoraP
           profile.name.toLowerCase() === needle,
       );
       if (index < 0) throw new Error(`Unknown Cora profile: ${reference}`);
+      if (expectedCreatedAt !== undefined && registry.profiles[index].createdAt !== expectedCreatedAt) {
+        throw new Error("This profile changed. Refresh before deleting it.");
+      }
       const [stored] = registry.profiles.splice(index, 1);
 
       // Move the whole isolated identity+memory tree out of its live location

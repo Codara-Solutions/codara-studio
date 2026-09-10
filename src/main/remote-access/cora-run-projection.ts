@@ -1,5 +1,8 @@
+import type { HumanRunMessage } from "@shared/types";
+import { normalizeQuestionOptionsForMessage } from "@shared/run-questions";
 import type {
   RemoteCoraMessage,
+  RemoteCoraQuestionOption,
   RemoteCoraRun,
   RemoteCoraRunProjection,
   RemoteCoraRunTruncation,
@@ -316,4 +319,19 @@ function findLastIndex<T>(
     if (predicate(values[index])) return index;
   }
   return -1;
+}
+
+export function projectRemoteCoraQuestionOptions(
+  message: Pick<HumanRunMessage, "message" | "questionOptions">,
+): RemoteCoraQuestionOption[] {
+  // Never truncate an answer: it is the user's reply when selected. Oversized
+  // choices leave the question available through the ordinary text composer.
+  return normalizeQuestionOptionsForMessage(message.message, message.questionOptions)
+    .filter((option) =>
+      Buffer.byteLength(option.id, "utf8") <= 256 &&
+      Buffer.byteLength(option.label, "utf8") <= 512 &&
+      Buffer.byteLength(option.description, "utf8") <= 2048 &&
+      Buffer.byteLength(option.answer, "utf8") <= 16 * 1024
+    )
+    .map((option) => ({ ...option, recommended: option.recommended === true }));
 }

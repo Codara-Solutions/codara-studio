@@ -52,6 +52,9 @@ export interface StudioTerminalShareOptions {
   // store surfaces it here and the service turns it into a terminals.changed
   // push. Attached subscribers still get their sequenced onExit regardless.
   onTerminalsChanged?: () => void;
+  // Where a failed inventory read is reported. The phone's list then falls
+  // back to the last inventory this store synchronised rather than failing.
+  log?: (line: string) => void;
 }
 
 /**
@@ -73,12 +76,24 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
   }
 
   async list(_ownerKey: string): Promise<RemoteTerminalLeaseDescriptor[]> {
-    const inventory = await requestTerminalOp<StudioTerminalInventoryItem[]>(
-      "list",
-      {},
-      { timeoutMs: 5_000 },
-    );
-    this.synchronize(Array.isArray(inventory) ? inventory : []);
+    // The inventory lives in the renderer. A hidden or reloading window can
+    // answer late or not at all; that must not empty the phone's list — the
+    // PTYs are still alive in main — so a failed read keeps the last
+    // synchronised inventory and reports why.
+    try {
+      const inventory = await requestTerminalOp<StudioTerminalInventoryItem[]>(
+        "list",
+        {},
+        { timeoutMs: 5_000 },
+      );
+      this.synchronize(Array.isArray(inventory) ? inventory : []);
+    } catch (err) {
+      this.options.log?.(
+        `studio terminal inventory read failed; serving the last ${this.records.size} known: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     return [...this.records.values()]
       .filter((record) => record.descriptor.phase !== "ended")
       .map((record) => ({ ...record.descriptor }))
@@ -225,6 +240,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
           ...existing.descriptor,
           workspaceId: item.workspaceId,
           desktopTabId: item.tabId,
+          desktopPaneId: item.paneId,
           title: item.title,
           profile: item.profile,
           phase: "live",
@@ -239,6 +255,7 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
         phase: "live",
         profile: item.profile,
         desktopTabId: item.tabId,
+        desktopPaneId: item.paneId,
         title: item.title,
         cols: 100,
         rows: 30,

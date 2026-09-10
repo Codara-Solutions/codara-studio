@@ -176,6 +176,7 @@ export function projectRemoteFleetOverview(
       id: workspace.id,
       name: workspace.name,
       color: workspace.color ?? "#2AA298",
+      ...(workspace.icon ? { icon: workspace.icon } : {}),
       ...(workspace.branch ? { branch: workspace.branch } : {}),
       conversationCount: aggregate?.count ?? 0,
       ...(latest

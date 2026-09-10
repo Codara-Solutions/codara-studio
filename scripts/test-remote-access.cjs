@@ -705,6 +705,7 @@ async function main() {
         name: "Studio",
         path: "/private/studio",
         color: "#123456",
+        icon: "cloud",
         branch: "feature/mobile",
       },
       {
@@ -808,6 +809,8 @@ async function main() {
       projection.workspaces[0]?.id === "ws-1" &&
         projection.workspaces[0]?.name === "Studio" &&
         projection.workspaces[0]?.color === "#123456" &&
+        projection.workspaces[0]?.icon === "cloud" &&
+        projection.workspaces[1]?.icon === undefined &&
         projection.workspaces[0]?.branch === "feature/mobile" &&
         projection.workspaces[0]?.activeAutomations === 2 &&
         !JSON.stringify(projection).includes("/private/"),
@@ -4000,6 +4003,61 @@ async function main() {
     stream.inject(rpc.encodeFrame({ id, method, params }));
   const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "phone-history-peer-"));
+    const historyStream = makeFakeStream();
+    historyStream.remotePublicKey = Buffer.alloc(32, 7);
+    const requestedKeys = [];
+    let automaticMergeWrites = 0;
+    const service = new remoteAccess.RemoteAccessService({
+      remoteDir: dir, deviceName: "History Test", appVersion: "test",
+      listWorkspaces: async () => [],
+      listNotificationHistory: async (key) => { requestedKeys.push(key); return []; },
+      updateGitHubAutoMerge: async () => { automaticMergeWrites++; return { kind: "confirmed", outcome: "enabled", status: { revision: "c".repeat(64) } }; },
+      createTerminal: async () => { throw new Error("not used"); },
+      log: () => {},
+    });
+    try {
+      service.onAuthorizedStream(historyStream);
+      historyStream.inject(rpc.encodeFrame({ id: 1, method: "notifications.history", params: {} }));
+      await flush();
+      check("phone history cannot be read before hello", historyStream.outbox.at(-1)?.error?.code === "not-connected" && requestedKeys.length === 0);
+      historyStream.inject(rpc.encodeFrame({ id: 2, method: "hello", params: {
+        protocol: rpc.RPC_PROTOCOL_VERSION,
+        device: { publicKey: "forged-peer", name: "Phone", role: "phone", version: "1" },
+      } }));
+      await flush();
+      historyStream.inject(rpc.encodeFrame({ id: 3, method: "notifications.history", params: {} }));
+      await flush();
+      check("phone history is bound to the encrypted peer, not hello's claimed key",
+        requestedKeys.length === 1 && requestedKeys[0] === historyStream.remotePublicKey.toString("base64") && historyStream.outbox.at(-1)?.ok === true,
+        { requestedKeys, reply: historyStream.outbox.at(-1) });
+      const automaticMerge = { workspaceId: "ws1", requestId: "automatic-merge-retry", input: {
+        target: { repositoryUrl: "https://github.com/codara/studio", pullRequestNumber: 42, expectedHeadCommitOid: "a".repeat(40) },
+        expectedRevision: "b".repeat(64), action: "enable", strategy: "squash",
+      } };
+      const waitReply = async (id) => {
+        for (let attempt = 0; attempt < 1000; attempt++) {
+          const reply = historyStream.outbox.find((item) => item.id === id);
+          if (reply) return reply;
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        throw new Error("Timed out waiting for automatic merge receipt");
+      };
+      historyStream.inject(rpc.encodeFrame({ id: 4, method: "github.autoMerge.update", params: automaticMerge }));
+      const first = await waitReply(4);
+      historyStream.inject(rpc.encodeFrame({ id: 5, method: "github.autoMerge.update", params: automaticMerge }));
+      const retry = await waitReply(5);
+      check("automatic merge retries reuse the authenticated peer's durable receipt", automaticMergeWrites === 1 && first.result?.result?.outcome === "enabled" && JSON.stringify(first.result) === JSON.stringify(retry.result));
+      historyStream.inject(rpc.encodeFrame({ id: 6, method: "github.autoMerge.update", params: { ...automaticMerge, input: { ...automaticMerge.input, strategy: "rebase" } } }));
+      check("automatic merge cannot change intent under an existing receipt", (await waitReply(6)).error?.code === "mutation-conflict" && automaticMergeWrites === 1);
+
+    } finally {
+      historyStream.destroy();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   request(1, "workspaces.list", {});
   await flush();
   check(
@@ -4449,6 +4507,73 @@ async function main() {
         calls.push(["workspaces.group.create", name]);
         return { id: "group-new", name, collapsed: false };
       },
+      readCapabilityMcp: async (input) => {
+        calls.push(["capabilities.mcp.read", input]);
+        return { targets: [{ id: "a".repeat(64), label: "This workspace", runtime: "shared", scope: "workspace", format: "json" }] };
+      },
+      updateCapabilityAsset: async (input) => {
+        calls.push(["capabilities.assets.update", input]);
+        return { capabilities: { mcp: [], skills: [] }, message: "Capability saved." };
+      },
+      readCapabilityProfile: async (profileId) => {
+        calls.push(["capabilities.profile.read", profileId]);
+        return { content: "# Careful Coder", revision: "c".repeat(64), maxChars: 4000 };
+      },
+      updateCapabilityProfile: async (input) => {
+        calls.push(["capabilities.profile.update", input]);
+        return { capabilities: { profiles: [{ id: "careful-coder", name: "Careful Coder" }] }, message: "Profile saved." };
+      },
+      readCapabilityMemory: async (input) => {
+        calls.push(["capabilities.memory.read", input]);
+        return { content: "- My note", revision: "a".repeat(64), bytesCap: 4096 };
+      },
+      updateCapabilityMemory: async (input) => {
+        calls.push(["capabilities.memory.update", input]);
+        return { content: input.content ?? "", revision: "b".repeat(64), bytesCap: 4096 };
+      },
+      getCapabilities: async (input) => {
+        calls.push(["capabilities.get", input]);
+        return {
+          ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+          workerModels: [
+            { id: "claude-opus-5", group: "Claude", enabled: true, premium: false },
+            { id: "claude-fable-5", group: "Claude", enabled: false, premium: true },
+          ],
+          policy: { mcpAwareness: true, skillAwareness: true, autoInstallStudioMcp: true },
+          mcp: [
+            {
+              id: "mcp:github",
+              kind: "mcp",
+              name: "github",
+              runtime: "claude",
+              scope: "user",
+              enabled: true,
+              detail: "npx -y @modelcontextprotocol/server-github",
+            },
+          ],
+          skills: [],
+          builtins: [],
+        };
+      },
+      updateCapabilities: async (input) => {
+        calls.push(["capabilities.update", input]);
+        return {
+          workerModels: (input.enabledWorkerModels ?? []).map((id) => ({
+            id,
+            group: "Claude",
+            enabled: true,
+            premium: false,
+          })),
+          policy: {
+            mcpAwareness: input.mcpAwareness ?? true,
+            skillAwareness: true,
+            autoInstallStudioMcp: true,
+          },
+          mcp: [],
+          skills: [],
+          builtins: [],
+        };
+      },
       updateWorkspaceGroup: async (input) => {
         calls.push(["workspaces.group.update", input]);
         return {
@@ -4592,6 +4717,26 @@ async function main() {
             },
           ],
         };
+      },
+      readGitHubAutoMerge: async (input) => {
+        calls.push(["github.autoMerge.status", input]);
+        return { revision: "b".repeat(64), state: "OPEN", request: null };
+      },
+      updateGitHubAutoMerge: async (input) => {
+        calls.push(["github.autoMerge.update", input]);
+        return { kind: "confirmed", outcome: "enabled", status: { revision: "c".repeat(64), state: "OPEN" } };
+      },
+      readGitHubReviewDiscussions: async (input) => {
+        calls.push(["github.review.discussions", input]);
+        return { headCommitOid: input.target.expectedHeadCommitOid, baseCommitOid: "c".repeat(40), threads: [] };
+      },
+      readGitHubReview: async (input) => {
+        calls.push(["github.review.diff", input]);
+        return { headCommitOid: input.target.expectedHeadCommitOid, files: [] };
+      },
+      submitGitHubReview: async (input) => {
+        calls.push(["github.review.submit", input]);
+        return { kind: "submitted", url: "https://github.com/codara/studio/pull/42#pullrequestreview-1", headCommitOid: input.review.expectedHeadCommitOid };
       },
       getGitHubStatus: async (workspaceId) => {
         calls.push(["github.status", workspaceId]);
@@ -5204,6 +5349,8 @@ async function main() {
       shutdown() {},
     };
     extendedServices.workerTerminalControls = workerControlRegistry;
+    const notificationHistory = [{ id: "event-1", computerId: "studio", kind: "blocked", title: "Needs answer", body: "Question", workspaceId: "ws1", createdAt: "2026-09-09T10:00:00Z" }];
+    extendedServices.listNotificationHistory = async () => notificationHistory;
     const ex = makeFakeStream();
     const exSession = new rpc.RpcSession(ex, extendedServices);
     const exReq = (id, method, params) =>
@@ -5219,6 +5366,12 @@ async function main() {
     });
     await flush();
 
+    exReq(9900, "notifications.history", {});
+    await flush();
+    check("notification history returns the bound phone's retained events", ex.outbox.at(-1)?.result?.notifications?.[0]?.id === "event-1");
+    exReq(9901, "notifications.history", { devicePublicKey: "another-phone" });
+    await flush();
+    check("notification history refuses a caller-supplied device identity", ex.outbox.at(-1)?.error?.code === "invalid-params");
     exReq(11, "workspaces.list", {});
     await flush();
     check(
@@ -5336,6 +5489,153 @@ async function main() {
         calls.at(-1)?.[1]?.color === "#FF5C2B" &&
         ex.outbox.at(-1)?.result?.group?.color === "#FF5C2B",
       calls.at(-1),
+    );
+    exReq(91, "capabilities.get", { workspaceId: "ws1" });
+    await flush();
+    check(
+      "capabilities.get projects the Capability Center without config contents",
+      calls.at(-1)?.[0] === "capabilities.get" &&
+        calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        ex.outbox.at(-1)?.result?.capabilities?.workerModels?.[1]?.premium === true &&
+        ex.outbox.at(-1)?.result?.capabilities?.mcp?.[0]?.name === "github",
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(92, "capabilities.update", {
+      enabledWorkerModels: ["claude-opus-5", "gpt-5.6-sol"],
+      mcpAwareness: false,
+    });
+    await flush();
+    check(
+      "capabilities.update delegates the roster and policy flags",
+      calls.at(-1)?.[0] === "capabilities.update" &&
+        calls.at(-1)?.[1]?.enabledWorkerModels?.length === 2 &&
+        calls.at(-1)?.[1]?.mcpAwareness === false &&
+        ex.outbox.at(-1)?.result?.capabilities?.policy?.mcpAwareness === false,
+      { call: calls.at(-1), response: ex.outbox.at(-1) },
+    );
+    exReq(921, "capabilities.update", {
+      workspaceId: "ws1",
+      asset: { sessionKey: "mcp:github", target: "workers", enabled: true },
+      memory: { scope: "workspace", enabled: false, profileId: "careful-coder" },
+    });
+    await flush();
+    check(
+      "capabilities.update preserves workspace, assignment and memory scope",
+      calls.at(-1)?.[1]?.workspaceId === "ws1" &&
+        calls.at(-1)?.[1]?.asset?.target === "workers" &&
+        calls.at(-1)?.[1]?.memory?.enabled === false &&
+        calls.at(-1)?.[1]?.memory?.profileId === "careful-coder",
+      calls.at(-1),
+    );
+    for (const patch of [
+      { workspaceId: "", mcpAwareness: true },
+      { asset: null },
+      { asset: { sessionKey: "mcp:github", target: "anything", enabled: true } },
+      { asset: { sessionKey: "", target: "cora", enabled: true } },
+      { asset: { sessionKey: "mcp:github", target: "cora", enabled: "yes" } },
+      { memory: { scope: "workspace", enabled: true } },
+      { memory: { scope: "global", enabled: "yes" } },
+      { memory: { scope: "other", enabled: true } },
+      { memory: { scope: "global", enabled: true, profileId: "../other" } },
+    ]) {
+      exReq(922, "capabilities.update", patch);
+      await flush();
+      check("capabilities.update rejects invalid scoped changes", ex.outbox.at(-1)?.error?.code === "invalid-params", { patch, response: ex.outbox.at(-1) });
+    }
+    exReq(930, "capabilities.mcp.read", { workspaceId: "ws1", assetId: "a".repeat(64), path: "/ignored" });
+    await flush();
+    check("MCP editor reads use opaque IDs without accepting paths", calls.at(-1)?.[1]?.assetId === "a".repeat(64) && calls.at(-1)?.[1]?.path === undefined && ex.outbox.at(-1)?.result?.editor?.targets.length === 1);
+    exReq(931, "capabilities.get", { workspaceId: "ws1", assetOffset: 200 });
+    await flush();
+    check("capability reads preserve inventory offsets", calls.at(-1)?.[1]?.assetOffset === 200);
+    for (const assetOffset of [-1, 1.5, "200"]) {
+      const count = calls.length;
+      exReq(931, "capabilities.get", { assetOffset });
+      await flush();
+      check("invalid inventory offsets cannot reach the service", calls.length === count && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    const mcpDraft = { name: "tools", transport: "stdio", command: "node", args: ["", "  exact  "], env: { TOKEN: "  fixture  " } };
+    for (const input of [
+      { action: "saveMcp", targetId: "a".repeat(64), server: mcpDraft },
+      { action: "saveMcp", targetId: "a".repeat(64), replaceId: "b".repeat(64), revision: "c".repeat(64), server: mcpDraft },
+      { action: "install", assetId: "a".repeat(64), runtime: "grok" },
+      { action: "remove", assetId: "a".repeat(64) },
+      { action: "builtin", builtinId: "codara-studio", runtime: "claude", installed: false },
+    ]) {
+      exReq(932, "capabilities.assets.update", { ...input, workspaceId: "ws1", path: "/ignored" });
+      await flush();
+      check("asset changes carry only validated scoped input", calls.at(-1)?.[0] === "capabilities.assets.update" && JSON.stringify(calls.at(-1)?.[1]) === JSON.stringify({ workspaceId: "ws1", ...input }), { input, actual: calls.at(-1) });
+    }
+    for (const input of [
+      null, [], { action: "remove", assetId: "/tmp/skill" },
+      { action: "install", assetId: "a".repeat(64), runtime: "unknown" },
+      { action: "builtin", builtinId: "custom", runtime: "claude", installed: true },
+      { action: "builtin", builtinId: "codara-studio", runtime: "grok", installed: "false" },
+      { action: "saveMcp", targetId: "a".repeat(64), replaceId: "b".repeat(64), server: mcpDraft },
+      { action: "saveMcp", targetId: "a".repeat(64), revision: "c".repeat(64), server: mcpDraft },
+      ...[{ args: [2] }, { args: Array(129).fill("x") }, { env: { TOKEN: 42 } }, { env: JSON.parse('{"__proto__":"x"}') }, { env: { TOKEN: "x".repeat(8193) } }, { transport: "shell" }, { name: "" }].map((patch) => ({ action: "saveMcp", targetId: "a".repeat(64), server: { ...mcpDraft, ...patch } })),
+    ]) {
+      const count = calls.length;
+      exReq(933, "capabilities.assets.update", input);
+      await flush();
+      check("invalid asset edits cannot reach the service", calls.length === count && ex.outbox.at(-1)?.error?.code === "invalid-params", { input, response: ex.outbox.at(-1) });
+    }
+    exReq(927, "capabilities.profile.read", { profileId: "careful-coder" });
+    await flush();
+    check("profile read returns instructions and a conflict revision", calls.at(-1)?.[1] === "careful-coder" && ex.outbox.at(-1)?.result?.document?.revision === "c".repeat(64));
+    for (const input of [
+      { action: "create", name: "Careful Coder", description: "", instructions: "Prefer focused changes." },
+      { action: "use", profileId: "careful-coder" },
+      { action: "save", profileId: "careful-coder", revision: "c".repeat(64), content: "" },
+      { action: "delete", profileId: "careful-coder", createdAt: "2026-09-09T00:00:00.000Z" },
+    ]) {
+      exReq(928, "capabilities.profile.update", { ...input, workspaceId: "ws1", path: "/ignored" });
+      await flush();
+      check("profile mutations preserve workspace and discard arbitrary paths", calls.at(-1)?.[1]?.action === input.action && calls.at(-1)?.[1]?.workspaceId === "ws1" && calls.at(-1)?.[1]?.path === undefined && ex.outbox.at(-1)?.result?.message === "Profile saved.");
+    }
+    for (const input of [
+      {}, { action: "create", name: " " }, { action: "create", name: "x", instructions: "a".repeat(3501) },
+      { action: "use", profileId: "../other" }, { action: "use", profileId: "default", workspaceId: "" },
+      { action: "save", profileId: "default", content: "no revision" },
+      { action: "save", profileId: "default", content: "x".repeat(4001), revision: "c".repeat(64) },
+      { action: "delete", profileId: "default", createdAt: "2026-09-09" },
+      { action: "delete", profileId: "careful-coder" },
+    ]) {
+      const count = calls.length;
+      exReq(929, "capabilities.profile.update", input);
+      await flush();
+      check("invalid profile changes cannot reach the service", calls.length === count && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    const memoryTarget = { workspaceId: "ws1", profileId: "careful-coder", scope: "workspace" };
+    exReq(923, "capabilities.memory.read", memoryTarget);
+    await flush();
+    check("memory reads preserve the selected profile and workspace", calls.at(-1)?.[1]?.profileId === "careful-coder" && ex.outbox.at(-1)?.result?.document?.content === "- My note");
+    exReq(924, "capabilities.memory.update", { ...memoryTarget, revision: "a".repeat(64), action: "save", content: "", path: "/ignored" });
+    await flush();
+    check("memory saves accept empty text and pass only a scoped target", calls.at(-1)?.[1]?.content === "" && calls.at(-1)?.[1]?.path === undefined && calls.at(-1)?.[1]?.revision === "a".repeat(64));
+    exReq(925, "capabilities.memory.update", { ...memoryTarget, revision: "a".repeat(64), action: "clear", includeUserLines: false });
+    await flush();
+    check("memory clear preserves explicit user-note protection", calls.at(-1)?.[1]?.includeUserLines === false);
+    for (const patch of [
+      { ...memoryTarget, profileId: "../other" },
+      { ...memoryTarget, workspaceId: "" },
+      { ...memoryTarget, scope: "other" },
+      { ...memoryTarget, action: "save", content: "draft" },
+      { ...memoryTarget, action: "save", revision: "a".repeat(64), content: "😀".repeat(17000) },
+      { ...memoryTarget, action: "clear", revision: "a".repeat(64) },
+      { ...memoryTarget, action: "clear", revision: "a".repeat(64), includeUserLines: "yes" },
+    ]) {
+      const count = calls.length;
+      exReq(926, "capabilities.memory.update", patch);
+      await flush();
+      check("invalid memory changes never reach storage", calls.length === count && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    exReq(93, "capabilities.update", {});
+    await flush();
+    check(
+      "capabilities.update rejects an empty patch",
+      ex.outbox.at(-1)?.error?.code === "invalid-params",
+      ex.outbox.at(-1),
     );
     exReq(33, "workspaces.move", {
       workspaceId: "ws1",
@@ -5745,6 +6045,48 @@ async function main() {
       ex.outbox.at(-1)?.error?.code === "mutation-conflict",
       ex.outbox.at(-1),
     );
+    const reviewTarget = { repositoryUrl: "https://github.com/codara/studio", pullRequestNumber: 42, expectedHeadCommitOid: "a".repeat(40) };
+    exReq(66500, "github.review.diff", { workspaceId: "ws1", target: reviewTarget, page: 2 });
+    await flush();
+    check("review diff preserves exact PR and paginated commit identity", calls.at(-1)?.[0] === "github.review.diff" && calls.at(-1)?.[1]?.page === 2 && ex.outbox.at(-1)?.result?.diff?.headCommitOid === reviewTarget.expectedHeadCommitOid);
+    exReq(66510, "github.review.discussions", { workspaceId: "ws1", target: { ...reviewTarget, command: "ignored" }, cursor: "reply-cursor", threadId: "thread-id" });
+    await flush();
+    check("review discussions preserve scoped pagination and strip extra target fields", calls.at(-1)?.[0] === "github.review.discussions" && calls.at(-1)?.[1]?.cursor === "reply-cursor" && calls.at(-1)?.[1]?.threadId === "thread-id" && calls.at(-1)?.[1]?.target?.command === undefined && ex.outbox.at(-1)?.result?.discussions?.threads?.length === 0);
+    for (const patch of [{ cursor: "" }, { cursor: "x".repeat(1025) }, { threadId: "a\nb" }, { threadId: 1 }, { command: "extra" }]) {
+      const before = calls.length;
+      exReq(66511, "github.review.discussions", { workspaceId: "ws1", target: reviewTarget, ...patch });
+      await flush();
+      check("invalid discussion pagination cannot reach GitHub", calls.length === before && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    exReq(66520, "github.autoMerge.status", { workspaceId: "ws1", target: reviewTarget });
+    await flush();
+    check("automatic merge status reads the selected PR", calls.at(-1)?.[0] === "github.autoMerge.status" && ex.outbox.at(-1)?.result?.status?.state === "OPEN");
+    const autoInput = { target: reviewTarget, expectedRevision: "b".repeat(64), action: "enable", strategy: "squash" };
+    exReq(66521, "github.autoMerge.update", { workspaceId: "ws1", requestId: "auto-merge-1", input: { ...autoInput, command: "ignored" } });
+    await flush();
+    check("automatic merge projects only the selected action and confirmation", calls.at(-1)?.[0] === "github.autoMerge.update" && calls.at(-1)?.[1]?.input?.command === undefined && calls.at(-1)?.[1]?.input?.expectedRevision === autoInput.expectedRevision && ex.outbox.at(-1)?.result?.result?.outcome === "enabled");
+    for (const patch of [{ strategy: "admin" }, { action: "merge-now" }, { expectedRevision: "old" }, { target: { ...reviewTarget, expectedHeadCommitOid: "main" } }]) {
+      const before = calls.length;
+      exReq(66522, "github.autoMerge.update", { workspaceId: "ws1", requestId: "auto-merge-2", input: { ...autoInput, ...patch } });
+      await flush();
+      check("invalid automatic merge requests cannot reach GitHub", calls.length === before && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    const review = { ...reviewTarget, expectedBaseCommitOid: "c".repeat(40), event: "REQUEST_CHANGES", body: "Please address the line comment.", comments: [{ path: "src/app.ts", side: "LEFT", line: 12, body: "Keep this behavior." }] };
+    exReq(66501, "github.review.submit", { workspaceId: "ws1", requestId: "review-retry-1", review: { ...review, command: "ignored" } });
+    await flush();
+    check("review submission preserves line coordinates and strips unsupported fields", calls.at(-1)?.[0] === "github.review.submit" && calls.at(-1)?.[1]?.review?.comments?.[0]?.line === 12 && calls.at(-1)?.[1]?.review?.command === undefined && ex.outbox.at(-1)?.result?.result?.kind === "submitted");
+    for (const patch of [{ event: "MERGE" }, { body: "" }, { comments: [{ ...review.comments[0], side: "BOTH" }] }, { comments: [{ ...review.comments[0], line: -1 }] }, { comments: Array(31).fill(review.comments[0]) }, { expectedHeadCommitOid: "main" }, { repositoryUrl: "file:///repo" }]) {
+      const before = calls.length;
+      exReq(66502, "github.review.submit", { workspaceId: "ws1", requestId: "review-retry-2", review: { ...review, ...patch } });
+      await flush();
+      check("invalid reviews cannot reach GitHub", calls.length === before && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
+    for (const page of [0, 301, 1.5, "2"]) {
+      const before = calls.length;
+      exReq(66503, "github.review.diff", { workspaceId: "ws1", target: reviewTarget, page });
+      await flush();
+      check("invalid review pages cannot reach GitHub", calls.length === before && ex.outbox.at(-1)?.error?.code === "invalid-params");
+    }
     exReq(66401, "github.ready", {
       workspaceId: "ws1",
       requestId: "ready-ws1-42",
@@ -6909,6 +7251,16 @@ async function main() {
         { response: ex.outbox.at(-1), call: calls.at(-1) },
       );
     }
+    for (const model of ["grok-4.6", "google/gemini-3.5-flash", "anthropic/claude-opus-5"]) {
+      exReq(944, "cora.send", {
+        workspaceId: "ws1", runId: "run-1", message: "keep going",
+        clientMessageId: `phone-model-${model}`, model,
+      });
+      await flush();
+      check("cora.send accepts Grok and OpenRouter catalog ids for service validation",
+        calls.at(-1)?.[0] === "cora.send" && calls.at(-1)?.[1]?.model === model,
+        { model, call: calls.at(-1), response: ex.outbox.at(-1) });
+    }
     exReq(93, "cora.send", {
       workspaceId: "ws1",
       runId: "run-1",
@@ -7702,11 +8054,12 @@ async function main() {
       ex.outbox.at(-1),
     );
 
-    // The OpenCode / Cursor / Grok terminal providers were removed. A phone
-    // still running an older build can ask for one of those profiles, so the
+    // The OpenCode / Cursor terminal providers were removed. A phone still
+    // running an older build can ask for one of those profiles, so the
     // request must be rejected as unsupported rather than silently starting a
-    // bare shell that the user believes is a coding agent.
-    const removedProfiles = ["opencode", "cursor", "grok"];
+    // bare shell that the user believes is a coding agent. Grok is a real
+    // worker profile again, alongside Claude and Codex.
+    const removedProfiles = ["opencode", "cursor"];
     const removedCreates = [];
     for (let index = 0; index < removedProfiles.length; index += 1) {
       const profile = removedProfiles[index];
@@ -7725,6 +8078,19 @@ async function main() {
         code: response?.error?.code,
       });
     }
+    exReq(1105, "terminal.create", {
+      workspaceId: "ws1",
+      cols: 80,
+      rows: 24,
+      profile: "grok",
+      requestId: "create-grok-phone-0001",
+    });
+    await flush();
+    check(
+      "phone terminal.create accepts the Grok worker profile",
+      ex.outbox.at(-1)?.error?.code !== "invalid-params",
+      ex.outbox.at(-1),
+    );
     check(
       "phone terminal.create rejects the removed experimental CLI profiles",
       removedCreates.every(
@@ -7741,11 +8107,13 @@ async function main() {
     });
     await flush();
     const survivingTerminal = sharedTerminals.at(-1);
+    const leasesBeforeDisconnect = terminalLeaseStore.leases.size;
     exSession.destroy();
     check(
       "production disconnect detaches its subscriber while preserving the durable PTY",
       survivingTerminal?.closed === false &&
-        terminalLeaseStore.leases.size === 1 &&
+        leasesBeforeDisconnect > 0 &&
+        terminalLeaseStore.leases.size === leasesBeforeDisconnect &&
         terminalLeaseStore.calls.at(-1)?.[0] === "detachSubscriber",
       {
         terminal: survivingTerminal,

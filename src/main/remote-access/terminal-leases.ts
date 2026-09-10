@@ -16,6 +16,7 @@ export interface RemoteTerminalLeaseDescriptor {
   phase: RemoteTerminalLeasePhase;
   profile: RemoteTerminalCreateRequest["profile"];
   desktopTabId?: string;
+  desktopPaneId?: string;
   title?: string;
   cols: number;
   rows: number;
@@ -263,12 +264,14 @@ export class RemoteTerminalLeaseRegistry
           throw new Error("The terminal lease ended before it was ready.");
         }
         const desktopTabId = boundedMetadata(handle.desktopTabId, 256);
+        const desktopPaneId = boundedMetadata(handle.desktopPaneId, 256);
         const title = boundedMetadata(handle.title, 240);
         lease.handle = handle;
         lease.descriptor = {
           ...lease.descriptor,
           phase: "live",
           ...(desktopTabId ? { desktopTabId } : {}),
+          ...(desktopPaneId ? { desktopPaneId } : {}),
           ...(title ? { title } : {}),
         };
         this.scheduleExpiryIfDetached(lease);

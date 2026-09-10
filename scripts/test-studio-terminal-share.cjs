@@ -193,6 +193,7 @@ async function main() {
       const first = await store.list("phone-a");
       assert.equal(first.length, 1);
       assert.equal(first[0].terminalId, "studio-pane-1");
+      assert.equal(first[0].desktopPaneId, "pane-1");
       assert.equal(first[0].origin, "studio");
       assert.equal(first[0].closeable, false);
       assert.equal(first[0].phase, "live");

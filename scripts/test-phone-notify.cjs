@@ -47,6 +47,7 @@ const check = (name, cond, detail) => {
 
 const NOTIFICATION = {
   id: "evt-1",
+  computerId: "studio-public-key",
   kind: "blocked",
   title: "Automation needs your answer",
   body: "Should I delete the production database?",
@@ -74,6 +75,35 @@ async function main() {
     path.join(ROOT, "src", "main", "remote-access", "rpc.ts"),
     "phone-notify-rpc-test.cjs",
   );
+
+  {
+    const assert = require('node:assert/strict');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-phone-notify-'));
+    try {
+      const store = new phoneNotify.PhoneNotificationStore(dir);
+      const prefs = { needsAnswer: true, completed: true, automations: true };
+      const registration = { enabled: true, prefs, updatedAt: NOTIFICATION.createdAt };
+      await store.set('old-phone', registration);
+      await store.set('new-phone', { ...registration, prefs: { ...prefs, github: true } });
+      const git = { ...NOTIFICATION, id: 'git-1', kind: 'github', sourceView: 'queue', runId: undefined, automationId: undefined };
+      await store.record('old-phone', git);
+      await store.record('new-phone', git);
+      assert.equal((await store.listHistory('old-phone')).length, 0);
+      assert.equal((await new phoneNotify.PhoneNotificationStore(dir).listHistory('new-phone'))[0].sourceView, 'queue');
+      assert.equal(phoneNotify.phoneNotificationKindAllowed('github', { ...prefs, github: false }), false);
+      assert.equal(phoneNotify.phoneNotificationKindAllowed('completed', { ...prefs, github: false }), true);
+      let payload;
+      await phoneNotify.sendExpoPushMessages([{ devicePublicKey: 'new-phone', token: 'test-token' }], git, async (_url, options) => {
+        payload = JSON.parse(options.body)[0];
+        return jsonResponse({ data: [{ status: 'ok', id: 'ticket' }] });
+      });
+      assert.equal(payload.title, 'GitHub activity');
+      assert.equal(payload.data.sourceView, 'queue');
+      assert.equal(payload.data.computerId, NOTIFICATION.computerId);
+      assert.equal(JSON.stringify(payload).includes(NOTIFICATION.body), false);
+      assert.equal(JSON.stringify(payload).includes(NOTIFICATION.workspaceName), false);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
 
   /* ---------------------------------------------- store first-touch race */
   {
@@ -119,6 +149,41 @@ async function main() {
     );
   }
 
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "phone-history-"));
+    try {
+      const store = new phoneNotify.PhoneNotificationStore(dir);
+      const recent = { ...NOTIFICATION, id: "recent", terminalPaneId: "pane-right", createdAt: "2026-09-09T12:00:00Z" };
+      await Promise.all([
+        store.record("keyA", recent),
+        store.record("keyB", NOTIFICATION),
+        store.record("keyA", NOTIFICATION),
+      ]);
+      await store.record("keyA", recent);
+      const reread = new phoneNotify.PhoneNotificationStore(dir);
+      check("phone history survives concurrent first arrivals and restart in event order",
+        (await reread.listHistory("keyA")).map((entry) => entry.id).join(",") === "recent,evt-1");
+      check("phone history retains the exact terminal pane across restart",
+        (await reread.listHistory("keyA"))[0].terminalPaneId === "pane-right");
+      check("phone history is isolated by paired device",
+        (await reread.listHistory("keyB")).map((entry) => entry.id).join(",") === "evt-1" &&
+        (await reread.listHistory("unknown")).length === 0);
+      await store.set("muted", { enabled: false, prefs: { needsAnswer: true, completed: true, automations: true }, updatedAt: recent.createdAt });
+      await store.set("filtered", { enabled: true, prefs: { needsAnswer: false, completed: true, automations: true }, updatedAt: recent.createdAt });
+      await store.record("muted", recent);
+      await store.record("filtered", recent);
+      check("notification history respects disabled alerts at delivery time",
+        (await store.listHistory("muted")).length === 0 && (await store.listHistory("filtered")).length === 0);
+      await Promise.all(Array.from({ length: 205 }, (_, index) => store.record("keyA", {
+        ...NOTIFICATION, id: `bounded-${index}`, createdAt: new Date(Date.UTC(2026, 8, 1) + index * 1000).toISOString(),
+      })));
+      const bounded = await store.listHistory("keyA");
+      check("history caps after ordering without evicting the newest event", bounded.length === 200 && bounded[0].id === "recent");
+      await store.remove("keyA");
+      check("removing phone notification data clears its retained history", (await new phoneNotify.PhoneNotificationStore(dir).listHistory("keyA")).length === 0);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+
   /* --------------------------------------------------- ticket mapping */
   {
     const calls = [];
@@ -161,6 +226,11 @@ async function main() {
       outcomes[2],
     );
 
+    await phoneNotify.sendExpoPushMessages([{ devicePublicKey: "keyA", token: "token" }], { ...NOTIFICATION, terminalPaneId: "pane-right" }, fetchImpl);
+    const terminalMessage = calls[1].body[0];
+    check("terminal push preserves exact pane routing with generic terminal copy",
+      terminalMessage.data.terminalPaneId === "pane-right" && terminalMessage.title === "Terminal needs you" &&
+      !JSON.stringify(terminalMessage).includes(NOTIFICATION.body), terminalMessage);
     const message = calls[0].body[0];
     check(
       "push payloads leaving the E2E channel carry only generic copy",
@@ -173,7 +243,10 @@ async function main() {
     );
     check(
       "push payloads keep the routing ids in data",
-      message.data.workspaceId === "ws1" &&
+      message.data.id === "evt-1" &&
+        message.data.createdAt === NOTIFICATION.createdAt &&
+        message.data.computerId === "studio-public-key" &&
+        message.data.workspaceId === "ws1" &&
         message.data.runId === "run-1" &&
         message.data.automationId === "job-1" &&
         message.data.kind === "blocked",
@@ -329,6 +402,7 @@ async function main() {
     const services = {
       device: { publicKey: "pk", name: "Studio", role: "computer", version: "0.0.0" },
       listWorkspaces: async () => [],
+      registerNotifications: async (input) => { services.registration = input; },
       createTerminal: async () => {
         throw new Error("unused");
       },
@@ -357,6 +431,15 @@ async function main() {
       "a proven session with recent inbound traffic is push-live",
       session.isPushLive(nowMs) === true,
     );
+
+    for (const github of [undefined, true, false, 'invalid']) {
+      stream.inject(rpc.encodeFrame({ id: 10, method: 'notifications.register', params: {
+        enabled: true, prefs: { needsAnswer: true, completed: true, automations: true, ...(github !== undefined ? { github } : {}) },
+      } }));
+      await flush();
+      check(`GitHub registration validates ${String(github)}`, outbox.at(-1)?.ok === (github !== 'invalid'));
+      if (github !== 'invalid') check('GitHub registration preserves advertised support', services.registration.prefs.github === github);
+    }
 
     nowMs += rpc.PUSH_LIVENESS_WINDOW_MS;
     check(

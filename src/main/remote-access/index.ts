@@ -109,6 +109,14 @@ export interface RemoteAccessDeps {
   getFleetOverview?: RemoteRpcServices["getFleetOverview"];
   listSubscriptionProfiles?: RemoteRpcServices["listSubscriptionProfiles"];
   listCoraModels?: RemoteRpcServices["listCoraModels"];
+  getCapabilities?: RemoteRpcServices["getCapabilities"];
+  updateCapabilities?: RemoteRpcServices["updateCapabilities"];
+  readCapabilityMemory?: RemoteRpcServices["readCapabilityMemory"];
+  updateCapabilityMemory?: RemoteRpcServices["updateCapabilityMemory"];
+  readCapabilityProfile?: RemoteRpcServices["readCapabilityProfile"];
+  updateCapabilityProfile?: RemoteRpcServices["updateCapabilityProfile"];
+  readCapabilityMcp?: RemoteRpcServices["readCapabilityMcp"];
+  updateCapabilityAsset?: RemoteRpcServices["updateCapabilityAsset"];
   studioTerminalLeases?: RemoteTerminalLeaseStore;
   listNativeCliAccounts?: RemoteRpcServices["listNativeCliAccounts"];
   listWorkspaceOrganization?: RemoteRpcServices["listWorkspaceOrganization"];
@@ -130,6 +138,11 @@ export interface RemoteAccessDeps {
   getGitCommitDetail?: RemoteRpcServices["getGitCommitDetail"];
   getGitHubStatus?(workspaceId: string): Promise<GitHubWorkspaceStatus>;
   getGitHubWorkQueue?: RemoteRpcServices["getGitHubWorkQueue"];
+  readGitHubAutoMerge?: RemoteRpcServices["readGitHubAutoMerge"];
+  updateGitHubAutoMerge?: RemoteRpcServices["updateGitHubAutoMerge"];
+  readGitHubReviewDiscussions?: RemoteRpcServices["readGitHubReviewDiscussions"];
+  readGitHubReview?: RemoteRpcServices["readGitHubReview"];
+  submitGitHubReview?: RemoteRpcServices["submitGitHubReview"];
   publishGitHub?(input: {
     workspaceId: string;
     input: GitHubPublishInput;
@@ -178,6 +191,7 @@ export interface RemoteAccessDeps {
   registerNotifications?: (
     input: RemoteNotificationRegistration & { devicePublicKey: string },
   ) => Promise<void>;
+  listNotificationHistory?: (devicePublicKey: string) => Promise<RemotePhoneNotification[]>;
   beginImageUpload?: RemoteRpcServices["beginImageUpload"];
   attachWorkerTerminal?: RemoteRpcServices["attachWorkerTerminal"];
   createTerminal(
@@ -304,6 +318,10 @@ export class RemoteAccessService {
   }
 
   /* ---------------------------------------------------------------- status */
+
+  getComputerPublicKey(): string | null {
+    return this.identity?.publicKeyB64 ?? null;
+  }
 
   getStatus(): RemoteAccessStatus {
     return this.status;
@@ -810,6 +828,14 @@ export class RemoteAccessService {
       getFleetOverview: this.deps.getFleetOverview,
       listSubscriptionProfiles: this.deps.listSubscriptionProfiles,
       listCoraModels: this.deps.listCoraModels,
+      getCapabilities: this.deps.getCapabilities,
+      updateCapabilities: this.deps.updateCapabilities,
+      readCapabilityMemory: this.deps.readCapabilityMemory,
+      updateCapabilityMemory: this.deps.updateCapabilityMemory,
+      readCapabilityProfile: this.deps.readCapabilityProfile,
+      updateCapabilityProfile: this.deps.updateCapabilityProfile,
+      readCapabilityMcp: this.deps.readCapabilityMcp,
+      updateCapabilityAsset: this.deps.updateCapabilityAsset,
       listNativeCliAccounts: this.deps.listNativeCliAccounts,
       listWorkspaceOrganization: this.deps.listWorkspaceOrganization,
       listDirectories: this.deps.listDirectories,
@@ -852,6 +878,17 @@ export class RemoteAccessService {
       getGitCommitDetail: this.deps.getGitCommitDetail,
       getGitHubStatus: this.deps.getGitHubStatus,
       getGitHubWorkQueue: this.deps.getGitHubWorkQueue,
+      readGitHubAutoMerge: this.deps.readGitHubAutoMerge,
+      updateGitHubAutoMerge: this.deps.updateGitHubAutoMerge
+        ? (input) => this.executeMutation(keyB64, input.requestId, "github.autoMerge.update",
+          { workspaceId: input.workspaceId, input: input.input }, () => this.deps.updateGitHubAutoMerge!(input))
+        : undefined,
+      readGitHubReviewDiscussions: this.deps.readGitHubReviewDiscussions,
+      readGitHubReview: this.deps.readGitHubReview,
+      submitGitHubReview: this.deps.submitGitHubReview
+        ? (input) => this.executeMutation(keyB64, input.requestId, "github.review.submit",
+          { workspaceId: input.workspaceId, review: input.review }, () => this.deps.submitGitHubReview!(input))
+        : undefined,
       publishGitHub: this.deps.publishGitHub
         ? (input) =>
             this.executeMutation(
@@ -1017,6 +1054,9 @@ export class RemoteAccessService {
               ...input,
               devicePublicKey: keyB64,
             })
+        : undefined,
+      listNotificationHistory: this.deps.listNotificationHistory
+        ? () => this.deps.listNotificationHistory!(keyB64)
         : undefined,
       beginImageUpload: this.deps.beginImageUpload,
       attachWorkerTerminal: this.deps.attachWorkerTerminal,

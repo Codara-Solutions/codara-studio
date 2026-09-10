@@ -1,4 +1,4 @@
-import type { HumanRunMessage, RunState } from "./types";
+import type { HumanRunMessage, RunQuestionOption, RunState } from "./types";
 
 const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
 
@@ -332,4 +332,116 @@ export function resolveSingleUnresolvedRunQuestion(run: RunState): HumanRunMessa
   if (run.blockedOn) return resolveOpenRunQuestion(run);
   const unresolved = unresolvedRunQuestions(run.humanMessages);
   return unresolved.length === 1 ? unresolved[0] : null;
+}
+
+export function normalizeQuestionOptionsForMessage(
+  question: string,
+  options: RunQuestionOption[] | undefined,
+): RunQuestionOption[] {
+  const normalized = (options ?? [])
+    .slice(0, 4)
+    .map((option, index) => ({
+      id: option.id?.trim() || `option_${index + 1}`,
+      label: option.label?.trim() || `Option ${index + 1}`,
+      description: option.description?.trim() || option.answer?.trim() || option.label?.trim() || "",
+      answer: option.answer?.trim() || option.label?.trim() || "",
+      recommended: option.recommended === true,
+    }))
+    .filter((option) => option.label && option.answer);
+  const legacy = legacyQuestionOptions(question);
+  if (normalized.length === legacy.length && normalized.every((option, index) =>
+    option.id === legacy[index].id && option.answer === legacy[index].answer
+  )) return [];
+  if (normalized.length > 0) {
+    if (!normalized.some((option) => option.recommended)) normalized[0].recommended = true;
+    let seenRecommended = false;
+    for (const option of normalized) {
+      if (!option.recommended) continue;
+      if (!seenRecommended) {
+        seenRecommended = true;
+        continue;
+      }
+      option.recommended = false;
+    }
+    return normalized;
+  }
+  return [];
+}
+
+// Exact signatures of persisted fallback choices, used only to remove them.
+function legacyQuestionOptions(question: string): RunQuestionOption[] {
+  const q = question.toLowerCase();
+  if (/\b(export|csv|json|field|privacy|user data)\b/.test(q)) {
+    return [
+      {
+        id: "recommended_json_minimal",
+        label: "JSON minimal",
+        description: "Export only non-sensitive fields as JSON; safest default for implementation.",
+        answer: "Use JSON format and export only non-sensitive fields. Do not include private or credential-like data.",
+        recommended: true,
+      },
+      {
+        id: "csv_basic",
+        label: "CSV basic",
+        description: "Use CSV for spreadsheet workflows with a conservative field set.",
+        answer: "Use CSV format with a conservative set of non-sensitive fields suitable for spreadsheets.",
+        recommended: false,
+      },
+      {
+        id: "ask_full_scope",
+        label: "Full export",
+        description: "Include a broader export surface; higher privacy and review risk.",
+        answer: "Build a broader export flow, but require explicit field allowlisting and avoid sensitive data by default.",
+        recommended: false,
+      },
+    ];
+  }
+  if (/\b(delete|remove|clean|destructive|wipe|purge)\b/.test(q)) {
+    return [
+      {
+        id: "dry_run",
+        label: "Dry run first",
+        description: "Inspect and report what would change before deleting anything.",
+        answer: "Do a dry run first. Report exactly what would be deleted and wait for approval before destructive changes.",
+        recommended: true,
+      },
+      {
+        id: "safe_delete",
+        label: "Safe delete",
+        description: "Delete only clearly generated/transient items with narrow scope.",
+        answer: "Proceed only with safe deletion of clearly generated or transient items inside the requested scope.",
+        recommended: false,
+      },
+      {
+        id: "manual_review",
+        label: "Manual review",
+        description: "Pause and prepare a checklist for me to approve manually.",
+        answer: "Prepare a manual review checklist and do not delete anything automatically.",
+        recommended: false,
+      },
+    ];
+  }
+  return [
+    {
+      id: "safe_default",
+      label: "Safe default",
+      description: "Choose the conservative implementation with minimal scope.",
+      answer: `Use the safest conservative default for this question: ${question}`,
+      recommended: true,
+    },
+    {
+      id: "fast_path",
+      label: "Fast path",
+      description: "Optimize for speed and a narrow useful result.",
+      answer: `Choose the fastest narrow implementation that still satisfies the request: ${question}`,
+      recommended: false,
+    },
+    {
+      id: "thorough_path",
+      label: "Thorough path",
+      description: "Spend more time to cover edge cases and future-proofing.",
+      answer: `Choose the more thorough implementation and include relevant edge cases: ${question}`,
+      recommended: false,
+    },
+  ];
 }

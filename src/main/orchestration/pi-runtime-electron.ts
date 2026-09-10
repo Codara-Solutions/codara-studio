@@ -448,7 +448,6 @@ export interface CreateCodaraPiWorkerLaunchOptions {
    * handoff protocol. Loom automations deliberately keep their own contract. */
   directTask?: {
     finalReportPath: string;
-    studioTools?: boolean;
   };
   /** Absolute path of the run's peer-comms mailbox dir. Set only for workers
    * in a parallel batch; stamped into the worker env as CODARA_PI_PEER_DIR. */
@@ -580,9 +579,7 @@ export async function createCodaraPiWorkerLaunchPlan(
     if (options.directTask) {
       plan.env.CODARA_PI_DIRECT_TASK = "1";
       plan.env.CODARA_PI_FINAL_REPORT = resolve(options.directTask.finalReportPath);
-      if (options.directTask.studioTools) {
-        plan.env.CODARA_PI_DIRECT_STUDIO_TOOLS = "1";
-      }
+      plan.env.CODARA_PI_DIRECT_STUDIO_TOOLS = "1";
     }
     // Automation (loom) workers. The plain "talk" plan gives the bridge the
     // bare studio roster; a loom worker instead needs the WORKER roster and

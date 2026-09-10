@@ -1090,6 +1090,77 @@ export async function getMemoryStatus(
   };
 }
 
+export interface MemoryDocument {
+  content: string;
+  revision: string;
+  bytesCap: number;
+}
+
+function memoryDocument(scope: MemoryScope, workspaceId: string, profileId: string): MemoryDocument {
+  const path = tierPath(scope, workspaceId, profileId);
+  let raw = "";
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (Buffer.byteLength(raw, "utf8") > 64 * 1024) {
+    throw new Error("This memory file is too large to edit on the phone. Trim it in Studio first.");
+  }
+  return {
+    content: parseMemoryFile(raw).lines.map((line) => line.raw).join("\n"),
+    revision: createHash("sha256").update(raw).digest("hex"),
+    bytesCap: MEMORY_FILE_MAX_BYTES,
+  };
+}
+
+export async function readMemoryDocument(
+  scope: MemoryScope,
+  workspaceId: string | null,
+  profileId: string,
+): Promise<MemoryDocument> {
+  if (scope === "workspace" && !workspaceId) throw new Error("Choose a workspace first.");
+  await ensureMigrated();
+  return withPathLock(tierPath(scope, workspaceId ?? "", profileId), async () => {
+    resolveCoraProfile(profileId);
+    return memoryDocument(scope, workspaceId ?? "", profileId);
+  });
+}
+
+export async function updateMemoryDocument(
+  scope: MemoryScope,
+  workspaceId: string | null,
+  profileId: string,
+  revision: string,
+  change: { action: "save"; content: string } | { action: "clear"; includeUserLines: boolean },
+): Promise<MemoryDocument> {
+  if (scope === "workspace" && !workspaceId) throw new Error("Choose a workspace first.");
+  await ensureMigrated();
+  const wsId = workspaceId ?? "";
+  return withPathLock(tierPath(scope, wsId, profileId), async () => {
+    resolveCoraProfile(profileId);
+    // The comparison shares the writers' lock, so a remember call that lands
+    // while the phone is editing cannot be lost to its older draft.
+    if (memoryDocument(scope, wsId, profileId).revision !== revision) {
+      throw new Error("Memory changed in Studio. Reload the latest version before saving or clearing.");
+    }
+    let file: MemoryFile;
+    if (change.action === "save") {
+      file = parseMemoryFile([...buildHeader(scope, wsId, profileId), change.content].join("\n"));
+      if (fileBytes(file) > MEMORY_FILE_MAX_BYTES) {
+        throw new Error("Memory is limited to 4 KB including its heading. Shorten the text and try again.");
+      }
+    } else if (change.includeUserLines) {
+      file = templateFile(scope, wsId, profileId);
+    } else {
+      file = loadForWrite(scope, wsId, profileId);
+      file.lines = file.lines.filter((line) => line.kind !== "auto" && line.kind !== "cora");
+    }
+    await writeMemoryFile(scope, wsId, file, profileId);
+    return memoryDocument(scope, wsId, profileId);
+  });
+}
+
 export async function setMemoryEnabled(
   scope: MemoryScope,
   workspaceId: string | null,

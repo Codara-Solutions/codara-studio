@@ -84,6 +84,7 @@ import {
   isBackendFailureQuestion,
   MANAGER_TURN_FAILURE_REASON,
   normalizeHumanRunQuestionMessages,
+  normalizeQuestionOptionsForMessage,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
   resolveSingleUnresolvedRunQuestion,
   resumeBlockingRunQuestion,
@@ -1437,13 +1438,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       scheduleAutopilotReview(run.id, input.cwd);
       return run;
     }
-    // Build the options NEXT TO the question text: this branch knows exactly
-    // which decision it is asking (retry vs move on vs replan), so it must
-    // supply matching choices itself. Passing undefined would make
-    // postRunQuestion backfill fallbackQuestionOptions, whose generic
-    // "Safe default / Fast path / Thorough path" set is tuned for
-    // implementation-scope questions and reads as a non sequitur here
-    // (observed in run-msq6zj3l-1e2qv8).
+    // This branch knows the decision, so its choices must match the failure.
     const allStepsResolved =
       run.steps.length > 0 && failedSteps.length > 0 && unfinishedSteps.length === 0;
     let question: string;
@@ -1500,8 +1495,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
         },
       ];
     } else if (run.steps.length === 0) {
-      // Genuinely open-ended — any canned choice would be made up. Options
-      // stay undefined and the fallback set gives the user quick outs.
+      // Open-ended questions keep a free-text reply instead of invented choices.
       question = "I don't have a plan to run yet. Tell me what you'd like me to do.";
     } else {
       question =
@@ -9695,13 +9689,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
     throw new Error(`clientMessageId is already used by a non-question message: ${clientMessageId}`);
   }
 
-  // A failed turn gets NO synthesized options. fallbackQuestionOptions matches
-  // on question prose, so an error string fell through to the generic
-  // safe/fast/thorough triple and produced choices like "Use the safest
-  // conservative default for this question: Cora's manager turn failed...".
-  // Offering them is what turned run-msrlghok-icf7da into four rounds of
-  // answers that each re-ran the same failing turn. The notice already says
-  // what to do: send the message again.
+  // Backend failures offer a retry in the notice, not a product decision.
   const questionOptions = input.backendFailure
     ? []
     : normalizeQuestionOptionsForMessage(message, input.questionOptions);
@@ -16687,9 +16675,7 @@ function normalizeRun(run: RunState): RunState {
         ? "queued"
         : "acknowledged";
     if (message.author === "spark" && message.kind === "question") {
-      // Re-synthesizing here would undo the suppression above on the next load
-      // — and it is also what heals runs parked before the flag existed: their
-      // absurd stored options are dropped the first time they are read.
+      // Drop legacy generated choices when loading previously parked runs.
       message.questionOptions = isBackendFailureQuestion(message)
         ? undefined
         : normalizeQuestionOptionsForMessage(message.message, message.questionOptions);
@@ -17543,113 +17529,6 @@ async function askHumanQuestion(
     backendFailure: context?.backendFailure,
   });
   return posted.run;
-}
-
-function normalizeQuestionOptionsForMessage(
-  question: string,
-  options: SparkManagerQuestionOption[] | undefined,
-): SparkManagerQuestionOption[] {
-  const normalized = (options ?? [])
-    .slice(0, 4)
-    .map((option, index) => ({
-      id: option.id?.trim() || `option_${index + 1}`,
-      label: option.label?.trim() || `Option ${index + 1}`,
-      description: option.description?.trim() || option.answer?.trim() || option.label?.trim() || "",
-      answer: option.answer?.trim() || option.label?.trim() || "",
-      recommended: option.recommended === true,
-    }))
-    .filter((option) => option.label && option.answer);
-  if (normalized.length >= 2) {
-    if (!normalized.some((option) => option.recommended)) normalized[0].recommended = true;
-    let seenRecommended = false;
-    for (const option of normalized) {
-      if (!option.recommended) continue;
-      if (!seenRecommended) {
-        seenRecommended = true;
-        continue;
-      }
-      option.recommended = false;
-    }
-    return normalized;
-  }
-  return fallbackQuestionOptions(question);
-}
-
-function fallbackQuestionOptions(question: string): SparkManagerQuestionOption[] {
-  const q = question.toLowerCase();
-  if (/\b(export|csv|json|field|privacy|user data)\b/.test(q)) {
-    return [
-      {
-        id: "recommended_json_minimal",
-        label: "JSON minimal",
-        description: "Export only non-sensitive fields as JSON; safest default for implementation.",
-        answer: "Use JSON format and export only non-sensitive fields. Do not include private or credential-like data.",
-        recommended: true,
-      },
-      {
-        id: "csv_basic",
-        label: "CSV basic",
-        description: "Use CSV for spreadsheet workflows with a conservative field set.",
-        answer: "Use CSV format with a conservative set of non-sensitive fields suitable for spreadsheets.",
-        recommended: false,
-      },
-      {
-        id: "ask_full_scope",
-        label: "Full export",
-        description: "Include a broader export surface; higher privacy and review risk.",
-        answer: "Build a broader export flow, but require explicit field allowlisting and avoid sensitive data by default.",
-        recommended: false,
-      },
-    ];
-  }
-  if (/\b(delete|remove|clean|destructive|wipe|purge)\b/.test(q)) {
-    return [
-      {
-        id: "dry_run",
-        label: "Dry run first",
-        description: "Inspect and report what would change before deleting anything.",
-        answer: "Do a dry run first. Report exactly what would be deleted and wait for approval before destructive changes.",
-        recommended: true,
-      },
-      {
-        id: "safe_delete",
-        label: "Safe delete",
-        description: "Delete only clearly generated/transient items with narrow scope.",
-        answer: "Proceed only with safe deletion of clearly generated or transient items inside the requested scope.",
-        recommended: false,
-      },
-      {
-        id: "manual_review",
-        label: "Manual review",
-        description: "Pause and prepare a checklist for me to approve manually.",
-        answer: "Prepare a manual review checklist and do not delete anything automatically.",
-        recommended: false,
-      },
-    ];
-  }
-  return [
-    {
-      id: "safe_default",
-      label: "Safe default",
-      description: "Choose the conservative implementation with minimal scope.",
-      answer: `Use the safest conservative default for this question: ${question}`,
-      recommended: true,
-    },
-    {
-      id: "fast_path",
-      label: "Fast path",
-      description: "Optimize for speed and a narrow useful result.",
-      answer: `Choose the fastest narrow implementation that still satisfies the request: ${question}`,
-      recommended: false,
-    },
-    {
-      id: "thorough_path",
-      label: "Thorough path",
-      description: "Spend more time to cover edge cases and future-proofing.",
-      answer: `Choose the more thorough implementation and include relevant edge cases: ${question}`,
-      recommended: false,
-    },
-  ];
 }
 
 function shouldRecordPauseReasonAsUserNote(reason: string): boolean {
@@ -19622,10 +19501,6 @@ async function runPiWorkerSession({
         run.executionMode === "direct" && !run.automationId
           ? {
               finalReportPath: paths.finalReportJson,
-              studioTools:
-                /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|browser|preview|tabs?|website|screenshot)\b/i.test(
-                  `${task.title}\n${task.description}`,
-                ),
             }
           : undefined,
       // Frozen contract with resources/pi-cora/worker.ts: parallel-batch

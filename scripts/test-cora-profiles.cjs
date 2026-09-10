@@ -150,6 +150,58 @@ async function main() {
   );
   if (deleted.stagedDataPath) fs.rmSync(deleted.stagedDataPath, { recursive: true, force: true });
 
+  const editable = await profiles.createCoraProfile({ name: "Editor", instructions: "Initial instructions" });
+  let reservedNameRejected = false;
+  try { await profiles.createCoraProfile({ name: "Cora" }); } catch { reservedNameRejected = true; }
+  check("custom profiles cannot shadow the built-in Cora identity", reservedNameRejected && profiles.resolveCoraProfile("Cora").id === "default");
+  const document = await profiles.readCoraProfileDocument(editable.id);
+  check("profile editor reads the complete Markdown without a local path", document.content.includes("Initial instructions") && document.maxChars === 4000 && document.identityPath === undefined);
+  const concurrent = await Promise.allSettled([
+    profiles.saveCoraProfileDocument(editable.id, document.revision, "# Editor\n\nUpdated instructions"),
+    profiles.saveCoraProfileDocument(editable.id, document.revision, "stale instructions"),
+  ]);
+  check("simultaneous instruction edits preserve the first write", concurrent[0].status === "fulfilled" && concurrent[1].status === "rejected");
+  const updated = await profiles.readCoraProfileDocument(editable.id);
+  check("saved instructions reach the actual Cora prompt", profiles.formatCoraProfileForTurn(editable.id).includes("Updated instructions"));
+  let capRejected = false;
+  try { await profiles.saveCoraProfileDocument(editable.id, updated.revision, "x".repeat(4001)); } catch { capRejected = true; }
+  check("over-limit instructions leave the saved file intact", capRejected && (await profiles.readCoraProfileDocument(editable.id)).revision === updated.revision);
+  fs.writeFileSync(editable.identityPath, "An edit from the desktop", "utf8");
+  let staleRejected = false;
+  try { await profiles.saveCoraProfileDocument(editable.id, updated.revision, "stale"); } catch { staleRejected = true; }
+  check("phone drafts cannot overwrite an intervening desktop edit", staleRejected && fs.readFileSync(editable.identityPath, "utf8") === "An edit from the desktop");
+  let deleteRejected = false;
+  try { await profiles.deleteCoraProfile(editable.id, new Date(0).toISOString()); } catch { deleteRejected = true; }
+  check("stale profile deletion preserves the replacement identity", deleteRejected && profiles.resolveCoraProfile(editable.id).id === editable.id);
+
+  const lifecycle = await load("src/main/orchestration/delete-cora-profile.ts");
+  await profiles.setDefaultCoraProfile(editable.id);
+  await memory.setMemoryEnabled("global", "", false, editable.id);
+  const order = [];
+  let stagedPath;
+  const removed = await lifecycle.deleteCoraProfileWithChats(editable.id, {
+    expectedCreatedAt: editable.createdAt,
+    reassignRuns: async (from, to) => {
+      order.push(profiles.listCoraProfiles().some((profile) => profile.id === from) ? "before" : "after");
+      check("deletion reassigns chats to built-in Cora", from === editable.id && to === "default");
+      return order.length === 1 ? 2 : 1;
+    },
+    trashItem: async (location) => {
+      stagedPath = location;
+      order.push("trash");
+      check("only the staged directory is offered to Trash", location.includes(".deleted-") && !fs.existsSync(path.dirname(editable.identityPath)) && fs.existsSync(location));
+    },
+  });
+  check("both reassignment passes precede trashing", order.join(",") === "before,after,trash" && removed.reassignedRunCount === 3);
+  check("shared deletion returns the authoritative profile list", removed.profiles.every((profile) => profile.id !== editable.id) && removed.profiles.find((profile) => profile.id === "default").isDefault);
+  check("shared deletion clears the deleted profile's toggle state", JSON.parse(fs.readFileSync(path.join(HOME, "memory", "memory-state.json"), "utf8")).profileGlobals[editable.id] === undefined);
+  check("deleted profile data stays recoverable until the OS trashes it", stagedPath && fs.readFileSync(path.join(stagedPath, "PROFILE.md"), "utf8") === "An edit from the desktop");
+  let resurrectionRejected = false;
+  try { await profiles.saveCoraProfileDocument(editable.id, updated.revision, "resurrect"); } catch { resurrectionRejected = true; }
+  check("late edits cannot resurrect a deleted profile directory", resurrectionRejected && !fs.existsSync(path.dirname(editable.identityPath)));
+
+  fs.rmSync(HOME, { recursive: true, force: true });
+
   if (failures) process.exit(1);
   console.log("\nCora profile isolation: all assertions passed");
 }

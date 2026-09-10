@@ -721,6 +721,35 @@ async function main() {
     "hostile path escaped",
   );
 
+  {
+    const target = ["workspace", "ws-editor", "default"];
+    const emptyDocument = await mem.readMemoryDocument(...target);
+    check("memory editor reads an absent tier without creating a file", emptyDocument.content === "" && !fs.existsSync(workspaceFile(mem, "ws-editor")));
+    const edited = await mem.updateMemoryDocument(...target, emptyDocument.revision, {
+      action: "save", content: "# Cora memory notes\n- My note\n- [cora 2026-09-09] Generated note\n",
+    });
+    check("memory editor preserves headings and refreshes its revision", edited.content.includes("# Cora memory notes") && edited.revision !== emptyDocument.revision);
+    check("memory editor omits the managed header", !edited.content.includes("<!--") && !edited.content.includes("workspace: ws-editor"));
+    await mem.rememberAdd("workspace", "ws-editor", ["A concurrent Cora fact"], "run-editor");
+    await expectThrow("stale draft cannot overwrite Cora additions", () => mem.updateMemoryDocument(...target, edited.revision, { action: "save", content: "stale" }), /changed in Studio/);
+    await expectThrow("stale clear cannot delete unseen additions", () => mem.updateMemoryDocument(...target, edited.revision, { action: "clear", includeUserLines: true }), /changed in Studio/);
+    const fresh = await mem.readMemoryDocument(...target);
+    const results = await Promise.allSettled([
+      mem.updateMemoryDocument(...target, fresh.revision, { action: "save", content: fresh.content + "\n- First edit" }),
+      mem.updateMemoryDocument(...target, fresh.revision, { action: "save", content: "second edit" }),
+    ]);
+    check("simultaneous editor saves cannot silently overwrite each other", results[0].status === "fulfilled" && results[1].status === "rejected");
+    const saved = await mem.readMemoryDocument(...target);
+    await expectThrow("editor enforces the byte cap without losing saved content", () => mem.updateMemoryDocument(...target, saved.revision, { action: "save", content: "😀".repeat(1024) }), /4 KB/);
+    check("failed edit leaves the file unchanged", (await mem.readMemoryDocument(...target)).revision === saved.revision);
+    const editorCleared = await mem.updateMemoryDocument(...target, saved.revision, { action: "clear", includeUserLines: false });
+    check("clear Cora entries preserves user notes and headings", editorCleared.content.includes("My note") && editorCleared.content.includes("# Cora memory notes") && !editorCleared.content.includes("Generated note") && !editorCleared.content.includes("concurrent Cora fact"));
+    const clearedAll = await mem.updateMemoryDocument(...target, editorCleared.revision, { action: "clear", includeUserLines: true });
+    check("clear everything removes user notes only when explicitly requested", !clearedAll.content.includes("My note"));
+    await expectThrow("editor requires a workspace for workspace memory", () => mem.readMemoryDocument("workspace", null, "default"), /workspace/);
+    await expectThrow("editor rejects a deleted profile instead of recreating its files", () => mem.updateMemoryDocument("global", null, "missing-profile", clearedAll.revision, { action: "save", content: "no" }), /Unknown Cora profile/);
+  }
+
   fs.rmSync(TMP_HOME, { recursive: true, force: true });
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

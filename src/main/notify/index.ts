@@ -26,6 +26,7 @@ import {
   rearm as policyRearm,
 } from "./policy";
 import type { PublishInput } from "./types";
+import { publishDeliveredNotification } from "./subscribers";
 
 // Unified notifications pipeline: producers (run adapter below,
 // terminal-agent-notify, automation-loop) call publish(); the pure policy
@@ -118,6 +119,7 @@ export function publish(input: PublishInput): void {
     signalTerminalAttention(event);
   }
   if (!decision.deliver) return;
+  publishDeliveredNotification(event);
   void loadPreferences()
     .then((prefs) => deliver(event, prefs.notificationChannels))
     .catch((err) => {
