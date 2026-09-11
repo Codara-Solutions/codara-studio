@@ -43,6 +43,7 @@ async function loadQueue() {
                   export class GitHubCliError extends Error {
                     constructor(code, message) { super(message); this.code = code; }
                   }
+                  globalThis.__queueCliError = GitHubCliError;
                   export function createGitHubCliAdapter() { throw new Error("production stub"); }
                 `,
               };
@@ -769,6 +770,20 @@ async function main() {
       "ws-pr",
       "managed worktrees for scanned repositories win the 64-workspace join cap",
     );
+
+    queue.invalidateGitHubWorkQueueCache();
+    const noRemote = dependencies({ repoForCwd: () => {
+      throw new globalThis.__queueCliError("command-failed", "no git remotes found");
+    } });
+    const noRemoteStatus = await queue.readGitHubWorkQueue(noRemote.value);
+    assert.equal(noRemoteStatus.errors.length, 0, "folders without GitHub remotes are not refresh failures");
+    queue.invalidateGitHubWorkQueueCache();
+    const inaccessible = dependencies({ repoForCwd: () => {
+      throw new globalThis.__queueCliError("command-failed", "repository private/repo not found");
+    } });
+    const inaccessibleStatus = await queue.readGitHubWorkQueue(inaccessible.value);
+    assert.ok(inaccessibleStatus.errors.length > 0, "inaccessible repositories must remain visible as errors");
+    assert.match(inaccessibleStatus.errors[0].message, /account access/);
 
     console.log(
       "PASS GitHub Work Queue singleflight, bounds, joins, partial failures, and fork safety",

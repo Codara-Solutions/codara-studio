@@ -328,6 +328,12 @@ async function buildGitHubWorkQueue(
             repository: await dependencies.github.resolveRepository(root.canonicalRoot),
           };
         } catch (cause) {
+          // Local folders and repositories without a GitHub remote are valid
+          // workspaces, but have no GitHub queue to refresh.
+          if (cause instanceof GitHubCliError && cause.code === "command-failed"
+            && /not a git repository|no git remotes?|none of the git remotes.*(?:github|supported)|does not have any remotes/i.test(cause.message)) {
+            return null;
+          }
           addError(
             errors,
             queueError(
@@ -898,7 +904,9 @@ function queueError(
     code,
     message:
       stage === "resolve-repository"
-        ? "A GitHub repository could not be identified."
+        ? code === "not-authenticated"
+          ? "Reconnect GitHub in Studio, then refresh."
+          : "Check this project's GitHub remote and account access in Studio."
         : stage === "list-issues"
           ? "Open issues could not be loaded."
           : "Open pull requests could not be loaded.",
