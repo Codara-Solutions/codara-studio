@@ -442,8 +442,9 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /\bGoodbye\b!?/i,
     ],
   },
-  // Codex activity needs the elapsed-time footer. Bare status words also
-  // occur in prompt drafts and transcript text, so they cannot start a turn.
+  // Unframed Codex output needs the elapsed-time footer. Bare status words
+  // also occur in drafts and transcripts; classifyCodexScreen uses their
+  // position relative to the composer to recognize timer-free status lines.
   // Codex has no AskUserQuestion-style MCQ, so it never classifies as
   // blocked — "needs you" is Claude-only.
   codex: {
@@ -568,9 +569,17 @@ export function classifyCodexScreen(tail: string): "working" | "idle" | null {
       break;
     }
   }
+  const footer = composer < 0 ? "" : lines.slice(composer + 1).join("\n");
+  const hasComposer = composer >= 0 && (CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer))
+    || /\?\s*for\s*shortcuts/i.test(footer));
   const above = lines.slice(0, composer < 0 ? lines.length : composer).filter((line) => line.trim());
   for (let i = above.length - 1; i >= 0; i--) {
     const status = above[i];
+    // Codex can omit the timer and animate only the color of "Working".
+    // Accept that exact live status above a recognized composer, never words
+    // in its editable draft or arbitrary chunks from the output stream.
+    if (hasComposer && i === above.length - 1
+      && /^\s*(?:[•▌]\s*)?Working(?:…|\.{3})?(?:\s*\(\s*esc\s+to\s+interrupt\s*\))?\s*$/i.test(status)) return "working";
     if (
       (i === above.length - 1 || /^\s*•?\s*Waiting for background terminal\b/i.test(status)) &&
       RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))
@@ -580,18 +589,14 @@ export function classifyCodexScreen(tail: string): "working" | "idle" | null {
     // live block, so an older timer cannot override a completed response.
     if (!/^\s+(?:└|│|\S)/.test(status)) break;
   }
-  if (composer < 0) return null;
-  const footer = lines.slice(composer + 1).join("\n");
-  return CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer)) || /\?\s*for\s*shortcuts/i.test(footer)
-    ? "idle"
-    : null;
+  return hasComposer ? "idle" : null;
 }
 
 // Narrow post-submit detector for Cora's worker launch driver. Unlike the
 // always-on terminal classifier, its input tap starts only after the agent TUI
 // is input-ready and immediately before Codara pastes a worker prompt. That
 // makes Codex 0.144's bare shimmer word "Working" a safe positive here even
-// though it is deliberately too broad for general terminal polling.
+// though it is deliberately too broad for unframed output classification.
 export function workerSubmitTurnStarted(
   runtime: PublicAgentRuntime,
   visible: string,

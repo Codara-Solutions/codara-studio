@@ -25,6 +25,18 @@ const esbuild = require("esbuild");
       await paint(busy(elapsed));
       assert.equal(screen.state(), "working", elapsed);
     }
+    for (const status of ["• Working", "Working", "• Working…", "• Working (esc to interrupt)"]) {
+      await paint(`\x1b[2J\x1b[HOpenAI Codex\x1b[5;1H${status}\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project`);
+      assert.equal(screen.state(), "working", "the live shimmer does not require an elapsed timer");
+      await paint(`\x1b[5;${status.indexOf("Working") + 1}H\x1b[38;2;128;128;128mW\x1b[m`);
+      assert.equal(screen.state(), "working", "a color-only shimmer keeps the same activity");
+      await paint("\x1b[5;1H\x1b[2K");
+      assert.equal(screen.state(), "idle", "erasing the shimmer returns to ready");
+    }
+    await paint("\x1b[2J\x1b[HFinal response.\r\n› Explain this status\r\n• Working\r\ngpt-6-astra high fast · ~/project");
+    assert.equal(screen.state(), "idle", "a bare shimmer quoted in the draft is still editable text");
+    await paint("\x1b[2J\x1b[H• Working\r\nAll tests passed.\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/project");
+    assert.equal(screen.state(), "idle", "a completed response supersedes an old shimmer");
     await paint(busy("9m 21s"));
     for (const data of ["\x1b[5;3HW", "\x1b[5;4Ho", "\x1b[5;6Hking", "\x1b[5;16H2", "\x1b]0;⠙ project\x07", "\x1b[2 q"]) {
       await paint(data);

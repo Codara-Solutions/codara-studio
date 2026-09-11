@@ -61,6 +61,7 @@ import {
 import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { preserveTerminalViewport } from "./terminalViewport";
+import { createTerminalWakeRecovery } from "./terminalWakeRecovery";
 
 export type { SparkOpenInput };
 
@@ -3770,48 +3771,33 @@ export function useTerminalSession({
   // System sleep does not necessarily toggle React's `visible` prop, so the
   // normal reveal recovery above may never run. Listen to Electron's explicit
   // host-resume signal and browser focus/visibility as fallbacks. Repair the
-  // WebGL/DOM renderer first, re-fit the grid, force a full repaint, and only
-  // then acknowledge main's sleep pause so queued PTY bytes cannot race a
-  // blank or context-lost canvas.
+  // renderer before resuming PTY delivery, then repaint after the queued bytes
+  // and final layout frames. The first repaint alone can be discarded when
+  // Chromium restores the canvas or xterm changes its grid during unlock.
   useEffect(() => {
-    let recoveryFrame: number | null = null;
-    let recoveryTimer: number | null = null;
-    let recoveryGeneration = 0;
-    const recoverAfterHostWake = () => {
-      recoveryGeneration += 1;
-      const generation = recoveryGeneration;
-      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
-      if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
-      const finishRecovery = () => {
-        if (generation !== recoveryGeneration) return;
-        if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
-        if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
-        recoveryFrame = null;
-        recoveryTimer = null;
+    const wakeRecovery = createTerminalWakeRecovery({
+      fit: () => {
+        const host = container.current;
+        // Unlock can briefly expose zero-size geometry before the next frame.
+        if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
         try {
           resizeXtermForOwner();
         } catch {
-          /* the host can still be transitioning from lock-screen geometry */
+          /* lock-screen geometry can still be settling */
         }
+      },
+      repaint: () => recoverRendererRef.current?.(),
+      resume: async () => {
         refitAndResizeRef.current?.();
-        recoverRendererRef.current?.();
+        if (!readOnlyRef.current) await window.spark.pty.resume(sessionId);
+      },
+      afterWrite: (done) => {
         const term = termRef.current;
-        if (term) {
-          try {
-            term.refresh(0, Math.max(0, term.rows - 1));
-          } catch {
-            /* terminal may be disposing during a simultaneous tab close */
-          }
-        }
-        if (!readOnlyRef.current) void window.spark.pty.resume(sessionId);
-      };
-      // Prefer the next paint so xterm repairs before queued bytes drain. A
-      // Chromium may throttle a fully occluded window; never let that leave the
-      // PTY backlog paused indefinitely. The timer drains data into xterm's
-      // buffer and a later focus/visibility recovery repaints it if necessary.
-      recoveryFrame = window.requestAnimationFrame(finishRecovery);
-      recoveryTimer = window.setTimeout(finishRecovery, 250);
-    };
+        if (term) term.write("", done);
+        else done();
+      },
+    });
+    const recoverAfterHostWake = () => wakeRecovery.recover();
     const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
@@ -3830,12 +3816,10 @@ export function useTerminalSession({
     // event will follow in that case, so apply the current state immediately.
     onVisibility();
     return () => {
-      recoveryGeneration += 1;
+      wakeRecovery.dispose();
       offHostResume();
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
-      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
-      if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
     };
   }, [resizeXtermForOwner, sessionId]);
 

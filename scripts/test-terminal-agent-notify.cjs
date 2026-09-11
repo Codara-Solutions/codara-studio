@@ -610,8 +610,9 @@ async function main() {
   feed("p13", "\x1b[5;1H\x1b[2K\x1b[7;1H\x1b[J› Explain this status\r\nWorking (9m 21s • esc to interrupt)\r\ngpt-6-astra high fast · ~/src");
   await waitForState("p13", "idle");
   check("a cleared busy footer and a quoted footer in the draft resolve to ready", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "idle");
-  feed("p13", "\x1b[5;1H• Working (0s • esc to interrupt)");
+  feed("p13", "\x1b[5;1H• Working");
   await waitForState("p13", "working");
+  check("a timer-free Codex shimmer updates the authoritative pane state", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
   feed("p13", "\x1b]9;Codex: turn completed\x07");
   await waitForState("p13", "idle");
   feed("p13", "\x1b[5;6Hking");
