@@ -2311,7 +2311,15 @@ export function useTerminalSession({
         agentStateRevision += 1;
         authoritativeAgentState = state.runtime === "codex" || state.runtime === "claude"
           ? { runtime: state.runtime, state: state.state } : null;
-        if (activeRuntime === "codex" && state.state === "done") resetAgentPhase({ exitSignal: true });
+        if (activeRuntime === "codex" && state.state === "done") {
+          resetAgentPhase({ exitSignal: true });
+          return;
+        }
+        // Main's sweep can follow the local poller's confirmation. That poller
+        // will not report an unchanged frame again, so apply the event itself.
+        if (authoritativeAgentState?.runtime === activeRuntime && state.state !== "launching") {
+          reportRuntimeState(state.state);
+        }
       };
       const offAgentState = window.spark.terminalNotify?.onState?.(observeAgentState);
       cleanups.push(() => offAgentState?.());

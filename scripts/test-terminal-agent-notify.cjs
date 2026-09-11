@@ -592,8 +592,9 @@ async function main() {
     !mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "restored-codex"));
 
   T.dimensions = new Map([["p13", { cols: 100, rows: 20 }]]);
-  feed("p13", "\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/src");
+  feed("p13", "\x1b[2J\x1b[HOpenAI Codex (v0.154.0)\x1b[5;1H• Working (9m 21s • esc to interrupt)\x1b[6;10H⠁ ⠂ ⠄ ⠈ ⠐ ⠠ ⡀ ⢀\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/src");
   await waitForState("p13", "working");
+  check("Codex 0.154 composer sparkles do not hide a working turn", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
   feed("p13", "\x1b[5;6Hking\x1b[5;16H2");
   await sleep(16_000);
   check("a rendered Codex busy footer survives partial repaints and long silence", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");

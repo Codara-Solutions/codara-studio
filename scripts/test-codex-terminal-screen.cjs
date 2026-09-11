@@ -25,6 +25,19 @@ const esbuild = require("esbuild");
       await paint(busy(elapsed));
       assert.equal(screen.state(), "working", elapsed);
     }
+    // Codex rust-v0.154.0 draws these eight Braille dots on the Astra composer.
+    // Source: codex-rs/tui/src/bottom_pane/chat_composer/sparkle.rs (DOTS).
+    const stars = "⠁ ⠂ ⠄ ⠈ ⠐ ⠠ ⡀ ⢀";
+    for (const status of ["• Working (5s • esc to interrupt)", "• Working"]) {
+      await paint(`\x1b[2J\x1b[HOpenAI Codex (v0.154.0)\x1b[5;1H${status}\x1b[6;8H${stars}\x1b[7;1H› Ask Codex to do anything    ${stars}\x1b[8;10H${stars}\x1b[9;1Hgpt-6-astra xhigh · ~/project · Respond to greeting`);
+      assert.equal(screen.state(), "working", "sparkles on the composer padding must not hide the live status");
+      await paint("\x1b[6;8H\x1b[38;2;100;100;110m⢀\x1b[m");
+      assert.equal(screen.state(), "working", "an animation-only repaint keeps the turn working");
+      await paint("\x1b[5;1H\x1b[2K");
+      assert.equal(screen.state(), "idle", "sparkles on their own do not imply work");
+      await paint(`\x1b[5;1HFinal response.\x1b[7;3HExplain this status\x1b[K\x1b[8;1H${status}\x1b[K`);
+      assert.equal(screen.state(), "idle", "quoted status text in a sparkling draft stays idle");
+    }
     for (const status of ["• Working", "Working", "• Working…", "• Working (esc to interrupt)"]) {
       await paint(`\x1b[2J\x1b[HOpenAI Codex\x1b[5;1H${status}\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project`);
       assert.equal(screen.state(), "working", "the live shimmer does not require an elapsed timer");

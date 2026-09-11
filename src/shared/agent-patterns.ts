@@ -573,6 +573,12 @@ export function classifyCodexScreen(tail: string): "working" | "idle" | null {
   const hasComposer = composer >= 0 && (CODEX_LIVE_IDENTITY.some((pattern) => pattern.test(footer))
     || /\?\s*for\s*shortcuts/i.test(footer));
   const above = lines.slice(0, composer < 0 ? lines.length : composer).filter((line) => line.trim());
+  // Codex 0.154 paints these Astra sparkles in the composer's padding row.
+  // Skip only decoration directly beside a recognized composer; transcript
+  // text must still separate an old busy footer from the current prompt.
+  if (hasComposer) {
+    while (above.length && /^[\s⠁⠂⠄⠈⠐⠠⡀⢀]+$/.test(above[above.length - 1])) above.pop();
+  }
   for (let i = above.length - 1; i >= 0; i--) {
     const status = above[i];
     // Codex can omit the timer and animate only the color of "Working".
