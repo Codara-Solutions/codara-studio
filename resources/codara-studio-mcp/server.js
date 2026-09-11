@@ -126,13 +126,15 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_snapshot",
     description:
-      "Return a compact outline of rendered preview content with selectors, accessible labels, current form values, and control states. Hidden content is omitted. Use to inspect and verify the page without reading full HTML.",
+      "Read the page as a compact semantic outline with actionable @references, labels, values, and states. Pass @references as selectors to click/type/press_key/mouse/hover/wait_for. Hidden content and inactive modal backgrounds are omitted. selector scopes a section; since=previous snapshotId returns a diff when smaller, otherwise a full snapshot. Re-read after a stale reference; use screenshots for visual content.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "string" },
         mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
         maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
+        selector: { type: "string" },
+        since: { type: "string" },
       },
       additionalProperties: false,
     },
@@ -140,13 +142,13 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_click",
     description:
-      "Click an element by CSS selector inside the target preview tab. Fires pointer/mouse events plus element.click() so React/Vue handlers fire.",
+      "Click one element by snapshot @reference or unique CSS selector. Waits briefly for visibility and actionability; ambiguous, stale, disabled, or covered targets fail. Uses DOM events; use mouse when trusted native input is required.",
     inputSchema: {
       type: "object",
       required: ["selector"],
       properties: {
         tabId: { type: "string" },
-        selector: { type: "string", description: "CSS selector. The first match is used." },
+        selector: { type: "string", description: "Snapshot @reference or unique CSS selector." },
       },
       additionalProperties: false,
     },
@@ -154,7 +156,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_type",
     description:
-      "Type text into an input/textarea/contentEditable, or select a native dropdown option by its exact value. clearFirst clears text fields before typing; dropdown selection always replaces the current value.",
+      "Type text into an input/textarea/contentEditable by snapshot @reference or unique CSS selector, or select a native dropdown option by its exact value. clearFirst clears text fields before typing; dropdown selection always replaces the current value.",
     inputSchema: {
       type: "object",
       required: ["selector", "text"],
@@ -424,6 +426,7 @@ const PREVIEW_TOOLS = [
               timeoutMs: { type: "number" },
               mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
               maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
+              since: { type: "string" },
               x: { type: "number" },
               y: { type: "number" },
               deltaX: { type: "number" },
@@ -1770,37 +1773,13 @@ function isTransportTimeout(err) {
   return Boolean(err && typeof err.message === "string" && err.message.includes("agent socket timeout"));
 }
 
-// terminal.create and preview.navigate mint renderer tabs; terminal.write and
-// terminal.close must prove they belong to the same run that minted their
-// terminal. For terminal ownership, the launch-time SPARK_RUN_ID is the
-// authority: a model-supplied runId must never let one run impersonate another.
-// User-facing agents with no SPARK_RUN_ID keep null-scoped ownership. EVERY
-// preview op carries the same best-effort caller-supplied routing stamp, not
-// just navigate: the renderer scopes implicit tab picking to the calling run,
-// so an unstamped snapshot/click/resize would fall back to picking whatever
-// preview tab happened to be open, including the user's.
+// Browser and terminal routing belongs to the launching process, not tool JSON.
 function injectRunIdForStudioOwnership(rpc, args) {
-  if (
-    rpc !== "terminal.read" &&
-    rpc !== "terminal.create" &&
-    rpc !== "terminal.write" &&
-    rpc !== "terminal.close" &&
-    !rpc.startsWith("preview.")
-  ) return;
-  if (
-    rpc === "terminal.read" ||
-    rpc === "terminal.create" ||
-    rpc === "terminal.write" ||
-    rpc === "terminal.close"
-  ) {
-    const envRunId = (process.env.SPARK_RUN_ID || "").trim();
-    if (envRunId) args.runId = envRunId;
-    else delete args.runId;
-    return;
-  }
-  if (typeof args.runId === "string" && args.runId.trim().length > 0) return;
-  const envRunId = process.env.SPARK_RUN_ID;
-  if (envRunId && envRunId.trim().length > 0) args.runId = envRunId.trim();
+  if (!rpc.startsWith("preview.") && !["terminal.read", "terminal.create", "terminal.write", "terminal.close"].includes(rpc)) return;
+  const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+  if (envRunId) args.runId = envRunId;
+  else delete args.runId;
+  if (rpc.startsWith("preview.")) delete args.workspaceId;
 }
 
 function resolveSparkHome() {

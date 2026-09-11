@@ -7,6 +7,7 @@ import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
+import { scopePreviewWorkspace } from "./preview-workspace";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
@@ -1001,12 +1002,6 @@ async function handleTerminalClose(
   }
 }
 
-async function scopePreviewWorkspace(params: Record<string, unknown>): Promise<void> {
-  if (typeof params.runId !== "string" || !params.runId) return;
-  const run = await (await getRunStore()).getRun(params.runId);
-  if (run?.workspaceId) params.workspaceId = run.workspaceId;
-}
-
 async function handlePreviewOp(
   method: string,
   params: Record<string, unknown>,
@@ -1015,7 +1010,7 @@ async function handlePreviewOp(
   const op = method.replace(/^preview\./, "") as PreviewOpName;
   const previewParams: PreviewOpParams = { ...params };
   try {
-    await scopePreviewWorkspace(previewParams);
+    await scopePreviewWorkspace(previewParams, async (runId) => (await getRunStore()).getRun(runId));
     if (op === "navigate" && typeof previewParams.url === "string") {
       const reachable = await waitForLoopbackPreviewServer(previewParams.url);
       if (!reachable) {
@@ -1040,7 +1035,7 @@ async function handlePreviewInputRpc(
 ): Promise<JsonRpcResponse> {
   const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
-    await scopePreviewWorkspace(params);
+    await scopePreviewWorkspace(params, async (runId) => (await getRunStore()).getRun(runId));
     const result = await handlePreviewInputOp(op, params);
     return successResponse(id, result);
   } catch (err) {

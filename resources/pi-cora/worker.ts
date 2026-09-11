@@ -6,6 +6,7 @@ import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
+import { CORA_REPLY_LANGUAGE, CORA_BROWSER_WORKFLOW } from "./prompt";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
@@ -96,6 +97,9 @@ function directTaskSystemPrompt(systemPrompt: string, mcpSuffix: string): string
   return `${systemPrompt}
 
 You are Cora, handling one user request directly.
+
+- ${CORA_REPLY_LANGUAGE}
+- ${CORA_BROWSER_WORKFLOW}
 
 - For greetings, opinions, and questions that need no project work, answer
   naturally and warmly. Do not inspect the repository or say "acknowledged",
@@ -315,6 +319,8 @@ You are a Cora engineering worker running inside Codara Studio's pinned Pi
 harness. The user-facing Cora manager has delegated one bounded task to you.
 
 Worker contract:
+- ${CORA_REPLY_LANGUAGE}
+- ${CORA_BROWSER_WORKFLOW}
 - Treat the task prompt as an exact outcome and path-access contract.
 - Work directly in the supplied current directory using Pi's native read,
   search, edit, write, and shell tools. Do not merely explain what another

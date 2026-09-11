@@ -3993,7 +3993,9 @@ export default function App() {
       // terminal tab OR the source leaf currently hosts a worker chip (manual
       // claude/codex panes are exactly this case). Those still get the click-to-
       // open chip; they just never auto-open.
+      const sourceWorkspaceId = activeIdRef.current;
       const sourceTab = tabs.tabs.find((t) => t.id === tabId);
+      if (!sourceWorkspaceId || !sourceTab) return;
       const isWorkerScopedTab =
         sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers";
       const sourceLeaf =
@@ -4042,7 +4044,7 @@ export default function App() {
       void window.spark.preview
         .probeLocalServer(url)
         .then((reachable) => {
-          if (!reachable) return;
+          if (!reachable || activeIdRef.current !== sourceWorkspaceId) return;
           // Re-run both dedupes against post-await state: the probe takes up to
           // a second, in which the user (or another pane) may have opened this
           // origin. Suppression is recorded only where a tab exists — a probe
@@ -4059,7 +4061,7 @@ export default function App() {
           lastOpenedUrlByTerminalRef.current.set(paneId, url);
           // focus:false — an auto-detected preview opens in the background so it
           // doesn't steal the active tab from a chat the user is working in.
-          newPreviewTab(url, { runId: ownerRunId, focus: false });
+          newPreviewTab(url, { runId: ownerRunId, workspaceId: sourceWorkspaceId, focus: false });
         })
         .catch(() => undefined);
     },

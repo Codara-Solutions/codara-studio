@@ -471,6 +471,14 @@ function sortedEqual(actual, expected, label) {
     process.env.CODARA_PI_DIRECT_TASK = "1";
     delete require.cache[require.resolve(SERVER)];
     const directMemoryBridge = require(SERVER);
+    await directMemoryBridge.callToolByName("codara_preview_snapshot", { runId: "run-spoofed", workspaceId: "unrelated" });
+    assert.equal(received.at(-1).params.runId, "run-trusted", "browser observations use the calling run");
+    assert.equal(received.at(-1).params.workspaceId, undefined, "browser workspace is resolved from the run");
+    await directMemoryBridge.callToolByName("codara_preview_run", { steps: [
+      { action: "navigate", url: "https://example.test", runId: "run-spoofed", workspaceId: "unrelated" },
+    ] });
+    assert.equal(received.at(-1).params.runId, "run-trusted", "batched browser actions use the same owner");
+    assert.equal(received.at(-1).params.workspaceId, undefined);
     await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"], runId: "run-spoofed" });
     assert.strictEqual(received.at(-1).method, "orchestrator.remember");
     assert.strictEqual(received.at(-1).params.runId, "run-trusted", "direct memory stays in the calling workspace/profile");

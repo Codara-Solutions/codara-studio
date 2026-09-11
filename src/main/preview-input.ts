@@ -23,6 +23,7 @@
 
 import { ipcMain, webContents, type WebContents } from "electron";
 
+import { createPreviewDOM } from "../shared/preview-dom";
 import { previewKeyEvents } from "./preview-keyboard";
 import { requestPreviewOp } from "./preview-bridge";
 import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
@@ -191,7 +192,7 @@ async function resolvePoint(
   const probe = `(${centerProbe.toString()})(${JSON.stringify({
     selector,
     scrollIntoView: opts.scrollIntoView,
-  })})`;
+  })}, ${createPreviewDOM.toString()})`;
   const rect = (await wc.executeJavaScript(probe, false)) as
     | { ok: true; x: number; y: number }
     | { ok: false; error: string }
@@ -204,12 +205,11 @@ async function resolvePoint(
 
 // Stringified and run in the guest. Returns the element's viewport-relative
 // center in CSS pixels — the coordinate space sendInputEvent consumes.
-function centerProbe(opts: { selector: string; scrollIntoView: boolean }) {
-  const el = document.querySelector(opts.selector) as HTMLElement | null;
+async function centerProbe(opts: { selector: string; scrollIntoView: boolean }, createDOM: typeof createPreviewDOM) {
+  const dom = createDOM();
+  const el = opts.scrollIntoView ? await dom.ready(opts.selector) : dom.find(opts.selector);
   if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
-  if (opts.scrollIntoView) el.scrollIntoView({ block: "center", inline: "center" });
-  const rect = el.getBoundingClientRect();
-  return { ok: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  return { ok: true, ...dom.point(el) };
 }
 
 function normalizeModifiers(raw: unknown): string[] {
@@ -570,7 +570,7 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
   }
   if (typeof params.selector === "string" && params.selector) {
     const focused = await wc.executeJavaScript(
-      `(() => { const el = document.querySelector(${JSON.stringify(params.selector)});
+      `(async () => { const el = await (${createPreviewDOM.toString()})().ready(${JSON.stringify(params.selector)});
         if (!el || typeof el.focus !== "function") return false;
         el.focus(); return document.activeElement === el || el.contains(document.activeElement); })()`,
       false,

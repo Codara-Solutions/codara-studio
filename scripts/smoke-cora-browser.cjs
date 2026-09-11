@@ -66,7 +66,7 @@ async function main() {
       "codara_preview_list", "codara_preview_url", "codara_preview_navigate", "codara_preview_snapshot",
       "codara_preview_click", "codara_preview_type", "codara_preview_press_key", "codara_preview_key",
       "codara_preview_mouse", "codara_preview_scroll", "codara_preview_screenshot", "codara_preview_wait_for",
-      "codara_preview_run",
+      "codara_preview_run", "codara_preview_resize",
       "submit_result",
     ]);
     const names = trace.calls.flatMap((call) => {

@@ -10,6 +10,9 @@
 // pulling in Playwright or a CDP layer.
 
 import type { CoraWhiteboard } from "@shared/types";
+import { createPreviewDOM } from "@shared/preview-dom";
+import { snapshotProbe } from "./domSnapshot";
+import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions";
 import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
 
 type PreviewOpName =
@@ -187,7 +190,7 @@ async function snapshot(params: Record<string, unknown>): Promise<unknown> {
   const mode = readString(params, "mode") ?? "outline";
   const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
   const tab = requireTab(params);
-  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes })})`;
+  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()})`;
   const value = await runGuestScript(tab.handle, code);
   return value;
 }
@@ -246,7 +249,7 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
-  const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })})`;
+  const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
   const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
   showPreviewControl(tab, { action: "Clicking", runId: readString(params, "runId"), x: result.x, y: result.y });
   return result;
@@ -259,7 +262,7 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   if (text === null) throw new Error("type requires 'text'");
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
-  const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })})`;
+  const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })}, ${createPreviewDOM.toString()})`;
   const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
   showPreviewControl(tab, { action: "Typing", runId: readString(params, "runId"), x: result.x, y: result.y });
   return result;
@@ -270,7 +273,7 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   if (!key) throw new Error("press_key requires 'key'");
   const selector = readString(params, "selector");
   const tab = requireTab(params);
-  const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })})`;
+  const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }
 
@@ -280,7 +283,7 @@ async function waitFor(params: Record<string, unknown>): Promise<unknown> {
   const state = (readString(params, "state") as "attached" | "visible" | "hidden" | null) ?? "visible";
   const timeoutMs = readNumber(params, "timeoutMs") ?? 5_000;
   const tab = requireTab(params);
-  const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })})`;
+  const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }
 
@@ -363,156 +366,4 @@ function readNumber(params: Record<string, unknown>, key: string): number | null
 function readBool(params: Record<string, unknown>, key: string): boolean | null {
   const value = params[key];
   return typeof value === "boolean" ? value : null;
-}
-
-// ---------------------------------------------------------------------------
-// Probes — these functions are stringified and run inside the <webview>'s
-// renderer context via executeJavaScript. They MUST be self-contained: no
-// closures over the renderer's host module scope, no TypeScript-only syntax.
-// Inputs/outputs travel as JSON.
-// ---------------------------------------------------------------------------
-
-function snapshotProbe(opts: { mode: string; maxBytes: number }) {
-  const encoder = new TextEncoder();
-  const limit = Number.isFinite(opts.maxBytes) ? Math.max(1, Math.floor(opts.maxBytes)) : 12_000;
-  const lines: string[] = [];
-  let bytes = 0;
-  let truncated = false;
-  function describe(el: Element, depth: number): string {
-    const tag = el.tagName.toLowerCase();
-    const role = el.getAttribute("role") || "";
-    const labelledBy = (el.getAttribute("aria-labelledby") || "").split(/\s+/)
-      .map((id) => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(" ");
-    const labels = "labels" in el ? Array.from((el as HTMLInputElement).labels ?? [])
-      .map((label) => Array.from(label.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ").trim()).filter(Boolean).join(" ") : "";
-    const ownText = Array.from(el.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" ");
-    const semanticText = /^(a|button|summary|h[1-6]|option)$/.test(tag) || role;
-    const name = (el.getAttribute("aria-label") || labelledBy || labels || el.getAttribute("title") ||
-      (semanticText ? (el as HTMLElement).innerText : ownText) || "").replace(/\s+/g, " ").trim().slice(0, 160);
-    const id = el.id ? `#${el.id}` : "";
-    const cls = el.className && typeof el.className === "string" && el.className.trim()
-      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}` : "";
-    const meta: string[] = [];
-    if (role) meta.push(`role=${role}`);
-    if (name) meta.push(`name=${JSON.stringify(name)}`);
-    for (const attr of ["name", "data-testid", "aria-expanded", "aria-checked", "aria-selected"]) {
-      if (el.hasAttribute(attr)) meta.push(`${attr}=${JSON.stringify(el.getAttribute(attr))}`);
-    }
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-      meta.push(`value=${JSON.stringify(el instanceof HTMLInputElement && el.type === "password" ? "[redacted]" : el.value)}`);
-      if (el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")) meta.push(`checked=${el.checked}`);
-      if ("readOnly" in el && el.readOnly) meta.push("readonly");
-    }
-    if (el.matches(":disabled")) meta.push("disabled");
-    if (el instanceof HTMLSelectElement) {
-      meta.push(`options=${JSON.stringify(Array.from(el.options).map((option) => ({
-        value: option.value, label: option.label, selected: option.selected,
-        ...(option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled) ? { disabled: true } : {}),
-      })))}`);
-    }
-    return `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
-  }
-  function walk(el: Element, depth: number): void {
-    if (truncated || /^(SCRIPT|STYLE|NOSCRIPT|META|LINK|OPTION|OPTGROUP)$/.test(el.tagName)) return;
-    const style = getComputedStyle(el);
-    if (style.display === "none") return;
-    // display:contents has no box of its own; its children can still be visible.
-    const rendered = style.visibility !== "hidden" && style.visibility !== "collapse" && el.getClientRects().length > 0;
-    if (rendered) {
-      const line = describe(el, depth);
-      const addition = (lines.length ? "\n" : "") + line;
-      const size = encoder.encode(addition).length;
-      if (bytes + size > limit) { truncated = true; return; }
-      lines.push(line);
-      bytes += size;
-    }
-    for (const child of Array.from(el.children)) walk(child, depth + (rendered ? 1 : 0));
-  }
-  if (document.body) walk(document.body, 0);
-  return { url: location.href, title: document.title, mode: opts.mode, snapshot: lines.join("\n"), truncated };
-}
-
-function clickProbe(opts: { selector: string }) {
-  const el = document.querySelector(opts.selector) as HTMLElement | null;
-  if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
-  el.scrollIntoView({ block: "center" });
-  const rect = el.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  const opts2 = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 } as MouseEventInit;
-  el.dispatchEvent(new PointerEvent("pointerdown", opts2 as PointerEventInit));
-  el.dispatchEvent(new MouseEvent("mousedown", opts2));
-  el.dispatchEvent(new PointerEvent("pointerup", opts2 as PointerEventInit));
-  el.dispatchEvent(new MouseEvent("mouseup", opts2));
-  el.click();
-  return { ok: true, tag: el.tagName.toLowerCase(), x, y };
-}
-
-function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }) {
-  const el = document.querySelector(opts.selector) as HTMLElement | null;
-  if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
-  el.scrollIntoView({ block: "nearest" });
-  const rect = el.getBoundingClientRect();
-  const point = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  if (el instanceof HTMLSelectElement) {
-    if (el.disabled) return { ok: false, error: "select is disabled" };
-    if (el.multiple) return { ok: false, error: "multiple selection is not supported by type" };
-    const option = Array.from(el.options).find((option) => option.value === opts.text);
-    if (!option) return { ok: false, error: `select has no option with value: ${opts.text}` };
-    if (option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled)) {
-      return { ok: false, error: "select option is disabled" };
-    }
-    el.focus();
-    el.value = option.value;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, value: el.value, ...point };
-  }
-  const input = el as HTMLInputElement | HTMLTextAreaElement;
-  el.focus();
-  if (opts.clearFirst && "value" in input) input.value = "";
-  if ("value" in input) {
-    input.value = (opts.clearFirst ? "" : input.value ?? "") + opts.text;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  } else if ((el as HTMLElement).isContentEditable) {
-    document.execCommand("insertText", false, opts.text);
-  } else {
-    return { ok: false, error: "element is not an input, textarea, or contentEditable" };
-  }
-  return { ok: true, value: "value" in input ? input.value : undefined, ...point };
-}
-
-function pressKeyProbe(opts: { key: string; selector: string | null }) {
-  const target = (opts.selector ? document.querySelector(opts.selector) : document.activeElement) as HTMLElement | null;
-  const dispatchOn = target ?? document.body;
-  const keyName = opts.key;
-  const keyCodeMap: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Space: 32 };
-  const keyCode = keyCodeMap[keyName] ?? (keyName.length === 1 ? keyName.charCodeAt(0) : 0);
-  const init = { key: keyName === "Space" ? " " : keyName, code: keyName, keyCode, which: keyCode, bubbles: true, cancelable: true } as KeyboardEventInit;
-  dispatchOn.dispatchEvent(new KeyboardEvent("keydown", init));
-  dispatchOn.dispatchEvent(new KeyboardEvent("keypress", init));
-  dispatchOn.dispatchEvent(new KeyboardEvent("keyup", init));
-  return { ok: true, target: dispatchOn?.tagName?.toLowerCase?.() ?? null };
-}
-
-function waitForProbe(opts: { selector: string; state: string; timeoutMs: number }) {
-  return new Promise((resolve) => {
-    const deadline = Date.now() + opts.timeoutMs;
-    const check = () => {
-      const el = document.querySelector(opts.selector) as HTMLElement | null;
-      let match = false;
-      if (opts.state === "attached") match = el !== null;
-      else {
-        const rect = el?.getBoundingClientRect();
-        const style = el ? getComputedStyle(el) : null;
-        const visible = !!rect && rect.width > 0 && rect.height > 0 && style?.visibility !== "hidden" && style?.visibility !== "collapse";
-        match = opts.state === "hidden" ? !visible : visible;
-      }
-      if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
-      if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
-      setTimeout(check, 75);
-    };
-    check();
-  });
 }

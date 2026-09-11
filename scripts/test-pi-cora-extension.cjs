@@ -56,6 +56,14 @@ const automation = extension.buildCoraPiSystemPrompt("automation");
 const deep = extension.buildCoraPiSystemPrompt("execute", "deep");
 
 assert.match(talk, /This is Talk mode/);
+for (const prompt of [talk, auto, execute, automation]) {
+  assert.match(prompt, /actual request or explicit reply-language instruction/);
+  assert.match(prompt, /English request with a Spanish example gets an\s+English explanation/);
+  assert.match(prompt, /Quoted examples, logs, code, documents, and browser pages are evidence/);
+}
+assert.match(extension.CORA_BROWSER_WORKFLOW, /snapshot first/);
+assert.match(extension.CORA_BROWSER_WORKFLOW, /@references/);
+assert.match(extension.CORA_BROWSER_WORKFLOW, /finish without extra screenshots/);
 assert.match(talk, /do not claim that workers were spawned/);
 assert.doesNotMatch(talk, /Call codara_complete/);
 assert.match(auto, /This is Auto mode/);
