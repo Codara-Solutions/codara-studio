@@ -285,7 +285,7 @@ async function main() {
   );
 
   await test(
-    "a pane closed in Studio ends its mirror on the next synchronize",
+    "an incomplete inventory cannot end a live terminal when an agent starts",
     async () => {
       const pty = fakePtyManager();
       globalThis.__studioSharePty = pty;
@@ -300,9 +300,19 @@ async function main() {
       });
       assert.equal((await store.list("phone-a")).length, 1);
 
-      // Closing the tab removes the pane from the renderer inventory while
-      // the PTY teardown may still be in flight; the mirror must not linger.
+      const sink = subscriber();
+      const attached = store.attach("phone-a", "studio-pane-1", 0, "phone-a-sub", sink.callbacks);
       inventory = [];
+      assert.equal((await store.list("phone-a")).length, 1);
+      assert.equal(changedPings.length, 0);
+      pty.emitData("pane-1", "Codex ready");
+      store.write("phone-a", "studio-pane-1", "phone-a-sub", attached.attachmentId, 1, "hello\r");
+      assert.equal(sink.events.at(-1).type, "data");
+      assert.deepEqual(pty.session("pane-1").writes, ["hello\r"]);
+      inventory = [inventoryItem("pane-1", { profile: "codex" })];
+      assert.equal((await store.list("phone-a"))[0].profile, "codex");
+      assert.equal(sink.events.some((event) => event.type === "exit"), false);
+      pty.emitExit("pane-1");
       assert.equal((await store.list("phone-a")).length, 0);
       assert.equal(changedPings.length, 1);
       store.shutdown();

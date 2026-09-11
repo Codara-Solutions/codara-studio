@@ -86,7 +86,8 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
         {},
         { timeoutMs: 5_000 },
       );
-      this.synchronize(Array.isArray(inventory) ? inventory : []);
+      if (!Array.isArray(inventory)) throw new Error("Studio terminal inventory is unavailable.");
+      this.synchronize(inventory);
     } catch (err) {
       this.options.log?.(
         `studio terminal inventory read failed; serving the last ${this.records.size} known: ${
@@ -284,7 +285,9 @@ export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
     }
 
     for (const [terminalId, record] of [...this.records]) {
-      if (!visibleIds.has(terminalId) && record.descriptor.phase !== "ended") {
+      // Renderer snapshots can omit a live pane while agent metadata or the
+      // workspace layout changes. Only PTY liveness can confirm its exit.
+      if (!visibleIds.has(terminalId) && !pty.exists(record.paneId) && record.descriptor.phase !== "ended") {
         this.recordExit(record);
       }
     }

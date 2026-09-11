@@ -497,12 +497,14 @@ async function getFleetOverviewForRemote(): Promise<RemoteFleetOverviewProjectio
   // One read per backing collection. In particular, runs are loaded globally
   // once rather than once per workspace; the pure projector performs every
   // workspace aggregation over that one snapshot.
-  const [workspaces, runs, automations] = await Promise.all([
+  const [workspaces, runs, automations, agentCounts] = await Promise.all([
     listWorkspacesForRemote(),
     listRuns(),
     listJobs(),
+    requestTerminalOp<Record<string, { total: number; working: number }>>("agentCounts", {}, { timeoutMs: 2_000 })
+      .catch(() => undefined),
   ]);
-  return projectRemoteFleetOverview(workspaces, runs, automations);
+  return projectRemoteFleetOverview(workspaces, runs, automations, { agentCounts });
 }
 
 async function listSubscriptionProfilesForRemote(): Promise<
@@ -577,6 +579,8 @@ async function getCapabilitiesForRemote(input: {
   const inventory = listAgentAssets({ cwd, settings });
   const asset = (item: (typeof inventory.mcp)[number]): RemoteCapabilityAsset => ({
     id: remoteCapabilityId(item.id),
+    location: truncateUtf8(item.path, 512),
+    ...(item.mcpTransport ? { transport: item.mcpTransport } : {}),
     sessionKey: truncateUtf8(item.sessionKey, 256),
     ...(item.kind === "mcp" ? {
       cora: item.enabledForSessions && item.enabledForCoraManager,

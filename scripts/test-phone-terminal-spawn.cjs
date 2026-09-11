@@ -66,6 +66,19 @@ async function loadRendererSpawnSeam() {
 
 async function main() {
   const seam = await loadRendererSpawnSeam();
+  seam.setWorkspaceAgentCounts({ "ws-1": { total: 1, working: 1 } });
+  check("remote counts use the same census published by App", seam.getWorkspaceAgentCounts()["ws-1"].working === 1);
+  seam.setWorkspaceAgentCounts({ "ws-1": { total: 1, working: 0 } });
+  check("a working agent can become idle without losing its total", seam.getWorkspaceAgentCounts()["ws-1"].total === 1
+    && seam.getWorkspaceAgentCounts()["ws-1"].working === 0);
+
+  seam.setListShareableStudioTerminalsFn(null);
+  let unavailable = false;
+  try { seam.listShareableStudioTerminals(); } catch { unavailable = true; }
+  check("an unregistered inventory reports unavailable instead of an empty roster", unavailable);
+  seam.setListShareableStudioTerminalsFn(() => []);
+  check("a ready empty inventory remains valid", seam.listShareableStudioTerminals().length === 0);
+
 
   // ── createAgentTerminal waits for a late adapter instead of failing ──────
   {

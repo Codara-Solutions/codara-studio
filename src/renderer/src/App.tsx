@@ -62,6 +62,7 @@ import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
   setListShareableStudioTerminalsFn,
+  setWorkspaceAgentCounts,
 } from "./components/Terminal/terminalRegistry";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
@@ -1235,6 +1236,11 @@ export default function App() {
     }
     return m;
   }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
+
+  useEffect(() => {
+    setWorkspaceAgentCounts(agentsByWorkspaceId);
+    return () => setWorkspaceAgentCounts(null);
+  }, [agentsByWorkspaceId]);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a

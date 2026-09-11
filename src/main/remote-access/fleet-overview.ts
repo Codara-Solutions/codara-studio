@@ -33,6 +33,7 @@ interface ConversationAggregate {
 }
 
 export interface RemoteFleetProjectionLimits {
+  agentCounts?: Record<string, { total: number; working: number }>;
   maxRows?: number;
   maxAgents?: number;
   maxBytes?: number;
@@ -172,7 +173,11 @@ export function projectRemoteFleetOverview(
     if (rows.length >= maxRows) break;
     const aggregate = conversations.get(workspace.id);
     const latest = aggregate?.latest;
+    const count = limits.agentCounts?.[workspace.id];
+    const validCount = count && Number.isSafeInteger(count.total) && Number.isSafeInteger(count.working)
+      && count.total >= 0 && count.working >= 0 && count.working <= count.total;
     const row: RemoteFleetWorkspaceOverview = {
+      ...(validCount ? { agentCount: { total: count.total, working: count.working } } : {}),
       id: workspace.id,
       name: workspace.name,
       color: workspace.color ?? "#2AA298",

@@ -99,6 +99,7 @@ export interface RemoteWorkspaceInfo {
 }
 
 export interface RemoteFleetWorkspaceOverview {
+  agentCount?: { total: number; working: number };
   id: string;
   name: string;
   color: string;
@@ -215,6 +216,8 @@ export interface RemoteCapabilityWorkerModel {
 }
 
 export interface RemoteCapabilityAsset {
+  location?: string;
+  transport?: string;
   id: string;
   kind: "mcp" | "skill";
   name: string;

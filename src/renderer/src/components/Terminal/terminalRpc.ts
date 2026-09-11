@@ -12,6 +12,7 @@ import {
   createAgentTerminal,
   forgetExternalTerminalSize,
   listShareableStudioTerminals,
+  getWorkspaceAgentCounts,
   setExternalTerminalSize,
 } from "./terminalRegistry";
 import type { TerminalLeafOrigin } from "../../tabs/types";
@@ -57,6 +58,8 @@ export function registerTerminalRpcHandler(): void {
 
 async function dispatch(req: BridgeRequest): Promise<unknown> {
   switch (req.op) {
+    case "agentCounts":
+      return getWorkspaceAgentCounts();
     case "list":
       return listShareableStudioTerminals();
     case "create":

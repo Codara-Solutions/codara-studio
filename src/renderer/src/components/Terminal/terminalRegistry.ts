@@ -59,7 +59,10 @@ export function setListShareableStudioTerminalsFn(
 }
 
 export function listShareableStudioTerminals(): ShareableStudioTerminal[] {
-  return listShareableStudioTerminalsFn?.() ?? [];
+  if (!listShareableStudioTerminalsFn) {
+    throw new Error("Studio terminal inventory is not ready.");
+  }
+  return listShareableStudioTerminalsFn();
 }
 
 type CreateAgentTerminalFn = (
@@ -180,4 +183,16 @@ export function subscribeExternalTerminalSize(
 export function forgetExternalTerminalSize(paneId: string): void {
   externalTerminalSizes.delete(paneId);
   externalTerminalSizeHandlers.delete(paneId);
+}
+
+export type WorkspaceAgentCounts = Record<string, { total: number; working: number }>;
+let workspaceAgentCounts: WorkspaceAgentCounts | null = null;
+
+export function setWorkspaceAgentCounts(counts: WorkspaceAgentCounts | null): void {
+  workspaceAgentCounts = counts;
+}
+
+export function getWorkspaceAgentCounts(): WorkspaceAgentCounts {
+  if (!workspaceAgentCounts) throw new Error("Studio agent counts are not ready.");
+  return workspaceAgentCounts;
 }

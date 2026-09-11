@@ -790,6 +790,11 @@ async function main() {
       { input: { workspaceId: "ws-1" }, state: { status: "paused" } },
       { input: { workspaceId: "ws-2" }, state: { status: "idle" } },
     ];
+    const counted = fleetOverview.projectRemoteFleetOverview(workspaces, runs, automations, {
+      agentCounts: { "ws-1": { total: 3, working: 1 }, "ws-2": { total: 1, working: 2 } },
+    });
+    check("fleet uses the desktop census without recounting sessions", counted.workspaces[0]?.agentCount?.total === 3
+      && counted.workspaces[0]?.agentCount?.working === 1 && counted.workspaces[1]?.agentCount === undefined, counted);
     const projection = fleetOverview.projectRemoteFleetOverview(
       workspaces,
       runs,
@@ -1288,7 +1293,7 @@ async function main() {
         occurrences("listRuns()") === 1 &&
         occurrences("listJobs()") === 1 &&
         fleetReader.includes(
-          "projectRemoteFleetOverview(workspaces, runs, automations)",
+          "projectRemoteFleetOverview(workspaces, runs, automations, { agentCounts })",
         ),
       fleetReader,
     );
