@@ -581,18 +581,21 @@ export function classifyCodexScreen(tail: string): "working" | "idle" | null {
   }
   for (let i = above.length - 1; i >= 0; i--) {
     const status = above[i];
+    // A queued message is part of the live bottom pane, between the busy
+    // footer and composer. Its preview can wrap over several indented rows.
+    if (hasComposer && /^\s*•\s*Messages to be submitted after next tool call\s*\(press esc to interrupt and send immediately\)/i.test(status)) return "working";
     // Codex can omit the timer and animate only the color of "Working".
     // Accept that exact live status above a recognized composer, never words
     // in its editable draft or arbitrary chunks from the output stream.
     if (hasComposer && i === above.length - 1
       && /^\s*(?:[•▌]\s*)?Working(?:…|\.{3})?(?:\s*\(\s*esc\s+to\s+interrupt\s*\))?\s*$/i.test(status)) return "working";
     if (
-      (i === above.length - 1 || /^\s*•?\s*Waiting for background terminal\b/i.test(status)) &&
+      (i === above.length - 1 || /^\s*•?\s*(?:Waiting for background terminal|Compacting context)\b/i.test(status)) &&
       RUNTIME_PATTERNS.codex.working.some((pattern) => pattern.test(status))
     ) return "working";
-    // Background-terminal waits include an indented command below the timer,
-    // sometimes wrapped over several rows. A transcript paragraph ends the
-    // live block, so an older timer cannot override a completed response.
+    // Background waits, compaction and queued messages include indented detail
+    // below the timer. A transcript paragraph ends the live block, so an older
+    // timer cannot override a completed response.
     if (!/^\s+(?:└|│|\S)/.test(status)) break;
   }
   return hasComposer ? "idle" : null;

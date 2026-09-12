@@ -215,7 +215,7 @@ async function main() {
   check(
     "workspace remount restores the viewport distance from the bottom",
     source.includes("viewportFromBottom") &&
-      source.includes("buffer.baseY - liveSnapshot.viewportFromBottom"),
+      source.includes("viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom)"),
   );
   check(
     "hidden panes keep their live renderer and exact TUI buffer",
@@ -224,7 +224,7 @@ async function main() {
   );
   check(
     "a terminal first revealed after a hidden mount follows live output",
-    source.includes("viewportBeforeHideRef.current = { line: 0, atBottom: true }"),
+    source.includes("viewportRecovery.recover()"),
   );
   check(
     "viewport restoration survives every delayed fit frame",

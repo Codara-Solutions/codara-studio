@@ -607,6 +607,15 @@ async function main() {
   await sleep(2500);
   check("Codex stays working while waiting for a background terminal", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
   check("a background terminal wait does not send completion", alertCount() === beforeBackgroundWait);
+  for (const status of [
+    "• Compacting context (24s • esc to interrupt)\r\n  └ Making room to continue.",
+    "• Working (2m 31s • esc to interrupt)\r\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\r\n  ↳ [Image #1] this should stay working",
+  ]) {
+    feed("p13", `\x1b[5;1H\x1b[J${status}\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high fast · ~/src`);
+    await sleep(2500);
+    check("Codex stays working through compaction and queued message previews", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+    check("compaction and queued messages do not send completion", alertCount() === beforeBackgroundWait);
+  }
   feed("p13", "\x1b[6;1H\x1b[2K");
   feed("p13", "\x1b[5;1H\x1b[2K\x1b[7;1H\x1b[J› Explain this status\r\nWorking (9m 21s • esc to interrupt)\r\ngpt-6-astra high fast · ~/src");
   await waitForState("p13", "idle");

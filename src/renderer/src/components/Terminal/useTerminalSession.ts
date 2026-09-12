@@ -60,7 +60,7 @@ import {
 } from "./resume-policy";
 import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
-import { preserveTerminalViewport } from "./terminalViewport";
+import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery } from "./terminalWakeRecovery";
 
 export type { SparkOpenInput };
@@ -666,6 +666,7 @@ export function useTerminalSession({
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const viewportRecoveryRef = useRef<ReturnType<typeof createTerminalViewportRecovery> | null>(null);
   const resizeXtermForOwner = useCallback(() => {
     const term = termRef.current;
     if (!term) return;
@@ -1481,6 +1482,24 @@ export function useTerminalSession({
       }
 
       term.open(container.current);
+      const viewportHost = container.current;
+      const viewportRecovery = createTerminalViewportRecovery(term, () =>
+        visibleRef.current && document.visibilityState === "visible" &&
+        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0,
+      );
+      viewportRecoveryRef.current = viewportRecovery;
+      const scrollSubscription = term.onScroll(() => viewportRecovery.observe());
+      const writeSubscription = term.onWriteParsed(() => viewportRecovery.observe());
+      const onViewportInput = () => viewportRecovery.userInput();
+      const viewportInputEvents = ["wheel", "pointerdown", "touchstart", "keydown", "input"] as const;
+      for (const event of viewportInputEvents) viewportHost.addEventListener(event, onViewportInput, { capture: true, passive: true });
+      viewportRecovery.recover();
+      cleanups.push(() => {
+        viewportRecovery.dispose();
+        scrollSubscription.dispose();
+        writeSubscription.dispose();
+        for (const event of viewportInputEvents) viewportHost.removeEventListener(event, onViewportInput, true);
+      });
       try {
         resizeXtermForOwner();
       } catch {
@@ -1560,19 +1579,7 @@ export function useTerminalSession({
         const finishReplay = () => {
           replayPending = false;
           forgetXtermBufferSnapshot(sessionId);
-          const frame = window.requestAnimationFrame(() => {
-            try {
-              const buffer = term.buffer.active;
-              const target = Math.max(
-                0,
-                buffer.baseY - liveSnapshot.viewportFromBottom,
-              );
-              term.scrollToLine(target);
-            } catch {
-              /* the pane may have unmounted again before replay finished */
-            }
-          });
-          cleanups.push(() => window.cancelAnimationFrame(frame));
+          viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
         if (replay) {
           term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
@@ -3582,7 +3589,8 @@ export function useTerminalSession({
             rememberXtermBufferSnapshot(sessionId, {
               text,
               pendingBytes,
-              viewportFromBottom: Math.max(0, buffer.baseY - buffer.viewportY),
+              viewportFromBottom: viewportRecoveryRef.current?.distanceFromBottom() ??
+                Math.max(0, buffer.baseY - buffer.viewportY),
             });
           }
         } catch {
@@ -3600,6 +3608,7 @@ export function useTerminalSession({
       }
       termRef.current = null;
       fitRef.current = null;
+      viewportRecoveryRef.current = null;
       // The hidden-pane bytes have been folded into the snapshot's pendingBytes
       // above (when we snapshotted); clear the live buffer now. main's pause()
       // only preserves not-yet-flushed pendingChunks, so already-delivered
@@ -3617,25 +3626,11 @@ export function useTerminalSession({
   // those were previously on React's pre-paint path, and a few busy panes with
   // multi-megabyte backlogs made workspace clicks visibly stall.
   const prevVisibleRef = useRef<boolean | null>(null);
-  const viewportBeforeHideRef = useRef<{ line: number; atBottom: boolean } | null>(null);
   useLayoutEffect(() => {
     const prev = prevVisibleRef.current;
     prevVisibleRef.current = visible;
     if (!visible) {
-      const term = termRef.current;
-      if (term) {
-        const buffer = term.buffer.active;
-        viewportBeforeHideRef.current = {
-          line: buffer.viewportY,
-          atBottom: buffer.viewportY >= buffer.baseY,
-        };
-      } else if (!viewportBeforeHideRef.current) {
-        // A pane can mount for the first time underneath an inactive tab or a
-        // background workspace. It has no visible viewport to capture yet, but
-        // its xterm may already be receiving a Codex/Claude startup frame.
-        // First reveal should follow that live output, not expose row zero.
-        viewportBeforeHideRef.current = { line: 0, atBottom: true };
-      }
+      viewportRecoveryRef.current?.suspend();
       hiddenReplayPendingRef.current = false;
       return;
     }
@@ -3700,7 +3695,7 @@ export function useTerminalSession({
 
   useLayoutEffect(() => {
     if (!visible) return;
-    const savedViewport = viewportBeforeHideRef.current;
+    viewportRecoveryRef.current?.recover();
     try {
       resizeXtermForOwner();
     } catch {
@@ -3723,8 +3718,8 @@ export function useTerminalSession({
     // flex/absolute terminal host can report an intermediate size. FitAddon can
     // reset xterm's viewport on ANY of those frames, so restoring scroll only
     // after frame one still left Codex at the top. Restore after each matching
-    // frame; the last callback wins after the final fit while the whole sequence
-    // remains under ~50 ms.
+    // frame, then keep the saved position through the asynchronous PTY redraw.
+    // The viewport recovery yields immediately to deliberate user scrolling.
     let raf: number | null = null;
     let remainingRestoreFrames = 3;
     // A trailing repaint after the fit frames. A workspace switch reveals a
@@ -3745,11 +3740,7 @@ export function useTerminalSession({
       // Force a full repaint and recreate a lost WebGL context before
       // restoring the viewport into the final renderer.
       recoverRendererRef.current?.();
-      const term = termRef.current;
-      if (term && savedViewport) {
-        if (savedViewport.atBottom) term.scrollToBottom();
-        else term.scrollToLine(savedViewport.line);
-      }
+      viewportRecoveryRef.current?.restore();
       remainingRestoreFrames -= 1;
       if (remainingRestoreFrames > 0) {
         raf = window.requestAnimationFrame(restoreAfterFit);
@@ -3758,6 +3749,7 @@ export function useTerminalSession({
       trailingRepaint = window.setTimeout(() => {
         trailingRepaint = null;
         recoverRendererRef.current?.();
+        viewportRecoveryRef.current?.restore();
       }, REVEAL_TRAILING_REPAINT_MS);
     };
     raf = window.requestAnimationFrame(restoreAfterFit);
@@ -3794,7 +3786,10 @@ export function useTerminalSession({
           /* lock-screen geometry can still be settling */
         }
       },
-      repaint: () => recoverRendererRef.current?.(),
+      repaint: () => {
+        recoverRendererRef.current?.();
+        viewportRecoveryRef.current?.restore();
+      },
       resume: async () => {
         refitAndResizeRef.current?.();
         if (!readOnlyRef.current) await window.spark.pty.resume(sessionId);
@@ -3805,19 +3800,25 @@ export function useTerminalSession({
         else done();
       },
     });
-    const recoverAfterHostWake = () => wakeRecovery.recover();
+    const recoverAfterHostWake = () => {
+      viewportRecoveryRef.current?.recover();
+      wakeRecovery.recover();
+    };
+    const onBlur = () => viewportRecoveryRef.current?.suspend();
     const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
         recoverAfterHostWake();
-      } else if (!readOnlyRef.current) {
+      } else {
+        viewportRecoveryRef.current?.suspend();
         // Stop IPC/xterm churn while the whole window is minimized, hidden to
         // tray, or frozen by the OS. Main keeps a bounded ordered backlog and
         // recoverAfterHostWake resumes it only after xterm has repaired/refit.
-        void window.spark.pty.pause(sessionId);
+        if (!readOnlyRef.current) void window.spark.pty.pause(sessionId);
       }
     };
+    window.addEventListener("blur", onBlur);
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     // A pane can mount after the document is already hidden; no transition
@@ -3826,6 +3827,7 @@ export function useTerminalSession({
     return () => {
       wakeRecovery.dispose();
       offHostResume();
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };

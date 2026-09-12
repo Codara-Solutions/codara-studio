@@ -21,6 +21,18 @@ const esbuild = require("esbuild");
   };
   const busy = (elapsed) => `\x1b[2J\x1b[HOpenAI Codex (v0.153.4)\x1b[5;1H• Working (${elapsed} • esc to interrupt)\x1b[7;1H› Ask Codex to do anything\x1b[8;1Hgpt-6-astra high fast · ~/project`;
   try {
+    for (const status of [
+      "• Compacting context (24s • esc to interrupt)\r\n  └ Making room to continue.",
+      "• Working (2m 31s • esc to interrupt)\r\n\r\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\r\n  ↳ [Image #1] also here it should not show ready",
+      "• Working\r\n• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\r\n  ↳ a queued request with a long line that wraps across the terminal width and continues here",
+    ]) {
+      await paint(`\x1b[2J\x1b[H${status}\r\n\r\n   ⠁ ⠈ ⠐\r\n› Ask Codex to do anything\r\ngpt-6-astra xhigh · ~/project`);
+      assert.equal(screen.state(), "working", "compaction and queued-message details must not hide the live status");
+      await paint(`\x1b[2J\x1b[H${status}\r\n\r\nFinished the request.\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra xhigh · ~/project`);
+      assert.equal(screen.state(), "idle", "a completed answer supersedes an old status and queue");
+      await paint(`\x1b[2J\x1b[HFinal response.\r\n› Explain this screenshot\r\n${status}\r\ngpt-6-astra xhigh · ~/project`);
+      assert.equal(screen.state(), "idle", "busy chrome quoted in a draft is not a live status");
+    }
     for (const elapsed of ["0s", "59s", "1m 0s", "9m 21s", "1h 2m 3s"]) {
       await paint(busy(elapsed));
       assert.equal(screen.state(), "working", elapsed);

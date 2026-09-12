@@ -77,16 +77,9 @@ async function main() {
     "utf8",
   );
   check(
-    "tab/workspace hides remember the exact xterm viewport",
-    /viewportBeforeHideRef[\s\S]*line: buffer\.viewportY[\s\S]*atBottom: buffer\.viewportY >= buffer\.baseY/.test(terminalSource),
-  );
-  check(
-    "revealing a Codex terminal restores bottom-follow or its prior line",
-    /savedViewport\.atBottom\) term\.scrollToBottom\(\);[\s\S]*term\.scrollToLine\(savedViewport\.line\)/.test(terminalSource),
-  );
-  check(
-    "a Codex terminal first created while hidden follows the bottom on reveal",
-    terminalSource.includes("viewportBeforeHideRef.current = { line: 0, atBottom: true }"),
+    "tab/workspace hides freeze the last visible viewport before recovery",
+    terminalSource.includes("viewportRecoveryRef.current?.suspend()") &&
+      terminalSource.includes("viewportRecoveryRef.current?.recover()"),
   );
   check(
     "the viewport is restored after all three delayed fit frames",
