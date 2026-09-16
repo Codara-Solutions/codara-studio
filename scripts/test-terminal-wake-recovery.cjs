@@ -36,13 +36,13 @@ const esbuild = require("esbuild");
     let finishWrite;
     const recovery = createTerminalWakeRecovery({
       fit: () => events.push("fit"),
-      repaint: () => events.push("paint"),
+      repaint: (reset) => events.push(reset ? "reset" : "paint"),
       resume: () => { events.push("resume"); return new Promise((resolve) => { finishResume = resolve; }); },
       afterWrite: (callback) => { events.push("write barrier"); finishWrite = callback; },
     });
     recovery.recover();
     frame();
-    assert.deepEqual(events, ["fit", "paint", "resume"]);
+    assert.deepEqual(events, ["paint", "fit", "resume"]);
     finishResume();
     await Promise.resolve();
     assert.equal(events.at(-1), "write barrier", "resume acknowledgment must not race pending xterm writes");
@@ -51,11 +51,15 @@ const esbuild = require("esbuild");
     for (let index = 0; index < 3; index++) frame();
     const beforeTrailingPaint = events.length;
     timer(350);
-    assert.deepEqual(events.slice(beforeTrailingPaint), ["fit", "paint"], "the last repaint follows the final layout frame");
+    assert.deepEqual(events.slice(beforeTrailingPaint), ["paint", "fit"], "the last repaint follows the final layout frame");
     assert.equal(frames.size + timers.size, 0, "settled wake recovery stops scheduling work");
 
+    recovery.recover(true);
     recovery.recover();
+    const beforeReset = events.length;
     timer(250);
+    assert.deepEqual(events.slice(beforeReset), ["reset", "fit", "resume"], "focus following host wake preserves the pending GPU reset and fits the new renderer");
+    assert.equal(events.filter((event) => event === "reset").length, 1, "one reset per recovery, not per repaint");
     assert.equal(events.at(-1), "resume", "occlusion cannot leave PTY delivery paused");
     finishResume();
     await Promise.resolve();
@@ -67,7 +71,14 @@ const esbuild = require("esbuild");
     frame();
     finishResume();
     await Promise.resolve();
+    finishWrite();
+    for (let index = 0; index < 3; index++) frame();
+    timer(350);
+    assert.equal(events.filter((event) => event === "reset").length, 1, "settling paints do not recreate GPU resources");
+    recovery.recover(true);
     recovery.dispose();
+    frame();
+    timer(250);
     finishWrite();
     assert.equal(frames.size + timers.size, 0, "unmount cancels recovery even with a queued write callback");
 

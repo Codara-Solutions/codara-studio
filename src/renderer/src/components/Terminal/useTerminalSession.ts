@@ -716,7 +716,7 @@ export function useTerminalSession({
   // Bridge to the effect-local renderer-recovery routine so the visibility
   // layout effect can force a full repaint — and reload a dead WebGL context —
   // the moment a hidden pane returns to screen. See recoverRendererOnShow.
-  const recoverRendererRef = useRef<(() => void) | null>(null);
+  const recoverRendererRef = useRef<((resetRenderer?: boolean) => void) | null>(null);
   const normalizedScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(scrollbackLineLimit);
   const scrollbackLineLimitRef = useRef<number>(normalizedScrollbackLineLimit);
   useEffect(() => {
@@ -1020,7 +1020,7 @@ export function useTerminalSession({
       //      gl.isContextLost() and reload the addon (re-establishing a live
       //      context, or dropping to the DOM renderer once the reload budget is
       //      spent).
-      const recoverRendererOnShow = () => {
+      const recoverRendererOnShow = (resetRenderer = false) => {
         const t = termRef.current;
         if (!t) return;
         if (webgl) {
@@ -1044,7 +1044,8 @@ export function useTerminalSession({
               }
             }
           }
-          if (!gl || gl.isContextLost()) {
+          // Sleep can leave corrupt GPU resources even with a live context.
+          if (resetRenderer || !gl || gl.isContextLost()) {
             try {
               webgl.dispose();
             } catch {
@@ -1053,12 +1054,9 @@ export function useTerminalSession({
             webgl = null;
             if (webglReloads < WEBGL_MAX_RELOADS && loadWebgl()) {
               webglReloads += 1;
-              // Fresh addon: re-fit so cols/atlas re-establish for the reloaded
-              // renderer, then the refresh below paints the first frame.
-              refitAfterRendererSwapRef.current?.();
             }
-            // else: reload budget spent — xterm is on the DOM renderer now, and
-            // the refresh below repaints it.
+            // DOM fallback also changes cell metrics and needs a PTY resize.
+            refitAfterRendererSwapRef.current?.();
           } else {
             // Live context — clear any prior reload debt so a single future loss
             // still gets the full reload budget.
@@ -3786,8 +3784,8 @@ export function useTerminalSession({
           /* lock-screen geometry can still be settling */
         }
       },
-      repaint: () => {
-        recoverRendererRef.current?.();
+      repaint: (resetRenderer) => {
+        recoverRendererRef.current?.(resetRenderer);
         viewportRecoveryRef.current?.restore();
       },
       resume: async () => {
@@ -3800,12 +3798,12 @@ export function useTerminalSession({
         else done();
       },
     });
-    const recoverAfterHostWake = () => {
+    const recoverAfterHostWake = (resetRenderer = false) => {
       viewportRecoveryRef.current?.recover();
-      wakeRecovery.recover();
+      wakeRecovery.recover(resetRenderer);
     };
     const onBlur = () => viewportRecoveryRef.current?.suspend();
-    const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
+    const offHostResume = window.spark.pty.onHostResume(() => recoverAfterHostWake(true));
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
       if (document.visibilityState === "visible") {

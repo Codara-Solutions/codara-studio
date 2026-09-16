@@ -1,6 +1,6 @@
 interface WakeRecoveryOptions {
   fit(): void;
-  repaint(): void;
+  repaint(resetRenderer?: boolean): void;
   resume(): Promise<void>;
   afterWrite(callback: () => void): void;
 }
@@ -8,6 +8,7 @@ interface WakeRecoveryOptions {
 /** Repaint after both the ordered PTY backlog and wake-time layout have settled. */
 export function createTerminalWakeRecovery(options: WakeRecoveryOptions) {
   let generation = 0;
+  let resetPending = false;
   let frame: number | null = null;
   let timer: number | null = null;
   const cancel = () => {
@@ -17,11 +18,14 @@ export function createTerminalWakeRecovery(options: WakeRecoveryOptions) {
     timer = null;
   };
   const paint = () => {
+    const resetRenderer = resetPending;
+    resetPending = false;
+    options.repaint(resetRenderer);
     options.fit();
-    options.repaint();
   };
   return {
-    recover() {
+    recover(resetRenderer = false) {
+      resetPending ||= resetRenderer;
       const current = ++generation;
       cancel();
       let started = false;
@@ -63,6 +67,7 @@ export function createTerminalWakeRecovery(options: WakeRecoveryOptions) {
     },
     dispose() {
       generation += 1;
+      resetPending = false;
       cancel();
     },
   };
