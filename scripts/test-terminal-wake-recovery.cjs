@@ -33,11 +33,12 @@ const esbuild = require("esbuild");
     };
     const events = [];
     let finishResume;
+    const redrawRequests = [];
     let finishWrite;
     const recovery = createTerminalWakeRecovery({
       fit: () => events.push("fit"),
       repaint: (reset) => events.push(reset ? "reset" : "paint"),
-      resume: () => { events.push("resume"); return new Promise((resolve) => { finishResume = resolve; }); },
+      resume: (redraw) => { redrawRequests.push(redraw); events.push("resume"); return new Promise((resolve) => { finishResume = resolve; }); },
       afterWrite: (callback) => { events.push("write barrier"); finishWrite = callback; },
     });
     recovery.recover();
@@ -60,6 +61,7 @@ const esbuild = require("esbuild");
     timer(250);
     assert.deepEqual(events.slice(beforeReset), ["reset", "fit", "resume"], "focus following host wake preserves the pending GPU reset and fits the new renderer");
     assert.equal(events.filter((event) => event === "reset").length, 1, "one reset per recovery, not per repaint");
+    assert.deepEqual(redrawRequests, [false, true], "host recovery requests a child redraw even after focus coalescing");
     assert.equal(events.at(-1), "resume", "occlusion cannot leave PTY delivery paused");
     finishResume();
     await Promise.resolve();

@@ -2794,8 +2794,8 @@ export function registerIpc(): void {
   handle("pty:pause", async (_e, args: { id: string }) => {
     pty.pause(args.id);
   });
-  handle("pty:resume", async (_e, args: { id: string }) => {
-    pty.resume(args.id);
+  handle("pty:resume", async (_e, args: { id: string; redraw?: boolean }) => {
+    pty.resume(args.id, args.redraw === true);
   });
   // Renderer backpressure ack: xterm reports parsed bytes so pty-manager can
   // pause the child at the OS level when the screen falls too far behind.

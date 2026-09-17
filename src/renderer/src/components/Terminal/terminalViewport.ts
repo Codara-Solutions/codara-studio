@@ -23,6 +23,7 @@ export function createTerminalViewportRecovery(
 ) {
   let position: ViewportPosition = { line: 0, atBottom: true };
   let suspended = false;
+  let following = true;
   let recovering = false;
   let restoring = false;
   let disposed = false;
@@ -39,7 +40,7 @@ export function createTerminalViewportRecovery(
     position = { line: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY };
   };
   const restore = () => {
-    if (disposed || restoring || !recovering || !isVisible()) return;
+    if (disposed || suspended || restoring || (!recovering && !following) || !isVisible()) return;
     restoring = true;
     try {
       if (position.atBottom) terminal.scrollToBottom();
@@ -61,9 +62,11 @@ export function createTerminalViewportRecovery(
     cancelTimer();
     suspended = false;
     recovering = true;
+    following = position.atBottom;
     restore();
     // xterm parses writes asynchronously, and the PTY resize is debounced by
     // 256 ms. Three early animation frames cannot cover the resulting redraw.
+    // Bottom-follow survives this window: startup replay may arrive much later.
     timer = window.setTimeout(() => {
       timer = null;
       restore();
@@ -73,7 +76,7 @@ export function createTerminalViewportRecovery(
   };
   const observe = () => {
     if (restoring) return;
-    if (recovering) restore();
+    if (recovering || following) restore();
     else remember();
   };
   // Native scrolling suppresses xterm's public onScroll event. Register after
@@ -92,11 +95,13 @@ export function createTerminalViewportRecovery(
       // Scrolling, selection and search take precedence over a pending repair.
       cancelTimer();
       recovering = false;
+      following = false;
       suspended = false;
       remember();
     },
     restoreSnapshot(viewportFromBottom: number) {
       if (disposed) return;
+      following = viewportFromBottom === 0;
       position = {
         line: Math.max(0, terminal.buffer.active.baseY - viewportFromBottom),
         atBottom: viewportFromBottom === 0,

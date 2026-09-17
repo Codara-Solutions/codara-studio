@@ -1021,7 +1021,8 @@ const api = {
     resourceSnapshot: (): Promise<PtyResourceSnapshot> =>
       ipcRenderer.invoke("pty:resourceSnapshot"),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
-    resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
+    resume: (id: string, redraw = false): Promise<void> =>
+      ipcRenderer.invoke("pty:resume", { id, redraw }),
     // Backpressure ack (see pty-manager ackRenderBytes). Fire-and-forget.
     ack: (id: string, bytes: number): void => {
       ipcRenderer.send("pty:ack", { id, bytes });

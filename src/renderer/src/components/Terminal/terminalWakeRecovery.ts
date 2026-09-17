@@ -1,7 +1,7 @@
 interface WakeRecoveryOptions {
   fit(): void;
   repaint(resetRenderer?: boolean): void;
-  resume(): Promise<void>;
+  resume(redraw: boolean): Promise<void>;
   afterWrite(callback: () => void): void;
 }
 
@@ -59,8 +59,9 @@ export function createTerminalWakeRecovery(options: WakeRecoveryOptions) {
         if (started || current !== generation) return;
         started = true;
         cancel();
+        const redraw = resetPending;
         paint();
-        void options.resume().then(settle, settle);
+        void options.resume(redraw).then(settle, settle);
       };
       frame = window.requestAnimationFrame(begin);
       timer = window.setTimeout(begin, 250);

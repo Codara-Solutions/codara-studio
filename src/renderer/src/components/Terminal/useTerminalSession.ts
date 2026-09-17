@@ -3239,7 +3239,7 @@ export function useTerminalSession({
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
       if (!rawTailReattachRef.current && !readOnlyRef.current) {
-        void window.spark.pty.resume(sessionId);
+        void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
       }
 
       // Two-stage debounce, ported from the terax design.
@@ -3788,9 +3788,11 @@ export function useTerminalSession({
         recoverRendererRef.current?.(resetRenderer);
         viewportRecoveryRef.current?.restore();
       },
-      resume: async () => {
+      resume: async (redraw) => {
         refitAndResizeRef.current?.();
-        if (!readOnlyRef.current) await window.spark.pty.resume(sessionId);
+        if (!readOnlyRef.current) {
+          await window.spark.pty.resume(sessionId, redraw && !externalSizeOwnerRef.current);
+        }
       },
       afterWrite: (done) => {
         const term = termRef.current;
@@ -3807,7 +3809,7 @@ export function useTerminalSession({
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        recoverAfterHostWake();
+        recoverAfterHostWake(true);
       } else {
         viewportRecoveryRef.current?.suspend();
         // Stop IPC/xterm churn while the whole window is minimized, hidden to

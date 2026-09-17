@@ -795,8 +795,8 @@ async function spawnWithSessionLock(
     }
     if (!opts.preserveSizeOnAttach) {
       try {
-        existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
-        existing.resizedAt = Date.now();
+        resize(opts.id, opts.cols, opts.rows);
+        if (previouslyDetached) requestTerminalRedraw(existing);
       } catch {
         /* may have exited */
       }
@@ -1886,7 +1886,7 @@ export function pauseAllForHostSuspend(): number {
 // the onData listener receives the missed bytes in arrival order, then flips
 // `attached` back to true so subsequent pty output resumes the normal flush
 // path. Safe to call on a fresh session (no backlog, attached already true).
-export function resume(id: string): void {
+export function resume(id: string, redraw = false): void {
   const s = sessions.get(id);
   if (!s) return;
   if (
@@ -1910,6 +1910,7 @@ export function resume(id: string): void {
   s.detachedBacklogBytes = 0;
   s.attached = true;
   s.lastAttachAt = Date.now();
+  if (redraw) requestTerminalRedraw(s);
 }
 
 // Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
@@ -2240,6 +2241,28 @@ export function inject(
   write(id, `\x1b[200~${sanitized}\x1b[201~`);
   const submit = opts?.submit ?? true;
   if (submit) write(id, "\r");
+}
+
+const terminalRedraws = new WeakSet<Session>();
+
+function requestTerminalRedraw(s: Session): void {
+  if (s.disposed || s.exited || terminalRedraws.has(s)) return;
+  // A raw byte tail may contain only incremental animation frames. Repainting
+  // xterm cannot reconstruct the missing cells; the child must redraw them.
+  // A real size change triggers SIGWINCH even when the pane's size is stable.
+  try {
+    s.pty.resize(s.cols > 1 ? s.cols - 1 : 2, s.rows);
+  } catch {
+    return;
+  }
+  terminalRedraws.add(s);
+  const timer = setTimeout(() => {
+    terminalRedraws.delete(s);
+    if (sessions.get(s.id) !== s || s.disposed || s.exited) return;
+    // Layout or a phone size owner may have resized during the pulse.
+    resize(s.id, s.cols, s.rows);
+  }, 100);
+  timer.unref();
 }
 
 export function resize(id: string, cols: number, rows: number): void {

@@ -53,6 +53,15 @@ const esbuild = require("esbuild");
     assert.equal(active.viewportY, 1200, "asynchronous parser output restores the new bottom");
     settle();
 
+    active.baseY = 1600;
+    active.viewportY = 0;
+    recovery.observe();
+    assert.equal(active.viewportY, 1600, "startup output arriving after the recovery timer still follows the bottom");
+    terminal.scrollToLine(100);
+    assert.equal(active.viewportY, 1600, "a delayed native viewport reset is not mistaken for user scrolling");
+    active.baseY = 1200;
+    recovery.observe();
+
     recovery.userInput();
     terminal.scrollToLine(450);
     recovery.suspend();
@@ -65,6 +74,10 @@ const esbuild = require("esbuild");
     recovery.restore();
     settle();
     assert.equal(active.viewportY, 350, "user scrolling cancels every pending restoration");
+    active.baseY = 1300;
+    recovery.observe();
+    assert.equal(active.viewportY, 350, "new output does not pull a user out of history");
+    active.baseY = 1200;
 
     recovery.recover();
     recovery.restoreSnapshot(50);
