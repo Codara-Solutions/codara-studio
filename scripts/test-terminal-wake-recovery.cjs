@@ -41,7 +41,8 @@ const esbuild = require("esbuild");
       resume: (redraw) => { redrawRequests.push(redraw); events.push("resume"); return new Promise((resolve) => { finishResume = resolve; }); },
       afterWrite: (callback) => { events.push("write barrier"); finishWrite = callback; },
     });
-    recovery.recover();
+    recovery.recover("window-visible");
+    recovery.recover("focus");
     frame();
     assert.deepEqual(events, ["paint", "fit", "resume"]);
     finishResume();
@@ -54,8 +55,10 @@ const esbuild = require("esbuild");
     timer(350);
     assert.deepEqual(events.slice(beforeTrailingPaint), ["paint", "fit"], "the last repaint follows the final layout frame");
     assert.equal(frames.size + timers.size, 0, "settled wake recovery stops scheduling work");
+    assert.deepEqual(redrawRequests, [false], "returning to the app drains output without resizing the child");
+    assert.equal(events.includes("reset"), false, "ordinary visibility changes keep the existing renderer");
 
-    recovery.recover(true);
+    recovery.recover("resume");
     recovery.recover();
     const beforeReset = events.length;
     timer(250);
@@ -77,7 +80,12 @@ const esbuild = require("esbuild");
     for (let index = 0; index < 3; index++) frame();
     timer(350);
     assert.equal(events.filter((event) => event === "reset").length, 1, "settling paints do not recreate GPU resources");
-    recovery.recover(true);
+    recovery.recover("unlock-screen");
+    recovery.recover("window-visible");
+    frame();
+    assert.equal(redrawRequests.at(-1), true, "a window reveal cannot downgrade pending unlock recovery");
+    finishResume();
+    await Promise.resolve();
     recovery.dispose();
     frame();
     timer(250);

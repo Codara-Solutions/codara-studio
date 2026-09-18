@@ -61,7 +61,7 @@ import {
 import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
-import { createTerminalWakeRecovery } from "./terminalWakeRecovery";
+import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
 
 export type { SparkOpenInput };
 
@@ -3800,16 +3800,16 @@ export function useTerminalSession({
         else done();
       },
     });
-    const recoverAfterHostWake = (resetRenderer = false) => {
+    const recoverAfterHostWake = (reason: TerminalRecoveryReason = "focus") => {
       viewportRecoveryRef.current?.recover();
-      wakeRecovery.recover(resetRenderer);
+      wakeRecovery.recover(reason);
     };
     const onBlur = () => viewportRecoveryRef.current?.suspend();
-    const offHostResume = window.spark.pty.onHostResume(() => recoverAfterHostWake(true));
+    const offHostResume = window.spark.pty.onHostResume(({ reason }) => recoverAfterHostWake(reason));
     const onFocus = () => recoverAfterHostWake();
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        recoverAfterHostWake(true);
+        recoverAfterHostWake("window-visible");
       } else {
         viewportRecoveryRef.current?.suspend();
         // Stop IPC/xterm churn while the whole window is minimized, hidden to

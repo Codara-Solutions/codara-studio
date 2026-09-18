@@ -1,3 +1,5 @@
+export type TerminalRecoveryReason = "focus" | "window-visible" | "resume" | "unlock-screen";
+
 interface WakeRecoveryOptions {
   fit(): void;
   repaint(resetRenderer?: boolean): void;
@@ -24,8 +26,10 @@ export function createTerminalWakeRecovery(options: WakeRecoveryOptions) {
     options.fit();
   };
   return {
-    recover(resetRenderer = false) {
-      resetPending ||= resetRenderer;
+    recover(reason: TerminalRecoveryReason = "focus") {
+      // Occlusion and ordinary app switches do not invalidate the terminal.
+      // Rebuilding WebGL and pulsing the PTY size here makes live TUIs flash.
+      resetPending ||= reason === "resume" || reason === "unlock-screen";
       const current = ++generation;
       cancel();
       let started = false;

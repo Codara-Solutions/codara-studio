@@ -543,6 +543,9 @@ function ensureSweep(): void {
         const state = w.codexScreen.state();
         if (state === "working") {
           w.codexIdleSince = null;
+          if (w.codexAwaitingIdle && w.codexScreen.hasProgressSinceCompletion()) {
+            w.codexAwaitingIdle = false;
+          }
           if (!w.codexAwaitingIdle) enterWorking(w, now);
         } else if (state === "idle") {
           w.codexAwaitingIdle = false;
@@ -1147,6 +1150,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         if (w.state === "working") w.state = "idle";
         if (w.runtime === "codex") {
           w.codexAwaitingIdle = true;
+          w.codexScreen?.markCompleted();
         }
         w.userTurnArmed = false;
         // Turn done = ready for input → chip "idle". Emit regardless of the
@@ -1201,6 +1205,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         w.userTurnArmed = false;
         if (w.runtime === "codex") {
           w.codexAwaitingIdle = true;
+          w.codexScreen?.markCompleted();
         }
         emitPaneState(w, "idle");
       }
@@ -1214,7 +1219,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       const shouldAlert =
         priorState !== problem.kind &&
         (priorState === "working" || w.userTurnArmed);
-      if (w.runtime === "codex") w.codexAwaitingIdle = true;
+      if (w.runtime === "codex") {
+        w.codexAwaitingIdle = true;
+        w.codexScreen?.markCompleted();
+      }
       w.state = problem.kind;
       emitPaneState(w, problem.kind === "failed" ? "error" : "blocked");
       if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
@@ -1479,6 +1487,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     w.state = "idle";
     if (w.runtime === "codex") {
       w.codexAwaitingIdle = true;
+      w.codexScreen?.markCompleted();
     }
     w.teammatesActive = 0;
     w.hookSubagentsActive = 0;

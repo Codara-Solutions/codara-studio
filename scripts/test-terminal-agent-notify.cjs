@@ -628,6 +628,10 @@ async function main() {
   feed("p13", "\x1b[5;6Hking");
   await sleep(2200);
   check("explicit completion is not undone by a queued busy repaint", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "idle");
+  feed("p13", "\x1b[5;1H\x1b[J• Working (53s • esc to interrupt) · 2 background terminals running · /ps to view · /stop to close\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("p13", "working");
+  check("a fresh busy frame escapes the completion guard without an intermediate idle frame", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "working");
+
   feed("p13", "\x1b[5;1H\x1b[2K");
   await sleep(1200);
   feed("p13", "\x1b[5;1H• Working (1s • esc to interrupt)");

@@ -8,6 +8,9 @@ export class CodexTerminalScreen {
   private pending = 0;
   private disposed = false;
   private revision = 0;
+  private completionRevision = 0;
+  private completionPending = false;
+  private completedFrame: string | null = null;
 
   constructor(cols: number, rows: number, private readonly onIdleFrame?: () => void) {
     this.terminal = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
@@ -33,7 +36,39 @@ export class CodexTerminalScreen {
     return this.readState();
   }
 
+  markCompleted(): void {
+    if (this.disposed) return;
+    const revision = ++this.completionRevision;
+    this.completionPending = true;
+    // Completion can share a chunk with the final repaint. Capture after its
+    // parser write, so that repaint cannot masquerade as the next turn.
+    this.terminal.write("", () => {
+      if (this.disposed || revision !== this.completionRevision) return;
+      this.completedFrame = this.progressFrame();
+      this.completionPending = false;
+    });
+  }
+
+  hasProgressSinceCompletion(): boolean {
+    return !this.disposed && this.pending === 0 && !this.completionPending &&
+      this.completedFrame !== null && this.progressFrame() !== this.completedFrame;
+  }
+
+  private progressFrame(): string {
+    // Composer sparkles and reflow are not evidence of another turn. Timer,
+    // status and transcript changes are, even if no idle frame was observed.
+    const lines = this.readFrame().split("\n");
+    let composer = lines.length - 1;
+    while (composer >= 0 && !/^\s*›/.test(lines[composer])) composer -= 1;
+    return lines.slice(0, composer < 0 ? lines.length : composer)
+      .join("\n").replace(/[\s⠁⠂⠄⠈⠐⠠⡀⢀]/g, "");
+  }
+
   private readState(): "working" | "idle" | null {
+    return classifyCodexScreen(this.readFrame());
+  }
+
+  private readFrame(): string {
     const buffer = this.terminal.buffer.active;
     const lines: string[] = [];
     for (let row = buffer.baseY; row < buffer.length; row++) {
@@ -47,7 +82,7 @@ export class CodexTerminalScreen {
         lines[lines.length - 1] += text;
       } else lines.push(text);
     }
-    return classifyCodexScreen(lines.join("\n"));
+    return lines.join("\n");
   }
 
   dispose(): void {
