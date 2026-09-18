@@ -206,6 +206,8 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
   };
   const beginEdit = (target: Selection | null = selection) => {
     if (!target || parsed.malformed || edit) return;
+    // A previous apply may still have a cell-focus callback queued for paint.
+    pendingFocus.current = null;
     setSelection(target);
     setEditError(null);
     setEdit({ target, record: target.row + (settings.header ? 1 : 0),

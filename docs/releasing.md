@@ -7,7 +7,11 @@ There are two pipelines. The GitHub Actions one is canonical.
 `.github/workflows/release.yml` runs at 02:17 UTC every day and whenever you
 run `gh workflow run Release`. Each run ships everything merged to `main`
 since the last `vX.Y.Z` tag as one release; a run with nothing new is skipped
-by the version step. Branch protection requires the CI `test` check on an
+by the version step. CI also runs the full release checks on every direct push
+to `main`, so bypassing the PR flow cannot defer feedback until the nightly.
+Each Release run includes a summary stating whether public downloads were
+updated, skipped for lack of changes, or blocked by a failed stage.
+Branch protection requires the CI `test` check on an
 up-to-date branch, so the last PR merged before a run was tested on the exact
 tree that ships. The workflow:
 

@@ -233,3 +233,42 @@ jobs:
           RELEASES_S3_ACCESS_KEY_ID: ${{ secrets.RELEASES_S3_ACCESS_KEY_ID }}
           RELEASES_S3_SECRET_ACCESS_KEY: ${{ secrets.RELEASES_S3_SECRET_ACCESS_KEY }}
         run: node scripts/publish-release-bundle.cjs
+
+  summary:
+    needs: [prepare, test, build, tag, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report whether public downloads were updated
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          TAG_RESULT: ${{ needs.tag.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          RELEASE_SKIPPED: ${{ needs.prepare.outputs.skip }}
+        run: |
+          failed=0
+          if [ "$PUBLISH_RESULT" = success ]; then
+            outcome="Public downloads updated successfully."
+          elif [ "$PREPARE_RESULT" = success ] && [ "$RELEASE_SKIPPED" = true ]; then
+            outcome="No unreleased changes. Public downloads were not updated."
+          else
+            outcome="Release did not finish publishing. Check the failed or cancelled jobs before retrying."
+            echo "::error::$outcome"
+            failed=1
+          fi
+          {
+            echo "## Release outcome"
+            echo "$outcome"
+            echo
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Prepare | $PREPARE_RESULT |"
+            echo "| Test | $TEST_RESULT |"
+            echo "| Build | $BUILD_RESULT |"
+            echo "| Tag | $TAG_RESULT |"
+            echo "| Publish | $PUBLISH_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"

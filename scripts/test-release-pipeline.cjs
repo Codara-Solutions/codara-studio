@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const yaml = require("js-yaml");
 const { createBundle, verifyBundle, hash } = require("./release-bundle.cjs");
 const { publishBundle } = require("./publish-release-bundle.cjs");
@@ -210,4 +211,34 @@ test("workflow isolates the App key and gates publication on a verified tag", ()
   assert.match(workflow.jobs.publish.if, /needs\.tag\.result == 'success'/);
   assert.ok(workflow.jobs.build.steps.find((step) => step.with?.name === "release-bundle"));
   assert.match(JSON.stringify(workflow.jobs.prepare), /Re-run failed jobs/);
+});
+
+test("direct main pushes run release checks before the next nightly", () => {
+  const workflow = yaml.load(fs.readFileSync(path.join(__dirname, "../.github/workflows/ci.yml"), "utf8"));
+  assert.deepEqual(workflow.on.push.branches, ["main"]);
+  assert.deepEqual(workflow.on.pull_request.branches, ["main"]);
+  assert.ok(workflow.jobs.test.steps.some((step) => step.run === "npm run test:all"));
+});
+
+test("release summary distinguishes publication from skipped and failed runs", () => {
+  const workflow = yaml.load(fs.readFileSync(path.join(__dirname, "../.github/workflows/release.yml"), "utf8"));
+  assert.equal(workflow.jobs.summary.if, "always()");
+  assert.deepEqual(workflow.jobs.summary.needs, ["prepare", "test", "build", "tag", "publish"]);
+  const script = workflow.jobs.summary.steps[0].run;
+  const summary = path.join(temporary, "summary.md");
+  for (const [publish, skipped, expected, message] of [
+    ["success", "false", 0, "updated successfully"],
+    ["skipped", "true", 0, "were not updated"],
+    ["failure", "false", 1, "did not finish publishing"],
+    ["skipped", "false", 1, "did not finish publishing"],
+  ]) {
+    fs.writeFileSync(summary, "");
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env: {
+      PATH: process.env.PATH, GITHUB_STEP_SUMMARY: summary, PREPARE_RESULT: "success",
+      TEST_RESULT: "success", BUILD_RESULT: "success", TAG_RESULT: "success",
+      PUBLISH_RESULT: publish, RELEASE_SKIPPED: skipped,
+    } });
+    assert.equal(result.status, expected, result.stderr);
+    assert.ok(fs.readFileSync(summary, "utf8").includes(message));
+  }
 });

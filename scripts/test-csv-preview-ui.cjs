@@ -170,6 +170,28 @@ async function main() {
     await page.keyboard.press('Enter');
     await expect(page.locator('[data-cell="0:1"]')).toHaveText('applied by Enter');
     await page.locator('[data-cell="0:1"]').dblclick();
+    await page.getByRole('textbox', { name: 'Edit selected cell' }).fill('focus race value');
+    await page.evaluate(() => {
+      window.csvOriginalRaf = window.requestAnimationFrame;
+      window.csvHeldFrames = [];
+      window.requestAnimationFrame = (callback) => {
+        window.csvHeldFrames.push(callback);
+        return window.csvHeldFrames.length;
+      };
+    });
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('textbox', { name: 'Edit selected cell' })).toHaveCount(0);
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('textbox', { name: 'Edit selected cell' })).toBeFocused();
+    await page.evaluate(() => {
+      window.requestAnimationFrame = window.csvOriginalRaf;
+      for (const callback of window.csvHeldFrames) callback(performance.now());
+      window.csvHeldFrames = [];
+    });
+    await expect(page.getByRole('textbox', { name: 'Edit selected cell' })).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Edit cell', exact: true })).toBeVisible();
+    await page.locator('[data-cell="0:1"]').dblclick();
     await page.getByRole('textbox', { name: 'Edit selected cell' }).fill('keep this draft');
     await page.evaluate(() => window.changeCsv('name;value\nAda;changed elsewhere\nBen;17'));
     await page.getByRole('button', { name: 'Apply change' }).click();

@@ -1,10 +1,11 @@
 name: CI
 
-# Pull-request gate: contributors' changes run the same typechecks and the
-# full unit-test registry that gate releases, so a PR shows red before a
-# human ever reviews broken code. Branch protection can require this check.
+# Run the release checks on pull requests and direct main pushes so a bypass
+# cannot leave a regression undiscovered until the next nightly release.
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
 
