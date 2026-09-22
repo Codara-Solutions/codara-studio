@@ -13,7 +13,7 @@ import type {
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
-import { sanitizeNestedAgentEnv } from "./env-sanitize";
+import { restoreUserZdotdir, sanitizeElectronViteDevEnv, sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
 import { getHookRpcEnvSafe } from "./hook-rpc";
@@ -1342,6 +1342,11 @@ function doSpawn(
   // CC 2.1.201 then writes NO session JSONL, killing the chat backends'
   // transcript tailing and timing out every turn. See env-sanitize.ts.
   sanitizeNestedAgentEnv(env);
+  // A dev app (`npm run dev`) and a Studio started from another Studio's pane
+  // both carry their launcher's wiring; the shell must look like one opened
+  // from a plain terminal. See env-sanitize.ts.
+  sanitizeElectronViteDevEnv(env);
+  restoreUserZdotdir(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.

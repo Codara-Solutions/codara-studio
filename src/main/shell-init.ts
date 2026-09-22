@@ -2,6 +2,7 @@ import { promises as fsp, constants as fsc } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { resolveBundledResourcePath } from "./bundled-resources";
+import { userZdotdirFromEnv } from "./env-sanitize";
 
 // Materializes Codara's shell-integration scripts into a stable on-disk
 // location (`~/.cache/spark/shell-integration/`) and returns the path so a
@@ -194,7 +195,8 @@ async function buildUnixLaunch(): Promise<IntegratedShellLaunch> {
       // delegate back to their personal config — without this, users with a
       // custom ZDOTDIR (oh-my-zsh-installed-elsewhere setups) lose their
       // prompt theme on launch.
-      if (process.env.ZDOTDIR) env.SPARK_USER_ZDOTDIR = process.env.ZDOTDIR;
+      const userZdotdir = userZdotdirFromEnv(process.env);
+      if (userZdotdir) env.SPARK_USER_ZDOTDIR = userZdotdir;
       env.ZDOTDIR = zdotdir;
       // -l so /etc/zprofile (path_helper on macOS, /etc/profile on Linux)
       // runs and the GUI-launched shell ends up with a real PATH including

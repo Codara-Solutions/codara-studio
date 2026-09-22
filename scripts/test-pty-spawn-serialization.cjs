@@ -201,7 +201,12 @@ function stubPlugin() {
         return JSON.stringify(value);
       }
     `,
-    "./env-sanitize": "export function sanitizeNestedAgentEnv() {}",
+    "./env-sanitize": `
+      export function sanitizeNestedAgentEnv() {}
+      export function sanitizeElectronViteDevEnv() {}
+      export function restoreUserZdotdir() {}
+      export function userZdotdirFromEnv() { return undefined; }
+    `,
     "./path-reconstruction": "export function injectEnrichedPath() {}",
     "./binary-resolver": `
       export async function resolveBinary(name) {
