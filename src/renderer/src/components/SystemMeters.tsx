@@ -5,12 +5,13 @@ type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
 };
 
-type MetricKind = "cpu" | "gpu" | "ram";
+type MetricKind = "cpu" | "gpu" | "ram" | "swap";
 
 interface HistoryPoint {
   cpu: number;
   gpu: number | null;
   ram: number;
+  swap: number | null;
 }
 
 const POLL_INTERVAL_MS = 2_500;
@@ -32,6 +33,11 @@ const METRICS: ReadonlyArray<{
     label: "RAM",
     color: "color-mix(in oklch, var(--accent) 28%, #e9a85f)",
   },
+  {
+    kind: "swap",
+    label: "SWAP",
+    color: "color-mix(in oklch, var(--accent) 22%, #e8677a)",
+  },
 ];
 
 function valueFor(
@@ -40,12 +46,28 @@ function valueFor(
 ): number | null {
   if (kind === "cpu") return snapshot.cpuPercent;
   if (kind === "gpu") return snapshot.gpuPercent;
+  if (kind === "swap") return snapshot.swapPercent ?? null;
   return snapshot.ramPercent;
 }
 
 function formatBytes(bytes: number): string {
   const gib = bytes / 1024 ** 3;
   return `${gib >= 10 ? gib.toFixed(0) : gib.toFixed(1)} GB`;
+}
+
+// Swap is read in bytes: its percentage is of a total that macOS grows on
+// demand, so "6.2G" says more than "87".
+function compactSwap(bytes: number | null): string {
+  if (bytes == null) return "—";
+  const gib = bytes / 1024 ** 3;
+  if (gib < 0.05) return "0G";
+  return `${gib >= 10 ? gib.toFixed(0) : gib.toFixed(1)}G`;
+}
+
+function metricText(snapshot: SystemResourceSnapshot, kind: MetricKind): string {
+  if (kind === "swap") return compactSwap(snapshot.swapUsedBytes);
+  const value = valueFor(snapshot, kind);
+  return value === null ? "—" : String(Math.round(value));
 }
 
 function MiniRing({ value, color }: { value: number | null; color: string }) {
@@ -131,9 +153,11 @@ function MetricRow({
       ? `${snapshot.cpuLogicalCores} logical cores`
       : metric.kind === "ram"
         ? `${formatBytes(snapshot.ramUsedBytes)} of ${formatBytes(snapshot.ramTotalBytes)}`
-        : value === null
-          ? "GPU activity is unavailable on this machine"
-          : "Busiest graphics engine";
+        : metric.kind === "swap"
+          ? swapDetail(snapshot)
+          : value === null
+            ? "GPU activity is unavailable on this machine"
+            : "Busiest graphics engine";
   return (
     <div className="system-meter-popover-row">
       <div className="system-meter-popover-heading">
@@ -142,7 +166,11 @@ function MetricRow({
         </span>
         <span className="system-meter-popover-label">{metric.label}</span>
         <span className="system-meter-popover-value" style={{ color: metric.color }}>
-          {value === null ? "—" : `${Math.round(value)}%`}
+          {metric.kind === "swap"
+            ? compactSwap(snapshot.swapUsedBytes)
+            : value === null
+              ? "—"
+              : `${Math.round(value)}%`}
         </span>
       </div>
       <div className="system-meter-popover-graph">
@@ -159,6 +187,14 @@ function MetricRow({
       <span className="system-meter-popover-detail">{detail}</span>
     </div>
   );
+}
+
+function swapDetail(snapshot: SystemResourceSnapshot): string {
+  const used = snapshot.swapUsedBytes;
+  const total = snapshot.swapTotalBytes;
+  if (used == null || total == null) return "Swap usage is unavailable on this machine";
+  if (total === 0) return "No swap in use";
+  return `${formatBytes(used)} of ${formatBytes(total)} swap space`;
 }
 
 function SystemPopover({
@@ -228,7 +264,12 @@ export default function SystemMeters() {
         setSnapshot(next);
         setHistory((current) => [
           ...current.slice(-(HISTORY_LENGTH - 1)),
-          { cpu: next.cpuPercent, gpu: next.gpuPercent, ram: next.ramPercent },
+          {
+            cpu: next.cpuPercent,
+            gpu: next.gpuPercent,
+            ram: next.ramPercent,
+            swap: next.swapPercent ?? null,
+          },
         ]);
       })
       .catch(() => undefined);
@@ -270,6 +311,9 @@ export default function SystemMeters() {
   const title = snapshot
     ? METRICS.map((metric) => {
         const value = valueFor(snapshot, metric.kind);
+        if (metric.kind === "swap") {
+          return `${metric.label} ${value === null ? "unavailable" : compactSwap(snapshot.swapUsedBytes)}`;
+        }
         return `${metric.label} ${value === null ? "unavailable" : `${Math.round(value)}%`}`;
       }).join(" · ")
     : "System activity loading";
@@ -297,7 +341,7 @@ export default function SystemMeters() {
               <MiniRing value={value} color={metric.color} />
               <span className="system-meter-mini-label">{metric.label}</span>
               <span className="system-meter-mini-value" style={{ color: metric.color }}>
-                {value === null ? "—" : Math.round(value)}
+                {snapshot ? metricText(snapshot, metric.kind) : "—"}
               </span>
             </span>
           );

@@ -1488,6 +1488,9 @@ export interface SystemResourceSnapshot {
   ramPercent: number;
   ramUsedBytes: number;
   ramTotalBytes: number;
+  swapPercent: number | null;
+  swapUsedBytes: number | null;
+  swapTotalBytes: number | null;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
