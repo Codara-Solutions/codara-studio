@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import SystemMeters from "./SystemMeters";
@@ -9,6 +9,8 @@ import type { NavigateTo } from "../notifications/routing";
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
 };
+
+const BRAND_CLEARANCE_PX = 12;
 
 function GearIcon({ size = 14 }: { size?: number }) {
   // Classic 8-tooth cog with a center hub. Strokes only — matches the chrome's
@@ -238,6 +240,34 @@ function WindowChrome({
     };
   }, [isWin]);
 
+  // The centered brand and the trailing cluster are both absolutely placed, so
+  // nothing keeps them apart: account pills, the system meters and, on
+  // Windows, the caption buttons reach the middle of a 1280px window. The brand
+  // is decorative, so it steps aside rather than being painted over.
+  const brandRef = useRef<HTMLSpanElement>(null);
+  const trailingRef = useRef<HTMLDivElement>(null);
+  const [brandCrowded, setBrandCrowded] = useState(false);
+  useLayoutEffect(() => {
+    const brand = brandRef.current;
+    const trailing = trailingRef.current;
+    if (!brand || !trailing) return;
+    const measure = () => {
+      setBrandCrowded(
+        trailing.getBoundingClientRect().left <
+          brand.getBoundingClientRect().right + BRAND_CLEARANCE_PX,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(brand);
+    observer.observe(trailing);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, []);
+
   const handleMinimize = () => {
     void window.spark.windowControls.minimize().catch(() => undefined);
   };
@@ -297,26 +327,39 @@ function WindowChrome({
           pointerEvents: "none",
         }}
       >
-        {/* The brand mark follows the workspace accent, so the titlebar
-            quietly says which workspace's colour you are living in. */}
-        <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
-          <CodaraMark size={11} />
-        </span>
         <span
+          ref={brandRef}
+          data-titlebar-brand
           style={{
-            color: "var(--muted)",
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-            lineHeight: 1,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            visibility: brandCrowded ? "hidden" : "visible",
           }}
         >
-          Codara Studio
+          {/* The brand mark follows the workspace accent, so the titlebar
+              quietly says which workspace's colour you are living in. */}
+          <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+            <CodaraMark size={11} />
+          </span>
+          <span
+            style={{
+              color: "var(--muted)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              lineHeight: 1,
+            }}
+          >
+            Codara Studio
+          </span>
         </span>
       </div>
       <div style={{ flex: 1 }} />
       <div
+        ref={trailingRef}
+        data-titlebar-trailing
         style={{
           position: "absolute",
           right: 0,
