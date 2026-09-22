@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const visibleModelTrigger = '[aria-hidden="false"] button[aria-label^="Model and thinking:"]';
+
 test("Cora drafts survive editor and workspace navigation", async () => {
   const fixture = await prepareWorkspace();
   let app: ElectronApplication | null = null;
@@ -98,7 +100,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
     await conversation.evaluate((element) => {
       element.setAttribute("data-retained-conversation-probe", "workspace-a");
     });
-    const modelButton = page.locator('[aria-hidden="false"] button[title="Chat model"]');
+    const modelButton = page.locator(visibleModelTrigger);
     await expect(modelButton).toHaveText(/GPT-5\.6 Luna/);
     await modelButton.evaluate((element) => {
       element.setAttribute("data-retained-model-probe", "workspace-a");
@@ -115,17 +117,13 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
       "gpt-5.6-terra",
     );
     await expect(page.getByText("B retained conversation message", { exact: true })).toBeVisible();
-    await expect(page.locator('[aria-hidden="false"] button[title="Chat model"]')).toHaveText(
-      /GPT-5\.6 Terra/,
-    );
+    await expect(page.locator(visibleModelTrigger)).toHaveText(/GPT-5\.6 Terra/);
 
-    await page.evaluate(() => {
+    await page.evaluate((trigger) => {
       const labels: string[] = [];
       const sample = () => {
-        const button = document.querySelector(
-          '[aria-hidden="false"] button[title="Chat model"]',
-        );
-        const label = button?.textContent?.trim();
+        // The model name only: the trigger also carries the thinking depth.
+        const label = document.querySelector(`${trigger} .composer-pill-label`)?.textContent?.trim();
         if (label && labels[labels.length - 1] !== label) labels.push(label);
       };
       const observer = new MutationObserver(sample);
@@ -133,7 +131,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
       sample();
       (window as unknown as { __coraModelProbe: { labels: string[]; observer: MutationObserver } })
         .__coraModelProbe = { labels, observer };
-    });
+    }, visibleModelTrigger);
 
     await page.locator('[data-workspace-id="ws-draft-a"]').dispatchEvent("click");
     await expect(
@@ -143,7 +141,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
       "workspace-a",
     );
     await expect(page.getByText("A retained conversation message", { exact: true })).toBeVisible();
-    const restoredModel = page.locator('[aria-hidden="false"] button[title="Chat model"]');
+    const restoredModel = page.locator(visibleModelTrigger);
     await expect(restoredModel).toHaveAttribute("data-retained-model-probe", "workspace-a");
     await expect(restoredModel).toHaveText(/GPT-5\.6 Luna/);
     const labels = await page.evaluate(() => {

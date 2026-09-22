@@ -82,7 +82,7 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
     expect(created).toMatchObject({
       backend: "pi",
       model: "gpt-5.6-sol",
-      effort: "high",
+      effort: "medium",
     });
     expect(created.runId).toBeTruthy();
 
@@ -391,13 +391,18 @@ test("a draft chat's Board promotes to an idle run on the first card without sta
 
     // Creating a card promotes the draft to a real run — WITHOUT starting
     // autopilot. The card must land on that run's own board.
-    await page.getByRole("button", { name: "+ Add card" }).first().click();
-    const titleInput = page.locator('input[placeholder="New card in Ideas"]');
+    await page.getByRole("button", { name: "New card in Ideas" }).click();
+    const cardPanel = page.getByRole("dialog", { name: "New card" });
+    const titleInput = cardPanel.getByPlaceholder("What should Cora build?");
     await expect(titleInput).toBeVisible();
     await titleInput.fill("Card created from a draft chat");
     await titleInput.press("Enter");
+    await expect(cardPanel).toHaveCount(0);
+    // The promoted run also takes the card's title, so look in the lane.
     await expect(
-      page.getByText("Card created from a draft chat", { exact: true }),
+      page
+        .locator('[data-board-lane="idea"]')
+        .getByText("Card created from a draft chat", { exact: true }),
     ).toBeVisible();
 
     await expect.poll(async () => page.evaluate(async () => {
