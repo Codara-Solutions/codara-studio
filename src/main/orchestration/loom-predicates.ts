@@ -9,15 +9,16 @@
 // run-store.ts need the SAME shell-check / git-clean / sentinel logic to settle
 // a guard the SAME way the loop's StopConditions settle. automation-loop imports
 // run-store (lazily), so run-store importing automation-loop would close a
-// static cycle. Extracting the primitives here — a leaf module that imports only
-// node:child_process + @shared/types (the latter type-only, erased) — lets BOTH
-// import them with no cycle. automation-loop delegates its StopConditions checks
-// to runShellCheck/gitClean/scanLoopSentinel here so the two code paths stay
-// byte-identical and the 55 automation-loop checks stay green.
+// static cycle. Extracting the primitives here (a leaf module that imports only
+// node:child_process, @shared/types and the dependency-free env-sanitize) lets
+// BOTH import them with no cycle. automation-loop delegates its StopConditions
+// checks to runShellCheck/gitClean/scanLoopSentinel here so the two code paths
+// stay byte-identical and the 55 automation-loop checks stay green.
 
 import { exec } from "node:child_process";
 import type { GuardPredicate } from "@shared/types";
 import { SHELL_CHECK_TIMEOUT_MS, SPARK_LOOP_CONTINUE, SPARK_LOOP_DONE } from "@shared/types";
+import { processEnvWithoutElectronViteDev } from "../env-sanitize";
 
 /** Run a shell command in `cwd` with the bounded loop timeout; resolve true iff
  *  it exits 0 (a check passed). Never rejects/hangs — a spawn throw or a timeout
@@ -27,7 +28,16 @@ import { SHELL_CHECK_TIMEOUT_MS, SPARK_LOOP_CONTINUE, SPARK_LOOP_DONE } from "@s
 export function runShellCheck(cwd: string, cmd: string): Promise<boolean> {
   return new Promise((resolve) => {
     try {
-      exec(cmd, { cwd, timeout: SHELL_CHECK_TIMEOUT_MS, windowsHide: true }, (err) => resolve(!err));
+      exec(
+        cmd,
+        {
+          cwd,
+          env: processEnvWithoutElectronViteDev(),
+          timeout: SHELL_CHECK_TIMEOUT_MS,
+          windowsHide: true,
+        },
+        (err) => resolve(!err),
+      );
     } catch {
       resolve(false);
     }

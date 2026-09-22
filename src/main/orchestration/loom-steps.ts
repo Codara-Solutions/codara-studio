@@ -13,10 +13,10 @@
 // renderNodePrompt — WITHOUT its auto-incoming append (a shell command must
 // never grow an upstream transcript on its tail).
 //
-// Leaf-ish on purpose: node builtins + the pure loom-graph module + type-only
-// shared types. The notify sink is injected (ctx.notify) so the engine can wire
-// the real pipeline while tests script it; when absent the notify action falls
-// back to a lazy import of ../notify.
+// Leaf-ish on purpose: node builtins + the pure loom-graph and env-sanitize
+// modules + type-only shared types. The notify sink is injected (ctx.notify)
+// so the engine can wire the real pipeline while tests script it; when absent
+// the notify action falls back to a lazy import of ../notify.
 
 import { spawn } from "node:child_process";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -28,6 +28,7 @@ import type {
   LoomStepNode,
   LoomStepResult,
 } from "@shared/types";
+import { processEnvWithoutElectronViteDev } from "../env-sanitize";
 import { renderNodePrompt, truncateOutput } from "./loom-graph";
 
 export const DEFAULT_STEP_TIMEOUT_SEC = 120;
@@ -164,7 +165,7 @@ export function runShellCapture(
     try {
       child = spawn(exe, args(command), {
         cwd: opts.cwd,
-        env: { ...process.env, ...(opts.env ?? {}) },
+        env: { ...processEnvWithoutElectronViteDev(), ...(opts.env ?? {}) },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
         // Own process group on unix so a timeout can kill the whole tree.

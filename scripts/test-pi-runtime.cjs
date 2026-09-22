@@ -258,6 +258,10 @@ async function main() {
     SPARK_AGENT_CAPABILITY: "scoped",
     SPARK_RUN_ID: "untrusted-run",
     SAFE_SETTING: "preserved",
+    NODE_ENV: "development",
+    NODE_ENV_ELECTRON_VITE: "development",
+    ELECTRON_RENDERER_URL: "http://localhost:5173",
+    ELECTRON_EXEC_PATH: "/opt/electron/Electron",
   }, "/tmp/codara-pi-config", "/tmp/codara-pi-sessions");
   assert.equal(sanitized.ANTHROPIC_API_KEY, undefined);
   assert.equal(sanitized.OPENAI_API_KEY, undefined);
@@ -270,6 +274,20 @@ async function main() {
   assert.equal(sanitized.SPARK_AGENT_CAPABILITY, undefined);
   assert.equal(sanitized.SPARK_RUN_ID, undefined);
   assert.equal(sanitized.SAFE_SETTING, "preserved");
+  // Pi's bash tool passes its env to the user's commands, so a dev app's
+  // electron-vite wiring must not reach them.
+  assert.equal(sanitized.NODE_ENV, undefined);
+  assert.equal(sanitized.NODE_ENV_ELECTRON_VITE, undefined);
+  assert.equal(sanitized.ELECTRON_RENDERER_URL, undefined);
+  assert.equal(sanitized.ELECTRON_EXEC_PATH, undefined);
+  assert.equal(
+    runtime.buildPiSubscriptionEnvironment(
+      { NODE_ENV: "production", NODE_ENV_ELECTRON_VITE: "development" },
+      "/tmp/codara-pi-config",
+      "/tmp/codara-pi-sessions",
+    ).NODE_ENV,
+    "production",
+  );
   assert.equal(sanitized.PI_TELEMETRY, "0");
   assert.equal(sanitized.ELECTRON_RUN_AS_NODE, "1");
   // Pinned inside Codara's own agent dir: pi-web-search must never fall back to

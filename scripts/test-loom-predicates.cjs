@@ -2,8 +2,9 @@
 // loom-predicates.ts). loom-predicates touches the shell (node:child_process.exec)
 // for tests/command/gitClean, so this harness STUBS node:child_process via an
 // esbuild plugin: a fake `exec(cmd, opts, cb)` consults globalThis.__LP for the
-// command's scripted outcome (exit code + stdout), so every probe is deterministic
-// and no real process is spawned. @shared/types is resolved to the real source so
+// command's scripted outcome (exit code + stdout) and records the env the child
+// would get (process.env when none is passed, as the real exec does), so every
+// probe is deterministic and no real process is spawned. @shared/types is resolved to the real source so
 // the SPARK_LOOP_* sentinels + SHELL_CHECK_TIMEOUT_MS come from one place.
 //
 //   node scripts/test-loom-predicates.cjs
@@ -37,7 +38,7 @@ const harnessPlugin = {
       contents:
         "globalThis.__LP ??= { shell: {}, calls: [] };\n" +
         "export function exec(cmd, opts, cb){\n" +
-        "  const L = globalThis.__LP; L.calls.push({ cmd, cwd: opts && opts.cwd });\n" +
+        "  const L = globalThis.__LP; L.calls.push({ cmd, cwd: opts && opts.cwd, env: (opts && opts.env) || process.env });\n" +
         "  const scripted = L.shell[cmd];\n" +
         "  const code = scripted ? scripted.code : 1;\n" +
         "  const stdout = scripted ? (scripted.stdout ?? '') : '';\n" +
@@ -147,6 +148,51 @@ async function main() {
     ok("command: exit 0 → pass", (await P.evaluateGuardPredicate({ type: "command", command: "test -f flag" }, ctx())) === true);
     ok("command: exit !=0 → fail", (await P.evaluateGuardPredicate({ type: "command", command: "grep TODO src" }, ctx())) === false);
     ok("command: unscripted command → fail (default non-zero)", (await P.evaluateGuardPredicate({ type: "command", command: "never-scripted" }, ctx())) === false);
+  }
+
+  // ── tests/command: a dev app's electron-vite wiring stays out of the check ───
+  // `npm run dev` exports these into the app; a check runs the user's own tests
+  // or command, which must see what a plain terminal would.
+  {
+    const devWiring = {
+      NODE_ENV: "development",
+      NODE_ENV_ELECTRON_VITE: "development",
+      ELECTRON_RENDERER_URL: "http://localhost:5173",
+      ELECTRON_EXEC_PATH: "/opt/electron/Electron",
+    };
+    const saved = Object.fromEntries(
+      [...Object.keys(devWiring), "SPARK_HOME_DIR"].map((key) => [key, process.env[key]]),
+    );
+    const lastEnv = () => L.calls[L.calls.length - 1].env;
+    try {
+      Object.assign(process.env, devWiring, { SPARK_HOME_DIR: "/codara-home" });
+      L.shell = { "npm test": { code: 0 }, "make check": { code: 0 } };
+      L.calls = [];
+      await P.evaluateGuardPredicate({ type: "tests" }, ctx());
+      let env = lastEnv();
+      ok(
+        "tests: dev app's NODE_ENV and electron-vite vars are not inherited",
+        env.NODE_ENV === undefined &&
+          env.ELECTRON_RENDERER_URL === undefined &&
+          env.ELECTRON_EXEC_PATH === undefined &&
+          env.NODE_ENV_ELECTRON_VITE === undefined,
+      );
+      ok("tests: the rest of the app env is inherited", env.SPARK_HOME_DIR === "/codara-home" && env.PATH === process.env.PATH);
+      await P.evaluateGuardPredicate({ type: "command", command: "make check" }, ctx());
+      env = lastEnv();
+      ok("command: dev app's NODE_ENV and ELECTRON_RENDERER_URL are not inherited", env.NODE_ENV === undefined && env.ELECTRON_RENDERER_URL === undefined);
+      // NODE_ENV is electron-vite's only while it equals the mode marker.
+      process.env.NODE_ENV = "production";
+      await P.evaluateGuardPredicate({ type: "tests" }, ctx());
+      env = lastEnv();
+      ok("tests: a user-set NODE_ENV survives", env.NODE_ENV === "production" && env.ELECTRON_RENDERER_URL === undefined);
+      ok("tests: process.env itself is untouched", process.env.ELECTRON_RENDERER_URL === devWiring.ELECTRON_RENDERER_URL);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   }
 
   // ── gitClean: porcelain empty/non-empty mapping ──────────────────────────────

@@ -163,6 +163,51 @@ async function main() {
     assert.strictEqual(r.output, "node 2 ok");
   });
 
+  await t("command + script: a dev app's electron-vite wiring stays out of the child", async () => {
+    // `npm run dev` exports these into the app. A step runs the user's own
+    // build or tests, which must see what a plain terminal would.
+    const devWiring = {
+      NODE_ENV: "development",
+      NODE_ENV_ELECTRON_VITE: "development",
+      ELECTRON_RENDERER_URL: "http://localhost:5173",
+      ELECTRON_EXEC_PATH: "/opt/electron/Electron",
+    };
+    const saved = Object.fromEntries(Object.keys(devWiring).map((key) => [key, process.env[key]]));
+    const keys = ["NODE_ENV", "ELECTRON_RENDERER_URL", "ELECTRON_EXEC_PATH", "NODE_ENV_ELECTRON_VITE", "SPARK_RUN_ID"];
+    const probe = (extra = {}) =>
+      step("s", {
+        type: "script",
+        language: "node",
+        code: `console.log(${JSON.stringify(keys)}.map((k) => process.env[k] ?? "-").join("|"))`,
+        ...extra,
+      });
+    const stepCtx = ctx({ env: { SPARK_RUN_ID: "run-1" } });
+    try {
+      Object.assign(process.env, devWiring);
+      const dev = await executeStep(probe(), stepCtx);
+      assert.strictEqual(dev.ok, true, dev.error);
+      assert.strictEqual(dev.output, "-|-|-|-|run-1");
+      const pinned = await executeStep(probe({ env: { NODE_ENV: "test" } }), stepCtx);
+      assert.strictEqual(pinned.output, "test|-|-|-|run-1");
+      if (!isWin) {
+        const command = await executeStep(
+          step("s", { type: "command", command: 'echo "${NODE_ENV-unset}|${ELECTRON_RENDERER_URL-unset}"' }),
+          stepCtx,
+        );
+        assert.strictEqual(command.output, "unset|unset");
+      }
+      // NODE_ENV is electron-vite's only while it equals the mode marker.
+      process.env.NODE_ENV = "production";
+      const user = await executeStep(probe(), stepCtx);
+      assert.strictEqual(user.output, "production|-|-|-|run-1");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   if (!isWin) {
     await t("script: bash", async () => {
       const r = await executeStep(step("s", { type: "script", language: "bash", code: 'x=3\necho "bash $x"' }), ctx());

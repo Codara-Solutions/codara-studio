@@ -78,6 +78,17 @@ export function sanitizeElectronViteDevEnv(env: Record<string, string | undefine
   delete env[ELECTRON_VITE_MODE_MARKER];
 }
 
+/**
+ * A copy of process.env without electron-vite's dev wiring, for a child that
+ * runs the user's own commands outside pty-manager (automation steps and
+ * checks). Those must behave as they would from a plain terminal.
+ */
+export function processEnvWithoutElectronViteDev(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  sanitizeElectronViteDevEnv(env);
+  return env;
+}
+
 // Codara's zsh integration dir. Must match the cache layout shell-init.ts
 // materializes (<home>/.cache/spark/shell-integration/zsh). Matched by suffix
 // rather than against this process's home: an instance started with another

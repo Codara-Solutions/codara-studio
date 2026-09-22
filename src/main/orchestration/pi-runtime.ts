@@ -8,6 +8,7 @@ import type {
 } from "@shared/types";
 import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
+import { sanitizeElectronViteDevEnv } from "../env-sanitize";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 export const CODARA_PI_VERSION = "0.85.1";
@@ -350,6 +351,9 @@ export function buildPiSubscriptionEnvironment(
       upper === "SPARK_AUTOMATION_ID" || upper === "SPARK_NODE_ID") continue;
     env[key] = value;
   }
+  // Pi's bash tool hands its own env to every command it runs in the user's
+  // project, so a dev app's wiring would reach their builds and test runs.
+  sanitizeElectronViteDevEnv(env);
   env.ELECTRON_RUN_AS_NODE = "1";
   env.PI_CODING_AGENT_DIR = resolve(configDir);
   env.PI_CODING_AGENT_SESSION_DIR = resolve(sessionDir);
