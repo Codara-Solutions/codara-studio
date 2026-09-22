@@ -19,7 +19,8 @@ import type { TerminalAgentSession } from "../../tabs/types";
 //
 // Visibility is controlled by the parent: hidden panes stay mounted (so the
 // PTY survives tab switches) but get visibility:hidden + pointer-events:none
-// so they can't accidentally steal focus from the active pane.
+// so they can't accidentally steal focus from the active pane, and are
+// shifted off the viewport so xterm stops rendering them.
 
 export interface TerminalPaneHandle {
   write: (data: string) => void;
@@ -95,6 +96,10 @@ interface Props {
   // clear the leaf's `bootResume` marker.
   onBootResumeConsumed?: () => void;
 }
+
+// Far enough past any display edge that no part of the pane intersects the
+// viewport.
+const HIDDEN_PANE_TRANSFORM = "translateX(-100000px)";
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
   function TerminalPane(
@@ -198,6 +203,12 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
           overflow: "hidden",
           visibility: visible ? "visible" : "hidden",
           pointerEvents: visible ? "auto" : "none",
+          // xterm pauses its renderer only while an IntersectionObserver
+          // reports the screen off the viewport, which visibility:hidden alone
+          // never does, so a hidden pane still fed by writeWhileHidden would
+          // redraw its WebGL canvas every frame. A transform leaves layout, the
+          // fit and the PTY size untouched, and xterm repaints in full on return.
+          transform: visible ? undefined : HIDDEN_PANE_TRANSFORM,
         }}
       >
         <div
