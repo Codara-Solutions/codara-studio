@@ -73,7 +73,9 @@ function MiniRing({ value, color }: { value: number | null; color: string }) {
         strokeDasharray={circumference}
         strokeDashoffset={circumference * (1 - progress / 100)}
         transform="rotate(-90 7 7)"
-        style={{ transition: "stroke-dashoffset 420ms var(--ease-out)" }}
+        // No transition: a tween on every poll repaints the title bar for ~25
+        // frames, and each frame re-composites every glass backdrop-filter on
+        // screen, which kept an idle window at ~15% CPU.
       />
       <circle cx="7" cy="7" r="1" fill={value === null ? "var(--muted)" : color} />
     </svg>
