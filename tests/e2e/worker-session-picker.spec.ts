@@ -36,7 +36,7 @@ test("the tab strip's worker rows list workspace history and can delete a sessio
     await expect(tabPicker.getByRole("button", { name: "Codex worker" })).toBeVisible();
     await tabPicker.getByRole("button", { name: "Claude worker" }).dispatchEvent("click");
 
-    const dialog = page.getByRole("dialog", { name: "Claude Code sessions" });
+    const dialog = page.getByRole("dialog", { name: "Claude sessions" });
     await expect(dialog).toBeVisible();
     const rows = dialog.getByRole("listitem");
     await expect(rows).toHaveCount(2);
@@ -47,6 +47,7 @@ test("the tab strip's worker rows list workspace history and can delete a sessio
     // into the highlight. Repeat events are ignored outright, so an armed row
     // stays armed and nothing is deleted.
     await expect(dialog).toBeFocused();
+    await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Delete");
     const armedConfirm = dialog.getByRole("button", { name: /^Delete session/, exact: false });
     await expect(dialog.getByText(/^Permanently delete/)).toBeVisible();

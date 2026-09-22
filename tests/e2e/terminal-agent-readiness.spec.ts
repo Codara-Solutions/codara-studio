@@ -21,6 +21,9 @@ for (const runtime of ["claude", "codex"] as const) {
         env: {
           ...electronEnv,
           HOME: fixture.homeDir,
+          CLAUDE_CONFIG_DIR: join(fixture.homeDir, ".claude"),
+          CODEX_HOME: join(fixture.homeDir, ".codex"),
+          GROK_HOME: join(fixture.homeDir, ".grok"),
           PATH: `${fixture.binDir}${delimiter}${process.env.PATH ?? ""}`,
           SPARK_USER_DATA_DIR: fixture.userDataDir,
           CODARA_HOME_DIR: fixture.userDataDir,
@@ -64,7 +67,7 @@ async function openSession(
   const picker = page.locator(".spark-tabbar-picker");
   const workerLabel = runtime === "claude" ? "Claude worker" : "Codex worker";
   await picker.getByRole("button", { name: workerLabel }).dispatchEvent("click");
-  const dialogName = runtime === "claude" ? "Claude Code sessions" : "Codex sessions";
+  const dialogName = runtime === "claude" ? "Claude sessions" : "Codex sessions";
   const dialog = page.getByRole("dialog", { name: dialogName });
   await expect(dialog).toBeVisible();
   if (launchKind === "fresh") {
