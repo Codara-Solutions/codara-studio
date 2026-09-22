@@ -575,6 +575,8 @@ export default function AgentCapabilitiesDialog({
       .finally(() => setBusyKey(null));
   };
 
+  // The reread runs inside the busy window so the switch lands on the new
+  // state instead of flicking back to the old one first.
   const installBuiltin = (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => {
     setBusyKey(`${id}:${runtime}`);
     void window.spark.agents
@@ -582,10 +584,10 @@ export default function AgentCapabilitiesDialog({
       .then((result) => {
         setStatus(
           result.ok
-            ? `Installed ${id} for ${RUNTIME_LABEL[runtime]}.`
-            : result.error ?? `Could not install ${id} for ${RUNTIME_LABEL[runtime]}.`,
+            ? `Added Codara Studio tools to the ${CLI_LABEL[runtime]}.`
+            : result.error ?? `Could not add Codara Studio tools to the ${CLI_LABEL[runtime]}.`,
         );
-        refreshBuiltins();
+        return requestBuiltins().then(setBuiltins);
       })
       .catch((err) => setStatus((err as Error).message))
       .finally(() => setBusyKey(null));
@@ -598,10 +600,10 @@ export default function AgentCapabilitiesDialog({
       .then((result) => {
         setStatus(
           result.ok
-            ? `Removed ${id} from ${RUNTIME_LABEL[runtime]}.`
-            : result.error ?? `Could not remove ${id} from ${RUNTIME_LABEL[runtime]}.`,
+            ? `Removed Codara Studio tools from the ${CLI_LABEL[runtime]}. They stay off until you turn them back on.`
+            : result.error ?? `Could not remove Codara Studio tools from the ${CLI_LABEL[runtime]}.`,
         );
-        refreshBuiltins();
+        return requestBuiltins().then(setBuiltins);
       })
       .catch((err) => setStatus((err as Error).message))
       .finally(() => setBusyKey(null));
@@ -1094,7 +1096,7 @@ export default function AgentCapabilitiesDialog({
                     />
                     <PolicyToggle
                       title="Auto-install Codara Studio MCP"
-                      detail="Keep the built-in server present on launch for preview and terminal tools."
+                      detail="Keep the built-in server current in each CLI on launch. A CLI you switch it off for stays off."
                       checked={draft.playwrightMcpAutoInstall}
                       onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
                     />
@@ -1975,9 +1977,9 @@ function BuiltinRow({
   );
 }
 
-// The built-in server's state in one CLI's config. Codara maintains these
-// entries itself when auto-install is on, so the common case is a fact to
-// report rather than an action to offer.
+// The built-in server in one CLI's config, as a switch: off removes Codara's
+// entry and keeps it out across launches, on writes it back. An entry the user
+// wrote is theirs to change, and a CLI that is not installed has no config.
 function BuiltinCliCell({
   runtime,
   status,
@@ -1994,63 +1996,43 @@ function BuiltinCliCell({
   onUninstall: () => void;
 }) {
   const label = CLI_LABEL[runtime];
-  if (status.state === "installed" && autoManaged) {
+  // Holds the flipped position while the config write and the status reread
+  // run, so the switch does not snap back before the new state arrives.
+  const [target, setTarget] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!busy) setTarget(null);
+  }, [busy]);
+  if (status.state !== "installed" && status.state !== "available") {
     return (
-      <Cell label={label} title={`Codara keeps this entry in ${status.configPath}`}>
-        <span className="spark-badge is-ok" style={flagBadgeStyle}>
-          Managed
-        </span>
+      <Cell label={label} title={status.configPath}>
+        <span style={cellNoteStyle}>{builtinStateLabel(status.state)}</span>
       </Cell>
     );
   }
-  if (status.state === "installed") {
-    return (
-      <Cell label={label}>
-        <ConfirmRemoveButton
-          busy={busy}
-          disabled={false}
-          label="Remove"
-          title={status.configPath}
-          onConfirm={onUninstall}
-        />
-      </Cell>
-    );
-  }
-  if (status.state === "available") {
-    return (
-      <Cell label={label}>
-        <button
-          type="button"
-          className="spark-btn"
-          style={microBtnStyle}
-          disabled={busy}
-          onClick={onInstall}
-          title={`Write the entry into ${status.configPath}`}
-        >
-          {busy ? "…" : "Add"}
-        </button>
-      </Cell>
-    );
-  }
+  const installed = status.state === "installed";
+  const title = installed
+    ? `The ${label} can use Codara Studio tools${autoManaged ? " (kept current on launch)" : ""}. Turn off to remove them.\n${status.configPath}`
+    : `Turn on to give the ${label} Codara Studio tools.\n${status.configPath}`;
   return (
-    <Cell label={label} title={status.configPath}>
-      <span style={cellNoteStyle}>{builtinStateLabel(status.state, autoManaged)}</span>
+    <Cell label={label} title={title}>
+      <Switch
+        checked={target ?? installed}
+        disabled={busy}
+        ariaLabel={`Codara Studio tools for the ${label}`}
+        onChange={(next) => {
+          setTarget(next);
+          if (next) onInstall();
+          else onUninstall();
+        }}
+      />
     </Cell>
   );
 }
 
-function builtinStateLabel(state: SparkBuiltinInstallState, autoManaged: boolean): string {
-  switch (state) {
-    case "installed":
-      return autoManaged ? "managed by Codara" : "added";
-    case "user-managed":
-      return "Set up by you";
-    case "available":
-      return "Not added";
-    case "unavailable":
-    default:
-      return "Not detected";
-  }
+function builtinStateLabel(state: SparkBuiltinInstallState): string {
+  if (state === "user-managed") return "Set up by you";
+  if (state === "unavailable") return "Not detected";
+  return state === "installed" ? "Added" : "Not added";
 }
 
 // Destructive actions stay neutral until armed, then reveal the danger tint for

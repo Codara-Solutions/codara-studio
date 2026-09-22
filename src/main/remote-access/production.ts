@@ -673,7 +673,10 @@ async function updateCapabilityAssetForRemote(input: RemoteAssetUpdate) {
     const settings = await loadSettings();
     let message: string;
     if (input.action === "builtin") {
-      const { getSparkBuiltinStatus, installSparkBuiltin, uninstallSparkBuiltin } = await import("../mcp-installer");
+      const [{ getSparkBuiltinStatus }, { setSparkBuiltinInstalled }] = await Promise.all([
+        import("../mcp-installer"),
+        import("../builtin-mcp-actions"),
+      ]);
       const runtimes = await detectAgentRuntimes(false);
       const available = (kind: string) => runtimes.some((runtime) => runtime.kind === kind && runtime.installed);
       const status = await getSparkBuiltinStatus({
@@ -683,7 +686,7 @@ async function updateCapabilityAssetForRemote(input: RemoteAssetUpdate) {
       const state = status.find((item) => item.id === input.builtinId)?.[input.runtime].state;
       if (state === "user-managed") throw new Error("This server entry is user-managed. Codara will not replace or remove it.");
       if (state === "unavailable" || !state) throw new Error(`Install ${input.runtime} in Studio before managing its built-in server.`);
-      const result = await (input.installed ? installSparkBuiltin : uninstallSparkBuiltin)(input.builtinId, input.runtime);
+      const result = await setSparkBuiltinInstalled(input.builtinId, input.runtime, input.installed);
       if (!result.ok) throw new Error(result.error ?? "Could not update the built-in server.");
       message = `Codara Studio MCP was ${input.installed ? "installed" : "removed"} for ${input.runtime}.`;
     } else {

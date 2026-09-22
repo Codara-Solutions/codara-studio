@@ -263,6 +263,44 @@ function buildServerEnv(): Record<string, string> {
   return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: codaraHome() };
 }
 
+// The CLIs the user switched the built-in off for. Launch auto-install skips
+// them, so a removal outlives the restart that would otherwise write the entry
+// straight back; an explicit install clears the mark. Only the personal configs
+// are tracked: a caller naming its own Codex or Grok home manages another file.
+const OPT_OUT_FILE = "builtin-mcp.json";
+const BUILTIN_RUNTIMES: readonly SparkBuiltinRuntime[] = ["claude", "codex", "grok"];
+let optOutWrite: Promise<void> = Promise.resolve();
+
+function optOutPath(): string {
+  return join(codaraHome(), OPT_OUT_FILE);
+}
+
+export function readSparkBuiltinOptOuts(): Set<SparkBuiltinRuntime> {
+  try {
+    const parsed = JSON.parse(readFileSync(optOutPath(), "utf8")) as { removedFrom?: unknown };
+    const listed = Array.isArray(parsed.removedFrom) ? parsed.removedFrom : [];
+    return new Set(BUILTIN_RUNTIMES.filter((runtime) => listed.includes(runtime)));
+  } catch {
+    return new Set();
+  }
+}
+
+// Serialized: two switches flipped in quick succession would otherwise both
+// read the old list and the second write would drop the first change.
+function setSparkBuiltinOptOut(runtime: SparkBuiltinRuntime, optedOut: boolean): Promise<void> {
+  const next = optOutWrite.then(async () => {
+    const current = readSparkBuiltinOptOuts();
+    if (current.has(runtime) === optedOut) return;
+    if (optedOut) current.add(runtime);
+    else current.delete(runtime);
+    await fs.mkdir(codaraHome(), { recursive: true });
+    const removedFrom = BUILTIN_RUNTIMES.filter((entry) => current.has(entry));
+    await writeFileAtomic(optOutPath(), JSON.stringify({ version: 1, removedFrom }, null, 2) + "\n");
+  });
+  optOutWrite = next.catch(() => undefined);
+  return next;
+}
+
 export async function installSparkPreviewMcp(
   options: CodexMcpHomeOptions = {},
 ): Promise<void> {
@@ -299,15 +337,16 @@ export async function repairSparkBuiltinEntries(
 // createIfMissing so the entry lands the first time. The never-overwrite-a-
 // user-entry guards inside installForClaude/installForCodex still hold.
 export async function installSparkPreviewMcpAtBoot(): Promise<void> {
+  const optedOut = readSparkBuiltinOptOuts();
   const [claudeBin, codexBin, grokBin] = await Promise.all([
     resolveBinary("claude").catch(() => null),
     resolveBinary("codex").catch(() => null),
     resolveBinary("grok").catch(() => null),
   ]);
   await Promise.all([
-    installForClaude(Boolean(claudeBin)),
-    installForCodex(Boolean(codexBin)),
-    installForGrok(Boolean(grokBin)),
+    optedOut.has("claude") ? false : installForClaude(Boolean(claudeBin)),
+    optedOut.has("codex") ? false : installForCodex(Boolean(codexBin)),
+    optedOut.has("grok") ? false : installForGrok(Boolean(grokBin)),
   ]);
 }
 
@@ -811,9 +850,10 @@ function tomlString(value: string): string {
 // ---------------------------------------------------------------------------
 
 // True when sub-agent prompts should be told to USE the codara-studio MCP.
-// True if either (a) auto-install is on AND a Claude/Codex runtime is on
-// disk (so we know we wrote an entry), or (b) the user has a codara-studio
-// entry of their own in any user/workspace config.
+// True if either (a) auto-install is on AND a Claude/Codex runtime the user
+// has not switched it off for is on disk (so we know we wrote an entry), or
+// (b) the user has a codara-studio entry of their own in any user/workspace
+// config.
 export function isSparkPreviewMcpAvailable(input: {
   cwd: string | null;
   autoInstallEnabled: boolean;
@@ -821,9 +861,10 @@ export function isSparkPreviewMcpAvailable(input: {
 }): boolean {
   const codexTarget = resolveCodexMcpConfigTarget(input.codexHome);
   if (input.autoInstallEnabled) {
-    if (existsSync(CLAUDE_USER_CONFIG)) return true;
-    if (existsSync(codexTarget.codexHome)) return true;
-    if (existsSync(resolveGrokMcpConfigTarget().grokHome)) return true;
+    const optedOut = readSparkBuiltinOptOuts();
+    if (!optedOut.has("claude") && existsSync(CLAUDE_USER_CONFIG)) return true;
+    if ((input.codexHome || !optedOut.has("codex")) && existsSync(codexTarget.codexHome)) return true;
+    if (!optedOut.has("grok") && existsSync(resolveGrokMcpConfigTarget().grokHome)) return true;
   }
   return detectUserSparkEntry(input.cwd, input.codexHome);
 }
@@ -1040,6 +1081,7 @@ export async function installSparkBuiltin(
     if (runtime === "claude") await installForClaude(true);
     else if (runtime === "grok") await installForGrok(true, undefined, options.grokHome);
     else await installForCodex(true, undefined, options.codexHome);
+    if (targetsPersonalConfig(runtime, options)) await setSparkBuiltinOptOut(runtime, false);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1052,12 +1094,28 @@ export async function uninstallSparkBuiltin(
   options: CodexMcpHomeOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
-    if (runtime === "claude") return await uninstallManagedClaudeServer(SERVER_NAME);
-    if (runtime === "grok") return await uninstallGrokBuiltinBlock(options.grokHome);
-    return await uninstallCodexBuiltinBlock(options.codexHome);
+    const result =
+      runtime === "claude"
+        ? await uninstallManagedClaudeServer(SERVER_NAME)
+        : runtime === "grok"
+          ? await uninstallGrokBuiltinBlock(options.grokHome)
+          : await uninstallCodexBuiltinBlock(options.codexHome);
+    if (result.ok && targetsPersonalConfig(runtime, options)) {
+      await setSparkBuiltinOptOut(runtime, true);
+    }
+    return result;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function targetsPersonalConfig(
+  runtime: SparkBuiltinRuntime,
+  options: CodexMcpHomeOptions,
+): boolean {
+  if (runtime === "codex") return !options.codexHome;
+  if (runtime === "grok") return !options.grokHome;
+  return true;
 }
 
 async function detectClaudeBuiltinState(

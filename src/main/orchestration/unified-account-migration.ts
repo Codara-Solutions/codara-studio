@@ -223,34 +223,10 @@ export async function migrateUnifiedAccounts(
       await step(
         named("share-mcp-servers"),
         async () => {
-          const store = (deps.claudeStore ??
-            service.adapter.store) as ClaudeCliAccountProfileStore;
-          const snapshot = await store.snapshot();
-          const shared = await syncClaudeCliMcpServers({
-            baselinePath: join(store.rootDir, CLAUDE_CLI_MCP_BASELINE_FILE),
-            files: [
-              // Claude Code's own file: updated in place, never created here.
-              {
-                path:
-                  store.personalConfigDirEnv === null
-                    ? join(dirname(resolve(store.personalConfigDir)), CLAUDE_CLI_CONFIG_FILE)
-                    : join(store.personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE),
-                create: false,
-              },
-              ...snapshot.profiles.map((profile) => ({
-                path: managedClaudeConfigFile(
-                  claudeCliManagedProfileConfigDir(store.rootDir, profile.id),
-                ),
-                create: true,
-              })),
-            ],
+          await shareClaudeMcpServers(
+            (deps.claudeStore ?? service.adapter.store) as ClaudeCliAccountProfileStore,
             log,
-          });
-          if (shared.written.length > 0) {
-            log(
-              `[accounts] shared ${shared.names.length} MCP server(s) across ${shared.written.length} Claude account file(s)`,
-            );
-          }
+          );
         },
         entry,
       );
@@ -262,6 +238,49 @@ export async function migrateUnifiedAccounts(
     await (deps.refreshShellPointer ?? refreshActiveCliEnvPointer)();
   });
   return report;
+}
+
+async function shareClaudeMcpServers(
+  store: ClaudeCliAccountProfileStore,
+  log: (message: string) => void,
+): Promise<void> {
+  const snapshot = await store.snapshot();
+  const shared = await syncClaudeCliMcpServers({
+    baselinePath: join(store.rootDir, CLAUDE_CLI_MCP_BASELINE_FILE),
+    files: [
+      // Claude Code's own file: updated in place, never created here.
+      {
+        path:
+          store.personalConfigDirEnv === null
+            ? join(dirname(resolve(store.personalConfigDir)), CLAUDE_CLI_CONFIG_FILE)
+            : join(store.personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE),
+        create: false,
+      },
+      ...snapshot.profiles.map((profile) => ({
+        path: managedClaudeConfigFile(claudeCliManagedProfileConfigDir(store.rootDir, profile.id)),
+        create: true,
+      })),
+    ],
+    log,
+  });
+  if (shared.written.length > 0) {
+    log(
+      `[accounts] shared ${shared.names.length} MCP server(s) across ${shared.written.length} Claude account file(s)`,
+    );
+  }
+}
+
+/**
+ * Codara edited the personal `.claude.json` MCP block. Claude sessions started
+ * from Codara read their account's own copy, so without this the edit would
+ * only reach them at the next launch.
+ */
+export async function shareClaudeMcpServersNow(): Promise<void> {
+  await unifiedAccountsReady();
+  await shareClaudeMcpServers(
+    unifiedAccountsFor("anthropic").adapter.store as ClaudeCliAccountProfileStore,
+    (message) => console.warn(message),
+  );
 }
 
 let readyPromise: Promise<void> | null = null;

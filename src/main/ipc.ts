@@ -118,6 +118,7 @@ import { anthropicAccounts } from "./orchestration/unified-account-registry";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import * as mcpInstaller from "./mcp-installer";
+import { setSparkBuiltinInstalled } from "./builtin-mcp-actions";
 import * as coraMemory from "./orchestration/cora-memory";
 import {
   deleteWorkerSession,
@@ -1185,17 +1186,13 @@ export function registerIpc(): void {
   });
   handle(
     "agents:installBuiltin",
-    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
-      const { installSparkBuiltin } = mcpInstaller;
-      return installSparkBuiltin(input.id, input.runtime);
-    },
+    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) =>
+      setSparkBuiltinInstalled(input.id, input.runtime, true),
   );
   handle(
     "agents:uninstallBuiltin",
-    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
-      const { uninstallSparkBuiltin } = mcpInstaller;
-      return uninstallSparkBuiltin(input.id, input.runtime);
-    },
+    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) =>
+      setSparkBuiltinInstalled(input.id, input.runtime, false),
   );
 
   handle("preferences:load", async (): Promise<AppPreferences> => {

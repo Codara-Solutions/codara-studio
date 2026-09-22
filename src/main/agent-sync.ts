@@ -24,6 +24,7 @@ import type {
   AgentMcpTransport,
 } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
+import { RESERVED_MCP_SERVER_NAMES } from "./orchestration/pi-mcp-config";
 
 type SyncKind = "mcp" | "skill";
 // Grok Build reads the same Codex-shaped TOML (`[mcp_servers.<name>]`), which
@@ -756,8 +757,11 @@ async function syncMcpConfigs(cwd: string | null, result: AgentSyncResult): Prom
   const codexPath = tomlRuntimeConfigPath("codex");
 
   try {
-    const claudeServers = readClaudeMcpServers(claudePath);
-    const codexServers = readCodexMcpServers(codexPath);
+    // The built-in server is switched per CLI in the Capability Center, and its
+    // entry holds this machine's absolute paths, so it never rides a sync into
+    // another CLI or into a project .mcp.json that may be committed.
+    const claudeServers = readClaudeMcpServers(claudePath).filter((server) => !isReservedMcpName(server.name));
+    const codexServers = readCodexMcpServers(codexPath).filter((server) => !isReservedMcpName(server.name));
 
     const codexAdded = await writeCodexManagedMcpServers(codexPath, claudeServers, result);
     result.mcp.toCodex.push(...codexAdded);
@@ -793,6 +797,12 @@ async function syncSkillDirs(cwd: string | null, result: AgentSyncResult): Promi
     await copyMissingSkills(pair.codex, pair.claude, "codex", "claude", pair.label, result);
     await copyMissingSkills(pair.claude, pair.codex, "claude", "codex", pair.label, result);
   }
+}
+
+const RESERVED_MCP_NAMES = new Set<string>(RESERVED_MCP_SERVER_NAMES.map((name) => name.toLowerCase()));
+
+function isReservedMcpName(name: string): boolean {
+  return RESERVED_MCP_NAMES.has(name.toLowerCase());
 }
 
 function readClaudeMcpServers(path: string): McpServerConfig[] {
