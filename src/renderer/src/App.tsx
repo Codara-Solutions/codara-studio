@@ -4543,10 +4543,10 @@ export default function App() {
   );
 
   const openInSparkBrowser = useCallback(
-    (url: string, options?: { forceNew?: boolean }) => {
+    (url: string, options?: { forceNew?: boolean; background?: boolean }) => {
       if (!isBrowserUrl(url)) return;
       if (options?.forceNew) {
-        newPreviewTab(url);
+        newPreviewTab(url, options.background ? { focus: false } : undefined);
         return;
       }
       const existing = tabs.tabs.find(
@@ -4581,9 +4581,13 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ url?: unknown; forceNew?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ url?: unknown; forceNew?: unknown; background?: unknown }>)
+        .detail;
       if (typeof detail?.url === "string") {
-        openInSparkBrowser(detail.url, { forceNew: detail.forceNew === true });
+        openInSparkBrowser(detail.url, {
+          forceNew: detail.forceNew === true,
+          background: detail.background === true,
+        });
       }
     };
     window.addEventListener("spark:open-browser-url", handler);

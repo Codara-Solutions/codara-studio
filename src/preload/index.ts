@@ -1577,23 +1577,33 @@ function isBrowserUrl(url: string): boolean {
 
 function dispatchOpenInSparkBrowser(
   url: string,
-  options?: { forceNew?: boolean },
+  options?: { forceNew?: boolean; background?: boolean },
 ): void {
   const rendererWindow = globalThis as unknown as {
     dispatchEvent: (event: CustomEvent) => boolean;
   };
   rendererWindow.dispatchEvent(
     new CustomEvent("spark:open-browser-url", {
-      detail: { url, forceNew: options?.forceNew === true },
+      detail: {
+        url,
+        forceNew: options?.forceNew === true,
+        background: options?.background === true,
+      },
     }),
   );
 }
 
-ipcRenderer.on("app:open-browser-url", (_event, url: string) => {
-  if (typeof url === "string" && isBrowserUrl(url)) {
-    dispatchOpenInSparkBrowser(url);
-  }
-});
+ipcRenderer.on(
+  "app:open-browser-url",
+  (_event, url: string, options?: { forceNew?: boolean; background?: boolean }) => {
+    if (typeof url === "string" && isBrowserUrl(url)) {
+      dispatchOpenInSparkBrowser(url, {
+        forceNew: options?.forceNew === true,
+        background: options?.background === true,
+      });
+    }
+  },
+);
 
 // Replay chord keystrokes from a focused <webview> guest as a synthetic
 // KeyboardEvent on the host window. The main process is the one that

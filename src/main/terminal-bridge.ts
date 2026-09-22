@@ -28,7 +28,7 @@
 
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
-import { isTrustedOnSender } from "./main-window-trust";
+import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
@@ -153,7 +153,12 @@ export async function requestTerminalOp<T = unknown>(
   });
 }
 
+// The app window first: only its renderer answers these requests, and a
+// focused popup opened by a page in the in-app browser would leave them
+// waiting for the timeout.
 function pickTargetWindow(): BrowserWindow | null {
+  const main = getTrustedMainWindow();
+  if (main && !main.webContents.isDestroyed()) return main;
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && !focused.webContents.isDestroyed()) return focused;
   const all = BrowserWindow.getAllWindows().filter((w) => !w.webContents.isDestroyed());

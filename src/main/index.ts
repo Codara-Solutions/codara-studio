@@ -35,6 +35,7 @@ import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
+import { routeGuestPopups } from "./guest-popups";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
@@ -824,8 +825,8 @@ function createWindow(): void {
     // (stripped above), so this params write does not itself change what loads;
     // it is kept only so the two views of the attach can never disagree and
     // mislead a future reader. `allowpopups` is intentionally left as BrowserPane
-    // sets it: window.open from a guest is already routed to the in-app browser
-    // by setWindowOpenHandler below, so it cannot open a privileged window.
+    // sets it: window.open from a guest is routed by routeGuestPopups (see the
+    // web-contents-created handler), so it cannot open a privileged window.
     const attrPreload = params.preload;
     if (attrPreload) {
       let attrPath = "";
@@ -1256,6 +1257,7 @@ app.whenReady().then(async () => {
   // forwarded payload into a synthetic KeyboardEvent dispatched on window.
   app.on("web-contents-created", (_e, contents) => {
     if (contents.getType() !== "webview") return;
+    routeGuestPopups(contents, () => contents.hostWebContents);
     contents.on("before-input-event", (_event, input) => {
       if (input.type !== "keyDown") return;
       const mods = input.modifiers ?? [];

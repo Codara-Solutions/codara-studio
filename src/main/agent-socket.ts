@@ -9,6 +9,7 @@ import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { scopePreviewWorkspace } from "./preview-workspace";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { getTrustedMainWindow } from "./main-window-trust";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
@@ -2110,7 +2111,10 @@ function requireDevTools(id: JsonRpcId): JsonRpcResponse | null {
   );
 }
 
+// The app window first, never a popup a page in the in-app browser opened.
 function pickAppWindow(): BrowserWindow | null {
+  const main = getTrustedMainWindow();
+  if (main && !main.webContents.isDestroyed()) return main;
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && !focused.webContents.isDestroyed()) return focused;
   return BrowserWindow.getAllWindows().find((w) => !w.webContents.isDestroyed()) ?? null;
