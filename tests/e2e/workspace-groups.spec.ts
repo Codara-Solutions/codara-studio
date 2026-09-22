@@ -3,6 +3,7 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { readableWorkspaceAccent } from "../../src/shared/workspace-colors";
 
 test("workspace folders persist, collapse, move workspaces, and delete without deleting workspaces", async () => {
   test.setTimeout(60_000);
@@ -116,9 +117,21 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     await page
       .getByRole("button", { name: "Set Client projects folder color to #FF5C2B" })
       .click({ force: true });
+    // The title is small text, so it renders the contrast-safe variant of the
+    // family color against the active theme rather than the raw hex.
+    const themeTokens = await page.evaluate(() => {
+      const tokens = getComputedStyle(document.documentElement);
+      return {
+        surface: tokens.getPropertyValue("--panel-3").trim(),
+        ink: tokens.getPropertyValue("--ink").trim(),
+      };
+    });
     await expect(
       group.getByRole("button", { name: "Client projects", exact: true }),
-    ).toHaveCSS("color", "rgb(255, 92, 43)");
+    ).toHaveCSS(
+      "color",
+      hexToRgbCss(readableWorkspaceAccent("#FF5C2B", themeTokens.surface, themeTokens.ink)),
+    );
 
     await group.getByTitle("Collapse Client projects").click();
     await expect(group.locator('[data-workspace-id="ws-alpha"]')).toHaveCount(0);
@@ -217,6 +230,11 @@ async function renderedBackgroundPixel(locator: Locator): Promise<{ r: number; g
     const [r, g, b] = context.getImageData(0, 0, 1, 1).data;
     return { r, g, b };
   });
+}
+
+function hexToRgbCss(value: string): string {
+  const channels = [1, 3, 5].map((start) => Number.parseInt(value.slice(start, start + 2), 16));
+  return `rgb(${channels.join(", ")})`;
 }
 
 function hexLightness(value: string): number {
