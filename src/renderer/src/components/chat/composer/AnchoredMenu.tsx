@@ -58,7 +58,9 @@ interface Props {
    * workspaces scroll container here so a row menu near the section's end
    * flips up instead of overhanging the Source Control section below it.
    * Only the flip DECISION consults the boundary; the flipped-up position and
-   * `left` are still viewport-clamped as before.
+   * `left` are still viewport-clamped as before. The boundary is a preference,
+   * not a wall: when the panel does not fit above the trigger either, it
+   * overhangs the boundary rather than the window's top edge.
    *
    * The boundary is also a VISIBILITY contract for the anchor: if the anchor's
    * rect has left through the boundary's bottom edge — the row was dragged
@@ -184,10 +186,25 @@ export default function AnchoredMenu({
       // stays inside the boundary because it hangs above `rect.top`, and the
       // occlusion check above guarantees `rect.top` is above the boundary's
       // bottom whenever this code runs.
+      //
+      // Flipping only helps when the panel fits above. A folder menu opened
+      // from a row high in a short workspaces section (the default window
+      // leaves it about 330px) overflows the section by a few pixels, and
+      // flipping it pushed its color swatches past the window's top edge,
+      // out of reach. Overhanging the next section keeps it usable, so the
+      // boundary yields; only when the viewport cannot hold it below either
+      // does the roomier side win.
+      const viewportBottom = window.innerHeight - EDGE_PAD;
       const bottomLimit = boundaryRect
-        ? Math.min(window.innerHeight - EDGE_PAD, boundaryRect.bottom)
-        : window.innerHeight - EDGE_PAD;
-      if (height > 0 && top + height > bottomLimit) {
+        ? Math.min(viewportBottom, boundaryRect.bottom)
+        : viewportBottom;
+      const roomAbove = rect.top - ANCHOR_GAP - EDGE_PAD;
+      const flip =
+        height > 0 &&
+        top + height > bottomLimit &&
+        (height <= roomAbove ||
+          (top + height > viewportBottom && roomAbove > viewportBottom - top));
+      if (flip) {
         setPosition({ left, bottom: bottomAnchored });
       } else {
         setPosition({ left, top });
