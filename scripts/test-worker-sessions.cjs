@@ -26,8 +26,12 @@ async function main() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codara-worker-session-fixtures-"));
   const previousClaudeConfig = process.env.CLAUDE_CONFIG_DIR;
   const previousCodexHome = process.env.CODEX_HOME;
+  const previousGrokHome = process.env.GROK_HOME;
   process.env.CLAUDE_CONFIG_DIR = path.join(fixtureRoot, "claude-home");
   process.env.CODEX_HOME = path.join(fixtureRoot, "codex-home");
+  // The all-session scan also reads the personal Grok home; without this it
+  // picks up the host's real ~/.grok sessions and their cwds.
+  process.env.GROK_HOME = path.join(fixtureRoot, "grok-home");
   await esbuild.build({
     entryPoints: [ENTRY],
     bundle: true,
@@ -933,6 +937,8 @@ async function main() {
   else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfig;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
+  if (previousGrokHome === undefined) delete process.env.GROK_HOME;
+  else process.env.GROK_HOME = previousGrokHome;
 }
 
 main().catch((error) => {
