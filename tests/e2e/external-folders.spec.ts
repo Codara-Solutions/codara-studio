@@ -48,6 +48,9 @@ test("external folders render as extra Explorer roots, live-refresh, and detach 
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

@@ -26,7 +26,13 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     "utf8",
   );
 
-  const env = { ...process.env, SPARK_USER_DATA_DIR: userDataDir };
+  const env = {
+    ...process.env,
+    SPARK_USER_DATA_DIR: userDataDir,
+    CODARA_HOME_DIR: userDataDir,
+    SPARK_HOME_DIR: userDataDir,
+    SPARK_SKIP_LEGACY_MIGRATION: "1",
+  };
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({ args: ["."], env });

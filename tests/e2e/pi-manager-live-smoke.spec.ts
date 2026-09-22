@@ -44,6 +44,9 @@ test("the default Cora manager runs through Pi and can explain work on the persi
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

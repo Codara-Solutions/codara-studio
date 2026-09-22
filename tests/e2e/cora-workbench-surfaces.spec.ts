@@ -55,6 +55,9 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -345,6 +348,9 @@ test("a draft chat's Board promotes to an idle run on the first card without sta
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
