@@ -2291,6 +2291,22 @@ export function sessionPid(id: string): number | null {
   return typeof pid === "number" && pid > 0 ? pid : null;
 }
 
+// The session whose pty is the nearest of `pids`, given nearest first (a
+// process and then its ancestors). Answers "which pane is this process
+// running in" for a caller that only knows its own pid.
+export function sessionForProcessChain(pids: readonly number[]): string | null {
+  const byPid = new Map<number, string>();
+  for (const [id, session] of sessions) {
+    const pid = session.pty.pid;
+    if (typeof pid === "number" && pid > 0) byPid.set(pid, id);
+  }
+  for (const pid of pids) {
+    const id = byPid.get(pid);
+    if (id) return id;
+  }
+  return null;
+}
+
 export function sessionDimensions(id: string): { cols: number; rows: number } | null {
   const session = sessions.get(id);
   return session ? { cols: session.cols, rows: session.rows } : null;

@@ -79,6 +79,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const title = readString(params, "title");
   const workspaceId = readString(params, "workspaceId");
   const workspaceCwd = readString(params, "workspaceCwd");
+  const callerPaneId = readString(params, "callerPaneId");
   // Main pins the Claude account when it builds a phone-origin create
   // (createRemoteTerminal resolves the Active profile and validates any
   // --resume id against ITS state dir). Dropping the id here would let the
@@ -93,6 +94,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     title: title ?? undefined,
     workspaceId: workspaceId ?? undefined,
     workspaceCwd: workspaceCwd ?? undefined,
+    callerPaneId: callerPaneId ?? undefined,
     nativeClaudeProfileId: nativeClaudeProfileId ?? undefined,
     nativeCliLoginToken: nativeCliLoginToken ?? undefined,
     origin: origin ?? undefined,

@@ -493,11 +493,11 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Temporary terminals are closed automatically when their Cora run finishes. Use retention='service' only for a dev server or watcher the user explicitly needs after completion; it remains run-owned and is closed when the run is deleted. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
+      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Temporary terminals are closed automatically when their Cora run finishes. Use retention='service' only for a dev server or watcher the user explicitly needs after completion; it remains run-owned and is closed when the run is deleted. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. The tab opens in the workspace you run in, next to your own terminal when you run in one. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to that workspace's root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
     inputSchema: {
       type: "object",
       properties: {
-        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the calling run's workspace root (or the active workspace root when no run identity is available) when omitted." },
+        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the calling run's workspace root, else the root of the workspace whose terminal you run in, else the active workspace root." },
         command: { type: "string", description: "Optional shell command to run immediately after the terminal opens." },
         title: { type: "string", description: "Optional tab title." },
         retention: {
@@ -1780,6 +1780,16 @@ function injectRunIdForStudioOwnership(rpc, args) {
   if (envRunId) args.runId = envRunId;
   else delete args.runId;
   if (rpc.startsWith("preview.")) delete args.workspaceId;
+  if (rpc === "terminal.create") {
+    // Codara opens the new tab beside the pane this agent runs in. The pane id
+    // only arrives when the CLI passed its environment through (Codex starts
+    // MCP servers with a cleared one), so the pid lets Codara find the pane by
+    // walking up the process tree instead.
+    const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
+    if (envPaneId) args.callerPaneId = envPaneId;
+    else delete args.callerPaneId;
+    args.callerPid = process.pid;
+  }
 }
 
 function resolveSparkHome() {

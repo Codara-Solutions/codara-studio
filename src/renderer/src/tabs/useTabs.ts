@@ -44,6 +44,7 @@ import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
 import { openEditor, type OpenEditorOptions } from "./openEditor";
 import { moveTabInList } from "./tabReorder";
+import { insertTabAfter } from "./agentTerminalPlacement";
 import { applySplitDrop, type SplitDropSource, type SplitDropPlacement } from "./splitDrop";
 import { resolveBootActiveTabId } from "./bootSelection";
 import { mergeSessionStart, type SessionStartRecord } from "../components/Terminal/resume-policy";
@@ -910,6 +911,10 @@ export interface WorkspaceTerminalLayout {
 }
 
 export interface AgentTerminalTabOptions {
+  // Picks the tab to open right after from the layout's CURRENT tabs, so two
+  // creates landing in one render still see each other. Null, absent, or a
+  // tab that is gone means the end of the strip.
+  placeAfter?: (tabs: readonly Tab[]) => TabId | null;
   cwd?: string;
   autorun?: string;
   title?: string;
@@ -962,7 +967,9 @@ export function appendAgentTerminalToWorkspaceLayout(
       ...layout,
       // Keep the frozen activeId untouched: bridge-created terminals never
       // steal focus, including when their workspace is hidden.
-      tabs: normalizeTerminalTitles([...layout.tabs, tab]),
+      tabs: normalizeTerminalTitles(
+        insertTabAfter(layout.tabs, tab, options?.placeAfter?.(layout.tabs)),
+      ),
     },
     tabId,
     paneId,
@@ -1935,7 +1942,7 @@ export function useTabs(
           activePaneId: paneId,
           ...(color ? { color } : {}),
         };
-        return normalizeTerminalTitles([...curr, tab]);
+        return normalizeTerminalTitles(insertTabAfter(curr, tab, options?.placeAfter?.(curr)));
       });
       // Deliberately NOT setActiveId: an agent-spawned terminal appears in the
       // strip tinted but does not steal focus from the user's current tab.

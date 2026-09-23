@@ -78,6 +78,11 @@ import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import { emitLocalToast } from "./notifications/local-toast";
 import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
+import {
+  agentTerminalAnchor,
+  locateTerminalPane,
+  type WorkspaceTabs,
+} from "./tabs/agentTerminalPlacement";
 import type { ActiveNotificationView } from "./notifications/viewed";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -4611,9 +4616,10 @@ export default function App() {
   // Shared terminal bridge: an MCP client or the Remote Access service asks
   // for a new terminal tab; we mint an origin-marked, UNFOCUSED tab
   // (newAgentTerminalTab never steals focus) and hand the paneId back so the
-  // caller can write/read the PTY. cwd
-  // defaults to the calling run's workspace cwd (threaded through the bridge),
-  // else the active workspace's cwd.
+  // caller can write/read the PTY. The tab opens in the calling run's
+  // workspace, else the workspace of the pane the calling agent runs in, else
+  // the one on screen, and right beside that pane's tab when it is there. cwd
+  // defaults to that workspace's cwd.
   //
   // Remembers where each bridge-owned pane was minted (survives the effect
   // re-running on tab-state changes) so destroy can reach a pane in a
@@ -4622,7 +4628,7 @@ export default function App() {
   const agentTerminalPlacementsRef = useRef(
     new Map<
       string,
-      { workspaceId: string | null; tabId: string; paneId: string }
+      { workspaceId: string | null; tabId: string; paneId: string; callerPaneId?: string }
     >(),
   );
   // Fingerprint of the last shareable-terminal inventory reported to main, so
@@ -4700,44 +4706,67 @@ export default function App() {
           `Cannot create a terminal for unknown workspace '${input.workspaceId}'.`,
         );
       }
-      const cwd = input.cwd || input.workspaceCwd || activeWorkspace?.cwd || home;
-      // A background run's terminal must not land in the ACTIVE workspace's
-      // strip (same invariant as the spawn_terminals queue path). The hidden
-      // mounted stack picks the tab up from its frozen layout and spawns the
-      // PTY, so the returned paneId still comes online for write/read.
-      if (input.workspaceId && input.workspaceId !== tabs.tabsWorkspaceId) {
-        const minted = tabs.newAgentTerminalTabInWorkspace(input.workspaceId, {
-          cwd,
-          autorun: input.command,
-          title: input.title,
-          origin: input.origin,
-          nativeClaudeProfileId: input.nativeClaudeProfileId,
-          nativeCliLoginToken: input.nativeCliLoginToken,
-        });
-        agentTerminalPlacementsRef.current.set(minted.tabId, {
-          workspaceId: input.workspaceId,
-          tabId: minted.tabId,
-          paneId: minted.paneId,
-        });
-        return { ...minted, cwd };
+      const callerPaneId = input.callerPaneId;
+      const layouts: WorkspaceTabs[] = [];
+      if (tabs.tabsWorkspaceId) {
+        layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
       }
-      const { tabId, paneId } = tabs.newAgentTerminalTab({
+      for (const layout of tabs.inactiveWorkspaceLayouts) {
+        layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
+      }
+      const located = callerPaneId ? locateTerminalPane(layouts, callerPaneId) : null;
+      const caller = located && validWorkspaceIds.has(located.workspaceId) ? located : null;
+      const targetWorkspaceId = input.workspaceId ?? caller?.workspaceId;
+      const targetWorkspaceCwd =
+        input.workspaceCwd ??
+        (targetWorkspaceId
+          ? workspacesRef.current.find((w) => w.id === targetWorkspaceId)?.cwd
+          : undefined);
+      const cwd = input.cwd || targetWorkspaceCwd || activeWorkspace?.cwd || home;
+      const placeAfter =
+        caller && caller.workspaceId === (targetWorkspaceId ?? tabs.tabsWorkspaceId)
+          ? (current: readonly Tab[]) =>
+              agentTerminalAnchor(current, caller.tabId, (tabId) =>
+                [...agentTerminalPlacementsRef.current.values()].some(
+                  (placement) =>
+                    placement.tabId === tabId && placement.callerPaneId === callerPaneId,
+                ),
+              )
+          : undefined;
+      const options = {
         cwd,
         autorun: input.command,
         title: input.title,
         origin: input.origin,
         nativeClaudeProfileId: input.nativeClaudeProfileId,
         nativeCliLoginToken: input.nativeCliLoginToken,
-      });
+        placeAfter,
+      };
+      // A background run's terminal must not land in the ACTIVE workspace's
+      // strip (same invariant as the spawn_terminals queue path). The hidden
+      // mounted stack picks the tab up from its frozen layout and spawns the
+      // PTY, so the returned paneId still comes online for write/read.
+      if (targetWorkspaceId && targetWorkspaceId !== tabs.tabsWorkspaceId) {
+        const minted = tabs.newAgentTerminalTabInWorkspace(targetWorkspaceId, options);
+        agentTerminalPlacementsRef.current.set(minted.tabId, {
+          workspaceId: targetWorkspaceId,
+          tabId: minted.tabId,
+          paneId: minted.paneId,
+          ...(callerPaneId ? { callerPaneId } : {}),
+        });
+        return { ...minted, cwd };
+      }
+      const { tabId, paneId } = tabs.newAgentTerminalTab(options);
       // Account sign-in is explicitly user-initiated from `cora auth cli`, so
       // unlike agent-created terminals it should come to the foreground.
       if (input.nativeCliLoginToken) tabs.setActiveTab(tabId);
       const placementWorkspaceId =
-        input.workspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
+        targetWorkspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
       agentTerminalPlacementsRef.current.set(tabId, {
         workspaceId: placementWorkspaceId,
         tabId,
         paneId,
+        ...(callerPaneId ? { callerPaneId } : {}),
       });
       return { tabId, paneId, cwd };
     });

@@ -509,6 +509,28 @@ function sortedEqual(actual, expected, label) {
       "service",
       "terminal.create must forward the schema-validated retention policy",
     );
+    // Placement follows the process the agent runs in, never tool JSON.
+    const previousPaneId = process.env.SPARK_AGENT_PANE_ID;
+    process.env.SPARK_AGENT_PANE_ID = "pane-caller";
+    await directBridge.callToolByName("codara_terminal_create", {
+      cwd: HOME,
+      callerPaneId: "pane-spoofed",
+      callerPid: 1,
+    });
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    delete process.env.SPARK_AGENT_PANE_ID;
+    const previousLegacyPaneId = process.env.SPARK_PANE_ID;
+    delete process.env.SPARK_PANE_ID;
+    await directBridge.callToolByName("codara_terminal_create", { cwd: HOME, callerPaneId: "pane-spoofed" });
+    assert.strictEqual(
+      received.at(-1).params.callerPaneId,
+      undefined,
+      "a CLI that cleared the environment sends only its pid",
+    );
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    if (previousPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPaneId;
+    if (previousLegacyPaneId !== undefined) process.env.SPARK_PANE_ID = previousLegacyPaneId;
     await directBridge.callToolByName("codara_terminal_write", {
       paneId: "pane-owned",
       text: "npm test",

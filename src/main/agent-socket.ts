@@ -10,6 +10,7 @@ import { writeFileAtomic } from "./fs-atomic";
 import { scopePreviewWorkspace } from "./preview-workspace";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { getTrustedMainWindow } from "./main-window-trust";
+import { processChain } from "./owned-process-tree";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
@@ -175,6 +176,8 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
+// A burst of creates from one agent shares one process listing.
+const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
 // Cap on chat.append message length. Big enough for a verifier verdict
 // summary or a multi-paragraph status update, small enough that a buggy
 // sub-agent can't DoS the run-store by sending a megabyte at a time.
@@ -770,6 +773,24 @@ async function handleTerminalRead(
   });
 }
 
+// The pane the calling agent runs in, so its new terminal opens beside it
+// instead of in whichever workspace is on screen. Only placement follows from
+// it, never ownership. The MCP server sends the pane id when the CLI passed
+// its environment through and always its own pid, which reaches the pane
+// through the process tree when it did not.
+async function resolveCallerPaneId(params: Record<string, unknown>): Promise<string | null> {
+  const hinted = stringParam(params, "callerPaneId");
+  if (hinted && pty.hasSession(hinted)) return hinted;
+  const callerPid = params.callerPid;
+  if (typeof callerPid !== "number" || !Number.isSafeInteger(callerPid)) return null;
+  // A reused listing can predate a freshly started MCP server; read a new one
+  // before giving up.
+  const chain =
+    (await processChain(callerPid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ??
+    (await processChain(callerPid).catch(() => null));
+  return chain ? pty.sessionForProcessChain(chain) : null;
+}
+
 // Create a new terminal tab on the user's behalf. Tab/pane state is owned by
 // the renderer, so we round-trip through the terminal-bridge; the renderer
 // mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
@@ -842,6 +863,7 @@ async function handleTerminalCreate(
       }
     }
   }
+  const callerPaneId = await resolveCallerPaneId(params);
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
       "create",
@@ -851,6 +873,7 @@ async function handleTerminalCreate(
         ...(title ? { title } : {}),
         ...(workspaceId ? { workspaceId } : {}),
         ...(workspaceCwd ? { workspaceCwd } : {}),
+        ...(callerPaneId ? { callerPaneId } : {}),
       },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY

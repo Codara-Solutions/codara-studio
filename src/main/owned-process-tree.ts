@@ -276,3 +276,29 @@ export async function descendantProcessesWithCommands(
   if (!tree) return null;
   return tree.members.filter((member) => member.pid !== rootPid);
 }
+
+/** `pid` and then its ancestors, nearest first. Null when `pid` is not listed. */
+export function processChainIn(
+  listed: readonly { pid: number; parentPid: number }[],
+  pid: number,
+): number[] | null {
+  const parentOf = new Map(listed.map((entry) => [entry.pid, entry.parentPid]));
+  if (!parentOf.has(pid)) return null;
+  const chain: number[] = [];
+  let current: number | undefined = pid;
+  while (current !== undefined && current > 0 && !chain.includes(current)) {
+    chain.push(current);
+    current = parentOf.get(current);
+  }
+  return chain;
+}
+
+/**
+ * `pid` and its ancestors from a live listing. `maxAgeMs` reuses a recent
+ * listing. Null when the process list is unavailable or `pid` has exited.
+ */
+export async function processChain(pid: number, maxAgeMs = 0): Promise<number[] | null> {
+  if (!safePid(pid)) return null;
+  const listed = await listProcessesWithCommands(maxAgeMs);
+  return listed ? processChainIn(listed, pid) : null;
+}

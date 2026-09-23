@@ -22,6 +22,9 @@ export interface CreateAgentTerminalInput {
   // of the active one. Absent for user-facing/non-run agents.
   workspaceId?: string;
   workspaceCwd?: string;
+  // The pane the calling agent runs in, resolved by main. The tab opens in
+  // that pane's workspace (unless a run names another) right beside it.
+  callerPaneId?: string;
   // Main-resolved identity for a local phone-created Claude terminal. SSH
   // terminals never receive local account profiles.
   nativeClaudeProfileId?: string;
