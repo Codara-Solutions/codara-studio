@@ -220,6 +220,65 @@ async function main() {
     fs.rmSync(reseedFixture, { recursive: true, force: true });
   }
 
+  // A personal login that is an older copy of an account a managed profile
+  // holds (signing in to Cora with the terminal's account) is retired; any
+  // doubt keeps it.
+  const dupFixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-dup-test-"));
+  try {
+    const store = {
+      rootDir: path.join(dupFixture, ".codarastudio", "codex-cli"),
+      personalHomeDir: path.join(dupFixture, ".codex"),
+    };
+    const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const auth = (account, lastRefresh, token) =>
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        last_refresh: lastRefresh,
+        tokens: { account_id: account, refresh_token: token },
+      });
+    const personal = T.codexCliPersonalAuthFile(store.rootDir);
+    const live = path.join(store.personalHomeDir, "auth.json");
+    const otherSlot = path.join(store.rootDir, "accounts", OTHER, "auth.json");
+    writePrivate(personal, auth("acct-1", "2026-09-09T00:00:00Z", "old-grant"));
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    writePrivate(otherSlot, auth("acct-2", "2026-09-23T00:00:00Z", "other-grant"));
+    writePrivate(
+      path.join(store.rootDir, "active-auth.json"),
+      JSON.stringify({ version: 1, profileId: PROFILE }),
+    );
+
+    // A Cora row on the personal slot, or an older managed copy: kept.
+    assert.equal(
+      await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER], { personalHasRow: async () => true }),
+      false,
+    );
+    writePrivate(live, auth("acct-1", "2026-09-01T00:00:00Z", "older-grant"));
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    assert.equal(fs.existsSync(personal), true);
+
+    // The live managed profile holds a newer grant of the same account: retired.
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    const logs = [];
+    assert.equal(
+      await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER], { log: (line) => logs.push(line) }),
+      true,
+    );
+    assert.equal(fs.existsSync(personal), false);
+    assert.equal(fs.readFileSync(live, "utf8"), auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    assert.ok(logs.every((line) => !line.includes("grant")), "no token reaches the log");
+
+    // While the personal login is live nothing moves.
+    writePrivate(personal, auth("acct-1", "2026-09-09T00:00:00Z", "old-grant"));
+    writePrivate(
+      path.join(store.rootDir, "active-auth.json"),
+      JSON.stringify({ version: 1, profileId: "personal" }),
+    );
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    assert.equal(fs.existsSync(personal), true);
+  } finally {
+    fs.rmSync(dupFixture, { recursive: true, force: true });
+  }
+
   console.log("Codex auth-only selector contracts passed");
 }
 

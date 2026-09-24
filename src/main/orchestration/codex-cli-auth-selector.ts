@@ -226,6 +226,69 @@ export async function ensureCodexCliAuthVault(
   return withSelectionLock(store.rootDir, () => ensureVaultUnlocked(store));
 }
 
+async function lastRefreshOf(path: string): Promise<number | undefined> {
+  const read = await readPrivateJsonFile(path).catch(() => null);
+  if (!read || read.kind !== "value" || !isRecord(read.value)) return undefined;
+  const raw = read.value.last_refresh;
+  const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Drop the personal slot's saved login when a managed profile holds a newer
+ * login of the same ChatGPT account. Signing in to Cora with the account
+ * the terminal already used creates a managed profile with a login of its
+ * own; the personal copy left in the vault is then an older, unused grant of
+ * the same account with no card of its own (the account's row is the
+ * managed one), which a later switch to the personal slot would bring back
+ * already expired. Nothing happens while the personal login is live, when
+ * either file does not name its account, or when a Cora row owns the
+ * personal slot.
+ */
+export async function retireSupersededCodexPersonalLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  managedProfileIds: readonly string[],
+  options: {
+    personalHasRow?: () => Promise<boolean>;
+    log?: (message: string) => void;
+  } = {},
+): Promise<boolean> {
+  return withSelectionLock(store.rootDir, async () => {
+    const marker = await readSelection(store.rootDir);
+    if (marker === null || marker === CODEX_CLI_PERSONAL_PROFILE_ID) return false;
+    const personal = codexCliPersonalAuthFile(store.rootDir);
+    if (!(await safeRegularFile(personal))) return false;
+    const account = await credentialAccountId(personal);
+    if (!account) return false;
+    if (await options.personalHasRow?.().catch(() => true)) return false;
+    const personalRefreshed = (await lastRefreshOf(personal)) ?? 0;
+    for (const rawId of managedProfileIds) {
+      let profileId: CodexCliProfileId;
+      try {
+        profileId = normalizeCodexCliProfileId(rawId);
+      } catch {
+        continue;
+      }
+      if (profileId === CODEX_CLI_PERSONAL_PROFILE_ID) continue;
+      // The live profile's freshest copy is the live file itself.
+      const file =
+        profileId === marker
+          ? join(store.personalHomeDir, CODEX_CLI_AUTH_FILE)
+          : storedAuthFile(store, profileId);
+      if (!(await safeRegularFile(file))) continue;
+      if ((await credentialAccountId(file)) !== account) continue;
+      const refreshed = await lastRefreshOf(file);
+      if (refreshed === undefined || refreshed <= personalRefreshed) continue;
+      await removeCredential(personal);
+      options.log?.(
+        `[accounts] the personal Codex login was an older copy of an account profile ${profileId} holds; it was removed`,
+      );
+      return true;
+    }
+    return false;
+  });
+}
+
 export interface ActivateCodexCliAccountOptions {
   /**
    * Let a signed-out profile take the live slot: the previous login is still

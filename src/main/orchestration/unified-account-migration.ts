@@ -16,7 +16,10 @@ import {
   type RefreshedAnthropicTokens,
 } from "./claude-login-keeper";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
-import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
+import {
+  ensureCodexCliAuthVault,
+  retireSupersededCodexPersonalLogin,
+} from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
 import { undoGrokLiveSlotSwap, type UndoGrokLiveSlotSwapResult } from "./grok-live-slot-undo";
 import {
@@ -141,7 +144,18 @@ async function beforePairing(
   }
   if (adapter.runtime === "codex") {
     const store = (deps.codexStore ?? adapter.store) as CodexCliAccountProfileStore;
-    return { active: await ensureCodexCliAuthVault(store) };
+    const active = await ensureCodexCliAuthVault(store);
+    const piStore = deps.piStore ?? defaultPiAccountAuthStore();
+    await retireSupersededCodexPersonalLogin(
+      store,
+      (await store.snapshot()).profiles.map((profile) => profile.id),
+      {
+        personalHasRow: async () =>
+          Boolean(await piStore.registry.profileForCliProfileId("openai-codex", "personal")),
+        log,
+      },
+    );
+    return { active };
   }
   const store = (deps.grokStore ?? adapter.store) as GrokCliAccountProfileStore;
   const result = await undoGrokLiveSlotSwap({
