@@ -280,6 +280,25 @@ async function loadOAuth(provider: PiSubscriptionProvider): Promise<OAuthAuth> {
 
 const loadAuthStorage = loadPiAuthStorage;
 
+/**
+ * One Anthropic refresh grant through the pinned Pi's own module, for the
+ * Claude login keeper: the same client and endpoint Cora refreshes with.
+ */
+export async function refreshAnthropicOAuthToken(
+  refreshToken: string,
+  signal: AbortSignal,
+): Promise<{ access: string; refresh: string; expires: number }> {
+  const oauth = await loadOAuth("anthropic");
+  if (typeof oauth.refresh !== "function") {
+    throw new Error("Pinned Pi cannot refresh an Anthropic login");
+  }
+  const next = await oauth.refresh(
+    { type: "oauth", access: "", refresh: refreshToken, expires: 0 },
+    signal,
+  );
+  return { access: next.access, refresh: next.refresh, expires: next.expires };
+}
+
 function disconnectedConnection(provider: PiSubscriptionProvider): PiSubscriptionConnection {
   const meta = PROVIDER_META[provider];
   return {
@@ -876,6 +895,14 @@ export async function refreshPiSubscriptionProfileCredential(
     return { access, refreshed };
   };
   const service = unifiedAccountsFor(provider);
+  if (provider === "anthropic") {
+    // The live Claude login has one refresher, the keeper, under Claude
+    // Code's lock; a refresh of Cora's copy here would be a second one. When
+    // the keeper renews the login, the mirror has already brought the new
+    // token to Cora by the time the attempt below looks.
+    const { nudgeClaudeLoginKeeper } = await import("./claude-login-keeper");
+    await nudgeClaudeLoginKeeper().catch(() => null);
+  }
   let outcome: { access: string | null; refreshed: boolean };
   try {
     outcome = await attempt();

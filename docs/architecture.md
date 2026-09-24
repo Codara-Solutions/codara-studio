@@ -129,10 +129,13 @@ switch through the prompt hooks.
 refreshed last holds the only valid refresh token, and the mirror copies it
 to the other side (newer expiry wins, a side without a refresh token never
 wins, foreign logins are never adopted, writes go through Pi's lock and the
-adapter's atomic store). A login Claude Code blanks after a spent refresh
-token is repaired from the Cora half, never read as a logout. Both halves
-still refresh the same grant; see the review notes in `REVIEW.md` for the
-recommended simplification.
+adapter's atomic store). Claude Code and Pi both refresh five minutes before
+expiry, so `claude-login-keeper.ts` renews the live Claude login ahead of
+both, under Claude Code's refresh lock and compare-and-swap, leaving one
+refresher while Studio runs. A login Claude Code blanks after a spent refresh
+token is repaired from the Cora half, never read as a logout. See the review
+notes in `REVIEW.md` for the remaining step (Cora owning no refresh of its
+own).
 
 ## Notifications
 

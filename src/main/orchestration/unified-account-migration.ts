@@ -8,11 +8,15 @@ import {
   type MigrateClaudeToOneHomeResult,
 } from "./claude-cli-live-login";
 import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
+import { startClaudeLoginKeeper } from "./claude-login-keeper";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
 import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
 import { undoGrokLiveSlotSwap, type UndoGrokLiveSlotSwapResult } from "./grok-live-slot-undo";
-import { setNativeClaudeProfileResolutionHooks } from "./native-claude-profile-runtime";
+import {
+  nativeClaudeProfileStore,
+  setNativeClaudeProfileResolutionHooks,
+} from "./native-claude-profile-runtime";
 import { setNativeCodexProfileResolutionHooks } from "./native-codex-profile-runtime";
 import { setNativeGrokProfileResolutionHooks } from "./native-grok-profile-runtime";
 import { defaultPiAccountAuthStore, type PiAccountAuthStore } from "./pi-account-auth-store";
@@ -302,6 +306,24 @@ export function startUnifiedAccountMigration(
 
 export function unifiedAccountsReady(): Promise<void> {
   return readyPromise ?? Promise.resolve();
+}
+
+/**
+ * Studio's one refresher for the live Claude login (claude-login-keeper.ts),
+ * started once the pass has settled which login is live.
+ */
+export function startStudioClaudeLoginKeeper(): void {
+  void unifiedAccountsReady().then(() => {
+    startClaudeLoginKeeper({
+      store: nativeClaudeProfileStore,
+      refresh: async (refreshToken, signal) =>
+        (await import("./pi-subscription-auth")).refreshAnthropicOAuthToken(refreshToken, signal),
+      afterChange: async () => {
+        await unifiedAccountsFor("anthropic").reconcileDefault();
+      },
+      log: (message) => console.warn(message),
+    });
+  });
 }
 
 /** Test seam: forget the process-wide gate so a suite can run the pass again. */

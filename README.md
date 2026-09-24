@@ -148,7 +148,8 @@ account, with your personal state linked into it. Codara never edits your
 shell startup files.
 
 Codara mirrors the OAuth credential between an account's two halves so both
-stay signed in. The design is described in
+stay signed in, and renews the Active Claude login shortly before it expires
+so Claude Code and Cora never race to refresh it. The design is described in
 [docs/architecture.md](./docs/architecture.md#accounts).
 
 ```sh
