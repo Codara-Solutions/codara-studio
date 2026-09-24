@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lock } from "proper-lockfile";
 import {
@@ -916,6 +916,79 @@ export interface MigrateClaudeToOneHomeResult {
   projects: number;
   /** Profiles whose directory credential stores were removed. */
   retired: string[];
+  /** Directories of accounts no longer registered, removed once their transcripts moved home. */
+  orphans: string[];
+}
+
+/**
+ * Copy the session transcripts of a retired account directory into the
+ * live home's `projects/`, never replacing one that is already there. A
+ * `projects` link into the home (how managed directories shared it) holds
+ * nothing of its own.
+ */
+async function moveTranscriptsHome(legacyDir: string, homeConfigDir: string): Promise<number> {
+  const source = join(legacyDir, "projects");
+  const stat = await lstatOrNull(source);
+  if (!stat?.isDirectory()) return 0;
+  let moved = 0;
+  const target = join(homeConfigDir, "projects");
+  for (const project of await fs.readdir(source, { withFileTypes: true })) {
+    if (!project.isDirectory()) continue;
+    const from = join(source, project.name);
+    const to = join(target, project.name);
+    await fs.mkdir(to, { recursive: true, mode: 0o700 });
+    for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      try {
+        await fs.copyFile(join(from, entry.name), join(to, entry.name), fsConstants.COPYFILE_EXCL);
+        moved += 1;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+  }
+  return moved;
+}
+
+/**
+ * Account directories whose account is no longer registered (a delete that
+ * predates the one home, or a crash between the directory and the
+ * registry). One that still holds a login is left for the user; one that
+ * holds none only keeps transcripts, which move home before it goes.
+ */
+async function retireOrphanAccountDirs(
+  store: ClaudeLoginSlotStore,
+  managedProfileIds: readonly string[],
+  options: ClaudeCredentialStoreOptions,
+  log: (message: string) => void,
+): Promise<string[]> {
+  const accountsDir = join(resolve(store.rootDir), CLAUDE_CLI_ACCOUNTS_DIRECTORY);
+  const registered = new Set(managedProfileIds);
+  const entries = await fs.readdir(accountsDir, { withFileTypes: true }).catch(() => []);
+  const retired: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || registered.has(entry.name)) continue;
+    if (!isClaudeCliManagedProfileId(entry.name)) continue;
+    const dir = join(accountsDir, entry.name);
+    try {
+      const stores = await readClaudeCredentialStores(dir, dir, options);
+      const vault = await readClaudeVaultedLogin(claudeCliVaultFile(store.rootDir, entry.name));
+      if (stores.keychain || stores.file || vault.kind !== "none") continue;
+      const moved = await moveTranscriptsHome(dir, store.personalConfigDir);
+      await fs.rm(dir, { recursive: true, force: true });
+      retired.push(entry.name);
+      log(
+        `[accounts] removed the directory of an account that is no longer registered (${moved} transcript(s) moved to the Claude home)`,
+      );
+    } catch (error) {
+      log(
+        `[accounts] an unregistered Claude account directory was left in place: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+  return retired;
 }
 
 /** Which of two stored MCP grants is healthier: a refresh token, then the later expiry, then any token. */
@@ -1072,6 +1145,7 @@ export async function migrateClaudeToOneHome(
     mcpGrants: 0,
     projects: 0,
     retired: [],
+    orphans: [],
   };
   await withClaudeSelectionLock(store.rootDir, async () => {
     if (!(await readClaudeLiveSelection(store.rootDir))) {
@@ -1158,6 +1232,9 @@ export async function migrateClaudeToOneHome(
   // The baseline the per-account MCP server sync kept; one home needs none.
   await fs.rm(join(resolve(store.rootDir), RETIRED_MCP_BASELINE_FILE), { force: true }).catch(
     () => undefined,
+  );
+  result.orphans = await withClaudeSelectionLock(store.rootDir, () =>
+    retireOrphanAccountDirs(store, input.managedProfileIds, options, log),
   );
   // The first marker names the home's account from `.claude.json`, which the
   // retired slot swap could leave naming a managed account. A personal marker

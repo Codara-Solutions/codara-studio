@@ -406,6 +406,38 @@ async function main() {
     console.log("PASS an identity is never filed under another account's login");
   }
 
+  // --- Directories of accounts no longer registered ------------------------
+  {
+    const o = fixture("orphans");
+    const ORPHAN = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const KEPT = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    writeJson(o.liveCredentials, { claudeAiOauth: login("own") });
+    const project = "-work-codara";
+    const homeProjects = path.join(o.store.personalConfigDir, "projects", project);
+    fs.mkdirSync(homeProjects, { recursive: true });
+    fs.writeFileSync(path.join(homeProjects, "shared.jsonl"), "home copy\n");
+    const orphanProjects = path.join(o.accountDir(ORPHAN), "projects", project);
+    fs.mkdirSync(orphanProjects, { recursive: true });
+    fs.writeFileSync(path.join(orphanProjects, "only-there.jsonl"), "transcript\n");
+    fs.writeFileSync(path.join(orphanProjects, "shared.jsonl"), "orphan copy\n");
+    writeJson(path.join(o.accountDir(ORPHAN), ".claude.json"), { projects: {} });
+    // An unregistered directory that still holds a login is the user's call.
+    writeJson(path.join(o.accountDir(KEPT), ".credentials.json"), { claudeAiOauth: login("kept") });
+    const logs = [];
+    const result = await mod.migrateClaudeToOneHome({
+      store: o.store,
+      managedProfileIds: [],
+      log: (line) => logs.push(line),
+    });
+    assert.deepEqual(result.orphans, [ORPHAN]);
+    assert.equal(fs.existsSync(o.accountDir(ORPHAN)), false);
+    assert.equal(fs.readFileSync(path.join(homeProjects, "only-there.jsonl"), "utf8"), "transcript\n");
+    assert.equal(fs.readFileSync(path.join(homeProjects, "shared.jsonl"), "utf8"), "home copy\n", "never replaced");
+    assert.equal(fs.existsSync(path.join(o.accountDir(KEPT), ".credentials.json")), true);
+    assert.ok(logs.some((line) => line.includes("1 transcript(s) moved")));
+    console.log("PASS an unregistered account directory goes once its transcripts are home; one with a login stays");
+  }
+
   console.log("\nPASS Claude accounts in one home");
 }
 
