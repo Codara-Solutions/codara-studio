@@ -59,39 +59,35 @@ also prunes its own after grading).
 
 ## Accounts
 
-`cora auth list` shows both halves of every account in one directory:
-Cora's OAuth subscriptions and the native Claude Code, Codex, and Grok
-identities used by Studio terminals. An account normally has both halves
-(see `docs/architecture.md`, Accounts); `cora auth use` picks the Cora half
-new chats run on, `cora auth cli use` picks the CLI half new terminals sign in
-as.
+An account is one sign-in (Claude, ChatGPT or Grok) that serves both Cora
+and the matching CLI. `cora auth list` shows every account with its Cora side
+and its CLI side; `cora auth use` makes one the Active account for both (see
+[docs/accounts.md](../docs/accounts.md)).
 
 ```sh
 cora auth list
 cora auth add anthropic "Work Claude"
 cora auth login anthropic "Work Claude"       # reconnect
-cora auth use anthropic "Work Claude"         # future Cora chats
+cora auth use anthropic "Work Claude"         # Active for Cora and Claude Code
 cora auth rename anthropic "Work Claude" "Team Claude"
 cora auth remove anthropic "Team Claude"
 
-cora auth cli list claude
-cora auth cli add claude "Work CLI"
-cora auth cli login claude "Work CLI"          # reconnect
-cora auth cli use claude "Work CLI"            # new Studio terminals
-cora auth cli rename claude "Work CLI" "Team CLI"
-cora auth cli logout claude "Team CLI"
-cora auth cli remove claude "Team CLI"
+cora auth cli list claude                     # the CLI side only
+cora auth cli rename claude "Work Claude" "Team Claude"
+cora auth cli remove claude "Old CLI"         # only a CLI side no account uses
 ```
 
-Every printed `#1`, `#2`, … is selectable, so the short form
+Every printed `#1`, `#2`, and so on is selectable, so the short form
 `cora auth use anthropic 2` works too.
 
-Subscription sign-in opens the provider page and finishes in the invoking
-terminal. Native CLI sign-in opens a guarded Studio terminal because those
-tools own an interactive CLI ceremony. Add `--default` to make a reconnect the
-default after it succeeds; destructive commands confirm unless `--yes` is
-present. Existing Cora runs and already-open terminals keep their frozen
-account when a default changes.
+Sign-in opens the provider page and finishes in the invoking terminal. Add
+`--default` to make a reconnected account Active once it succeeds;
+destructive commands confirm unless `--yes` is present. Cora runs already
+going keep the account they started with. Claude Code runs every account in
+your own `~/.claude`, so an open Claude Code terminal, in Studio or any other
+terminal app, moves to the new account on its next request. A Codex switch
+stops and reports the open Codex sessions; close them (or switch from the
+account card, which offers to) and run it again.
 
 ## The live dashboard
 

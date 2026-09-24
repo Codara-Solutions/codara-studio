@@ -7,11 +7,11 @@ import { AGENT_FAMILIES, isAgentRuntimeKind, type AgentFamilyId } from "@shared/
 
 export type AgentBrandRuntime = AgentFamilyId;
 
-export function agentBrandColor(runtime: AgentBrandRuntime): string {
+export function agentBrandColor(runtime: AgentBrandRuntime | "pi"): string {
   return `var(--agent-${runtime})`;
 }
 
-export function agentBrandTone(runtime: AgentBrandRuntime | "shell"): {
+export function agentBrandTone(runtime: AgentBrandRuntime | "pi" | "shell"): {
   color: string;
   background: string;
   border: string;

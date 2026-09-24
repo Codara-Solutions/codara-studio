@@ -19317,7 +19317,7 @@ async function runPiWorkerSession({
     attemptId,
     `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
       `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
-      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the pinned Pi harness…\r\n`,
+      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the Pi harness…\r\n`,
   );
 
   let client: PiRpcClient | null = null;

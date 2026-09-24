@@ -9,7 +9,6 @@ import type {
   ClaudeCredentialRecord,
 } from "./claude-cli-credentials";
 import type { ClaudeCliProfileLeaseRegistry } from "./claude-cli-profile-execution";
-import type { NativeCliAccountIdentity } from "./native-cli-account-identity";
 import {
   UnifiedAccountNotConnectedError,
   UnifiedAccountSessionsError,
@@ -44,15 +43,10 @@ export interface AnthropicAccountServiceOptions extends UnifiedAccountServiceOpt
   claudeStore?: ClaudeCliAccountProfileStore;
   leases?: ClaudeCliProfileLeaseRegistry;
   backend?: ClaudeCliCredentialBackend;
+  /** Test seam: keep the live Claude slot away from the Keychain. */
+  fileOnly?: boolean;
   /** Test seam. Production asks Anthropic's OAuth profile endpoint. */
   readIdentity?: (accessToken: string) => Promise<AnthropicAccountProfile>;
-  /** Test seam. Production reads the config's oauthAccount block. */
-  readCliIdentity?: (
-    configDir: string,
-    configDirEnv: string | null,
-    homeDir: string,
-  ) => Promise<NativeCliAccountIdentity>;
-  homeDir?: string;
   /** Test seam. Production checks process.platform for the Keychain probe. */
   platform?: NodeJS.Platform;
 }
@@ -62,17 +56,16 @@ export class AnthropicAccountService extends UnifiedAccountService<
   ClaudeCredentialRecord
 > {
   constructor(options: AnthropicAccountServiceOptions = {}) {
-    const { claudeStore, leases, backend, readIdentity, readCliIdentity, homeDir, platform, ...rest } =
-      options;
+    const { claudeStore, leases, backend, fileOnly, readIdentity, platform, ...rest } = options;
     super(
       createClaudeAccountAdapter({
         ...(claudeStore ? { store: claudeStore } : {}),
         ...(leases ? { leases } : {}),
         ...(backend ? { backend } : {}),
+        ...(fileOnly ? { fileOnly } : {}),
         ...(readIdentity ? { readIdentity } : {}),
-        ...(readCliIdentity ? { readCliIdentity } : {}),
-        ...(homeDir ? { homeDir } : {}),
         ...(platform ? { platform } : {}),
+        ...(rest.log ? { log: rest.log } : {}),
       }),
       rest,
     );

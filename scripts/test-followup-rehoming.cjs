@@ -82,7 +82,7 @@ export function getBackend(kind) { return backend(kind); }
 export function listBackends() { return []; }
 export async function disposeManagerSessions() {}`,
   "./pi-runtime-electron": `export async function resolveCodaraPiExecutionAccount() { return { accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10", provider: "anthropic", configDir: "/tmp/cora-stub-pi" }; }
-export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); }
+export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); } export async function resolveCodaraPiLibrary() { throw new Error("pi runtime is stubbed"); } export async function resolveUserPiRuntime() { throw new Error("pi runtime is stubbed"); }
 export function codaraPiPaths() { return { home: "/tmp/cora-stub-pi" }; }
 export async function cleanupPiMcpBridgeConfig() {}
 export async function createCodaraPiWorkerLaunchPlan() { throw new Error("pi worker launch is stubbed"); }`,

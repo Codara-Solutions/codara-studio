@@ -57,6 +57,7 @@ async function buildHarness() {
       `export * as execution from ${JSON.stringify(orchestration("claude-cli-profile-execution.ts"))};`,
       `export * as mirror from ${JSON.stringify(orchestration("credential-mirror.ts"))};`,
       `export * as credentials from ${JSON.stringify(orchestration("claude-cli-credentials.ts"))};`,
+      `export * as liveLogin from ${JSON.stringify(orchestration("claude-cli-live-login.ts"))};`,
     ].join("\n"),
   );
   const out = path.join(TMP, "harness.cjs");
@@ -81,7 +82,7 @@ async function buildHarness() {
           }));
           build.onLoad({ filter: /^runtime-electron$/, namespace: "stub" }, () => ({
             loader: "js",
-            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); }`,
+            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); } export async function resolveCodaraPiLibrary() { throw new Error("not used"); } export async function resolveUserPiRuntime() { throw new Error("not used"); }`,
           }));
           // The service invalidates the usage and model caches after a
           // mutation; both modules pull Electron, and the suite injects its
@@ -299,14 +300,21 @@ async function main() {
     claudeStore,
     leases,
     mirror,
-    backend,
+    fileOnly: true,
     loadAuthStorage,
     readIdentity: async () => ({}),
-    homeDir: HOME,
     invalidateCaches: async () => undefined,
     platform: "linux",
     log: (message) => logs.push(message),
   });
+  const readProfile = async (cliId) => {
+    const side = await H.liveLogin.readClaudeProfileLogin(claudeStore, cliId);
+    return side.kind === "login" ? side.record : side;
+  };
+  const vaultOf = (cliId) => {
+    const file = H.liveLogin.claudeCliVaultFile(claudeRoot, cliId);
+    return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+  };
   const deps = { service, piStore, claudeStore, backend, log: (message) => logs.push(message) };
   // The unified runner restricted to Anthropic, with its provider entry
   // lifted to the top so the assertions below read one provider's report.
@@ -334,24 +342,46 @@ async function main() {
   const report = await migrate(deps);
   assert.equal(report.failedStep, null, JSON.stringify(report));
 
-  // Live slot undone: the swapped account got its fresher token back, the
-  // personal login is back in ~/.claude, the vault and marker are gone.
+  // The retired selector's swap is undone first: the swapped account got
+  // its fresher token back and the personal login its own slot.
   assert.equal(report.liveSlot.restoredFrom, CLI.swapped);
   assert.equal(report.liveSlot.personalRestored, true);
   assert.deepEqual(report.liveSlot.removedRetiredDirs, [".personal.retired-deadbeef"]);
   assert.equal(fs.existsSync(path.join(claudeRoot, "active-auth.json")), false);
   assert.equal(fs.existsSync(path.join(claudeRoot, "personal")), false);
   assert.ok(fs.existsSync(report.liveSlot.retiredVaultDir));
-  assert.equal((await readSlot(personalDir, null)).accessToken, "personal-access-4");
-  assert.equal((await readSlot(managedDir(CLI.swapped), managedDir(CLI.swapped))).accessToken, "swapped-access-9");
-  // The personal identity came back with the credential, and the rest of
-  // ~/.claude.json survived the merge.
   assert.equal(report.liveSlot.identityRestored, true);
+  pass("the retired selector's live-slot swap is undone and the fresher token stays with its account");
+
+  // Then every account moves into the one home: each account directory's
+  // login became its vault and its store was retired, and the default
+  // account's login is the one Claude Code now runs on, in ~/.claude.
+  assert.equal(report.liveSlot.oneHome.createdMarker, true);
+  assert.deepEqual(
+    [...report.liveSlot.oneHome.vaulted].sort(),
+    [CLI.swapped, CLI.byFingerprint, CLI.byEmail, CLI.mismatch, CLI.lonely].sort(),
+  );
+  for (const id of report.liveSlot.oneHome.vaulted) {
+    assert.equal(
+      fs.existsSync(path.join(managedDir(id), ".credentials.json")),
+      false,
+      "an account directory keeps no credential store of its own",
+    );
+  }
+  assert.equal(await H.liveLogin.readClaudeLiveProfileId(claudeRoot), CLI.swapped);
+  assert.equal((await readProfile(CLI.swapped)).accessToken, "swapped-access-9", "the default account is live");
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(personalDir, ".credentials.json"), "utf8")).claudeAiOauth.accessToken,
+    "swapped-access-9",
+  );
+  assert.equal((await readProfile("personal")).accessToken, "personal-access-4", "Account 1's login waits in its vault");
+  assert.equal(vaultOf("personal").oauthAccount.accountUuid, UUID.personal);
+  // ~/.claude.json names the live account, and the rest of it survived.
   const homeConfig = JSON.parse(fs.readFileSync(path.join(HOME, ".claude.json"), "utf8"));
-  assert.equal(homeConfig.oauthAccount.accountUuid, UUID.personal);
-  assert.equal(homeConfig.oauthAccount.emailAddress, "me@example.com");
+  assert.equal(homeConfig.oauthAccount.accountUuid, UUID.swapped);
+  assert.equal(homeConfig.oauthAccount.emailAddress, "swapped@example.com");
   assert.equal(homeConfig.hasCompletedOnboarding, true);
-  pass("the live-slot swap is undone and the fresher token stays with its account");
+  pass("every account moves into the one home and the default account's login is live");
 
   // Pairing: fingerprint, then email when a fingerprint verdict is impossible,
   // never across differing fingerprints; the first reconcile makes the newer
@@ -367,10 +397,10 @@ async function main() {
     [`${rowByEmail.id}:email`, `${rowByFingerprint.id}:fingerprint`, `${rowSwapped.id}:fingerprint`].sort(),
   );
   assert.equal(readPi(rowSwapped.id).access, "swapped-access-9", "the terminal's fresher token flowed to Cora");
-  assert.equal((await readSlot(managedDir(CLI.byFingerprint), managedDir(CLI.byFingerprint))).accessToken, "fp-access-3");
+  assert.equal((await readProfile(CLI.byFingerprint)).accessToken, "fp-access-3");
   assert.equal(readPi(rowByFingerprint.id).access, "fp-access-3");
-  assert.equal((await readSlot(managedDir(CLI.byEmail), managedDir(CLI.byEmail))).accessToken, "email-cora-access-9", "Cora's fresher token flowed to the terminal");
-  assert.equal((await readSlot(managedDir(CLI.mismatch), managedDir(CLI.mismatch))).accessToken, "mismatch-access-1");
+  assert.equal((await readProfile(CLI.byEmail)).accessToken, "email-cora-access-9", "Cora's fresher token flowed to the terminal");
+  assert.equal((await readProfile(CLI.mismatch)).accessToken, "mismatch-access-1");
   assert.equal(readPi(rowMismatch.id).access, "mismatch-cora-access-1");
   assert.ok(logs.some((line) => line.includes("by email")), "email pairs are logged for support");
   pass("halves pair by fingerprint, then by email, never across differing fingerprints");

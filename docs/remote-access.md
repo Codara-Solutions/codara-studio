@@ -1,66 +1,103 @@
 # Remote access
 
-Remote access lets a phone (the Codara companion app) watch and drive the
-desktop: read runs, answer Cora's questions, edit boards, open terminals, and
-receive notifications. Code lives in `src/main/remote-access/`; the shared
-wire types are in `src/shared/remote-access.ts`.
+Remote access lets the Codara phone app watch and drive this computer: follow
+Cora runs and answer their questions, edit boards, browse files and git,
+manage automations, open terminals, and get notifications, on your wifi or
+from anywhere. It is off until you turn it on. This page starts with how to
+use it and what a paired phone is allowed to do, then describes the security
+design for anyone reviewing or changing it. The code is in
+`src/main/remote-access/`, and the wire types shared with the phone are in
+`src/shared/remote-access.ts`.
 
-## Pairing
+## Pairing a phone
 
-1. The desktop keeps a static Noise identity in `~/.codarastudio/remote/`
-   (private key mode 0600, directory 0700, written with O_EXCL staging).
-2. Settings, Remote access shows a QR code carrying a 32-byte single-use
-   pairing secret with a 2 minute TTL. Pairing requests are accepted only
-   from loopback or private (RFC 1918) addresses, never through the relay,
-   and you must approve the device in the app after checking its fingerprint.
-3. Once paired, the device's public key is stored; revocation is immediate and
-   durable.
+1. Open Settings, **Remote access**, and switch it on.
+2. Click **Pair a device**. A QR code appears; it is valid for two minutes and
+   works once.
+3. Scan it with the Codara app. Your phone must be on the same local network
+   for this step.
+4. Codara shows the phone's name and a short code. Check that the code
+   matches the one on the phone, then click **Approve**.
 
-## Transport
-
-- Local: a TCP listener with a stable port (`stable-port.ts`) speaking Noise
-  IK pinned to the desktop's static key (`listener.ts`).
-- Relay: when the phone is not on the local network, both sides connect to
-  the Codara relay over TLS (`relay-client.ts`). The relay only forwards
-  ciphertext; a tunnel is accepted only if the claimed peer is paired and the
-  Noise-derived key matches.
-
-Inbound limits: 1 MiB frames, 32 in-flight requests, 4 MiB backlog, 8
-terminals per device (`rpc.ts`, `terminal-leases.ts`).
+The phone now appears under **Paired devices**. Revoking it there ends its
+live sessions immediately and permanently. Turning remote access off stops
+the listener and the relay connection.
 
 ## What a paired device can do
 
-The RPC surface (`rpc.ts`, bound to live services in `production.ts`) covers
-workspaces, files, git and GitHub, Cora runs (send, stop, resume, undo, fast
-mode), boards and whiteboards, worker terminals, automations, notifications,
-and terminals. Mutations carry idempotency keys recorded in a ledger
-(`mutation-ledger.ts`) so retries over a flaky link do not double-apply.
+A paired phone can:
+
+- list and add workspaces, and browse, read, create, rename, move and delete
+  files in them;
+- read git status and history, and work with GitHub pull requests and issues
+  (review, publish, merge, auto-merge);
+- follow Cora runs, send messages, stop, resume and undo, and edit a run's
+  board;
+- run, pause, resume and toggle automations, and use their worker terminals;
+- open, attach to and type into terminals (up to eight per device);
+- read and change Capability Center items, Cora memory and profiles;
+- receive notifications.
 
 There are no permission tiers yet: a paired device has the same authority as
-the desktop UI. Treat pairing like handing over your laptop. Known gaps that
-the review in `REVIEW.md` recommends closing: `workspaces.add` accepts your
-home directory itself, remote terminals launch agents with permission
-prompts skipped, and `cora.send` is not rate limited.
+the desktop UI. Treat pairing like handing someone your unlocked laptop.
+Known gaps (see also the security section of
+[the September 2026 review](./reviews/2026-09-codebase-review.md#4-security)):
+a phone can add your home folder itself as a workspace, terminals it opens
+start Claude Code and Codex with permission prompts skipped, and `cora.send`
+is not rate limited.
 
-## Notifications on the phone
+## Identity and pairing
 
-`phone-notify.ts` bridges the unified notification pipeline (`src/main/notify/`)
-to paired devices with delivery receipts.
+- The desktop has a static Noise identity in `~/.codarastudio/remote/` (the
+  directory is mode 0700 and the private key 0600, written through exclusive,
+  no-follow staging files).
+- The QR code carries a 32-byte, single-use pairing secret that expires after
+  2 minutes.
+- Pairing requests are accepted only from loopback or private (RFC 1918)
+  addresses, never through the relay, and only after you approve the device
+  and its fingerprint in the app.
+- Once paired, the device's public key is stored. Revocation is immediate and
+  survives restarts.
 
-### Reconnect recovery
+## Transport security
 
-Paired mobile sessions give LAN a 350 ms head start, then race the authenticated
-relay. A failed relay attempt leaves pending LAN attempts alive, and the first
-successful pinned Noise handshake cancels the other attempts. Initial pairing
-remains LAN-only.
+- **Local network:** a TCP listener on a stable port (`stable-port.ts`)
+  speaking Noise IK pinned to the desktop's static key (`listener.ts`).
+  Unauthenticated connections get a short handshake deadline.
+- **Relay:** when the phone is away from the local network, both sides
+  connect to the Codara relay over TLS (`relay-client.ts`). The relay only
+  forwards ciphertext: a tunnel is accepted only when the claimed peer is
+  paired and the Noise-derived key matches, and payloads stay end-to-end
+  encrypted. Once authenticated, Studio expects a relay heartbeat at least
+  every 60 seconds.
+- **Reconnecting:** the phone app gives the local network a 350 ms head start,
+  then races the relay; the first pinned Noise handshake to succeed wins and
+  the other attempts are cancelled. First-time pairing stays local-only.
+- **Relay ownership:** before replacing a silent Studio connection, the relay
+  probes it for two seconds, and a responsive Studio keeps its connection.
+  Late frames from recently closed phone streams are ignored, so a cancelled
+  phone cannot disconnect other sessions.
 
-The relay probes an existing Studio socket for two seconds before replacing a
-silent connection. A responsive Studio keeps ownership. Late frames from
-recently closed phone streams are ignored within a bounded retirement window,
-so a cancelled phone cannot disconnect other sessions. Studio also enforces an
-authentication deadline and a 60-second server-heartbeat deadline.
+## Application protocol
 
-The relay must run as one replica until connection routing has shared ownership.
-Aggregate `relay_metrics` logs report active connections/sessions, forwarded
-bytes, slow receivers, buffered high-water and acceptance latency totals. Payloads
-remain encrypted end to end; the relay does not inspect application messages.
+`rpc.ts` defines the versioned, length-prefixed JSON protocol spoken inside the
+encrypted stream, and `production.ts` binds it to the app's live services.
+
+- Inbound limits: 1 MiB per frame, 32 requests in flight, a 4 MiB write
+  backlog, and 8 terminals per device (`rpc.ts`, `terminal-leases.ts`).
+- Mutations carry idempotency keys recorded in a ledger
+  (`mutation-ledger.ts`), so a retry over a flaky link never applies twice.
+- Notifications reach the phone through `phone-notify.ts`, which bridges the
+  app's notification pipeline (`src/main/notify/`) to paired devices with
+  delivery receipts.
+
+## Running the relay
+
+The relay's code is not in this repository. It must run as a single replica
+until connection routing has shared ownership. Its aggregate `relay_metrics`
+logs report active connections and sessions, forwarded bytes, slow receivers,
+buffer high-water marks and accept latency; it never inspects application
+messages.
+
+For the full list of files Codara keeps for remote access, see
+[on-your-machine.md](./on-your-machine.md).

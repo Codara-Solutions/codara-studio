@@ -6,6 +6,10 @@
 export const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
 export const CODEX_LAUNCH_COMMAND = "codex --yolo";
 export const GROK_LAUNCH_COMMAND = "grok --yolo";
+// Pi runs as the user installed it: their own `pi` in their own shell, with
+// their own ~/.pi (logins, settings, extensions). No flags: their own Pi
+// settings decide, and `pi --resume` inside the pane picks a past session.
+export const PI_LAUNCH_COMMAND = "pi";
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
 export type AgentSessionRuntime = "claude" | "codex" | "grok";

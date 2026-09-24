@@ -2,7 +2,9 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   activateCodexCliAccount,
+  adoptCodexNativeLogin,
   codexCliPersonalAuthFile,
+  detectCodexNativeLogin,
   readCodexCliSelection,
   withCodexSelectionLock,
 } from "../codex-cli-auth-selector";
@@ -309,6 +311,16 @@ export function createCodexAccountAdapter(
     },
     activeCliProfileId() {
       return activeId(resolveStore().rootDir);
+    },
+    async detectNativeLogin() {
+      const current = resolveStore();
+      const change = await detectCodexNativeLogin(
+        current,
+        (await current.snapshot()).profiles.map((profile) => profile.id),
+      );
+      return change
+        ? { from: change.from, to: change.to, adopt: () => adoptCodexNativeLogin(current, change) }
+        : null;
     },
     switchSideEffects: {
       async sessionCount(context: SwitchContext) {

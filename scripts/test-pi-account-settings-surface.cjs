@@ -109,16 +109,24 @@ assert.match(descriptors, /AGENT_FAMILY_IDS\.map\(\(id\) => \(\{/);
 assert.match(descriptors, /cliLabel: "Claude Code" \| "Codex" \| "Grok";/);
 assert.match(descriptors, /loginHint: "claude login" \| "codex login" \| "grok login";/);
 assert.match(descriptors, /brand: "claude" \| "codex" \| "grok";/);
-assert.match(descriptors, /claude: \{ cliLabel: "Claude Code", loginHint: "claude login", switchClosesSessions: false \}/);
-assert.match(descriptors, /codex: \{ cliLabel: "Codex", loginHint: "codex login", switchClosesSessions: true \}/);
-assert.match(descriptors, /grok: \{ cliLabel: "Grok", loginHint: "grok login", switchClosesSessions: false \}/);
+assert.match(descriptors, /claude: \{\s*cliLabel: "Claude Code",\s*loginHint: "claude login",\s*switchClosesSessions: false,\s*sessionsFollowLiveLogin: true,\s*\}/);
+assert.match(descriptors, /codex: \{\s*cliLabel: "Codex",\s*loginHint: "codex login",\s*switchClosesSessions: true,\s*sessionsFollowLiveLogin: false,\s*\}/);
+assert.match(descriptors, /grok: \{\s*cliLabel: "Grok",\s*loginHint: "grok login",\s*switchClosesSessions: false,\s*sessionsFollowLiveLogin: false,\s*\}/);
 assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1, "only Codex closes sessions on a switch");
+assert.equal((descriptors.match(/sessionsFollowLiveLogin: true/g) ?? []).length, 1, "only Claude runs every session on the live login");
 assert.match(descriptors, /export function accountProviderDetail\(/);
 assert.ok(
   descriptors.includes(
     "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`",
   ),
 );
+assert.ok(
+  descriptors.includes(
+    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`",
+  ),
+);
+// A Claude card never offers to close terminals to delete an account.
+assert.match(settings, /const closeSessionsCount = descriptor\.sessionsFollowLiveLogin\s*\? 0/);
 assert.ok(
   descriptors.includes(
     "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`",

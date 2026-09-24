@@ -120,6 +120,7 @@ import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
+  PI_LAUNCH_COMMAND,
   buildAgentResumeCommand,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
@@ -155,9 +156,14 @@ import {
   type ChatStatusTone,
 } from "./components/chat/timeline";
 
-function workerTabBrandColor(runtime: string | null | undefined): string | undefined {
+function workerTabBrandColor(
+  runtime: string | null | undefined,
+  launchCommand?: string,
+): string | undefined {
   const brand = agentBrandRuntime(runtime);
-  return brand ? agentBrandColor(brand) : undefined;
+  if (brand) return agentBrandColor(brand);
+  // Pi has no session runtime of its own here; its launch command names it.
+  return launchCommand === PI_LAUNCH_COMMAND ? agentBrandColor("pi") : undefined;
 }
 
 // Closed dialogs and pickers stay out of the startup runtime. Their chunks are
@@ -4160,7 +4166,7 @@ export default function App() {
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return;
       }
@@ -4231,7 +4237,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
-        color: workerTabBrandColor(launchRuntime),
+        color: workerTabBrandColor(launchRuntime, launchCommand),
       });
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
@@ -4256,7 +4262,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
-        color: workerTabBrandColor(launchRuntime),
+        color: workerTabBrandColor(launchRuntime, launchCommand),
       });
     },
     [activeWorkspace?.cwd, prepareWorkerLaunch, tabs],
@@ -4341,6 +4347,10 @@ export default function App() {
     () => openTabBarWorkerSessions("grok"),
     [openTabBarWorkerSessions],
   );
+  const openPiWorker = useCallback(() => {
+    const cwd = resolveWorkerLaunchCwd();
+    launchWorkerInNewTerminalTab(PI_LAUNCH_COMMAND, cwd ? { cwd } : undefined);
+  }, [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd]);
   const openPaneWorkerSessions = useCallback(
     (
       runtime: WorkerSessionRuntime,
@@ -4979,6 +4989,7 @@ export default function App() {
       "worker.newClaude": () => handleNewWorkerPane(CLAUDE_LAUNCH_COMMAND),
       "worker.newCodex": () => handleNewWorkerPane(CODEX_LAUNCH_COMMAND),
       "worker.newGrok": () => handleNewWorkerPane(GROK_LAUNCH_COMMAND),
+      "worker.newPi": () => handleNewWorkerPane(PI_LAUNCH_COMMAND),
       "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
       "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
       "worker.grokSessions": () => openShortcutWorkerSessions("grok"),
@@ -5613,7 +5624,7 @@ export default function App() {
         t.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return null;
       }
@@ -5636,7 +5647,7 @@ export default function App() {
         t.newTerminalTab(cwd, launchCommand, {
           agentSession: makeSession(cwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return null;
       }
@@ -6029,6 +6040,7 @@ export default function App() {
               onNewClaudeWorker={openClaudeWorkerSessions}
               onNewCodexWorker={openCodexWorkerSessions}
               onNewGrokWorker={openGrokWorkerSessions}
+              onNewPiWorker={openPiWorker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
               onRenameChat={handleRenameChatTab}
@@ -6587,6 +6599,8 @@ interface WorkspaceProps {
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
+  // Pi keeps its own sessions, so its row opens a fresh `pi` directly.
+  onNewPiWorker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
   // path, threaded down to the chat panel's embedded board sub-view.
@@ -6643,6 +6657,7 @@ const Workspace = React.memo(function Workspace({
   onNewClaudeWorker,
   onNewCodexWorker,
   onNewGrokWorker,
+  onNewPiWorker,
   onNewChat,
   onOpenBoardCardRun,
   onRenameChat,
@@ -7268,6 +7283,7 @@ const Workspace = React.memo(function Workspace({
         onNewClaudeWorker={onNewClaudeWorker}
         onNewCodexWorker={onNewCodexWorker}
         onNewGrokWorker={onNewGrokWorker}
+        onNewPiWorker={onNewPiWorker}
         onNewChat={onNewChat}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}

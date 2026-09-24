@@ -60,6 +60,12 @@ export interface PiCommitOneShotDependencies {
     requirePreferred: true;
   }) => Promise<PiAccountRuntimeProfile>;
   resolveLaunchRuntime: () => Promise<PiCommitLaunchRuntime>;
+  /**
+   * Renew the account's credential in this process before the child runs,
+   * so the child (launched without Codara's extension) never refreshes a
+   * login on its own: a Claude login has one refresher, Studio.
+   */
+  renewCredential: (provider: PiSubscriptionProvider, profileId: string) => Promise<unknown>;
   spawnProcess: (
     command: string,
     args: readonly string[],
@@ -171,10 +177,19 @@ async function defaultResolveLaunchRuntime(): Promise<PiCommitLaunchRuntime> {
   };
 }
 
+async function defaultRenewCredential(
+  provider: PiSubscriptionProvider,
+  profileId: string,
+): Promise<unknown> {
+  const { refreshPiSubscriptionProfileCredential } = await import("./pi-subscription-auth");
+  return refreshPiSubscriptionProfileCredential(profileId, provider);
+}
+
 const DEFAULT_DEPENDENCIES: PiCommitOneShotDependencies = {
   inspectAccounts: defaultInspectAccounts,
   resolveAccount: defaultResolveAccount,
   resolveLaunchRuntime: defaultResolveLaunchRuntime,
+  renewCredential: defaultRenewCredential,
   spawnProcess: (command, args, options) =>
     nodeSpawn(command, [...args], options) as unknown as PiCommitChildProcess,
   createTemporaryDirectory: (prefix) => mkdtemp(prefix),
@@ -280,13 +295,19 @@ export async function runSessionlessPiCommitMessage(
   const dependencies = { ...DEFAULT_DEPENDENCIES, ...overrides };
 
   // This inspection is read-only with respect to OAuth. It may report an
-  // expired but refreshable credential as usable, but Pi alone refreshes it
-  // after the user actually requests generation.
+  // expired but refreshable credential as usable; the renewal below makes it
+  // current before the child starts.
   const inspection = await dependencies.inspectAccounts();
   const route = resolvePiCommitRoute(input.modelSelection, inspection);
   if (!route) return null;
   const profileId = selectUsableProfileId(inspection, route.provider);
   if (!profileId) return null;
+  // The child runs without Codara's extension, so a credential it found due
+  // would be refreshed by Pi itself: a second refresher of a Claude login
+  // Studio and Claude Code share. Renewed here (through the Claude slot for
+  // Anthropic) with enough headroom that the child never finds it due. A
+  // failure is left to the child, as before.
+  await dependencies.renewCredential(route.provider, profileId).catch(() => undefined);
 
   const [account, launch] = await Promise.all([
     dependencies.resolveAccount({

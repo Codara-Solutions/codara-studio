@@ -124,7 +124,7 @@ async function main() {
   const storeRoot = path.join(TMP, "store");
   const personalConfigDir = path.join(TMP, "personal");
   privateDir(personalConfigDir);
-  const connected = new Set([personalConfigDir]);
+  const connected = new Set(["personal"]);
   const leases = new mod.ClaudeCliProfileLeaseRegistry();
   const ids = [PROFILE_ID, OTHER_ID];
   const store = new mod.ClaudeCliAccountProfileStore(storeRoot, {
@@ -132,8 +132,8 @@ async function main() {
     personalConfigDirEnv: null,
     idFactory: () => ids.shift(),
     leases,
-    authChecker: ({ configDir }) =>
-      connected.has(configDir)
+    authChecker: ({ profileId }) =>
+      connected.has(profileId)
         ? { connected: true }
         : { connected: false, reason: "missing" },
   });
@@ -142,7 +142,7 @@ async function main() {
     storeRoot,
     profile.profile.id,
   );
-  connected.add(profileConfigDir);
+  connected.add(PROFILE_ID);
   await store.setDefaultProfile(profile.profile.id);
 
   // Legacy absence remains personal after a managed account becomes default.
@@ -158,7 +158,9 @@ async function main() {
   );
 
   // A new-session default resolution is explicit and emits an exact,
-  // sanitized child environment without mutating the parent.
+  // sanitized child environment without mutating the parent. A managed
+  // account runs in the same home as personal: its login is what differs,
+  // never its CLAUDE_CONFIG_DIR.
   const selected = await mod.resolveClaudeCliExecutionProfile(store, {
     useDefault: true,
     baseEnv,
@@ -168,9 +170,14 @@ async function main() {
   assert.equal(selected.label, "Native account");
   assert.equal(selected.managed, true);
   assert.equal(selected.connected, true);
-  assert.equal(selected.env.CLAUDE_CONFIG_DIR, profileConfigDir);
+  assert.equal(
+    "CLAUDE_CONFIG_DIR" in selected.env,
+    false,
+    "a managed account keeps the one home's unset selector",
+  );
   assert.equal(selected.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(baseEnv.CLAUDE_CONFIG_DIR, "/wrong/config");
+  assert.deepEqual(fs.readdirSync(profileConfigDir), [], "no account directory is ever a Claude home");
 
   // If the app inherited an explicit legacy selector, personal preserves that
   // exact canonical directory instead of falling back to ~/.claude.
@@ -270,10 +277,6 @@ async function main() {
   );
 
   await store.setDefaultProfile("personal");
-  await assert.rejects(
-    () => store.deleteProfile(PROFILE_ID),
-    /active and cannot be deleted/i,
-  );
   releaseOne();
   releaseOne();
   releaseDuplicate();
@@ -300,9 +303,13 @@ async function main() {
   finishExclusive();
   await exclusive;
 
+  // A terminal lease records which account a session started on; it never
+  // pins the profile, because the session runs on the live login.
+  const releaseStarted = leases.acquire(PROFILE_ID, "terminal:pane-started");
   const deleted = await store.deleteProfile(PROFILE_ID);
   assert.equal(deleted.deleted, true);
   assert.equal(fs.existsSync(profileConfigDir), false);
+  releaseStarted();
 
   const disconnected = await store.createProfile({ label: "Needs login" });
   const unready = await mod.resolveClaudeCliExecutionProfile(store, {
@@ -375,16 +382,10 @@ async function main() {
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
       "src/main/orchestration/account-adapters/claude-account-adapter.ts",
-      // The active account pointer derives the plain-shell selector from
-      // the store default; it writes a data file, never launches.
-      "src/main/orchestration/active-cli-env-pointer.ts",
       "src/main/orchestration/anthropic-accounts.ts",
       "src/main/orchestration/claude-live-slot-undo.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
-      // Type-only import of the execution-profile shape; resolution still
-      // funnels through native-claude-profile-runtime.
-      "src/main/orchestration/native-cli-shell-defaults.ts",
       "src/main/orchestration/unified-account-migration.ts",
       "src/main/pty-manager.ts",
       // Read-only transcript discovery needs the personal Claude projects
@@ -394,7 +395,7 @@ async function main() {
   );
 
   console.log(
-    "PASS native Claude execution profiles: exact isolated environment, credential stripping, legacy/frozen identity, and deletion-safe leases",
+    "PASS native Claude execution profiles: one home for every account, provider overrides removed from the child env, frozen ids kept, and leases that never pin a login",
   );
 }
 

@@ -316,8 +316,8 @@ function sortedEqual(actual, expected, label) {
     );
     assert.match(
       workerSchema.description,
-      /bundled Pi runtime/,
-      "worker schema must state that automation workers run on the bundled Pi runtime",
+      /run on Cora's Pi runtime/,
+      "worker schema must state that automation workers run on Cora's Pi runtime",
     );
     for (const modelId of ["claude-opus-5", "claude-fable-5", "gpt-5.6-sol"]) {
       assert.ok(

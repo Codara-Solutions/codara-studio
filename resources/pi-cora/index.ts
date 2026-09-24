@@ -1,6 +1,11 @@
 import { createRequire } from "node:module";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  codaraAnthropicRenewalAccount,
+  registerCodaraAnthropicRenewal,
+  type CodaraSocketRequest,
+} from "./anthropic-refresh";
 import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
@@ -28,6 +33,7 @@ interface BridgeToolResult {
 interface CodaraBridge {
   listTools(): BridgeTool[];
   callToolByName(name: string, args: unknown): Promise<BridgeToolResult>;
+  requestCodara?: CodaraSocketRequest;
 }
 
 const requireFromExtension = createRequire(import.meta.url);
@@ -106,6 +112,12 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
     const content = whiteboardReview.followUp();
     if (content) pi.sendMessage({ customType: "whiteboard-review", content, display: false }, { triggerTurn: true, deliverAs: "followUp" });
   });
+
+  // Studio renews the Claude login; this process never spends its refresh token.
+  const renewalAccount = codaraAnthropicRenewalAccount();
+  if (renewalAccount && bridge.requestCodara) {
+    registerCodaraAnthropicRenewal(pi, { accountProfileId: renewalAccount, request: bridge.requestCodara });
+  }
 
   // Keep the manager's context inside Codara's token budget instead of Pi's
   // window-sized default.

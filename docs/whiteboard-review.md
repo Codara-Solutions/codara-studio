@@ -1,83 +1,93 @@
-# Cora whiteboard review
+# Whiteboards and Cora's review
 
-A board write creates a draft. Cora's workflow is to investigate the code,
-create a readable draft, inspect the rendered result, correct problems, and
-record a review of that exact revision. The header distinguishes a draft from
-**Cora reviewed**, with the review summary and limitations available on hover.
-**Review & improve** prepares a chat request to run that workflow on the current
-board, including manual edits.
+Every Cora chat has a whiteboard: an infinite canvas of cards and connections
+that you and Cora both edit. You can also open a standalone whiteboard with
+`Mod+Shift+W` and save it as a `.coraboard` file. This page explains what the
+"Draft" and "Cora reviewed" labels mean, how Cora builds project maps with
+evidence from the code, and what its review does and does not prove.
+
+## Draft or reviewed
+
+The whiteboard's header shows one of two labels:
+
+- **Draft · needs review**: the current revision has not been reviewed.
+  Every edit, yours or Cora's, starts a new draft.
+- **Cora reviewed**: Cora inspected this exact revision and recorded a
+  review. Hover the label to read the review's summary and any limitations
+  Cora noted.
+
+**Review & improve** in the header asks Cora, in the chat, to review the
+current board, including your manual edits: check its claims against the
+code, look at the rendered result, fix problems, and review the final
+revision without overwriting your choices.
 
 ## Project maps
 
-The manager prompt asks Cora to inspect entry points, module boundaries,
-imports and calls, storage, external interfaces, and an end-to-end path. File
-and symbol cards can carry `sources` containing repository-relative `path:line`
-references. Connections can carry the same evidence. `confidence: "inferred"`
-marks a hypothesis and renders its edge dashed; source references also appear
-on cards and in image exports.
+When you ask for a map of a project, Cora reads the code before drawing:
+entry points, module boundaries, imports and calls, storage, external
+interfaces, and one path through the system from end to end.
 
-For a large map with independent areas, Cora may use 2-3 bounded leaf
-researchers, on economical enabled models at low effort. They inspect distinct
-areas and write their own notes, without editing source code. The manager
-reconciles the cross-module relationships. Small maps and modes without workers
-use direct reading. This uses the existing worker scheduler and model allowlist;
-there is no additional provider account or mandatory worker cost.
+- File and symbol cards, and the connections between them, can carry
+  **sources**: repository-relative `path:line` references. They show on the
+  cards and in image exports.
+- A connection marked as **inferred** is a hypothesis, drawn with a dashed
+  line.
+- For a large map with independent areas, Cora may send two or three
+  read-only researchers, on economical models at low effort, to read
+  separate areas, then connects the areas itself. Small maps are read
+  directly. This uses your normal worker models and accounts; nothing extra
+  is required.
 
-## Tools and review contract
+## How the review works
 
-- `codara_whiteboard_get` returns the board, revision, and structural issues.
-- `codara_whiteboard_update` preserves the existing replace/merge/clear API.
-  Every content edit, including a human edit, invalidates the prior review.
-- `codara_whiteboard_arrange` runs Dagre on module interiors and then the graph
-  between modules. It retains geometric group membership and semantic content.
-  It changes positions, so use it for a new draft or requested layout changes.
-- `codara_whiteboard_inspect` renders an isolated instance of the real React
-  Flow canvas and returns a PNG image content block with diagnostics and the
-  inspected revision. It works while the chat's board is hidden. It does not
-  move the user's viewport, select cards, or change the board.
-- `codara_whiteboard_review` records the manager's assessment. It requires a
-  recent inspection of the current revision, no blocking layout/text issues,
-  and readable capture coverage of every card. Large overviews return
-  `detailNeeded`; use `nodeIds` to inspect close-ups. Unresolved warnings require
-  recorded limitations. Revision checks reject edits during capture/review.
+Cora's workflow for any board it writes:
 
-A source check establishes that a referenced file and line exist within the
-workspace, not that they prove the claim. Invalid or unavailable references,
-isolated cards, missing evidence, and incomplete branch labels are warnings.
-Overlaps and clipped titles/bodies block review. Semantic correctness still
-requires Cora to read the code and the returned images. A review is explicitly
-Cora's assessment, not a machine proof that the map is exhaustive or correct.
+1. Read the code and write a draft.
+2. Render the board to an image (`codara_whiteboard_inspect`) and look at it.
+   This works even when the board is not on screen and never moves your view
+   or selection. Large boards are inspected again in close-ups.
+3. Fix what is wrong, optionally re-laying the board out
+   (`codara_whiteboard_arrange`, which moves cards and so is only used on new
+   drafts or when you ask).
+4. Record the review (`codara_whiteboard_review`).
 
-The Pi manager extension tracks draft writes. Completion rejections are also
-capped at two so failed verification cannot trap a run in a tool retry loop. If it ends without reviewing the
-board, it can schedule up to two follow-ups for that user request. Aborted or
-failed agent turns do not restart themselves. Persistent capture/verification
-failures leave the board labeled as a draft, with instructions to disclose the
-limitation. A new user request clears the pending follow-up state.
+A review is refused while the board has blocking problems: cards that
+overlap, titles or text that are cut off, or an inspection that did not cover
+every card readably. Broken or missing source references, isolated cards and
+unlabeled branches are warnings; Cora must list any it leaves unresolved as
+limitations. If the board changes while Cora is inspecting or reviewing it,
+the review is rejected and has to be redone on the new revision.
 
-Review metadata survives run reloads. Portable `.coraboard` files preserve
-source evidence; importing a file starts a draft rather than inheriting a review
-of another workspace's sources. Saving an untitled board keeps its tab identity
-and selection instead of relying on separate open/close state updates.
+If Cora finishes a request without reviewing the board it drew, it gets up to
+two follow-up turns to do so. If the review still cannot be completed, the
+board stays labeled as a draft and Cora says why. A new request from you
+clears that follow-up.
 
-## Open-source foundation
+What a review is not: checking that a referenced file and line exist does not
+prove the claim the card makes. The review is Cora's own assessment, after
+reading the code and the rendered images, not a machine proof that the map is
+complete or correct.
 
-The editor already uses [React Flow](https://github.com/xyflow/xyflow), which
-fits structured code maps and editable node/edge data. Replacing the canvas
-would not establish that the relationships are correct. This change adds
-[Dagre](https://github.com/dagrejs/dagre) for directed layout and uses
-[React Flow's image-capture approach](https://reactflow.dev/examples/misc/download-image)
-with `html-to-image` 1.11.11. All three libraries are MIT-licensed. Image
-inspection is local to Studio and does not upload the board to a canvas service.
+## Saving and sharing
 
-## Verification
+Reviews survive app restarts. A `.coraboard` file keeps each card's source
+evidence, but importing one always starts as a draft, since a review of one
+workspace's sources says nothing about another's.
 
-`npm test -- 'whiteboard|codara-studio-mcp|pi-cora-extension'` exercises layout,
-group separation, cycles, source references, revision/coverage checks, image
-transport, and the actual manager extension's bounded continuation wiring.
+## For contributors
 
-The Electron tests in `tests/e2e/whiteboard-review.spec.ts` exercise the live
-socket, store, renderer, image capture, correction, review, reload, manual-edit
-invalidation, clipping detection, and detail crops. They use a controlled source
-fixture and no paid model. They establish the tool and enforcement mechanics;
-they do not measure a model's architectural understanding on arbitrary projects.
+- The canvas is [React Flow](https://github.com/xyflow/xyflow). Layout uses
+  [Dagre](https://github.com/dagrejs/dagre), and inspection captures images
+  with `html-to-image` 1.11.11, following
+  [React Flow's download-image example](https://reactflow.dev/examples/misc/download-image).
+  All three are MIT-licensed, and capture is local: the board is never
+  uploaded anywhere.
+- The review rules for Cora live in `resources/pi-cora/whiteboard-review-policy.ts`;
+  the tool contracts are in `resources/codara-studio-mcp/server.js` (see
+  [mcp-tools.md](./mcp-tools.md#whiteboard-and-board)).
+- `npm test -- 'whiteboard|codara-studio-mcp|pi-cora-extension'` covers
+  layout, source references, revision and coverage checks, image transport and
+  the follow-up limit. `tests/e2e/whiteboard-review.spec.ts` drives the real
+  app through capture, correction, review, reload and manual-edit
+  invalidation with a fixed fixture and no paid model. These tests prove the
+  mechanics, not a model's understanding of an arbitrary project.

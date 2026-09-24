@@ -57,7 +57,12 @@ import {
   cleanupNativeCliActivePointerArtifacts,
   cleanupRetiredCodexHomeEnvironment,
 } from "./orchestration/native-cli-terminal-cleanup";
-import { startUnifiedAccountMigration } from "./orchestration/unified-account-migration";
+import {
+  followNativeLogins,
+  startNativeLoginFollower,
+  startStudioClaudeLoginKeeper,
+  startUnifiedAccountMigration,
+} from "./orchestration/unified-account-migration";
 import { credentialMirror } from "./orchestration/credential-mirror";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
@@ -1061,6 +1066,22 @@ app.whenReady().then(async () => {
   // handler registered above awaits this pass, so it must start before any
   // of them can run, which is why it follows registerIpc() synchronously.
   void startUnifiedAccountMigration();
+  // The live Claude login gets one refresher ahead of Claude Code and Cora,
+  // so the two never race for its single-use refresh token.
+  startStudioClaudeLoginKeeper();
+  // A `/login` or `codex login` in any terminal as another known account
+  // makes that account the Active one here too.
+  startNativeLoginFollower();
+  // Earlier builds installed a copy of Pi of their own under the Codara
+  // home. Cora now runs the user's Pi (or the bundled one) and nothing
+  // reads that copy any more.
+  void import("./orchestration/pi-runtime-install")
+    .then(({ retiredPiRuntimeRoot }) =>
+      import("node:fs/promises").then((fsp) =>
+        fsp.rm(retiredPiRuntimeRoot(), { recursive: true, force: true }),
+      ),
+    )
+    .catch(() => undefined);
   // One-time tidy-up after the retired "Active account in your terminal"
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and
@@ -1199,6 +1220,12 @@ app.whenReady().then(async () => {
     resumeTimer = setTimeout(() => {
       resumeTimer = null;
       void onSystemResume();
+      // A login that lapsed during sleep is renewed before Claude Code and
+      // Cora both reach for it on the first request after waking.
+      void import("./orchestration/claude-login-keeper")
+        .then((m) => m.nudgeClaudeLoginKeeper())
+        .catch(() => undefined);
+      void followNativeLogins().catch(() => undefined);
       // Waking the machine is exactly when remote state is stale: bring every
       // repository's next background fetch forward (short jitter, not now).
       void import("./git-auto-fetch")

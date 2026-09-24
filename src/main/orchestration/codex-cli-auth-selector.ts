@@ -1,7 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { codexAccountIdFromAccessToken } from "./account-adapters/codex-credential-codec";
+import {
+  CODEX_AUTH_CLAIM,
+  codexAccountIdFromAccessToken,
+} from "./account-adapters/codex-credential-codec";
+import { jwtClaim, jwtStringClaim } from "./native-cli-account-identity";
 import {
   CODEX_CLI_AUTH_FILE,
   CODEX_CLI_PERSONAL_PROFILE_ID,
@@ -10,12 +14,12 @@ import {
   type CodexCliAccountProfileStore,
   type CodexCliProfileId,
 } from "./codex-cli-account-profiles";
+import { withAccountSelectionLock } from "./account-selection-lock";
 import { readPrivateJsonFile } from "./native-cli-atomic-file";
 
 const ACTIVE_AUTH_FILE = "active-auth.json";
 const PERSONAL_DIRECTORY = "personal";
 const MAX_AUTH_BYTES = 16 * 1024 * 1024;
-const mutationTails = new Map<string, Promise<void>>();
 
 interface ActiveAuthSelection {
   version: 1;
@@ -99,6 +103,27 @@ async function credentialAccountId(path: string): Promise<string | undefined> {
 }
 
 /**
+ * The person a credential file belongs to: the ChatGPT account (a Team
+ * workspace shares one) plus the user inside it, or undefined when the file
+ * does not say both. Deciding that two files hold the same login needs
+ * both; an account id alone would take a teammate's login for one's own.
+ */
+async function credentialUser(path: string): Promise<string | undefined> {
+  const read = await readPrivateJsonFile(path).catch(() => null);
+  if (!read || read.kind !== "value" || !isRecord(read.value)) return undefined;
+  const tokens = read.value.tokens;
+  if (!isRecord(tokens)) return undefined;
+  const account =
+    typeof tokens.account_id === "string" && tokens.account_id.length > 0
+      ? tokens.account_id
+      : codexAccountIdFromAccessToken(tokens.access_token);
+  const auth = jwtClaim(tokens.id_token, CODEX_AUTH_CLAIM) ?? jwtClaim(tokens.access_token, CODEX_AUTH_CLAIM);
+  const userId = isRecord(auth) && typeof auth.chatgpt_user_id === "string" ? auth.chatgpt_user_id : undefined;
+  const user = userId || jwtStringClaim(tokens.id_token, "email")?.toLowerCase();
+  return account && user ? `${account}\u0000${user}` : undefined;
+}
+
+/**
  * Whether the live file may be saved into a slot: true unless both name an
  * account and the accounts differ. A `codex login` as someone else while a
  * profile owned the live file is an external login, not that profile's
@@ -172,21 +197,7 @@ export function withCodexSelectionLock<T>(
 }
 
 async function withSelectionLock<T>(rootDir: string, operation: () => Promise<T>): Promise<T> {
-  const key = resolve(rootDir);
-  const previous = mutationTails.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((done) => {
-    release = done;
-  });
-  const tail = previous.catch(() => undefined).then(() => current);
-  mutationTails.set(key, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (mutationTails.get(key) === tail) mutationTails.delete(key);
-  }
+  return withAccountSelectionLock(rootDir, operation);
 }
 
 async function ensureVaultUnlocked(
@@ -224,6 +235,133 @@ export async function ensureCodexCliAuthVault(
   store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
 ): Promise<CodexCliProfileId> {
   return withSelectionLock(store.rootDir, () => ensureVaultUnlocked(store));
+}
+
+async function lastRefreshOf(path: string): Promise<number | undefined> {
+  const read = await readPrivateJsonFile(path).catch(() => null);
+  if (!read || read.kind !== "value" || !isRecord(read.value)) return undefined;
+  const raw = read.value.last_refresh;
+  const parsed = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * Drop the personal slot's saved login when a managed profile holds a newer
+ * login of the same ChatGPT account. Signing in to Cora with the account
+ * the terminal already used creates a managed profile with a login of its
+ * own; the personal copy left in the vault is then an older, unused grant of
+ * the same account with no card of its own (the account's row is the
+ * managed one), which a later switch to the personal slot would bring back
+ * already expired. Nothing happens while the personal login is live, when
+ * either file does not name its account, or when a Cora row owns the
+ * personal slot.
+ */
+export async function retireSupersededCodexPersonalLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  managedProfileIds: readonly string[],
+  options: {
+    personalHasRow?: () => Promise<boolean>;
+    log?: (message: string) => void;
+  } = {},
+): Promise<boolean> {
+  return withSelectionLock(store.rootDir, async () => {
+    const marker = await readSelection(store.rootDir);
+    if (marker === null || marker === CODEX_CLI_PERSONAL_PROFILE_ID) return false;
+    const personal = codexCliPersonalAuthFile(store.rootDir);
+    if (!(await safeRegularFile(personal))) return false;
+    const account = await credentialUser(personal);
+    if (!account) return false;
+    if (await options.personalHasRow?.().catch(() => true)) return false;
+    const personalRefreshed = (await lastRefreshOf(personal)) ?? 0;
+    for (const rawId of managedProfileIds) {
+      let profileId: CodexCliProfileId;
+      try {
+        profileId = normalizeCodexCliProfileId(rawId);
+      } catch {
+        continue;
+      }
+      if (profileId === CODEX_CLI_PERSONAL_PROFILE_ID) continue;
+      // The live profile's freshest copy is the live file itself.
+      const file =
+        profileId === marker
+          ? join(store.personalHomeDir, CODEX_CLI_AUTH_FILE)
+          : storedAuthFile(store, profileId);
+      if (!(await safeRegularFile(file))) continue;
+      if ((await credentialUser(file)) !== account) continue;
+      const refreshed = await lastRefreshOf(file);
+      if (refreshed === undefined || refreshed <= personalRefreshed) continue;
+      await removeCredential(personal);
+      options.log?.(
+        `[accounts] the personal Codex login was an older copy of an account profile ${profileId} holds; it was removed`,
+      );
+      return true;
+    }
+    return false;
+  });
+}
+
+export interface CodexNativeLoginChange {
+  /** The profile the marker names, whose login `codex login` replaced. */
+  from: CodexCliProfileId;
+  /** The known profile the live login now belongs to. */
+  to: CodexCliProfileId;
+}
+
+/**
+ * Whether a `codex login` in a terminal put another known account's login
+ * in ~/.codex/auth.json. The file names its ChatGPT account; the live
+ * profile's own saved copy says which account it was. Null when nothing
+ * changed, either account is unknown, or two profiles hold that account.
+ */
+export async function detectCodexNativeLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  managedProfileIds: readonly string[],
+): Promise<CodexNativeLoginChange | null> {
+  const marker = await readSelection(store.rootDir).catch(() => null);
+  if (marker === null) return null;
+  const liveAccount = await credentialUser(join(store.personalHomeDir, CODEX_CLI_AUTH_FILE));
+  if (!liveAccount) return null;
+  const ownerAccount = await credentialUser(storedAuthFile(store, marker));
+  if (!ownerAccount || ownerAccount === liveAccount) return null;
+  const owners: CodexCliProfileId[] = [];
+  for (const rawId of [CODEX_CLI_PERSONAL_PROFILE_ID, ...managedProfileIds]) {
+    let profileId: CodexCliProfileId;
+    try {
+      profileId = normalizeCodexCliProfileId(rawId);
+    } catch {
+      continue;
+    }
+    if (profileId === marker || owners.includes(profileId)) continue;
+    if ((await credentialUser(storedAuthFile(store, profileId))) === liveAccount) {
+      owners.push(profileId);
+    }
+  }
+  return owners.length === 1 ? { from: marker, to: owners[0] } : null;
+}
+
+/**
+ * Make the profile a terminal `codex login` signed in as the live one: its
+ * slot takes the live file and the marker moves. The live file is not
+ * touched; the replaced profile keeps the login its slot holds. False when
+ * the live file or the marker changed since the detection.
+ */
+export async function adoptCodexNativeLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  change: CodexNativeLoginChange,
+): Promise<boolean> {
+  return withSelectionLock(store.rootDir, async () => {
+    if ((await readSelection(store.rootDir)) !== change.from) return false;
+    const liveAuth = join(store.personalHomeDir, CODEX_CLI_AUTH_FILE);
+    const target = storedAuthFile(store, change.to);
+    const [liveAccount, targetAccount] = await Promise.all([
+      credentialUser(liveAuth),
+      credentialUser(target),
+    ]);
+    if (!liveAccount || liveAccount !== targetAccount) return false;
+    await atomicCopy(liveAuth, target);
+    await writeSelection(store.rootDir, change.to);
+    return true;
+  });
 }
 
 export interface ActivateCodexCliAccountOptions {

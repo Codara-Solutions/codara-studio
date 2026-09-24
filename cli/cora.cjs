@@ -31,13 +31,12 @@ ${c.bold("PROFILES & MEMORY")}
   profile use <name|id>                select the default for new chats
 
 ${c.bold("ACCOUNTS")}
-  auth list [provider]                 list Cora + native CLI accounts
-  auth add <provider> [label]          connect another Cora subscription
-  auth use <provider> <#|label|id>     default account for new Cora chats
+  auth list [provider]                 list accounts (Cora and CLI sides)
+  auth add <provider> [label]          sign in to another account
+  auth use <provider> <#|label|id>     make it the Active account (Cora + CLI)
   auth login|rename|remove <provider> …
-  auth cli list [claude|codex|grok]    list managed terminal identities
-  auth cli add|login|use|rename|logout|remove <runtime> …
-                                       manage Claude/Codex/Grok CLI accounts
+  auth cli list [claude|codex|grok]    list the CLI side of each account
+  auth cli rename|remove <runtime> …   rename a CLI side, remove an unused one
 
 ${c.bold("RUNS & AGENTS")}
   runs                         list runs (works offline)

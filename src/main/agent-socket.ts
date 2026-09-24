@@ -592,6 +592,12 @@ async function dispatch(
         return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
+      case "accounts.anthropic.renew":
+        // Cora's Pi processes renew their Claude login here instead of
+        // spending the refresh token themselves. A scoped (imported-PR)
+        // process reaches this only because its claim lists the method, and
+        // every caller must present the login's current refresh token.
+        return await handleAnthropicRenew(params, id);
       case "accounts.use":
       case "accounts.rename":
       case "accounts.remove":
@@ -1453,6 +1459,31 @@ async function handleChatCreate(
     });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleAnthropicRenew(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const accountProfileId = stringParam(params, "accountProfileId");
+  const refreshToken = typeof params.refreshToken === "string" ? params.refreshToken : "";
+  if (!accountProfileId) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "accountProfileId is required");
+  }
+  try {
+    const { renewCoraAnthropicLogin } = await import("./orchestration/unified-account-migration");
+    const tokens = await renewCoraAnthropicLogin(accountProfileId, refreshToken, {
+      provePossession: true,
+    });
+    return successResponse(id, {
+      access: tokens.access,
+      refresh: tokens.refresh,
+      expires: tokens.expires,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    return errorResponse(id, ERR_INTERNAL, `The Claude login could not be renewed: ${message}`);
   }
 }
 
@@ -4801,7 +4832,7 @@ async function handleAutomationCreate(
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "worker is required: set an explicit model and effort (automations run on the bundled Pi runtime)",
+      "worker is required: set an explicit model and effort (automations run on Cora's Pi runtime)",
     );
   }
   const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });

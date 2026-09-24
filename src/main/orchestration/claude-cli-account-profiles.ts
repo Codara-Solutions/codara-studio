@@ -10,50 +10,33 @@ import {
   codaraHomeDir,
   isCodaraManagedCliPath,
 } from "./codara-managed-cli-roots";
-import { ensureSharedCliState } from "./native-cli-shared-state";
 import {
-  readClaudeCredentialRecord,
-  type ClaudeCliCredentialOptions,
-} from "./claude-cli-credentials";
+  CLAUDE_CLI_ACCOUNTS_DIRECTORY,
+  CLAUDE_CLI_CONFIG_FILE,
+  CLAUDE_CLI_PERSONAL_PROFILE_ID,
+  isClaudeCliManagedProfileId,
+  normalizeClaudeCliProfileId,
+  type ClaudeCliProfileId,
+} from "./claude-cli-profile-ids";
+import { readClaudeProfileLogin } from "./claude-cli-live-login";
+
+export {
+  CLAUDE_CLI_ACCOUNTS_DIRECTORY,
+  CLAUDE_CLI_CONFIG_FILE,
+  CLAUDE_CLI_PERSONAL_PROFILE_ID,
+  isClaudeCliManagedProfileId,
+  normalizeClaudeCliProfileId,
+  type ClaudeCliProfileId,
+};
 
 const execFileAsync = promisify(execFile);
 
-export const CLAUDE_CLI_PERSONAL_PROFILE_ID = "personal" as const;
 export const CLAUDE_CLI_ACCOUNT_PROFILES_VERSION = 1 as const;
 export const CLAUDE_CLI_ACCOUNT_PROFILES_FILE = "account-profiles.json";
-export const CLAUDE_CLI_ACCOUNTS_DIRECTORY = "accounts";
 export const CLAUDE_CLI_PROFILE_LABEL_MAX_LENGTH = 80;
 
-/**
- * Non-credential preferences copied into a freshly created managed account so
- * the CLI does not drop the terminal into its first-run wizard.
- *
- * Claude Code 2.1.220 gates the whole onboarding flow (theme picker, security
- * notes, terminal setup) on `hasCompletedOnboarding` in its global config file,
- * and writes `hasCompletedOnboarding` + `lastOnboardingVersion` when the flow
- * finishes. Anthropic's own eval harness seeds a config directory the same
- * way. The theme the wizard would ask for is NOT seeded here: settings.json is
- * shared with the personal config directory through a symlink (see
- * native-cli-shared-state.ts), so the personal theme — and every other
- * setting — arrives through the link instead of a diverging copy.
- *
- * The list below is exhaustive and closed. Nothing identity- or
- * credential-bearing (oauthAccount, userID, anonymousId, machineID, projects,
- * mcpServers, customApiKeyResponses, hooks, env, …) is ever considered: a
- * managed account is a separate login, and copying any of that would either
- * cross accounts or carry the personal machine's identity into one.
- */
-export const CLAUDE_CLI_SEEDED_CONFIG_KEYS = [
-  "hasCompletedOnboarding",
-  "lastOnboardingVersion",
-] as const;
-export const CLAUDE_CLI_CONFIG_FILE = ".claude.json";
-/** Refuse to parse an implausibly large personal config rather than stall. */
-const PERSONAL_CONFIG_MAX_BYTES = 32 * 1024 * 1024;
-const ONBOARDING_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
-
-const UUID_V4_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** Refuse to parse an implausibly large config rather than stall. */
+const CONFIG_MAX_BYTES = 32 * 1024 * 1024;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
 const PROFILE_KEYS = new Set(["id", "label", "createdAt", "updatedAt"]);
 const ROOT_KEYS = new Set(["version", "profiles", "defaultProfileId"]);
@@ -73,10 +56,6 @@ function normalizeManagedClaudePath(value: string): string {
   return resolve(value).normalize("NFC");
 }
 
-export type ClaudeCliProfileId =
-  | typeof CLAUDE_CLI_PERSONAL_PROFILE_ID
-  | string;
-
 export interface ClaudeCliManagedProfile {
   /** Opaque UUIDv4. Never derived from an Anthropic identity or credential. */
   id: string;
@@ -92,7 +71,7 @@ export interface ClaudeCliAccountProfilesSnapshot {
 }
 
 export interface ClaudeCliProfileConnection {
-  /** Opaque local id. `personal` represents the pre-feature Claude home. */
+  /** Opaque local id. `personal` represents the pre-feature Claude login. */
   id: ClaudeCliProfileId;
   label: string;
   managed: boolean;
@@ -122,11 +101,16 @@ export interface ClaudeCliAuthCheckResult {
 export interface ClaudeCliAuthCheckInput {
   profileId: ClaudeCliProfileId;
   managed: boolean;
-  /** Main-process-only. Never expose this object through IPC/RPC. */
+  /** The account store root: where the live-login marker and the vaults are. */
+  rootDir: string;
+  /**
+   * Main-process-only. The Claude home every terminal runs in, whichever
+   * profile it is launched for. Never expose this object through IPC/RPC.
+   */
   configDir: string;
   /**
-   * Exact legacy selector for the child. Null means CLAUDE_CONFIG_DIR was
-   * originally unset and must remain unset; managed profiles always set it.
+   * Exact selector for the child. Null means CLAUDE_CONFIG_DIR was
+   * originally unset and must remain unset.
    */
   configDirEnv: string | null;
 }
@@ -137,10 +121,6 @@ export type ClaudeCliAuthChecker = (
 
 export interface ClaudeCliProfileLeaseView {
   isLeased(profileId: ClaudeCliProfileId): boolean;
-  runWhileUnleased?<T>(
-    profileId: ClaudeCliProfileId,
-    operation: () => Promise<T>,
-  ): Promise<T>;
 }
 
 export interface ClaudeCliAccountProfileStoreOptions {
@@ -153,7 +133,7 @@ export interface ClaudeCliAccountProfileStoreOptions {
   personalConfigDirEnv?: string | null;
   idFactory?: () => string;
   now?: () => Date;
-  /** Token-blind checker; production reads the credential slot's shape. */
+  /** Token-blind checker; production reads the profile's live or vaulted login. */
   authChecker?: ClaudeCliAuthChecker;
   /** Test/deployment seam for the supported Claude CLI executable. */
   claudeExecutable?: string;
@@ -177,7 +157,7 @@ export interface ClaudeCliResolvedProfile {
   profileId: ClaudeCliProfileId;
   label: string;
   managed: boolean;
-  /** Main-process-only. */
+  /** Main-process-only. The one Claude home, for every profile. */
   configDir: string;
   /** Main-process-only; null preserves an originally-unset selector. */
   configDirEnv: string | null;
@@ -265,10 +245,10 @@ export function codaraClaudeCliAccountRootDir(): string {
 
 /**
  * The inherited selector, but only when it names a directory of the user's
- * own. Studio may have been started from a shell that already points
- * CLAUDE_CONFIG_DIR at the Active managed account (see
- * codara-managed-cli-roots.ts); treating that as the personal login would make
- * "personal" resolve to a Codara-managed account and follow it around.
+ * own. Studio may have been started from a shell that still points
+ * CLAUDE_CONFIG_DIR at a Codara account directory from the per-directory
+ * model (see codara-managed-cli-roots.ts); treating that as the user's home
+ * would make every terminal run in a retired account directory.
  */
 export function defaultPersonalClaudeConfigDirEnv(): string | null {
   const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
@@ -281,23 +261,11 @@ export function defaultPersonalClaudeConfigDir(): string {
   return defaultPersonalClaudeConfigDirEnv() ?? resolve(join(homedir(), ".claude"));
 }
 
-export function isClaudeCliManagedProfileId(value: unknown): value is string {
-  return typeof value === "string" && UUID_V4_PATTERN.test(value);
-}
-
-export function normalizeClaudeCliProfileId(
-  value: unknown,
-  label = "Native Claude account profile id",
-): ClaudeCliProfileId {
-  if (value === undefined || value === null || value === "") {
-    return CLAUDE_CLI_PERSONAL_PROFILE_ID;
-  }
-  if (value === CLAUDE_CLI_PERSONAL_PROFILE_ID || isClaudeCliManagedProfileId(value)) {
-    return value;
-  }
-  throw new TypeError(`${label} must be "personal" or a lowercase UUIDv4`);
-}
-
+/**
+ * A managed profile's own directory under the account root. It holds the
+ * profile's vaulted login; before the one-home model it was also the
+ * CLAUDE_CONFIG_DIR its terminals ran in.
+ */
 export function claudeCliManagedProfileConfigDir(
   rootDir: string,
   rawProfileId: string,
@@ -588,68 +556,19 @@ async function persistSnapshotAtomically(
   }
 }
 
-/**
- * Where Claude Code 2.1.220 reads its global config from, in its own order: a
- * `.config.json` inside the config directory when one exists, otherwise
- * `$CLAUDE_CONFIG_DIR/.claude.json` — and `~/.claude.json` when the selector is
- * unset, which is why this cannot simply join the personal config directory.
- *
- * The home is derived from the personal config directory (`<home>/.claude`
- * when no selector is set) rather than os.homedir(): every other path in this
- * store flows from the injected home, and reaching for the process home here
- * made the onboarding seed read the developer machine's real ~/.claude.json
- * under test while CI, with no such file, saw the truthful empty seed.
- */
-function personalClaudeConfigFiles(
-  personalConfigDir: string,
-  personalConfigDirEnv: string | null,
-): string[] {
-  return [
-    join(personalConfigDir, ".config.json"),
-    personalConfigDirEnv
-      ? join(personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE)
-      : join(dirname(resolve(personalConfigDir)), CLAUDE_CLI_CONFIG_FILE),
-  ];
-}
-
 /** Reads a JSON object, or null for anything missing, unsafe, or unparseable. */
 async function readJsonRecordIfSafe(
   path: string,
 ): Promise<Record<string, unknown> | null> {
   const stats = await lstatOrNull(path).catch(() => null);
   if (!stats || stats.isSymbolicLink() || !stats.isFile()) return null;
-  if (stats.size > PERSONAL_CONFIG_MAX_BYTES) return null;
+  if (stats.size > CONFIG_MAX_BYTES) return null;
   try {
     const parsed = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
-}
-
-async function readFirstJsonRecord(
-  paths: readonly string[],
-): Promise<Record<string, unknown> | null> {
-  for (const path of paths) {
-    const record = await readJsonRecordIfSafe(path);
-    if (record) return record;
-  }
-  return null;
-}
-
-export function pickClaudeCliFirstRunConfig(
-  personal: Record<string, unknown> | null,
-): Record<string, unknown> {
-  const seeded: Record<string, unknown> = {};
-  // Claiming the wizard is done for an account whose owner never finished it
-  // would be a guess, so this mirrors the personal state instead of asserting.
-  if (!personal || personal.hasCompletedOnboarding !== true) return seeded;
-  seeded.hasCompletedOnboarding = true;
-  const version = personal.lastOnboardingVersion;
-  if (typeof version === "string" && ONBOARDING_VERSION_PATTERN.test(version)) {
-    seeded.lastOnboardingVersion = version;
-  }
-  return seeded;
 }
 
 async function writePrivateJsonFile(
@@ -665,11 +584,7 @@ async function writePrivateJsonFile(
   }
 }
 
-/**
- * Atomic replacement of a private JSON file. Unlike writePrivateJsonFile it
- * tolerates an existing destination, which is the normal case for a managed
- * .claude.json that already carries the seeded onboarding flags.
- */
+/** Atomic replacement of a private JSON file that may already exist. */
 async function replacePrivateJsonFile(
   path: string,
   value: Record<string, unknown>,
@@ -695,11 +610,9 @@ export interface ManagedClaudeIdentity {
 }
 
 /**
- * Records which Anthropic account a managed directory holds, the way Claude
- * Code records it after its own login (`oauthAccount` in .claude.json). Claude
- * Code reads that block for /status and for its own pairing; a directory that
- * received its credential from Codara rather than from `claude login` would
- * otherwise have none. Every other key in the file is kept as is.
+ * Records which Anthropic account a Claude config directory holds, the way
+ * Claude Code records it after its own login (`oauthAccount` in
+ * .claude.json). Every other key in the file is kept as is.
  */
 export async function writeManagedClaudeIdentity(
   configDir: string,
@@ -720,54 +633,6 @@ export async function writeManagedClaudeIdentity(
       : {}),
   };
   await replacePrivateJsonFile(configPath, { ...existing, oauthAccount });
-}
-
-export interface SeedClaudeCliFirstRunInput {
-  /** A just-created, still-empty managed account directory. */
-  configDir: string;
-  personalConfigDir: string;
-  personalConfigDirEnv: string | null;
-}
-
-export interface SeedClaudeCliFirstRunResult {
-  configKeys: string[];
-}
-
-/**
- * Copies the allowlisted first-run onboarding flags into a new managed
- * account's .claude.json. The theme (and every other setting) is deliberately
- * NOT seeded: settings.json is shared with the personal config directory via
- * a symlink (native-cli-shared-state.ts), so seeding a copy here would fork
- * the two files at the moment of creation.
- *
- * Best-effort by design: a missing, unreadable, or unusual personal config
- * leaves the new account exactly as it was created, because a working account
- * with one extra wizard is better than a failed account creation. Skipping the
- * wizard also skips its sign-in step, which is what the Accounts panel's
- * "not signed in yet" hint exists to say up front.
- */
-export async function seedManagedClaudeCliFirstRunPreferences(
-  input: SeedClaudeCliFirstRunInput,
-): Promise<SeedClaudeCliFirstRunResult> {
-  const empty: SeedClaudeCliFirstRunResult = { configKeys: [] };
-  let personalConfig: Record<string, unknown> | null;
-  try {
-    personalConfig = await readFirstJsonRecord(
-      personalClaudeConfigFiles(input.personalConfigDir, input.personalConfigDirEnv),
-    );
-  } catch {
-    return empty;
-  }
-
-  const config = pickClaudeCliFirstRunConfig(personalConfig);
-  if (Object.keys(config).length === 0) return empty;
-  const configPath = join(input.configDir, CLAUDE_CLI_CONFIG_FILE);
-  try {
-    await writePrivateJsonFile(configPath, config);
-  } catch {
-    return empty;
-  }
-  return { configKeys: Object.keys(config) };
 }
 
 async function withMutationLock<T>(
@@ -811,6 +676,7 @@ function parseLoggedInOnly(output: unknown): boolean | null {
   }
 }
 
+/** `claude auth status --json` against the live home, reduced to one boolean. */
 export async function defaultClaudeCliAuthChecker(
   input: Readonly<ClaudeCliAuthCheckInput>,
   options: { claudeExecutable?: string; baseEnv?: NodeJS.ProcessEnv } = {},
@@ -820,19 +686,15 @@ export async function defaultClaudeCliAuthChecker(
     exists = await assertSafeDirectory(input.configDir, {
       create: false,
       repairMode: false,
-      // Existing ~/.claude is commonly 0755. It is owned outside this
-      // feature, so accept a real non-symlink directory without chmod. Every
-      // managed ~/.codarastudio/claude-cli/accounts/* directory remains 0700-only.
-      requirePrivate: input.managed,
+      // ~/.claude is commonly 0755 and owned outside Codara; accept a real
+      // non-symlink directory without chmod.
+      requirePrivate: false,
     });
   } catch (error) {
     if (error instanceof ClaudeCliAccountProfileSafetyError) {
       return { connected: false, reason: "unsafe" };
     }
     throw error;
-  }
-  if (!exists && input.managed) {
-    return { connected: false, reason: "missing" };
   }
 
   const executable = options.claudeExecutable?.trim() || "claude";
@@ -849,8 +711,8 @@ export async function defaultClaudeCliAuthChecker(
       executable,
       ["auth", "status", "--json"],
       {
-        // For personal with no state directory yet, preserve the caller's cwd
-        // and let Claude report its legacy keychain/global auth status.
+        // With no state directory yet, preserve the caller's cwd and let
+        // Claude report its keychain/global auth status.
         ...(exists ? { cwd: input.configDir } : {}),
         env,
         windowsHide: true,
@@ -872,56 +734,48 @@ export async function defaultClaudeCliAuthChecker(
     : { connected: false, reason: "missing" };
 }
 
-/** Personal-profile fallback verdicts, so a signed-out ~/.claude costs one spawn a minute, not one per card. */
-const personalFallbackCache = new Map<
+/** Live-profile fallback verdicts, so a signed-out home costs one spawn a minute, not one per card. */
+const liveFallbackCache = new Map<
   string,
   { checkedAt: number; result: ClaudeCliAuthCheckResult }
 >();
-const PERSONAL_FALLBACK_TTL_MS = 60_000;
+const LIVE_FALLBACK_TTL_MS = 60_000;
 
-export interface ClaudeCredentialAuthCheckerOptions extends ClaudeCliCredentialOptions {
+export interface ClaudeCredentialAuthCheckerOptions {
   now?: () => number;
+  /** Test seam: read the live slot's file only, never a Keychain. */
+  fileOnly?: boolean;
   /**
-   * Consulted for the personal profile only, when its credential slot holds
-   * nothing: the user may still be signed in through a mechanism that stores
+   * Consulted for the live profile only, when the live slot holds no OAuth
+   * login: the user may still be signed in through a mechanism that stores
    * no OAuth credential (an API key helper, an environment token). Null
    * disables the fallback; production runs `claude auth status --json`.
    */
-  personalFallback?: ClaudeCliAuthChecker | null;
+  liveFallback?: ClaudeCliAuthChecker | null;
 }
 
 /**
- * Token-blind connection status from the credential slot itself: connected
- * when a refresh token is present, with the raw expiry alongside so the card
- * can say "refreshing" rather than "signed out" for a lapsed access token. No
- * Claude subprocess is spawned for a managed profile, ever.
+ * Token-blind connection status from the profile's login itself: the live
+ * slot while the profile is live, its vault otherwise. Connected when a
+ * token is present, with the raw expiry alongside so the card can say
+ * "refreshing" rather than "signed out" for a lapsed access token. A vaulted
+ * profile never spawns a Claude subprocess.
  */
 export async function claudeCredentialAuthChecker(
   input: Readonly<ClaudeCliAuthCheckInput>,
   options: ClaudeCredentialAuthCheckerOptions = {},
 ): Promise<ClaudeCliAuthCheckResult> {
-  let exists = false;
-  try {
-    exists = await assertSafeDirectory(input.configDir, {
-      create: false,
-      repairMode: false,
-      requirePrivate: input.managed,
-    });
-  } catch (error) {
-    if (error instanceof ClaudeCliAccountProfileSafetyError) {
-      return { connected: false, reason: "unsafe" };
-    }
-    throw error;
-  }
-  if (!exists && input.managed) return { connected: false, reason: "missing" };
-  let record: Awaited<ReturnType<typeof readClaudeCredentialRecord>>;
-  try {
-    record = await readClaudeCredentialRecord(input.configDir, input.configDirEnv, {
-      ...(options.backend ? { backend: options.backend } : {}),
-    });
-  } catch {
-    return { connected: false, reason: "unavailable" };
-  }
+  const read = await readClaudeProfileLogin(
+    {
+      rootDir: input.rootDir,
+      personalConfigDir: input.configDir,
+      personalConfigDirEnv: input.configDirEnv,
+    },
+    input.profileId,
+    options.fileOnly ? { fileOnly: true } : {},
+  );
+  if (read.kind === "unreadable") return { connected: false, reason: "unavailable" };
+  const record = read.record;
   if (record && (record.refreshToken || record.accessToken)) {
     const expiresAt = record.expiresAt > 0 ? record.expiresAt : null;
     return {
@@ -930,22 +784,30 @@ export async function claudeCredentialAuthChecker(
       canRefresh: record.refreshToken.length > 0,
     };
   }
-  if (input.managed) return { connected: false, reason: "missing" };
+  if (!read.live) return { connected: false, reason: "missing" };
   const fallback =
-    options.personalFallback === undefined
+    options.liveFallback === undefined
       ? (probe: Readonly<ClaudeCliAuthCheckInput>) => defaultClaudeCliAuthChecker(probe)
-      : options.personalFallback;
+      : options.liveFallback;
   if (!fallback) return { connected: false, reason: "missing" };
   const now = options.now?.() ?? Date.now();
-  const cached = personalFallbackCache.get(input.configDir);
-  if (cached && now - cached.checkedAt < PERSONAL_FALLBACK_TTL_MS) return cached.result;
+  const cached = liveFallbackCache.get(input.configDir);
+  if (cached && now - cached.checkedAt < LIVE_FALLBACK_TTL_MS) return cached.result;
   const result = await Promise.resolve(fallback(input)).catch(
     (): ClaudeCliAuthCheckResult => ({ connected: false, reason: "unavailable" }),
   );
-  personalFallbackCache.set(input.configDir, { checkedAt: now, result });
+  liveFallbackCache.set(input.configDir, { checkedAt: now, result });
   return result;
 }
 
+/**
+ * The Claude account registry. Every profile, Account 1 included, is a
+ * login rather than a directory: terminals always run in the user's own
+ * Claude home, the live profile's login sits in that home's credential
+ * store, and every other profile's login waits in its vault (see
+ * claude-cli-live-login.ts). A managed profile keeps a directory under the
+ * account root to hold that vault.
+ */
 export class ClaudeCliAccountProfileStore {
   readonly rootDir: string;
   readonly accountsDir: string;
@@ -998,50 +860,26 @@ export class ClaudeCliAccountProfileStore {
       options.authChecker ??
       ((input) =>
         claudeCredentialAuthChecker(input, {
-          personalFallback: (probe) =>
+          liveFallback: (probe) =>
             defaultClaudeCliAuthChecker(probe, {
               claudeExecutable: options.claudeExecutable,
             }),
         }));
   }
 
+  private checkInput(profileId: ClaudeCliProfileId, managed: boolean): ClaudeCliAuthCheckInput {
+    return {
+      profileId,
+      managed,
+      rootDir: this.rootDir,
+      configDir: this.personalConfigDir,
+      configDirEnv: this.personalConfigDirEnv,
+    };
+  }
+
   private async ensureStoreDirectories(): Promise<void> {
     await assertSafeDirectory(this.rootDir, { create: true, repairMode: true });
     await assertSafeDirectory(this.accountsDir, { create: true, repairMode: true });
-  }
-
-  /**
-   * Managed accounts share the user-state surfaces (chats, settings, history)
-   * with the personal Claude home so switching accounts behaves like
-   * logout+login in one home; only credentials and identity stay per-account.
-   *
-   * Best-effort by design: resolution must never start failing because a
-   * symlink could not be made. A leased profile is skipped entirely — every
-   * launch resolves BEFORE acquiring its lease, so the first spawn of a
-   * profile always healed its directory, and migrating a real directory out
-   * from under a live CLI would lose its writes. The per-profile mutation key
-   * serializes concurrent resolutions of the same profile without blocking
-   * other profiles or the metadata lock.
-   */
-  private async ensureManagedSharedState(
-    profileId: string,
-    configDir: string,
-  ): Promise<void> {
-    if (process.platform === "win32") return;
-    if (this.leases?.isLeased(profileId)) return;
-    try {
-      await withMutationLock(`${this.filePath}::share::${profileId}`, async () => {
-        if (this.leases?.isLeased(profileId)) return;
-        await ensureSharedCliState({
-          managedDir: configDir,
-          personalDir: this.personalConfigDir,
-          runtime: "claude",
-        });
-      });
-    } catch {
-      // ensureSharedCliState reports per-name outcomes and never throws; this
-      // guard keeps even an unexpected failure out of the launch path.
-    }
   }
 
   private async reconcileLocked(
@@ -1112,33 +950,19 @@ export class ClaudeCliAccountProfileStore {
         id: ClaudeCliProfileId;
         label: string;
         managed: boolean;
-        configDir: string;
       }> = [
-        {
-          id: CLAUDE_CLI_PERSONAL_PROFILE_ID,
-          label: "Account 1",
-          managed: false,
-          configDir: this.personalConfigDir,
-        },
+        { id: CLAUDE_CLI_PERSONAL_PROFILE_ID, label: "Account 1", managed: false },
         ...snapshot.profiles.map((profile) => ({
           id: profile.id,
           label: profile.label,
           managed: true,
-          configDir: claudeCliManagedProfileConfigDir(this.rootDir, profile.id),
         })),
       ];
 
       for (const candidate of candidates) {
         let status: ClaudeCliAuthCheckResult;
         try {
-          status = await this.authChecker({
-            profileId: candidate.id,
-            managed: candidate.managed,
-            configDir: candidate.configDir,
-            configDirEnv: candidate.managed
-              ? candidate.configDir
-              : this.personalConfigDirEnv,
-          });
+          status = await this.authChecker(this.checkInput(candidate.id, candidate.managed));
         } catch {
           status = { connected: false, reason: "unavailable" };
         }
@@ -1186,7 +1010,7 @@ export class ClaudeCliAccountProfileStore {
       snapshot = await readSnapshotFromDisk(this.filePath);
       const existingIds = new Set(snapshot.profiles.map((profile) => profile.id));
       let id: string | null = null;
-      let configDir: string | null = null;
+      let profileDir: string | null = null;
       for (let attempt = 0; attempt < MAX_ID_GENERATION_ATTEMPTS; attempt += 1) {
         const candidate = this.idFactory();
         if (!isClaudeCliManagedProfileId(candidate)) {
@@ -1201,22 +1025,14 @@ export class ClaudeCliAccountProfileStore {
         );
         if (!(await lstatOrNull(candidateDir))) {
           id = candidate;
-          configDir = candidateDir;
+          profileDir = candidateDir;
           break;
         }
       }
-      if (!id || !configDir) throw new ClaudeCliAccountProfileIdCollisionError();
+      if (!id || !profileDir) throw new ClaudeCliAccountProfileIdCollisionError();
 
-      await fs.mkdir(configDir, { mode: 0o700 });
-      if (process.platform !== "win32") await fs.chmod(configDir, 0o700);
-      await seedManagedClaudeCliFirstRunPreferences({
-        configDir,
-        personalConfigDir: this.personalConfigDir,
-        personalConfigDirEnv: this.personalConfigDirEnv,
-      });
-      // A fresh directory takes the pure "managed entry missing" branch of
-      // the heal: every shared name becomes a link before first use.
-      await this.ensureManagedSharedState(id, configDir);
+      await fs.mkdir(profileDir, { mode: 0o700 });
+      if (process.platform !== "win32") await fs.chmod(profileDir, 0o700);
       const timestamp = this.now().toISOString();
       const profile: ClaudeCliManagedProfile = {
         id,
@@ -1228,7 +1044,7 @@ export class ClaudeCliAccountProfileStore {
       try {
         await persistSnapshotAtomically(this.rootDir, this.filePath, snapshot);
       } catch (error) {
-        await fs.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+        await fs.rm(profileDir, { recursive: true, force: true }).catch(() => undefined);
         throw error;
       }
       return { profile: { ...profile }, snapshot: cloneSnapshot(snapshot) };
@@ -1278,14 +1094,8 @@ export class ClaudeCliAccountProfileStore {
         throw new ClaudeCliAccountProfileNotFoundError(profileId);
       }
       if (profileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID) {
-        const configDir = claudeCliManagedProfileConfigDir(this.rootDir, profileId);
         const status = await Promise.resolve(
-          this.authChecker({
-            profileId,
-            managed: true,
-            configDir,
-            configDirEnv: configDir,
-          }),
+          this.authChecker(this.checkInput(profileId, true)),
         ).catch(() => ({ connected: false, reason: "unavailable" as const }));
         if (!status.connected) {
           throw new Error(
@@ -1300,6 +1110,11 @@ export class ClaudeCliAccountProfileStore {
     });
   }
 
+  /**
+   * The profile a launch is for. Every profile runs in the same Claude home
+   * with the same environment; the id only says which account the launch
+   * was made for.
+   */
   async resolveProfile(
     input: ResolveClaudeCliProfileInput = {},
   ): Promise<ClaudeCliResolvedProfile> {
@@ -1315,20 +1130,14 @@ export class ClaudeCliAccountProfileStore {
         : normalizeClaudeCliProfileId(input.profileId);
     let label = "Account 1";
     let managed = false;
-    let configDir = this.personalConfigDir;
-    let configDirEnv = this.personalConfigDirEnv;
     if (profileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new ClaudeCliAccountProfileNotFoundError(profileId);
       label = profile.label;
       managed = true;
-      configDir = claudeCliManagedProfileConfigDir(this.rootDir, profileId);
-      configDirEnv = configDir;
-      await assertSafeDirectory(configDir, { create: false, repairMode: false });
-      await this.ensureManagedSharedState(profileId, configDir);
     }
     const status = await Promise.resolve(
-      this.authChecker({ profileId, managed, configDir, configDirEnv }),
+      this.authChecker(this.checkInput(profileId, managed)),
     ).catch(() => ({ connected: false, reason: "unavailable" as const }));
     if (input.requireConnected && !status.connected) {
       throw new Error("Selected native Claude account is not connected");
@@ -1337,12 +1146,18 @@ export class ClaudeCliAccountProfileStore {
       profileId,
       label,
       managed,
-      configDir,
-      configDirEnv,
+      configDir: this.personalConfigDir,
+      configDirEnv: this.personalConfigDirEnv,
       connected: status.connected === true,
     };
   }
 
+  /**
+   * Remove a managed profile and its directory (its vault with it). No
+   * terminal runs inside a profile's directory, so a terminal launched while
+   * the profile was live never blocks the delete; the account service hands
+   * the live slot to another profile first.
+   */
   async deleteProfile(
     rawProfileId: string,
   ): Promise<DeleteClaudeCliProfileResult> {
@@ -1352,82 +1167,57 @@ export class ClaudeCliAccountProfileStore {
       }
       throw new TypeError("Managed native Claude profile id must be a lowercase UUIDv4");
     }
-    const mutate = () =>
-      withMutationLock(this.filePath, async () => {
-        let snapshot = await readSnapshotFromDisk(this.filePath);
-        await this.reconcileLocked(snapshot);
-        snapshot = await readSnapshotFromDisk(this.filePath);
-        const target = snapshot.profiles.find(
-          (profile) => profile.id === rawProfileId,
+    return withMutationLock(this.filePath, async () => {
+      let snapshot = await readSnapshotFromDisk(this.filePath);
+      await this.reconcileLocked(snapshot);
+      snapshot = await readSnapshotFromDisk(this.filePath);
+      const target = snapshot.profiles.find(
+        (profile) => profile.id === rawProfileId,
+      );
+      if (!target) return { deleted: false, snapshot: cloneSnapshot(snapshot) };
+      if (snapshot.defaultProfileId === rawProfileId) {
+        throw new ClaudeCliDefaultProfileDeletionError(rawProfileId);
+      }
+      const profileDir = claudeCliManagedProfileConfigDir(this.rootDir, rawProfileId);
+      const staged = join(
+        this.accountsDir,
+        `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
+      );
+      const profileStats = await lstatOrNull(profileDir);
+      if (
+        profileStats &&
+        (profileStats.isSymbolicLink() || !profileStats.isDirectory())
+      ) {
+        throw new ClaudeCliAccountProfileSafetyError(
+          "the account directory selected for deletion is unsafe",
         );
-        if (!target) return { deleted: false, snapshot: cloneSnapshot(snapshot) };
-        if (snapshot.defaultProfileId === rawProfileId) {
-          throw new ClaudeCliDefaultProfileDeletionError(rawProfileId);
-        }
-        if (this.leases?.isLeased(rawProfileId)) {
-          throw new ClaudeCliAccountProfileLeasedError(rawProfileId);
-        }
-
-        // Serialize against the shared-state heal for this profile: a heal
-        // mid-migration keeps transcripts in a temporary stage inside the
-        // config directory, and deleting the directory in that window would
-        // destroy state the heal was moving into the personal home.
-        return withMutationLock(
-          `${this.filePath}::share::${rawProfileId}`,
-          async () => {
-            const configDir = claudeCliManagedProfileConfigDir(
-              this.rootDir,
-              rawProfileId,
-            );
-            const staged = join(
-              this.accountsDir,
-              `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
-            );
-            const configStats = await lstatOrNull(configDir);
-            if (
-              configStats &&
-              (configStats.isSymbolicLink() || !configStats.isDirectory())
-            ) {
-              throw new ClaudeCliAccountProfileSafetyError(
-                "the account config directory selected for deletion is unsafe",
-              );
-            }
-            if (
-              configStats &&
-              process.platform !== "win32" &&
-              (configStats.mode & 0o077) !== 0
-            ) {
-              throw new ClaudeCliAccountProfileSafetyError(
-                "the account config directory selected for deletion is not private",
-              );
-            }
-            if (configStats) await fs.rename(configDir, staged);
-            const next: ClaudeCliAccountProfilesSnapshot = {
-              ...snapshot,
-              profiles: snapshot.profiles.filter(
-                (profile) => profile.id !== rawProfileId,
-              ),
-            };
-            try {
-              await persistSnapshotAtomically(this.rootDir, this.filePath, next);
-            } catch (error) {
-              if (configStats) {
-                await fs.rename(staged, configDir).catch(() => undefined);
-              }
-              throw error;
-            }
-            if (configStats) await fs.rm(staged, { recursive: true, force: true });
-            return { deleted: true, snapshot: cloneSnapshot(next) };
-          },
+      }
+      if (
+        profileStats &&
+        process.platform !== "win32" &&
+        (profileStats.mode & 0o077) !== 0
+      ) {
+        throw new ClaudeCliAccountProfileSafetyError(
+          "the account directory selected for deletion is not private",
         );
-      });
-
-    if (this.leases?.runWhileUnleased) {
-      return this.leases.runWhileUnleased(rawProfileId, mutate);
-    }
-    if (this.leases?.isLeased(rawProfileId)) {
-      throw new ClaudeCliAccountProfileLeasedError(rawProfileId);
-    }
-    return mutate();
+      }
+      if (profileStats) await fs.rename(profileDir, staged);
+      const next: ClaudeCliAccountProfilesSnapshot = {
+        ...snapshot,
+        profiles: snapshot.profiles.filter(
+          (profile) => profile.id !== rawProfileId,
+        ),
+      };
+      try {
+        await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+      } catch (error) {
+        if (profileStats) {
+          await fs.rename(staged, profileDir).catch(() => undefined);
+        }
+        throw error;
+      }
+      if (profileStats) await fs.rm(staged, { recursive: true, force: true });
+      return { deleted: true, snapshot: cloneSnapshot(next) };
+    });
   }
 }

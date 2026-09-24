@@ -22,7 +22,7 @@ import { pathToFileURL } from "node:url";
 import { PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 import type { PiSubscriptionProvider, PiCatalogModel } from "@shared/types";
 
-import { codaraPiPaths, resolveCodaraPiRuntime } from "./pi-runtime-electron";
+import { codaraPiPaths, resolveCodaraPiLibrary } from "./pi-runtime-electron";
 
 /** Pi throttles its own network refresh to 4h; this only bounds how often we
  * pay the (cheap, local) composition cost and pick up a background refresh. */
@@ -117,7 +117,7 @@ function dropDatedAliases(models: PiCatalogModel[]): PiCatalogModel[] {
 }
 
 async function loadModelRuntime(): Promise<ModelRuntimeLike> {
-  const runtime = await resolveCodaraPiRuntime();
+  const runtime = await resolveCodaraPiLibrary();
   const paths = codaraPiPaths();
   // pathToFileURL, not string concatenation: a Windows drive letter, a space,
   // or a '#' in the install path all produce a wrong or invalid URL otherwise.

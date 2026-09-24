@@ -251,6 +251,27 @@ async function main() {
           "id,isDefault,label,provider,remainingPercent,status,windows",
       serializedAccounts.slice(0, 240),
     );
+    // The Claude login renewal hands a login only to a caller that already
+    // holds the account's refresh token; nothing else reaches the network.
+    const renewWithoutAccount = await rpc(handshake, "accounts.anthropic.renew", { refreshToken: "x" });
+    check(
+      "accounts.anthropic.renew requires an account",
+      renewWithoutAccount.error?.code === -32602,
+      JSON.stringify(renewWithoutAccount).slice(0, 160),
+    );
+    const renewWithWrongToken = await rpc(handshake, "accounts.anthropic.renew", {
+      accountProfileId: account?.id,
+      refreshToken: "not-the-account-token",
+    });
+    const serializedRenewal = JSON.stringify(renewWithWrongToken);
+    check(
+      "accounts.anthropic.renew refuses a caller without the account's refresh token",
+      Boolean(renewWithWrongToken.error) &&
+        /does not match/.test(renewWithWrongToken.error?.message ?? "") &&
+        !serializedRenewal.includes(ACCOUNT_ACCESS_SECRET) &&
+        !serializedRenewal.includes(ACCOUNT_REFRESH_SECRET),
+      serializedRenewal.slice(0, 200),
+    );
     check(
       "accounts.list never leaks credentials, identities, paths, or auth details",
       !serializedAccounts.includes(ACCOUNT_ACCESS_SECRET) &&

@@ -72,7 +72,8 @@ const CLAUDE_SETTINGS_PATH = join(claudeConfigDir(), "settings.json");
 // shape, command shape, or matcher convention changes.
 // "3": the script was renamed spark-hook.py -> codara-hook.py and the tags
 // moved from _sparkManaged/_sparkVersion to _codaraManaged/_codaraVersion.
-const CODARA_HOOK_VERSION = "3";
+// "4": the launcher exits before any work outside a Codara pane.
+const CODARA_HOOK_VERSION = "4";
 
 // The Claude hook events we want to ingest. Order is the order we'll write
 // them into the JSON, which has no semantic meaning to Claude but keeps the
@@ -395,8 +396,15 @@ function shellQuote(value: string): string {
 //     path, which is true of the command shape this replaced as well.)
 //   - `python -c CODE a b` sets argv to ['-c', a, b]; dropping element 0 hands
 //     the script the argv it expects (script path, then hook name).
+//
+// The settings file is shared with every Claude Code session on the machine,
+// including ones in other terminal apps. Their events carry no pane id and
+// the watcher drops them, so the launcher leaves before importing anything
+// else or writing an event file: outside a Codara pane a tool call costs one
+// interpreter start and nothing more.
 const HOOK_LAUNCHER_CODE =
   "import sys; sys.path[:]=[d for d in sys.path if d]; import os; " +
+  "os.environ.get('SPARK_PANE_ID') or sys.exit(0); " +
   "b=set(os.path.realpath(e) for e in (os.environ.get('PYTHONPATH') or '').split(os.pathsep) if e); " +
   "b.add(os.path.realpath(os.getcwd())); " +
   "sys.path[:]=[d for d in sys.path if os.path.realpath(d) not in b]; " +

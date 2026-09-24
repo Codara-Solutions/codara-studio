@@ -79,6 +79,12 @@ async function loadElectronLaunchPlans(outDirectory) {
     } };`,
     storage: "module.exports = { loadSettings: async () => ({}) };",
     "agent-sync": "module.exports = { listPiMcpServers: () => [] };",
+    "path-reconstruction": "module.exports = { getEnrichedEnv: async () => process.env };",
+    // The user's installed Pi: a fake global package outside the app tree.
+    "binary-resolver": `module.exports = {
+      resolveBinary: async () => process.env.CODARA_TEST_PI_BINARY || null,
+      forgetResolvedBinary: () => undefined,
+    };`,
     "agent-socket-capabilities": `module.exports = {
       mintAgentSocketCapability: (input) => ({
         id: "capability-" + input.audience,
@@ -106,7 +112,7 @@ async function loadElectronLaunchPlans(outDirectory) {
         build.onResolve({ filter: /^@shared\// }, (args) => ({
           path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
         }));
-        build.onResolve({ filter: /^(electron|\.\.\/storage|\.\.\/agent-sync|\.\.\/agent-socket-capabilities)$/ }, (args) => ({
+        build.onResolve({ filter: /^(electron|\.\.\/storage|\.\.\/agent-sync|\.\.\/agent-socket-capabilities|\.\.\/binary-resolver|\.\.\/path-reconstruction)$/ }, (args) => ({
           path: args.path.replace("../", ""),
           namespace: "stub",
         }));
@@ -122,7 +128,25 @@ function extensionArgs(plan) {
   return plan.args.filter((_value, index) => plan.args[index - 1] === "--extension");
 }
 
+/** A global `npm install -g` of Pi outside the app tree, for the launch plans. */
+function installFakeGlobalPi() {
+  const prefix = fs.mkdtempSync(path.join(os.tmpdir(), "codara-global-pi-"));
+  const packageRoot = path.join(prefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+  fs.mkdirSync(path.join(packageRoot, "dist", "bundle"), { recursive: true });
+  fs.writeFileSync(
+    path.join(packageRoot, "package.json"),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.87.1", bin: { pi: "dist/bundle/cli.js" } }),
+  );
+  fs.writeFileSync(path.join(packageRoot, "dist", "bundle", "cli.js"), "#!/usr/bin/env node\n");
+  fs.mkdirSync(path.join(prefix, "bin"));
+  fs.symlinkSync(path.join(packageRoot, "dist", "bundle", "cli.js"), path.join(prefix, "bin", "pi"));
+  process.env.CODARA_TEST_PI_BINARY = path.join(prefix, "bin", "pi");
+  process.on("exit", () => fs.rmSync(prefix, { recursive: true, force: true }));
+  return fs.realpathSync(path.join(packageRoot, "dist", "bundle", "cli.js"));
+}
+
 async function main() {
+  const globalPiEntrypoint = installFakeGlobalPi();
   assert.equal(runtime.CODARA_PI_VERSION, "0.85.1");
   assert.equal(
     runtime.CLAUDE_SUBSCRIPTION_SYSTEM_PROMPT,
@@ -161,6 +185,51 @@ async function main() {
       runtime.resolvePinnedPiRuntime([path.join(directory, "node_modules")]),
       /Version mismatches/,
     );
+  });
+
+  // Cora runs the Pi the user installed: any version from the minimum up,
+  // found through the package its `pi` links into or npm's global layout.
+  assert.equal(runtime.CODARA_PI_MIN_VERSION, "0.85.1");
+  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent");
+  assert.equal(runtime.comparePiVersions("0.87.1", "0.85.1"), 1);
+  assert.equal(runtime.comparePiVersions("0.85.1", "0.85.1"), 0);
+  assert.equal(runtime.comparePiVersions("0.85.0", "0.85.1"), -1);
+  assert.equal(runtime.comparePiVersions("1.0.0-beta.2", "0.99.9"), 1);
+  assert.equal(runtime.comparePiVersions("v0.90.0", "0.85.1"), 1);
+  await withTempDirectory(async (directory) => {
+    const prefix = path.join(directory, "prefix");
+    const packageRoot = path.join(prefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+    const writeManifest = (version) =>
+      fs.writeFileSync(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({ name: "@earendil-works/pi-coding-agent", version, bin: { pi: "dist/bundle/cli.js" } }),
+      );
+    fs.mkdirSync(path.join(packageRoot, "dist", "bundle"), { recursive: true });
+    fs.writeFileSync(path.join(packageRoot, "dist", "bundle", "cli.js"), "#!/usr/bin/env node\n");
+    writeManifest("0.87.1");
+    fs.mkdirSync(path.join(prefix, "bin"), { recursive: true });
+    const linked = path.join(prefix, "bin", "pi");
+    fs.symlinkSync(path.join(packageRoot, "dist", "bundle", "cli.js"), linked);
+
+    const roots = await runtime.piPackageRootsForBinary(linked);
+    assert.equal(roots[0], fs.realpathSync(packageRoot), "the link resolves into its package first");
+    const located = await runtime.resolveInstalledPiRuntime(roots);
+    assert.equal(located.version, "0.87.1", "a newer Pi than the tested one runs Cora");
+    assert.equal(located.entrypoint, path.join(fs.realpathSync(packageRoot), "dist", "bundle", "cli.js"));
+
+    // A shim that is not a link (Windows' pi.cmd, some managers) finds npm's layout.
+    const shimDir = path.join(directory, "shim");
+    const shimPackage = path.join(shimDir, "node_modules", "@earendil-works", "pi-coding-agent");
+    fs.mkdirSync(path.dirname(shimPackage), { recursive: true });
+    fs.symlinkSync(packageRoot, shimPackage);
+    fs.writeFileSync(path.join(shimDir, "pi.cmd"), "@echo off\n");
+    const shimRoots = await runtime.piPackageRootsForBinary(path.join(shimDir, "pi.cmd"));
+    assert.ok(shimRoots.includes(path.resolve(shimPackage)));
+    assert.equal((await runtime.resolveInstalledPiRuntime(shimRoots)).version, "0.87.1");
+
+    writeManifest("0.84.4");
+    await assert.rejects(runtime.resolveInstalledPiRuntime(roots), /Pi 0\.84\.4 is installed, but Cora needs Pi 0\.85\.1 or newer/);
+    await assert.rejects(runtime.resolveInstalledPiRuntime([]), /Pi is not installed.*npm install -g @earendil-works\/pi-coding-agent/);
   });
 
   // pi-ai's OAuth modules are looked up the way Node would resolve them from
@@ -440,6 +509,38 @@ async function main() {
     }).env;
   assert.equal(tierPlanFor("anthropic").CODARA_PI_PROVIDER, "anthropic");
   assert.equal(tierPlanFor("openai-codex").CODARA_PI_PROVIDER, "openai-codex");
+
+  // A Claude process names its account so the extension can ask Studio to
+  // renew the login; no other provider carries the stamp.
+  const renewalAccountFor = (provider, projectPolicyMode, baseEnv = {}) =>
+    runtime.buildPiManagerLaunchPlan({
+      runtime: fakeRuntime,
+      provider,
+      accountProfileId: "acct-1",
+      configDir: "/config",
+      sessionDir: "/sessions",
+      sessionId: "session-123",
+      runId: "run-123",
+      mode: "execute",
+      cwd: "/workspace",
+      bridgePath: "/bridge/server.js",
+      extensionPaths: ["/extensions/cora.ts"],
+      processExecutable: "/electron",
+      ...(projectPolicyMode ? { projectPolicyMode } : {}),
+      baseEnv,
+    }).env.CODARA_PI_ACCOUNT_PROFILE_ID;
+  assert.equal(renewalAccountFor("anthropic"), "acct-1");
+  assert.equal(renewalAccountFor("openai-codex"), undefined);
+  assert.equal(
+    renewalAccountFor("anthropic", "untrusted-pull-request"),
+    "acct-1",
+    "an imported-PR process renews through its scoped capability",
+  );
+  assert.equal(
+    renewalAccountFor("openai-codex", undefined, { CODARA_PI_ACCOUNT_PROFILE_ID: "inherited" }),
+    undefined,
+    "an inherited stamp never leaks into a plan",
+  );
   // Setting off (and unset) means no stamp at all, for either provider.
   for (const provider of ["anthropic", "openai-codex"]) {
     assert.equal(
@@ -623,6 +724,7 @@ async function main() {
       sessionId: "session-web-search",
       cwd: directory,
     });
+    assert.equal(managerPlan.args[0], globalPiEntrypoint, "Cora runs the user's installed Pi");
     const managerExtensions = extensionArgs(managerPlan);
     assert.equal(managerExtensions.length, 2);
     assert.equal(path.basename(path.dirname(managerExtensions[0])), "pi-cora");
@@ -741,7 +843,7 @@ async function main() {
     assert.equal(
       untrustedWorkerPlan.env.SPARK_AGENT_CAPABILITY,
       "scoped",
-      "untrusted workers receive a deny-all process claim instead of the root handshake",
+      "untrusted workers receive a renewal-only process claim instead of the root handshake",
     );
     assert.equal(
       untrustedWorkerPlan.agentSocketCapabilityId,

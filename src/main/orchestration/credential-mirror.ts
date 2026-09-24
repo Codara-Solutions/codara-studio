@@ -183,6 +183,31 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    * drops it here, so the logged-out login cannot come back on a switch.
    */
   afterPersonalLogout?(location: Loc): Promise<void>;
+  /**
+   * Whether an empty CLI slot is a sign-out the user asked for. Claude Code
+   * also empties a login itself when its refresh token turns out to be spent
+   * (another holder rotated it); that is a login to repair from the fresher
+   * half, not a logout to propagate. Absent means every empty slot counts.
+   */
+  isDeliberateSignOut?(raw: Raw | null): boolean;
+  /**
+   * Whether the personal slot at this location is Codara's to create from
+   * the Cora half. The user's own live login never is; a vault Codara keeps
+   * for Account 1 while another account is live may be.
+   */
+  mayCreatePersonalSlot?(location: Loc): Promise<boolean>;
+  /**
+   * A CLI slot that held no login was just filled from the Cora half.
+   * Providers that record the account beside opaque tokens (Claude) learn
+   * whose login the slot now holds here; an identity record left from an
+   * earlier login would otherwise name the wrong account, and the foreign
+   * check would then shut the pair out for good.
+   */
+  afterCliSlotFilled?(
+    location: Loc,
+    canonical: CanonicalCredential,
+    expectedFingerprint: string | undefined,
+  ): Promise<void>;
 }
 
 export interface CredentialPair<Loc = unknown, Raw = unknown> {
@@ -336,21 +361,32 @@ export async function reconcilePair<Loc, Raw>(
   }
   if (verdict === "equal" || verdict === "none") return result;
 
+  let repairPersonal = false;
   if (verdict === "pi-only" && personal) {
     // The personal slot belongs to the user. A credential that was there and
     // is gone now is a CLI logout; one that was never there is not Codara's
-    // to create.
-    if (options.previousCliPresent === true && !options.cancelled?.()) {
-      const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-      await AuthStorage.create(pair.authFile).delete(codec.provider);
-      await chmodPrivate(pair.authFile);
-      result.wrote = "pi-delete";
-      await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
+    // to create. A slot the CLI emptied on its own (a spent refresh token)
+    // is neither, and neither is a vault Codara keeps for Account 1: both
+    // are repaired from the Cora half instead.
+    const deliberate = adapter.isDeliberateSignOut?.(cli.raw) ?? true;
+    if (deliberate && options.previousCliPresent === true) {
+      if (!options.cancelled?.()) {
+        const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
+        await AuthStorage.create(pair.authFile).delete(codec.provider);
+        await chmodPrivate(pair.authFile);
+        result.wrote = "pi-delete";
+        await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
+      }
+      return result;
     }
-    return result;
+    repairPersonal =
+      !deliberate ||
+      (await adapter.mayCreatePersonalSlot?.(pair.location).catch(() => false)) === true;
+    if (!repairPersonal) return result;
   }
 
   if (verdict === "pi-newer" || verdict === "pi-only") {
+    let filledEmptySlot = false;
     // A managed half is created by ensureCliHalf alone. Its directory being
     // gone here means the account is mid-delete; writing would resurrect it.
     if (!personal && !(await adapter.cliSideExists(pair.location))) return result;
@@ -367,7 +403,12 @@ export async function reconcilePair<Loc, Raw>(
       const latestVerdict = compareCredentials(piCanonical, latestCanonical);
       result.verdict = latestVerdict;
       result.cliPresent = latestCanonical !== null;
-      if (latestVerdict !== "pi-newer" && (latestVerdict !== "pi-only" || personal)) return;
+      if (
+        latestVerdict !== "pi-newer" &&
+        (latestVerdict !== "pi-only" || (personal && !repairPersonal))
+      ) {
+        return;
+      }
       if (options.cancelled?.()) return;
       const record = codec.cliRecordFromCanonical(piCanonical!, latest.raw);
       if (record === null) {
@@ -378,37 +419,49 @@ export async function reconcilePair<Loc, Raw>(
       }
       await adapter.writeCli(pair.location, record);
       result.wrote = "cli";
+      filledEmptySlot = latestVerdict === "pi-only";
     });
+    if (filledEmptySlot && adapter.afterCliSlotFilled && !options.cancelled?.()) {
+      await adapter
+        .afterCliSlotFilled(pair.location, piCanonical!, pair.identityFingerprint)
+        .catch(() => undefined);
+    }
     return result;
   }
 
   // cli-newer or cli-only. The winner is read again under the slot lock, so
   // a switch that moved the live file since the read above (Codex) cannot
-  // attribute another profile's login to this pair, and the comparison is
-  // repeated under Pi's lock so a Pi refresh that landed in the meantime
-  // wins instead of being undone.
+  // attribute another profile's login to this pair; the login read then is
+  // this pair's whatever happens to the slot afterwards. The slot lock is
+  // released before Pi's is taken: a Pi process renewing this account holds
+  // Pi's lock and waits for the slot lock (the Claude renewal), so holding
+  // both in the other order would stall the two until one timed out. The
+  // comparison is repeated under Pi's lock so a Pi refresh that landed in
+  // the meantime wins instead of being undone.
   if (options.cancelled?.()) return result;
   const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-  await lock(async () => {
+  const winner = await lock(async (): Promise<CanonicalCredential | null> => {
     const latest = await adapter.readCli(pair.location);
-    if (latest.kind !== "credential") return;
-    const winner = codec.canonicalFromCli(latest.raw);
-    if (isForeign(winner)) return;
-    const latestVerdict = compareCredentials(piCanonical, winner);
+    if (latest.kind !== "credential") return null;
+    const read = codec.canonicalFromCli(latest.raw);
+    if (isForeign(read)) return null;
+    const latestVerdict = compareCredentials(piCanonical, read);
     result.verdict = latestVerdict;
-    result.cliPresent = winner !== null;
-    if (!winner || (latestVerdict !== "cli-newer" && latestVerdict !== "cli-only")) return;
-    let written = false;
-    await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
-      if (options.cancelled?.()) return undefined;
-      const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
-      if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
-      written = true;
-      return codec.piRecordFromCanonical(winner, current);
-    });
-    await chmodPrivate(pair.authFile);
-    if (written) result.wrote = "pi";
+    result.cliPresent = read !== null;
+    if (!read || (latestVerdict !== "cli-newer" && latestVerdict !== "cli-only")) return null;
+    return read;
   });
+  if (!winner) return result;
+  let written = false;
+  await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
+    if (options.cancelled?.()) return undefined;
+    const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
+    if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
+    written = true;
+    return codec.piRecordFromCanonical(winner, current);
+  });
+  await chmodPrivate(pair.authFile);
+  if (written) result.wrote = "pi";
   return result;
 }
 

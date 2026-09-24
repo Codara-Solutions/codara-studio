@@ -43,6 +43,11 @@ export function clearResolverCache(): void {
   cache.clear();
 }
 
+/** Forget one binary's cached answer, so the next lookup probes again. */
+export function forgetResolvedBinary(name: string): void {
+  cache.delete(name);
+}
+
 // On Windows, `where <name>` can return several matches for one CLI — npm, for
 // instance, installs BOTH an extensionless Unix `sh` shim and a `<name>.cmd`
 // batch shim side by side (this is exactly how `codex` lands). Not all of these

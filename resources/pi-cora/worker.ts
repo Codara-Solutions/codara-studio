@@ -2,6 +2,11 @@ import { createRequire } from "node:module";
 import { writeFile } from "node:fs/promises";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  codaraAnthropicRenewalAccount,
+  registerCodaraAnthropicRenewal,
+  type CodaraSocketRequest,
+} from "./anthropic-refresh";
 import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
@@ -32,6 +37,7 @@ interface BridgeToolResult {
 interface CodaraBridge {
   listTools(): BridgeTool[];
   callToolByName(name: string, args: unknown): Promise<BridgeToolResult>;
+  requestCodara?: CodaraSocketRequest;
 }
 
 const requireFromExtension = createRequire(import.meta.url);
@@ -266,7 +272,7 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
   return texts.join("\n") || fallback;
 }
 
-// Cora workers run the pinned Pi harness with provider subscription models
+// Cora workers run the Pi harness with provider subscription models
 // underneath it. Keep the worker identity explicit: Anthropic's subscription
 // route is launched with Claude Code's compatibility system prompt, then this
 // extension supplies the actual Cora worker contract without pretending the
@@ -281,6 +287,12 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
     : "";
   const directTask = Boolean(directReportPath);
   let mcp: McpBridgeHandle | null = null;
+
+  // Studio renews the Claude login; this process never spends its refresh token.
+  const renewalAccount = codaraAnthropicRenewalAccount();
+  if (renewalAccount && bridge.requestCodara) {
+    registerCodaraAnthropicRenewal(pi, { accountProfileId: renewalAccount, request: bridge.requestCodara });
+  }
 
   // Long worker sessions compact on Codara's token budget, not on Pi's
   // window-sized default.
@@ -315,7 +327,7 @@ Security contract:
       ? directTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "")
       : `${systemPrompt}
 
-You are a Cora engineering worker running inside Codara Studio's pinned Pi
+You are a Cora engineering worker running inside Codara Studio's Pi
 harness. The user-facing Cora manager has delegated one bounded task to you.
 
 Worker contract:

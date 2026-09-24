@@ -1,27 +1,40 @@
-import { dirname, join, resolve } from "node:path";
+import { promises as fs } from "node:fs";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { ClaudeAccountAdapter } from "./account-adapters/claude-account-adapter";
 import { refreshActiveCliEnvPointer } from "./active-cli-env-pointer";
-import {
-  CLAUDE_CLI_CONFIG_FILE,
-  claudeCliManagedProfileConfigDir,
-  type ClaudeCliAccountProfileStore,
-} from "./claude-cli-account-profiles";
+import type { ClaudeCliAccountProfileStore } from "./claude-cli-account-profiles";
 import type { ClaudeCliCredentialBackend } from "./claude-cli-credentials";
+import {
+  migrateClaudeToOneHome,
+  type MigrateClaudeToOneHomeResult,
+} from "./claude-cli-live-login";
 import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
 import {
-  CLAUDE_CLI_MCP_BASELINE_FILE,
-  managedClaudeConfigFile,
-  syncClaudeCliMcpServers,
-} from "./claude-cli-mcp-sync";
+  claudeLoginKeeperDeps,
+  renewClaudeLoginForCora,
+  startClaudeLoginKeeper,
+  type RefreshedAnthropicTokens,
+} from "./claude-login-keeper";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
-import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
+import {
+  ensureCodexCliAuthVault,
+  retireSupersededCodexPersonalLogin,
+} from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
 import { undoGrokLiveSlotSwap, type UndoGrokLiveSlotSwapResult } from "./grok-live-slot-undo";
-import { setNativeClaudeProfileResolutionHooks } from "./native-claude-profile-runtime";
+import {
+  nativeClaudeProfileStore,
+  setNativeClaudeProfileResolutionHooks,
+} from "./native-claude-profile-runtime";
 import { setNativeCodexProfileResolutionHooks } from "./native-codex-profile-runtime";
 import { setNativeGrokProfileResolutionHooks } from "./native-grok-profile-runtime";
-import { defaultPiAccountAuthStore, type PiAccountAuthStore } from "./pi-account-auth-store";
+import { loadPiAuthStorage, type PiOAuthCredential } from "./pi-auth-storage";
+import {
+  codaraPiAccountRootDir,
+  defaultPiAccountAuthStore,
+  piAccountProfilePaths,
+  type PiAccountAuthStore,
+} from "./pi-account-auth-store";
 import {
   UNIFIED_ACCOUNT_PROVIDERS,
   unifiedAccountsFor,
@@ -40,10 +53,12 @@ import type { UnifiedAccountService } from "./unified-accounts";
  *
  * Order: the legacy fold once (pi-agent/auth.json into per-profile files),
  * then per provider (anthropic, openai-codex, xai): the provider's own
- * pre-pairing repair (Claude: undo the live-slot swap; Codex: ensure the
- * auth vault; Grok: undo the live-slot swap), clear dangling links, pair
- * halves, Account 1, repair defaults, start the mirror. Then the runtime
- * resolution hooks are installed and the gate resolves.
+ * pre-pairing repair (Claude: undo the retired selector's swap, then move
+ * every account directory into the one home; Codex: ensure the auth vault;
+ * Grok: undo the live-slot swap), clear dangling links, pair halves,
+ * Account 1, repair defaults (which also puts the default account's login in
+ * the live slot), start the mirror. Then the runtime resolution hooks are
+ * installed and the gate resolves.
  */
 
 export interface UnifiedAccountMigrationDeps {
@@ -63,7 +78,11 @@ export interface UnifiedAccountMigrationDeps {
 
 export interface ProviderMigrationReport {
   /** The provider's pre-pairing repair result (undo or vault), if it ran. */
-  beforePairing: UndoLiveSlotSwapResult | UndoGrokLiveSlotSwapResult | { active: string } | null;
+  beforePairing:
+    | (UndoLiveSlotSwapResult & { oneHome: MigrateClaudeToOneHomeResult })
+    | UndoGrokLiveSlotSwapResult
+    | { active: string }
+    | null;
   clearedLinks: string[];
   paired: Array<{ coraProfileId: string; cliProfileId: string; by: "fingerprint" | "email" }>;
   accountOne: string | null;
@@ -112,11 +131,32 @@ async function beforePairing(
         }`,
       );
     }
-    return result;
+    // Every account now runs in the one Claude home: each account
+    // directory's login becomes its vault and its MCP grants and projects
+    // join the home, before pairing reads any identity.
+    const snapshot = await store.snapshot();
+    const oneHome = await migrateClaudeToOneHome({
+      store,
+      managedProfileIds: snapshot.profiles.map((profile) => profile.id),
+      defaultProfileId: snapshot.defaultProfileId,
+      log,
+    });
+    return { ...result, oneHome };
   }
   if (adapter.runtime === "codex") {
     const store = (deps.codexStore ?? adapter.store) as CodexCliAccountProfileStore;
-    return { active: await ensureCodexCliAuthVault(store) };
+    const active = await ensureCodexCliAuthVault(store);
+    const piStore = deps.piStore ?? defaultPiAccountAuthStore();
+    await retireSupersededCodexPersonalLogin(
+      store,
+      (await store.snapshot()).profiles.map((profile) => profile.id),
+      {
+        personalHasRow: async () =>
+          Boolean(await piStore.registry.profileForCliProfileId("openai-codex", "personal")),
+        log,
+      },
+    );
+    return { active };
   }
   const store = (deps.grokStore ?? adapter.store) as GrokCliAccountProfileStore;
   const result = await undoGrokLiveSlotSwap({
@@ -212,25 +252,6 @@ export async function migrateUnifiedAccounts(
       },
       entry,
     );
-    if (service.adapter.runtime === "claude") {
-      // MCP servers belong to the user, not to one Anthropic login. They live
-      // in `.claude.json`, which stays per account because it also carries the
-      // account identity, so every managed account used to start with an empty
-      // list while the personal login had the real one. Share just that block,
-      // every launch, so a server added anywhere reaches every account and a
-      // machine that predates this repairs itself without the user editing
-      // JSON by hand.
-      await step(
-        named("share-mcp-servers"),
-        async () => {
-          await shareClaudeMcpServers(
-            (deps.claudeStore ?? service.adapter.store) as ClaudeCliAccountProfileStore,
-            log,
-          );
-        },
-        entry,
-      );
-    }
   }
   // Running plain shells follow the pointer; a fresh one after the pass
   // makes a shell that outlived a previous Studio converge on this default.
@@ -238,49 +259,6 @@ export async function migrateUnifiedAccounts(
     await (deps.refreshShellPointer ?? refreshActiveCliEnvPointer)();
   });
   return report;
-}
-
-async function shareClaudeMcpServers(
-  store: ClaudeCliAccountProfileStore,
-  log: (message: string) => void,
-): Promise<void> {
-  const snapshot = await store.snapshot();
-  const shared = await syncClaudeCliMcpServers({
-    baselinePath: join(store.rootDir, CLAUDE_CLI_MCP_BASELINE_FILE),
-    files: [
-      // Claude Code's own file: updated in place, never created here.
-      {
-        path:
-          store.personalConfigDirEnv === null
-            ? join(dirname(resolve(store.personalConfigDir)), CLAUDE_CLI_CONFIG_FILE)
-            : join(store.personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE),
-        create: false,
-      },
-      ...snapshot.profiles.map((profile) => ({
-        path: managedClaudeConfigFile(claudeCliManagedProfileConfigDir(store.rootDir, profile.id)),
-        create: true,
-      })),
-    ],
-    log,
-  });
-  if (shared.written.length > 0) {
-    log(
-      `[accounts] shared ${shared.names.length} MCP server(s) across ${shared.written.length} Claude account file(s)`,
-    );
-  }
-}
-
-/**
- * Codara edited the personal `.claude.json` MCP block. Claude sessions started
- * from Codara read their account's own copy, so without this the edit would
- * only reach them at the next launch.
- */
-export async function shareClaudeMcpServersNow(): Promise<void> {
-  await unifiedAccountsReady();
-  await shareClaudeMcpServers(
-    unifiedAccountsFor("anthropic").adapter.store as ClaudeCliAccountProfileStore,
-    (message) => console.warn(message),
-  );
 }
 
 let readyPromise: Promise<void> | null = null;
@@ -299,11 +277,10 @@ function installResolutionHooks(deps: UnifiedAccountMigrationDeps): void {
     beforeNewProfile: async () => {
       await anthropic.reconcileDefault();
     },
-    beforeFrozenProfile: async (profileId) => {
-      await anthropic.reconcileCliProfile(profileId);
-    },
-    afterLeaseReleased: async (profileId) => {
-      await anthropic.reconcileCliProfile(profileId);
+    // Every Claude terminal ran on the live login, whichever account it
+    // started on, so that is the pair to reconcile.
+    afterLeaseReleased: async () => {
+      await anthropic.reconcileDefault();
     },
   });
   const codex = serviceFor("openai-codex");
@@ -355,6 +332,123 @@ export function startUnifiedAccountMigration(
 
 export function unifiedAccountsReady(): Promise<void> {
   return readyPromise ?? Promise.resolve();
+}
+
+/**
+ * Studio's one refresher for the live Claude login (claude-login-keeper.ts),
+ * started once the pass has settled which login is live.
+ */
+export function startStudioClaudeLoginKeeper(): void {
+  void unifiedAccountsReady().then(() => {
+    startClaudeLoginKeeper({
+      store: nativeClaudeProfileStore,
+      refresh: async (refreshToken, signal) =>
+        (await import("./pi-subscription-auth")).refreshAnthropicOAuthToken(refreshToken, signal),
+      afterChange: async () => {
+        await unifiedAccountsFor("anthropic").reconcileDefault();
+      },
+      log: (message) => console.warn(message),
+    });
+  });
+}
+
+/** CLIs whose terminal sign-ins are followed (Grok keeps one home per account). */
+const NATIVE_LOGIN_PROVIDERS = ["anthropic", "openai-codex"] as const;
+const NATIVE_LOGIN_FOLLOW_INTERVAL_MS = 60 * 1000;
+let nativeLoginTimer: NodeJS.Timeout | null = null;
+
+/**
+ * One pass of following sign-ins made in terminals: a `/login` or `codex
+ * login` as another account Codara knows makes that account the Active one.
+ */
+export async function followNativeLogins(): Promise<void> {
+  await unifiedAccountsReady();
+  for (const provider of NATIVE_LOGIN_PROVIDERS) {
+    await unifiedAccountsFor(provider)
+      .followNativeLogin()
+      .catch(() => null);
+  }
+}
+
+/** Follow terminal sign-ins once a minute while Studio runs. */
+export function startNativeLoginFollower(): void {
+  if (nativeLoginTimer) return;
+  nativeLoginTimer = setInterval(() => {
+    void followNativeLogins();
+  }, NATIVE_LOGIN_FOLLOW_INTERVAL_MS);
+  nativeLoginTimer.unref?.();
+  void followNativeLogins();
+}
+
+/**
+ * Cora's Anthropic refresh, made by Studio instead of by Pi (the bundled
+ * extension routes Pi's refresh here over the agent socket). A linked
+ * account renews through its Claude slot, so Claude Code, the keeper and
+ * Cora share one refresher; a Cora-only account has no other holder and is
+ * simply refreshed.
+ */
+export async function renewCoraAnthropicLogin(
+  coraProfileId: string,
+  heldRefreshToken: string,
+  options: { provePossession?: boolean } = {},
+): Promise<RefreshedAnthropicTokens> {
+  // No wait for the startup pass here: the caller holds Pi's lock on this
+  // account's store, which the pass may itself be waiting for. Before the
+  // keeper starts, the renewal is a plain refresh of Cora's own token.
+  if (options.provePossession) {
+    // A socket caller shows the refresh token Cora's store holds for the
+    // account (the Pi process asking has just read it under its lock), so
+    // the socket never hands a login to a caller that did not already hold it.
+    const { authFile } = piAccountProfilePaths(codaraPiAccountRootDir(), coraProfileId);
+    const stored = await fs
+      .readFile(authFile, "utf8")
+      .then((raw) => (JSON.parse(raw) as { anthropic?: { refresh?: unknown } }).anthropic?.refresh)
+      .catch(() => undefined);
+    if (!heldRefreshToken || stored !== heldRefreshToken) {
+      throw new Error("the refresh token does not match this account's Cora login");
+    }
+  }
+  const pair = await unifiedAccountsFor("anthropic").pairFor(coraProfileId);
+  const deps = claudeLoginKeeperDeps();
+  let tokens: RefreshedAnthropicTokens;
+  if (pair && deps) {
+    const renewal = await renewClaudeLoginForCora(deps, pair.cliProfileId, heldRefreshToken, {
+      ...(pair.identityFingerprint ? { expectedFingerprint: pair.identityFingerprint } : {}),
+    });
+    if (renewal.outcome === "adopted") return renewal.tokens;
+    tokens = renewal.tokens;
+  } else {
+    const { refreshAnthropicOAuthToken } = await import("./pi-subscription-auth");
+    tokens = await refreshAnthropicOAuthToken(heldRefreshToken, AbortSignal.timeout(20_000));
+  }
+  storeRenewalIfAbandoned(coraProfileId, heldRefreshToken, tokens);
+  return tokens;
+}
+
+/**
+ * Pi stores a renewal under its own lock once Studio answers. Pi bounds the
+ * wait (15 seconds since 0.87), and a Claude Code refresh in flight or a
+ * slow grant can outlast it: Pi then gives up with only the token Studio
+ * just spent in its store, and the account would stay signed out. So once
+ * Pi lets go of its lock, a store that still holds the token Cora asked
+ * with takes the renewal; one Pi wrote (or that changed otherwise) is left
+ * alone.
+ */
+function storeRenewalIfAbandoned(
+  coraProfileId: string,
+  heldRefreshToken: string,
+  tokens: RefreshedAnthropicTokens,
+): void {
+  if (!heldRefreshToken) return;
+  void (async () => {
+    const { authFile } = piAccountProfilePaths(defaultPiAccountAuthStore().rootDir, coraProfileId);
+    const AuthStorage = await loadPiAuthStorage();
+    await AuthStorage.create(authFile).modify("anthropic", async (current) => {
+      const record = current as PiOAuthCredential | undefined;
+      if (record?.type !== "oauth" || record.refresh !== heldRefreshToken) return undefined;
+      return { ...record, access: tokens.access, refresh: tokens.refresh, expires: tokens.expires };
+    });
+  })().catch(() => undefined);
 }
 
 /** Test seam: forget the process-wide gate so a suite can run the pass again. */

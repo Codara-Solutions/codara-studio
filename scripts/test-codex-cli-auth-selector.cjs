@@ -28,6 +28,10 @@ async function loadContract(entryPoint) {
   return mod.exports;
 }
 
+// A Codex id_token names the user; a Team workspace shares one account id.
+const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+const idToken = (email) => `${b64({ alg: "none" })}.${b64({ email })}.sig`;
+
 function writePrivate(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, value, { mode: 0o600 });
@@ -218,6 +222,114 @@ async function main() {
     assert.deepEqual(order, ["lock", "switch"]);
   } finally {
     fs.rmSync(reseedFixture, { recursive: true, force: true });
+  }
+
+  // A personal login that is an older copy of an account a managed profile
+  // holds (signing in to Cora with the terminal's account) is retired; any
+  // doubt keeps it.
+  const dupFixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-dup-test-"));
+  try {
+    const store = {
+      rootDir: path.join(dupFixture, ".codarastudio", "codex-cli"),
+      personalHomeDir: path.join(dupFixture, ".codex"),
+    };
+    const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const auth = (account, lastRefresh, token, email = "me@example.com") =>
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        last_refresh: lastRefresh,
+        tokens: { account_id: account, refresh_token: token, id_token: idToken(email) },
+      });
+    const personal = T.codexCliPersonalAuthFile(store.rootDir);
+    const live = path.join(store.personalHomeDir, "auth.json");
+    const otherSlot = path.join(store.rootDir, "accounts", OTHER, "auth.json");
+    writePrivate(personal, auth("acct-1", "2026-09-09T00:00:00Z", "old-grant"));
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    writePrivate(otherSlot, auth("acct-2", "2026-09-23T00:00:00Z", "other-grant"));
+    writePrivate(
+      path.join(store.rootDir, "active-auth.json"),
+      JSON.stringify({ version: 1, profileId: PROFILE }),
+    );
+
+    // A teammate's login in the same Team workspace is not a copy of ours.
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant", "teammate@example.com"));
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+
+    // A Cora row on the personal slot, or an older managed copy: kept.
+    assert.equal(
+      await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER], { personalHasRow: async () => true }),
+      false,
+    );
+    writePrivate(live, auth("acct-1", "2026-09-01T00:00:00Z", "older-grant"));
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    assert.equal(fs.existsSync(personal), true);
+
+    // The live managed profile holds a newer grant of the same account: retired.
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    const logs = [];
+    assert.equal(
+      await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER], { log: (line) => logs.push(line) }),
+      true,
+    );
+    assert.equal(fs.existsSync(personal), false);
+    assert.equal(fs.readFileSync(live, "utf8"), auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
+    assert.ok(logs.every((line) => !line.includes("grant")), "no token reaches the log");
+
+    // While the personal login is live nothing moves.
+    writePrivate(personal, auth("acct-1", "2026-09-09T00:00:00Z", "old-grant"));
+    writePrivate(
+      path.join(store.rootDir, "active-auth.json"),
+      JSON.stringify({ version: 1, profileId: "personal" }),
+    );
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    assert.equal(fs.existsSync(personal), true);
+  } finally {
+    fs.rmSync(dupFixture, { recursive: true, force: true });
+  }
+
+  // A `codex login` in a terminal as another known account: that profile
+  // becomes the live one and keeps the new login; nothing else moves.
+  const nativeFixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-native-test-"));
+  try {
+    const store = {
+      rootDir: path.join(nativeFixture, ".codarastudio", "codex-cli"),
+      personalHomeDir: path.join(nativeFixture, ".codex"),
+    };
+    const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const auth = (account, token, email = `${token.split("-")[0]}@example.com`) =>
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { account_id: account, refresh_token: token, id_token: idToken(email) },
+      });
+    const live = path.join(store.personalHomeDir, "auth.json");
+    const ownSlot = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
+    const otherSlot = path.join(store.rootDir, "accounts", OTHER, "auth.json");
+    writePrivate(ownSlot, auth("acct-1", "own"));
+    writePrivate(otherSlot, auth("acct-2", "other-old"));
+    writePrivate(path.join(store.rootDir, "active-auth.json"), JSON.stringify({ version: 1, profileId: PROFILE }));
+    writePrivate(live, auth("acct-1", "own-live"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null, "the live profile's own login");
+
+    writePrivate(live, auth("acct-2", "other-new"));
+    const change = await T.detectCodexNativeLogin(store, [PROFILE, OTHER]);
+    assert.deepEqual(change, { from: PROFILE, to: OTHER });
+    assert.equal(await T.adoptCodexNativeLogin(store, change), true);
+    assert.equal(await T.readCodexCliSelection(store.rootDir), OTHER);
+    assert.equal(fs.readFileSync(otherSlot, "utf8"), auth("acct-2", "other-new"));
+    assert.equal(fs.readFileSync(ownSlot, "utf8"), auth("acct-1", "own"), "the replaced profile keeps its login");
+    assert.equal(fs.readFileSync(live, "utf8"), auth("acct-2", "other-new"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null, "and it settles");
+    assert.equal(await T.adoptCodexNativeLogin(store, change), false, "a stale change is refused");
+
+    // An account no profile holds is left alone, and so is a teammate in a
+    // known Team workspace.
+    writePrivate(live, auth("acct-3", "stranger"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null);
+    writePrivate(live, auth("acct-1", "teammate-new", "teammate@example.com"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null);
+  } finally {
+    fs.rmSync(nativeFixture, { recursive: true, force: true });
   }
 
   console.log("Codex auth-only selector contracts passed");

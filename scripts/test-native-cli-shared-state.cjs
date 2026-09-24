@@ -2,11 +2,12 @@
 "use strict";
 
 // Guard for the shared CLI state layer (native-cli-shared-state.ts): managed
-// Claude/Grok accounts share explicitly allowlisted user-state surfaces with
-// the personal home via symlinks, keeping credentials and identity
-// per-account. Codex deliberately is not part of this layer: its managed slots
-// are auth-only vaults and every launch uses the ordinary ~/.codex home. Runs
-// entirely against temp dirs — never the real CLI homes or ~/.codarastudio.
+// Grok accounts share explicitly allowlisted user-state surfaces with the
+// personal home via symlinks, keeping credentials and identity per-account.
+// Claude and Codex deliberately are not part of this layer: each runs every
+// account in one home and switches only the login inside it, so a managed
+// slot is a vault, never a second home. Runs entirely against temp dirs,
+// never the real CLI homes or ~/.codarastudio.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -59,225 +60,158 @@ function stashRootsIn(dir) {
   return fs.readdirSync(dir).filter((name) => name.startsWith(".codara-stash-"));
 }
 
-async function testClaudeFreshLinkSet() {
-  const personal = path.join(TMP, "claude-fresh", "personal");
-  const managed = path.join(TMP, "claude-fresh", "managed");
+async function testGrokFreshLinkSet() {
+  const personal = path.join(TMP, "grok-fresh", "personal");
+  const managed = path.join(TMP, "grok-fresh", "managed");
   fs.mkdirSync(personal, { recursive: true, mode: 0o700 });
   fs.mkdirSync(managed, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(personal, "settings.json"), '{"theme":"dark"}\n', { mode: 0o600 });
-  fs.writeFileSync(path.join(personal, "settings.local.json"), '{"local":true}\n', { mode: 0o600 });
-  fs.writeFileSync(path.join(personal, "statusline-command.sh"), "#!/bin/sh\necho hi\n", { mode: 0o700 });
-  fs.writeFileSync(path.join(personal, "history.jsonl"), '{"line":"A"}\n{"line":"B"}\n', { mode: 0o600 });
-  fs.mkdirSync(path.join(personal, "projects", "enc"), { recursive: true });
-  fs.writeFileSync(path.join(personal, "projects", "enc", "keep.jsonl"), "personal transcript\n");
-  // Unlisted / private names must never be linked or moved in either
-  // direction — the live per-PID session registry especially.
-  fs.mkdirSync(path.join(personal, "sessions"));
-  fs.writeFileSync(path.join(personal, "sessions", "abc.json"), '{"pid":123,"status":"busy"}');
-  fs.mkdirSync(path.join(personal, "statsig"));
-  fs.writeFileSync(path.join(personal, "statsig", "evaluation"), "PERSONAL_ONLY");
-  fs.writeFileSync(path.join(managed, ".credentials.json"), "MANAGED_CREDENTIAL", { mode: 0o600 });
+  fs.writeFileSync(path.join(personal, "config.toml"), 'model = "grok"\n', { mode: 0o600 });
+  fs.mkdirSync(path.join(personal, "sessions", "enc"), { recursive: true });
+  fs.writeFileSync(path.join(personal, "sessions", "enc", "keep.jsonl"), "personal transcript\n");
+  // Private names are never linked or moved in either direction.
+  fs.writeFileSync(path.join(personal, "auth.json"), "PERSONAL_LOGIN", { mode: 0o600 });
+  fs.writeFileSync(path.join(managed, "auth.json"), "MANAGED_LOGIN", { mode: 0o600 });
 
   const result = await shared.ensureSharedCliState({
     managedDir: managed,
     personalDir: personal,
-    runtime: "claude",
+    runtime: "grok",
   });
   assert.equal(result.skipped, undefined);
 
-  for (const spec of shared.CLAUDE_CLI_SHARED_STATE) {
-    if (spec.kind !== "dir" || spec.heal !== "link") continue;
+  for (const spec of shared.GROK_CLI_SHARED_STATE) {
+    if (spec.kind !== "dir") continue;
     assert.ok(isLinkTo(path.join(managed, spec.name), path.join(personal, spec.name)), `${spec.name} must be a link`);
     assert.ok(fs.statSync(path.join(personal, spec.name)).isDirectory(), `${spec.name} personal target must exist`);
     assert.equal(outcomeOf(result, spec.name), "linked");
   }
-  // `todos` belongs to older CLIs: absent from the personal home means no
-  // link at all.
-  assert.equal(fs.existsSync(path.join(managed, "todos")), false);
-  assert.equal(outcomeOf(result, "todos"), "skipped-missing");
-  // The live session registry is PRIVATE: never linked, never entered. This
-  // deserves an explicit check because the SAME name is shared for codex,
-  // where sessions/ is the transcript store — for claude it is a per-PID
-  // registry of RUNNING sessions.
-  assert.equal(
-    shared.CLAUDE_CLI_SHARED_STATE.some((spec) => spec.name === "sessions"),
-    false,
-    "claude sessions/ must not be in the share list",
-  );
-  assert.equal(fs.existsSync(path.join(managed, "sessions")), false);
-  // Deliberately private despite living beside the shared settings.json.
-  for (const name of ["settings.local.json", "statusline-command.sh", "image-cache"]) {
-    assert.equal(
-      shared.CLAUDE_CLI_SHARED_STATE.some((spec) => spec.name === name),
-      false,
-      `${name} must stay per-account`,
-    );
-    assert.equal(fs.existsSync(path.join(managed, name)), false);
-  }
-
-  assert.ok(isLinkTo(path.join(managed, "settings.json"), path.join(personal, "settings.json")));
-  assert.ok(isLinkTo(path.join(managed, "history.jsonl"), path.join(personal, "history.jsonl")));
+  assert.ok(isLinkTo(path.join(managed, "config.toml"), path.join(personal, "config.toml")));
   // A file link is skipped while the personal target is missing.
-  assert.equal(fs.existsSync(path.join(managed, "CLAUDE.md")), false);
-  assert.equal(outcomeOf(result, "CLAUDE.md"), "skipped-missing");
-  // Reading through the link sees the personal content.
-  assert.equal(
-    fs.readFileSync(path.join(managed, "settings.json"), "utf8"),
-    '{"theme":"dark"}\n',
-  );
+  assert.equal(fs.existsSync(path.join(managed, "AGENTS.md")), false);
+  assert.equal(outcomeOf(result, "AGENTS.md"), "skipped-missing");
+  assert.equal(fs.readFileSync(path.join(managed, "config.toml"), "utf8"), 'model = "grok"\n');
+  assert.equal(fs.readFileSync(path.join(managed, "auth.json"), "utf8"), "MANAGED_LOGIN");
+  assert.equal(fs.lstatSync(path.join(managed, "auth.json")).isSymbolicLink(), false);
 
-  // Never linked, never moved: credential file stays a private managed file,
-  // per-account personal names stay out of the managed dir.
-  assert.equal(fs.readFileSync(path.join(managed, ".credentials.json"), "utf8"), "MANAGED_CREDENTIAL");
-  assert.equal(fs.lstatSync(path.join(managed, ".credentials.json")).isSymbolicLink(), false);
-  assert.equal(fs.existsSync(path.join(managed, "statsig")), false);
-  assert.equal(fs.readFileSync(path.join(personal, "statsig", "evaluation"), "utf8"), "PERSONAL_ONLY");
-
-  // Idempotent second pass: everything already linked, nothing backed up.
   const again = await shared.ensureSharedCliState({
     managedDir: managed,
     personalDir: personal,
-    runtime: "claude",
+    runtime: "grok",
   });
-  assert.equal(outcomeOf(again, "projects"), "linked");
-  assert.equal(outcomeOf(again, "settings.json"), "linked");
+  assert.equal(outcomeOf(again, "sessions"), "linked");
+  assert.equal(outcomeOf(again, "config.toml"), "linked");
   assert.deepEqual(backupsIn(personal), []);
   console.log("PASS fresh managed dir gets the allowlisted link set and nothing else");
 }
 
 async function testClobberHealing() {
-  const personal = path.join(TMP, "claude-clobber", "personal");
-  const managed = path.join(TMP, "claude-clobber", "managed");
+  const personal = path.join(TMP, "grok-clobber", "personal");
+  const managed = path.join(TMP, "grok-clobber", "managed");
   fs.mkdirSync(personal, { recursive: true, mode: 0o700 });
   fs.mkdirSync(managed, { recursive: true, mode: 0o700 });
 
   // Byte-equal clobber: relink without a backup.
-  fs.writeFileSync(path.join(personal, "settings.json"), '{"theme":"dark"}');
-  fs.writeFileSync(path.join(managed, "settings.json"), '{"theme":"dark"}');
-  let result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "settings.json"), "healed-file");
-  assert.ok(isLinkTo(path.join(managed, "settings.json"), path.join(personal, "settings.json")));
+  fs.writeFileSync(path.join(personal, "config.toml"), 'theme = "dark"');
+  fs.writeFileSync(path.join(managed, "config.toml"), 'theme = "dark"');
+  let result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "config.toml"), "healed-file");
+  assert.ok(isLinkTo(path.join(managed, "config.toml"), path.join(personal, "config.toml")));
   assert.deepEqual(backupsIn(personal), []);
 
   // Divergent, managed newer: managed content wins, personal copy backed up.
-  fs.rmSync(path.join(managed, "settings.json"));
-  fs.writeFileSync(path.join(managed, "settings.json"), '{"theme":"light"}');
+  fs.rmSync(path.join(managed, "config.toml"));
+  fs.writeFileSync(path.join(managed, "config.toml"), 'theme = "light"');
   const old = new Date(Date.now() - 100_000);
-  fs.utimesSync(path.join(personal, "settings.json"), old, old);
-  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "settings.json"), "healed-file");
-  assert.ok(isLinkTo(path.join(managed, "settings.json"), path.join(personal, "settings.json")));
-  assert.equal(fs.readFileSync(path.join(personal, "settings.json"), "utf8"), '{"theme":"light"}');
+  fs.utimesSync(path.join(personal, "config.toml"), old, old);
+  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "config.toml"), "healed-file");
+  assert.ok(isLinkTo(path.join(managed, "config.toml"), path.join(personal, "config.toml")));
+  assert.equal(fs.readFileSync(path.join(personal, "config.toml"), "utf8"), 'theme = "light"');
   let backups = backupsIn(personal);
   assert.equal(backups.length, 1, "the losing personal content must be preserved");
-  assert.equal(fs.readFileSync(path.join(personal, backups[0]), "utf8"), '{"theme":"dark"}');
+  assert.equal(fs.readFileSync(path.join(personal, backups[0]), "utf8"), 'theme = "dark"');
   fs.rmSync(path.join(personal, backups[0]));
 
   // Divergent, personal newer: personal content survives, managed copy backed up.
-  fs.rmSync(path.join(managed, "settings.json"));
-  fs.writeFileSync(path.join(managed, "settings.json"), '{"theme":"stale"}');
-  fs.utimesSync(path.join(managed, "settings.json"), old, old);
-  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "settings.json"), "healed-file");
-  assert.equal(fs.readFileSync(path.join(personal, "settings.json"), "utf8"), '{"theme":"light"}');
+  fs.rmSync(path.join(managed, "config.toml"));
+  fs.writeFileSync(path.join(managed, "config.toml"), 'theme = "stale"');
+  fs.utimesSync(path.join(managed, "config.toml"), old, old);
+  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "config.toml"), "healed-file");
+  assert.equal(fs.readFileSync(path.join(personal, "config.toml"), "utf8"), 'theme = "light"');
   backups = backupsIn(personal);
   assert.equal(backups.length, 1, "the losing managed content must be preserved");
-  assert.equal(fs.readFileSync(path.join(personal, backups[0]), "utf8"), '{"theme":"stale"}');
+  assert.equal(fs.readFileSync(path.join(personal, backups[0]), "utf8"), 'theme = "stale"');
 
   // Clobber with no personal target: the managed content MOVES to personal.
-  fs.writeFileSync(path.join(managed, "CLAUDE.md"), "managed instructions\n");
-  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "CLAUDE.md"), "healed-file");
-  assert.ok(isLinkTo(path.join(managed, "CLAUDE.md"), path.join(personal, "CLAUDE.md")));
-  assert.equal(fs.readFileSync(path.join(personal, "CLAUDE.md"), "utf8"), "managed instructions\n");
+  fs.writeFileSync(path.join(managed, "AGENTS.md"), "managed instructions\n");
+  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "AGENTS.md"), "healed-file");
+  assert.ok(isLinkTo(path.join(managed, "AGENTS.md"), path.join(personal, "AGENTS.md")));
+  assert.equal(fs.readFileSync(path.join(personal, "AGENTS.md"), "utf8"), "managed instructions\n");
 
   // A wrong-target link is retargeted at the personal equivalent.
-  const elsewhere = path.join(TMP, "claude-clobber", "elsewhere.json");
-  fs.writeFileSync(elsewhere, "{}");
-  fs.rmSync(path.join(managed, "settings.json"));
-  fs.symlinkSync(elsewhere, path.join(managed, "settings.json"));
-  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.ok(isLinkTo(path.join(managed, "settings.json"), path.join(personal, "settings.json")));
+  const elsewhere = path.join(TMP, "grok-clobber", "elsewhere.toml");
+  fs.writeFileSync(elsewhere, "");
+  fs.rmSync(path.join(managed, "config.toml"));
+  fs.symlinkSync(elsewhere, path.join(managed, "config.toml"));
+  result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.ok(isLinkTo(path.join(managed, "config.toml"), path.join(personal, "config.toml")));
   console.log("PASS clobbered files heal: byte-equal relinks, newest wins with a backup, wrong targets retarget");
 }
 
-async function testJsonlLineUnion() {
-  const personal = path.join(TMP, "claude-history", "personal");
-  const managed = path.join(TMP, "claude-history", "managed");
-  fs.mkdirSync(personal, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(managed, { recursive: true, mode: 0o700 });
-  // The personal side deliberately lacks a trailing newline so the merge seam
-  // is exercised; the managed side repeats line B so the dedupe is exercised.
-  fs.writeFileSync(path.join(personal, "history.jsonl"), '{"line":"A"}\n{"line":"B"}');
-  fs.writeFileSync(
-    path.join(managed, "history.jsonl"),
-    '{"line":"B"}\n{"line":"C"}\n{"line":"D"}\n',
-  );
-  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "history.jsonl"), "healed-file");
-  assert.ok(isLinkTo(path.join(managed, "history.jsonl"), path.join(personal, "history.jsonl")));
-  const lines = fs
-    .readFileSync(path.join(personal, "history.jsonl"), "utf8")
-    .split("\n")
-    .filter(Boolean);
-  assert.deepEqual(lines, ['{"line":"A"}', '{"line":"B"}', '{"line":"C"}', '{"line":"D"}']);
-
-  console.log("PASS history.jsonl heals as a lossless line union");
-}
-
 async function testRealDirectoryMigration() {
-  const personal = path.join(TMP, "claude-migrate", "personal");
-  const managed = path.join(TMP, "claude-migrate", "managed");
-  fs.mkdirSync(path.join(personal, "projects", "enc"), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(personal, "projects", "enc", "both.jsonl"), "personal copy\n");
-  fs.mkdirSync(path.join(managed, "projects", "enc"), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(managed, "projects", "enc", "only-managed.jsonl"), "managed transcript\n");
-  fs.writeFileSync(path.join(managed, "projects", "enc", "both.jsonl"), "managed copy\n");
+  const personal = path.join(TMP, "grok-migrate", "personal");
+  const managed = path.join(TMP, "grok-migrate", "managed");
+  fs.mkdirSync(path.join(personal, "sessions", "enc"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(personal, "sessions", "enc", "both.jsonl"), "personal copy\n");
+  fs.mkdirSync(path.join(managed, "sessions", "enc"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(managed, "sessions", "enc", "only-managed.jsonl"), "managed transcript\n");
+  fs.writeFileSync(path.join(managed, "sessions", "enc", "both.jsonl"), "managed copy\n");
 
-  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "projects"), "merged-dir");
-  assert.ok(isLinkTo(path.join(managed, "projects"), path.join(personal, "projects")));
+  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "sessions"), "merged-dir");
+  assert.ok(isLinkTo(path.join(managed, "sessions"), path.join(personal, "sessions")));
   // The unique transcript moved into the shared store; the collision kept the
   // PERSONAL copy and stashed the managed one.
   assert.equal(
-    fs.readFileSync(path.join(personal, "projects", "enc", "only-managed.jsonl"), "utf8"),
+    fs.readFileSync(path.join(personal, "sessions", "enc", "only-managed.jsonl"), "utf8"),
     "managed transcript\n",
   );
   assert.equal(
-    fs.readFileSync(path.join(personal, "projects", "enc", "both.jsonl"), "utf8"),
+    fs.readFileSync(path.join(personal, "sessions", "enc", "both.jsonl"), "utf8"),
     "personal copy\n",
   );
   const stashRoots = stashRootsIn(managed);
   assert.equal(stashRoots.length, 1, "colliding managed entries must be stashed");
   assert.equal(
-    fs.readFileSync(path.join(managed, stashRoots[0], "projects", "enc", "both.jsonl"), "utf8"),
+    fs.readFileSync(path.join(managed, stashRoots[0], "sessions", "enc", "both.jsonl"), "utf8"),
     "managed copy\n",
   );
-  // The staged migration directory is cleaned up after a full merge.
   assert.deepEqual(
     fs.readdirSync(managed).filter((name) => name.includes(".migrating-")),
     [],
   );
-  console.log("PASS a real projects/ directory migrates: transcripts merge, collisions keep personal and stash managed");
+  console.log("PASS a real sessions/ directory migrates: transcripts merge, collisions keep personal and stash managed");
 }
 
 async function testInterruptedMigrationRecovery() {
   // A crash inside migrateRealDirectory leaves the link installed and the
-  // unmerged remainder in a `.projects.migrating-*` stage. The next heal must
+  // unmerged remainder in a `.sessions.migrating-*` stage. The next heal must
   // finish the merge instead of declaring the (correct) link done.
-  const personal = path.join(TMP, "claude-recover", "personal");
-  const managed = path.join(TMP, "claude-recover", "managed");
-  fs.mkdirSync(path.join(personal, "projects"), { recursive: true, mode: 0o700 });
+  const personal = path.join(TMP, "grok-recover", "personal");
+  const managed = path.join(TMP, "grok-recover", "managed");
+  fs.mkdirSync(path.join(personal, "sessions"), { recursive: true, mode: 0o700 });
   fs.mkdirSync(managed, { recursive: true, mode: 0o700 });
-  fs.symlinkSync(path.join(personal, "projects"), path.join(managed, "projects"));
-  const stage = path.join(managed, ".projects.migrating-deadbeef");
+  fs.symlinkSync(path.join(personal, "sessions"), path.join(managed, "sessions"));
+  const stage = path.join(managed, ".sessions.migrating-deadbeef");
   fs.mkdirSync(path.join(stage, "enc"), { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(stage, "enc", "stranded.jsonl"), "stranded transcript\n");
 
-  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "claude" });
-  assert.equal(outcomeOf(result, "projects"), "linked");
+  const result = await shared.ensureSharedCliState({ managedDir: managed, personalDir: personal, runtime: "grok" });
+  assert.equal(outcomeOf(result, "sessions"), "linked");
   assert.equal(
-    fs.readFileSync(path.join(personal, "projects", "enc", "stranded.jsonl"), "utf8"),
+    fs.readFileSync(path.join(personal, "sessions", "enc", "stranded.jsonl"), "utf8"),
     "stranded transcript\n",
     "an interrupted migration's transcripts must reach the shared store",
   );
@@ -288,7 +222,7 @@ async function testInterruptedMigrationRecovery() {
 async function testGuards() {
   const dir = path.join(TMP, "guards", "same");
   fs.mkdirSync(dir, { recursive: true });
-  const same = await shared.ensureSharedCliState({ managedDir: dir, personalDir: dir, runtime: "claude" });
+  const same = await shared.ensureSharedCliState({ managedDir: dir, personalDir: dir, runtime: "grok" });
   assert.equal(same.skipped, "unsafe-input");
   assert.deepEqual(fs.readdirSync(dir), []);
 
@@ -297,14 +231,14 @@ async function testGuards() {
   const managed = path.join(TMP, "guards", "managed");
   fs.mkdirSync(personal, { recursive: true });
   fs.mkdirSync(managed, { recursive: true });
-  fs.writeFileSync(path.join(personal, "settings.json"), "{}");
+  fs.writeFileSync(path.join(personal, "config.toml"), "");
   const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
   Object.defineProperty(process, "platform", { value: "win32" });
   try {
     const skipped = await shared.ensureSharedCliState({
       managedDir: managed,
       personalDir: personal,
-      runtime: "claude",
+      runtime: "grok",
     });
     assert.equal(skipped.skipped, "win32");
     assert.deepEqual(skipped.entries, []);
@@ -320,58 +254,25 @@ async function testClaudeStoreWiring() {
   const personal = path.join(TMP, "claude-store-personal");
   fs.mkdirSync(personal, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(personal, "settings.json"), '{"theme":"dark"}', { mode: 0o600 });
-  const leased = new Set();
   let idIndex = 0;
   const store = new claudeStores.ClaudeCliAccountProfileStore(storeRoot, {
     personalConfigDir: personal,
     personalConfigDirEnv: null,
     idFactory: () => IDS[idIndex++],
     authChecker: () => ({ connected: true }),
-    leases: { isLeased: (profileId) => leased.has(profileId) },
   });
-
-  const created = await store.createProfile({ label: "Shared state" });
-  const configDir = claudeStores.claudeCliManagedProfileConfigDir(storeRoot, created.profile.id);
-  assert.ok(isLinkTo(path.join(configDir, "projects"), path.join(personal, "projects")));
-  assert.ok(isLinkTo(path.join(configDir, "settings.json"), path.join(personal, "settings.json")));
-
-  // Simulate a pre-feature profile that is currently LEASED: the heal must
-  // skip entirely (the state was healed when the first terminal resolved).
-  fs.rmSync(path.join(configDir, "projects"));
-  fs.mkdirSync(path.join(configDir, "projects", "enc"), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(configDir, "projects", "enc", "live.jsonl"), "live transcript\n");
-  leased.add(created.profile.id);
-  await store.resolveProfile({ profileId: created.profile.id });
-  assert.equal(
-    fs.lstatSync(path.join(configDir, "projects")).isSymbolicLink(),
-    false,
-    "a leased profile must not be healed",
+  const created = await store.createProfile({ label: "One home" });
+  const profileDir = claudeStores.claudeCliManagedProfileConfigDir(storeRoot, created.profile.id);
+  assert.deepEqual(
+    fs.readdirSync(profileDir),
+    [],
+    "a managed Claude profile is a vault slot, never a second Claude home",
   );
-  assert.equal(fs.readFileSync(path.join(configDir, "projects", "enc", "live.jsonl"), "utf8"), "live transcript\n");
-
-  // Unleased again: the same resolution path migrates the real directory.
-  leased.delete(created.profile.id);
-  await store.resolveProfile({ profileId: created.profile.id });
-  assert.ok(isLinkTo(path.join(configDir, "projects"), path.join(personal, "projects")));
-  assert.equal(
-    fs.readFileSync(path.join(personal, "projects", "enc", "live.jsonl"), "utf8"),
-    "live transcript\n",
-  );
-
-  // Deleting a healed profile removes only the links: every personal target
-  // survives, transcripts included.
-  const doomed = await store.createProfile({ label: "Doomed" });
-  const doomedDir = claudeStores.claudeCliManagedProfileConfigDir(storeRoot, doomed.profile.id);
-  assert.ok(isLinkTo(path.join(doomedDir, "projects"), path.join(personal, "projects")));
-  const deleted = await store.deleteProfile(doomed.profile.id);
-  assert.equal(deleted.deleted, true);
-  assert.equal(fs.existsSync(doomedDir), false);
-  assert.equal(
-    fs.readFileSync(path.join(personal, "projects", "enc", "live.jsonl"), "utf8"),
-    "live transcript\n",
-  );
-  assert.equal(fs.readFileSync(path.join(personal, "settings.json"), "utf8"), '{"theme":"dark"}');
-  console.log("PASS store wiring: create links, resolve heals, leased skips, deletion spares personal state");
+  const resolved = await store.resolveProfile({ profileId: created.profile.id });
+  assert.equal(resolved.configDir, personal, "every Claude profile runs in the one home");
+  assert.equal(resolved.configDirEnv, null);
+  assert.deepEqual(fs.readdirSync(profileDir), [], "resolving never plants links");
+  console.log("PASS claude store wiring: a managed profile is a vault slot and resolves to the one home");
 }
 
 async function testCodexStoreWiring() {
@@ -401,9 +302,8 @@ async function testCodexStoreWiring() {
 }
 
 async function main() {
-  await testClaudeFreshLinkSet();
+  await testGrokFreshLinkSet();
   await testClobberHealing();
-  await testJsonlLineUnion();
   await testRealDirectoryMigration();
   await testInterruptedMigrationRecovery();
   await testGuards();
