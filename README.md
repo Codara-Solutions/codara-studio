@@ -1,235 +1,147 @@
 # Codara Studio
 
-Codara Studio is a desktop control surface for AI coding agents. It is an
-Electron app that combines a terminal multiplexer, a built-in orchestrating
-agent called Cora, a Chromium preview that agents can drive, and the account
-plumbing needed to run several Claude Code, Codex, and Grok identities side by
-side. One window where your agents work, ask questions, and ship, while you
-watch.
+Codara Studio is a desktop app for working with AI coding agents. It puts
+your terminals, your agent CLIs (Claude Code, Codex, Grok and Pi), a built-in
+browser the agents can drive, and an orchestrating agent called **Cora** in
+one window, so you can hand off work, watch it happen, and step in when an
+agent needs you.
 
-**Download:** [studio.codarasolutions.com](https://studio.codarasolutions.com).
-macOS builds are signed and notarized. Windows builds are currently unsigned;
-see [SECURITY.md](./SECURITY.md) for how to verify one. Linux is build from
-source only. The app self-updates: every push to `main` becomes a release and
-running apps hear about it within seconds.
+It is for developers who already use terminal coding agents and want one
+place to run several of them side by side, across projects and accounts.
 
-Codara Studio is MIT licensed. Contributions land through pull requests
-([CONTRIBUTING.md](./CONTRIBUTING.md)); vulnerabilities go through
-[SECURITY.md](./SECURITY.md); conventions for AI agents working in this repo
-live in [AGENTS.md](./AGENTS.md).
+- **Download:** [studio.codarasolutions.com](https://studio.codarasolutions.com)
+  (macOS and Windows). macOS builds are signed and notarized. Windows builds
+  are not signed yet, so SmartScreen warns on first run;
+  [SECURITY.md](./SECURITY.md) shows how to verify an installer. On Linux,
+  build it yourself (see [Build from source](#build-from-source)).
+- **Updates:** releases are cut nightly whenever something new has been
+  merged, and a running app hears about a new release within seconds.
+- **License:** MIT.
 
-## What it does
+## What you get
 
-- **Terminals and workspaces.** Split panes, tabs, and workspaces per project
-  folder (local or over SSH), with shell integration for zsh, bash, and
-  PowerShell. Claude Code, Codex, Grok and Pi each open in a pane from the +
-  menu. Every terminal Codara opens knows which agent account it should sign
-  in as.
-- **Cora.** A built-in orchestrator that plans work, spawns Claude, Codex, Grok,
-  or Pi workers in their own panes, keeps a kanban board and a whiteboard per
-  conversation, and asks you only when it has to. Cora runs on the Pi coding
-  agent you install (`npm install -g @earendil-works/pi-coding-agent`, or one
-  click in Settings) with a Codara extension; you update Pi yourself, and the
-  same `pi` works in any terminal.
-- **Runs, boards, and whiteboards.** Every Cora conversation is a run with a
-  live graph of workers, a task board, and a canvas, all persisted on disk and
-  readable with the app closed.
-- **Preview.** A real Chromium `<webview>` tab that any Claude Code or Codex
-  session can drive through the bundled MCP server: navigate, click, type,
-  screenshot, read console and network. No Playwright, no headless browser.
-- **Automations.** Looms (node graphs of workers and deterministic steps) that
-  run on a schedule, on a git trigger, or on demand, with budgets and
-  iteration loops.
-- **Accounts.** Several Claude, Codex, and Grok logins on one machine, each in
-  its own private login directory, sharing your chat history and settings.
-- **Run terminal lifecycle.** Worker panes belong to their run.
-  Temporary worker panes close automatically when a run settles.
-  Service panes remain until their run is deleted, and
-  failed closes retry automatically.
-- **Notifications and remote access.** Codara tells you when an agent finishes
-  or needs you, across terminals you typed into yourself and Cora runs, and
-  can pair with a phone to watch and answer from anywhere.
-
-See [docs/glossary.md](./docs/glossary.md) for the vocabulary (run, step,
-worker, wave, loom, pass, board, whiteboard, workspace, dock) and
-[docs/architecture.md](./docs/architecture.md) for how the pieces fit.
+- **Terminals and workspaces.** Tabs and split panes, grouped into one
+  workspace per project folder, local or over SSH. Shell integration for zsh,
+  bash and PowerShell lets Codara tell when a command or an agent turn starts
+  and ends. Your shell startup files are never edited.
+- **Agent CLIs in panes.** The **+** menu opens a Claude Code, Codex, Grok or
+  Pi pane in one click. Codara notices when Claude Code, Codex or Grok
+  finishes a turn or needs you, even in a background workspace.
+- **Cora, the orchestrator.** Describe the work in a Cora chat. Cora plans it,
+  hands pieces to Claude, Codex, Grok or Pi workers in their own panes,
+  checks the results, and asks you only when it must. Every chat has a kanban
+  board and a whiteboard that you and Cora both edit.
+- **A browser agents can use.** A real Chromium tab that Claude Code, Codex,
+  Grok and Cora drive through Codara's MCP tools: navigate, click, type, take
+  screenshots, read the console and network.
+- **Automations.** Reusable graphs of agent workers and plain steps (shell,
+  script, HTTP, file, notification) that run on a schedule, on a git or folder
+  event, or on demand, with budgets and loop limits.
+- **Several accounts per CLI.** Keep more than one Claude, ChatGPT or Grok
+  sign-in and switch which one is Active. For Claude Code and Codex a switch
+  works like `/login` as another account, so your settings, history and MCP
+  sign-ins stay put.
+- **Everything else you need nearby.** A code editor, file search, git and
+  GitHub pull requests, usage and cost meters, desktop notifications, a `cora`
+  CLI to drive Cora from any terminal, and optional pairing with the Codara
+  phone app to follow and answer from anywhere.
 
 ## Quick start
 
-1. Install the app, open it, and add a workspace (a project folder).
-2. Open a terminal tab and run `claude` or `codex` as usual, or start a Cora
-   chat from the composer and describe the work.
-3. In Settings, Agents tab, add the accounts you want Studio terminals to use.
-4. Ask an agent to open the Preview: the `codara_preview_*` tools are installed
-   into Claude Code, Codex, and Grok automatically (see below).
+1. Install the app and open it. A first-run guide checks your tools (Git,
+   Python 3, Node.js, Claude Code, Codex), connects an account, and helps you
+   pick a project folder. See [Getting started](./docs/getting-started.md).
+2. Open a terminal with Cmd+T (Ctrl+T on Windows and Linux) and run `claude`,
+   `codex`, `grok` or `pi` as usual, or pick one from the **+** menu.
+3. Click **Cora** in the tab bar and describe what you want done.
+4. Ask any agent to check its work in the browser: the Codara Studio MCP
+   server is added to Claude Code, Codex and Grok for you.
 
-## Agent integration
-
-Codara ships one MCP server (`resources/codara-studio-mcp/server.js`) with
-four tool rosters selected by `SPARK_MCP_MODE`: `studio` for terminals you run
-yourself, and `worker`, `execute`, and `automation` for orchestrated runs. The
-full tool table is in [docs/mcp-tools.md](./docs/mcp-tools.md).
-
-The studio roster is auto-installed into `~/.claude.json`,
-`~/.codex/config.toml`, and the Grok CLI's `config.toml` when those binaries
-are found on disk. Toggle it in the Capability Center (the "MCP and skills"
-button in the Cora composer) under Session policy, "Auto-install Codara Studio
-MCP"; the setting key is `playwrightMcpAutoInstall`.
-
-The server proxies each call to the running app over a loopback HTTP JSON-RPC
-socket with a bearer token, described by `~/.codarastudio/agent-socket.json`.
-If the app is closed, tools return a clean "Codara appears to be offline"
-error instead of hanging.
-
-Using the Preview from an agent:
-
-1. Call `codara_preview_navigate({ url })` first. It creates the preview tab if
-   none is open. Later calls default to the active preview tab; pass `tabId`
-   to target a specific one, and `codara_preview_list` enumerates them.
-2. `codara_preview_screenshot` returns the PNG as an inline image block, so the
-   agent can look at the rendered UI.
-3. `codara_preview_run` executes an ordered batch of steps in one round trip.
-   Prefer it for multi-step flows.
-
-Codara also installs a Claude Code hook into `~/.claude/settings.json` that
-reports session, tool, and subagent events back to the app, which is how
-worker panes show live state and how "finished" notifications avoid firing
-while background agents are still running. Everything Codara writes outside
-its own folder is listed in
+To connect to your agents, Codara adds its MCP server to the Claude Code,
+Codex and Grok configs and a hook to `~/.claude/settings.json`. Each CLI's MCP
+entry can be switched off in the Capability Center (the **MCP and skills**
+button in the Cora composer). Every file Codara touches outside its own
+`~/.codarastudio` folder is listed in
 [docs/on-your-machine.md](./docs/on-your-machine.md).
 
-## The `cora` CLI
+Cora runs on the [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
+(`@earendil-works/pi-coding-agent`, 0.85.1 or newer). Install it with
+`npm install -g @earendil-works/pi-coding-agent` or with **Install Pi** in
+Settings, Agents, and update it yourself whenever you like; until you do,
+Cora runs on a Pi build bundled with the app. The same `pi` works in any
+terminal.
 
-`cli/cora.cjs` is a terminal remote for the running app. It discovers the app
-the same way the MCP server does. Run inspection commands work with the app
-closed because they read `~/.codarastudio/runs` directly. The fullscreen
-`cora chat` UI uses the bundled pi-tui package; every other command is
-standard library only.
+## Accounts in brief
 
-```sh
-npm link                 # once, gives you a global `cora`
-cora status              # is the app up? version, subscriptions, activity
-cora chat                # fullscreen Cora chat (the TTY default)
-cora runs                # list runs straight off disk
-cora watch <run>         # live dashboard of a run and its subagents
-cora board <run>         # the run's kanban board
-cora auth list           # Cora subscriptions and native CLI identities
-cora bench               # the harness benchmark (see cli/README.md)
-cora rpc preview.list    # raw JSON-RPC escape hatch
-```
+Each account is one sign-in (Claude, ChatGPT or Grok) that both Cora and the
+matching terminal tool use. One account per CLI is the **Active** one.
 
-Claude and Codex terminals can use it as an agent-to-agent bridge:
+- **Claude Code and Codex** run every account in your own `~/.claude` and
+  `~/.codex`. Switching the Active account works like `/login` as another
+  account: MCP sign-ins, settings, history and project trust stay, and
+  terminals outside Codara see the new account too. It also works the other
+  way: a `/login` or `codex login` in any terminal as an account Codara knows
+  makes it the Active one within a minute.
+- **Grok** keeps a private home per managed account.
+- **Pi** panes use your own `~/.pi` and its own sign-ins.
+- Codara is the one refresher of a Claude login: while Studio runs, it renews
+  the Active login before Claude Code would, and Cora asks Codara instead of
+  refreshing its own copy.
 
-```sh
-cora start "Fix the failing tests" --cwd . --wait
-cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
-cora agent message <run> all "Re-check the acceptance criteria"
-```
+Manage accounts in Settings, Agents, or with `cora auth`. The full story is in
+[docs/accounts.md](./docs/accounts.md).
 
-`cora help` lists everything; [docs/cli.md](./docs/cli.md) has the command
-reference and [cli/README.md](./cli/README.md) covers the chat UI and the
-benchmark. The `app.*` RPC namespace (screenshots, in-page evaluation) is
-dev-gated: available in unpackaged builds, and in packaged builds only when
-the app is launched with `CODARA_DEV_TOOLS=1`.
+## Documentation
 
-## Accounts
+| Page | Read it when you want to |
+|---|---|
+| [Getting started](./docs/getting-started.md) | Install the app and get through the first-run guide. |
+| [Accounts](./docs/accounts.md) | Add accounts, switch the Active one, and understand sign-in and refresh. |
+| [Shortcuts and settings](./docs/shortcuts-and-settings.md) | Look up a key binding or find which Settings tab holds an option. |
+| [The `cora` CLI](./docs/cli.md) | Drive Cora and inspect runs from a terminal. |
+| [MCP tools](./docs/mcp-tools.md) | See which Codara tools an agent gets and what each one does. |
+| [Whiteboards and review](./docs/whiteboard-review.md) | Understand Cora's project maps and what "Cora reviewed" means. |
+| [Remote access](./docs/remote-access.md) | Pair a phone and understand what a paired device can do. |
+| [What Codara writes on your machine](./docs/on-your-machine.md) | Audit or undo every file and setting Codara touches. |
+| [Glossary](./docs/glossary.md) | Look up a term: run, worker, loom, pass, Active account, and more. |
+| [Architecture](./docs/architecture.md) | Find the code behind a behavior. |
+| [Releasing](./docs/releasing.md) | Ship or recover a release (maintainers). |
 
-An account has two halves: a Cora half (an OAuth subscription Cora's Pi
-sessions use) and a CLI half (the account's Claude Code, Codex, or Grok
-login). Add and manage them in Settings, Agents tab, Accounts, or with
-`cora auth`.
+`docs/harness-lab/` and `docs/benchmarks/` hold measurement records from
+experiments on Cora's harness. They are evidence, not guides.
 
-One account per CLI is the Active one. Claude Code and Codex run every
-account in your own `~/.claude` and `~/.codex`, so switching the Active
-account works like `/login` as another account: the sign-in changes
-everywhere at once, including terminals outside Codara such as Ghostty, and
-MCP sign-ins, settings, chats, the `/resume` list, history and project trust
-all stay, because there is only one copy of each. Running Claude Code
-sessions pick up the new account on their next request; running Codex
-sessions are closed after you confirm. It works the other way too: a
-`/login` or `codex login` in any terminal as an account Codara knows makes
-that account the Active one here within a minute. Grok keeps a private home
-per managed account, with your personal state linked into it. Pi, in its own
-panes, runs as you installed it with its own `~/.pi` and sign-ins. Codara
-never edits your shell startup files.
+## Build from source
 
-Codara mirrors the OAuth credential between an account's two halves so both
-stay signed in. Codara is the one refresher of a Claude login: it renews the
-Active login shortly before Claude Code would, and Cora asks Codara instead of
-refreshing its own copy, so no two clients ever race on one grant. The design
-is described in
-[docs/architecture.md](./docs/architecture.md#accounts).
-
-```sh
-cora auth list                         # every Cora and native CLI account
-cora auth add anthropic "Work Claude"  # add a Cora subscription in-browser
-cora auth use anthropic "Work Claude"  # default for future Cora chats
-cora auth cli list claude              # Claude Code terminal identities
-cora auth cli add claude "Work CLI"    # sign in in a guarded Studio terminal
-cora auth cli use claude "Work CLI"    # Active account for new terminals
-```
-
-## Keyboard shortcuts and settings
-
-The most used defaults (Cmd on macOS, Ctrl elsewhere): Cmd+K switch Cora run,
-Cmd+L focus the composer, Cmd+T new terminal tab, Cmd+D split right,
-Cmd+Shift+D split down, Cmd+P quick open, Cmd+E new browser tab, Cmd+B toggle
-the sidebar, Ctrl+` toggle the terminal, Cmd+M cycle model, Cmd+N cycle
-thinking effort, Cmd+Shift+/ show the cheat sheet. Everything is rebindable in
-Settings, Keybindings. The full table and the settings tabs are in
-[docs/shortcuts-and-settings.md](./docs/shortcuts-and-settings.md).
-
-## Developing
-
-Prerequisites: Node 22 or newer (`.nvmrc`), a C++ toolchain for the native
+You need Node 22 or newer (see `.nvmrc`), a C++ toolchain for the native
 modules (`node-pty`, `sodium-native`), and Python 3.8 or newer for the Claude
-Code hook script. `npm install` rebuilds the native modules for Electron and
-patches the bundled Pi OAuth page.
+Code hook script.
 
 ```sh
-npm install
-npm run dev          # hot-reloading Electron dev build
-npm run typecheck    # node, web, and e2e projects
-npm test             # the unit registry (scripts/test-*.{cjs,mjs})
-npm test -- hook     # only suites whose name matches a regex
-npm run test:e2e     # Playwright against the built app
+npm install              # also rebuilds native modules for Electron
+npm run dev              # hot-reloading development build
+npm run typecheck        # node, web and e2e projects
+npm test                 # the unit suites (scripts/test-*.{cjs,mjs})
+npm test -- hook         # only suites whose name matches a regex
+npm run test:e2e         # Playwright against a fresh build
+npm run package:linux    # an AppImage for Linux (package:mac, package:win too)
 ```
 
-Repository layout:
+Before opening a pull request, read [CONTRIBUTING.md](./CONTRIBUTING.md).
+AI agents working in this repository follow [AGENTS.md](./AGENTS.md).
+[docs/architecture.md](./docs/architecture.md) maps the code.
 
-- `src/main/` Electron main process: windows, IPC, terminals, the agent
-  socket, notifications, remote access, and `orchestration/` (Cora, runs,
-  workers, automations, accounts).
-- `src/preload/` the `window.spark` bridge exposed to the renderer.
-- `src/renderer/` the React UI.
-- `src/shared/` types and catalogs used by both sides.
-- `resources/` shipped alongside the app: the MCP server, the Claude hook,
-  the Pi extension that makes Cora, shell integration, orchestration prompts.
-- `cli/` the `cora` CLI. `scripts/` build, release, and unit test scripts.
-  `tests/e2e/` Playwright specs.
+## Releases
 
-## Releasing
-
-Releases are nightly. The GitHub Actions `Release` workflow runs at 02:17 UTC
-(or on demand with `gh workflow run Release`), runs the typechecks and the
-full unit registry, derives the next version from the conventional commits
-since the last `vX.Y.Z` tag (a breaking change bumps the major, a
-`Release: minor` trailer the minor, anything else including `feat:` the
-patch), builds and signs macOS, and cross-builds the Windows installer.
-Both platforms are saved as an immutable Actions artifact before a dedicated
-GitHub App tags the built commit. Publication then uploads binaries followed
-by update feeds; failed uploads resume from the original artifact without
-rebuilding. Everything merged since the last tag ships as one release; a
-night with nothing new is skipped. The tracked `package.json` version is not
-bumped by CI. Tags reserve versions, and failed publications can be resumed
-with `gh workflow run Release --ref main -f resume_run_id=ORIGINAL_RUN_ID`.
-`npm run release:mac|win|all` is the separate manual fallback that builds from
-a pristine worktree and needs the untracked `.env.releases`.
-Details in [docs/releasing.md](./docs/releasing.md).
+The `Release` GitHub Actions workflow runs every night at 02:17 UTC. It tests,
+builds and signs everything merged since the last `vX.Y.Z` tag, tags the built
+commit, then publishes the installers and update feeds. A night with nothing
+new is skipped. [docs/releasing.md](./docs/releasing.md) covers version bumps,
+recovery of a failed publication, and the manual fallback.
 
 ## License
 
 Codara Studio is open source under the [MIT License](./LICENSE), copyright
-Codara Solutions. Use it, modify it, redistribute it, build on it, commercially
-or otherwise; keep the copyright and permission notice with copies of the
-software.
+Codara Solutions. Use it, modify it, redistribute it and build on it,
+commercially or otherwise; keep the copyright and permission notice with
+copies of the software. Report security problems as described in
+[SECURITY.md](./SECURITY.md).
