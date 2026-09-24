@@ -1,7 +1,7 @@
 import { app, shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
-import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult, PlanFile } from "@shared/types";
+import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult } from "@shared/types";
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 import { isRemotePath } from "@shared/remote";
@@ -9,9 +9,6 @@ import * as remoteFs from "./remote/remote-fs";
 
 const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
 const MAX_FILE_LIST_FILES = 10000;
-const MAX_PLAN_FILES = 200;
-const MAX_PLAN_SCAN_DEPTH = 5;
-const SKIPPED_PLAN_DIRS = new Set([".git", "node_modules", "out", "dist", "build", ".next", ".turbo"]);
 const SKIPPED_FILE_LIST_DIRS = new Set([
   ".git",
   "node_modules",
@@ -202,13 +199,6 @@ export async function readFileEx(path: string): Promise<FsReadResult> {
     size: st.size,
     mtimeMs: st.mtimeMs,
   };
-}
-
-export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
-  if (isRemotePath(root)) return remoteFs.remoteListMarkdownFiles(root);
-  const files: PlanFile[] = [];
-  await collectMarkdownFiles(root, root, 0, files);
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
 }
 
 // Conflict-aware editor save. When `expectedMtimeMs` is provided (autosave),
@@ -597,41 +587,6 @@ async function collectFiles(
       path,
       isDir: false,
       ext: extname(entry.name).replace(/^\./, "").toLowerCase() || undefined,
-    });
-  }
-}
-
-async function collectMarkdownFiles(
-  root: string,
-  dir: string,
-  depth: number,
-  files: PlanFile[],
-): Promise<void> {
-  if (files.length >= MAX_PLAN_FILES || depth > MAX_PLAN_SCAN_DEPTH) return;
-
-  let entries: import("node:fs").Dirent[];
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") return;
-    throw err;
-  }
-
-  for (const entry of entries) {
-    if (files.length >= MAX_PLAN_FILES) return;
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (!SKIPPED_PLAN_DIRS.has(entry.name)) {
-        await collectMarkdownFiles(root, path, depth + 1, files);
-      }
-      continue;
-    }
-    if (!entry.isFile() || extname(entry.name).toLowerCase() !== ".md") continue;
-    files.push({
-      name: entry.name,
-      path,
-      relativePath: relative(root, path) || entry.name,
     });
   }
 }

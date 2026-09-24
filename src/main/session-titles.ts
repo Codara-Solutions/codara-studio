@@ -142,14 +142,6 @@ export function parseClaudeHead(headText: string): ClaudeTranscriptHead {
   return out;
 }
 
-export interface CodexTranscriptHead {
-  cwd: string | null;
-  startedAtMs: number | null;
-  // First user message that survives sanitizeUserText, unclamped. Codex has
-  // no ai-title equivalent.
-  firstUserText: string | null;
-}
-
 // ---- ai-title deep scan ----
 //
 // The ai-title record is appended once, early in a session's life — usually

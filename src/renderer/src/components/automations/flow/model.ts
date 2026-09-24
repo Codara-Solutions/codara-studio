@@ -28,8 +28,7 @@ import { defaultStepAction, stepTitle, validateStepAction, type StepType } from 
 // This module owns the draft<->persisted translation, the graph<->ReactFlow
 // translation, and validation.
 
-// ── legacy linear-node kinds (still used by validateNode + the trigger form) ──
-export type LoomNodeKind = "trigger" | "loop" | "worker";
+// ── trigger / loop / worker drafts (the trigger and loop inspectors) ──
 export interface TriggerDraft {
   kind: AutomationTrigger["kind"];
   cronExpr: string;
@@ -283,55 +282,6 @@ export function buildWorker(d: WorkerDraft): LoomWorkerConfig {
   const t = Number(d.timeoutMin);
   if (d.timeoutMin.trim() && Number.isFinite(t) && t > 0) worker.timeoutMinutes = Math.round(t);
   return worker;
-}
-
-// ── validation (per-node, used by the trigger form + footer hints) ───────────
-// Returns the node's first problem as user-facing text, or null when valid.
-
-export function validateNode(
-  kind: LoomNodeKind,
-  draft: LoomDraft,
-  ctx: { chainableCount: number },
-): string | null {
-  if (kind === "trigger") {
-    const t = draft.trigger;
-    if (t.kind === "cron" && !t.cronExpr.trim()) return "Cron needs an expression.";
-    if (t.kind === "interval") {
-      const m = Number(t.intervalMin);
-      if (!Number.isFinite(m) || m <= 0) return "Interval needs minutes > 0.";
-    }
-    if (t.kind === "folder") {
-      if (!t.folderPath.trim()) return "Folder trigger needs a path.";
-      if (!t.folderEvents.add && !t.folderEvents.change && !t.folderEvents.unlink) {
-        return "Folder trigger needs at least one event.";
-      }
-    }
-    if (t.kind === "onFinishOf") {
-      if (ctx.chainableCount === 0) return "No other automation to chain after yet.";
-      if (!t.chainSourceId.trim()) return "Pick the automation to chain after.";
-    }
-    if (t.kind === "git" && !t.gitEvents.remoteUpdated && !t.gitEvents.localBranchMoved) {
-      return "Git trigger needs at least one event.";
-    }
-    if (t.kind === "onAutomationActivity" && !t.activityEvents.finished && !t.activityEvents.failed) {
-      return "Automation-activity trigger needs at least one outcome.";
-    }
-    return null;
-  }
-  if (kind === "loop") {
-    if (draft.loop.kind === "count") {
-      const n = Number(draft.loop.countN);
-      if (!Number.isFinite(n) || n <= 0) return "N times needs a count > 0.";
-    }
-    if (draft.loop.kind === "cadence") {
-      const m = Number(draft.loop.cadenceMin);
-      if (!Number.isFinite(m) || m <= 0) return "Cadence needs minutes > 0.";
-    }
-    return null;
-  }
-  // worker — runs on the bundled Pi runtime, so there is nothing to gate on:
-  // model and effort are always concrete in the draft.
-  return null;
 }
 
 // ── ReactFlow node/edge payloads ─────────────────────────────────────────────

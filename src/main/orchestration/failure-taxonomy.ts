@@ -6,7 +6,7 @@
 // rejection, a missing binary, a one-off provider 500, and a real 90 minute
 // timeout all produced the same decision, and maybeQueueCliLaunchFallback's
 // single regex could only answer "environmental or not". The patterns here are
-// the ones already scattered across worker-launch.ts (waitForAgentTui's launch
+// the ones already scattered across worker-launch.ts (the retired CLI launch
 // markers, detectFatalWorkerRuntimeError's runtime checks), pi-runtime.ts's
 // OAuth throws, and run-store.ts's interrupt regex, collected in one place so
 // the policy can differ per kind:

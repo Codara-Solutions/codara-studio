@@ -153,16 +153,3 @@ export async function readGitText(cwd: string, args: string[]): Promise<string> 
     return "";
   }
 }
-
-export function splitGitLines(value: string): string[] {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-export function uniqueSorted(values: string[]): string[] {
-  return [...new Set(values)].sort((a, b) =>
-    a.localeCompare(b, undefined, { sensitivity: "base" }),
-  );
-}

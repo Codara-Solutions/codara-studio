@@ -325,64 +325,6 @@ export function ensureWorkspaceGroupColors(
 }
 
 /**
- * Choose an unused lighter/darker shade of one folder's family color. Member
- * separation is scored first; colors outside the folder are also excluded so
- * the rail never contains exact duplicates.
- */
-export function pickWorkspaceGroupShade(
-  familyColor: string,
-  memberColors: readonly string[],
-  unavailableColors: readonly string[],
-  identity: string,
-): string {
-  const family = normalizeWorkspaceColor(familyColor) ?? pickWorkspaceColor([], identity);
-  const familyRgb = parseHexColor(family)!;
-  const hsl = rgbToHsl(...familyRgb);
-  const shadeSpecs = [
-    [hsl.saturation, hsl.lightness],
-    [Math.max(50, hsl.saturation - 10), 78],
-    [Math.min(82, hsl.saturation + 8), 48],
-    [Math.max(46, hsl.saturation - 16), 70],
-    [Math.min(78, hsl.saturation + 4), 56],
-    [Math.max(44, hsl.saturation - 20), 74],
-    [Math.min(84, hsl.saturation + 10), 52],
-    [Math.max(48, hsl.saturation - 14), 66],
-    [Math.min(76, hsl.saturation + 2), 60],
-    [Math.max(42, hsl.saturation - 22), 80],
-    [Math.min(86, hsl.saturation + 12), 45],
-    [Math.max(52, hsl.saturation - 8), 72],
-  ] as const;
-  const candidates = [...new Set(shadeSpecs.map(([saturation, lightness]) =>
-    hslToHex(hsl.hue, saturation, lightness)))];
-  const used = new Set(unavailableColors.map((color) => normalizeWorkspaceColor(color)).filter(Boolean));
-  const memberLabs = memberColors
-    .map(hexToOklab)
-    .filter((color): color is OklabColor => color !== null);
-
-  if (memberLabs.length === 0 && !used.has(family)) return family;
-
-  const offset = stableHash(identity.replace(/\\/g, "/")) % candidates.length;
-  let best: string | null = null;
-  let bestDistance = -1;
-  for (let step = 0; step < candidates.length; step += 1) {
-    const candidate = candidates[(offset + step) % candidates.length];
-    if (used.has(candidate)) continue;
-    const lab = hexToOklab(candidate)!;
-    const nearest = memberLabs.length === 0
-      ? distanceSquared(lab, hexToOklab(family)!)
-      : memberLabs.reduce(
-          (distance, member) => Math.min(distance, distanceSquared(lab, member)),
-          Number.POSITIVE_INFINITY,
-        );
-    if (nearest > bestDistance + 1e-12) {
-      best = candidate;
-      bestDistance = nearest;
-    }
-  }
-  return best ?? pickWorkspaceColor(unavailableColors, identity);
-}
-
-/**
  * Build one folder's workspace shades in rail order. The first member is the
  * darkest and each following member is lighter, so position and color tell the
  * same story. The folder title itself keeps the exact family color.
@@ -434,35 +376,6 @@ export function applyWorkspaceGroupShades(
     return { ...workspace, color };
   });
   return changed ? next : (workspaces as Workspace[]);
-}
-
-/** Rebalance an entire rail into distinct folder families and global singles. */
-export function rebalanceWorkspaceColors(
-  workspaces: readonly Workspace[],
-  groups: readonly WorkspaceGroup[],
-): { workspaces: Workspace[]; groups: WorkspaceGroup[] } {
-  const coloredGroups = ensureWorkspaceGroupColors(groups);
-  const shadedWorkspaces = applyWorkspaceGroupShades(workspaces, coloredGroups);
-  const assignments = new Map<string, string>();
-  const usedColors: string[] = shadedWorkspaces
-    .filter((workspace) => workspace.groupId)
-    .map((workspace) => workspace.color);
-  const validGroupIds = new Set(coloredGroups.map((group) => group.id));
-
-  for (const workspace of shadedWorkspaces) {
-    if (workspace.groupId && validGroupIds.has(workspace.groupId)) continue;
-    const color = pickWorkspaceColor(usedColors, workspace.cwd || workspace.id);
-    assignments.set(workspace.id, color);
-    usedColors.push(color);
-  }
-
-  return {
-    groups: coloredGroups,
-    workspaces: shadedWorkspaces.map((workspace) => {
-      const color = assignments.get(workspace.id);
-      return color ? { ...workspace, color } : workspace;
-    }),
-  };
 }
 
 // Exported for focused regression tests and any future accessibility tooling.

@@ -1715,8 +1715,6 @@ async function main() {
     const run = parkedRun({ flagged: true, question: parkQuestion({ backendFailure: true }) });
     assert.equal(T.isBackendFailurePark(run), true);
     assert.equal(T.workspaceRailTone([run]), null);
-    // And it drops out of the switcher's "needs you" bucket.
-    assert.equal(T.switcherGroupForTone(T.describeRunStatus(run).tone), "done");
   });
 
   // Parks written before the flag existed carry only the reason string. They
@@ -1740,7 +1738,6 @@ async function main() {
     assert.equal(status.tone, "blocked");
     assert.equal(status.label, "Needs you");
     assert.equal(T.workspaceRailTone([run]), "blocked");
-    assert.equal(T.switcherGroupForTone(status.tone), "needs-you");
   });
 
   // The park site must mark itself, and must not offer scope options for an

@@ -13,8 +13,6 @@ import type {
   RemotePairingState,
 } from "@shared/remote-access";
 import type {
-  GitHubPublishInput,
-  GitHubPublishResult,
   GitHubShareDraft,
   GitHubShareInput,
   GitHubShareResult,
@@ -50,7 +48,6 @@ import type {
   AgentMcpServerDetail,
   AgentMcpServerDraft,
   AgentMcpTarget,
-  AgentRuntimeDiagnostic,
   AgentSyncResult,
   SparkBuiltinActionResult,
   SparkBuiltinMcpId,
@@ -358,11 +355,6 @@ const api = {
       ipcRenderer.invoke("usage-analytics:summary", input),
   },
   agents: {
-    runtimes: (force = false): Promise<AgentRuntimeDiagnostic[]> =>
-      ipcRenderer.invoke("agents:runtimes", { force }).catch((err: unknown) => {
-        if (isMissingIpcHandlerError(err, "agents:runtimes")) return [];
-        throw err;
-      }),
     sync: (input?: { cwd?: string | null }): Promise<AgentSyncResult> =>
       ipcRenderer.invoke("agents:sync", input ?? {}).catch((err: unknown) => {
         if (!isMissingIpcHandlerError(err, "agents:sync")) throw err;
@@ -818,11 +810,6 @@ const api = {
         cwd,
         refresh: options.refresh === true,
       }),
-    publish: (
-      cwd: string,
-      input: GitHubPublishInput,
-    ): Promise<GitHubPublishResult> =>
-      ipcRenderer.invoke("github:publish", { cwd, input }),
     shareDraft: (cwd: string): Promise<GitHubShareDraft> =>
       ipcRenderer.invoke("github:shareDraft", { cwd }),
     share: (cwd: string, input: GitHubShareInput): Promise<GitHubShareResult> =>
@@ -1531,8 +1518,6 @@ const api = {
         },
       };
     },
-    cancel: (searchId: string): Promise<void> =>
-      ipcRenderer.invoke("search:cancel", searchId),
   },
   // Browser-ish URLs should stay inside Codara by default. Non-browser
   // schemes still route through Electron so mailto: and friends work.

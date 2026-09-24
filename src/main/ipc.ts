@@ -150,8 +150,6 @@ import type {
   RemotePairingSession,
 } from "@shared/remote-access";
 import type {
-  GitHubPublishInput,
-  GitHubPublishResult,
   GitHubMarkReadyInput,
   GitHubMarkReadyResult,
   GitHubMergeInput,
@@ -208,12 +206,6 @@ let githubCliMod: typeof import("./github-cli") | undefined;
 async function getGitHubCli(): Promise<typeof import("./github-cli")> {
   githubCliMod ??= await import("./github-cli");
   return githubCliMod;
-}
-
-let githubPublishMod: typeof import("./github-publish") | undefined;
-async function getGitHubPublish(): Promise<typeof import("./github-publish")> {
-  githubPublishMod ??= await import("./github-publish");
-  return githubPublishMod;
 }
 
 let githubShareMod: typeof import("./github-share") | undefined;
@@ -1083,12 +1075,6 @@ export function registerIpc(): void {
   });
 
   handle(
-    "agents:runtimes",
-    async (_e, input?: { force?: boolean }) => {
-      return detectAgentRuntimes(Boolean(input?.force));
-    },
-  );
-  handle(
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
       const { syncAgentAssets } = await getAgentSync();
@@ -1889,25 +1875,6 @@ export function registerIpc(): void {
     },
   );
 
-  handle(
-    "github:publish",
-    async (
-      _e,
-      request: { cwd?: unknown; input?: GitHubPublishInput } | null,
-    ): Promise<GitHubPublishResult> => {
-      const cwd = request?.cwd;
-      if (typeof cwd !== "string" || !cwd.trim() || cwd.length > 16_384) {
-        throw new Error("GitHub publish requires a valid local workspace.");
-      }
-      if (isRemotePath(cwd)) {
-        throw new Error(
-          "Publishing pull requests is currently available for local workspaces only.",
-        );
-      }
-      const { publishGitHubWorktree } = await getGitHubPublish();
-      return publishGitHubWorktree(cwd, request?.input);
-    },
-  );
   handle(
     "github:shareDraft",
     async (_e, request: { cwd?: unknown } | null) => {

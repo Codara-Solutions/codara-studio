@@ -28,8 +28,6 @@ const {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
   pickWorkspaceColor,
-  pickWorkspaceGroupShade,
-  rebalanceWorkspaceColors,
   readableWorkspaceAccent,
   workspaceAccentInk,
   workspaceColorContrast,
@@ -147,17 +145,6 @@ assert.equal(new Set(groups.map((group) => group.color)).size, groups.length,
 assert.deepEqual(ensureWorkspaceGroupColors(groups), groups,
   "persisted folder family colors must remain stable");
 
-const shadeOne = pickWorkspaceGroupShade(groups[0].color, [], [], "/client/one");
-const shadeTwo = pickWorkspaceGroupShade(groups[0].color, [shadeOne], [shadeOne], "/client/two");
-const shadeThree = pickWorkspaceGroupShade(
-  groups[0].color,
-  [shadeOne, shadeTwo],
-  [shadeOne, shadeTwo],
-  "/client/three",
-);
-assert.equal(new Set([shadeOne, shadeTwo, shadeThree]).size, 3,
-  "members of one folder must receive different shades");
-
 const orderedShades = workspaceGroupShades("#2AA298", 5);
 assert.equal(new Set(orderedShades).size, orderedShades.length,
   "an ordered folder gradient must keep every member distinct");
@@ -182,26 +169,6 @@ assert.ok(
   workspaceColorLightness(movedOrder[0].color) < workspaceColorLightness(movedOrder[1].color) &&
     workspaceColorLightness(movedOrder[1].color) < workspaceColorLightness(movedOrder[2].color),
   "reordering members must reassign the dark-to-light gradient by rail position",
-);
-
-const rebalanced = rebalanceWorkspaceColors(
-  [
-    { id: "client-a", name: "A", cwd: "/client/a", color: "#2AA298", workers: [], groupId: "group-client" },
-    { id: "client-b", name: "B", cwd: "/client/b", color: "#2AA298", workers: [], groupId: "group-client" },
-    { id: "internal-a", name: "C", cwd: "/internal/a", color: "#2AA298", workers: [], groupId: "group-internal" },
-    { id: "loose", name: "Loose", cwd: "/loose", color: "#2AA298", workers: [] },
-  ],
-  groups,
-);
-assert.equal(
-  new Set(rebalanced.workspaces.map((workspace) => workspace.color)).size,
-  rebalanced.workspaces.length,
-  "a full rebalance must remove exact duplicates across the rail",
-);
-assert.ok(
-  workspaceColorLightness(rebalanced.workspaces[0].color) <
-    workspaceColorLightness(rebalanced.workspaces[1].color),
-  "a folder's first member must be darker than the sibling below it",
 );
 
 console.log(

@@ -24,7 +24,6 @@ import { getConnection, shQuote } from "./connections";
 
 const MAX_BINARY_READ_BYTES = 300 * 1024 * 1024;
 const MAX_FILE_LIST_FILES = 10000;
-const MAX_MARKDOWN_FILES = 200;
 const LIST_SKIP_DIRS = [".git", "node_modules", "out", "dist", "build", ".next", ".turbo", "coverage"];
 
 function toMs(attrs: SftpStats): number {
@@ -270,25 +269,6 @@ export async function remoteListFiles(remoteRoot: string): Promise<FileListResul
   });
   files.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
   return { files, truncated };
-}
-
-export async function remoteListMarkdownFiles(
-  remoteRoot: string,
-): Promise<Array<{ name: string; path: string; relativePath: string }>> {
-  const parts = parseRemotePath(remoteRoot);
-  if (!parts) throw new Error(`Not a remote path: ${remoteRoot}`);
-  const conn = await getConnection(parts.hostId);
-  const prune = LIST_SKIP_DIRS.map((d) => `-name ${shQuote(d)}`).join(" -o ");
-  const cmd = `cd ${shQuote(parts.path)} && find . -maxdepth 6 \\( ${prune} \\) -prune -o -type f \\( -iname '*.md' -o -iname '*.markdown' \\) -print 2>/dev/null | head -n ${MAX_MARKDOWN_FILES}`;
-  const res = await conn.exec(cmd, { timeoutMs: 20_000 });
-  const rels = res.stdout.split("\n").map((l) => l.replace(/^\.\//, "").trim()).filter(Boolean);
-  return rels
-    .map((rel) => ({
-      name: basenamePosix(rel),
-      path: makeRemotePath(parts.hostId, remoteJoin(parts.path, rel)),
-      relativePath: rel,
-    }))
-    .sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
 }
 
 // Paste-after-copy. Sources may be LOCAL absolute paths (upload) or ssh://

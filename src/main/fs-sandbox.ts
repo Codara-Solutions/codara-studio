@@ -18,7 +18,7 @@ import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-p
 //     is a coarse defence, not a security boundary; real isolation would
 //     also need OS-level sandboxing.
 //   * Only gates read primitives (fs:list, fs:listFiles, fs:readText,
-//     fs:readEx, fs:listMarkdownFiles, fs:setWatchRoot). Write/create/
+//     fs:readEx, fs:addWatchRoot). Write/create/
 //     delete handlers have a different attack surface and are untouched.
 //
 // The runs root narrows the symlink limitation above, because it is the one
