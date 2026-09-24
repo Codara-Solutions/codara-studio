@@ -265,7 +265,7 @@ async function main() {
         shell: true,
         input: '{"session_id":"s1","tool_name":"Bash"}',
         encoding: "utf8",
-        env: { ...process.env, CODARA_HOME_DIR: hooksHome },
+        env: { ...process.env, SPARK_PANE_ID: "pane-test", CODARA_HOME_DIR: hooksHome },
       });
       const dropped = fs.existsSync(path.join(hooksHome, "hooks"))
         ? fs.readdirSync(path.join(hooksHome, "hooks")).filter((f) => f.endsWith(".json"))
@@ -274,6 +274,24 @@ async function main() {
         "the emitted command runs the script and records the event",
         live.status === 0 && dropped.length === 1,
         `status=${live.status} files=${dropped.length} stderr=${(live.stderr || "").trim()}`,
+      );
+
+      // The settings file is shared with Claude Code sessions in other
+      // terminal apps. Outside a Codara pane the hook exits at once and
+      // records nothing the watcher would only drop.
+      const outsideHome = scratch("hooks-home-outside");
+      const outsideEnv = { ...process.env, CODARA_HOME_DIR: outsideHome };
+      delete outsideEnv.SPARK_PANE_ID;
+      const outside = spawnSync(command, {
+        shell: true,
+        input: '{"session_id":"s2","tool_name":"Bash"}',
+        encoding: "utf8",
+        env: outsideEnv,
+      });
+      check(
+        "outside a Codara pane the hook exits 0 and records nothing",
+        outside.status === 0 && !fs.existsSync(path.join(outsideHome, "hooks")),
+        `status=${outside.status} stderr=${(outside.stderr || "").trim()}`,
       );
 
       // Defence in depth: even a durable path can be deleted by a user
@@ -572,7 +590,7 @@ async function main() {
         shell: true,
         input: '{"session_id":"s1","tool_name":"Bash"}',
         encoding: "utf8",
-        env: { ...process.env, CODARA_HOME_DIR: scratch("hooks-home") },
+        env: { ...process.env, SPARK_PANE_ID: "pane-test", CODARA_HOME_DIR: scratch("hooks-home") },
       });
       check(
         "the PreToolUse hook does not block after the worktree is deleted",
@@ -689,7 +707,7 @@ async function main() {
         cwd: hostile,
         input: '{"tool_name":"Bash"}',
         encoding: "utf8",
-        env: { ...process.env, CODARA_HOME_DIR: hooksHome },
+        env: { ...process.env, SPARK_PANE_ID: "pane-test", CODARA_HOME_DIR: hooksHome },
       });
       const recorded = fs.existsSync(path.join(hooksHome, "hooks"))
         ? fs.readdirSync(path.join(hooksHome, "hooks")).length
@@ -715,7 +733,7 @@ async function main() {
         shell: true,
         input: '{"tool_name":"Bash"}',
         encoding: "utf8",
-        env: { ...process.env, CODARA_HOME_DIR: hooksHome },
+        env: { ...process.env, SPARK_PANE_ID: "pane-test", CODARA_HOME_DIR: hooksHome },
       });
       const recorded = fs.existsSync(path.join(hooksHome, "hooks"))
         ? fs.readdirSync(path.join(hooksHome, "hooks")).length
@@ -813,7 +831,7 @@ async function main() {
           cwd: project,
           input: '{"tool_name":"Bash"}',
           encoding: "utf8",
-          env: { ...process.env, PYTHONPATH: entry, CODARA_HOME_DIR: hooksHome },
+          env: { ...process.env, SPARK_PANE_ID: "pane-test", PYTHONPATH: entry, CODARA_HOME_DIR: hooksHome },
         });
         const recorded = fs.existsSync(path.join(hooksHome, "hooks"))
           ? fs.readdirSync(path.join(hooksHome, "hooks")).length
@@ -840,7 +858,7 @@ async function main() {
           cwd: basePrefix,
           input: '{"tool_name":"Bash"}',
           encoding: "utf8",
-          env: { ...process.env, CODARA_HOME_DIR: hooksHome },
+          env: { ...process.env, SPARK_PANE_ID: "pane-test", CODARA_HOME_DIR: hooksHome },
         });
         const recorded = fs.existsSync(path.join(hooksHome, "hooks"))
           ? fs.readdirSync(path.join(hooksHome, "hooks")).length
