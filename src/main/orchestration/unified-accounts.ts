@@ -384,17 +384,36 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       .length;
   }
 
+  /**
+   * Terminals per CLI profile. Where every session runs on the live login,
+   * all of them count for the live profile whichever account they started
+   * on, and none for any other.
+   */
+  private async sessionCounter(
+    profileIds: readonly string[],
+  ): Promise<(cliProfileId: string) => number> {
+    if (!this.adapter.sessionsFollowLiveLogin) {
+      return (cliProfileId) => this.liveSessionCount(cliProfileId);
+    }
+    const live = await this.adapter.activeCliProfileId?.().catch(() => undefined);
+    const owners = new Set<string>();
+    for (const id of new Set([this.personalId, ...profileIds])) {
+      for (const owner of this.leases.owners(id)) {
+        if (owner.startsWith("terminal:")) owners.add(owner);
+      }
+    }
+    return (cliProfileId) => (cliProfileId === live ? owners.size : 0);
+  }
+
   /** Terminal status per CLI profile id, from one credential read each. */
   async terminalStatuses(): Promise<Map<string, UnifiedTerminalStatus>> {
     const statuses = new Map<string, UnifiedTerminalStatus>();
     try {
       const connections = await this.adapter.inspectCli();
       this.sweepLeases();
+      const sessions = await this.sessionCounter(connections.map((connection) => connection.id));
       for (const connection of connections) {
-        statuses.set(
-          connection.id,
-          terminalStatusFrom(connection, this.liveSessionCount(connection.id)),
-        );
+        statuses.set(connection.id, terminalStatusFrom(connection, sessions(connection.id)));
       }
     } catch (error) {
       this.log(
@@ -419,6 +438,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     const linked = new Set<string>();
     const accounts: UnifiedAccountView[] = [];
     this.sweepLeases();
+    const sessions = await this.sessionCounter((cli ?? []).map((connection) => connection.id));
     for (const profile of inspection.snapshot.profiles) {
       if (profile.provider !== this.provider) continue;
       const cliProfileId = profile.cliProfileId ?? null;
@@ -439,9 +459,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         isAccount1: cliProfileId === this.personalId,
         isDefault: inspection.snapshot.defaults[this.provider] === profile.id,
         cora,
-        terminal: connection
-          ? terminalStatusFrom(connection, this.liveSessionCount(connection.id))
-          : null,
+        terminal: connection ? terminalStatusFrom(connection, sessions(connection.id)) : null,
       });
     }
     const terminalOnly: UnifiedTerminalOnlyView[] = [];
@@ -452,7 +470,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         cliProfileId: connection.id,
         label: connection.label,
         isCliDefault: connection.isDefault,
-        terminal: terminalStatusFrom(connection, this.liveSessionCount(connection.id)),
+        terminal: terminalStatusFrom(connection, sessions(connection.id)),
       });
     }
     return { accounts, terminalOnly };
@@ -1062,10 +1080,13 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       const personalRow = profile.cliProfileId === this.personalId;
       const cliProfileId = personalRow ? null : profile.cliProfileId;
       const closeSessions = options.closeSessions === true;
+      // Sessions that follow the live login never run on the half being
+      // deleted: the hand-off below moves the live login first.
+      const sessionsFollow = this.adapter.sessionsFollowLiveLogin === true;
       // Every refusal comes before anything moves: the card asks about the
       // terminals in a second step, and a delete the user then abandons must
       // not have switched Cora and the CLI to another account.
-      if (cliProfileId) {
+      if (cliProfileId && !sessionsFollow) {
         this.sweepLeases();
         const owners = this.leases.owners(cliProfileId);
         const terminals = this.liveSessionCount(cliProfileId);
@@ -1124,7 +1145,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
             if (restored) await this.watchProfile(restored);
             throw error;
           }
-          if (this.sessionsHook && this.leases.isLeased(cliProfileId)) {
+          if (!sessionsFollow && this.sessionsHook && this.leases.isLeased(cliProfileId)) {
             closedSessionCount = (await this.sessionsHook.disposeProfileSessions(cliProfileId))
               .closedSessionCount;
             this.sweepLeases();

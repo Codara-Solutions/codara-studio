@@ -271,7 +271,9 @@ async function main() {
   );
   fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(claudeDir, 0o700);
-  const claudeFile = path.join(claudeDir, ".credentials.json");
+  // Every Claude account runs in one home; while another account is live,
+  // this account's login waits in its vault.
+  const claudeFile = path.join(claudeDir, "login.json");
   const now = Date.now();
   fs.writeFileSync(
     authFile,
@@ -288,14 +290,17 @@ async function main() {
   fs.writeFileSync(
     claudeFile,
     JSON.stringify({
-      claudeAiOauth: {
-        accessToken: "terminal-access",
-        refreshToken: "terminal-refresh",
-        // Raw expiry: fresher than Cora's (Pi stores raw minus five minutes),
-        // and still lapsed, so the retry really has to refresh.
-        expiresAt: now + 250_000,
-        scopes: ["user:inference"],
-        subscriptionType: "max",
+      version: 1,
+      store: {
+        claudeAiOauth: {
+          accessToken: "terminal-access",
+          refreshToken: "terminal-refresh",
+          // Raw expiry: fresher than Cora's (Pi stores raw minus five
+          // minutes), and still lapsed, so the retry really has to refresh.
+          expiresAt: now + 250_000,
+          scopes: ["user:inference"],
+          subscriptionType: "max",
+        },
       },
     }),
     { mode: 0o600 },
@@ -336,7 +341,7 @@ async function main() {
   check("both files converge on the repaired token", () => {
     const stored = JSON.parse(fs.readFileSync(authFile, "utf8")).anthropic;
     assert.strictEqual(stored.refresh, "repaired-refresh-token");
-    const terminal = JSON.parse(fs.readFileSync(claudeFile, "utf8")).claudeAiOauth;
+    const terminal = JSON.parse(fs.readFileSync(claudeFile, "utf8")).store.claudeAiOauth;
     assert.strictEqual(terminal.accessToken, "repaired-access-token");
     assert.strictEqual(terminal.refreshToken, "repaired-refresh-token");
     assert.strictEqual(terminal.subscriptionType, "max", "Claude-only fields survive the mirror");

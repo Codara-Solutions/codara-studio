@@ -99,27 +99,40 @@ Everything under `src/main/orchestration/`. The vocabulary is in
 ## Accounts
 
 One account has two halves. The Cora half is a Pi OAuth credential in
-`~/.codarastudio/pi-agent/accounts/<id>/auth.json`. The CLI half is a private
-login directory for Claude Code (`CLAUDE_CONFIG_DIR`), Codex (`CODEX_HOME`),
-or Grok, with user-state surfaces (projects, settings, history) symlinked to
-your personal home by `native-cli-shared-state.ts` so switching feels like
-logout and login on one home. "Account 1" is your personal login in the CLI's
-default home.
+`~/.codarastudio/pi-agent/accounts/<id>/auth.json`. The CLI half depends on
+the CLI:
+
+- **Claude Code and Codex run every account in one home**, the user's own
+  `~/.claude` and `~/.codex`, exactly as they run in any other terminal app.
+  The Active account's login is the one in that home; every other account's
+  login waits in a vault under `~/.codarastudio`. A switch moves only the
+  login, the way `/login` as another account does: for Claude Code the
+  account-scoped secure-storage keys and the `oauthAccount` identity
+  (`claude-cli-live-login.ts`), for Codex `auth.json`
+  (`codex-cli-auth-selector.ts`). MCP sign-ins, settings, history and project
+  trust exist once, so they survive every switch and a terminal outside
+  Codara sees the same account. A Claude switch holds Claude Code's own
+  refresh and storage locks, closes no session, and running sessions adopt
+  the new login on their next request.
+- **Grok** gives each managed account a private `GROK_HOME`, with user state
+  symlinked to the personal home by `native-cli-shared-state.ts`.
+
+"Account 1" is your own login in the CLI's default home.
 
 `unified-accounts.ts` is the single mutation path (use, share login, delete,
-rename) with per-provider adapters in `account-adapters/`. The Active
+rename) with per-provider adapters in `account-adapters/`. The Active Grok
 account for new terminals is resolved by `active-cli-env-pointer.ts` and
 injected into PTY environments by `pty-manager.ts`; running shells follow a
 switch through the prompt hooks.
 
-`credential-mirror.ts` keeps the two halves converged: both sides refresh the
-same OAuth grant independently and refresh tokens rotate, so whichever side
-refreshed last holds the only valid refresh token, and the mirror copies it to
-the other side (newer expiry wins, a side without a refresh token never wins,
-foreign logins are never adopted, writes go through Pi's lock and the
-adapter's atomic store). This is the most bug-prone area of the app because
-two independent refreshers share one grant; see the review notes in
-`REVIEW.md` for the recommended simplification.
+`credential-mirror.ts` keeps the two halves converged: whichever side
+refreshed last holds the only valid refresh token, and the mirror copies it
+to the other side (newer expiry wins, a side without a refresh token never
+wins, foreign logins are never adopted, writes go through Pi's lock and the
+adapter's atomic store). A login Claude Code blanks after a spent refresh
+token is repaired from the Cora half, never read as a logout. Both halves
+still refresh the same grant; see the review notes in `REVIEW.md` for the
+recommended simplification.
 
 ## Notifications
 

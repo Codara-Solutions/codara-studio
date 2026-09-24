@@ -1,6 +1,5 @@
 import {
   claudeCredentialAuthChecker,
-  ClaudeCliAccountProfileNotFoundError,
   ClaudeCliAccountProfileStore,
   type ClaudeCliProfileId,
 } from "./claude-cli-account-profiles";
@@ -12,12 +11,13 @@ import {
 
 /**
  * Process-wide native Claude profile store and lease registry. All Claude CLI
- * launch surfaces resolve through this module so legacy-unset and managed
- * CLAUDE_CONFIG_DIR semantics cannot drift between transports.
+ * launch surfaces resolve through this module so CLAUDE_CONFIG_DIR semantics
+ * cannot drift between transports.
  *
- * A managed account runs in its own CLAUDE_CONFIG_DIR and the personal
- * account is ~/.claude itself: nothing is swapped into the official slot any
- * more, so resolving a profile never touches another account's credential.
+ * Every account runs in the user's own Claude home, exactly as `claude` does
+ * in any other terminal app; an account switch moves the login inside that
+ * home (claude-cli-live-login.ts). A profile id only records which account a
+ * session started on.
  */
 export const nativeClaudeProfileLeases = defaultClaudeCliProfileLeases();
 
@@ -31,8 +31,7 @@ export const nativeClaudeProfileLeases = defaultClaudeCliProfileLeases();
 export interface NativeClaudeProfileResolutionHooks {
   ready(): Promise<void>;
   beforeNewProfile(): Promise<void>;
-  beforeFrozenProfile(profileId: ClaudeCliProfileId): Promise<void>;
-  /** A terminal on this profile exited; the moment its token most likely rotated. */
+  /** A Claude terminal exited; the moment the live login most likely rotated. */
   afterLeaseReleased(profileId: ClaudeCliProfileId): Promise<void>;
 }
 
@@ -69,28 +68,17 @@ export async function resolveNewNativeClaudeProfile(
 }
 
 /**
- * Restored panes keep the account they were started with while it still
- * exists; a profile deleted in the meantime falls back to the default.
+ * A restored pane or a transcript lookup for an earlier session. Its
+ * account is history: every Claude session runs on the live login in the
+ * one home, so it resolves like a new launch. A pane that started on another
+ * account continues on the active one, the same as a `claude --resume` in
+ * any other terminal after a `/login`.
  */
 export async function resolveFrozenNativeClaudeProfile(
-  nativeClaudeProfileId: string | null | undefined,
+  _nativeClaudeProfileId: string | null | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<ClaudeCliExecutionProfile> {
-  const hooks = resolutionHooks;
-  await hooks?.ready();
-  try {
-    const frozen = await resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
-      profileId: nativeClaudeProfileId,
-      baseEnv,
-    });
-    await hooks?.beforeFrozenProfile(frozen.profileId).catch(() => undefined);
-    return frozen;
-  } catch (error) {
-    if (error instanceof ClaudeCliAccountProfileNotFoundError) {
-      return resolveNewNativeClaudeProfile(baseEnv);
-    }
-    throw error;
-  }
+  return resolveNewNativeClaudeProfile(baseEnv);
 }
 
 /** Called by the pty layer when a Claude terminal's lease is released. */

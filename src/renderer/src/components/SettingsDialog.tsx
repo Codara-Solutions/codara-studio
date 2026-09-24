@@ -2424,8 +2424,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           closeSessionsPrompt?.profileId === profile.id ? closeSessionsPrompt : null;
         // Store-change broadcasts must not disarm the requested action.
         // Fresh counts replace the refusal while its card stays open.
-        const closeSessionsCount =
-          profile.terminal?.liveSessions ?? (refused?.action === "delete" ? refused.count : 0);
+        const closeSessionsCount = descriptor.sessionsFollowLiveLogin
+          ? 0
+          : profile.terminal?.liveSessions ?? (refused?.action === "delete" ? refused.count : 0);
         const switchCloseSessionsCount = refused?.action === "use"
           ? (overview?.switchSessionCounts?.[provider] ?? refused.count) : 0;
         return {

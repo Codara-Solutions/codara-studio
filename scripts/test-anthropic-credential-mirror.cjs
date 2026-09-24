@@ -3,8 +3,10 @@
 
 // The provider-generic credential mirror over the Claude adapter, driven
 // against real temp directories and the REAL pinned Pi AuthStorage
-// (proper-lockfile and all). The Keychain is replaced by an in-memory map so
-// no real item is touched.
+// (proper-lockfile and all). Claude accounts live in one home: the live
+// profile's login is the home's credential store and every other profile's
+// login is its vault. The Keychain is off, so the live store is the home's
+// `.credentials.json` and no real item is touched.
 //
 //   node scripts/test-anthropic-credential-mirror.cjs
 
@@ -22,6 +24,9 @@ const OUT = path.join(TMP, "mirror.cjs");
 const CORA_ID = "11111111-1111-4111-8111-111111111111";
 const CLI_ID = "22222222-2222-4222-8222-222222222222";
 const PADDING = 5 * 60 * 1000;
+process.env.CODARA_DISABLE_KEYCHAIN = "1";
+process.env.CODARA_HOME_DIR = path.join(TMP, "codara-home");
+delete process.env.CLAUDE_CONFIG_DIR;
 
 const stubPlugin = {
   name: "mirror-harness",
@@ -79,6 +84,7 @@ async function main() {
       `export * from ${JSON.stringify(orchestration("credential-mirror.ts"))};`,
       `export * as codec from ${JSON.stringify(orchestration("account-adapters/claude-credential-codec.ts"))};`,
       `export * as claudeAdapter from ${JSON.stringify(orchestration("account-adapters/claude-account-adapter.ts"))};`,
+      `export * as claudeStores from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
     ].join("\n"),
   );
   await esbuild.build({
@@ -95,63 +101,70 @@ async function main() {
   const codec = mod.codec;
   const AuthStorage = await loadAuthStorage();
 
-  // A Keychain that lives in a map, keyed by service, plus the real file half.
-  const keychain = new Map();
-  const credentialsMod = await (async () => {
-    const out = path.join(TMP, "credentials.cjs");
-    await esbuild.build({
-      entryPoints: [path.join(ROOT, "src", "main", "orchestration", "claude-cli-credentials.ts")],
-      bundle: true,
-      platform: "node",
-      format: "cjs",
-      outfile: out,
-      logLevel: "silent",
-    });
-    return require(out);
-  })();
-  const backend = {
-    async read(configDir, configDirEnv) {
-      return (
-        keychain.get(credentialsMod.claudeCliKeychainService(configDirEnv)) ??
-        credentialsMod.readCredentialFile(credentialsMod.claudeCredentialFile(configDir))
-      );
-    },
-    async write(configDir, configDirEnv, credential) {
-      await credentialsMod.atomicWriteCredential(
-        credentialsMod.claudeCredentialFile(configDir),
-        credential,
-      );
-      keychain.set(credentialsMod.claudeCliKeychainService(configDirEnv), credential);
-    },
-    async clear(configDir, configDirEnv) {
-      keychain.delete(credentialsMod.claudeCliKeychainService(configDirEnv));
-      fs.rmSync(credentialsMod.claudeCredentialFile(configDir), { force: true });
-    },
-  };
-
-  // The adapter carries the Keychain seam; a pair built on another backend
-  // (a racing or gated one below) gets its own adapter.
-  const makeAdapter = (adapterBackend) =>
-    mod.claudeAdapter.createClaudeAccountAdapter({ backend: adapterBackend, platform: "linux" });
-  const adapter = makeAdapter(backend);
+  // Every pair gets its own Claude home and account store. A managed pair's
+  // CLI half is its vault until the marker names it live; Account 1's is the
+  // live home until another profile takes the slot.
   let pairIndex = 0;
   function makePair(options = {}) {
     pairIndex += 1;
     const root = path.join(TMP, `pair-${pairIndex}`);
     const piDir = path.join(root, "pi", CORA_ID);
     const cliId = options.personal ? "personal" : CLI_ID;
-    const configDir = path.join(root, options.personal ? ".claude" : path.join("claude-cli", "accounts", CLI_ID));
+    const home = path.join(root, "home");
+    const configDir = path.join(home, ".claude");
     fs.mkdirSync(piDir, { recursive: true, mode: 0o700 });
     fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-    return {
+    fs.mkdirSync(path.join(root, "claude-cli"), { recursive: true, mode: 0o700 });
+    const store = new mod.claudeStores.ClaudeCliAccountProfileStore(path.join(root, "claude-cli"), {
+      personalConfigDir: configDir,
+      personalConfigDirEnv: null,
+      idFactory: () => CLI_ID,
+      authChecker: () => ({ connected: true }),
+    });
+    const adapter = mod.claudeAdapter.createClaudeAccountAdapter({
+      store,
+      fileOnly: true,
+      platform: "linux",
+    });
+    const pair = {
       provider: "anthropic",
       coraProfileId: CORA_ID,
       cliProfileId: cliId,
       authFile: path.join(piDir, "auth.json"),
-      location: { configDir, configDirEnv: options.personal ? null : configDir },
+      location: adapter.locate(cliId),
       adapter,
     };
+    const meta = {
+      root,
+      home,
+      configDir,
+      store,
+      liveFile: path.join(configDir, ".credentials.json"),
+      identityFile: path.join(home, ".claude.json"),
+      markerFile: path.join(root, "claude-cli", "live-login.json"),
+    };
+    pairs.set(pair, meta);
+    return { pair, meta, ready: options.personal ? Promise.resolve() : store.createProfile({ label: "Managed" }) };
   }
+  const pairs = new Map();
+  const metaOf = (pair) => {
+    for (const [known, meta] of pairs) if (known.authFile === pair.authFile) return meta;
+    throw new Error("unknown pair");
+  };
+  const isLive = (pair) => {
+    const meta = metaOf(pair);
+    const marker = fs.existsSync(meta.markerFile)
+      ? JSON.parse(fs.readFileSync(meta.markerFile, "utf8")).profileId
+      : "personal";
+    return marker === pair.cliProfileId;
+  };
+  const makeLive = (pair) => {
+    fs.writeFileSync(
+      metaOf(pair).markerFile,
+      JSON.stringify({ version: 1, profileId: pair.cliProfileId }),
+      { mode: 0o600 },
+    );
+  };
   const writePi = (pair, credential) => {
     if (credential === null) {
       fs.rmSync(pair.authFile, { force: true });
@@ -164,22 +177,27 @@ async function main() {
     fs.existsSync(pair.authFile)
       ? JSON.parse(fs.readFileSync(pair.authFile, "utf8")).anthropic ?? null
       : null;
-  const writeClaude = (pair, record) => {
-    const { configDir, configDirEnv } = pair.location;
+  const writeClaude = (pair, record, extras = {}) => {
+    const file = isLive(pair) ? metaOf(pair).liveFile : pair.location.vaultFile;
     if (record === null) {
-      keychain.delete(credentialsMod.claudeCliKeychainService(configDirEnv));
-      fs.rmSync(credentialsMod.claudeCredentialFile(configDir), { force: true });
+      fs.rmSync(file, { force: true });
       return;
     }
-    const file = credentialsMod.claudeCredentialFile(configDir);
-    fs.writeFileSync(file, JSON.stringify({ claudeAiOauth: record }), { mode: 0o600 });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const body = isLive(pair)
+      ? { ...extras, claudeAiOauth: record }
+      : { version: 1, store: { claudeAiOauth: record } };
+    fs.writeFileSync(file, JSON.stringify(body), { mode: 0o600 });
     fs.chmodSync(file, 0o600);
-    keychain.delete(credentialsMod.claudeCliKeychainService(configDirEnv));
   };
   const readClaude = (pair) =>
-    adapter.readCli(pair.location).then((side) => (side.kind === "credential" ? side.raw : side));
+    pair.adapter.readCli(pair.location).then((side) => (side.kind === "credential" ? side.raw : side));
   const reconcile = (pair, extra = {}) =>
     mod.reconcilePair(pair, { loadAuthStorage, retryDelayMs: 20, ...extra });
+  const withReadCli = (pair, readCli) => ({
+    ...pair,
+    adapter: { ...pair.adapter, readCli },
+  });
 
   const T0 = 1_800_000_000_000;
   const pi = (n, extra = {}) => ({
@@ -197,6 +215,11 @@ async function main() {
     subscriptionType: "max",
     ...extra,
   });
+  async function managedPair() {
+    const made = makePair();
+    await made.ready;
+    return made;
+  }
 
   // Pure core.
   {
@@ -247,7 +270,7 @@ async function main() {
 
   // Fresher Pi wins: the Claude side gets the token, its own fields survive.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(5));
     writeClaude(pair, claude(3, { rateLimitTier: "tier" }));
     const result = await reconcile(pair);
@@ -261,101 +284,90 @@ async function main() {
     assert.equal(after.subscriptionType, "max");
     assert.equal(after.rateLimitTier, "tier");
     assert.deepEqual(readPi(pair), pi(5), "the winning side is untouched");
-    assert.equal(mode(credentialsMod.claudeCredentialFile(pair.location.configDir)), 0o600);
-    assert.ok(keychain.has(credentialsMod.claudeCliKeychainService(pair.location.configDirEnv)));
+    assert.equal(mode(pair.location.vaultFile), 0o600);
     const again = await reconcile(pair);
     assert.equal(again.verdict, "equal");
     assert.equal(again.wrote, null);
     pass("a fresher Pi token flows to Claude Code and the pair is then in sync");
   }
 
+  // The live slot keeps its MCP grants when the mirror writes the login.
   {
-    const pair = makePair();
-    pair.adapter = makeAdapter(credentialsMod.fileOnlyClaudeCliCredentialBackend);
+    const { pair, meta } = await managedPair();
+    makeLive(pair);
     writePi(pair, pi(5));
-    const file = credentialsMod.claudeCredentialFile(pair.location.configDir);
     const extras = { mcpOAuth: { server: { accessToken: "mcp-live", refreshToken: "mcp-refresh" } } };
-    fs.writeFileSync(file, JSON.stringify({ ...extras, claudeAiOauth: claude(3) }), { mode: 0o600 });
+    writeClaude(pair, claude(3), extras);
     assert.equal((await reconcile(pair)).wrote, "cli");
-    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(meta.liveFile, "utf8"));
     assert.deepEqual(raw.mcpOAuth, extras.mcpOAuth);
     assert.equal(raw.claudeAiOauth.accessToken, "pi-access-5");
+    assert.equal(
+      JSON.parse(fs.readFileSync(pair.location.vaultFile, "utf8")).store.claudeAiOauth.accessToken,
+      "pi-access-5",
+      "the vault copy trails the live slot",
+    );
     assert.equal(readPi(pair).mcpOAuth, undefined, "MCP grants never enter Pi account credentials");
-    pass("the real file backend preserves MCP grants during a mirror reconciliation");
+    pass("the live slot preserves MCP grants during a mirror reconciliation");
   }
-  // Identity crossover: the user logs their OWN ~/.claude into a different
+
+  // Identity crossover: the user logs the live home into a different
   // account. Claude's tokens are opaque, so the slot's identity record is the
   // only witness; without consulting it the row would adopt a stranger's
   // login as its Cora half and every card would show that account's usage.
   {
-    const pair = { ...makePair({ personal: true }), identityFingerprint: "fp-own-account" };
-    writePi(pair, pi(2));
-    writeClaude(pair, claude(9));
-    // Claude Code records the personal identity beside the home, not inside
-    // the config dir: <home>/.claude.json, the file the real reader consults.
-    const slotHome = path.dirname(pair.location.configDir);
-    const identityFile = path.join(slotHome, ".claude.json");
+    const { pair, meta } = makePair({ personal: true });
+    const owned = { ...pair, identityFingerprint: "fp-own-account" };
+    writePi(owned, pi(2));
+    writeClaude(owned, claude(9));
 
     // Same account: the fresher CLI token still flows to Cora.
-    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own" } }));
+    fs.writeFileSync(meta.identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own" } }));
     const sameAccount = await reconcile({
-      ...pair,
-      adapter: { ...adapter, cliIdentityFingerprint: async () => "fp-own-account" },
+      ...owned,
+      adapter: { ...owned.adapter, cliIdentityFingerprint: async () => "fp-own-account" },
     });
     assert.equal(sameAccount.verdict, "cli-newer");
     assert.equal(sameAccount.wrote, "pi");
 
     // Another account in the same slot: nothing moves, in either direction.
-    writePi(pair, pi(2));
-    writeClaude(pair, claude(9));
-    const foreignAdapter = { ...adapter, cliIdentityFingerprint: async () => "fp-someone-else" };
-    const stranger = await reconcile({ ...pair, adapter: foreignAdapter });
+    writePi(owned, pi(2));
+    writeClaude(owned, claude(9));
+    const foreignAdapter = { ...owned.adapter, cliIdentityFingerprint: async () => "fp-someone-else" };
+    const stranger = await reconcile({ ...owned, adapter: foreignAdapter });
     assert.equal(stranger.verdict, "foreign");
     assert.equal(stranger.wrote, null);
-    assert.deepEqual(readPi(pair), pi(2), "the row keeps its own Cora credential");
-    assert.equal((await readClaude(pair)).accessToken, "claude-access-9", "the stranger's login is left alone");
+    assert.deepEqual(readPi(owned), pi(2), "the row keeps its own Cora credential");
+    assert.equal((await readClaude(owned)).accessToken, "claude-access-9", "the stranger's login is left alone");
 
     // A fresher Cora half must not overwrite the stranger's slot either.
-    writePi(pair, pi(20));
-    const outward = await reconcile({ ...pair, adapter: foreignAdapter });
+    writePi(owned, pi(20));
+    const outward = await reconcile({ ...owned, adapter: foreignAdapter });
     assert.equal(outward.verdict, "foreign");
     assert.equal(outward.wrote, null);
-    assert.equal((await readClaude(pair)).accessToken, "claude-access-9");
+    assert.equal((await readClaude(owned)).accessToken, "claude-access-9");
 
-    // The real adapter reads that identity from the slot's own .claude.json,
-    // so the wiring, not just the mirror rule, is pinned here.
-    const realAdapter = mod.claudeAdapter.createClaudeAccountAdapter({
-      backend,
-      platform: "linux",
-      homeDir: slotHome,
-    });
-    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own-uuid" } }));
-    const ownFingerprint = await realAdapter.cliIdentityFingerprint(pair.location);
+    // The real adapter reads that identity from the live home's
+    // .claude.json, so the wiring, not just the mirror rule, is pinned here.
+    fs.writeFileSync(meta.identityFile, JSON.stringify({ oauthAccount: { accountUuid: "own-uuid" } }));
+    const ownFingerprint = await owned.adapter.cliIdentityFingerprint(owned.location);
     assert.ok(ownFingerprint, "the adapter reads the slot's identity");
-    writePi(pair, pi(2));
-    writeClaude(pair, claude(9));
-    const mine = await reconcile({
-      ...pair,
-      identityFingerprint: ownFingerprint,
-      adapter: realAdapter,
-    });
+    writePi(owned, pi(2));
+    writeClaude(owned, claude(9));
+    const mine = await reconcile({ ...owned, identityFingerprint: ownFingerprint });
     assert.equal(mine.verdict, "cli-newer", "the row's own login still mirrors");
-    fs.writeFileSync(identityFile, JSON.stringify({ oauthAccount: { accountUuid: "other-uuid" } }));
-    writePi(pair, pi(2));
-    writeClaude(pair, claude(9));
-    const theirs = await reconcile({
-      ...pair,
-      identityFingerprint: ownFingerprint,
-      adapter: realAdapter,
-    });
+    fs.writeFileSync(meta.identityFile, JSON.stringify({ oauthAccount: { accountUuid: "other-uuid" } }));
+    writePi(owned, pi(2));
+    writeClaude(owned, claude(9));
+    const theirs = await reconcile({ ...owned, identityFingerprint: ownFingerprint });
     assert.equal(theirs.verdict, "foreign", "a re-login into another account is refused");
-    assert.deepEqual(readPi(pair), pi(2));
+    assert.deepEqual(readPi(owned), pi(2));
 
     // An unreadable identity is not a verdict: a healthy pair keeps working.
-    writePi(pair, pi(2));
+    writePi(owned, pi(2));
     const unknown = await reconcile({
-      ...pair,
-      adapter: { ...adapter, cliIdentityFingerprint: async () => undefined },
+      ...owned,
+      adapter: { ...owned.adapter, cliIdentityFingerprint: async () => undefined },
     });
     assert.equal(unknown.verdict, "cli-newer");
     assert.equal(unknown.wrote, "pi");
@@ -365,7 +377,7 @@ async function main() {
   // Fresher Claude wins: the Pi side is rewritten under Pi's lock with the
   // padding re-applied, and the auth file stays owner-only.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(2));
     writeClaude(pair, claude(7));
     const result = await reconcile(pair);
@@ -384,7 +396,7 @@ async function main() {
 
   // Never lowers an expiry, in sync is a no-op, conflict is a no-op.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(4));
     writeClaude(pair, claude(4, { accessToken: "pi-access-4", refreshToken: "pi-refresh-4" }));
     assert.equal((await reconcile(pair)).wrote, null);
@@ -403,7 +415,7 @@ async function main() {
 
   // A side without a refresh token never wins.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(1));
     writeClaude(pair, claude(9, { refreshToken: "" }));
     const result = await reconcile(pair);
@@ -414,14 +426,14 @@ async function main() {
 
   // Missing sides are copied for a managed pair, in both directions.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(3));
     assert.equal((await reconcile(pair)).wrote, "cli");
     const created = await readClaude(pair);
     assert.equal(created.accessToken, "pi-access-3");
     assert.deepEqual(created.scopes, [...codec.ANTHROPIC_OAUTH_SCOPES]);
     assert.equal("subscriptionType" in created, false);
-    const other = makePair();
+    const { pair: other } = await managedPair();
     writeClaude(other, claude(3));
     assert.equal((await reconcile(other)).wrote, "pi");
     assert.equal(readPi(other).access, "claude-access-3");
@@ -429,15 +441,16 @@ async function main() {
     pass("a missing managed side is created from the other half");
   }
 
-  // Account 1: ~/.claude is never created, and a logout there signs Cora out
-  // only when the previous observation had a credential.
+  // Account 1 while live: the user's own login is never created there, and a
+  // logout (`/logout` removes the record) signs Cora out only when the
+  // previous observation had a credential.
   {
-    const pair = makePair({ personal: true });
+    const { pair } = makePair({ personal: true });
     writePi(pair, pi(3));
     let result = await reconcile(pair);
     assert.equal(result.verdict, "pi-only");
     assert.equal(result.wrote, null);
-    assert.equal(await readClaude(pair), null, "the mirror never creates ~/.claude's credential");
+    assert.equal(await readClaude(pair), null, "the mirror never creates the live home's login");
     assert.deepEqual(readPi(pair), pi(3));
     result = await reconcile(pair, { previousCliPresent: false });
     assert.equal(result.wrote, null);
@@ -446,21 +459,56 @@ async function main() {
     assert.equal(readPi(pair), null, "a claude logout signs Account 1 out of Cora");
     assert.equal(mode(pair.authFile), 0o600);
     // The reverse direction never deletes: a missing Pi side with a live
-    // ~/.claude simply gets the credential copied to Pi.
+    // login simply gets the credential copied to Pi.
     writeClaude(pair, claude(2));
     result = await reconcile(pair, { previousCliPresent: true });
     assert.equal(result.wrote, "pi");
     assert.equal(readPi(pair).access, "claude-access-2");
-    // An existing ~/.claude credential IS updated.
+    // An existing live login IS updated.
     writePi(pair, pi(8));
     assert.equal((await reconcile(pair)).wrote, "cli");
     assert.equal((await readClaude(pair)).accessToken, "pi-access-8");
-    pass("Account 1 rules: no creation in ~/.claude, logout propagates one way only");
+    pass("Account 1 while live: no creation, logout propagates one way only");
+  }
+
+  // Claude Code blanks a login whose refresh token another holder already
+  // rotated. That is not a logout: Cora keeps its half and repairs the slot.
+  {
+    const { pair } = makePair({ personal: true });
+    writePi(pair, pi(6));
+    writeClaude(pair, { ...claude(4), accessToken: "", refreshToken: "", expiresAt: 0 });
+    const result = await reconcile(pair, { previousCliPresent: true });
+    assert.equal(result.verdict, "pi-only");
+    assert.equal(result.wrote, "cli", "the dead login is repaired from the fresher half");
+    assert.deepEqual(readPi(pair), pi(6), "Cora is not signed out");
+    const repaired = await readClaude(pair);
+    assert.equal(repaired.accessToken, "pi-access-6");
+    assert.equal(repaired.subscriptionType, "max", "the blanked record's own fields survive");
+    pass("a login Claude Code blanked after a spent refresh is repaired, never propagated as a logout");
+  }
+
+  // Account 1 while another account is live: its vault is Codara's, so the
+  // Cora half rebuilds it.
+  {
+    const { pair, ready } = makePair({ personal: true });
+    await ready;
+    fs.writeFileSync(
+      pairs.get(pair).markerFile,
+      JSON.stringify({ version: 1, profileId: CLI_ID }),
+      { mode: 0o600 },
+    );
+    writePi(pair, pi(4));
+    const result = await reconcile(pair);
+    assert.equal(result.verdict, "pi-only");
+    assert.equal(result.wrote, "cli");
+    assert.equal((await readClaude(pair)).accessToken, "pi-access-4");
+    assert.equal(fs.existsSync(pairs.get(pair).liveFile), false, "the live home is untouched");
+    pass("Account 1's vault is rebuilt from Cora while another account is live");
   }
 
   // A half-written file is retried, not treated as signed out.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(5));
     writeClaude(pair, claude(2));
     fs.writeFileSync(pair.authFile, '{"anthropic":{"type":"oauth","acc', { mode: 0o600 });
@@ -480,7 +528,7 @@ async function main() {
   // Lock interplay: a Pi refresh holding AuthStorage's lock while the mirror
   // reconciles must win, because the comparison is repeated under the lock.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(1));
     writeClaude(pair, claude(5));
     const storage = AuthStorage.create(pair.authFile);
@@ -505,23 +553,20 @@ async function main() {
     pass("a concurrent Pi refresh under the lock is never clobbered");
   }
 
-  // The Claude side has no lock: a terminal refresh that lands between the
-  // mirror's read and its write must win, or both halves end up holding a
-  // refresh token Anthropic already rotated away.
+  // A terminal refresh that lands between the mirror's read and its write
+  // must win, or both halves end up holding a refresh token Anthropic
+  // already rotated away.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(5));
     writeClaude(pair, claude(3));
     let reads = 0;
-    const racing = {
-      ...backend,
-      async read(configDir, configDirEnv) {
-        reads += 1;
-        if (reads === 2) writeClaude(pair, claude(9));
-        return backend.read(configDir, configDirEnv);
-      },
-    };
-    const result = await mod.reconcilePair({ ...pair, adapter: makeAdapter(racing) }, { loadAuthStorage, retryDelayMs: 20 });
+    const racing = withReadCli(pair, async (location) => {
+      reads += 1;
+      if (reads === 2) writeClaude(pair, claude(9));
+      return pair.adapter.readCli(location);
+    });
+    const result = await mod.reconcilePair(racing, { loadAuthStorage, retryDelayMs: 20 });
     assert.equal(result.wrote, null, "the stale comparison must not be written");
     assert.equal(result.verdict, "cli-newer");
     assert.equal((await readClaude(pair)).accessToken, "claude-access-9");
@@ -533,7 +578,7 @@ async function main() {
   // Unwatching a pair mid-reconcile: the reads finish, the write is refused,
   // and the caller can wait for the drain before removing the files.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(7));
     writeClaude(pair, claude(2));
     let release;
@@ -541,23 +586,20 @@ async function main() {
       release = resolve;
     });
     let gated = false;
-    const slow = {
-      ...backend,
-      async read(configDir, configDirEnv) {
-        if (!gated) {
-          gated = true;
-          await gate;
-        }
-        return backend.read(configDir, configDirEnv);
-      },
-    };
+    const slow = withReadCli(pair, async (location) => {
+      if (!gated) {
+        gated = true;
+        await gate;
+      }
+      return pair.adapter.readCli(location);
+    });
     const mirror = new mod.CredentialMirror({
       loadAuthStorage,
       pollWhenWatchBlind: null,
       debounceMs: 40,
       retryDelayMs: 20,
     });
-    mirror.watch({ ...pair, adapter: makeAdapter(slow) });
+    mirror.watch(slow);
     const inflight = mirror.reconcileNow(CORA_ID);
     await waitFor(() => gated);
     const drained = mirror.unwatch(CORA_ID);
@@ -572,33 +614,30 @@ async function main() {
     pass("an unwatched pair mid-reconcile lands its reads and refuses its write");
   }
 
-  // A managed directory that vanished between the read and the write (an
-  // account mid-delete) is never re-created from the Pi side.
+  // A managed profile whose directory vanished between the read and the
+  // write (an account mid-delete) is never re-created from the Pi side.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(4));
     let reads = 0;
-    const vanishing = {
-      ...backend,
-      async read(configDir, configDirEnv) {
-        reads += 1;
-        const raw = await backend.read(configDir, configDirEnv);
-        if (reads === 1) fs.rmSync(pair.location.configDir, { recursive: true, force: true });
-        return raw;
-      },
-    };
-    const result = await mod.reconcilePair({ ...pair, adapter: makeAdapter(vanishing) }, { loadAuthStorage, retryDelayMs: 20 });
+    const profileDir = path.dirname(pair.location.vaultFile);
+    const vanishing = withReadCli(pair, async (location) => {
+      reads += 1;
+      const side = await pair.adapter.readCli(location);
+      if (reads === 1) fs.rmSync(profileDir, { recursive: true, force: true });
+      return side;
+    });
+    const result = await mod.reconcilePair(vanishing, { loadAuthStorage, retryDelayMs: 20 });
     assert.equal(result.verdict, "pi-only");
     assert.equal(result.wrote, null);
-    assert.equal(fs.existsSync(pair.location.configDir), false, "the deleted directory must stay deleted");
-    assert.equal(keychain.has(credentialsMod.claudeCliKeychainService(pair.location.configDirEnv)), false);
+    assert.equal(fs.existsSync(profileDir), false, "the deleted directory must stay deleted");
     pass("a managed half whose directory is gone is not rebuilt by the mirror");
   }
 
   // Runtime: watchers converge both directions, the mirror's own writes are
   // not re-triggering, and both sides rotating at once settle on the newest.
   {
-    const pair = makePair();
+    const { pair } = await managedPair();
     writePi(pair, pi(1));
     writeClaude(pair, claude(1, { accessToken: "pi-access-1", refreshToken: "pi-refresh-1" }));
     const changes = [];
@@ -650,11 +689,10 @@ async function main() {
     await sleep(200);
     assert.equal((await mirror.reconcileNow(CORA_ID)).verdict, "equal");
 
-    // A Keychain-only rotation (no file event) is caught by reconcileNow.
-    keychain.set(
-      credentialsMod.claudeCliKeychainService(pair.location.configDirEnv),
-      JSON.stringify({ claudeAiOauth: claude(20) }),
-    );
+    // The pair follows its profile into the live slot: once the marker names
+    // it, a rotation Claude Code writes to the home reaches Cora.
+    makeLive(pair);
+    writeClaude(pair, claude(20));
     assert.equal((await mirror.reconcileNow(CORA_ID)).wrote, "pi");
     assert.equal(readPi(pair).access, "claude-access-20");
 
@@ -680,7 +718,7 @@ async function main() {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const file = path.join(dir, entry.name);
         if (entry.isDirectory()) visit(file);
-        else if (/auth\.json$|\.credentials\.json$/.test(entry.name) && (mode(file) & 0o077) !== 0) {
+        else if (/auth\.json$|\.credentials\.json$|login\.json$/.test(entry.name) && (mode(file) & 0o077) !== 0) {
           offending.push(file);
         }
       }

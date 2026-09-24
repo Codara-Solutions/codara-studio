@@ -1,14 +1,8 @@
 import { promises as fs } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import {
-  claudeCliManagedProfileConfigDir,
-  isClaudeCliManagedProfileId,
-  type ClaudeCliAccountProfileStore,
-} from "./claude-cli-account-profiles";
-import {
   codaraActiveCliEnvPointerFile,
   codaraHomeDir,
-  CODARA_CLAUDE_CLI_DIRNAME,
   CODARA_GROK_CLI_DIRNAME,
 } from "./codara-managed-cli-roots";
 import {
@@ -17,7 +11,6 @@ import {
   type GrokCliAccountProfileStore,
 } from "./grok-cli-account-profiles";
 import { atomicWritePrivateFile } from "./native-cli-atomic-file";
-import { nativeClaudeProfileStore } from "./native-claude-profile-runtime";
 import { nativeGrokProfileStore } from "./native-grok-profile-runtime";
 
 /**
@@ -31,24 +24,23 @@ import { nativeGrokProfileStore } from "./native-grok-profile-runtime";
  * and no line of it is a shell export. Its format is
  *
  *   codara-active-cli-env 1 <revision>
- *   CLAUDE_CONFIG_DIR=<absolute managed dir>
  *   GROK_HOME=<absolute managed dir>
  *
- * with the header first, then zero, one or two key lines. A personal default
- * omits its line (absence is the value). CODEX_HOME never appears: Codex has
- * one home and switches only auth.json. The revision strictly increases on
- * every write, so a shell that missed an intermediate switch still converges
- * on the next prompt. It lives under shell/, never under the retired active
- * pointer directory, which boot deletes and the managed-root check treats as
- * managed.
+ * with the header first, then zero or one key line. A personal default omits
+ * its line (absence is the value). Claude and Codex never appear: both have
+ * one home and switch only the login inside it. The hooks still accept a
+ * CLAUDE_CONFIG_DIR line, and its absence is what unsets a managed
+ * directory a shell exported under the per-directory model. The revision
+ * strictly increases on every write, so a shell that missed an intermediate
+ * switch still converges on the next prompt. It lives under shell/, never
+ * under the retired active pointer directory, which boot deletes and the
+ * managed-root check treats as managed.
  */
 
 export const ACTIVE_CLI_ENV_HEADER_WORD = "codara-active-cli-env";
 export const ACTIVE_CLI_ENV_FORMAT_VERSION = 1;
 
 export interface ActiveCliEnvSelectors {
-  /** Managed CLAUDE_CONFIG_DIR for the active Claude account; absent when personal. */
-  claudeConfigDir?: string;
   /** Managed GROK_HOME for the active Grok account; absent when personal. */
   grokHome?: string;
 }
@@ -89,8 +81,6 @@ export function formatActiveCliEnvPointer(
   homeDir: string,
 ): string {
   const lines = [`${ACTIVE_CLI_ENV_HEADER_WORD} ${ACTIVE_CLI_ENV_FORMAT_VERSION} ${revision}`];
-  const claude = managedValue(selectors.claudeConfigDir, homeDir, CODARA_CLAUDE_CLI_DIRNAME);
-  if (claude) lines.push(`CLAUDE_CONFIG_DIR=${claude}`);
   const grok = managedValue(selectors.grokHome, homeDir, CODARA_GROK_CLI_DIRNAME);
   if (grok) lines.push(`GROK_HOME=${grok}`);
   return `${lines.join("\n")}\n`;
@@ -127,7 +117,6 @@ export function writeActiveCliEnvPointer(
 }
 
 export interface RefreshActiveCliEnvPointerOptions extends WriteActiveCliEnvPointerOptions {
-  claudeStore?: Pick<ClaudeCliAccountProfileStore, "rootDir" | "snapshot">;
   grokStore?: Pick<GrokCliAccountProfileStore, "rootDir" | "snapshot">;
 }
 
@@ -140,16 +129,8 @@ export interface RefreshActiveCliEnvPointerOptions extends WriteActiveCliEnvPoin
 export async function activeCliEnvSelectors(
   options: RefreshActiveCliEnvPointerOptions = {},
 ): Promise<ActiveCliEnvSelectors> {
-  const claudeStore = options.claudeStore ?? nativeClaudeProfileStore;
   const grokStore = options.grokStore ?? nativeGrokProfileStore;
   const selectors: ActiveCliEnvSelectors = {};
-  const claudeDefault = await claudeStore
-    .snapshot()
-    .then((snapshot) => snapshot.defaultProfileId)
-    .catch(() => null);
-  if (claudeDefault && isClaudeCliManagedProfileId(claudeDefault)) {
-    selectors.claudeConfigDir = claudeCliManagedProfileConfigDir(claudeStore.rootDir, claudeDefault);
-  }
   const grokDefault = await grokStore
     .snapshot()
     .then((snapshot) => snapshot.defaultProfileId)

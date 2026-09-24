@@ -1,19 +1,13 @@
-import { dirname, join, resolve } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { ClaudeAccountAdapter } from "./account-adapters/claude-account-adapter";
 import { refreshActiveCliEnvPointer } from "./active-cli-env-pointer";
-import {
-  CLAUDE_CLI_CONFIG_FILE,
-  claudeCliManagedProfileConfigDir,
-  type ClaudeCliAccountProfileStore,
-} from "./claude-cli-account-profiles";
+import type { ClaudeCliAccountProfileStore } from "./claude-cli-account-profiles";
 import type { ClaudeCliCredentialBackend } from "./claude-cli-credentials";
-import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
 import {
-  CLAUDE_CLI_MCP_BASELINE_FILE,
-  managedClaudeConfigFile,
-  syncClaudeCliMcpServers,
-} from "./claude-cli-mcp-sync";
+  migrateClaudeToOneHome,
+  type MigrateClaudeToOneHomeResult,
+} from "./claude-cli-live-login";
+import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
 import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
@@ -40,10 +34,12 @@ import type { UnifiedAccountService } from "./unified-accounts";
  *
  * Order: the legacy fold once (pi-agent/auth.json into per-profile files),
  * then per provider (anthropic, openai-codex, xai): the provider's own
- * pre-pairing repair (Claude: undo the live-slot swap; Codex: ensure the
- * auth vault; Grok: undo the live-slot swap), clear dangling links, pair
- * halves, Account 1, repair defaults, start the mirror. Then the runtime
- * resolution hooks are installed and the gate resolves.
+ * pre-pairing repair (Claude: undo the retired selector's swap, then move
+ * every account directory into the one home; Codex: ensure the auth vault;
+ * Grok: undo the live-slot swap), clear dangling links, pair halves,
+ * Account 1, repair defaults (which also puts the default account's login in
+ * the live slot), start the mirror. Then the runtime resolution hooks are
+ * installed and the gate resolves.
  */
 
 export interface UnifiedAccountMigrationDeps {
@@ -63,7 +59,11 @@ export interface UnifiedAccountMigrationDeps {
 
 export interface ProviderMigrationReport {
   /** The provider's pre-pairing repair result (undo or vault), if it ran. */
-  beforePairing: UndoLiveSlotSwapResult | UndoGrokLiveSlotSwapResult | { active: string } | null;
+  beforePairing:
+    | (UndoLiveSlotSwapResult & { oneHome: MigrateClaudeToOneHomeResult })
+    | UndoGrokLiveSlotSwapResult
+    | { active: string }
+    | null;
   clearedLinks: string[];
   paired: Array<{ coraProfileId: string; cliProfileId: string; by: "fingerprint" | "email" }>;
   accountOne: string | null;
@@ -112,7 +112,17 @@ async function beforePairing(
         }`,
       );
     }
-    return result;
+    // Every account now runs in the one Claude home: each account
+    // directory's login becomes its vault and its MCP grants and projects
+    // join the home, before pairing reads any identity.
+    const snapshot = await store.snapshot();
+    const oneHome = await migrateClaudeToOneHome({
+      store,
+      managedProfileIds: snapshot.profiles.map((profile) => profile.id),
+      defaultProfileId: snapshot.defaultProfileId,
+      log,
+    });
+    return { ...result, oneHome };
   }
   if (adapter.runtime === "codex") {
     const store = (deps.codexStore ?? adapter.store) as CodexCliAccountProfileStore;
@@ -212,25 +222,6 @@ export async function migrateUnifiedAccounts(
       },
       entry,
     );
-    if (service.adapter.runtime === "claude") {
-      // MCP servers belong to the user, not to one Anthropic login. They live
-      // in `.claude.json`, which stays per account because it also carries the
-      // account identity, so every managed account used to start with an empty
-      // list while the personal login had the real one. Share just that block,
-      // every launch, so a server added anywhere reaches every account and a
-      // machine that predates this repairs itself without the user editing
-      // JSON by hand.
-      await step(
-        named("share-mcp-servers"),
-        async () => {
-          await shareClaudeMcpServers(
-            (deps.claudeStore ?? service.adapter.store) as ClaudeCliAccountProfileStore,
-            log,
-          );
-        },
-        entry,
-      );
-    }
   }
   // Running plain shells follow the pointer; a fresh one after the pass
   // makes a shell that outlived a previous Studio converge on this default.
@@ -238,49 +229,6 @@ export async function migrateUnifiedAccounts(
     await (deps.refreshShellPointer ?? refreshActiveCliEnvPointer)();
   });
   return report;
-}
-
-async function shareClaudeMcpServers(
-  store: ClaudeCliAccountProfileStore,
-  log: (message: string) => void,
-): Promise<void> {
-  const snapshot = await store.snapshot();
-  const shared = await syncClaudeCliMcpServers({
-    baselinePath: join(store.rootDir, CLAUDE_CLI_MCP_BASELINE_FILE),
-    files: [
-      // Claude Code's own file: updated in place, never created here.
-      {
-        path:
-          store.personalConfigDirEnv === null
-            ? join(dirname(resolve(store.personalConfigDir)), CLAUDE_CLI_CONFIG_FILE)
-            : join(store.personalConfigDirEnv, CLAUDE_CLI_CONFIG_FILE),
-        create: false,
-      },
-      ...snapshot.profiles.map((profile) => ({
-        path: managedClaudeConfigFile(claudeCliManagedProfileConfigDir(store.rootDir, profile.id)),
-        create: true,
-      })),
-    ],
-    log,
-  });
-  if (shared.written.length > 0) {
-    log(
-      `[accounts] shared ${shared.names.length} MCP server(s) across ${shared.written.length} Claude account file(s)`,
-    );
-  }
-}
-
-/**
- * Codara edited the personal `.claude.json` MCP block. Claude sessions started
- * from Codara read their account's own copy, so without this the edit would
- * only reach them at the next launch.
- */
-export async function shareClaudeMcpServersNow(): Promise<void> {
-  await unifiedAccountsReady();
-  await shareClaudeMcpServers(
-    unifiedAccountsFor("anthropic").adapter.store as ClaudeCliAccountProfileStore,
-    (message) => console.warn(message),
-  );
 }
 
 let readyPromise: Promise<void> | null = null;
@@ -299,11 +247,10 @@ function installResolutionHooks(deps: UnifiedAccountMigrationDeps): void {
     beforeNewProfile: async () => {
       await anthropic.reconcileDefault();
     },
-    beforeFrozenProfile: async (profileId) => {
-      await anthropic.reconcileCliProfile(profileId);
-    },
-    afterLeaseReleased: async (profileId) => {
-      await anthropic.reconcileCliProfile(profileId);
+    // Every Claude terminal ran on the live login, whichever account it
+    // started on, so that is the pair to reconcile.
+    afterLeaseReleased: async () => {
+      await anthropic.reconcileDefault();
     },
   });
   const codex = serviceFor("openai-codex");

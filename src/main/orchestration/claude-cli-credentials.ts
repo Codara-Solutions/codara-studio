@@ -10,20 +10,38 @@ import { atomicWritePrivateFile } from "./native-cli-atomic-file";
  * Claude Code's credential slot, read and written the way Claude Code itself
  * does it: on macOS the Keychain item for the config directory is consulted
  * first and the 0600 `.credentials.json` file second; elsewhere only the file
- * exists. A managed directory is written in both places so a terminal started
- * against it sees the same token Codara sees; the personal slot on macOS
- * updates the Keychain and an existing credential file, without creating a
- * file for a login that uses only the Keychain.
+ * exists. A write lands in every store that already exists, and a store is
+ * only ever created where Claude Code would create one: a Keychain item on
+ * macOS when neither exists, the file everywhere else. Creating a Keychain
+ * item beside a file Claude Code has fallen back to would shadow that file,
+ * MCP grants included, on its next read.
  *
- * Only claudeAiOauth is changed. MCP grants and other fields in each store
- * survive writes and sign-outs, and never move to a different account.
- * Nothing here selects an account. Which directory a terminal runs in is the
- * account store's decision (CLAUDE_CONFIG_DIR per managed profile, unset for
- * the user's own ~/.claude); this module only moves bytes for one directory.
+ * Writes replace only the keys they name. MCP grants and other fields in each
+ * store survive, and never move to a different account. Nothing here selects
+ * an account; this module only moves bytes for one directory.
  */
 
 export const CLAUDE_CREDENTIALS_FILE = ".credentials.json";
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
+
+/**
+ * The secure-storage keys that belong to one Anthropic login. Claude Code
+ * 2.1.281 deletes exactly these when it signs in as another account and
+ * keeps every other key (mcpOAuth above all), so an account switch moves
+ * these and nothing else.
+ */
+export const CLAUDE_ACCOUNT_SCOPED_STORE_KEYS = [
+  "claudeAiOauth",
+  "organizationUuid",
+  "trustedDeviceToken",
+  "enterpriseGateway",
+  "designOauth",
+] as const;
+
+const REFRESH_LOCK_FILE = ".oauth_refresh.lock";
+const REFRESH_LOCK_STALE_MS = 60_000;
+const REFRESH_LOCK_UPDATE_MS = 5_000;
+const STORAGE_LOCK_FILE = ".storage-write";
 const MAX_AUTH_BYTES = 16 * 1024 * 1024;
 const KEYCHAIN_TIMEOUT_MS = 10_000;
 const SECURITY_BINARY = "/usr/bin/security";
@@ -311,27 +329,80 @@ function loginFromStore(raw: string | null): string | null {
   return parseClaudeCredentialRecord(raw) === null ? null : raw;
 }
 
-/** Only the Claude login moves between accounts; MCP grants belong to this store. */
-function replaceLogin(raw: string | null, credential: string | null): string | null {
-  const store = raw === null ? {} : JSON.parse(normalizeCredentialStore(raw));
-  if (credential === null) delete store.claudeAiOauth;
-  else store.claudeAiOauth = JSON.parse(normalizeCredential(credential)).claudeAiOauth;
+export type ClaudeCredentialStoreObject = Record<string, unknown>;
+
+/** Both backends of one config directory, as parsed objects. */
+export interface ClaudeCredentialStores {
+  /** The Keychain item; null when there is none or no Keychain is in use. */
+  keychain: ClaudeCredentialStoreObject | null;
+  /** `.credentials.json`; null when the file does not exist. */
+  file: ClaudeCredentialStoreObject | null;
+}
+
+export interface ClaudeCredentialStoreUpdate<T> {
+  /**
+   * Applied to every store that is written: each existing store, or the one
+   * Claude Code would create when none exists. Receives an empty object for a
+   * store being created. Returning an empty object removes the store.
+   */
+  transform?: (store: ClaudeCredentialStoreObject) => ClaudeCredentialStoreObject;
+  result: T;
+}
+
+export interface ClaudeCredentialStoreOptions {
+  /** Test seam: never touch a Keychain, even on macOS. */
+  fileOnly?: boolean;
+}
+
+function parseStoreObject(raw: string | null): ClaudeCredentialStoreObject | null {
+  return raw === null
+    ? null
+    : (JSON.parse(normalizeCredentialStore(raw)) as ClaudeCredentialStoreObject);
+}
+
+function storeText(store: ClaudeCredentialStoreObject): string | null {
   return Object.keys(store).length === 0 ? null : JSON.stringify(store);
 }
 
-async function mutateLogin(
+function useKeychainBackend(options: ClaudeCredentialStoreOptions): boolean {
+  return !options.fileOnly && !keychainDisabled() && seams.platform === "darwin";
+}
+
+/** Both backends of a directory, read without the storage lock. Throws when either is unreadable. */
+export async function readClaudeCredentialStores(
   configDir: string,
   configDirEnv: string | null,
-  credential: string | null,
-  fileOnly = false,
-): Promise<void> {
-  if (credential !== null) normalizeCredential(credential);
+  options: ClaudeCredentialStoreOptions = {},
+): Promise<ClaudeCredentialStores> {
+  const [keychain, file] = await Promise.all([
+    useKeychainBackend(options)
+      ? readKeychainCredential(claudeCliKeychainService(configDirEnv))
+      : Promise.resolve(null),
+    readCredentialFile(claudeCredentialFile(configDir)),
+  ]);
+  return { keychain: parseStoreObject(keychain), file: parseStoreObject(file) };
+}
+
+/**
+ * Read both stores of a directory, change them under Claude Code's own
+ * `.storage-write` lock, and write back only what changed. Claude Code
+ * 2.1.281 takes the same proper-lockfile lock for every login and MCP
+ * mutation and re-reads inside it, so neither side can replace the other's
+ * write with a snapshot taken before the lock.
+ *
+ * The update callback sees what is stored now and returns how to change it
+ * plus a result for the caller; it runs inside the lock, so a decision made
+ * from the stores it was handed still holds when the write lands.
+ */
+export async function updateClaudeCredentialStores<T>(
+  configDir: string,
+  configDirEnv: string | null,
+  update: (stores: ClaudeCredentialStores) => ClaudeCredentialStoreUpdate<T>,
+  options: ClaudeCredentialStoreOptions = {},
+): Promise<T> {
   const created = await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   let compromised = false;
-  // Claude Code 2.1.261 uses this same proper-lockfile lock for login and MCP
-  // mutations. Reading inside it prevents a concurrent MCP refresh from
-  // being replaced by the snapshot taken before the lock was acquired.
-  const release = await lock(join(configDir, ".storage-write"), {
+  const release = await lock(join(configDir, STORAGE_LOCK_FILE), {
     realpath: false,
     retries: { retries: 10, minTimeout: 100, maxTimeout: 1000 },
     stale: 15_000,
@@ -340,31 +411,126 @@ async function mutateLogin(
   const assertLocked = (): void => {
     if (compromised) throw new Error("Claude credential write lock was lost");
   };
+  let removedEverything = false;
   try {
     const file = claudeCredentialFile(configDir);
-    const useKeychain = !fileOnly && !keychainDisabled() && seams.platform === "darwin";
+    const useKeychain = useKeychainBackend(options);
     const service = claudeCliKeychainService(configDirEnv);
-    const fromFile = await readCredentialFile(file);
-    const fromKeychain = useKeychain ? await readKeychainCredential(service) : null;
-    // Preserve each backend's own fields. A newer Claude token in one store
-    // says nothing about the freshness of an MCP token in the other store.
-    const nextFile = replaceLogin(fromFile, credential);
-    const nextKeychain = replaceLogin(fromKeychain, credential);
-    const writeFile = !useKeychain || configDirEnv !== null || fromFile !== null;
+    const fromFile = parseStoreObject(await readCredentialFile(file));
+    const fromKeychain = useKeychain ? parseStoreObject(await readKeychainCredential(service)) : null;
+    const { transform, result } = update({ keychain: fromKeychain, file: fromFile });
+    if (!transform) return result;
+    // The store Claude Code reads is the Keychain item when one exists and
+    // the file otherwise; a missing item is only created when there is no
+    // file it would shadow.
+    const writeKeychain = useKeychain && (fromKeychain !== null || fromFile === null);
+    const writeFile = fromFile !== null || !useKeychain;
+    const beforeKeychain = fromKeychain === null ? null : storeText(fromKeychain);
+    const beforeFile = fromFile === null ? null : storeText(fromFile);
+    const nextKeychain = writeKeychain ? storeText(transform({ ...(fromKeychain ?? {}) })) : beforeKeychain;
+    const nextFile = writeFile ? storeText(transform({ ...(fromFile ?? {}) })) : beforeFile;
     assertLocked();
-    if (useKeychain && nextKeychain !== fromKeychain) {
+    if (writeKeychain && nextKeychain !== beforeKeychain) {
       if (nextKeychain === null) await deleteKeychainCredential(service);
       else await writeKeychainCredential(service, nextKeychain);
     }
     assertLocked();
-    if (writeFile && nextFile !== fromFile) {
+    if (writeFile && nextFile !== beforeFile) {
       if (nextFile === null) await removeCredentialFile(file);
       else await atomicWriteCredential(file, nextFile);
     }
     assertLocked();
+    removedEverything = nextKeychain === null && nextFile === null;
+    return result;
   } finally {
     await release();
-    if (credential === null && created) await fs.rmdir(configDir).catch(() => undefined);
+    if (removedEverything && created) await fs.rmdir(configDir).catch(() => undefined);
+  }
+}
+
+/** Remove both stores of a directory outright: the Keychain item and the file. */
+export async function removeClaudeCredentialStores(
+  configDir: string,
+  configDirEnv: string | null,
+  options: ClaudeCredentialStoreOptions = {},
+): Promise<void> {
+  if (useKeychainBackend(options)) {
+    await deleteKeychainCredential(claudeCliKeychainService(configDirEnv));
+  }
+  await removeCredentialFile(claudeCredentialFile(configDir));
+}
+
+/** Only the Claude login moves between accounts; MCP grants belong to this store. */
+async function mutateLogin(
+  configDir: string,
+  configDirEnv: string | null,
+  credential: string | null,
+  fileOnly = false,
+): Promise<void> {
+  const login =
+    credential === null ? null : JSON.parse(normalizeCredential(credential)).claudeAiOauth;
+  await updateClaudeCredentialStores(
+    configDir,
+    configDirEnv,
+    () => ({
+      result: undefined,
+      transform: (store) => {
+        if (login === null) delete store.claudeAiOauth;
+        else store.claudeAiOauth = login;
+        return store;
+      },
+    }),
+    { fileOnly },
+  );
+}
+
+/**
+ * Hold Claude Code's own refresh locks on a config directory while
+ * `operation` runs. Claude Code 2.1.281 takes both before it refreshes a
+ * login (`.oauth_refresh.lock` inside the directory, and the legacy
+ * `<directory>.lock` beside it), re-reads the store under them, and saves
+ * with a compare-and-swap on the refresh token. Replacing the login while
+ * holding them means no refresh is in flight: a refresh that started before
+ * finishes first and its result is what gets moved, and one that starts
+ * after sees the new login and adopts it instead of refreshing the old one.
+ */
+export async function withClaudeCodeRefreshLock<T>(
+  configDir: string,
+  operation: () => Promise<T>,
+  options: { retries?: number } = {},
+): Promise<T> {
+  await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
+  const retries = {
+    retries: options.retries ?? 30,
+    minTimeout: 100,
+    maxTimeout: 1000,
+  };
+  let compromised = false;
+  const onCompromised = (): void => {
+    compromised = true;
+  };
+  const common = {
+    realpath: false,
+    stale: REFRESH_LOCK_STALE_MS,
+    update: REFRESH_LOCK_UPDATE_MS,
+    retries,
+    onCompromised,
+  };
+  const releaseCurrent = await lock(configDir, {
+    ...common,
+    lockfilePath: join(configDir, REFRESH_LOCK_FILE),
+  });
+  let releaseLegacy: (() => Promise<void>) | null = null;
+  try {
+    const real = await fs.realpath(configDir).catch(() => configDir);
+    const legacy = `${real}.lock`;
+    releaseLegacy = await lock(legacy, { ...common, lockfilePath: legacy });
+    const result = await operation();
+    if (compromised) throw new Error("Claude Code's refresh lock was lost");
+    return result;
+  } finally {
+    if (releaseLegacy) await releaseLegacy().catch(() => undefined);
+    await releaseCurrent().catch(() => undefined);
   }
 }
 

@@ -256,7 +256,7 @@ assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
 assert.match(card, /switchCloseSessionsCount/);
 assert.match(card, /`Close \$\{sessions\(switchCount\)\} and switch`/);
 const descriptors = read("src/renderer/src/lib/account-provider-descriptors.ts");
-assert.match(descriptors, /codex: \{ cliLabel: "Codex", loginHint: "codex login", switchClosesSessions: true \}/);
+assert.match(descriptors, /codex: \{\s*cliLabel: "Codex",\s*loginHint: "codex login",\s*switchClosesSessions: true,/);
 assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1);
 
 // The fingerprint is a one-way digest of the account id, computed in main with

@@ -446,21 +446,24 @@ export interface SpawnOptions {
   nativeGrokProfileId?: string;
   nativeGrokHome?: string;
   releaseNativeGrokProfileLease?: () => void;
-  /** Frozen native Claude account for a resume/worker/manual pane. */
+  /**
+   * The Claude account a resume/worker/manual pane started on. Every Claude
+   * pane runs in the user's own Claude home on the live login; the id only
+   * records the account for the lease.
+   */
   nativeClaudeProfileId?: string;
   /** Main-process-only exact selector. Null preserves legacy unset. */
   nativeClaudeConfigDirEnv?: string | null;
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeClaudeProfileLease?: () => void;
   /**
-   * Main-process-only Active-account homes for a PLAIN shell (no Studio
-   * startup command), so a hand-typed `claude`/`codex` follows the account
-   * switch. Environment-only: unlike the native*ProfileId fields these take
-   * no lease and are never persisted — a restored shell re-resolves whatever
-   * account is Active at restore time. Set by spawn() itself, never accepted
-   * over IPC.
+   * Main-process-only Active-account home for a PLAIN shell (no Studio
+   * startup command), so a hand-typed `grok` follows the account switch.
+   * Claude and Codex need none: each switches the login inside one home.
+   * Environment-only: unlike the native*ProfileId fields this takes no lease
+   * and is never persisted; a restored shell re-resolves whatever account is
+   * Active at restore time. Set by spawn() itself, never accepted over IPC.
    */
-  plainShellClaudeConfigDir?: string;
   plainShellGrokHome?: string;
   /**
    * A plain user shell exports SPARK_FOLLOW_ACTIVE_ACCOUNT=1 so the bundled
@@ -939,13 +942,14 @@ async function spawnWithSessionLock(
     };
   }
   // A plain user shell, with no Studio startup command, no worker run, no
-  // frozen account and no caller-selected home, follows the Active Claude
-  // and Grok accounts: the spawn-time selector makes the first prompt right
-  // (and serves shells without the bundled hooks, such as fish), and the
-  // follow flag lets the bundled prompt hooks track later switches, even
-  // from a personal default that becomes managed. Codex is intentionally
-  // omitted because its account selector swaps auth.json in one shared state
-  // home. Best-effort because a shell must always open. Deliberately no lease
+  // frozen account and no caller-selected home, follows the Active Grok
+  // account: the spawn-time selector makes the first prompt right (and
+  // serves shells without the bundled hooks, such as fish), and the follow
+  // flag lets the bundled prompt hooks track later switches, even from a
+  // personal default that becomes managed. Claude and Codex are omitted
+  // because each switches the login inside one shared home, and the flag
+  // still lets the hooks unset a Claude directory an older Studio exported.
+  // Best-effort because a shell must always open. Deliberately no lease
   // and no persistence: an idle shell tab must not block account operations,
   // and a restored shell should follow the account that is Active at restore
   // time.
@@ -964,9 +968,6 @@ async function spawnWithSessionLock(
     preparedOpts = {
       ...preparedOpts,
       plainShellFollowsActiveAccount: true,
-      ...(selectors?.claudeConfigDir
-        ? { plainShellClaudeConfigDir: selectors.claudeConfigDir }
-        : {}),
       ...(selectors?.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
     };
   } else if (
@@ -1462,16 +1463,6 @@ function doSpawn(
   // credential-override routes stripped while Studio's own variables survive.
   if (opts.nativeGrokHome) {
     const selectedEnv = buildGrokCliProfileEnvironment(env, opts.nativeGrokHome);
-    for (const key of Object.keys(env)) delete env[key];
-    for (const [key, value] of Object.entries(selectedEnv)) {
-      if (typeof value === "string") env[key] = value;
-    }
-  }
-  if (opts.plainShellClaudeConfigDir) {
-    const selectedEnv = buildClaudeCliProfileEnvironment(
-      env,
-      opts.plainShellClaudeConfigDir,
-    );
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;

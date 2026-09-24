@@ -104,4 +104,10 @@ export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
   /** The CLI profile whose login is live right now, when that differs from the store default. */
   activeCliProfileId?(): Promise<string>;
   readonly switchSideEffects?: SwitchSideEffects;
+  /**
+   * Every session runs on whichever login is live, never on a profile of its
+   * own (Claude's one home). Deleting any account then never has to close a
+   * session, and a lease only records which account a session started on.
+   */
+  readonly sessionsFollowLiveLogin?: boolean;
 }

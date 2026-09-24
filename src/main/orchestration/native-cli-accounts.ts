@@ -1,6 +1,4 @@
-import { dirname } from "node:path";
 import {
-  claudeCliManagedProfileConfigDir,
   CLAUDE_CLI_PERSONAL_PROFILE_ID,
   ClaudeCliAccountProfileLeasedError,
   ClaudeCliAccountProfileNotFoundError,
@@ -39,8 +37,8 @@ import {
   type GrokCliProfileConnection,
 } from "./grok-cli-account-profiles";
 import { GrokCliProfileLeaseRegistry } from "./grok-cli-profile-execution";
+import { readClaudeProfileIdentity } from "./claude-cli-live-login";
 import {
-  readClaudeCliAccountIdentity,
   readCodexCliAccountIdentity,
   readGrokCliAccountIdentity,
   type NativeCliAccountIdentity,
@@ -154,14 +152,12 @@ export type NativeCliAccountIdentityReader = (
 
 /**
  * Read-only account-identity probe for Claude Code, which records its account
- * in a config file rather than a credential file. It receives the profile's
- * config directory and the CLAUDE_CONFIG_DIR value that profile runs with, and
- * is bound by the same rules as the reader above.
+ * beside the login rather than inside the token: `.claude.json` while the
+ * profile is live, the profile's vault otherwise. It receives the profile id
+ * and is bound by the same rules as the reader above.
  */
 export type ClaudeCliAccountIdentityReader = (
-  configDir: string,
-  configDirEnv: string | null,
-  homeDir: string,
+  profileId: string,
 ) => Promise<NativeCliAccountIdentity>;
 
 export type NativeCliAccountErrorCode =
@@ -322,7 +318,9 @@ export class NativeCliAccountService {
     this.grokStore = options.grokStore ?? nativeGrokProfileStore;
     this.codexIdentityReader = options.codexIdentityReader ?? readCodexCliAccountIdentity;
     this.grokIdentityReader = options.grokIdentityReader ?? readGrokCliAccountIdentity;
-    this.claudeIdentityReader = options.claudeIdentityReader ?? readClaudeCliAccountIdentity;
+    this.claudeIdentityReader =
+      options.claudeIdentityReader ??
+      ((profileId) => readClaudeProfileIdentity(this.claudeStore, profileId));
   }
 
   private normalizeProfileId(
@@ -340,8 +338,7 @@ export class NativeCliAccountService {
 
   /**
    * Account identities for connected Claude sign-ins, keyed by profile id.
-   * The config path stays inside this method; only the digest and email
-   * leave it.
+   * Paths stay inside the reader; only the digest and email leave it.
    */
   private async claudeAccountIdentities(
     profiles: readonly ClaudeCliProfileConnection[],
@@ -350,28 +347,7 @@ export class NativeCliAccountService {
     await Promise.all(
       profiles.map(async (profile) => {
         if (!profile.connected) return;
-        let configDir: string;
-        let configDirEnv: string | null;
-        try {
-          configDir = profile.managed
-            ? claudeCliManagedProfileConfigDir(this.claudeStore.rootDir, profile.id)
-            : this.claudeStore.personalConfigDir;
-          configDirEnv = profile.managed
-            ? configDir
-            : this.claudeStore.personalConfigDirEnv;
-        } catch {
-          return;
-        }
-        // The personal profile runs with no CLAUDE_CONFIG_DIR, so Claude Code
-        // keeps its config beside that directory rather than inside it. Taking
-        // the home directory from the store keeps a store pointed at a sandbox
-        // from reaching the real one.
-        const homeDir = dirname(this.claudeStore.personalConfigDir);
-        const identity = await this.claudeIdentityReader(
-          configDir,
-          configDirEnv,
-          homeDir,
-        ).catch(() => undefined);
+        const identity = await this.claudeIdentityReader(profile.id).catch(() => undefined);
         if (identity?.fingerprint || identity?.email) {
           identities.set(profile.id, identity);
         }

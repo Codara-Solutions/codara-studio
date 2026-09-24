@@ -183,6 +183,19 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    * drops it here, so the logged-out login cannot come back on a switch.
    */
   afterPersonalLogout?(location: Loc): Promise<void>;
+  /**
+   * Whether an empty CLI slot is a sign-out the user asked for. Claude Code
+   * also empties a login itself when its refresh token turns out to be spent
+   * (another holder rotated it); that is a login to repair from the fresher
+   * half, not a logout to propagate. Absent means every empty slot counts.
+   */
+  isDeliberateSignOut?(raw: Raw | null): boolean;
+  /**
+   * Whether the personal slot at this location is Codara's to create from
+   * the Cora half. The user's own live login never is; a vault Codara keeps
+   * for Account 1 while another account is live may be.
+   */
+  mayCreatePersonalSlot?(location: Loc): Promise<boolean>;
 }
 
 export interface CredentialPair<Loc = unknown, Raw = unknown> {
@@ -336,18 +349,28 @@ export async function reconcilePair<Loc, Raw>(
   }
   if (verdict === "equal" || verdict === "none") return result;
 
+  let repairPersonal = false;
   if (verdict === "pi-only" && personal) {
     // The personal slot belongs to the user. A credential that was there and
     // is gone now is a CLI logout; one that was never there is not Codara's
-    // to create.
-    if (options.previousCliPresent === true && !options.cancelled?.()) {
-      const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-      await AuthStorage.create(pair.authFile).delete(codec.provider);
-      await chmodPrivate(pair.authFile);
-      result.wrote = "pi-delete";
-      await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
+    // to create. A slot the CLI emptied on its own (a spent refresh token)
+    // is neither, and neither is a vault Codara keeps for Account 1: both
+    // are repaired from the Cora half instead.
+    const deliberate = adapter.isDeliberateSignOut?.(cli.raw) ?? true;
+    if (deliberate && options.previousCliPresent === true) {
+      if (!options.cancelled?.()) {
+        const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
+        await AuthStorage.create(pair.authFile).delete(codec.provider);
+        await chmodPrivate(pair.authFile);
+        result.wrote = "pi-delete";
+        await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
+      }
+      return result;
     }
-    return result;
+    repairPersonal =
+      !deliberate ||
+      (await adapter.mayCreatePersonalSlot?.(pair.location).catch(() => false)) === true;
+    if (!repairPersonal) return result;
   }
 
   if (verdict === "pi-newer" || verdict === "pi-only") {
@@ -367,7 +390,12 @@ export async function reconcilePair<Loc, Raw>(
       const latestVerdict = compareCredentials(piCanonical, latestCanonical);
       result.verdict = latestVerdict;
       result.cliPresent = latestCanonical !== null;
-      if (latestVerdict !== "pi-newer" && (latestVerdict !== "pi-only" || personal)) return;
+      if (
+        latestVerdict !== "pi-newer" &&
+        (latestVerdict !== "pi-only" || (personal && !repairPersonal))
+      ) {
+        return;
+      }
       if (options.cancelled?.()) return;
       const record = codec.cliRecordFromCanonical(piCanonical!, latest.raw);
       if (record === null) {

@@ -1,6 +1,4 @@
-import type { ClaudeCliExecutionProfile } from "./claude-cli-profile-execution";
 import type { GrokCliExecutionProfile } from "./grok-cli-profile-execution";
-import { resolveNewNativeClaudeProfile } from "./native-claude-profile-runtime";
 import { resolveNewNativeGrokProfile } from "./native-grok-profile-runtime";
 import { resolve } from "node:path";
 import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
@@ -22,69 +20,47 @@ export function personalCliShellHomeEnvironment(
 /**
  * The Active native CLI accounts, projected onto plain Studio shells.
  *
- * Claude and Grok select managed accounts with their documented home
- * variables: a managed Claude account is a CLAUDE_CONFIG_DIR, a managed Grok
- * account is a GROK_HOME of its own under grok-cli/accounts, and the personal
- * account of each is the CLI's default home. A plain terminal tab has no
- * startup command, so these two selectors are added when Settings marks a
- * managed account Active. Codex is intentionally absent: it has one state
- * home and its switch moves only auth.json.
+ * Only Grok selects a managed account with a home variable: a managed Grok
+ * account is a GROK_HOME of its own under grok-cli/accounts, and the
+ * personal account is the CLI's default home. A plain terminal tab has no
+ * startup command, so that selector is added when Settings marks a managed
+ * account Active. Claude and Codex are intentionally absent: each has one
+ * home, and a switch moves only the login inside it, so a shell needs
+ * nothing to follow them and `claude` or `codex` typed anywhere, in Studio
+ * or another terminal app, runs as the Active account.
  *
  * Two invariants:
  *
  *  - A PERSONAL default contributes nothing. The shell keeps its inherited
- *    environment byte-for-byte, exactly the pre-feature behavior: an unset
- *    CLAUDE_CONFIG_DIR is not equivalent to an exported one, and a personal
- *    shell must also keep credential-override variables the profile builders
- *    would strip.
- *  - Resolution is best-effort and independent per CLI. A shell must always
- *    open: one unreadable account store costs that CLI's selector, never the
- *    spawn and never the other CLI's selector.
- *
- * Resolving through the runtime stores also repairs the selected Claude/Grok
- * state before the first shell after a switch opens.
+ *    environment byte-for-byte, exactly the pre-feature behavior.
+ *  - Resolution is best-effort. A shell must always open: an unreadable
+ *    account store costs the selector, never the spawn.
  *
  * Later switches reach a running shell through the active account pointer
  * (active-cli-env-pointer.ts) and the bundled prompt hooks. That path only
- * exports or unsets the two selector variables; it cannot strip the
+ * exports or unsets the selector variable; it cannot strip the
  * credential-override variables the spawn-time builders strip here, so a
  * shell that started personal and follows to a managed account keeps the
  * overrides it inherited. Documented, not fixed: the hook must never touch a
  * variable it did not set.
  */
 export interface PlainShellAccountSelectors {
-  /** Managed CLAUDE_CONFIG_DIR for the Active Claude account; absent when personal. */
-  claudeConfigDir?: string;
   /** Managed GROK_HOME for the Active Grok Build account; absent when personal. */
   grokHome?: string;
 }
 
 export interface PlainShellAccountSelectorDeps {
-  resolveClaude?: () => Promise<ClaudeCliExecutionProfile>;
   resolveGrok?: () => Promise<GrokCliExecutionProfile>;
 }
 
 export async function resolvePlainShellAccountSelectors(
   deps: PlainShellAccountSelectorDeps = {},
 ): Promise<PlainShellAccountSelectors | null> {
-  const resolveClaude = deps.resolveClaude ?? (() => resolveNewNativeClaudeProfile());
   const resolveGrok = deps.resolveGrok ?? (() => resolveNewNativeGrokProfile());
-
-  const [claude, grok] = await Promise.all([
-    resolveClaude().catch(() => null),
-    resolveGrok().catch(() => null),
-  ]);
-
-  const selectors: PlainShellAccountSelectors = {};
+  const grok = await resolveGrok().catch(() => null);
   // A managed profile always carries its selector in the built environment;
   // a missing one means the resolution was not usable, so the shell is left
   // alone rather than pointed at an empty selection.
-  const claudeConfigDir = claude?.managed ? claude.env.CLAUDE_CONFIG_DIR : undefined;
-  if (claudeConfigDir) selectors.claudeConfigDir = claudeConfigDir;
   const grokHome = grok?.managed ? grok.env.GROK_HOME : undefined;
-  if (grokHome) selectors.grokHome = grokHome;
-
-  return selectors.claudeConfigDir || selectors.grokHome
-    ? selectors
-    : null;
+  return grokHome ? { grokHome } : null;
 }

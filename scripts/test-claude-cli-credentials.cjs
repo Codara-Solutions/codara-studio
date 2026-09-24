@@ -290,9 +290,40 @@ async function main() {
       const darwinManaged = path.join(TMP, "darwin", "accounts", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab");
       const darwinPersonal = path.join(TMP, "darwin", "home", ".claude");
       await mod.writeClaudeCredentialRecord(darwinManaged, darwinManaged, record, real);
-      assert.ok(fs.existsSync(mod.claudeCredentialFile(darwinManaged)), "a managed slot keeps its file");
+      assert.equal(
+        fs.existsSync(mod.claudeCredentialFile(darwinManaged)),
+        false,
+        "a store with neither backend gets a Keychain item only, as Claude Code creates it",
+      );
       assert.deepEqual(JSON.parse(itemFor(darwinManaged)), { claudeAiOauth: record });
       assert.deepEqual(await mod.readClaudeCredentialRecord(darwinManaged, darwinManaged, real), record);
+
+      // Claude Code fell back to the file (its Keychain write failed) and
+      // dropped the item: a Codara write must land in that file and never
+      // create an item that would shadow it, MCP grants included.
+      const fallbackDir = path.join(TMP, "darwin", "fallback-home");
+      fs.mkdirSync(fallbackDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        mod.claudeCredentialFile(fallbackDir),
+        JSON.stringify({ mcpOAuth: { server: { accessToken: "only-in-file" } }, claudeAiOauth: record }),
+        { mode: 0o600 },
+      );
+      await mod.writeClaudeCredentialRecord(fallbackDir, fallbackDir, { ...record, accessToken: "rotated" }, real);
+      assert.equal(itemFor(fallbackDir), undefined, "no Keychain item may shadow a file-only store");
+      assert.deepEqual(JSON.parse(fs.readFileSync(mod.claudeCredentialFile(fallbackDir), "utf8")), {
+        mcpOAuth: { server: { accessToken: "only-in-file" } },
+        claudeAiOauth: { ...record, accessToken: "rotated" },
+      });
+      fs.rmSync(fallbackDir, { recursive: true, force: true });
+
+      // Both stores and a removal: removeClaudeCredentialStores retires a
+      // directory's item and file together.
+      const retiredDir = path.join(TMP, "darwin", "retired");
+      await mod.writeClaudeCredentialRecord(retiredDir, retiredDir, record, real);
+      fs.writeFileSync(mod.claudeCredentialFile(retiredDir), JSON.stringify({ claudeAiOauth: record }), { mode: 0o600 });
+      await mod.removeClaudeCredentialStores(retiredDir, retiredDir);
+      assert.equal(itemFor(retiredDir), undefined);
+      assert.equal(fs.existsSync(mod.claudeCredentialFile(retiredDir)), false);
 
       // Keychain and file MCP grants can rotate independently of the Claude
       // login. Preserve both, regardless of which login wins an account read.
@@ -397,6 +428,54 @@ async function main() {
       if (keychainWasDisabled !== undefined) process.env.CODARA_DISABLE_KEYCHAIN = keychainWasDisabled;
     }
     console.log("PASS on macOS the fresher credential store wins and a logout is still seen");
+  }
+
+  {
+    // Claude Code 2.1.281 holds `.oauth_refresh.lock` inside the directory
+    // and the legacy `<directory>.lock` beside it for a whole refresh. A
+    // switch must wait for both, exactly as a second Claude Code would.
+    const lockfile = require("proper-lockfile");
+    const home = path.join(TMP, "refresh-lock-home");
+    fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+    for (const [description, acquire] of [
+      [
+        "the current refresh lock",
+        () => lockfile.lock(home, {
+          realpath: false,
+          lockfilePath: path.join(home, ".oauth_refresh.lock"),
+        }),
+      ],
+      [
+        "the legacy refresh lock",
+        () => lockfile.lock(`${fs.realpathSync(home)}.lock`, {
+          realpath: false,
+          lockfilePath: `${fs.realpathSync(home)}.lock`,
+        }),
+      ],
+    ]) {
+      const release = await acquire();
+      let ran = false;
+      const pending = mod.withClaudeCodeRefreshLock(home, async () => {
+        ran = true;
+        return "done";
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(ran, false, `a switch waits while Claude Code holds ${description}`);
+      await release();
+      assert.equal(await pending, "done");
+      assert.equal(ran, true);
+    }
+    // Contended past its retries, the lock is refused rather than stolen.
+    const held = await lockfile.lock(home, {
+      realpath: false,
+      lockfilePath: path.join(home, ".oauth_refresh.lock"),
+    });
+    await assert.rejects(
+      () => mod.withClaudeCodeRefreshLock(home, async () => "never", { retries: 1 }),
+      (error) => error.code === "ELOCKED",
+    );
+    await held();
+    console.log("PASS a switch waits for Claude Code's current and legacy refresh locks");
   }
 
   {

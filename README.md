@@ -132,26 +132,23 @@ the app is launched with `CODARA_DEV_TOOLS=1`.
 ## Accounts
 
 An account has two halves: a Cora half (an OAuth subscription the bundled Pi
-runtime uses) and a CLI half (a private login directory for Claude Code,
-Codex, or Grok). Add and manage them in Settings, Agents tab, Accounts, or
-with `cora auth`.
+runtime uses) and a CLI half (the account's Claude Code, Codex, or Grok
+login). Add and manage them in Settings, Agents tab, Accounts, or with
+`cora auth`.
 
-One account per CLI is the Active one. Every terminal Codara opens uses it:
-agent panes resolve it at spawn, and a plain Studio shell gets it in its
-environment, so a `claude` or `codex` you type yourself signs in as the Active
-account. Terminals already open keep the account they started with, and your
-own terminals outside Codara are untouched. Codara never edits your shell
-startup files.
+One account per CLI is the Active one. Claude Code and Codex run every
+account in your own `~/.claude` and `~/.codex`, so switching the Active
+account works like `/login` as another account: the sign-in changes
+everywhere at once, including terminals outside Codara such as Ghostty, and
+MCP sign-ins, settings, chats, the `/resume` list, history and project trust
+all stay, because there is only one copy of each. Running Claude Code
+sessions pick up the new account on their next request; running Codex
+sessions are closed after you confirm. Grok keeps a private home per managed
+account, with your personal state linked into it. Codara never edits your
+shell startup files.
 
-Switching the Active account behaves like logging out and back in on one
-home: chats, the `/resume` list, history, and settings all stay, because every
-managed account shares those state surfaces with your personal `~/.claude` and
-`~/.codex` through links while credentials and identity stay private to each
-account. On Windows, managed accounts keep the older fully isolated behavior.
-
-Codara does not refresh tokens itself, but it does mirror the OAuth credential
-between an account's two halves so both stay signed in. The design and its
-known rough edges are described in
+Codara mirrors the OAuth credential between an account's two halves so both
+stay signed in. The design is described in
 [docs/architecture.md](./docs/architecture.md#accounts).
 
 ```sh

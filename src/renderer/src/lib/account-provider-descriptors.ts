@@ -28,15 +28,39 @@ export interface AccountProviderDescriptor {
    * asks again. Anthropic and Grok switches close nothing.
    */
   switchClosesSessions: boolean;
+  /**
+   * Every session runs on whichever login is live (Claude Code's one home),
+   * so a switch reaches running sessions too and deleting an account never
+   * has to close one.
+   */
+  sessionsFollowLiveLogin: boolean;
 }
 
 const CLI_WORDS: Record<
   AgentRuntimeKind,
-  Pick<AccountProviderDescriptor, "cliLabel" | "loginHint" | "switchClosesSessions">
+  Pick<
+    AccountProviderDescriptor,
+    "cliLabel" | "loginHint" | "switchClosesSessions" | "sessionsFollowLiveLogin"
+  >
 > = {
-  claude: { cliLabel: "Claude Code", loginHint: "claude login", switchClosesSessions: false },
-  codex: { cliLabel: "Codex", loginHint: "codex login", switchClosesSessions: true },
-  grok: { cliLabel: "Grok", loginHint: "grok login", switchClosesSessions: false },
+  claude: {
+    cliLabel: "Claude Code",
+    loginHint: "claude login",
+    switchClosesSessions: false,
+    sessionsFollowLiveLogin: true,
+  },
+  codex: {
+    cliLabel: "Codex",
+    loginHint: "codex login",
+    switchClosesSessions: true,
+    sessionsFollowLiveLogin: false,
+  },
+  grok: {
+    cliLabel: "Grok",
+    loginHint: "grok login",
+    switchClosesSessions: false,
+    sessionsFollowLiveLogin: false,
+  },
 };
 
 /** One descriptor per family, in the order the Accounts panel lists them. */
@@ -60,6 +84,9 @@ export function accountProviderDescriptor(
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
   if (descriptor.switchClosesSessions) {
     return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`;
+  }
+  if (descriptor.sessionsFollowLiveLogin) {
+    return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`;
   }
   return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`;
 }

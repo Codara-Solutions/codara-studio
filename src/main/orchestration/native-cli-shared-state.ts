@@ -1,5 +1,6 @@
-// Shared user-state surfaces between the personal CLI homes used by Claude
-// and Grok and every Codara-managed account directory.
+// Shared user-state surfaces between the personal Grok home and every
+// Codara-managed Grok account directory. Claude used this model too until it
+// moved to one home in which only the login switches (claude-cli-live-login.ts).
 //
 // A managed account used to be a born-empty, fully isolated config dir, so
 // switching the Active account meant an empty /resume, no settings, and no
@@ -28,97 +29,24 @@ import { promises as fs } from "node:fs";
 import type { Stats } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-export type NativeCliSharedStateRuntime = "claude" | "grok";
+export type NativeCliSharedStateRuntime = "grok";
 
 /**
  * How one shared name is established/healed:
  * - "link": always ensure the symlink, creating the personal target when it
  *   is missing (directories) or linking only when the personal file exists.
- * - "link-if-personal": like "link", but a missing managed entry is linked
- *   only when the personal home already has the name (legacy CLI layouts —
- *   creating them fresh would resurrect a retired layout).
- * - "line-union": JSONL logs. A real managed copy is merged into the
- *   personal file as a line union (personal lines in order, then managed
- *   lines not already present, deduped by exact line content). Claude has a
- *   cleanup pass that can compact/rewrite history (~/.claude/.last-cleanup),
- *   so after divergence one side may be compacted while the other holds
- *   fresh appends — newest-mtime-wins would lose data in both directions.
  * - "newest-wins": ordinary files. Identical copies just relink; on
  *   divergence the newest mtime wins and the losing content is preserved as
  *   a `.codara-backup-<ts>` file beside the personal target, so healing
  *   never silently discards either side's edits.
  */
-export type NativeCliSharedStateHeal =
-  | "link"
-  | "link-if-personal"
-  | "line-union"
-  | "newest-wins";
+export type NativeCliSharedStateHeal = "link" | "newest-wins";
 
 export interface NativeCliSharedStateName {
   name: string;
   kind: "dir" | "file";
   heal: NativeCliSharedStateHeal;
 }
-
-/**
- * Claude Code state shared with the personal config dir. Closed list — never
- * add a name without confirming it can never carry a credential, an account
- * identity, or per-process live state.
- */
-export const CLAUDE_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
-  { name: "projects", kind: "dir", heal: "link" },
-  { name: "tasks", kind: "dir", heal: "link" },
-  { name: "teams", kind: "dir", heal: "link" },
-  { name: "session-env", kind: "dir", heal: "link" },
-  { name: "file-history", kind: "dir", heal: "link" },
-  { name: "memory", kind: "dir", heal: "link" },
-  { name: "paste-cache", kind: "dir", heal: "link" },
-  { name: "shell-snapshots", kind: "dir", heal: "link" },
-  { name: "agents", kind: "dir", heal: "link" },
-  { name: "commands", kind: "dir", heal: "link" },
-  { name: "skills", kind: "dir", heal: "link" },
-  { name: "plugins", kind: "dir", heal: "link" },
-  { name: "output-styles", kind: "dir", heal: "link" },
-  { name: "hooks", kind: "dir", heal: "link" },
-  // Older CLIs only; never resurrected on accounts that predate it.
-  { name: "todos", kind: "dir", heal: "link-if-personal" },
-  { name: "settings.json", kind: "file", heal: "newest-wins" },
-  { name: "CLAUDE.md", kind: "file", heal: "newest-wins" },
-  { name: "history.jsonl", kind: "file", heal: "line-union" },
-];
-
-/**
- * Claude names that deliberately stay per-account. `sessions/` is a LIVE
- * session registry keyed by PID — sharing it would let a session under one
- * account try to attach to another account's running session. daemon/,
- * daemon.log, and jobs/ execute under the account that owns the daemon, so
- * sharing them would bill the wrong account. This list only informs the
- * unrecognized-name log; privacy is the default for every name not in the
- * share list. settings.local.json deliberately stays local to the account,
- * and statusline-command.sh keeps its per-account copy: the shared
- * settings.json references it by absolute path into ~/.claude, so the
- * personal script runs either way.
- */
-export const CLAUDE_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
-  "sessions",
-  "statsig",
-  "logs",
-  "ide",
-  "local",
-  "cache",
-  "backups",
-  "telemetry",
-  "daemon",
-  "daemon.log",
-  "jobs",
-  "downloads",
-  "settings.local.json",
-  "debug",
-  "chrome",
-  "image-cache",
-  "mcp-needs-auth-cache.json",
-  "statusline-command.sh",
-];
 
 export const GROK_CLI_SHARED_STATE: readonly NativeCliSharedStateName[] = [
   { name: "sessions", kind: "dir", heal: "link" },
@@ -141,12 +69,6 @@ export const GROK_CLI_PRIVATE_STATE_NAMES: readonly string[] = [
   "version.json",
 ];
 
-export const CLAUDE_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
-  CLAUDE_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
-);
-export const CLAUDE_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
-  CLAUDE_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
-);
 export const GROK_CLI_SHARED_STATE_DIR_SET: ReadonlySet<string> = new Set(
   GROK_CLI_SHARED_STATE.filter((entry) => entry.kind === "dir").map((entry) => entry.name),
 );
@@ -154,9 +76,9 @@ export const GROK_CLI_SHARED_STATE_FILE_SET: ReadonlySet<string> = new Set(
   GROK_CLI_SHARED_STATE.filter((entry) => entry.kind === "file").map((entry) => entry.name),
 );
 export interface EnsureSharedCliStateInput {
-  /** A Codara-managed account directory (CLAUDE_CONFIG_DIR / GROK_HOME). */
+  /** A Codara-managed account directory (a GROK_HOME). */
   managedDir: string;
-  /** The personal home the state is shared with (~/.claude / ~/.grok). */
+  /** The personal home the state is shared with (~/.grok). */
   personalDir: string;
   runtime: NativeCliSharedStateRuntime;
 }
@@ -213,9 +135,8 @@ async function lstatOrNull(path: string): Promise<Stats | null> {
 }
 
 function sharedStateSpec(
-  runtime: NativeCliSharedStateRuntime,
+  _runtime: NativeCliSharedStateRuntime,
 ): readonly NativeCliSharedStateName[] {
-  if (runtime === "claude") return CLAUDE_CLI_SHARED_STATE;
   return GROK_CLI_SHARED_STATE;
 }
 
@@ -225,10 +146,7 @@ function isRecognizedPersonalName(
 ): boolean {
   if (name.startsWith(".")) return true; // dot-prefixed misc (.DS_Store, .last-*, migrations)
   if (sharedStateSpec(runtime).some((entry) => entry.name === name)) return true;
-  const privateNames = runtime === "claude"
-    ? CLAUDE_CLI_PRIVATE_STATE_NAMES
-    : GROK_CLI_PRIVATE_STATE_NAMES;
-  if (privateNames.includes(name)) return true;
+  if (GROK_CLI_PRIVATE_STATE_NAMES.includes(name)) return true;
   if (name.includes(".sqlite") || isSqliteArtifactName(name)) return true;
   // Backup copies users, tools, and this module leave beside the originals.
   if (name.includes(".codara-backup-")) return true;
@@ -354,31 +272,6 @@ async function writeNewFile(path: string, content: Buffer): Promise<void> {
   }
 }
 
-/**
- * Merge two JSONL logs as a line union: every personal line in its original
- * order, then every managed line not already present (deduped by exact line
- * content). Lossless in both directions and idempotent, which is what makes
- * a failed swap safely retryable without duplicating history.
- */
-function unionJsonlLines(
-  personalContent: string,
-  managedContent: string,
-): { merged: string; additions: number } {
-  const personalLines = personalContent.length === 0 ? [] : personalContent.split("\n");
-  while (personalLines.length > 0 && personalLines[personalLines.length - 1] === "") {
-    personalLines.pop();
-  }
-  const seen = new Set(personalLines);
-  const out = [...personalLines];
-  let additions = 0;
-  for (const line of managedContent.split("\n")) {
-    if (!line || seen.has(line)) continue;
-    seen.add(line);
-    out.push(line);
-    additions += 1;
-  }
-  return { merged: out.length === 0 ? "" : `${out.join("\n")}\n`, additions };
-}
 
 interface MergeSummary {
   moved: number;
@@ -598,9 +491,6 @@ async function ensureSharedDirName(
   for (let attempt = 0; attempt < SWAP_MAX_ATTEMPTS; attempt += 1) {
     const stats = await lstatOrNull(managedPath);
     if (!stats) {
-      if (spec.heal === "link-if-personal" && !(await lstatOrNull(personalPath))) {
-        return { name, kind: "dir", outcome: "skipped-missing" };
-      }
       // The personal target must exist BEFORE the link: mkdir on a dangling
       // dir symlink path fails EEXIST, which would break the CLI's own
       // mkdir-if-missing bootstrapping.
@@ -698,39 +588,6 @@ async function ensureSharedFileName(
     // personal side before the name becomes a link.
     const managedContent = await fs.readFile(managedPath);
     const expected = { kind: "file" as const, ino: stats.ino, mtimeMs: stats.mtimeMs };
-
-    if (spec.heal === "line-union") {
-      const personalStats = await lstatOrNull(personalPath);
-      if (personalStats && (personalStats.isSymbolicLink() || !personalStats.isFile())) {
-        return {
-          name,
-          kind: "file",
-          outcome: "error",
-          detail: "personal target is not a regular file",
-        };
-      }
-      const personalContent = personalStats
-        ? await fs.readFile(personalPath, "utf8")
-        : "";
-      const { merged, additions } = unionJsonlLines(
-        personalContent,
-        managedContent.toString("utf8"),
-      );
-      // Skip the write when the union adds nothing: gratuitous rewrites of
-      // the personal log would churn its mtime for no content change.
-      if (!personalStats || additions > 0) {
-        await writeFileReplacingAtomic(personalPath, Buffer.from(merged, "utf8"), 0o600);
-      }
-      if (await swapWithSymlink(managedDir, managedPath, personalPath, expected)) {
-        return {
-          name,
-          kind: "file",
-          outcome: "healed-file",
-          detail: `line-union (${additions} added)`,
-        };
-      }
-      continue;
-    }
 
     const personalStats = await lstatOrNull(personalPath);
     if (!personalStats) {

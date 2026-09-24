@@ -90,8 +90,11 @@ Subscription sign-in opens the provider page and finishes in the invoking
 terminal. Native CLI sign-in opens a guarded Studio terminal because those
 tools own an interactive CLI ceremony. Add `--default` to make a reconnect the
 default after it succeeds; destructive commands confirm unless `--yes` is
-present. Existing Cora runs and already-open terminals keep their frozen
-account when a default changes.
+present. Existing Cora runs keep their frozen account when a default
+changes. Claude Code runs every account in your own `~/.claude`, so an open
+Claude Code terminal, in Studio or any other terminal app, moves to the new
+account on its next request; running Codex sessions are closed after you
+confirm.
 
 ## The live dashboard
 
