@@ -1459,11 +1459,10 @@ export function statusToneColor(tone: ChatStatusTone): string {
   }
 }
 
-// Priority ranking used by `workspaceAttentionPriority` to roll multiple
-// chats up to one "what should I look at first" signal per workspace.
-// Higher value wins. The buckets are intentionally coarse — a single
-// done-unseen chat outranks any number of live/done-seen ones because
-// "needs your eyes" trumps "still running".
+// Priority ranking behind compareRunsByAttention, which picks the run a
+// workspace's rail dot speaks for. Higher value wins. The buckets are
+// intentionally coarse: a single done-unseen chat outranks any number of
+// live/done-seen ones because "needs your eyes" trumps "still running".
 const ATTENTION_PRIORITY: Record<ChatStatusTone, number> = {
   blocked: 4,
   "done-unseen": 3,
@@ -1473,25 +1472,6 @@ const ATTENTION_PRIORITY: Record<ChatStatusTone, number> = {
   failed: 0,
   idle: 0,
 };
-
-// Workspace-level "what should I look at first" signal. Computes the max
-// attention priority across the given run list (one chat per run).
-//
-// Usage:
-//   const priority = workspaceAttentionPriority(runs.filter(r => r.workspaceId === ws.id));
-//   if (priority > 0) renderBadge();
-//
-// Returns 0 when there are no chats or none of them want attention. Pure
-// function; safe to call inside a render.
-export function workspaceAttentionPriority(runs: RunState[]): number {
-  let max = 0;
-  for (const run of runs) {
-    const tone = describeRunStatus(run).tone;
-    const value = ATTENTION_PRIORITY[tone] ?? 0;
-    if (value > max) max = value;
-  }
-  return max;
-}
 
 // Whether a status tone is asking anything of the user — the predicate behind
 // the workspace rail's attention dot.
@@ -1506,10 +1486,9 @@ export function workspaceAttentionPriority(runs: RunState[]): number {
 //                 that ever finished a chat.
 //   - `failed` /
 //     `cancelled` terminal and unchangeable. ATTENTION_PRIORITY already scores
-//                 failed at 0 and the run switcher files it under "Done", so a
-//                 rail dot for it would contradict both — and, sharing --danger
-//                 with `blocked`, would be indistinguishable from a run that
-//                 really is waiting on a reply.
+//                 failed at 0, so a rail dot for it would contradict that; and,
+//                 sharing --danger with `blocked`, it would be indistinguishable
+//                 from a run that really is waiting on a reply.
 //   - `idle`      never started.
 // Declared as a type predicate so a caller that guards on it (the rail's
 // StatusDot) keeps a non-null tone in hand for statusToneColor.
@@ -1541,104 +1520,12 @@ export function workspaceRailTone(runs: RunState[]): ChatStatusTone | null {
   const wanting = runs.filter((run) => toneWantsAttention(describeRunStatus(run).tone));
   if (wanting.length === 0) return null;
   // compareRunsByAttention sorts highest-attention first, so the head run
-  // dictates the dot. Its tone is the same one the switcher buckets and chat
-  // rows use, so the cues never disagree.
+  // dictates the dot. Its tone is the same one the run switcher and chat rows
+  // use, so the cues never disagree.
   return describeRunStatus(wanting.slice().sort(compareRunsByAttention)[0]).tone;
 }
 
-// The four display buckets the global run switcher groups every run into.
-// Distinct from ChatStatusTone (seven tones): several tones collapse to one
-// bucket — e.g. `live` and `paused` are both "Working", `failed` and `idle`
-// fall into "Done" so a stalled or cancelled run is still reachable, just
-// last. The mapping mirrors ATTENTION_PRIORITY ordering.
-export type RunSwitcherToneGroup = "needs-you" | "done-unseen" | "working" | "done";
-
-// Map a run's status tone to its switcher bucket. blocked → needs-you (the
-// one bucket that wants action), done-unseen stays its own bucket so finished
-// work the user hasn't looked at pops out, live/paused → working, and
-// done/failed/idle → done. failed is still listed but is the lowest-priority
-// member of the "done" bucket (ATTENTION_PRIORITY[failed] === 0).
-export function switcherGroupForTone(tone: ChatStatusTone): RunSwitcherToneGroup {
-  switch (tone) {
-    case "blocked":
-      return "needs-you";
-    case "done-unseen":
-      return "done-unseen";
-    case "live":
-    case "paused":
-      return "working";
-    case "done":
-    case "failed":
-    case "idle":
-    default:
-      return "done";
-  }
-}
-
-// Display order of the switcher buckets, top to bottom. Matches the priority
-// ranking: act-on-it first, then finished-but-unseen, then in-flight, then
-// already-settled work.
-export const SWITCHER_GROUP_ORDER: RunSwitcherToneGroup[] = [
-  "needs-you",
-  "done-unseen",
-  "working",
-  "done",
-];
-
-export const SWITCHER_GROUP_LABEL: Record<RunSwitcherToneGroup, string> = {
-  "needs-you": "Needs you",
-  "done-unseen": "Done · unseen",
-  working: "Working",
-  done: "Done",
-};
-
-// Newest-activity timestamp for ordering runs within a bucket. Prefers
-// updatedAt (moves as the run progresses) and falls back to createdAt.
-function runActivityTime(run: RunState): number {
-  const updated = Date.parse(run.updatedAt ?? "");
-  if (Number.isFinite(updated)) return updated;
-  const created = Date.parse(run.createdAt ?? "");
-  return Number.isFinite(created) ? created : 0;
-}
-
-// Bucket every run by its status tone, drop empty buckets, and return them in
-// SWITCHER_GROUP_ORDER. Within a bucket runs are sorted by attention priority
-// (higher tone first) and then by most-recent activity, so the run most
-// deserving of a click sits at the top of each section. Uses the same
-// describeRunStatus as the rail dots, so the dot tone and the group a run
-// lands in can never disagree.
-export function groupRunsByTone(
-  runs: RunState[],
-): Array<{ group: RunSwitcherToneGroup; label: string; runs: RunState[] }> {
-  const buckets = new Map<RunSwitcherToneGroup, RunState[]>();
-  for (const run of runs) {
-    const tone = describeRunStatus(run).tone;
-    const group = switcherGroupForTone(tone);
-    const list = buckets.get(group);
-    if (list) list.push(run);
-    else buckets.set(group, [run]);
-  }
-
-  const result: Array<{ group: RunSwitcherToneGroup; label: string; runs: RunState[] }> = [];
-  for (const group of SWITCHER_GROUP_ORDER) {
-    const list = buckets.get(group);
-    if (!list || list.length === 0) continue;
-    list.sort((a, b) => {
-      const byPriority =
-        (ATTENTION_PRIORITY[describeRunStatus(b).tone] ?? 0) -
-        (ATTENTION_PRIORITY[describeRunStatus(a).tone] ?? 0);
-      if (byPriority !== 0) return byPriority;
-      return runActivityTime(b) - runActivityTime(a);
-    });
-    result.push({ group, label: SWITCHER_GROUP_LABEL[group], runs: list });
-  }
-  return result;
-}
-
-// Single comparator the switcher's flat fallback and the rail share: higher
-// attention tone first, ties broken by newest createdAt. Use this for a flat
-// sort; groupRunsByTone for the bucketed view, workspaceAttentionPriority for
-// the per-workspace rollup.
+// Higher attention tone first, ties broken by newest createdAt.
 export function compareRunsByAttention(a: RunState, b: RunState): number {
   const byPriority =
     (ATTENTION_PRIORITY[describeRunStatus(b).tone] ?? 0) -
