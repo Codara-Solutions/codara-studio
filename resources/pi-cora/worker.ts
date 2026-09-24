@@ -2,6 +2,11 @@ import { createRequire } from "node:module";
 import { writeFile } from "node:fs/promises";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  codaraAnthropicRenewalAccount,
+  registerCodaraAnthropicRenewal,
+  type CodaraSocketRequest,
+} from "./anthropic-refresh";
 import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
@@ -32,6 +37,7 @@ interface BridgeToolResult {
 interface CodaraBridge {
   listTools(): BridgeTool[];
   callToolByName(name: string, args: unknown): Promise<BridgeToolResult>;
+  requestCodara?: CodaraSocketRequest;
 }
 
 const requireFromExtension = createRequire(import.meta.url);
@@ -281,6 +287,12 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
     : "";
   const directTask = Boolean(directReportPath);
   let mcp: McpBridgeHandle | null = null;
+
+  // Studio renews the Claude login; this process never spends its refresh token.
+  const renewalAccount = codaraAnthropicRenewalAccount();
+  if (renewalAccount && bridge.requestCodara) {
+    registerCodaraAnthropicRenewal(pi, { accountProfileId: renewalAccount, request: bridge.requestCodara });
+  }
 
   // Long worker sessions compact on Codara's token budget, not on Pi's
   // window-sized default.

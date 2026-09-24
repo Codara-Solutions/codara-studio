@@ -825,7 +825,73 @@ const noInput = {};
   }
 }
 
+// Studio renews the Claude login: a trusted Claude process asks over the
+// agent socket instead of spending its refresh token.
+{
+  const renewal = loadTypeScriptModule(
+    path.join(__dirname, "..", "resources", "pi-cora", "anthropic-refresh.ts"),
+  );
+  const trusted = {
+    CODARA_PI_PROVIDER: "anthropic",
+    CODARA_PI_PROJECT_POLICY: "trusted",
+    CODARA_PI_ACCOUNT_PROFILE_ID: "acct-1",
+  };
+  assert.equal(renewal.codaraAnthropicRenewalAccount(trusted), "acct-1");
+  assert.equal(
+    renewal.codaraAnthropicRenewalAccount({ ...trusted, CODARA_PI_PROVIDER: "openai-codex" }),
+    null,
+  );
+  assert.equal(
+    renewal.codaraAnthropicRenewalAccount({ ...trusted, CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }),
+    null,
+    "an imported-PR process keeps Pi's own refresh",
+  );
+  assert.equal(
+    renewal.codaraAnthropicRenewalAccount({ ...trusted, SPARK_AGENT_CAPABILITY: "scoped" }),
+    null,
+    "a scoped capability cannot reach the method",
+  );
+  assert.equal(renewal.codaraAnthropicRenewalAccount({ ...trusted, CODARA_PI_ACCOUNT_PROFILE_ID: " " }), null);
+
+  const registered = [];
+  const requests = [];
+  let answer = { access: "access-new", refresh: "refresh-new", expires: 1234 };
+  renewal.registerCodaraAnthropicRenewal(
+    { registerProvider: (name, config) => registered.push({ name, config }) },
+    {
+      accountProfileId: "acct-1",
+      request: async (method, params, timeoutMs) => {
+        requests.push({ method, params, timeoutMs });
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    },
+  );
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].name, "anthropic");
+  const oauth = registered[0].config.oauth;
+  assert.deepEqual(Object.keys(registered[0].config), ["oauth"], "models, base URL and API-key login stay Pi's");
+  const stored = { type: "oauth", access: "access-old", refresh: "refresh-old", expires: 1 };
+  const refreshed = await oauth.refreshToken(stored);
+  assert.deepEqual(refreshed, { type: "oauth", access: "access-new", refresh: "refresh-new", expires: 1234 });
+  assert.equal(requests[0].method, "accounts.anthropic.renew");
+  assert.deepEqual(requests[0].params, { accountProfileId: "acct-1", refreshToken: "refresh-old" });
+  assert.equal(oauth.getApiKey(refreshed), "access-new");
+  await assert.rejects(oauth.login({}), /account settings/);
+  answer = new Error("Codara agent socket unreachable: ECONNREFUSED");
+  await assert.rejects(oauth.refreshToken(stored), /Codara could not renew the Claude login: .*ECONNREFUSED/);
+  answer = { access: "", refresh: "x", expires: 1 };
+  await assert.rejects(oauth.refreshToken(stored), /no access token/);
+
+  for (const file of ["index.ts", "worker.ts"]) {
+    const source = fs.readFileSync(path.join(__dirname, "..", "resources", "pi-cora", file), "utf8");
+    assert.match(source, /registerCodaraAnthropicRenewal\(pi,/, `${file} must route the Claude refresh to Studio`);
+  }
+  assert.equal(typeof studioBridge.requestCodara, "function", "the bridge exposes the socket call");
+}
+
 console.log("pi Cora mode + execution-policy prompts: ok");
+console.log("pi Claude login renewal (through Studio): ok");
 console.log("pi worker policy (roster + access fence): ok");
 console.log("pi session compaction (256k trigger): ok");
 console.log("pi provider service tier (OpenAI opt-in, Anthropic never): ok");

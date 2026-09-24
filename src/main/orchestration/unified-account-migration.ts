@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type { ClaudeAccountAdapter } from "./account-adapters/claude-account-adapter";
 import { refreshActiveCliEnvPointer } from "./active-cli-env-pointer";
@@ -8,7 +9,12 @@ import {
   type MigrateClaudeToOneHomeResult,
 } from "./claude-cli-live-login";
 import { undoLiveSlotSwap, type UndoLiveSlotSwapResult } from "./claude-live-slot-undo";
-import { startClaudeLoginKeeper } from "./claude-login-keeper";
+import {
+  claudeLoginKeeperDeps,
+  renewClaudeLoginForCora,
+  startClaudeLoginKeeper,
+  type RefreshedAnthropicTokens,
+} from "./claude-login-keeper";
 import type { CodexCliAccountProfileStore } from "./codex-cli-account-profiles";
 import { ensureCodexCliAuthVault } from "./codex-cli-auth-selector";
 import type { GrokCliAccountProfileStore } from "./grok-cli-account-profiles";
@@ -19,7 +25,12 @@ import {
 } from "./native-claude-profile-runtime";
 import { setNativeCodexProfileResolutionHooks } from "./native-codex-profile-runtime";
 import { setNativeGrokProfileResolutionHooks } from "./native-grok-profile-runtime";
-import { defaultPiAccountAuthStore, type PiAccountAuthStore } from "./pi-account-auth-store";
+import {
+  codaraPiAccountRootDir,
+  defaultPiAccountAuthStore,
+  piAccountProfilePaths,
+  type PiAccountAuthStore,
+} from "./pi-account-auth-store";
 import {
   UNIFIED_ACCOUNT_PROVIDERS,
   unifiedAccountsFor,
@@ -324,6 +335,41 @@ export function startStudioClaudeLoginKeeper(): void {
       log: (message) => console.warn(message),
     });
   });
+}
+
+/**
+ * Cora's Anthropic refresh, made by Studio instead of by Pi (the bundled
+ * extension routes Pi's refresh here over the agent socket). A linked
+ * account renews through its Claude slot, so Claude Code, the keeper and
+ * Cora share one refresher; a Cora-only account has no other holder and is
+ * simply refreshed.
+ */
+export async function renewCoraAnthropicLogin(
+  coraProfileId: string,
+  heldRefreshToken: string,
+  options: { provePossession?: boolean } = {},
+): Promise<RefreshedAnthropicTokens> {
+  await unifiedAccountsReady();
+  if (options.provePossession) {
+    // A socket caller shows the refresh token Cora's store holds for the
+    // account (the Pi process asking has just read it under its lock), so
+    // the socket never hands a login to a caller that did not already hold it.
+    const { authFile } = piAccountProfilePaths(codaraPiAccountRootDir(), coraProfileId);
+    const stored = await fs
+      .readFile(authFile, "utf8")
+      .then((raw) => (JSON.parse(raw) as { anthropic?: { refresh?: unknown } }).anthropic?.refresh)
+      .catch(() => undefined);
+    if (!heldRefreshToken || stored !== heldRefreshToken) {
+      throw new Error("the refresh token does not match this account's Cora login");
+    }
+  }
+  const pair = await unifiedAccountsFor("anthropic").pairFor(coraProfileId);
+  const deps = claudeLoginKeeperDeps();
+  if (pair && deps) {
+    return (await renewClaudeLoginForCora(deps, pair.cliProfileId, heldRefreshToken)).tokens;
+  }
+  const { refreshAnthropicOAuthToken } = await import("./pi-subscription-auth");
+  return refreshAnthropicOAuthToken(heldRefreshToken, AbortSignal.timeout(20_000));
 }
 
 /** Test seam: forget the process-wide gate so a suite can run the pass again. */

@@ -230,6 +230,143 @@ async function main() {
     console.log("PASS the keeper follows whichever account is live");
   }
 
+  // Cora asks Studio instead of refreshing its own copy.
+  const piExpiry = (record) => record.expiresAt - 5 * MINUTE;
+
+  // A live login that is still good is adopted: no grant is spent.
+  {
+    const f = fixture(login("claude", 60 * MINUTE));
+    const run = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora-old");
+    assert.equal(renewal.outcome, "adopted");
+    assert.deepEqual(renewal.tokens, {
+      access: "access-claude",
+      refresh: "refresh-claude",
+      expires: piExpiry(login("claude", 60 * MINUTE)),
+    });
+    assert.deepEqual(run.calls, [], "Cora's stale refresh token is never spent");
+    console.log("PASS Cora adopts the login Claude Code or the keeper already renewed");
+  }
+
+  // A due live login is renewed with the slot's own token, under Claude
+  // Code's lock and compare-and-swap, and the vault trails.
+  {
+    const f = fixture(login("claude", 2 * MINUTE));
+    const run = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-claude");
+    assert.equal(renewal.outcome, "refreshed");
+    assert.deepEqual(renewal.tokens, grant("next"));
+    assert.deepEqual(run.calls, ["refresh-claude"]);
+    assert.equal(f.live().claudeAiOauth.refreshToken, "refresh-next");
+    assert.equal(f.live().claudeAiOauth.subscriptionType, "max");
+    assert.deepEqual(f.live().mcpOAuth, { server: { accessToken: "grant" } });
+    assert.equal(f.vault().store.claudeAiOauth.refreshToken, "refresh-next");
+    assert.equal(run.changes(), 0, "Pi stores the answer itself; the mirror is not driven under its lock");
+    console.log("PASS a due login is renewed once for Cora and lands in the terminal slot");
+  }
+
+  // Claude Code blanked the slot after a spent token: Cora's copy renews it
+  // and the slot is repaired.
+  {
+    const f = fixture({ accessToken: "", refreshToken: "", expiresAt: 0, scopes: ["user:inference"] });
+    const run = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    assert.equal(renewal.outcome, "refreshed");
+    assert.deepEqual(run.calls, ["refresh-cora"]);
+    assert.equal(f.live().claudeAiOauth.accessToken, "access-next");
+    console.log("PASS a slot Claude Code blanked is renewed from Cora's copy");
+  }
+
+  // The slot's token is spent already: Cora's copy is tried next.
+  {
+    const f = fixture(login("stale", 2 * MINUTE));
+    const run = deps(f, {
+      refresh: async (refreshToken) => {
+        run.calls.push(refreshToken);
+        if (refreshToken === "refresh-stale") throw new Error("invalid_grant");
+        return grant("next");
+      },
+    });
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    assert.deepEqual(run.calls, ["refresh-stale", "refresh-cora"]);
+    assert.equal(renewal.tokens.refresh, "refresh-next");
+    assert.equal(f.live().claudeAiOauth.refreshToken, "refresh-next");
+
+    const dead = fixture(login("stale", 2 * MINUTE));
+    const deadRun = deps(dead, {
+      refresh: async () => {
+        throw new Error("invalid_grant");
+      },
+    });
+    const before = fs.readFileSync(dead.liveFile, "utf8");
+    await assert.rejects(mod.renewClaudeLoginForCora(deadRun.deps, "personal", "refresh-cora"), /invalid_grant/);
+    assert.equal(fs.readFileSync(dead.liveFile, "utf8"), before, "a failed renewal writes nothing");
+    console.log("PASS the slot's token first, Cora's next, and nothing written when both fail");
+  }
+
+  // An account that is not live renews through its vault; the live login is
+  // another account's and stays untouched.
+  {
+    const f = fixture(login("live-account", 2 * MINUTE));
+    const id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const vaultFile = path.join(f.store.rootDir, "accounts", id, "login.json");
+    fs.mkdirSync(path.dirname(vaultFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      vaultFile,
+      JSON.stringify({
+        version: 1,
+        store: { claudeAiOauth: login("vaulted", 1 * MINUTE) },
+        oauthAccount: { emailAddress: "vaulted@example.com" },
+      }),
+      { mode: 0o600 },
+    );
+    const before = fs.readFileSync(f.liveFile, "utf8");
+    const run = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, id, "refresh-vaulted");
+    assert.equal(renewal.outcome, "refreshed");
+    assert.deepEqual(run.calls, ["refresh-vaulted"]);
+    const vault = JSON.parse(fs.readFileSync(vaultFile, "utf8"));
+    assert.equal(vault.store.claudeAiOauth.refreshToken, "refresh-next");
+    assert.equal(vault.oauthAccount.emailAddress, "vaulted@example.com", "the identity stays");
+    assert.equal(fs.readFileSync(f.liveFile, "utf8"), before, "the live login is not touched");
+    console.log("PASS an account that is not live renews through its vault only");
+  }
+
+  // A slot signed out on purpose stays signed out; Cora still gets a token.
+  {
+    const f = fixture(null);
+    const run = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    assert.equal(renewal.outcome, "refreshed");
+    assert.equal(fs.existsSync(f.liveFile), false);
+    await assert.rejects(mod.renewClaudeLoginForCora(run.deps, "personal", ""), /no refresh token/);
+    console.log("PASS a signed-out slot is not signed back in");
+  }
+
+  // A Claude Code refresh in flight is waited for, then adopted.
+  {
+    const f = fixture(login("current", 2 * MINUTE));
+    const lockfile = require("proper-lockfile");
+    const release = await lockfile.lock(f.store.personalConfigDir, {
+      realpath: false,
+      lockfilePath: path.join(f.store.personalConfigDir, ".oauth_refresh.lock"),
+    });
+    const run = deps(f, { refreshLockRetries: 20 });
+    const pending = mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-current");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    fs.writeFileSync(
+      f.liveFile,
+      JSON.stringify({ ...f.live(), claudeAiOauth: login("by-claude", 8 * 60 * MINUTE) }),
+      { mode: 0o600 },
+    );
+    await release();
+    const renewal = await pending;
+    assert.equal(renewal.outcome, "adopted");
+    assert.equal(renewal.tokens.access, "access-by-claude");
+    assert.deepEqual(run.calls, []);
+    console.log("PASS Cora waits for Claude Code's refresh and adopts it");
+  }
+
   console.log("\nPASS Claude login keeper");
 }
 

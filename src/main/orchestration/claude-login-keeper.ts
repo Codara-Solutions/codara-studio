@@ -4,7 +4,8 @@ import {
   readClaudeLiveProfileId,
   readClaudeProfileLogin,
   withClaudeSelectionLock,
-  writeClaudeProfileLogin,
+  writeClaudeVaultLogin,
+  type ClaudeLiveHome,
   type ClaudeLoginSlotStore,
 } from "./claude-cli-live-login";
 import {
@@ -14,6 +15,7 @@ import {
   type ClaudeCredentialRecord,
   type ClaudeCredentialStoreOptions,
 } from "./claude-cli-credentials";
+import type { ClaudeCliProfileId } from "./claude-cli-profile-ids";
 
 /**
  * One refresher for the live Claude login.
@@ -29,7 +31,9 @@ import {
  * Code's own refresh lock and with its compare-and-swap on the refresh
  * token, so neither finds it due while Studio runs. Running sessions adopt
  * the new token the next time they check (their access token no longer
- * matches the store), and the credential mirror carries it to Cora.
+ * matches the store), and the credential mirror carries it to Cora. When
+ * Cora does find its copy due, it asks Studio (renewClaudeLoginForCora)
+ * rather than spending the refresh token itself.
  */
 
 export const CLAUDE_LOGIN_KEEPER_LEAD_MS = 15 * 60 * 1000;
@@ -68,6 +72,54 @@ export type ClaudeLoginKeeperOutcome =
 
 function isDue(record: ClaudeCredentialRecord, now: number, leadMs: number): boolean {
   return record.expiresAt > 0 && record.expiresAt - now <= leadMs;
+}
+
+function nonEmpty(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function firstLine(error: unknown): string {
+  return error instanceof Error ? error.message.split("\n")[0] : String(error);
+}
+
+function withTokens(
+  record: ClaudeCredentialRecord,
+  tokens: RefreshedAnthropicTokens,
+): ClaudeCredentialRecord {
+  return {
+    ...record,
+    accessToken: tokens.access,
+    refreshToken: tokens.refresh,
+    expiresAt: tokens.expires + PI_EXPIRY_PADDING_MS,
+  };
+}
+
+/**
+ * Claude Code's compare-and-swap on the live slot: only a store that still
+ * holds the refresh token just spent takes the result.
+ */
+async function swapLiveLogin(
+  home: ClaudeLiveHome,
+  spent: string,
+  next: ClaudeCredentialRecord,
+  options: ClaudeCredentialStoreOptions,
+): Promise<boolean> {
+  return updateClaudeCredentialStores(
+    home.configDir,
+    home.configDirEnv,
+    (latest) => {
+      const login = claudeLiveLoginRecord(latest);
+      if (login?.refreshToken !== spent) return { result: false };
+      return {
+        result: true,
+        transform: (store) => {
+          store.claudeAiOauth = next;
+          return store;
+        },
+      };
+    },
+    options,
+  );
 }
 
 /**
@@ -109,39 +161,14 @@ export async function refreshLiveClaudeLoginIfDue(
             // login. Nothing is written: the mirror repairs the slot from the
             // fresher half, and Claude Code's own check does the rest.
             deps.log?.(
-              `[accounts] the live Claude login could not be refreshed ahead of time: ${
-                error instanceof Error ? error.message.split("\n")[0] : String(error)
-              }`,
+              `[accounts] the live Claude login could not be refreshed ahead of time: ${firstLine(error)}`,
             );
             return "failed";
           }
-          const next: ClaudeCredentialRecord = {
-            ...current,
-            accessToken: tokens.access,
-            refreshToken: tokens.refresh,
-            expiresAt: tokens.expires + PI_EXPIRY_PADDING_MS,
-          };
-          // Claude Code's compare-and-swap: only a store that still holds the
-          // refresh token just spent takes the result.
-          const saved = await updateClaudeCredentialStores(
-            home.configDir,
-            home.configDirEnv,
-            (latest) => {
-              const login = claudeLiveLoginRecord(latest);
-              if (login?.refreshToken !== current.refreshToken) return { result: false };
-              return {
-                result: true,
-                transform: (store) => {
-                  store.claudeAiOauth = next;
-                  return store;
-                },
-              };
-            },
-            storeOptions,
-          );
-          if (!saved) return "adopted";
+          const next = withTokens(current, tokens);
+          if (!(await swapLiveLogin(home, current.refreshToken, next, storeOptions))) return "adopted";
           // The vault copy trails the live slot.
-          await writeClaudeProfileLogin(deps.store, liveId, next, storeOptions).catch(() => undefined);
+          await writeClaudeVaultLogin(deps.store, liveId, next).catch(() => undefined);
           return "refreshed";
         },
         { retries: deps.refreshLockRetries ?? 3 },
@@ -157,9 +184,94 @@ export async function refreshLiveClaudeLoginIfDue(
   return outcome;
 }
 
+export interface ClaudeLoginRenewal {
+  outcome: "adopted" | "refreshed";
+  tokens: RefreshedAnthropicTokens;
+}
+
+/** An adopted login must outlast Pi's padding, or Pi would ask again at once. */
+const ADOPT_MIN_VALIDITY_MS = PI_EXPIRY_PADDING_MS + 60 * 1000;
+
+/**
+ * Renew a Claude login for its Cora half, which would otherwise refresh its
+ * own copy of the same grant (resources/pi-cora/anthropic-refresh.ts routes
+ * Pi's refresh here). Under the selection lock, and Claude Code's refresh
+ * lock while the profile is live:
+ *
+ * - a slot whose access token is still good is adopted as it is (Claude
+ *   Code or the keeper refreshed it already);
+ * - otherwise the slot's refresh token is spent, then Cora's copy if that
+ *   one fails (Claude Code blanked the slot, or the slot trails Cora), and
+ *   the result is compare-and-swapped into the slot.
+ *
+ * A slot with no login at all stays signed out; Cora still gets its token.
+ * Nothing here touches Pi's store: the caller holds Pi's lock and stores the
+ * answer itself.
+ */
+export async function renewClaudeLoginForCora(
+  deps: ClaudeLoginKeeperDeps,
+  profileId: ClaudeCliProfileId,
+  heldRefreshToken: string,
+): Promise<ClaudeLoginRenewal> {
+  const now = deps.now ?? Date.now;
+  const storeOptions: ClaudeCredentialStoreOptions = deps.fileOnly ? { fileOnly: true } : {};
+  const home = claudeLiveHome(deps.store);
+  return withClaudeSelectionLock(deps.store.rootDir, async () => {
+    const live = (await readClaudeLiveProfileId(deps.store.rootDir)) === profileId;
+    const renew = async (): Promise<ClaudeLoginRenewal> => {
+      const slot = await readClaudeProfileLogin(deps.store, profileId, storeOptions);
+      if (slot.kind === "unreadable") throw new Error("The Claude login could not be read");
+      const record = slot.record;
+      if (record?.accessToken && record.expiresAt - now() > ADOPT_MIN_VALIDITY_MS) {
+        return {
+          outcome: "adopted",
+          tokens: {
+            access: record.accessToken,
+            refresh: record.refreshToken,
+            expires: record.expiresAt - PI_EXPIRY_PADDING_MS,
+          },
+        };
+      }
+      const candidates = [...new Set([record?.refreshToken, heldRefreshToken].filter(nonEmpty))];
+      if (candidates.length === 0) throw new Error("The Claude login holds no refresh token");
+      let tokens: RefreshedAnthropicTokens | null = null;
+      let failure: unknown = null;
+      for (const candidate of candidates) {
+        try {
+          tokens = await deps.refresh(candidate, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
+          break;
+        } catch (error) {
+          failure = error;
+        }
+      }
+      if (!tokens) throw failure;
+      if (record) {
+        const next = withTokens(record, tokens);
+        const saved = live ? await swapLiveLogin(home, record.refreshToken, next, storeOptions) : true;
+        if (saved) {
+          await writeClaudeVaultLogin(deps.store, profileId, next).catch((error: unknown) => {
+            deps.log?.(`[accounts] a renewed Claude login was not saved to its vault: ${firstLine(error)}`);
+          });
+        }
+      }
+      return { outcome: "refreshed", tokens };
+    };
+    return live
+      ? withClaudeCodeRefreshLock(home.configDir, renew, {
+          ...(deps.refreshLockRetries !== undefined ? { retries: deps.refreshLockRetries } : {}),
+        })
+      : renew();
+  });
+}
+
 let keeperTimer: NodeJS.Timeout | null = null;
 let keeperDeps: ClaudeLoginKeeperDeps | null = null;
 let keeperRun: Promise<ClaudeLoginKeeperOutcome> | null = null;
+
+/** The running keeper's dependencies, or null before Studio started it. */
+export function claudeLoginKeeperDeps(): ClaudeLoginKeeperDeps | null {
+  return keeperDeps;
+}
 
 /** Run one pass now, joining a pass already in flight. */
 export function nudgeClaudeLoginKeeper(): Promise<ClaudeLoginKeeperOutcome | null> {

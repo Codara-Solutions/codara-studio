@@ -129,13 +129,18 @@ switch through the prompt hooks.
 refreshed last holds the only valid refresh token, and the mirror copies it
 to the other side (newer expiry wins, a side without a refresh token never
 wins, foreign logins are never adopted, writes go through Pi's lock and the
-adapter's atomic store). Claude Code and Pi both refresh five minutes before
-expiry, so `claude-login-keeper.ts` renews the live Claude login ahead of
-both, under Claude Code's refresh lock and compare-and-swap, leaving one
-refresher while Studio runs. A login Claude Code blanks after a spent refresh
-token is repaired from the Cora half, never read as a logout. See the review
-notes in `REVIEW.md` for the remaining step (Cora owning no refresh of its
-own).
+adapter's atomic store). A Claude login has one refresher while Studio runs:
+`claude-login-keeper.ts` renews the live login ahead of Claude Code, under
+Claude Code's refresh lock and compare-and-swap, and Cora never spends a
+Claude refresh token itself. Its Pi processes register an OAuth refresh for
+the `anthropic` provider (`resources/pi-cora/anthropic-refresh.ts`) that asks
+Studio over the agent socket (`accounts.anthropic.renew`, root callers that
+present the account's current refresh token). Studio adopts the slot's token
+when it is still good, otherwise renews it through the account's Claude slot
+(the live home or its vault) and Pi stores the answer. Imported-PR processes
+have no socket authority for this and keep Pi's own refresh. A login Claude
+Code blanks after a spent refresh token is repaired from the Cora half, never
+read as a logout.
 
 ## Notifications
 

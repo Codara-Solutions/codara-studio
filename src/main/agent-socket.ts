@@ -592,6 +592,14 @@ async function dispatch(
         return await handleWorkspacePrune(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
+      case "accounts.anthropic.renew":
+        // Cora's own Pi processes (trusted plans only; a scoped capability
+        // never lists it) renew their Claude login here instead of spending
+        // the refresh token themselves.
+        if (auth.kind !== "root") {
+          return errorResponse(id, ERR_FORBIDDEN, "Account credentials are user-owned.");
+        }
+        return await handleAnthropicRenew(params, id);
       case "accounts.use":
       case "accounts.rename":
       case "accounts.remove":
@@ -1453,6 +1461,31 @@ async function handleChatCreate(
     });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleAnthropicRenew(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const accountProfileId = stringParam(params, "accountProfileId");
+  const refreshToken = typeof params.refreshToken === "string" ? params.refreshToken : "";
+  if (!accountProfileId) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "accountProfileId is required");
+  }
+  try {
+    const { renewCoraAnthropicLogin } = await import("./orchestration/unified-account-migration");
+    const tokens = await renewCoraAnthropicLogin(accountProfileId, refreshToken, {
+      provePossession: true,
+    });
+    return successResponse(id, {
+      access: tokens.access,
+      refresh: tokens.refresh,
+      expires: tokens.expires,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    return errorResponse(id, ERR_INTERNAL, `The Claude login could not be renewed: ${message}`);
   }
 }
 

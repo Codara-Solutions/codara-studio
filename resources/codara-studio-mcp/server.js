@@ -2218,6 +2218,11 @@ module.exports = {
   callToolByName(name, args) {
     return callTool({ name, arguments: args });
   },
+  // The extension's non-tool calls (the Claude login renewal) go through the
+  // same authenticated socket client, with its scoped-capability rules.
+  requestCodara(method, params, timeoutMs) {
+    return postJsonRpc(method, params, timeoutMs);
+  },
 };
 
 if (require.main === module) startStdioServer();

@@ -440,6 +440,34 @@ async function main() {
     }).env;
   assert.equal(tierPlanFor("anthropic").CODARA_PI_PROVIDER, "anthropic");
   assert.equal(tierPlanFor("openai-codex").CODARA_PI_PROVIDER, "openai-codex");
+
+  // A trusted Claude process names its account so the extension can ask
+  // Studio to renew the login; nothing else carries the stamp.
+  const renewalAccountFor = (provider, projectPolicyMode, baseEnv = {}) =>
+    runtime.buildPiManagerLaunchPlan({
+      runtime: fakeRuntime,
+      provider,
+      accountProfileId: "acct-1",
+      configDir: "/config",
+      sessionDir: "/sessions",
+      sessionId: "session-123",
+      runId: "run-123",
+      mode: "execute",
+      cwd: "/workspace",
+      bridgePath: "/bridge/server.js",
+      extensionPaths: ["/extensions/cora.ts"],
+      processExecutable: "/electron",
+      ...(projectPolicyMode ? { projectPolicyMode } : {}),
+      baseEnv,
+    }).env.CODARA_PI_ACCOUNT_PROFILE_ID;
+  assert.equal(renewalAccountFor("anthropic"), "acct-1");
+  assert.equal(renewalAccountFor("openai-codex"), undefined);
+  assert.equal(renewalAccountFor("anthropic", "untrusted-pull-request"), undefined);
+  assert.equal(
+    renewalAccountFor("openai-codex", undefined, { CODARA_PI_ACCOUNT_PROFILE_ID: "inherited" }),
+    undefined,
+    "an inherited stamp never leaks into a plan",
+  );
   // Setting off (and unset) means no stamp at all, for either provider.
   for (const provider of ["anthropic", "openai-codex"]) {
     assert.equal(

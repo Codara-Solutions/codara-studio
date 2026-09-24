@@ -503,7 +503,6 @@ export async function writeClaudeProfileLogin(
   const slot = await claudeProfileSlot(store, profileId);
   const vault = await readClaudeVaultedLogin(slot.vaultFile);
   if (vault.kind === "unreadable") throw new Error("The Claude account vault is unreadable");
-  const previous = vault.kind === "value" ? vault.login : { store: {} };
   if (slot.live) {
     const home = claudeLiveHome(store);
     await updateClaudeCredentialStores(
@@ -519,7 +518,24 @@ export async function writeClaudeProfileLogin(
       options,
     );
   }
-  await writeVaultedLogin(slot.vaultFile, {
+  await writeClaudeVaultLogin(store, profileId, record);
+}
+
+/**
+ * Replace only the vault copy of a profile's login, for a caller that has
+ * already written the live slot under its own compare-and-swap. Callers hold
+ * the selection lock.
+ */
+export async function writeClaudeVaultLogin(
+  store: ClaudeLoginSlotStore,
+  profileId: ClaudeCliProfileId,
+  record: ClaudeCredentialRecord,
+): Promise<void> {
+  const file = claudeCliVaultFile(store.rootDir, profileId);
+  const vault = await readClaudeVaultedLogin(file);
+  if (vault.kind === "unreadable") throw new Error("The Claude account vault is unreadable");
+  const previous = vault.kind === "value" ? vault.login : { store: {} };
+  await writeVaultedLogin(file, {
     ...previous,
     store: { ...previous.store, claudeAiOauth: record },
   });

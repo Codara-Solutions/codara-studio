@@ -881,12 +881,23 @@ export async function refreshPiSubscriptionProfileCredential(
         return undefined;
       }
       if (!nonEmptyString(credential.refresh)) return undefined;
-      // The signal is REQUIRED, not optional. Pi's Anthropic module combines it
-      // with its own deadline through AbortSignal.any([signal, ...]), which
-      // throws ERR_INVALID_ARG_TYPE on undefined before it ever reaches the
-      // network, so omitting it failed every Claude refresh, which then read as
-      // "session expired" and locked the account out of routing entirely.
-      const next = await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
+      // A Claude login is renewed through its terminal slot, under Claude
+      // Code's lock, like the refresh Cora's own processes ask Studio for.
+      // Elsewhere the signal is REQUIRED, not optional: Pi's OAuth modules
+      // combine it with their own deadline through AbortSignal.any([signal,
+      // ...]), which throws ERR_INVALID_ARG_TYPE on undefined before it ever
+      // reaches the network, so omitting it failed every refresh, which then
+      // read as "session expired" and locked the account out of routing.
+      const next: OAuthCredential =
+        provider === "anthropic"
+          ? {
+              ...credential,
+              ...(await (await import("./unified-account-migration")).renewCoraAnthropicLogin(
+                profileId,
+                credential.refresh,
+              )),
+            }
+          : await oauth.refresh!(credential, AbortSignal.timeout(REFRESH_TIMEOUT_MS));
       access = nonEmptyString(next.access) ? next.access : null;
       refreshed = true;
       return next;
@@ -895,14 +906,6 @@ export async function refreshPiSubscriptionProfileCredential(
     return { access, refreshed };
   };
   const service = unifiedAccountsFor(provider);
-  if (provider === "anthropic") {
-    // The live Claude login has one refresher, the keeper, under Claude
-    // Code's lock; a refresh of Cora's copy here would be a second one. When
-    // the keeper renews the login, the mirror has already brought the new
-    // token to Cora by the time the attempt below looks.
-    const { nudgeClaudeLoginKeeper } = await import("./claude-login-keeper");
-    await nudgeClaudeLoginKeeper().catch(() => null);
-  }
   let outcome: { access: string | null; refreshed: boolean };
   try {
     outcome = await attempt();
