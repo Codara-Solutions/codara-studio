@@ -765,6 +765,9 @@ export interface PiSubscriptionOverview {
   runtimeExpectedVersion: string;
   /** The Pi build Codara is tested with (and bundles for its own use). */
   runtimeTestedVersion?: string;
+  /** Which Pi runs Cora: the user's own install, or the bundled build
+   * until they install one (runtimeError then says why theirs is not used). */
+  runtimeSource?: "user" | "bundled";
   /** True while Settings' install of Pi is running, so a reopened dialog
    * shows the in-progress state instead of an idle Install button. */
   runtimeInstalling?: boolean;

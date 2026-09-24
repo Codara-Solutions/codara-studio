@@ -82,7 +82,15 @@ const workerClaim = capabilities.authorizeAgentSocketCapability(
   2_001,
 );
 assert.equal(workerClaim.attemptId, "attempt-1");
-assert.deepEqual(workerClaim.allowedMethods, []);
+assert.deepEqual(
+  workerClaim.allowedMethods,
+  [capabilities.PI_CREDENTIAL_RENEWAL_METHOD],
+  "a worker may only renew the Claude login it already holds",
+);
+assert.ok(
+  managerClaim.allowedMethods.includes(capabilities.PI_CREDENTIAL_RENEWAL_METHOD),
+  "so may a manager, alongside its orchestration verbs",
+);
 
 assert.equal(
   capabilities.authorizeAgentSocketCapability("0".repeat(64), 2_001),
@@ -163,5 +171,5 @@ assert.match(
 
 capabilities.setAgentSocketCapabilityEndpoint(null);
 console.log(
-  "PASS scoped agent-socket claims, exact manager roster, deny-all workers, expiry, revocation, and bridge precedence",
+  "PASS scoped agent-socket claims, exact manager roster, renewal-only workers, expiry, revocation, and bridge precedence",
 );

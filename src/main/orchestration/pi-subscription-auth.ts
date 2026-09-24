@@ -20,7 +20,7 @@ import type {
 } from "@shared/types";
 
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS, isPiSubscriptionProvider } from "../../shared/agent-families";
-import { resolveCodaraPiLibrary, resolveCodaraPiRuntime } from "./pi-runtime-electron";
+import { resolveCodaraPiLibrary, resolveUserPiRuntime } from "./pi-runtime-electron";
 import { CODARA_PI_MIN_VERSION, CODARA_PI_VERSION, resolvePiAiModulePath } from "./pi-runtime";
 import { installPiCli, isPiCliInstalling } from "./pi-runtime-install";
 import {
@@ -156,6 +156,8 @@ const PROVIDER_META: Record<
 };
 
 /** Ceiling for a background token refresh. Pi's own resolver uses 15s. */
+/** Pi refreshes five minutes ahead; one more covers a short child's run. */
+const REFRESH_HEADROOM_MS = 6 * 60 * 1000;
 const REFRESH_TIMEOUT_MS = 15_000;
 
 const activeFlows = new Map<string, ActiveFlow>();
@@ -338,9 +340,31 @@ function compatibilityConnection(
 
 export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> {
   const [runtimeResult, inspection, terminals, switchSessionCounts] = await Promise.all([
-    resolveCodaraPiRuntime()
-      .then((runtime) => ({ installed: true as const, version: runtime.version, error: undefined }))
-      .catch((error) => ({ installed: false as const, version: null, error: safeAuthError(error) })),
+    // The user's own Pi runs Cora once installed; until then the bundled
+    // build does, and the reason the user's is not used is shown beside the
+    // Install Pi suggestion.
+    resolveUserPiRuntime()
+      .then((runtime) => ({
+        installed: true as const,
+        version: runtime.version,
+        source: "user" as const,
+        error: undefined,
+      }))
+      .catch((userError: unknown) =>
+        resolveCodaraPiLibrary()
+          .then((runtime) => ({
+            installed: true as const,
+            version: runtime.version,
+            source: "bundled" as const,
+            error: safeAuthError(userError),
+          }))
+          .catch((error: unknown) => ({
+            installed: false as const,
+            version: null,
+            source: undefined,
+            error: safeAuthError(error),
+          })),
+      ),
     inspectPiAccountProfileAuthStore(),
     terminalStatusesByProvider(),
     Promise.all(PI_SUBSCRIPTION_PROVIDERS.map(async (provider) =>
@@ -384,6 +408,7 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
   return {
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,
+    ...(runtimeResult.source ? { runtimeSource: runtimeResult.source } : {}),
     ...(runtimeResult.error ? { runtimeError: runtimeResult.error } : {}),
     runtimeExpectedVersion: CODARA_PI_MIN_VERSION,
     runtimeTestedVersion: CODARA_PI_VERSION,
@@ -877,8 +902,13 @@ export async function refreshPiSubscriptionProfileCredential(
     await storage.modify(provider, async (current) => {
       if (!isRecord(current) || current.type !== "oauth") return undefined;
       const credential = current as unknown as OAuthCredential;
-      // A minute of headroom: a token expiring as we speak is not worth a request.
-      if (typeof credential.expires === "number" && credential.expires > Date.now() + 60_000) {
+      // Headroom past Pi's own window (0.87 refreshes five minutes before its
+      // stored expiry), so a Pi process handed this credential right after
+      // never finds it due and refreshes it on its own.
+      if (
+        typeof credential.expires === "number" &&
+        credential.expires > Date.now() + REFRESH_HEADROOM_MS
+      ) {
         access = nonEmptyString(credential.access) ? credential.access : null;
         return undefined;
       }

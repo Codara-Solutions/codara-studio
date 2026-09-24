@@ -179,8 +179,9 @@ async function runInstall(
   forgetResolvedBinary("pi");
   // Never trust npm's exit code alone: re-resolve through the lookup the
   // launcher uses, so "installed" means "Cora will find this build".
-  const { resolveCodaraPiRuntime } = await import("./pi-runtime-electron");
-  const located = await resolveCodaraPiRuntime();
+  const { forgetNpmGlobalRoot, resolveUserPiRuntime } = await import("./pi-runtime-electron");
+  forgetNpmGlobalRoot();
+  const located = await resolveUserPiRuntime();
   await rm(retiredPiRuntimeRoot(), { recursive: true, force: true }).catch(() => undefined);
   onProgress({ message: `Pi ${located.version} is installed.` });
   return located.version;

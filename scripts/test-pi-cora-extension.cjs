@@ -842,14 +842,13 @@ const noInput = {};
     null,
   );
   assert.equal(
-    renewal.codaraAnthropicRenewalAccount({ ...trusted, CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }),
-    null,
-    "an imported-PR process keeps Pi's own refresh",
-  );
-  assert.equal(
-    renewal.codaraAnthropicRenewalAccount({ ...trusted, SPARK_AGENT_CAPABILITY: "scoped" }),
-    null,
-    "a scoped capability cannot reach the method",
+    renewal.codaraAnthropicRenewalAccount({
+      ...trusted,
+      CODARA_PI_PROJECT_POLICY: "untrusted-pull-request",
+      SPARK_AGENT_CAPABILITY: "scoped",
+    }),
+    "acct-1",
+    "an imported-PR process renews through its scoped capability too",
   );
   assert.equal(renewal.codaraAnthropicRenewalAccount({ ...trusted, CODARA_PI_ACCOUNT_PROFILE_ID: " " }), null);
 

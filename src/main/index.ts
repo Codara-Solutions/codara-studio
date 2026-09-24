@@ -1072,6 +1072,16 @@ app.whenReady().then(async () => {
   // A `/login` or `codex login` in any terminal as another known account
   // makes that account the Active one here too.
   startNativeLoginFollower();
+  // Earlier builds installed a copy of Pi of their own under the Codara
+  // home. Cora now runs the user's Pi (or the bundled one) and nothing
+  // reads that copy any more.
+  void import("./orchestration/pi-runtime-install")
+    .then(({ retiredPiRuntimeRoot }) =>
+      import("node:fs/promises").then((fsp) =>
+        fsp.rm(retiredPiRuntimeRoot(), { recursive: true, force: true }),
+      ),
+    )
+    .catch(() => undefined);
   // One-time tidy-up after the retired "Active account in your terminal"
   // feature: delete the pointer symlinks and generated env.sh it kept under
   // <codara-home>/cli/active/. Once they are gone this is a no-op, and

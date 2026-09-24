@@ -593,12 +593,10 @@ async function dispatch(
       case "accounts.list":
         return await handleAccountsList(id);
       case "accounts.anthropic.renew":
-        // Cora's own Pi processes (trusted plans only; a scoped capability
-        // never lists it) renew their Claude login here instead of spending
-        // the refresh token themselves.
-        if (auth.kind !== "root") {
-          return errorResponse(id, ERR_FORBIDDEN, "Account credentials are user-owned.");
-        }
+        // Cora's Pi processes renew their Claude login here instead of
+        // spending the refresh token themselves. A scoped (imported-PR)
+        // process reaches this only because its claim lists the method, and
+        // every caller must present the login's current refresh token.
         return await handleAnthropicRenew(params, id);
       case "accounts.use":
       case "accounts.rename":
@@ -4834,7 +4832,7 @@ async function handleAutomationCreate(
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "worker is required: set an explicit model and effort (automations run on the bundled Pi runtime)",
+      "worker is required: set an explicit model and effort (automations run on Cora's Pi runtime)",
     );
   }
   const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });

@@ -559,15 +559,10 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   // Anthropic plan never carries the flag at all, which is the first of the
   // two places that guarantee Anthropic can never run a priority tier.
   env.CODARA_PI_PROVIDER = options.provider;
-  // A trusted Claude process asks Studio to renew its login (the bundled
-  // extension's anthropic-refresh.ts), so it names the account it runs as.
-  // An imported-PR process has no socket authority for that and refreshes
-  // its own copy.
-  if (
-    options.provider === "anthropic" &&
-    options.accountProfileId &&
-    projectPolicyMode === "trusted"
-  ) {
+  // A Claude process asks Studio to renew its login (the bundled extension's
+  // anthropic-refresh.ts), so it names the account it runs as. An imported-PR
+  // process does too: its scoped capability lists that one method.
+  if (options.provider === "anthropic" && options.accountProfileId) {
     env.CODARA_PI_ACCOUNT_PROFILE_ID = options.accountProfileId;
   }
   if (

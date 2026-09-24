@@ -26,6 +26,20 @@ async function bundle(entry, outfile, extraSetup) {
           build.onResolve({ filter: /^@shared\// }, (args) => ({
             path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
           }));
+          // The pre-launch renewal: recorded, never real.
+          build.onResolve({ filter: /pi-subscription-auth$/ }, () => ({
+            path: "subscription-auth",
+            namespace: "stub",
+          }));
+          build.onLoad({ filter: /^subscription-auth$/, namespace: "stub" }, () => ({
+            loader: "js",
+            contents: `
+              export async function refreshPiSubscriptionProfileCredential(profileId, provider) {
+                (globalThis.__commitRenewals ??= []).push({ profileId, provider });
+                return null;
+              }
+            `,
+          }));
           if (extraSetup) extraSetup(build);
         },
       },
@@ -275,6 +289,11 @@ async function main() {
       preferredAccountProfileId: openaiId,
       requirePreferred: true,
     });
+    assert.deepEqual(
+      globalThis.__commitRenewals,
+      [{ profileId: openaiId, provider: "openai-codex" }],
+      "the credential is renewed in Studio before the child runs, so the child never refreshes it",
+    );
     assert.equal(captured.command, "/electron-helper");
     for (const flag of [
       "-p",

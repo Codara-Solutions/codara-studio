@@ -33,11 +33,22 @@ const MANAGER_LEASE_MS = 48 * 60 * 60 * 1_000;
 const WORKER_LEASE_MS = 6 * 60 * 60 * 1_000;
 
 // This is the complete server surface available to an imported-PR manager.
+/**
+ * The one method every untrusted Pi process may call: renewing the Claude
+ * login it already holds (the caller must present that login's current
+ * refresh token), so an imported-PR run never becomes a second refresher of
+ * a login Claude Code shares. It hands out nothing the process does not
+ * already have.
+ */
+export const PI_CREDENTIAL_RENEWAL_METHOD = "accounts.anthropic.renew";
+
 // The socket stamps its runId, so none of these verbs can be redirected to a
-// trusted sibling run. Workers receive a deny-all claim: they use native
-// contained file tools and must never regain Studio authority through a stale
-// bridge or hand-crafted loopback request.
+// trusted sibling run. Workers receive a claim that denies everything but
+// the credential renewal: they use native contained file tools and must
+// never regain Studio authority through a stale bridge or hand-crafted
+// loopback request.
 export const UNTRUSTED_PI_MANAGER_METHODS = Object.freeze([
+  PI_CREDENTIAL_RENEWAL_METHOD,
   "orchestrator.spawn_workers",
   "orchestrator.ask_user",
   "orchestrator.complete",
@@ -124,7 +135,7 @@ export function mintAgentSocketCapability(input: {
   const allowedMethods =
     input.audience === "untrusted-pi-manager"
       ? new Set<string>(UNTRUSTED_PI_MANAGER_METHODS)
-      : new Set<string>();
+      : new Set<string>([PI_CREDENTIAL_RENEWAL_METHOD]);
   const leaseMs =
     input.audience === "untrusted-pi-manager"
       ? MANAGER_LEASE_MS

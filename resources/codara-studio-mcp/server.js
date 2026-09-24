@@ -851,7 +851,7 @@ const LOOP_SCHEMA = {
 const WORKER_SCHEMA = {
   type: "object",
   description:
-    "Per-iteration worker config. Automation workers run on Codara's bundled Pi runtime, so there is no engine or CLI choice: the model id alone selects the provider (claude-* models run on the Anthropic subscription, gpt-* models on the Codex subscription). You MUST always set model AND effort explicitly; a worker missing either is rejected, and a worker that supplies an 'engine' field is rejected too.",
+    "Per-iteration worker config. Automation workers run on Cora's Pi runtime, so there is no engine or CLI choice: the model id alone selects the provider (claude-* models run on the Anthropic subscription, gpt-* models on the Codex subscription). You MUST always set model AND effort explicitly; a worker missing either is rejected, and a worker that supplies an 'engine' field is rejected too.",
   required: ["model", "effort"],
   properties: {
     model: {
@@ -1464,7 +1464,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_request_next_iteration",
     description:
-      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextModel/nextEffort; workers run on Codara's bundled Pi runtime, so the model id alone selects the provider (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextModel/nextEffort; workers run on Cora's Pi runtime, so the model id alone selects the provider (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
       type: "object",
       properties: {

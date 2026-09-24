@@ -68,7 +68,7 @@ async function build() {
           build.onResolve({ filter: /pi-runtime-electron$/ }, () => ({ path: "rt", namespace: "stub" }));
           build.onLoad({ filter: /^rt$/, namespace: "stub" }, () => ({
             loader: "js",
-            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); } export async function resolveCodaraPiLibrary() { throw new Error("not used"); }`,
+            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); } export async function resolveCodaraPiLibrary() { throw new Error("not used"); } export async function resolveUserPiRuntime() { throw new Error("not used"); }`,
           }));
         },
       },

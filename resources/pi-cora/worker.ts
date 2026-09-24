@@ -272,7 +272,7 @@ function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string 
   return texts.join("\n") || fallback;
 }
 
-// Cora workers run the pinned Pi harness with provider subscription models
+// Cora workers run the Pi harness with provider subscription models
 // underneath it. Keep the worker identity explicit: Anthropic's subscription
 // route is launched with Claude Code's compatibility system prompt, then this
 // extension supplies the actual Cora worker contract without pretending the
@@ -327,7 +327,7 @@ Security contract:
       ? directTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "")
       : `${systemPrompt}
 
-You are a Cora engineering worker running inside Codara Studio's pinned Pi
+You are a Cora engineering worker running inside Codara Studio's Pi
 harness. The user-facing Cora manager has delegated one bounded task to you.
 
 Worker contract:

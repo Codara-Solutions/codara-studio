@@ -156,9 +156,14 @@ import {
   type ChatStatusTone,
 } from "./components/chat/timeline";
 
-function workerTabBrandColor(runtime: string | null | undefined): string | undefined {
+function workerTabBrandColor(
+  runtime: string | null | undefined,
+  launchCommand?: string,
+): string | undefined {
   const brand = agentBrandRuntime(runtime);
-  return brand ? agentBrandColor(brand) : undefined;
+  if (brand) return agentBrandColor(brand);
+  // Pi has no session runtime of its own here; its launch command names it.
+  return launchCommand === PI_LAUNCH_COMMAND ? agentBrandColor("pi") : undefined;
 }
 
 // Closed dialogs and pickers stay out of the startup runtime. Their chunks are
@@ -4161,7 +4166,7 @@ export default function App() {
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return;
       }
@@ -4232,7 +4237,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
-        color: workerTabBrandColor(launchRuntime),
+        color: workerTabBrandColor(launchRuntime, launchCommand),
       });
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
@@ -4257,7 +4262,7 @@ export default function App() {
       tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
-        color: workerTabBrandColor(launchRuntime),
+        color: workerTabBrandColor(launchRuntime, launchCommand),
       });
     },
     [activeWorkspace?.cwd, prepareWorkerLaunch, tabs],
@@ -5619,7 +5624,7 @@ export default function App() {
         t.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return null;
       }
@@ -5642,7 +5647,7 @@ export default function App() {
         t.newTerminalTab(cwd, launchCommand, {
           agentSession: makeSession(cwd),
           manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime),
+          color: workerTabBrandColor(launchRuntime, launchCommand),
         });
         return null;
       }

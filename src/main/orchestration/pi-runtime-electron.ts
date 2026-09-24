@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -21,6 +22,7 @@ import {
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
+import { getEnrichedEnv } from "../path-reconstruction";
 import { writeFileAtomic } from "../fs-atomic";
 import {
   buildPiMcpBridgeConfig,
@@ -332,17 +334,22 @@ function insideBundledTree(packageRoot: string): boolean {
 
 /**
  * The Pi the user installed (`npm install -g @earendil-works/pi-coding-agent`),
- * which runs every Cora session and is the same `pi` their terminals run.
- * Updating it is the user's call. The app's own bundled copy never counts,
- * even when a development PATH puts its `pi` first.
+ * the same `pi` their terminals run. Updating it is the user's call. The
+ * app's own bundled copy never counts, even when a development PATH puts
+ * its `pi` first.
  */
-export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
+export async function resolveUserPiRuntime(): Promise<PiRuntimeLocation> {
   const binary = await resolveBinary("pi");
   // A miss is re-probed next time: the user may install Pi while Codara runs.
   if (!binary) forgetResolvedBinary("pi");
-  const roots = binary
-    ? (await piPackageRootsForBinary(binary)).filter((root) => !insideBundledTree(root))
-    : [];
+  const fromBinary = binary ? await piPackageRootsForBinary(binary) : [];
+  // Version-manager shims (asdf, mise, Volta) link nowhere near the package;
+  // npm itself says where its global packages live.
+  const npmRoot = await npmGlobalRoot();
+  const roots = [
+    ...fromBinary,
+    ...(npmRoot ? [join(npmRoot, "@earendil-works", "pi-coding-agent")] : []),
+  ].filter((root) => !insideBundledTree(root));
   try {
     return await resolveInstalledPiRuntime(roots);
   } catch (error) {
@@ -351,13 +358,40 @@ export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
   }
 }
 
+let npmRootCache: { value: string | null; at: number } | null = null;
+const NPM_ROOT_TTL_MS = 5 * 60 * 1000;
+
+/** Forget the cached npm root, after an install moved things around. */
+export function forgetNpmGlobalRoot(): void {
+  npmRootCache = null;
+}
+
+/** `npm root -g`, cached for a few minutes; null when npm cannot answer. */
+async function npmGlobalRoot(): Promise<string | null> {
+  if (npmRootCache && Date.now() - npmRootCache.at < NPM_ROOT_TTL_MS) return npmRootCache.value;
+  const env = await getEnrichedEnv().catch(() => process.env);
+  const value = await new Promise<string | null>((resolvePromise) => {
+    const [command, args] =
+      process.platform === "win32"
+        ? ["cmd.exe", ["/c", "npm", "root", "-g"]]
+        : ["npm", ["root", "-g"]];
+    execFile(command, args, { env, timeout: 5_000, windowsHide: true }, (error, stdout) => {
+      const root = String(stdout ?? "").trim();
+      resolvePromise(!error && root && isAbsolute(root) ? root : null);
+    });
+  });
+  npmRootCache = { value, at: Date.now() };
+  return value;
+}
+
 /**
- * The Pi for a background one-shot (commit messages): the user's install
- * when there is one, otherwise the bundled build, so a helper that never
- * shows Pi to the user does not wait on its install.
+ * The Pi that runs Cora's sessions: the user's own install once there is
+ * one, and until then the build bundled with the app, so Cora keeps
+ * working on a machine without Node while Settings recommends installing
+ * Pi.
  */
-export async function resolveCodaraPiRuntimeOrBundled(): Promise<PiRuntimeLocation> {
-  return resolveCodaraPiRuntime().catch(() => resolveCodaraPiLibrary());
+export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
+  return resolveUserPiRuntime().catch(() => resolveCodaraPiLibrary());
 }
 
 /**

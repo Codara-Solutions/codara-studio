@@ -2608,10 +2608,20 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
 
   if (guided) return (
     <div style={{ display: "grid", gap: 14 }}>
-      {overview && !overview.runtimeInstalled && (
+      {overview && overview.runtimeSource !== "user" && (
         <div>
-          <p style={{ color: "var(--muted)", fontSize: 12 }}>First, install Pi, the coding agent Cora runs on. Once it is installed, choose your account below.</p>
-          <PiRuntimeInstallRow expectedVersion={overview.runtimeExpectedVersion} runtimeError={overview.runtimeError} install={install} onInstall={installRuntime} />
+          <p style={{ color: "var(--muted)", fontSize: 12 }}>
+            {overview.runtimeInstalled
+              ? "Recommended: install Pi, the coding agent Cora runs on, so Cora uses your own copy. Choose your account below either way."
+              : "First, install Pi, the coding agent Cora runs on. Once it is installed, choose your account below."}
+          </p>
+          <PiRuntimeInstallRow
+            expectedVersion={overview.runtimeExpectedVersion}
+            runtimeError={overview.runtimeError}
+            bundledVersion={overview.runtimeSource === "bundled" ? overview.runtimeVersion ?? undefined : undefined}
+            install={install}
+            onInstall={installRuntime}
+          />
         </div>
       )}
       {!overview && loading && <p role="status">Checking account setup…</p>}
@@ -2670,7 +2680,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           <AccountCards providers={providerViews} actions={accountActions} />
         )}
         {!overview && loading ? <RuntimeDiagnosticSkeleton /> : null}
-        {overview?.runtimeInstalled ? (
+        {overview?.runtimeSource === "user" ? (
           <div
             style={{
               padding: "3px 3px 0",
@@ -2693,6 +2703,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           <PiRuntimeInstallRow
             expectedVersion={overview.runtimeExpectedVersion}
             runtimeError={overview.runtimeError}
+            bundledVersion={overview.runtimeSource === "bundled" ? overview.runtimeVersion ?? undefined : undefined}
             install={install}
             onInstall={installRuntime}
           />
@@ -2784,17 +2795,25 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
 function PiRuntimeInstallRow({
   expectedVersion,
   runtimeError,
+  bundledVersion,
   install,
   onInstall,
 }: {
   expectedVersion: string;
   runtimeError?: string;
+  /** Set while Cora runs on the bundled Pi: installing is then a recommendation. */
+  bundledVersion?: string;
   install: PiInstallView | null;
   onInstall: () => void;
 }) {
   const running = install?.status === "running";
   const failed = install?.status === "failed";
-  const tone = failed ? "var(--danger)" : running ? "var(--accent)" : "var(--danger)";
+  const recommended = bundledVersion !== undefined;
+  const tone = failed
+    ? "var(--danger)"
+    : running || recommended
+      ? "var(--accent)"
+      : "var(--danger)";
   return (
     <div
       aria-live="polite"
@@ -2811,7 +2830,7 @@ function PiRuntimeInstallRow({
     >
       <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
         <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
-          {running ? "Installing Pi…" : "Cora needs Pi"}
+          {running ? "Installing Pi…" : recommended ? "Install Pi for Cora and your terminals" : "Cora needs Pi"}
         </span>
         <span
           style={{
@@ -2828,8 +2847,12 @@ function PiRuntimeInstallRow({
           }}
         >
           {install?.message ||
-            runtimeError ||
-            `Cora's chats, planning and workers run on Pi ${expectedVersion} or newer, the coding agent you can also run as pi in any terminal.`}
+            (recommended
+              ? runtimeError && !/not installed/i.test(runtimeError)
+                ? `${runtimeError} Until then Cora uses Codara's built-in Pi ${bundledVersion}.`
+                : `Cora is using Codara's built-in Pi ${bundledVersion} for now. With your own Pi (${expectedVersion} or newer), Cora runs on it, you choose when to update it, and the same pi works in any terminal.`
+              : runtimeError ||
+                `Cora's chats, planning and workers run on Pi ${expectedVersion} or newer, the coding agent you can also run as pi in any terminal.`)}
         </span>
         {!running ? (
           <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>

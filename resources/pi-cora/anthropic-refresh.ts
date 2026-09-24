@@ -11,8 +11,9 @@
  * login expired (under its own credential lock), it asks Studio over the
  * agent socket; Studio renews the login under Claude Code's lock, or adopts
  * the token Claude Code or Studio's keeper already got, and Pi stores the
- * answer. Only trusted plans name an account (CODARA_PI_ACCOUNT_PROFILE_ID);
- * an imported-PR process keeps Pi's own refresh.
+ * answer. The launch plan names the account (CODARA_PI_ACCOUNT_PROFILE_ID);
+ * an imported-PR process asks through its scoped capability, which lists
+ * this one method.
  *
  * Import-free (types only) so it stays unit-testable outside Pi's loader.
  */
@@ -39,9 +40,7 @@ interface PiOAuthCredentials {
 /** The Cora account this process renews through Studio, or null to keep Pi's own refresh. */
 export function codaraAnthropicRenewalAccount(env: NodeJS.ProcessEnv = process.env): string | null {
   if (env.CODARA_PI_PROVIDER !== "anthropic") return null;
-  if (env.CODARA_PI_PROJECT_POLICY === "untrusted-pull-request") return null;
-  // A scoped capability cannot reach the method; asking would only fail.
-  if ((env.SPARK_AGENT_CAPABILITY ?? "").trim()) return null;
+  // Imported-PR processes ask too: their scoped capability lists the method.
   const accountProfileId = env.CODARA_PI_ACCOUNT_PROFILE_ID?.trim();
   return accountProfileId || null;
 }

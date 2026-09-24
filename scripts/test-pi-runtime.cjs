@@ -79,6 +79,7 @@ async function loadElectronLaunchPlans(outDirectory) {
     } };`,
     storage: "module.exports = { loadSettings: async () => ({}) };",
     "agent-sync": "module.exports = { listPiMcpServers: () => [] };",
+    "path-reconstruction": "module.exports = { getEnrichedEnv: async () => process.env };",
     // The user's installed Pi: a fake global package outside the app tree.
     "binary-resolver": `module.exports = {
       resolveBinary: async () => process.env.CODARA_TEST_PI_BINARY || null,
@@ -111,7 +112,7 @@ async function loadElectronLaunchPlans(outDirectory) {
         build.onResolve({ filter: /^@shared\// }, (args) => ({
           path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
         }));
-        build.onResolve({ filter: /^(electron|\.\.\/storage|\.\.\/agent-sync|\.\.\/agent-socket-capabilities|\.\.\/binary-resolver)$/ }, (args) => ({
+        build.onResolve({ filter: /^(electron|\.\.\/storage|\.\.\/agent-sync|\.\.\/agent-socket-capabilities|\.\.\/binary-resolver|\.\.\/path-reconstruction)$/ }, (args) => ({
           path: args.path.replace("../", ""),
           namespace: "stub",
         }));
@@ -509,8 +510,8 @@ async function main() {
   assert.equal(tierPlanFor("anthropic").CODARA_PI_PROVIDER, "anthropic");
   assert.equal(tierPlanFor("openai-codex").CODARA_PI_PROVIDER, "openai-codex");
 
-  // A trusted Claude process names its account so the extension can ask
-  // Studio to renew the login; nothing else carries the stamp.
+  // A Claude process names its account so the extension can ask Studio to
+  // renew the login; no other provider carries the stamp.
   const renewalAccountFor = (provider, projectPolicyMode, baseEnv = {}) =>
     runtime.buildPiManagerLaunchPlan({
       runtime: fakeRuntime,
@@ -530,7 +531,11 @@ async function main() {
     }).env.CODARA_PI_ACCOUNT_PROFILE_ID;
   assert.equal(renewalAccountFor("anthropic"), "acct-1");
   assert.equal(renewalAccountFor("openai-codex"), undefined);
-  assert.equal(renewalAccountFor("anthropic", "untrusted-pull-request"), undefined);
+  assert.equal(
+    renewalAccountFor("anthropic", "untrusted-pull-request"),
+    "acct-1",
+    "an imported-PR process renews through its scoped capability",
+  );
   assert.equal(
     renewalAccountFor("openai-codex", undefined, { CODARA_PI_ACCOUNT_PROFILE_ID: "inherited" }),
     undefined,
@@ -838,7 +843,7 @@ async function main() {
     assert.equal(
       untrustedWorkerPlan.env.SPARK_AGENT_CAPABILITY,
       "scoped",
-      "untrusted workers receive a deny-all process claim instead of the root handshake",
+      "untrusted workers receive a renewal-only process claim instead of the root handshake",
     );
     assert.equal(
       untrustedWorkerPlan.agentSocketCapabilityId,
