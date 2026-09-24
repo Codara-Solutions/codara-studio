@@ -1,7 +1,6 @@
 import {
   AGENT_FAMILIES,
   AGENT_FAMILY_IDS,
-  familyForSubscription,
   type AgentRuntimeKind,
   type PiSubscriptionProvider,
 } from "@shared/agent-families";
@@ -48,13 +47,6 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     brand: id,
     ...CLI_WORDS[id],
   }));
-
-export function accountProviderDescriptor(
-  provider: PiSubscriptionProvider,
-): AccountProviderDescriptor {
-  const runtime = familyForSubscription(provider).runtime;
-  return ACCOUNT_PROVIDER_DESCRIPTORS.find((entry) => entry.runtime === runtime)!;
-}
 
 /** The line under the provider name: what one account is and what a switch does. */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {

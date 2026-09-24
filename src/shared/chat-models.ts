@@ -161,22 +161,6 @@ const EFFORT_ORDER: AgentEffortLevel[] = [
   "max",
 ];
 
-const EFFORT_BARS: Record<AgentEffortLevel, number> = {
-  minimal: 1,
-  low: 1,
-  medium: 2,
-  high: 3,
-  xhigh: 4,
-  max: 5,
-};
-
-export const THINKING_BAR_COUNT = 5;
-
-export function barsForEffort(effort: AgentEffortLevel | undefined): number {
-  if (!effort) return 0;
-  return EFFORT_BARS[effort] ?? 0;
-}
-
 export function nextEffort(
   current: AgentEffortLevel | undefined,
   allowed: AgentEffortLevel[],

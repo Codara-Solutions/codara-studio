@@ -61,7 +61,6 @@ export const CODEX_MODEL_CATALOG: CodexModelCatalogEntry[] = [
 ];
 
 export const DEFAULT_CODEX_CHAT_MODEL: CodexModelId = "gpt-5.6-sol";
-export const DEFAULT_CODEX_WORKER_MODEL: CodexModelId = "gpt-5.6-terra";
 
 export const CODEX_MODEL_BY_TIER: Record<AgentModelTier, CodexModelId> = {
   top: "gpt-5.6-sol",

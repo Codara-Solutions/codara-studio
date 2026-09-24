@@ -67,11 +67,7 @@ async function main() {
     "every GPT-5.6 variant exposes max reasoning",
     catalog.CODEX_MODEL_CATALOG.every((model) => model.effortLevels.includes("max")),
   );
-  check(
-    "chat defaults to Sol and automation workers default to Terra",
-    catalog.DEFAULT_CODEX_CHAT_MODEL === "gpt-5.6-sol" &&
-      catalog.DEFAULT_CODEX_WORKER_MODEL === "gpt-5.6-terra",
-  );
+  check("chat defaults to Sol", catalog.DEFAULT_CODEX_CHAT_MODEL === "gpt-5.6-sol");
   check(
     "legacy GPT ids migrate by capability tier",
     catalog.normalizeCodexModelId("gpt-5.5@high") === "gpt-5.6-sol@high" &&

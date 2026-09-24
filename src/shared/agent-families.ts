@@ -38,7 +38,6 @@ export type AgentFamilyId = keyof typeof AGENT_FAMILIES;
 export type AgentRuntimeKind = AgentFamilyId;
 export type NativeCliAccountRuntime = AgentFamilyId;
 export type WorkerSessionRuntime = AgentFamilyId;
-export type PublicAgentRuntime = AgentFamilyId;
 export type SparkBuiltinRuntime = AgentFamilyId;
 export type PiSubscriptionProvider =
   (typeof AGENT_FAMILIES)[AgentFamilyId]["subscription"];
@@ -99,8 +98,4 @@ export function familyForModelId(model: string | undefined): AgentFamilyId | nul
 export function subscriptionForModelId(model: string): PiSubscriptionProvider | null {
   const family = familyForModelId(model);
   return family ? AGENT_FAMILIES[family].subscription : null;
-}
-
-export function runtimeForModelId(model: string | undefined): AgentRuntimeKind | null {
-  return familyForModelId(model);
 }
