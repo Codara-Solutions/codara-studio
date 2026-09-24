@@ -438,6 +438,43 @@ async function main() {
     console.log("PASS an unregistered account directory goes once its transcripts are home; one with a login stays");
   }
 
+  // --- A directory login newer than the vault's ----------------------------
+  // A first pass that stopped halfway, or a session still pointed at the old
+  // directory that refreshed since: the later generation wins, and a newer
+  // one that cannot replace the live login is kept aside, never dropped.
+  {
+    const m = fixture("fresher-directory");
+    writeJson(m.liveCredentials, { claudeAiOauth: login("own") });
+    writeJson(m.vault(ACCOUNT_A), { version: 1, store: { claudeAiOauth: login("a-old", 1_000) }, oauthAccount: { accountUuid: "uuid-a" } });
+    writeJson(path.join(m.accountDir(ACCOUNT_A), ".credentials.json"), { claudeAiOauth: login("a-new", 5_000) });
+    writeJson(m.vault(ACCOUNT_B), { version: 1, store: { claudeAiOauth: login("b-vault", 9_000) } });
+    writeJson(path.join(m.accountDir(ACCOUNT_B), ".credentials.json"), { claudeAiOauth: login("b-dir", 2_000) });
+    await mod.migrateClaudeToOneHome({ store: m.store, managedProfileIds: [ACCOUNT_A, ACCOUNT_B] });
+    assert.equal(readJson(m.vault(ACCOUNT_A)).store.claudeAiOauth.refreshToken, "refresh-a-new", "the newer directory login wins");
+    assert.equal(readJson(m.vault(ACCOUNT_A)).oauthAccount.accountUuid, "uuid-a", "and the vault keeps its identity");
+    assert.equal(readJson(m.vault(ACCOUNT_B)).store.claudeAiOauth.refreshToken, "refresh-b-vault", "an older one does not");
+    assert.equal(fs.existsSync(path.join(m.accountDir(ACCOUNT_A), ".credentials.json")), false);
+
+    const l = fixture("fresher-directory-live");
+    writeJson(l.marker, { version: 1, profileId: ACCOUNT_A });
+    writeJson(l.liveCredentials, { claudeAiOauth: login("a-live", 3_000) });
+    writeJson(l.vault(ACCOUNT_A), { version: 1, store: { claudeAiOauth: login("a-trail", 1_000) } });
+    writeJson(path.join(l.accountDir(ACCOUNT_A), ".credentials.json"), { claudeAiOauth: login("a-dir", 5_000) });
+    await mod.migrateClaudeToOneHome({ store: l.store, managedProfileIds: [ACCOUNT_A] });
+    assert.equal(readJson(l.liveCredentials).claudeAiOauth.refreshToken, "refresh-a-live", "the live login is not replaced");
+    const strays = fs.readdirSync(l.store.rootDir).filter((name) => name.startsWith("stray-login-"));
+    assert.equal(strays.length, 1, "the newer directory login is kept aside");
+    assert.equal(readJson(path.join(l.store.rootDir, strays[0])).store.claudeAiOauth.refreshToken, "refresh-a-dir");
+
+    // Logins kept aside go after a month.
+    const aged = path.join(l.store.rootDir, strays[0]);
+    const monthAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(aged, monthAgo, monthAgo);
+    await mod.migrateClaudeToOneHome({ store: l.store, managedProfileIds: [ACCOUNT_A] });
+    assert.equal(fs.existsSync(aged), false);
+    console.log("PASS the first pass keeps the newer of a directory's and a vault's login, and prunes old kept-aside logins");
+  }
+
   // --- A /login in a terminal as another known account ---------------------
   {
     const n = fixture("native-login");

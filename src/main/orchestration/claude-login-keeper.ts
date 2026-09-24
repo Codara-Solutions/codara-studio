@@ -1,5 +1,9 @@
 import {
+  claudeCliVaultFile,
   claudeLiveHome,
+  claudeLiveSlotHoldsProfile,
+  claudeLoginRecordOf,
+  readClaudeVaultedLogin,
   claudeLiveLoginRecord,
   readClaudeLiveProfileId,
   readClaudeProfileLogin,
@@ -51,7 +55,7 @@ export interface RefreshedAnthropicTokens {
 
 export interface ClaudeLoginKeeperDeps extends ClaudeCredentialStoreOptions {
   store: ClaudeLoginSlotStore;
-  /** The OAuth refresh grant; production uses the pinned Pi's Anthropic module. */
+  /** The OAuth refresh grant; production uses the bundled Pi library's Anthropic module. */
   refresh: (refreshToken: string, signal: AbortSignal) => Promise<RefreshedAnthropicTokens>;
   /** Carry a changed login to Cora; production reconciles the default pair. */
   afterChange?: () => Promise<void>;
@@ -68,7 +72,9 @@ export type ClaudeLoginKeeperOutcome =
   | "adopted"
   | "refreshed"
   | "busy"
-  | "failed";
+  | "failed"
+  /** The live login is another account's (a terminal `/login`); left alone. */
+  | "foreign";
 
 function isDue(record: ClaudeCredentialRecord, now: number, leadMs: number): boolean {
   return record.expiresAt > 0 && record.expiresAt - now <= leadMs;
@@ -135,6 +141,7 @@ export async function refreshLiveClaudeLoginIfDue(
   const storeOptions: ClaudeCredentialStoreOptions = deps.fileOnly ? { fileOnly: true } : {};
   const liveId = await readClaudeLiveProfileId(deps.store.rootDir).catch(() => null);
   if (liveId === null) return "no-login";
+  if (!(await claudeLiveSlotHoldsProfile(deps.store, liveId))) return "foreign";
   const seen = await readClaudeProfileLogin(deps.store, liveId, storeOptions);
   if (seen.kind !== "login" || !seen.record?.refreshToken) return "no-login";
   if (!isDue(seen.record, now(), leadMs)) return "not-due";
@@ -148,6 +155,7 @@ export async function refreshLiveClaudeLoginIfDue(
         async () => {
           // A switch may have landed while this waited for the lock.
           if ((await readClaudeLiveProfileId(deps.store.rootDir)) !== liveId) return "adopted";
+          if (!(await claudeLiveSlotHoldsProfile(deps.store, liveId))) return "foreign";
           const stores = await readClaudeCredentialStores(home.configDir, home.configDirEnv, storeOptions);
           const current = claudeLiveLoginRecord(stores);
           if (!current?.refreshToken) return "no-login";
@@ -217,16 +225,30 @@ export async function renewClaudeLoginForCora(
   deps: ClaudeLoginKeeperDeps,
   profileId: ClaudeCliProfileId,
   heldRefreshToken: string,
+  options: { expectedFingerprint?: string } = {},
 ): Promise<ClaudeLoginRenewal> {
   const now = deps.now ?? Date.now;
   const storeOptions: ClaudeCredentialStoreOptions = deps.fileOnly ? { fileOnly: true } : {};
   const home = claudeLiveHome(deps.store);
   return withClaudeSelectionLock(deps.store.rootDir, async () => {
-    const live = (await readClaudeLiveProfileId(deps.store.rootDir)) === profileId;
+    // The live slot is this profile's only while it holds this profile's
+    // account: after a terminal `/login` as someone else, the profile's own
+    // login is the one its vault (and Cora) keeps, and the stranger's login
+    // in the live slot is never handed out or saved as this profile's.
+    const live =
+      (await readClaudeLiveProfileId(deps.store.rootDir)) === profileId &&
+      (await claudeLiveSlotHoldsProfile(deps.store, profileId, options.expectedFingerprint));
     const renew = async (): Promise<ClaudeLoginRenewal> => {
-      const slot = await readClaudeProfileLogin(deps.store, profileId, storeOptions);
-      if (slot.kind === "unreadable") throw new Error("The Claude login could not be read");
-      const record = slot.record;
+      let record: ClaudeCredentialRecord | null;
+      if (live) {
+        const slot = await readClaudeProfileLogin(deps.store, profileId, storeOptions);
+        if (slot.kind === "unreadable") throw new Error("The Claude login could not be read");
+        record = slot.record;
+      } else {
+        const vault = await readClaudeVaultedLogin(claudeCliVaultFile(deps.store.rootDir, profileId));
+        if (vault.kind === "unreadable") throw new Error("The Claude login could not be read");
+        record = vault.kind === "value" ? claudeLoginRecordOf(vault.login.store) : null;
+      }
       if (record?.accessToken && record.expiresAt - now() > ADOPT_MIN_VALIDITY_MS) {
         return {
           outcome: "adopted",

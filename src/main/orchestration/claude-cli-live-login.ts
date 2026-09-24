@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lock } from "proper-lockfile";
+import { withAccountSelectionLock } from "./account-selection-lock";
 import {
   CLAUDE_CLI_ACCOUNTS_DIRECTORY,
   CLAUDE_CLI_CONFIG_FILE,
@@ -65,6 +66,8 @@ export const CLAUDE_CLI_LIVE_LOGIN_FILE = "live-login.json";
 export const CLAUDE_CLI_VAULT_LOGIN_FILE = "login.json";
 export const CLAUDE_CLI_PERSONAL_VAULT_FILE = "personal-login.json";
 const STRAY_LOGIN_PREFIX = "stray-login-";
+/** A login kept aside is recoverable by hand for a month, then removed. */
+const STRAY_LOGIN_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const RETIRED_MCP_BASELINE_FILE = "mcp-servers.json";
 const LIVE_LOGIN_VERSION = 1;
 const VAULT_VERSION = 1;
@@ -182,7 +185,6 @@ export async function readClaudeLiveProfileId(rootDir: string): Promise<ClaudeCl
   return (await readClaudeLiveSelection(rootDir))?.profileId ?? CLAUDE_CLI_PERSONAL_PROFILE_ID;
 }
 
-const selectionTails = new Map<string, Promise<void>>();
 
 /**
  * Serialize every change of the live slot inside this process. The
@@ -193,21 +195,7 @@ export async function withClaudeSelectionLock<T>(
   rootDir: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const key = resolve(rootDir);
-  const previous = selectionTails.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((done) => {
-    release = done;
-  });
-  const tail = previous.catch(() => undefined).then(() => current);
-  selectionTails.set(key, tail);
-  await previous.catch(() => undefined);
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (selectionTails.get(key) === tail) selectionTails.delete(key);
-  }
+  return withAccountSelectionLock(rootDir, operation);
 }
 
 // ---------------------------------------------------------------------------
@@ -477,6 +465,39 @@ export async function readClaudeProfileLogin(
   }
 }
 
+/**
+ * Whether the live slot holds the login of `profileId`, the profile the
+ * marker names. Claude Code records the account of every `/login` in
+ * `.claude.json`; a record naming another account than the profile's means
+ * a terminal signed in as someone else, and nothing may then treat the
+ * live login as this profile's (refresh it into this profile's vault, hand
+ * it to this profile's Cora half). An account unknown on either side counts
+ * as the profile's own, since nothing says otherwise. False mid-switch.
+ */
+export async function claudeLiveSlotHoldsProfile(
+  store: ClaudeLoginSlotStore,
+  profileId: ClaudeCliProfileId,
+  expectedFingerprint?: string,
+): Promise<boolean> {
+  const selection = await readClaudeLiveSelection(store.rootDir).catch(() => null);
+  if (!selection) return profileId === CLAUDE_CLI_PERSONAL_PROFILE_ID;
+  if (selection.switchingFrom || selection.profileId !== profileId) return false;
+  const liveAccountUuid = accountUuidOf(
+    await readClaudeOauthAccount(claudeLiveHome(store)).catch(() => null),
+  );
+  if (!liveAccountUuid) return true;
+  let expected = selection.accountUuid;
+  if (!expected) {
+    const vault = await readClaudeVaultedLogin(claudeCliVaultFile(store.rootDir, profileId));
+    expected = vault.kind === "value" ? accountUuidOf(vault.login.oauthAccount) : undefined;
+  }
+  if (expected && expected !== liveAccountUuid) return false;
+  if (expectedFingerprint && anthropicAccountFingerprint(liveAccountUuid) !== expectedFingerprint) {
+    return false;
+  }
+  return true;
+}
+
 /** The account a profile's slot records, from `.claude.json` while live and the vault otherwise. */
 export async function readClaudeProfileIdentity(
   store: ClaudeLoginSlotStore,
@@ -705,6 +726,22 @@ function attributeLiveLogin(input: AttributionInput): ClaudeCliProfileId | undef
   )?.profileId;
 }
 
+/**
+ * Logins a switch or the migration could not attribute are kept aside so a
+ * mistake is recoverable; they hold tokens, so they do not stay forever.
+ */
+async function pruneStrayLogins(rootDir: string, now: number): Promise<void> {
+  const dir = resolve(rootDir);
+  for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+    if (!name.startsWith(STRAY_LOGIN_PREFIX) || !name.endsWith(".json")) continue;
+    const file = join(dir, name);
+    const stat = await lstatOrNull(file).catch(() => null);
+    if (stat?.isFile() && now - stat.mtimeMs > STRAY_LOGIN_RETENTION_MS) {
+      await fs.rm(file, { force: true });
+    }
+  }
+}
+
 function strayLoginFile(rootDir: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return join(resolve(rootDir), `${STRAY_LOGIN_PREFIX}${stamp}-${randomBytes(3).toString("hex")}.json`);
@@ -870,8 +907,11 @@ export async function detectClaudeNativeLogin(
   if (!liveAccountUuid) return null;
   const known = new Set<ClaudeCliProfileId>([CLAUDE_CLI_PERSONAL_PROFILE_ID, ...knownProfileIds]);
   const vaults = await readVaultIndex(store, known);
+  // An owner whose account is unknown (the first marker had none to go by)
+  // still yields to a login that exactly one other profile records; the
+  // token check below keeps a stale record from moving anything.
   const ownerAccountUuid = selection.accountUuid ?? vaultAccountUuid(vaults, selection.profileId);
-  if (!ownerAccountUuid || ownerAccountUuid === liveAccountUuid) return null;
+  if (ownerAccountUuid === liveAccountUuid) return null;
   const owners = vaults.filter(
     (entry) =>
       entry.profileId !== selection.profileId &&
@@ -1255,7 +1295,32 @@ export async function migrateClaudeToOneHome(
             throw new Error("the account's vault is unreadable");
           }
           const vaultHasLogin = vault.kind === "value" && hasUsableLogin(vault.login.store);
-          if (!vaultHasLogin && hasUsableLogin(scoped)) {
+          if (vaultHasLogin && vault.kind === "value" && hasUsableLogin(scoped)) {
+            // Both hold a login: a pass that stopped halfway, or a session
+            // still pointed at the directory that refreshed since. The later
+            // generation is the account's present; an earlier one is spent.
+            const fromDirectory = claudeLoginRecordOf(scoped);
+            const fromVault = claudeLoginRecordOf(vault.login.store);
+            const directoryIsNewer =
+              fromDirectory !== null &&
+              fromDirectory.refreshToken !== fromVault?.refreshToken &&
+              fromDirectory.expiresAt > (fromVault?.expiresAt ?? 0);
+            if (directoryIsNewer) {
+              const live = (await readClaudeLiveProfileId(store.rootDir)) === profileId;
+              if (live) {
+                // The live slot is this account's own login; the directory's
+                // is kept aside rather than overwrite it or be lost.
+                await writeVaultedLogin(strayLoginFile(store.rootDir), {
+                  store: scoped,
+                  ...(vault.login.oauthAccount ? { oauthAccount: vault.login.oauthAccount } : {}),
+                });
+                log("[accounts] a newer Claude login found in an account directory was kept aside beside the live one");
+              } else {
+                await writeVaultedLogin(vaultFile, { ...vault.login, store: scoped });
+                result.vaulted.push(profileId);
+              }
+            }
+          } else if (!vaultHasLogin && hasUsableLogin(scoped)) {
             const oauthAccount =
               (vault.kind === "value" ? vault.login.oauthAccount : undefined) ??
               (isRecord(legacyConfig?.oauthAccount) ? legacyConfig.oauthAccount : undefined);
@@ -1316,6 +1381,7 @@ export async function migrateClaudeToOneHome(
   result.orphans = await withClaudeSelectionLock(store.rootDir, () =>
     retireOrphanAccountDirs(store, input.managedProfileIds, options, log),
   );
+  await pruneStrayLogins(store.rootDir, Date.now()).catch(() => undefined);
   // The first marker names the home's account from `.claude.json`, which the
   // retired slot swap could leave naming a managed account. A personal marker
   // that names an account a managed vault records is that stale copy: the

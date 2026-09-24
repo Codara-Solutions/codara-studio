@@ -367,6 +367,53 @@ async function main() {
     console.log("PASS Cora waits for Claude Code's refresh and adopts it");
   }
 
+  // A terminal `/login` as an account Codara does not know: the live slot
+  // holds a stranger's login. Nothing treats it as the live profile's.
+  {
+    const f = fixture(login("stranger", 2 * MINUTE));
+    const id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    fs.writeFileSync(
+      path.join(f.store.rootDir, "live-login.json"),
+      JSON.stringify({ version: 1, profileId: id, accountUuid: "uuid-own" }),
+      { mode: 0o600 },
+    );
+    const vaultFile = path.join(f.store.rootDir, "accounts", id, "login.json");
+    fs.mkdirSync(path.dirname(vaultFile), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      vaultFile,
+      JSON.stringify({ version: 1, store: { claudeAiOauth: login("own", 1 * MINUTE) }, oauthAccount: { accountUuid: "uuid-own" } }),
+      { mode: 0o600 },
+    );
+    // Claude Code recorded the stranger's account on /login.
+    fs.writeFileSync(
+      path.join(path.dirname(f.store.personalConfigDir), ".claude.json"),
+      JSON.stringify({ oauthAccount: { accountUuid: "uuid-stranger" } }),
+      { mode: 0o600 },
+    );
+    const liveBefore = fs.readFileSync(f.liveFile, "utf8");
+
+    const keeper = deps(f);
+    assert.equal(await mod.refreshLiveClaudeLoginIfDue(keeper.deps), "foreign");
+    assert.deepEqual(keeper.calls, [], "the stranger's login is not refreshed");
+
+    const cora = deps(f);
+    const renewal = await mod.renewClaudeLoginForCora(cora.deps, id, "refresh-own");
+    assert.equal(renewal.outcome, "refreshed");
+    assert.deepEqual(cora.calls, ["refresh-own"], "Cora's own login is renewed, never the stranger's");
+    assert.equal(fs.readFileSync(f.liveFile, "utf8"), liveBefore, "the live slot is not touched");
+    const vault = JSON.parse(fs.readFileSync(vaultFile, "utf8"));
+    assert.equal(vault.store.claudeAiOauth.refreshToken, "refresh-next", "the profile's vault keeps its own login");
+    assert.equal(vault.oauthAccount.accountUuid, "uuid-own");
+
+    // A live slot that still records no account counts as the profile's own.
+    const g = fixture(login("claude", 60 * MINUTE));
+    const adopt = await mod.renewClaudeLoginForCora(deps(g).deps, "personal", "refresh-x", {
+      expectedFingerprint: "fp-someone",
+    });
+    assert.equal(adopt.outcome, "adopted", "an unrecorded account is not treated as foreign");
+    console.log("PASS a stranger's terminal login is never refreshed or handed to Cora as the profile's");
+  }
+
   console.log("\nPASS Claude login keeper");
 }
 

@@ -108,6 +108,9 @@ const stubPlugin = {
       export async function resolveCodaraPiLibrary() {
         return { packageRoot: globalThis.__refreshHarness.packageRoot, version: "0.0.0" };
       }
+      export async function resolveUserPiRuntime() {
+        throw new Error("Pi is not installed");
+      }
     `);
     stub(/pi-runtime-install$/, "runtime-install", `
       export async function installPiCli() {}
@@ -214,7 +217,7 @@ async function main() {
     entry,
     [
       `export * from ${orchestration("pi-subscription-auth.ts")};`,
-      `export { startStudioClaudeLoginKeeper } from ${orchestration("unified-account-migration.ts")};`,
+      `export { renewCoraAnthropicLogin, startStudioClaudeLoginKeeper } from ${orchestration("unified-account-migration.ts")};`,
       `export { stopClaudeLoginKeeper } from ${orchestration("claude-login-keeper.ts")};`,
     ].join("\n"),
   );
@@ -243,6 +246,7 @@ async function main() {
 
   const {
     refreshPiSubscriptionProfileCredential,
+    renewCoraAnthropicLogin,
     startStudioClaudeLoginKeeper,
     stopClaudeLoginKeeper,
   } = require(OUTFILE);
@@ -549,6 +553,40 @@ async function main() {
     const slot = JSON.parse(fs.readFileSync(claudeFile, "utf8")).store.claudeAiOauth;
     assert.strictEqual(slot.refreshToken, "renewed-refresh");
     assert.strictEqual(slot.subscriptionType, "max");
+  });
+
+  // Pi gave up waiting for a renewal (its deadline passed): the token Studio
+  // spent is all its store holds. Once Pi lets go of its lock, the store
+  // still holding the token Cora asked with takes the renewal.
+  fs.writeFileSync(
+    authFile,
+    JSON.stringify({
+      anthropic: { type: "oauth", access: "asked-access", refresh: "asked-refresh", expires: Date.now() - 60_000 },
+    }),
+    { mode: 0o600 },
+  );
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ access_token: "late-access", refresh_token: "late-refresh", expires_in: 28_800 }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  let abandonedThrown = null;
+  try {
+    await renewCoraAnthropicLogin(PROFILE_ID, "asked-refresh");
+  } catch (error) {
+    abandonedThrown = error;
+  }
+  const deadline = Date.now() + 5_000;
+  let stored = null;
+  while (Date.now() < deadline) {
+    stored = JSON.parse(fs.readFileSync(authFile, "utf8")).anthropic;
+    if (stored.refresh === "late-refresh") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  check("a renewal Pi abandoned is stored once Pi lets go, so the spent token is not all it keeps", () => {
+    assert.strictEqual(abandonedThrown, null, abandonedThrown && abandonedThrown.message);
+    assert.strictEqual(stored.refresh, "late-refresh");
+    assert.strictEqual(stored.access, "late-access");
   });
 
   console.log(

@@ -28,6 +28,7 @@ import {
 } from "./native-claude-profile-runtime";
 import { setNativeCodexProfileResolutionHooks } from "./native-codex-profile-runtime";
 import { setNativeGrokProfileResolutionHooks } from "./native-grok-profile-runtime";
+import { loadPiAuthStorage, type PiOAuthCredential } from "./pi-auth-storage";
 import {
   codaraPiAccountRootDir,
   defaultPiAccountAuthStore,
@@ -391,7 +392,9 @@ export async function renewCoraAnthropicLogin(
   heldRefreshToken: string,
   options: { provePossession?: boolean } = {},
 ): Promise<RefreshedAnthropicTokens> {
-  await unifiedAccountsReady();
+  // No wait for the startup pass here: the caller holds Pi's lock on this
+  // account's store, which the pass may itself be waiting for. Before the
+  // keeper starts, the renewal is a plain refresh of Cora's own token.
   if (options.provePossession) {
     // A socket caller shows the refresh token Cora's store holds for the
     // account (the Pi process asking has just read it under its lock), so
@@ -407,11 +410,45 @@ export async function renewCoraAnthropicLogin(
   }
   const pair = await unifiedAccountsFor("anthropic").pairFor(coraProfileId);
   const deps = claudeLoginKeeperDeps();
+  let tokens: RefreshedAnthropicTokens;
   if (pair && deps) {
-    return (await renewClaudeLoginForCora(deps, pair.cliProfileId, heldRefreshToken)).tokens;
+    const renewal = await renewClaudeLoginForCora(deps, pair.cliProfileId, heldRefreshToken, {
+      ...(pair.identityFingerprint ? { expectedFingerprint: pair.identityFingerprint } : {}),
+    });
+    if (renewal.outcome === "adopted") return renewal.tokens;
+    tokens = renewal.tokens;
+  } else {
+    const { refreshAnthropicOAuthToken } = await import("./pi-subscription-auth");
+    tokens = await refreshAnthropicOAuthToken(heldRefreshToken, AbortSignal.timeout(20_000));
   }
-  const { refreshAnthropicOAuthToken } = await import("./pi-subscription-auth");
-  return refreshAnthropicOAuthToken(heldRefreshToken, AbortSignal.timeout(20_000));
+  storeRenewalIfAbandoned(coraProfileId, heldRefreshToken, tokens);
+  return tokens;
+}
+
+/**
+ * Pi stores a renewal under its own lock once Studio answers. Pi bounds the
+ * wait (15 seconds since 0.87), and a Claude Code refresh in flight or a
+ * slow grant can outlast it: Pi then gives up with only the token Studio
+ * just spent in its store, and the account would stay signed out. So once
+ * Pi lets go of its lock, a store that still holds the token Cora asked
+ * with takes the renewal; one Pi wrote (or that changed otherwise) is left
+ * alone.
+ */
+function storeRenewalIfAbandoned(
+  coraProfileId: string,
+  heldRefreshToken: string,
+  tokens: RefreshedAnthropicTokens,
+): void {
+  if (!heldRefreshToken) return;
+  void (async () => {
+    const { authFile } = piAccountProfilePaths(defaultPiAccountAuthStore().rootDir, coraProfileId);
+    const AuthStorage = await loadPiAuthStorage();
+    await AuthStorage.create(authFile).modify("anthropic", async (current) => {
+      const record = current as PiOAuthCredential | undefined;
+      if (record?.type !== "oauth" || record.refresh !== heldRefreshToken) return undefined;
+      return { ...record, access: tokens.access, refresh: tokens.refresh, expires: tokens.expires };
+    });
+  })().catch(() => undefined);
 }
 
 /** Test seam: forget the process-wide gate so a suite can run the pass again. */

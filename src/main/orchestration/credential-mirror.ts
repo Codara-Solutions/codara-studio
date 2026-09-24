@@ -431,31 +431,37 @@ export async function reconcilePair<Loc, Raw>(
 
   // cli-newer or cli-only. The winner is read again under the slot lock, so
   // a switch that moved the live file since the read above (Codex) cannot
-  // attribute another profile's login to this pair, and the comparison is
-  // repeated under Pi's lock so a Pi refresh that landed in the meantime
-  // wins instead of being undone.
+  // attribute another profile's login to this pair; the login read then is
+  // this pair's whatever happens to the slot afterwards. The slot lock is
+  // released before Pi's is taken: a Pi process renewing this account holds
+  // Pi's lock and waits for the slot lock (the Claude renewal), so holding
+  // both in the other order would stall the two until one timed out. The
+  // comparison is repeated under Pi's lock so a Pi refresh that landed in
+  // the meantime wins instead of being undone.
   if (options.cancelled?.()) return result;
   const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-  await lock(async () => {
+  const winner = await lock(async (): Promise<CanonicalCredential | null> => {
     const latest = await adapter.readCli(pair.location);
-    if (latest.kind !== "credential") return;
-    const winner = codec.canonicalFromCli(latest.raw);
-    if (isForeign(winner)) return;
-    const latestVerdict = compareCredentials(piCanonical, winner);
+    if (latest.kind !== "credential") return null;
+    const read = codec.canonicalFromCli(latest.raw);
+    if (isForeign(read)) return null;
+    const latestVerdict = compareCredentials(piCanonical, read);
     result.verdict = latestVerdict;
-    result.cliPresent = winner !== null;
-    if (!winner || (latestVerdict !== "cli-newer" && latestVerdict !== "cli-only")) return;
-    let written = false;
-    await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
-      if (options.cancelled?.()) return undefined;
-      const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
-      if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
-      written = true;
-      return codec.piRecordFromCanonical(winner, current);
-    });
-    await chmodPrivate(pair.authFile);
-    if (written) result.wrote = "pi";
+    result.cliPresent = read !== null;
+    if (!read || (latestVerdict !== "cli-newer" && latestVerdict !== "cli-only")) return null;
+    return read;
   });
+  if (!winner) return result;
+  let written = false;
+  await AuthStorage.create(pair.authFile).modify(codec.provider, async (current) => {
+    if (options.cancelled?.()) return undefined;
+    const underLock = compareCredentials(codec.canonicalFromPi(current), winner);
+    if (underLock !== "cli-newer" && underLock !== "cli-only") return undefined;
+    written = true;
+    return codec.piRecordFromCanonical(winner, current);
+  });
+  await chmodPrivate(pair.authFile);
+  if (written) result.wrote = "pi";
   return result;
 }
 

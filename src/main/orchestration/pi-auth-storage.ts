@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /**
- * The pinned Pi runtime's own auth.json store. Every Codara write to a Pi
+ * The bundled Pi library's own auth.json store (the same code Pi runs). Every Codara write to a Pi
  * credential file goes through it rather than through a plain file write:
  * Pi serializes writers with a proper-lockfile lock beside the file, and a
  * Codara write that bypassed the lock could clobber a token a running Pi

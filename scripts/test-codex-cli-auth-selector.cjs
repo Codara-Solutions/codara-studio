@@ -28,6 +28,10 @@ async function loadContract(entryPoint) {
   return mod.exports;
 }
 
+// A Codex id_token names the user; a Team workspace shares one account id.
+const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+const idToken = (email) => `${b64({ alg: "none" })}.${b64({ email })}.sig`;
+
 function writePrivate(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   fs.writeFileSync(file, value, { mode: 0o600 });
@@ -230,11 +234,11 @@ async function main() {
       personalHomeDir: path.join(dupFixture, ".codex"),
     };
     const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const auth = (account, lastRefresh, token) =>
+    const auth = (account, lastRefresh, token, email = "me@example.com") =>
       JSON.stringify({
         auth_mode: "chatgpt",
         last_refresh: lastRefresh,
-        tokens: { account_id: account, refresh_token: token },
+        tokens: { account_id: account, refresh_token: token, id_token: idToken(email) },
       });
     const personal = T.codexCliPersonalAuthFile(store.rootDir);
     const live = path.join(store.personalHomeDir, "auth.json");
@@ -246,6 +250,11 @@ async function main() {
       path.join(store.rootDir, "active-auth.json"),
       JSON.stringify({ version: 1, profileId: PROFILE }),
     );
+
+    // A teammate's login in the same Team workspace is not a copy of ours.
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant", "teammate@example.com"));
+    assert.equal(await T.retireSupersededCodexPersonalLogin(store, [PROFILE, OTHER]), false);
+    writePrivate(live, auth("acct-1", "2026-09-22T00:00:00Z", "new-grant"));
 
     // A Cora row on the personal slot, or an older managed copy: kept.
     assert.equal(
@@ -288,8 +297,11 @@ async function main() {
       personalHomeDir: path.join(nativeFixture, ".codex"),
     };
     const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const auth = (account, token) =>
-      JSON.stringify({ auth_mode: "chatgpt", tokens: { account_id: account, refresh_token: token } });
+    const auth = (account, token, email = `${token.split("-")[0]}@example.com`) =>
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { account_id: account, refresh_token: token, id_token: idToken(email) },
+      });
     const live = path.join(store.personalHomeDir, "auth.json");
     const ownSlot = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
     const otherSlot = path.join(store.rootDir, "accounts", OTHER, "auth.json");
@@ -310,8 +322,11 @@ async function main() {
     assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null, "and it settles");
     assert.equal(await T.adoptCodexNativeLogin(store, change), false, "a stale change is refused");
 
-    // An account no profile holds is left alone.
+    // An account no profile holds is left alone, and so is a teammate in a
+    // known Team workspace.
     writePrivate(live, auth("acct-3", "stranger"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null);
+    writePrivate(live, auth("acct-1", "teammate-new", "teammate@example.com"));
     assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null);
   } finally {
     fs.rmSync(nativeFixture, { recursive: true, force: true });
