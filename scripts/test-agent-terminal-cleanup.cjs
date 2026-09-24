@@ -399,8 +399,11 @@ async function main() {
     path.join(ROOT, "src", "renderer", "src", "components", "SettingsDialog.tsx"),
     "utf8",
   );
-  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-  for (const surface of [settingsSource, readme]) {
+  const settingsGuide = fs.readFileSync(
+    path.join(ROOT, "docs", "shortcuts-and-settings.md"),
+    "utf8",
+  );
+  for (const surface of [settingsSource, settingsGuide]) {
     assert.match(surface, /Temporary worker panes close/);
     assert.match(surface, /Service panes\s+remain until (?:the|their) run is deleted/);
     assert.match(surface, /failed closes retry automatically/i);

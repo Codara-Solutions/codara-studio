@@ -130,6 +130,10 @@ Open Settings with `Mod+,`. The tabs, top to bottom:
 | Runs | Every Cora run: browse, keep, delete. |
 | About | Version and links. A development build shows the nearest release tag plus the commits since it. |
 
+The run terminal lifecycle works like this. Temporary worker panes close when
+a run settles. Service panes remain until the run is deleted.
+Failed closes retry automatically.
+
 ## The Capability Center
 
 The **MCP and skills** button in the Cora composer opens the Capability
