@@ -279,6 +279,44 @@ async function main() {
     fs.rmSync(dupFixture, { recursive: true, force: true });
   }
 
+  // A `codex login` in a terminal as another known account: that profile
+  // becomes the live one and keeps the new login; nothing else moves.
+  const nativeFixture = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-native-test-"));
+  try {
+    const store = {
+      rootDir: path.join(nativeFixture, ".codarastudio", "codex-cli"),
+      personalHomeDir: path.join(nativeFixture, ".codex"),
+    };
+    const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const auth = (account, token) =>
+      JSON.stringify({ auth_mode: "chatgpt", tokens: { account_id: account, refresh_token: token } });
+    const live = path.join(store.personalHomeDir, "auth.json");
+    const ownSlot = path.join(store.rootDir, "accounts", PROFILE, "auth.json");
+    const otherSlot = path.join(store.rootDir, "accounts", OTHER, "auth.json");
+    writePrivate(ownSlot, auth("acct-1", "own"));
+    writePrivate(otherSlot, auth("acct-2", "other-old"));
+    writePrivate(path.join(store.rootDir, "active-auth.json"), JSON.stringify({ version: 1, profileId: PROFILE }));
+    writePrivate(live, auth("acct-1", "own-live"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null, "the live profile's own login");
+
+    writePrivate(live, auth("acct-2", "other-new"));
+    const change = await T.detectCodexNativeLogin(store, [PROFILE, OTHER]);
+    assert.deepEqual(change, { from: PROFILE, to: OTHER });
+    assert.equal(await T.adoptCodexNativeLogin(store, change), true);
+    assert.equal(await T.readCodexCliSelection(store.rootDir), OTHER);
+    assert.equal(fs.readFileSync(otherSlot, "utf8"), auth("acct-2", "other-new"));
+    assert.equal(fs.readFileSync(ownSlot, "utf8"), auth("acct-1", "own"), "the replaced profile keeps its login");
+    assert.equal(fs.readFileSync(live, "utf8"), auth("acct-2", "other-new"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null, "and it settles");
+    assert.equal(await T.adoptCodexNativeLogin(store, change), false, "a stale change is refused");
+
+    // An account no profile holds is left alone.
+    writePrivate(live, auth("acct-3", "stranger"));
+    assert.equal(await T.detectCodexNativeLogin(store, [PROFILE, OTHER]), null);
+  } finally {
+    fs.rmSync(nativeFixture, { recursive: true, force: true });
+  }
+
   console.log("Codex auth-only selector contracts passed");
 }
 

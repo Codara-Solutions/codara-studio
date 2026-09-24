@@ -70,6 +70,14 @@ export interface SwitchSideEffects {
   afterDefault(target: string, options?: { allowSignedOut?: boolean }): Promise<void>;
 }
 
+export interface NativeLoginChange {
+  /** The CLI profile that was live. */
+  from: string;
+  /** The CLI profile the live login now belongs to. */
+  to: string;
+  adopt(): Promise<boolean>;
+}
+
 export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
   extends CredentialMirrorAdapter<Loc, Raw> {
   readonly runtime: CliRuntime;
@@ -103,6 +111,13 @@ export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
   ): Promise<CanonicalCredential>;
   /** The CLI profile whose login is live right now, when that differs from the store default. */
   activeCliProfileId?(): Promise<string>;
+  /**
+   * A sign-in made in a terminal (`/login`, `codex login`) put another known
+   * profile's account in the live slot: which profile it was and which it
+   * is now, with `adopt` making that profile the live one without touching
+   * the login (false when the slot changed meanwhile). Null otherwise.
+   */
+  detectNativeLogin?(): Promise<NativeLoginChange | null>;
   readonly switchSideEffects?: SwitchSideEffects;
   /**
    * Every session runs on whichever login is live, never on a profile of its

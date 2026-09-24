@@ -438,6 +438,39 @@ async function main() {
     console.log("PASS an unregistered account directory goes once its transcripts are home; one with a login stays");
   }
 
+  // --- A /login in a terminal as another known account ---------------------
+  {
+    const n = fixture("native-login");
+    writeJson(n.marker, { version: 1, profileId: ACCOUNT_A, accountUuid: "uuid-a" });
+    writeJson(n.vault(ACCOUNT_A), { version: 1, store: { claudeAiOauth: login("a") }, oauthAccount: { accountUuid: "uuid-a" } });
+    writeJson(n.vault(ACCOUNT_B), { version: 1, store: { claudeAiOauth: login("b-old") }, oauthAccount: { accountUuid: "uuid-b" } });
+    // Claude Code's /login replaced the live login and recorded the account.
+    writeJson(n.liveCredentials, { claudeAiOauth: login("b-new"), mcpOAuth: { "server|1": { accessToken: "grant" } } });
+    writeJson(n.liveConfig, { oauthAccount: { accountUuid: "uuid-b", emailAddress: "b@example.com" } }, 0o644);
+    const known = [ACCOUNT_A, ACCOUNT_B];
+    const verifiedAs = (uuid) => async (token) => (token === "access-b-new" ? uuid : undefined);
+
+    assert.equal(await mod.detectClaudeNativeLogin(n.store, known, verifiedAs("uuid-other")), null, "the token decides");
+    const change = await mod.detectClaudeNativeLogin(n.store, known, verifiedAs("uuid-b"));
+    assert.deepEqual(change, { from: ACCOUNT_A, to: ACCOUNT_B, accountUuid: "uuid-b" });
+    assert.equal(await mod.adoptClaudeNativeLogin(n.store, change), true);
+    assert.equal(readJson(n.marker).profileId, ACCOUNT_B);
+    assert.equal(readJson(n.marker).accountUuid, "uuid-b");
+    assert.equal(readJson(n.vault(ACCOUNT_B)).store.claudeAiOauth.refreshToken, "refresh-b-new", "the new login is B's now");
+    assert.equal(readJson(n.vault(ACCOUNT_A)).store.claudeAiOauth.refreshToken, "refresh-a", "A keeps its own");
+    assert.equal(readJson(n.liveCredentials).claudeAiOauth.refreshToken, "refresh-b-new", "the live login is untouched");
+    assert.equal(await mod.detectClaudeNativeLogin(n.store, known, verifiedAs("uuid-b")), null, "and it settles");
+    assert.equal(await mod.adoptClaudeNativeLogin(n.store, change), false, "a stale change is refused");
+
+    // An account two profiles record, or one no profile records, is left alone.
+    writeJson(n.marker, { version: 1, profileId: ACCOUNT_A, accountUuid: "uuid-a" });
+    writeJson(n.vault("personal"), { version: 1, store: {}, oauthAccount: { accountUuid: "uuid-b" } });
+    assert.equal(await mod.detectClaudeNativeLogin(n.store, known, verifiedAs("uuid-b")), null);
+    writeJson(n.liveConfig, { oauthAccount: { accountUuid: "uuid-new" } }, 0o644);
+    assert.equal(await mod.detectClaudeNativeLogin(n.store, known, verifiedAs("uuid-new")), null);
+    console.log("PASS a terminal /login as another known account makes it the live one, checked against the token");
+  }
+
   console.log("\nPASS Claude accounts in one home");
 }
 

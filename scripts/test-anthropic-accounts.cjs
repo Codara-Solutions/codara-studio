@@ -381,6 +381,24 @@ async function main() {
   assert.equal(slot.live().claudeAiOauth.accessToken, "claude-access-2");
   assert.equal(slot.identity().accountUuid, ACCOUNT_UUID);
   assert.deepEqual(slot.live().mcpOAuth, liveWithGrant.mcpOAuth);
+
+  // A `/login` as Work in a terminal: Work becomes the Active account and
+  // Cora's default, holding the new login; Account 1 keeps its own.
+  {
+    assert.equal(await service.followNativeLogin(), null, "nothing to follow yet");
+    await slot.write("personal", claudeCredential(25), { accountUuid: OTHER_UUID, emailAddress: "work@example.com" });
+    assert.equal(await service.followNativeLogin(), workCli);
+    assert.equal(await slot.liveId(), workCli);
+    assert.equal((await claudeStore.snapshot()).defaultProfileId, workCli);
+    assert.equal((await piStore.registry.snapshot()).defaults.anthropic, work.id);
+    assert.equal(slot.vault(workCli).store.claudeAiOauth.accessToken, "claude-access-25");
+    assert.equal(slot.vault("personal").store.claudeAiOauth.accessToken, "claude-access-2");
+    assert.equal(await service.followNativeLogin(), null, "it settles");
+    await service.useAccount(accountOne.id);
+    assert.equal(slot.live().claudeAiOauth.accessToken, "claude-access-2");
+    assert.equal(slot.vault(workCli).store.claudeAiOauth.accessToken, "claude-access-25", "Work kept the new login");
+    pass("a terminal /login as a known account makes it the Active account and Cora's default");
+  }
   // Rollback: when the Claude side refuses, the Cora default is put back.
   const refusingStore = Object.create(claudeStore);
   refusingStore.setDefaultProfile = async () => {

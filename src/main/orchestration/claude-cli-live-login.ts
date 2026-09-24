@@ -839,6 +839,86 @@ async function activateLocked(
   return owner;
 }
 
+// ---------------------------------------------------------------------------
+// Following a sign-in made in a terminal.
+
+export interface ClaudeNativeLoginChange {
+  /** The profile the marker names, whose login `/login` replaced. */
+  from: ClaudeCliProfileId;
+  /** The known profile the live login now belongs to. */
+  to: ClaudeCliProfileId;
+  accountUuid: string;
+}
+
+/**
+ * Whether a `/login` in a terminal put another known account's login in the
+ * live slot. Claude Code records the new account in `.claude.json`; the
+ * token itself confirms it (`verifyAccountUuid` asks the account API), so a
+ * stale record never moves the Active account. Null when nothing changed,
+ * the account is unknown, or two profiles record it.
+ */
+export async function detectClaudeNativeLogin(
+  store: ClaudeLoginSlotStore,
+  knownProfileIds: readonly ClaudeCliProfileId[],
+  verifyAccountUuid: (accessToken: string) => Promise<string | undefined>,
+  options: ClaudeCredentialStoreOptions = {},
+): Promise<ClaudeNativeLoginChange | null> {
+  const selection = await readClaudeLiveSelection(store.rootDir).catch(() => null);
+  if (!selection || selection.switchingFrom) return null;
+  const home = claudeLiveHome(store);
+  const liveAccountUuid = accountUuidOf(await readClaudeOauthAccount(home).catch(() => null));
+  if (!liveAccountUuid) return null;
+  const known = new Set<ClaudeCliProfileId>([CLAUDE_CLI_PERSONAL_PROFILE_ID, ...knownProfileIds]);
+  const vaults = await readVaultIndex(store, known);
+  const ownerAccountUuid = selection.accountUuid ?? vaultAccountUuid(vaults, selection.profileId);
+  if (!ownerAccountUuid || ownerAccountUuid === liveAccountUuid) return null;
+  const owners = vaults.filter(
+    (entry) =>
+      entry.profileId !== selection.profileId &&
+      accountUuidOf(entry.login.oauthAccount) === liveAccountUuid,
+  );
+  if (owners.length !== 1) return null;
+  const live = claudeLiveLoginRecord(
+    await readClaudeCredentialStores(home.configDir, home.configDirEnv, options),
+  );
+  if (!live?.accessToken) return null;
+  const verified = await verifyAccountUuid(live.accessToken).catch(() => undefined);
+  if (verified?.trim().toLowerCase() !== liveAccountUuid) return null;
+  return { from: selection.profileId, to: owners[0].profileId, accountUuid: liveAccountUuid };
+}
+
+/**
+ * Make the profile a terminal `/login` signed in as the live one: its vault
+ * takes the live login and the marker moves. The live slot is not touched;
+ * the replaced profile keeps the login its vault (and Cora half) holds.
+ * False when the slot changed since the detection.
+ */
+export async function adoptClaudeNativeLogin(
+  store: ClaudeLoginSlotStore,
+  change: ClaudeNativeLoginChange,
+  options: ClaudeCredentialStoreOptions = {},
+): Promise<boolean> {
+  const home = claudeLiveHome(store);
+  return withClaudeSelectionLock(store.rootDir, () =>
+    withClaudeCodeRefreshLock(home.configDir, async () => {
+      const selection = await readClaudeLiveSelection(store.rootDir);
+      if (!selection || selection.switchingFrom || selection.profileId !== change.from) return false;
+      const liveOauthAccount = await readClaudeOauthAccount(home);
+      if (accountUuidOf(liveOauthAccount) !== change.accountUuid) return false;
+      const live = liveScopedKeys(
+        await readClaudeCredentialStores(home.configDir, home.configDirEnv, options),
+      );
+      if (!hasUsableLogin(live)) return false;
+      await writeVaultedLogin(claudeCliVaultFile(store.rootDir, change.to), {
+        store: live,
+        ...(liveOauthAccount ? { oauthAccount: liveOauthAccount } : {}),
+      });
+      await writeLiveSelection(store.rootDir, { profileId: change.to, accountUuid: change.accountUuid });
+      return true;
+    }),
+  );
+}
+
 async function saveLiveLogin(
   store: ClaudeLoginSlotStore,
   belongsTo: ClaudeCliProfileId | undefined,

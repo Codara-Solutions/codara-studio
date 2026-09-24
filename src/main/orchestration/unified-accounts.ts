@@ -867,6 +867,35 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   /**
+   * Follow a sign-in made in a terminal (`/login`, `codex login`) as
+   * another account Codara knows: that account becomes the Active one, and
+   * its row Cora's default, exactly as if it had been picked here. The
+   * login itself is left alone. Returns the CLI profile now live, or null
+   * when nothing changed.
+   */
+  async followNativeLogin(): Promise<string | null> {
+    if (!this.adapter.detectNativeLogin) return null;
+    return this.withMutation(async () => {
+      const change = await this.adapter.detectNativeLogin!().catch(() => null);
+      if (!change || !(await change.adopt().catch(() => false))) return null;
+      await this.store.setDefaultProfile(change.to).catch(() => undefined);
+      const row = await this.piStore.registry
+        .profileForCliProfileId(this.provider, change.to)
+        .catch(() => undefined);
+      if (row) {
+        await this.piStore.registry.setDefaultProfile(this.provider, row.id).catch(() => undefined);
+      }
+      this.log(
+        `[accounts] a ${this.adapter.labels.cliLabel} sign-in in a terminal made ${change.to} the Active account`,
+      );
+      await this.invalidateCaches().catch(() => undefined);
+      this.defaultsChanged();
+      this.broadcast();
+      return change.to;
+    });
+  }
+
+  /**
    * Make the CLI's live selection follow its store default (the Codex
    * marker can lag after a crash or a rolled-back switch). A no-op for CLIs
    * whose default is the selection.

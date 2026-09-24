@@ -351,6 +351,34 @@ export function startStudioClaudeLoginKeeper(): void {
   });
 }
 
+/** CLIs whose terminal sign-ins are followed (Grok keeps one home per account). */
+const NATIVE_LOGIN_PROVIDERS = ["anthropic", "openai-codex"] as const;
+const NATIVE_LOGIN_FOLLOW_INTERVAL_MS = 60 * 1000;
+let nativeLoginTimer: NodeJS.Timeout | null = null;
+
+/**
+ * One pass of following sign-ins made in terminals: a `/login` or `codex
+ * login` as another account Codara knows makes that account the Active one.
+ */
+export async function followNativeLogins(): Promise<void> {
+  await unifiedAccountsReady();
+  for (const provider of NATIVE_LOGIN_PROVIDERS) {
+    await unifiedAccountsFor(provider)
+      .followNativeLogin()
+      .catch(() => null);
+  }
+}
+
+/** Follow terminal sign-ins once a minute while Studio runs. */
+export function startNativeLoginFollower(): void {
+  if (nativeLoginTimer) return;
+  nativeLoginTimer = setInterval(() => {
+    void followNativeLogins();
+  }, NATIVE_LOGIN_FOLLOW_INTERVAL_MS);
+  nativeLoginTimer.unref?.();
+  void followNativeLogins();
+}
+
 /**
  * Cora's Anthropic refresh, made by Studio instead of by Pi (the bundled
  * extension routes Pi's refresh here over the agent socket). A linked

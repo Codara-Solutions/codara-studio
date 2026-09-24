@@ -20,7 +20,9 @@ import {
 } from "../claude-cli-credentials";
 import {
   activateClaudeCliAccount,
+  adoptClaudeNativeLogin,
   claudeCliVaultFile,
+  detectClaudeNativeLogin,
   clearClaudeProfileLogin,
   forgetClaudeVaultIdentity,
   readClaudeLiveProfileId,
@@ -259,6 +261,22 @@ export function createClaudeAccountAdapter(
     },
     activeCliProfileId() {
       return readClaudeLiveProfileId(resolveStore().rootDir);
+    },
+    async detectNativeLogin() {
+      const current = resolveStore();
+      const change = await detectClaudeNativeLogin(
+        current,
+        await knownProfileIds(),
+        async (accessToken) => (await readIdentity(accessToken)).accountUuid,
+        storeOptions,
+      );
+      return change
+        ? {
+            from: change.from,
+            to: change.to,
+            adopt: () => adoptClaudeNativeLogin(current, change, storeOptions),
+          }
+        : null;
     },
     switchSideEffects: {
       async sessionCount() {

@@ -289,6 +289,70 @@ export async function retireSupersededCodexPersonalLogin(
   });
 }
 
+export interface CodexNativeLoginChange {
+  /** The profile the marker names, whose login `codex login` replaced. */
+  from: CodexCliProfileId;
+  /** The known profile the live login now belongs to. */
+  to: CodexCliProfileId;
+}
+
+/**
+ * Whether a `codex login` in a terminal put another known account's login
+ * in ~/.codex/auth.json. The file names its ChatGPT account; the live
+ * profile's own saved copy says which account it was. Null when nothing
+ * changed, either account is unknown, or two profiles hold that account.
+ */
+export async function detectCodexNativeLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  managedProfileIds: readonly string[],
+): Promise<CodexNativeLoginChange | null> {
+  const marker = await readSelection(store.rootDir).catch(() => null);
+  if (marker === null) return null;
+  const liveAccount = await credentialAccountId(join(store.personalHomeDir, CODEX_CLI_AUTH_FILE));
+  if (!liveAccount) return null;
+  const ownerAccount = await credentialAccountId(storedAuthFile(store, marker));
+  if (!ownerAccount || ownerAccount === liveAccount) return null;
+  const owners: CodexCliProfileId[] = [];
+  for (const rawId of [CODEX_CLI_PERSONAL_PROFILE_ID, ...managedProfileIds]) {
+    let profileId: CodexCliProfileId;
+    try {
+      profileId = normalizeCodexCliProfileId(rawId);
+    } catch {
+      continue;
+    }
+    if (profileId === marker || owners.includes(profileId)) continue;
+    if ((await credentialAccountId(storedAuthFile(store, profileId))) === liveAccount) {
+      owners.push(profileId);
+    }
+  }
+  return owners.length === 1 ? { from: marker, to: owners[0] } : null;
+}
+
+/**
+ * Make the profile a terminal `codex login` signed in as the live one: its
+ * slot takes the live file and the marker moves. The live file is not
+ * touched; the replaced profile keeps the login its slot holds. False when
+ * the live file or the marker changed since the detection.
+ */
+export async function adoptCodexNativeLogin(
+  store: Pick<CodexCliAccountProfileStore, "rootDir" | "personalHomeDir">,
+  change: CodexNativeLoginChange,
+): Promise<boolean> {
+  return withSelectionLock(store.rootDir, async () => {
+    if ((await readSelection(store.rootDir)) !== change.from) return false;
+    const liveAuth = join(store.personalHomeDir, CODEX_CLI_AUTH_FILE);
+    const target = storedAuthFile(store, change.to);
+    const [liveAccount, targetAccount] = await Promise.all([
+      credentialAccountId(liveAuth),
+      credentialAccountId(target),
+    ]);
+    if (!liveAccount || liveAccount !== targetAccount) return false;
+    await atomicCopy(liveAuth, target);
+    await writeSelection(store.rootDir, change.to);
+    return true;
+  });
+}
+
 export interface ActivateCodexCliAccountOptions {
   /**
    * Let a signed-out profile take the live slot: the previous login is still
