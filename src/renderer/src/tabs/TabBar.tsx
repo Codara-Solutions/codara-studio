@@ -69,6 +69,7 @@ interface Props {
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
+  onNewPiWorker: () => void;
   // Starts a new draft Cora chat — the ✦ Cora button's action (identical to
   // the chat.new chord). The new-chat welcome surface is Cora's landing page.
   onNewChat: () => void;
@@ -138,6 +139,7 @@ function TabBar({
   onNewClaudeWorker,
   onNewCodexWorker,
   onNewGrokWorker,
+  onNewPiWorker,
   onNewChat,
   onRenameChat,
   onCloseChat,
@@ -921,6 +923,15 @@ function TabBar({
                 onNewGrokWorker();
               }}
             />
+            <PickerItem
+              label="Pi worker"
+              glyph={<RuntimeGlyph runtime="pi" />}
+              accent="pi"
+              onClick={() => {
+                setPickerOpen(false);
+                onNewPiWorker();
+              }}
+            />
           </div>
         )}
       </div>
@@ -1685,7 +1696,7 @@ function PickerItem({
   );
 }
 
-type PickerAccent = "shell" | "claude" | "codex" | "grok";
+type PickerAccent = "shell" | "claude" | "codex" | "grok" | "pi";
 
 // Same three tints the pane toolbar's add-pane menu uses, so a Claude row
 // reads identically whether it is spawned from the strip or from a pane.

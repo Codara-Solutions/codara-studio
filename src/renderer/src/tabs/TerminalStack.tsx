@@ -64,6 +64,7 @@ import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
+  PI_LAUNCH_COMMAND,
 } from "../workers/launch-commands";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
@@ -2463,6 +2464,8 @@ function PaneToolbar({
           onPick={(kind) => {
             setMenuOpen(false);
             if (kind === "shell") onSmartAdd();
+            // Pi keeps its own sessions (`pi --resume` inside the pane).
+            else if (kind === "pi") onSmartAdd(PI_LAUNCH_COMMAND);
             else onOpenWorkerSessions(kind);
           }}
         />,
@@ -2535,7 +2538,7 @@ export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex" | "grok";
+type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "pi";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
@@ -2550,7 +2553,7 @@ const AddPaneMenu = React.forwardRef<
     title: string;
     hint: string;
     command?: string;
-    accent: "shell" | "claude" | "codex" | "grok";
+    accent: "shell" | "claude" | "codex" | "grok" | "pi";
     glyph: React.ReactNode;
   }> = [
     {
@@ -2583,6 +2586,14 @@ const AddPaneMenu = React.forwardRef<
       command: GROK_LAUNCH_COMMAND,
       accent: "grok",
       glyph: <RuntimeGlyph runtime="grok" />,
+    },
+    {
+      kind: "pi",
+      title: "Pi worker",
+      hint: "worker",
+      command: PI_LAUNCH_COMMAND,
+      accent: "pi",
+      glyph: <RuntimeGlyph runtime="pi" />,
     },
   ];
 
@@ -2632,7 +2643,7 @@ function AddPaneMenuItem({
   hint: string;
   command?: string;
   glyph: React.ReactNode;
-  accent: "shell" | "claude" | "codex" | "grok";
+  accent: "shell" | "claude" | "codex" | "grok" | "pi";
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -2746,7 +2757,7 @@ function AddPaneMenuItem({
   );
 }
 
-function menuItemTone(accent: "shell" | "claude" | "codex" | "grok"): {
+function menuItemTone(accent: "shell" | "claude" | "codex" | "grok" | "pi"): {
   color: string;
   background: string;
   border: string;

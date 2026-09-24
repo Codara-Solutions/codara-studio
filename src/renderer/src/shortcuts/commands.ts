@@ -44,6 +44,7 @@ export type CommandId =
   | "worker.newClaude"
   | "worker.newCodex"
   | "worker.newGrok"
+  | "worker.newPi"
   | "worker.claudeSessions"
   | "worker.codexSessions"
   | "worker.grokSessions"
@@ -353,6 +354,12 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newGrok",
     label: "New Grok worker pane",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.newPi",
+    label: "New Pi worker pane",
     group: "Workers",
     defaultChords: [],
   },

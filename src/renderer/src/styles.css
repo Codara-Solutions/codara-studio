@@ -43,6 +43,7 @@
   --agent-claude: oklch(0.76 0.16 52);
   --agent-codex: oklch(0.74 0.13 175);
   --agent-grok: oklch(0.82 0.18 128);
+  --agent-pi: oklch(0.74 0.14 300);
 
   /* Fallback glyph color for a background-created terminal after its live
      runtime mark is gone. Agent activity never tints the whole tab. */
@@ -452,6 +453,7 @@
   --agent-claude: oklch(0.58 0.17 50);
   --agent-codex: oklch(0.50 0.13 175);
   --agent-grok: oklch(0.48 0.16 128);
+  --agent-pi: oklch(0.50 0.15 300);
 }
 
 * { box-sizing: border-box; }

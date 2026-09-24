@@ -1,9 +1,10 @@
 // Provider marks from the CC0 simple-icons set. The Anthropic, OpenAI, and
 // xAI trademarks identify the respective CLIs. Marks draw in currentColor;
 // call sites tint them with the fixed `--agent-claude` / `--agent-codex` /
-// `--agent-grok` tokens so they never follow the workspace accent.
+// `--agent-grok` / `--agent-pi` tokens so they never follow the workspace
+// accent. Pi's mark is a plain pi glyph.
 
-export type BrandRuntime = "claude" | "codex" | "grok";
+export type BrandRuntime = "claude" | "codex" | "grok" | "pi";
 
 export function ClaudeMark({ size = 14 }: { size?: number }) {
   return (
@@ -50,6 +51,21 @@ export function GrokMark({ size = 14 }: { size?: number }) {
   );
 }
 
+export function PiMark({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width={size}
+      height={size}
+      fill="currentColor"
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M3 5h18v3h-3.4v8.6c0 .9.4 1.3 1.3 1.3H20V21h-2c-2.6 0-4-1.3-4-3.9V8h-3.9l-.5 6.4C9.2 18.9 7.8 21 4.6 21H4v-3.1h.5c1.6 0 2.2-1.3 2.4-3.8L7.4 8H3z" />
+    </svg>
+  );
+}
+
 export function RuntimeMark({
   runtime,
   size = 14,
@@ -59,6 +75,7 @@ export function RuntimeMark({
 }) {
   if (runtime === "codex") return <CodexMark size={size} />;
   if (runtime === "grok") return <GrokMark size={size} />;
+  if (runtime === "pi") return <PiMark size={size} />;
   return <ClaudeMark size={size} />;
 }
 
