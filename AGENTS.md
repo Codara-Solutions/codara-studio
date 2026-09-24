@@ -3,6 +3,11 @@
 Conventions that keep changes landable in this codebase. They mirror how the
 existing code is written; when in doubt, read neighboring files and match them.
 
+To find your way around, read `docs/codebase-tour.md` (where things are, the
+main flows, where to start for a given change), `docs/architecture.md` (how
+the parts fit and why), and `scripts/README.md` (the test runner and an index
+of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
+
 ## Style
 
 - Match the surrounding code: naming, idiom, and comment density of the file
@@ -22,7 +27,9 @@ existing code is written; when in doubt, read neighboring files and match them.
   `npm test -- <regex>` (the registry globs `scripts/test-*.{cjs,mjs}`), for
   example `npm test -- step-lifecycle` or `npm test -- loom-steps` for
   orchestration changes and `npm test -- terminal-agent-notify` for the
-  terminal notifier. `npm test` runs everything and takes a while.
+  terminal notifier. `npm test` runs everything and takes a while. A few
+  suites need a build or extra tools first (`test-agent-socket` needs
+  `npm run build`); `scripts/README.md` lists them.
 - Tests that need a real subscription or network are the `smoke:*` scripts
   and are not part of the registry.
 
@@ -67,8 +74,12 @@ existing code is written; when in doubt, read neighboring files and match them.
   under `src/main/orchestration/`. `run-store.ts` is the run state machine;
   steps-only pass streaming spans `loom-steps.ts`, `loom-resolve.ts`,
   `run-store.ts`, and `automation-loop.ts`; accounts span
-  `unified-accounts.ts`, `credential-mirror.ts`, and the
-  `*-cli-account-profiles.ts` files.
+  `unified-accounts.ts`, `credential-mirror.ts`, the adapters in
+  `account-adapters/`, the `*-cli-account-profiles.ts` files,
+  `claude-cli-live-login.ts` and `claude-login-keeper.ts` (Claude's one
+  home and its one refresher), and `codex-cli-auth-selector.ts`. Cora runs
+  on Pi: `pi-runtime-electron.ts` resolves and launches it, `pi-backend.ts`
+  runs manager turns.
 - Shared types and catalogs are in `src/shared/`; the renderer reads them via
   `@shared/*`. `agent-patterns.ts` holds the regexes that recognize agent CLIs
   in terminal output and is shared by main and renderer.
@@ -82,8 +93,8 @@ existing code is written; when in doubt, read neighboring files and match them.
   that implements Cora in `resources/pi-cora/`, shell integration in
   `resources/shell-integration/`, orchestration prompts in
   `resources/orchestration/`.
-- The `cora` CLI is `cli/`. Unit tests are `scripts/test-*.cjs`; Playwright
-  specs are `tests/e2e/`.
+- The `cora` CLI is `cli/`. Unit tests are `scripts/test-*.cjs` and
+  `scripts/test-*.mjs`; Playwright specs are `tests/e2e/`.
 - Environment variables that form the contract with child CLIs, hooks, and
   shells keep the legacy `SPARK_*` prefix (`SPARK_PANE_ID`, `SPARK_MCP_MODE`,
   `SPARK_HOME_DIR`, ...). Do not rename them without an alias and a migration.
