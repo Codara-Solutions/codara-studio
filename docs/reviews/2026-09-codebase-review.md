@@ -1,5 +1,71 @@
 # Codara Studio review, September 2026
 
+> **This is a dated snapshot, not current documentation.** It was written on
+> 1 September 2026 against commit `63fcbbb4`, and all line numbers refer to
+> that commit. The code has changed since then. For how the app works today,
+> read [architecture.md](../architecture.md) and
+> [codebase-tour.md](../codebase-tour.md). The review moved here from
+> `REVIEW.md` at the repository root.
+
+## Status on 24 September 2026
+
+Only the items below were checked again. Everything else is as the review
+left it: open until someone checks it.
+
+Addressed:
+
+- **Two refreshers, one grant (2.1, class 1), for Claude.**
+  `claude-login-keeper.ts` is now the only thing that refreshes the live
+  Claude login while Studio runs. It refreshes ahead of Claude Code, under
+  Claude Code's own refresh lock. Cora's Pi processes no longer spend the
+  refresh token themselves: they ask Studio over the agent socket
+  (`accounts.anthropic.renew`, see `resources/pi-cora/anthropic-refresh.ts`).
+  The credential mirror still carries tokens between the two halves of an
+  account. Codex and Grok still rely on its "newer expiry wins" rule.
+- **Shared state through symlinks (2.1, class 2), for Claude.** Every Claude
+  Code account now runs in the user's own `~/.claude`. A switch moves only
+  the account's sign-in keys and identity (`claude-cli-live-login.ts`), so
+  nothing is linked any more, and `claude-cli-mcp-sync.ts` is gone. Codex
+  already worked this way when the review was written: it swaps only
+  `~/.codex/auth.json`. Grok still gives each managed account its own home,
+  with state linked from an allowlist in `native-cli-shared-state.ts`.
+- **Which account is active (2.1, class 3), in part.** The pointer file that
+  running shells follow (`active-cli-env-pointer.ts`) now names only the Grok
+  home. Claude and Codex have one home each, so a shell has nothing to
+  follow for them.
+- **The hook path (1.3), in part.** The hook launcher now exits before doing
+  any work outside a Codara pane, so Claude Code sessions in other terminal
+  apps no longer write event files. `PreToolUse` and `PostToolUse` are still
+  installed for every session, and each event in a Codara pane still starts
+  Python.
+- **False "finished" notifications (3.1).** Fixed in the review pass. A
+  follow-up also holds the alert while background tasks and monitors run.
+- **`test-remote-access-hostile.mjs` (5.5).** It no longer calls `gc()`, so
+  the registry's plain `node` invocation runs it.
+
+Checked and still open:
+
+- 1.1: every terminal pane still gets `writeWhileHidden`. `TerminalStack.tsx`
+  now has a comment saying this is intentional.
+- 4, High: the root agent-socket token is still exported into every PTY
+  (`pty-manager.ts`).
+- 4, High: `terminal.create` from the phone still launches
+  `claude --dangerously-skip-permissions` and `codex --yolo`
+  (`remote-access/production.ts`).
+- 4, Medium: the file write, rename and delete IPC handlers still take any
+  path. A comment in `ipc.ts` says they rely on the trusted-sender gate.
+- 4, Medium: the OpenRouter key is still stored in plain text in the
+  settings file (`storage.ts`).
+- 5.5: there is no ESLint or Prettier. `esbuild` and the bare `playwright`
+  package are still not direct dependencies. `test-cora-direct-mode.ts` is
+  still outside the registry.
+- 6: `server.js` still reports `serverInfo.version` `0.1.0`, and the bug
+  report template still mentions neither Grok nor `main.log`.
+
+The text below is unchanged from the original review.
+
+---
+
 A full pass over the repository: documentation, open-source hygiene, security,
 the main process, the terminal output path, the orchestration and accounts
 code, and product ideas. Findings are grouped by the three things you said
