@@ -40,8 +40,9 @@ A paired phone can:
 
 There are no permission tiers yet: a paired device has the same authority as
 the desktop UI. Treat pairing like handing someone your unlocked laptop.
-Known gaps (see also the security section of [REVIEW.md](../REVIEW.md)): a
-phone can add your home folder itself as a workspace, terminals it opens
+Known gaps (see also the security section of
+[the September 2026 review](./reviews/2026-09-codebase-review.md#4-security)):
+a phone can add your home folder itself as a workspace, terminals it opens
 start Claude Code and Codex with permission prompts skipped, and `cora.send`
 is not rate limited.
 

@@ -104,7 +104,9 @@ Manage accounts in Settings, Agents, or with `cora auth`. The full story is in
 | [Remote access](./docs/remote-access.md) | Pair a phone and understand what a paired device can do. |
 | [What Codara writes on your machine](./docs/on-your-machine.md) | Audit or undo every file and setting Codara touches. |
 | [Glossary](./docs/glossary.md) | Look up a term: run, worker, loom, pass, Active account, and more. |
-| [Architecture](./docs/architecture.md) | Find the code behind a behavior. |
+| [Codebase tour](./docs/codebase-tour.md) | Find your way around the code as a new contributor. |
+| [Architecture](./docs/architecture.md) | Understand how the parts fit together and why. |
+| [Tests and scripts](./scripts/README.md) | Run, debug or add a test suite. |
 | [Releasing](./docs/releasing.md) | Ship or recover a release (maintainers). |
 
 `docs/harness-lab/` and `docs/benchmarks/` hold measurement records from
@@ -128,7 +130,8 @@ npm run package:linux    # an AppImage for Linux (package:mac, package:win too)
 
 Before opening a pull request, read [CONTRIBUTING.md](./CONTRIBUTING.md).
 AI agents working in this repository follow [AGENTS.md](./AGENTS.md).
-[docs/architecture.md](./docs/architecture.md) maps the code.
+New to the code? Start with the
+[codebase tour](./docs/codebase-tour.md).
 
 ## Releases
 

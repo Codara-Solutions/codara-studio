@@ -166,7 +166,7 @@ calls.
 | `test-claude-cli-live-login`, `test-claude-login-keeper`, `test-claude-cli-credentials`, `test-claude-cli-account-profiles`, `test-claude-cli-profile-execution`, `test-transcript-repair` | Claude Code accounts in one home: the live login and saved logins, the one refresher, the Keychain or file credential store. |
 | `test-codex-cli-*` (account-profiles, auth-selector, profile-execution), `test-codex-accounts`, `test-codex-account-migration`, `test-codex-credential-codec`, `test-codex-home-routing` | Codex accounts: swapping `auth.json`, the saved logins, converting credentials. |
 | `test-grok-accounts`, `test-grok-account-migration`, `test-grok-credential-codec`, `test-native-cli-shared-state` | Grok accounts: one `GROK_HOME` per managed account, with shared state linked to the personal home. |
-| `test-anthropic-*` (accounts, account-identity, account-migration, credential-mirror), `test-unified-account-migration` | `unified-accounts.ts`, `credential-mirror.ts` and the startup migration. |
+| `test-anthropic-*` (accounts, account-identity, account-migration, credential-mirror), `test-unified-account-migration`, `test-account-selection-lock` | `unified-accounts.ts`, `credential-mirror.ts`, the startup migration, and the lock that makes switches take turns across processes. |
 | `test-native-cli-*` (accounts, account-wiring, process-shutdown, shell-defaults, terminal-removal), `test-active-cli-env-pointer`, `test-shell-integration-active-env`, `test-cli-custom-homes`, `test-login-return-focus` | How terminals follow the Active account, custom CLI homes, and returning to the app after a browser sign-in. |
 
 ### Cora memory and profiles

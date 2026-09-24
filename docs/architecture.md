@@ -193,6 +193,10 @@ Both CLIs run every account in the user's own home, `~/.claude` and
 - A Claude switch holds Claude Code's own refresh and storage locks and
   closes no session. Running sessions pick up the new login on their next
   request.
+- Switches for one CLI take turns through `account-selection-lock.ts`, a lock
+  file as well as an in-process queue, because a development build and the
+  installed app can run side by side and manage the same `~/.claude` and
+  `~/.codex`.
 
 ### Grok: one home per account
 
@@ -224,16 +228,20 @@ own, the slower one ends up holding a spent token.
 - **One refresher for Claude.** While Studio runs, `claude-login-keeper.ts`
   renews the live Claude login ahead of Claude Code. It works under Claude
   Code's own refresh lock and compare-and-swap, so Claude Code never finds
-  the login due.
+  the login due. It acts only while the live login is still the Active
+  account's: after a `/login` as an account Codara does not know, it leaves
+  that login alone.
 - **Cora never spends a Claude refresh token.** Its Pi processes register an
   OAuth refresh for the `anthropic` provider
   (`resources/pi-cora/anthropic-refresh.ts`) that asks Studio over the agent
-  socket (`accounts.anthropic.renew`). Only root callers may use that method,
-  and they must present the account's current refresh token. Studio adopts
-  the token in the account's Claude slot if it is still good, or renews it
-  through that slot (the live home or its vault), and Pi stores the answer.
-  Processes for imported pull requests have no socket access for this and
-  keep Pi's own refresh.
+  socket (`accounts.anthropic.renew`). The caller must present the account's
+  current refresh token, so the method hands out nothing the process does
+  not already hold; scoped processes (imported pull requests, workers) reach
+  it through their capability claim. Studio adopts the token in the
+  account's Claude slot if it is still good, or renews it through that slot
+  (the live home when it holds this account, otherwise its vault), and Pi
+  stores the answer. The commit-message helper runs Pi without the
+  extension, so Studio renews its credential before starting it.
 - **Blanked logins are repaired.** Claude Code blanks its stored login after
   a refresh with a spent token. Codara repairs that login from the Cora half
   and never reads it as a sign-out.
@@ -246,7 +254,8 @@ such a sign-in:
 
 - Claude's is recognized by the account Claude Code records in
   `.claude.json`, confirmed against the token itself.
-- Codex's is recognized by the account id in `auth.json`.
+- Codex's is recognized by the account id in `auth.json` together with the
+  user, because every member of a Team workspace shares one account id.
 
 That account's slot takes the live login and the marker, and both defaults
 (Active and Cora) move to it. The login itself is not changed.
