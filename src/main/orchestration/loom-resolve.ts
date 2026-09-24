@@ -78,15 +78,6 @@ export function emptyResolution(): InlineResolution {
   return { merges: [], guards: [], steps: [], skipped: [] };
 }
 
-/** Fold one resolution's lists into an accumulator (the finalize walk runs the
- *  resolution once per outer back-edge turn and persists the union). */
-export function appendResolution(into: InlineResolution, add: InlineResolution): void {
-  into.merges.push(...add.merges);
-  into.guards.push(...add.guards);
-  into.steps.push(...add.steps);
-  for (const id of add.skipped) if (!into.skipped.includes(id)) into.skipped.push(id);
-}
-
 /** Resolve every ready merge, guard and step — repeatedly, until a turn makes
  *  no progress — pruning dead branches between turns. Bounded by the node
  *  count + 1: each inline node resolves at most once (it only leaves "pending"

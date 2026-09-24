@@ -60,11 +60,3 @@ export function nudgeUsageRefresh(): void {
   }, USAGE_NUDGE_SETTLE_MS);
   settleTimer.unref();
 }
-
-/** Test/maintenance hook: forget pending nudges and the spacing clock. */
-export function resetUsageRefreshNudges(): void {
-  if (settleTimer) clearTimeout(settleTimer);
-  settleTimer = null;
-  lastRefreshAt = 0;
-  inflight = null;
-}

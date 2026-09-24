@@ -117,68 +117,6 @@ export interface ModelUsage {
   total_tokens?: number;
 }
 
-export interface PricedCallOutcome {
-  costUsd: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens?: number;
-}
-
-/**
- * Price a single model completion. Returns zeroed cost (but valid token
- * counts) when the model isn't in the table or the response carried no usage
- * block. Never throws — pricing must not break a working manager call.
- */
-export function priceCall(input: {
-  model: string;
-  usage: ModelUsage | null | undefined;
-}): PricedCallOutcome {
-  const usage = input.usage ?? {};
-  const inputTokens = numberOr(usage.input_tokens, numberOr(usage.prompt_tokens, 0));
-  const outputTokens = numberOr(usage.output_tokens, numberOr(usage.completion_tokens, 0));
-  // Anthropic-family responses carry the cache-read counter directly;
-  // OpenAI-family ones report `prompt_tokens_details.cached_tokens`. Prefer
-  // whichever the response actually carried; default undefined so we don't
-  // fabricate a zero on providers that don't bill caching.
-  const cacheReadTokens = pickCacheReadTokens(usage);
-
-  const price = MODEL_PRICES[normalizeModelKey(input.model)];
-  if (!price) {
-    // Unknown model — surface tokens, leave cost at zero so the UI shows
-    // $0.00 instead of a confidently-wrong number. Logged at the call site.
-    return {
-      costUsd: 0,
-      inputTokens,
-      outputTokens,
-      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-    };
-  }
-
-  // Subtract cached input tokens from the billed-at-full-rate count when the
-  // model has a dedicated `cacheRead` rate. Without that subtraction we'd
-  // double-bill the cache hit at both the input rate and the cacheRead rate.
-  const billedInputTokens =
-    cacheReadTokens !== undefined && price.cacheRead !== undefined
-      ? Math.max(0, inputTokens - cacheReadTokens)
-      : inputTokens;
-  const cacheReadCost =
-    cacheReadTokens !== undefined && price.cacheRead !== undefined
-      ? (cacheReadTokens / 1_000_000) * price.cacheRead
-      : 0;
-  const inputCost = (billedInputTokens / 1_000_000) * price.input;
-  const outputCost = (outputTokens / 1_000_000) * price.output;
-  const total = inputCost + outputCost + cacheReadCost;
-
-  return {
-    // Round to 6 decimals — sub-thousandths-of-a-cent precision is meaningless
-    // for users but lets a 100-call aggregate stay accurate to four decimals.
-    costUsd: Number.isFinite(total) ? Math.round(total * 1_000_000) / 1_000_000 : 0,
-    inputTokens,
-    outputTokens,
-    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-  };
-}
-
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
@@ -188,20 +126,6 @@ function pickCacheReadTokens(usage: ModelUsage): number | undefined {
   const cached = usage.prompt_tokens_details?.cached_tokens;
   if (typeof cached === "number") return cached;
   return undefined;
-}
-
-// Model ids reach us with optional variant suffixes (`:nitro`, `:floor`,
-// `@max`, etc.). The price is keyed off the base slug for most variants —
-// strip `@<effort>` first because that's a Codara-internal marker. `:nitro`
-// and friends are route-specific and we *do* want to look them up specifically
-// when listed in the table, so try the exact id first before falling back.
-function normalizeModelKey(model: string): string {
-  const trimmed = model.trim();
-  if (MODEL_PRICES[trimmed]) return trimmed;
-  const withoutEffort = trimmed.replace(/@.+$/, "");
-  if (MODEL_PRICES[withoutEffort]) return withoutEffort;
-  const withoutVariant = withoutEffort.replace(/:.+$/, "");
-  return withoutVariant;
 }
 
 // Map a worker runtime (+ optional model hint) to a MODEL_PRICES key. Workers
@@ -216,8 +140,8 @@ function normalizeModelKey(model: string): string {
 // Any `@<effort>` suffix on the hint is stripped first. We return the fully
 // reconstructed key only when it exists in MODEL_PRICES; failing that we retry
 // the provider-prefixed *default* base; otherwise undefined (unknown runtimes
-// like 'shell'/'manual', or a hint we can't price). Like `priceCall`, callers
-// treat an undefined/zero result as "untracked", not an error.
+// like 'shell'/'manual', or a hint we can't price). Callers treat an
+// undefined/zero result as "untracked", not an error.
 export function priceKeyForWorker(
   runtime: WorkerRuntime,
   modelHint?: string,
@@ -359,9 +283,8 @@ function usageModelKeyCandidates(bare: string): string[] {
 // result the same way the rest of this file treats its prices: a directional
 // number for the UI, drifting and approximate, never a ledger entry.
 //
-// When `usage` is present we price it through the exact same
-// input/output/cacheRead math as `priceCall` so the two stay consistent.
-// Otherwise we fall back to `estimatedInputTokens`/`estimatedOutputTokens`
+// When `usage` is present we price its measured input/output/cacheRead
+// counts. Otherwise we fall back to `estimatedInputTokens`/`estimatedOutputTokens`
 // (whatever defaults the caller chose). Unknown/unpriceable workers return 0.
 // Never throws.
 export function estimateWorkerCostUsd(input: {
@@ -378,8 +301,8 @@ export function estimateWorkerCostUsd(input: {
 
   let total: number;
   if (input.usage) {
-    // Mirror `priceCall`: same field-name fallbacks and cache-read handling so
-    // a measured worker cost lines up with a measured manager cost.
+    // Cached input leaves the full-rate count only when the model has its own
+    // cacheRead rate; otherwise the hit would be billed at both rates.
     const usage = input.usage;
     const inputTokens = numberOr(usage.input_tokens, numberOr(usage.prompt_tokens, 0));
     const outputTokens = numberOr(usage.output_tokens, numberOr(usage.completion_tokens, 0));
@@ -405,6 +328,7 @@ export function estimateWorkerCostUsd(input: {
     total = inputCost + outputCost;
   }
 
-  // Round to 6 decimals, matching `priceCall`'s aggregation precision.
+  // Round to 6 decimals: far below any figure the UI shows, yet a 100-call
+  // aggregate stays accurate to four decimals.
   return Number.isFinite(total) ? Math.round(total * 1_000_000) / 1_000_000 : 0;
 }

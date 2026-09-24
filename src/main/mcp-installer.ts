@@ -301,16 +301,6 @@ function setSparkBuiltinOptOut(runtime: SparkBuiltinRuntime, optedOut: boolean):
   return next;
 }
 
-export async function installSparkPreviewMcp(
-  options: CodexMcpHomeOptions = {},
-): Promise<void> {
-  await Promise.all([
-    installForClaude(),
-    installForCodex(false, undefined, options.codexHome),
-    installForGrok(false, undefined, options.grokHome),
-  ]);
-}
-
 // Repair-only pass over both runtimes: reports which config files it had to
 // rewrite. The Capability Center's "Sync Claude and Codex" action calls this so
 // a stale built-in entry (a Codara entry left pointing at an install path that
@@ -355,13 +345,6 @@ export async function installSparkPreviewMcpForCodex(
   options: CodexMcpHomeOptions = {},
 ): Promise<void> {
   await installForCodex(createIfMissing, undefined, options.codexHome);
-}
-
-export async function installSparkPreviewMcpForGrok(
-  createIfMissing = false,
-  options: CodexMcpHomeOptions = {},
-): Promise<void> {
-  await installForGrok(createIfMissing, undefined, options.grokHome);
 }
 
 // ---------------------------------------------------------------------------

@@ -56,14 +56,6 @@ export function grokSessionTranscriptPath(
   return join(grokSessionDir(cwd, sessionId, homeDir), "updates.jsonl");
 }
 
-export function grokSessionSummaryPath(
-  cwd: string,
-  sessionId: string,
-  homeDir?: string | null,
-): string {
-  return join(grokSessionDir(cwd, sessionId, homeDir), "summary.json");
-}
-
 export function isGrokSessionId(value: string): boolean {
   return GROK_SESSION_ID_PATTERN.test(value);
 }

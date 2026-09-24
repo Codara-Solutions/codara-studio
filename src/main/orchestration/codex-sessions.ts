@@ -120,25 +120,6 @@ async function listCandidates(
   return out;
 }
 
-/**
- * Find the newest rollout-*.jsonl whose mtime is at or after `since`. This is
- * the original mtime-only heuristic used by the managed chat backend, which
- * spawns codex serially and can assume the newest file is its own.
- */
-export async function discoverRolloutPath(
-  since: number,
-  spawnDate: Date,
-  explicitHome?: string | null,
-): Promise<string | null> {
-  const candidates = await listCandidates(
-    since,
-    spawnDate,
-    new Date(),
-    explicitHome,
-  );
-  return candidates.length > 0 ? candidates[0].path : null;
-}
-
 function extractCwd(entry: unknown): string | null {
   if (!entry || typeof entry !== "object") return null;
   const rec = entry as Record<string, unknown>;
@@ -216,8 +197,9 @@ function normalizePath(p: string): string {
 }
 
 /**
- * Like discoverRolloutPath, but prefers a rollout whose recorded cwd matches
- * `cwd`. Used by the manual-terminal capture path, where several Codex windows
+ * Find the newest rollout-*.jsonl whose mtime is at or after `since`,
+ * preferring one whose recorded cwd matches `cwd`. Used by the manual-terminal
+ * capture path, where several Codex windows
  * could be writing rollouts concurrently and the newest-by-mtime file might
  * belong to a different pane. By default falls back to the newest candidate
  * when no file's cwd can be matched (unknown/older schema), so it never does

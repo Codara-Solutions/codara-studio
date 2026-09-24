@@ -479,19 +479,3 @@ export function stepOutcome(
   if (node.continueOnError) return { status: "succeeded", output };
   return { status: "failed", output };
 }
-
-/** One-line description of a step for transcripts and logs. */
-export function describeStepAction(action: LoomStepAction): string {
-  switch (action.type) {
-    case "command":
-      return `$ ${action.command}`;
-    case "script":
-      return `${action.language} script`;
-    case "http":
-      return `${action.method} ${action.url}`;
-    case "writeFile":
-      return `${action.mode === "append" ? "append" : "write"} ${action.path}`;
-    case "notify":
-      return `notify: ${action.message}`;
-  }
-}
