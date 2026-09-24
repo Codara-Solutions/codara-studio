@@ -36,8 +36,8 @@ let cached: Promise<PiAuthStorageModule> | null = null;
 
 export async function loadPiAuthStorage(): Promise<PiAuthStorageModule> {
   cached ??= (async () => {
-    const { resolveCodaraPiRuntime } = await import("./pi-runtime-electron");
-    const runtime = await resolveCodaraPiRuntime();
+    const { resolveCodaraPiLibrary } = await import("./pi-runtime-electron");
+    const runtime = await resolveCodaraPiLibrary();
     const modulePath = join(runtime.packageRoot, "dist", "core", "auth-storage.js");
     const loaded = (await import(/* @vite-ignore */ pathToFileURL(modulePath).href)) as {
       AuthStorage?: PiAuthStorageModule;

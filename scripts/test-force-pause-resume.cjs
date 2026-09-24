@@ -114,7 +114,7 @@ const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount()
     configDir: "/tmp/cora-stub-pi",
   };
 }
-export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); }
+export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); } export async function resolveCodaraPiLibrary() { throw new Error("pi runtime is stubbed"); }
 export function codaraPiPaths() { return { home: "/tmp/cora-stub-pi" }; }
 export async function cleanupPiMcpBridgeConfig() {}
 export async function createCodaraPiWorkerLaunchPlan() { throw new Error("pi worker launch is stubbed"); }`;

@@ -760,10 +760,12 @@ export interface PiSubscriptionOverview {
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
   runtimeError?: string;
-  /** The Pi build Codara is pinned to, present whether or not it is installed
-   * — Settings labels its install button with this. */
+  /** The oldest installed Pi Cora runs on, present whether or not Pi is
+   * installed. */
   runtimeExpectedVersion: string;
-  /** True while Settings' managed install is running, so a reopened dialog
+  /** The Pi build Codara is tested with (and bundles for its own use). */
+  runtimeTestedVersion?: string;
+  /** True while Settings' install of Pi is running, so a reopened dialog
    * shows the in-progress state instead of an idle Install button. */
   runtimeInstalling?: boolean;
   connections: PiSubscriptionConnection[];

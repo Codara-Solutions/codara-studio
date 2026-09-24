@@ -20,9 +20,9 @@ import type {
 } from "@shared/types";
 
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS, isPiSubscriptionProvider } from "../../shared/agent-families";
-import { resolveCodaraPiRuntime } from "./pi-runtime-electron";
-import { CODARA_PI_VERSION, resolvePiAiModulePath } from "./pi-runtime";
-import { installPinnedPiRuntime, isPinnedPiRuntimeInstalling } from "./pi-runtime-install";
+import { resolveCodaraPiLibrary, resolveCodaraPiRuntime } from "./pi-runtime-electron";
+import { CODARA_PI_MIN_VERSION, CODARA_PI_VERSION, resolvePiAiModulePath } from "./pi-runtime";
+import { installPiCli, isPiCliInstalling } from "./pi-runtime-install";
 import {
   deletePiAccountCredentialProfile,
   inspectPiAccountProfileAuthStore,
@@ -259,7 +259,8 @@ async function openOAuthUrl(url: string): Promise<void> {
 }
 
 async function loadOAuth(provider: PiSubscriptionProvider): Promise<OAuthAuth> {
-  const runtime = await resolveCodaraPiRuntime();
+  // Sign-in runs in this process through the bundled Pi, never the user's install.
+  const runtime = await resolveCodaraPiLibrary();
   const meta = PROVIDER_META[provider];
   // Never assume where pi-ai lives relative to pi-coding-agent: the packaged
   // app hoists it to the top-level node_modules, a dev tree nests it.
@@ -384,8 +385,9 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     runtimeInstalled: runtimeResult.installed,
     runtimeVersion: runtimeResult.version,
     ...(runtimeResult.error ? { runtimeError: runtimeResult.error } : {}),
-    runtimeExpectedVersion: CODARA_PI_VERSION,
-    ...(isPinnedPiRuntimeInstalling() ? { runtimeInstalling: true } : {}),
+    runtimeExpectedVersion: CODARA_PI_MIN_VERSION,
+    runtimeTestedVersion: CODARA_PI_VERSION,
+    ...(isPiCliInstalling() ? { runtimeInstalling: true } : {}),
     connections,
     profiles,
     switchSessionCounts,
@@ -401,9 +403,9 @@ export async function installPiRuntimeForWindow(owner: WebContents): Promise<PiS
   const emit = (event: PiRuntimeInstallEvent): void => {
     if (!owner.isDestroyed()) owner.send("pi-runtime:install-event", event);
   };
-  emit({ type: "started", message: `Installing Pi ${CODARA_PI_VERSION}…` });
+  emit({ type: "started", message: "Installing Pi..." });
   try {
-    const version = await installPinnedPiRuntime(({ message }) => {
+    const version = await installPiCli(({ message }) => {
       emit({ type: "progress", message });
     });
     const overview = await inspectPiSubscriptions();

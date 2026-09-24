@@ -162,11 +162,11 @@ async function defaultResolveAccount(input: {
 }
 
 async function defaultResolveLaunchRuntime(): Promise<PiCommitLaunchRuntime> {
-  const { electronAsNodeInterpreter, resolveCodaraPiRuntime } = await import(
+  const { electronAsNodeInterpreter, resolveCodaraPiRuntimeOrBundled } = await import(
     "./pi-runtime-electron"
   );
   return {
-    runtime: await resolveCodaraPiRuntime(),
+    runtime: await resolveCodaraPiRuntimeOrBundled(),
     executable: electronAsNodeInterpreter(),
   };
 }

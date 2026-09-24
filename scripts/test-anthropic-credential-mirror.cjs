@@ -40,7 +40,7 @@ const stubPlugin = {
     }));
     build.onLoad({ filter: /^runtime-electron$/, namespace: "stub" }, () => ({
       loader: "js",
-      contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); }`,
+      contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); } export async function resolveCodaraPiLibrary() { throw new Error("not used"); }`,
     }));
   },
 };

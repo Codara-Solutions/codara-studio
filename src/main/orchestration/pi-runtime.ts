@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   ChatMode,
@@ -11,7 +11,19 @@ import { resolveCompactAtTokens } from "@shared/context-compaction";
 import { sanitizeElectronViteDevEnv } from "../env-sanitize";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
+/**
+ * The Pi build bundled with the app. Codara's main process uses it as a
+ * library (credential storage, sign-in flows, the model catalog); Cora's
+ * sessions run the Pi the user installed.
+ */
 export const CODARA_PI_VERSION = "0.85.1";
+/**
+ * The oldest installed Pi Cora runs on. Its RPC mode, command-line flags and
+ * the extension events Cora's extensions use are unchanged through 0.87.
+ */
+export const CODARA_PI_MIN_VERSION = "0.85.1";
+/** How the user installs, and later updates, Pi themselves. */
+export const PI_INSTALL_COMMAND = `npm install -g ${CODARA_PI_PACKAGE}`;
 /** Vendored Pi extension that registers the provider-native web_search tool.
  * It is a normal dependency of this repo, never the user's own pi packages. */
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
@@ -57,7 +69,7 @@ export interface PiRuntimeLocation {
   packageRoot: string;
   packageJsonPath: string;
   entrypoint: string;
-  version: typeof CODARA_PI_VERSION;
+  version: string;
 }
 
 export interface PiSubscriptionAuthStatus {
@@ -234,6 +246,95 @@ export async function resolvePinnedPiRuntime(
   }
   const detail = mismatches.length ? ` Version mismatches: ${mismatches.join(", ")}.` : "";
   throw new Error(`Codara's pinned Pi runtime ${CODARA_PI_VERSION} is not installed.${detail}`);
+}
+
+/** Compare two Pi versions by major, minor and patch; a pre-release tag is ignored. */
+export function comparePiVersions(a: string, b: string): number {
+  const parts = (version: string): number[] =>
+    version
+      .trim()
+      .replace(/^v/, "")
+      .split(/[-+]/)[0]
+      .split(".")
+      .slice(0, 3)
+      .map((part) => Number.parseInt(part, 10) || 0);
+  const left = parts(a);
+  const right = parts(b);
+  for (let index = 0; index < 3; index += 1) {
+    const delta = (left[index] ?? 0) - (right[index] ?? 0);
+    if (delta !== 0) return delta < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Locate the Pi the user installed, among candidate package roots (the
+ * package a `pi` executable links into, or npm's global layout beside it).
+ * Any version from CODARA_PI_MIN_VERSION up runs Cora; updating it is the
+ * user's call.
+ */
+export async function resolveInstalledPiRuntime(
+  packageRoots: readonly string[],
+): Promise<PiRuntimeLocation> {
+  const tooOld: string[] = [];
+  for (const root of packageRoots) {
+    const packageRoot = resolve(root);
+    const packageJsonPath = join(packageRoot, "package.json");
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(await readFile(packageJsonPath, "utf8"));
+    } catch {
+      continue;
+    }
+    if (!isRecord(manifest) || manifest.name !== CODARA_PI_PACKAGE) continue;
+    if (!nonEmptyString(manifest.version)) continue;
+    if (comparePiVersions(manifest.version, CODARA_PI_MIN_VERSION) < 0) {
+      tooOld.push(manifest.version);
+      continue;
+    }
+    const bin = isRecord(manifest.bin) ? manifest.bin.pi : null;
+    if (!nonEmptyString(bin)) continue;
+    const entrypoint = join(packageRoot, bin);
+    const entryStat = await stat(entrypoint).catch(() => null);
+    if (!entryStat?.isFile()) continue;
+    return { packageRoot, packageJsonPath, entrypoint, version: manifest.version };
+  }
+  if (tooOld.length > 0) {
+    throw new Error(
+      `Pi ${tooOld[0]} is installed, but Cora needs Pi ${CODARA_PI_MIN_VERSION} or newer. Update it with: ${PI_INSTALL_COMMAND}`,
+    );
+  }
+  throw new Error(
+    `Pi is not installed. Install it from Codara's account settings, or run: ${PI_INSTALL_COMMAND}`,
+  );
+}
+
+/**
+ * The package roots a `pi` executable can belong to: the package its link
+ * resolves into (npm, pnpm and bun link global binaries), then npm's global
+ * layouts beside a shim that is not a link (`<prefix>/bin/pi` and Windows'
+ * `<prefix>\pi.cmd`).
+ */
+export async function piPackageRootsForBinary(binary: string): Promise<string[]> {
+  const roots: string[] = [];
+  const real = await realpath(binary).catch(() => binary);
+  let dir = dirname(real);
+  for (let depth = 0; depth < 6; depth += 1) {
+    const manifest = await readFile(join(dir, "package.json"), "utf8")
+      .then((raw) => JSON.parse(raw) as unknown)
+      .catch(() => null);
+    if (isRecord(manifest) && manifest.name === CODARA_PI_PACKAGE) {
+      roots.push(dir);
+      break;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const shimDir = dirname(resolve(binary));
+  roots.push(join(dirname(shimDir), "lib", "node_modules", "@earendil-works", "pi-coding-agent"));
+  roots.push(join(shimDir, "node_modules", "@earendil-works", "pi-coding-agent"));
+  return [...new Set(roots.map((root) => resolve(root)))];
 }
 
 /**

@@ -114,6 +114,7 @@ async function main() {
                     };
                   },
                 };
+                module.exports.resolveCodaraPiRuntimeOrBundled = module.exports.resolveCodaraPiRuntime;
               `,
             }));
           },

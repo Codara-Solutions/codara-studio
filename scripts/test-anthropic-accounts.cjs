@@ -85,7 +85,7 @@ async function buildHarness() {
           }));
           build.onLoad({ filter: /^runtime-electron$/, namespace: "stub" }, () => ({
             loader: "js",
-            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); }`,
+            contents: `export async function resolveCodaraPiRuntime() { throw new Error("not used"); } export async function resolveCodaraPiLibrary() { throw new Error("not used"); }`,
           }));
           // The service invalidates the usage and model caches after a
           // mutation; both modules pull Electron, and the suite injects its

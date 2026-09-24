@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   ChatMode,
   CoraExecutionPolicy,
@@ -20,7 +20,7 @@ import {
   configuredOpenRouterCoraModels,
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
-import { managedPiRuntimeNodeModules } from "./pi-runtime-install";
+import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { writeFileAtomic } from "../fs-atomic";
 import {
   buildPiMcpBridgeConfig,
@@ -31,6 +31,8 @@ import {
 import {
   buildPiManagerLaunchPlan,
   inspectPiSubscriptionAuth,
+  piPackageRootsForBinary,
+  resolveInstalledPiRuntime,
   resolvePinnedPiRuntime,
   resolvePiWebSearchExtension,
   type PiManagerLaunchPlan,
@@ -305,18 +307,57 @@ export function electronAsNodeInterpreter(): string {
   return existsSync(helper) ? helper : process.execPath;
 }
 
-export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
-  const roots = app.isPackaged
+function bundledNodeModulesRoots(): string[] {
+  return app.isPackaged
     ? [
         join(process.resourcesPath, "app.asar", "node_modules"),
         join(process.resourcesPath, "app.asar.unpacked", "node_modules"),
       ]
     : developmentNodeModulesRoots();
-  // The managed root ($CODARA_HOME/pi-runtime) comes last: an app-bundled
-  // build is the one Codara shipped and tested, and Settings' installer only
-  // exists to fill the gap when that build is absent. Both are version-exact,
-  // so ordering only decides which identical build wins.
-  return resolvePinnedPiRuntime([...roots, managedPiRuntimeNodeModules()]);
+}
+
+/**
+ * The Pi build bundled with the app, which Codara's main process uses as a
+ * library: credential storage, the sign-in flows and the model catalog. It
+ * never runs a Cora session.
+ */
+export async function resolveCodaraPiLibrary(): Promise<PiRuntimeLocation> {
+  return resolvePinnedPiRuntime(bundledNodeModulesRoots());
+}
+
+function insideBundledTree(packageRoot: string): boolean {
+  const target = resolve(packageRoot);
+  return bundledNodeModulesRoots().some((root) => target.startsWith(`${resolve(root)}${sep}`));
+}
+
+/**
+ * The Pi the user installed (`npm install -g @earendil-works/pi-coding-agent`),
+ * which runs every Cora session and is the same `pi` their terminals run.
+ * Updating it is the user's call. The app's own bundled copy never counts,
+ * even when a development PATH puts its `pi` first.
+ */
+export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
+  const binary = await resolveBinary("pi");
+  // A miss is re-probed next time: the user may install Pi while Codara runs.
+  if (!binary) forgetResolvedBinary("pi");
+  const roots = binary
+    ? (await piPackageRootsForBinary(binary)).filter((root) => !insideBundledTree(root))
+    : [];
+  try {
+    return await resolveInstalledPiRuntime(roots);
+  } catch (error) {
+    forgetResolvedBinary("pi");
+    throw error;
+  }
+}
+
+/**
+ * The Pi for a background one-shot (commit messages): the user's install
+ * when there is one, otherwise the bundled build, so a helper that never
+ * shows Pi to the user does not wait on its install.
+ */
+export async function resolveCodaraPiRuntimeOrBundled(): Promise<PiRuntimeLocation> {
+  return resolveCodaraPiRuntime().catch(() => resolveCodaraPiLibrary());
 }
 
 /**

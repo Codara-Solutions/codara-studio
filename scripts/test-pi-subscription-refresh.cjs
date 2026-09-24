@@ -37,6 +37,9 @@ const CLI_ID = "66666666-6666-4666-8666-666666666666";
 // every directory it may touch inside this fixture and away from the Keychain.
 process.env.CODARA_HOME_DIR = path.join(TMP, "codara-home");
 process.env.CODARA_DISABLE_KEYCHAIN = "1";
+// The keeper reads the live Claude home; keep it inside the fixture too.
+process.env.HOME = path.join(TMP, "home");
+fs.mkdirSync(process.env.HOME, { recursive: true });
 delete process.env.CLAUDE_CONFIG_DIR;
 
 let failures = 0;
@@ -102,15 +105,19 @@ const stubPlugin = {
       export async function resolveCodaraPiRuntime() {
         return { packageRoot: globalThis.__refreshHarness.packageRoot, version: "0.0.0" };
       }
+      export async function resolveCodaraPiLibrary() {
+        return { packageRoot: globalThis.__refreshHarness.packageRoot, version: "0.0.0" };
+      }
     `);
     stub(/pi-runtime-install$/, "runtime-install", `
-      export async function installPinnedPiRuntime() {}
-      export function isPinnedPiRuntimeInstalling() { return false; }
+      export async function installPiCli() {}
+      export function isPiCliInstalling() { return false; }
     `);
-    // Only the pinned version is faked (the fixture runtime reports 0.0.0);
-    // the pi-ai lookup stays real so loadOAuth resolves the vendor module.
+    // Only the versions are faked (the fixture runtime reports 0.0.0); the
+    // pi-ai lookup stays real so loadOAuth resolves the vendor module.
     stub(/pi-runtime$/, "runtime", `
       export const CODARA_PI_VERSION = "0.0.0";
+      export const CODARA_PI_MIN_VERSION = "0.0.0";
       export { resolvePiAiModulePath } from "./pi-runtime.ts";
     `);
     stub(/pi-account-auth-store$/, "auth-store", `
@@ -164,6 +171,9 @@ const stubPlugin = {
           },
         };
       }
+      export function codaraPiAccountRootDir() {
+        return path.dirname(globalThis.__refreshHarness.authFile);
+      }
       export function piAccountProfilePaths(_root, id) {
         return {
           configDir: path.dirname(globalThis.__refreshHarness.authFile),
@@ -197,8 +207,19 @@ const stubPlugin = {
 };
 
 async function main() {
+  // One bundle, so the keeper this suite starts is the one the refresh uses.
+  const entry = path.join(TMP, "entry.ts");
+  const orchestration = (name) => JSON.stringify(path.join(ROOT, "src", "main", "orchestration", name));
+  fs.writeFileSync(
+    entry,
+    [
+      `export * from ${orchestration("pi-subscription-auth.ts")};`,
+      `export { startStudioClaudeLoginKeeper } from ${orchestration("unified-account-migration.ts")};`,
+      `export { stopClaudeLoginKeeper } from ${orchestration("claude-login-keeper.ts")};`,
+    ].join("\n"),
+  );
   await esbuild.build({
-    entryPoints: [path.join(ROOT, "src", "main", "orchestration", "pi-subscription-auth.ts")],
+    entryPoints: [entry],
     bundle: true,
     platform: "node",
     format: "cjs",
@@ -220,7 +241,11 @@ async function main() {
     );
   };
 
-  const { refreshPiSubscriptionProfileCredential } = require(OUTFILE);
+  const {
+    refreshPiSubscriptionProfileCredential,
+    startStudioClaudeLoginKeeper,
+    stopClaudeLoginKeeper,
+  } = require(OUTFILE);
 
   let access;
   let thrown = null;
@@ -465,6 +490,66 @@ async function main() {
       assert.strictEqual(fs.statSync(testCase.terminalFile).mode & 0o077, 0);
     });
   }
+
+  // With Studio's keeper running (production), a Claude refresh is renewed
+  // through the account's Claude slot: the vault's own token is spent, never
+  // Cora's dead copy, and both halves end on the result.
+  globalThis.__refreshHarness.provider = "anthropic";
+  globalThis.__refreshHarness.profileId = PROFILE_ID;
+  globalThis.__refreshHarness.cliProfileId = CLI_ID;
+  globalThis.__refreshHarness.authFile = authFile;
+  startStudioClaudeLoginKeeper();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const renewNow = Date.now();
+  fs.writeFileSync(
+    authFile,
+    JSON.stringify({
+      anthropic: { type: "oauth", access: "dead-access", refresh: "dead-refresh", expires: renewNow - 60_000 },
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    claudeFile,
+    JSON.stringify({
+      version: 1,
+      store: {
+        claudeAiOauth: {
+          accessToken: "slot-access",
+          refreshToken: "slot-refresh",
+          expiresAt: renewNow + 120_000,
+          scopes: ["user:inference"],
+          subscriptionType: "max",
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const renewGrants = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = String(options && options.body);
+    renewGrants.push(body.includes("slot-refresh") ? "slot" : body.includes("dead-refresh") ? "dead" : "other");
+    return new Response(
+      JSON.stringify({ access_token: "renewed-access", refresh_token: "renewed-refresh", expires_in: 28_800 }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  let renewedAccess;
+  let renewThrown = null;
+  try {
+    renewedAccess = await refreshPiSubscriptionProfileCredential(PROFILE_ID, "anthropic");
+  } catch (error) {
+    renewThrown = error;
+  }
+  stopClaudeLoginKeeper();
+  check("with the keeper running, Cora's refresh spends the Claude slot's token, not its own", () => {
+    assert.strictEqual(renewThrown, null, renewThrown && renewThrown.message);
+    assert.strictEqual(renewedAccess, "renewed-access");
+    assert.deepStrictEqual(renewGrants, ["slot"]);
+    assert.strictEqual(JSON.parse(fs.readFileSync(authFile, "utf8")).anthropic.refresh, "renewed-refresh");
+    const slot = JSON.parse(fs.readFileSync(claudeFile, "utf8")).store.claudeAiOauth;
+    assert.strictEqual(slot.refreshToken, "renewed-refresh");
+    assert.strictEqual(slot.subscriptionType, "max");
+  });
 
   console.log(
     failures === 0
