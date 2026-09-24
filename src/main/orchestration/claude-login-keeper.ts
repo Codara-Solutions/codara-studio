@@ -189,8 +189,13 @@ export interface ClaudeLoginRenewal {
   tokens: RefreshedAnthropicTokens;
 }
 
-/** An adopted login must outlast Pi's padding, or Pi would ask again at once. */
-const ADOPT_MIN_VALIDITY_MS = PI_EXPIRY_PADDING_MS + 60 * 1000;
+/**
+ * An adopted login must outlast Pi's padding plus the window in which Pi
+ * already asks again (five minutes since Pi 0.87), or Pi would ask at once.
+ */
+const ADOPT_MIN_VALIDITY_MS = PI_EXPIRY_PADDING_MS + 6 * 60 * 1000;
+/** Pi gives a refresh 15 seconds; a Claude Code refresh in flight is waited for about 10. */
+const RENEW_LOCK_RETRIES = 12;
 
 /**
  * Renew a Claude login for its Cora half, which would otherwise refresh its
@@ -258,7 +263,7 @@ export async function renewClaudeLoginForCora(
     };
     return live
       ? withClaudeCodeRefreshLock(home.configDir, renew, {
-          ...(deps.refreshLockRetries !== undefined ? { retries: deps.refreshLockRetries } : {}),
+          retries: deps.refreshLockRetries ?? RENEW_LOCK_RETRIES,
         })
       : renew();
   });

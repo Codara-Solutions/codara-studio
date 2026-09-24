@@ -72,11 +72,24 @@ export function registerCodaraAnthropicRenewal(
         if (signal?.aborted) throw new Error("The Claude login renewal was cancelled");
         let renewed: unknown;
         try {
-          renewed = await input.request(
+          const request = input.request(
             CODARA_ANTHROPIC_RENEW_METHOD,
             { accountProfileId: input.accountProfileId, refreshToken: current.refresh },
             RENEW_TIMEOUT_MS,
           );
+          // Pi 0.87 bounds a refresh with its own deadline; Pi 0.85 passes none.
+          renewed = signal
+            ? await Promise.race([
+                request,
+                new Promise<never>((_, reject) => {
+                  signal.addEventListener(
+                    "abort",
+                    () => reject(new Error("the renewal outlasted Pi's refresh deadline")),
+                    { once: true },
+                  );
+                }),
+              ])
+            : await request;
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           throw new Error(`Codara could not renew the Claude login: ${reason}`);

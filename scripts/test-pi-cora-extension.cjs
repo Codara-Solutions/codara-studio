@@ -882,6 +882,18 @@ const noInput = {};
   await assert.rejects(oauth.refreshToken(stored), /Codara could not renew the Claude login: .*ECONNREFUSED/);
   answer = { access: "", refresh: "x", expires: 1 };
   await assert.rejects(oauth.refreshToken(stored), /no access token/);
+  // Pi 0.87 bounds the refresh with its own signal; the renewal gives way.
+  answer = { access: "late", refresh: "late", expires: 1 };
+  const deadline = new AbortController();
+  const slow = renewal.registerCodaraAnthropicRenewal;
+  const slowRegistered = [];
+  slow(
+    { registerProvider: (name, config) => slowRegistered.push(config) },
+    { accountProfileId: "acct-1", request: () => new Promise(() => {}) },
+  );
+  const pending = slowRegistered[0].oauth.refreshToken(stored, deadline.signal);
+  deadline.abort();
+  await assert.rejects(pending, /deadline/);
 
   for (const file of ["index.ts", "worker.ts"]) {
     const source = fs.readFileSync(path.join(__dirname, "..", "resources", "pi-cora", file), "utf8");
