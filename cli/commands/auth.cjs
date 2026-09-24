@@ -26,6 +26,22 @@ const RUNTIME_ALIASES = new Map([
   ["xai", "grok"],
 ]);
 
+const PROVIDER_CLI_NAMES = new Map([
+  ["anthropic", "Claude Code"],
+  ["openai-codex", "Codex"],
+  ["xai", "Grok"],
+]);
+
+// One sign-in serves Cora and the CLI, so these moved to the account
+// commands; the app refuses the old CLI-only forms.
+const UNIFIED_CLI_ACTIONS = new Map([
+  ["add", "cora auth add <provider> [label]"],
+  ["login", "cora auth login <provider> <#|label|id>"],
+  ["reconnect", "cora auth login <provider> <#|label|id>"],
+  ["use", "cora auth use <provider> <#|label|id>"],
+  ["logout", "cora auth remove <provider> <#|label|id>"],
+]);
+
 const PROVIDER_ORDER = ["anthropic", "openai-codex", "xai"];
 const RUNTIME_ORDER = ["claude", "codex", "grok"];
 
@@ -48,7 +64,7 @@ function statusText(status) {
 }
 
 function accountMarker(account) {
-  return account.isDefault ? c.cyan("← default") : "";
+  return account.isDefault ? c.cyan("← Active") : "";
 }
 
 function formatSubscriptionAccounts(accounts, providerFilter) {
@@ -267,7 +283,9 @@ async function subscriptionAuth(args, flags) {
     const account = resolveAccount(await subscriptionAccounts(flags, provider), args[2]);
     const result = await rpc(flags, "accounts.use", { provider, profileId: account.id });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`${c.green("✓")} ${c.bold(account.label)} is now the default for new Cora chats`);
+    const cliName = PROVIDER_CLI_NAMES.get(provider);
+    console.log(`${c.green("✓")} ${c.bold(account.label)} is now the Active account for Cora and ${cliName}`);
+    console.log(c.dim("Cora chats already running keep the account they started with."));
     return;
   }
   if (action === "rename") {
@@ -302,38 +320,13 @@ async function nativeAuth(args, flags) {
     console.log(formatNativeAccounts(result.runtimes ?? [], runtime));
     return;
   }
-  if (action === "add") {
-    const runtime = normalizeRuntime(args[1]);
-    const label = flags.label || args.slice(2).join(" ").trim();
-    if (!label) fail("usage: cora auth cli add <claude|codex|grok> <label>");
-    const result = await rpc(flags, "nativeAccounts.add", { runtime, label });
-    if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`${c.green("✓")} opened ${c.bold(label)} sign-in in a new Studio terminal`);
-    console.log(c.dim("It becomes the default after sign-in succeeds."));
-    return;
+  const replacement = UNIFIED_CLI_ACTIONS.get(action);
+  if (replacement) {
+    fail(`one sign-in serves Cora and the CLI; use \`${replacement}\` instead`);
   }
   const runtime = normalizeRuntime(args[1]);
   const { profiles } = await nativeAccounts(flags, runtime);
   const account = resolveAccount(profiles, args[2], `${runtime} account`);
-  if (action === "login" || action === "reconnect") {
-    const result = await rpc(flags, "nativeAccounts.login", {
-      runtime,
-      profileId: account.id,
-      ...(flags.default ? { makeDefault: true } : {}),
-    });
-    if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`${c.green("✓")} opened ${c.bold(account.label)} sign-in in a new Studio terminal`);
-    return;
-  }
-  if (action === "use") {
-    const result = await rpc(flags, "nativeAccounts.use", { runtime, profileId: account.id });
-    if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`${c.green("✓")} ${c.bold(account.label)} is now the default ${runtime} CLI account`);
-    if (result.closedSessionCount) {
-      console.log(c.dim(`closed ${result.closedSessionCount} existing ${runtime} session${result.closedSessionCount === 1 ? "" : "s"}`));
-    }
-    return;
-  }
   if (action === "rename") {
     const label = flags.label || args.slice(3).join(" ").trim();
     if (!label) fail("usage: cora auth cli rename <runtime> <#|label|id> <new-label>");
@@ -342,21 +335,14 @@ async function nativeAuth(args, flags) {
     console.log(`${c.green("✓")} renamed ${c.bold(account.label)} to ${c.bold(label)}`);
     return;
   }
-  if (action === "logout") {
-    await confirmRemoval(`Sign out "${account.label}"?`, flags);
-    const result = await rpc(flags, "nativeAccounts.logout", { runtime, profileId: account.id });
-    if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    console.log(`${c.green("✓")} signed out ${c.bold(account.label)}`);
-    return;
-  }
   if (action === "remove" || action === "delete") {
-    await confirmRemoval(`Remove managed ${runtime} account "${account.label}"?`, flags);
+    await confirmRemoval(`Remove the unused ${runtime} sign-in "${account.label}"?`, flags);
     const result = await rpc(flags, "nativeAccounts.remove", { runtime, profileId: account.id });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
     console.log(`${c.green("✓")} removed ${c.bold(account.label)}`);
     return;
   }
-  fail("usage: cora auth cli list | add | login | use | rename | logout | remove");
+  fail("usage: cora auth cli list | rename | remove");
 }
 
 async function auth(args, flags) {

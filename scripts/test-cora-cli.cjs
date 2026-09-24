@@ -108,7 +108,7 @@ const subscriptionListing = formatSubscriptionAccounts([
   { id: "anthropic-two", provider: "anthropic", label: "Personal", status: "unavailable", isDefault: false },
 ], "anthropic");
 assert.match(subscriptionListing, /anthropic \(2 accounts\)/);
-assert.match(subscriptionListing, /#1\s+Work\s+connected\s+72% left\s+← default/);
+assert.match(subscriptionListing, /#1\s+Work\s+connected\s+72% left\s+← Active/);
 assert.match(subscriptionListing, /anthropic-one/);
 assert.equal(resolveAccount([
   { id: "profile-123", label: "Work" },
@@ -122,7 +122,7 @@ const nativeListing = formatNativeAccounts([{ runtime: "claude", profiles: [
   { id: "personal", label: "Personal", managed: false, inUse: false, isDefault: true, status: "connected" },
 ] }], "claude");
 assert.match(nativeListing, /claude \(1 account\)/);
-assert.match(nativeListing, /Personal\s+connected\s+personal\s+← default/);
+assert.match(nativeListing, /Personal\s+connected\s+personal\s+← Active/);
 
 // ── full-screen chat's pure view helpers ───────────────────────────────────
 

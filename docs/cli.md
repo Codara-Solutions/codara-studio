@@ -87,10 +87,10 @@ loop and full orchestration; see [cli/README.md](../cli/README.md).
 | `auth cli remove <runtime> <account>` | Removes a CLI identity that no account uses. |
 
 Providers are `anthropic`, `openai-codex` and `xai` (aliases: `claude`,
-`codex`, `chatgpt`, `grok`). One sign-in now serves Cora and the CLI together,
-so the app refuses `auth cli add`, `auth cli login`, `auth cli use` and
-`auth cli logout`, which `cora help` still lists; use `auth add`, `auth login`
-and `auth use` instead. [accounts.md](./accounts.md) explains the model.
+`codex`, `chatgpt`, `grok`). One sign-in serves Cora and the CLI together, so
+the older `auth cli add`, `auth cli login`, `auth cli use` and `auth cli logout`
+forms are gone; `cora` points you to `auth add`, `auth login`, `auth use` or
+`auth remove` instead. [accounts.md](./accounts.md) explains the model.
 
 ### Runs and agents
 
