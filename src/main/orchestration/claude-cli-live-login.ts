@@ -548,13 +548,19 @@ export async function writeClaudeProfileIdentity(
   oauthAccount: Record<string, unknown>,
 ): Promise<void> {
   const slot = await claudeProfileSlot(store, profileId);
+  // Fields of the same account are merged in; another account's record is
+  // replaced whole, never left with the previous account's name and org.
+  const merged = (existing: unknown): Record<string, unknown> => {
+    if (!isRecord(existing)) return oauthAccount;
+    const existingUuid = accountUuidOf(existing);
+    const incomingUuid = accountUuidOf(oauthAccount);
+    if (existingUuid && incomingUuid && existingUuid !== incomingUuid) return oauthAccount;
+    return { ...existing, ...oauthAccount };
+  };
   if (slot.live) {
     await updateClaudeGlobalConfig(claudeLiveHome(store), (config) => ({
       ...config,
-      oauthAccount: {
-        ...(isRecord(config.oauthAccount) ? config.oauthAccount : {}),
-        ...oauthAccount,
-      },
+      oauthAccount: merged(config.oauthAccount),
     }));
     const accountUuid = accountUuidOf(oauthAccount);
     const selection = await readClaudeLiveSelection(store.rootDir);
@@ -571,9 +577,26 @@ export async function writeClaudeProfileIdentity(
   if (vault.kind === "value") {
     await writeVaultedLogin(slot.vaultFile, {
       ...vault.login,
-      oauthAccount: { ...(vault.login.oauthAccount ?? {}), ...oauthAccount },
+      oauthAccount: merged(vault.login.oauthAccount),
     });
   }
+}
+
+/**
+ * Forget which account a vaulted profile's login belongs to, for a record
+ * that no longer describes the login it sits next to. Nothing happens while
+ * the profile is live: `.claude.json` is Claude Code's, and it re-reads the
+ * account itself. Callers hold the selection lock.
+ */
+export async function forgetClaudeVaultIdentity(
+  store: ClaudeLoginSlotStore,
+  profileId: ClaudeCliProfileId,
+): Promise<void> {
+  const slot = await claudeProfileSlot(store, profileId);
+  if (slot.live) return;
+  const vault = await readClaudeVaultedLogin(slot.vaultFile);
+  if (vault.kind !== "value" || !vault.login.oauthAccount) return;
+  await writeVaultedLogin(slot.vaultFile, { store: vault.login.store });
 }
 
 /**
@@ -848,10 +871,20 @@ async function saveLiveLogin(
   }
   const previous = vaults.find((entry) => entry.profileId === belongsTo)?.login;
   const previousAccountUuid = accountUuidOf(previous?.oauthAccount);
-  // `.claude.json` names the live login's account unless a crash left it
-  // naming the other side of a switch; the vault's own record wins then.
+  // `.claude.json` names the live login's account unless a crash (or the
+  // retired slot swap) left it naming another account: the other side of a
+  // switch, or any account another profile's vault records. The vault's own
+  // record wins then, and no record beats a wrong one.
+  const namesAnotherProfile =
+    liveAccountUuid !== undefined &&
+    vaults.some(
+      (entry) =>
+        entry.profileId !== belongsTo && accountUuidOf(entry.login.oauthAccount) === liveAccountUuid,
+    );
   const oauthAccount =
-    liveOauthAccount && (!previousAccountUuid || previousAccountUuid === liveAccountUuid)
+    liveOauthAccount &&
+    !namesAnotherProfile &&
+    (!previousAccountUuid || previousAccountUuid === liveAccountUuid)
       ? liveOauthAccount
       : previous?.oauthAccount;
   await writeVaultedLogin(claudeCliVaultFile(store.rootDir, belongsTo), {
@@ -1126,6 +1159,24 @@ export async function migrateClaudeToOneHome(
   await fs.rm(join(resolve(store.rootDir), RETIRED_MCP_BASELINE_FILE), { force: true }).catch(
     () => undefined,
   );
+  // The first marker names the home's account from `.claude.json`, which the
+  // retired slot swap could leave naming a managed account. A personal marker
+  // that names an account a managed vault records is that stale copy: the
+  // personal login's account is unknown then, not the managed one's.
+  await withClaudeSelectionLock(store.rootDir, async () => {
+    const selection = await readClaudeLiveSelection(store.rootDir);
+    if (selection?.profileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID || !selection.accountUuid) return;
+    const managed = await readVaultIndex(
+      store,
+      input.managedProfileIds.filter(isClaudeCliManagedProfileId),
+    );
+    if (managed.some((entry) => accountUuidOf(entry.login.oauthAccount) === selection.accountUuid)) {
+      await writeLiveSelection(store.rootDir, {
+        profileId: selection.profileId,
+        ...(selection.switchingFrom ? { switchingFrom: selection.switchingFrom } : {}),
+      });
+    }
+  }).catch(() => undefined);
   if (result.vaulted.length > 0 || result.mcpGrants > 0 || result.projects > 0) {
     log(
       `[accounts] Claude accounts now share one home: ${result.vaulted.length} login(s) vaulted, ${result.mcpGrants} MCP grant(s) and ${result.projects} project(s) carried over`,

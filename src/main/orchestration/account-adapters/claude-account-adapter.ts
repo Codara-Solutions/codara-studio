@@ -22,6 +22,7 @@ import {
   activateClaudeCliAccount,
   claudeCliVaultFile,
   clearClaudeProfileLogin,
+  forgetClaudeVaultIdentity,
   readClaudeLiveProfileId,
   readClaudeProfileIdentity,
   readClaudeProfileLogin,
@@ -237,6 +238,24 @@ export function createClaudeAccountAdapter(
       await withClaudeSelectionLock(location.rootDir, () =>
         writeClaudeProfileIdentity(resolveStore(), location.cliProfileId, block),
       );
+    },
+    async afterCliSlotFilled(location, canonical, expectedFingerprint) {
+      // The token answers for itself; offline, a record that disagrees with
+      // the row is dropped, since no record beats a wrong one.
+      const identity = await readIdentity(canonical.access).catch((): AnthropicAccountProfile => ({}));
+      const block = identityBlock(identity);
+      await withClaudeSelectionLock(location.rootDir, async () => {
+        const current = resolveStore();
+        if (block) {
+          await writeClaudeProfileIdentity(current, location.cliProfileId, block);
+          return;
+        }
+        if (!expectedFingerprint) return;
+        const recorded = await readClaudeProfileIdentity(current, location.cliProfileId);
+        if (recorded.fingerprint && recorded.fingerprint !== expectedFingerprint) {
+          await forgetClaudeVaultIdentity(current, location.cliProfileId);
+        }
+      });
     },
     activeCliProfileId() {
       return readClaudeLiveProfileId(resolveStore().rootDir);

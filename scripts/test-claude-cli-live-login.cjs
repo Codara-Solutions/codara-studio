@@ -363,6 +363,49 @@ async function main() {
   assert.equal(fs.readFileSync(f.liveConfig, "utf8"), "{ not json", "an unparsable config is never replaced");
   console.log("PASS .claude.json changes wait for Claude Code's lock and re-read under it");
 
+  // --- Identities never cross accounts -------------------------------------
+  // The retired slot swap left `.claude.json` naming the managed account
+  // while the home held the user's own login. The first marker must not
+  // record that account for the personal login, and switching away must not
+  // file it in the personal vault.
+  {
+    const g = fixture("stale-identity");
+    const mainAccount = { accountUuid: "uuid-main", emailAddress: "main@example.com", displayName: "Main" };
+    writeJson(g.liveCredentials, { claudeAiOauth: login("own") });
+    writeJson(g.liveConfig, { oauthAccount: mainAccount }, 0o644);
+    writeJson(path.join(g.accountDir(ACCOUNT_A), ".credentials.json"), { claudeAiOauth: login("main") });
+    writeJson(path.join(g.accountDir(ACCOUNT_A), ".claude.json"), { oauthAccount: mainAccount });
+    await mod.migrateClaudeToOneHome({ store: g.store, managedProfileIds: [ACCOUNT_A] });
+    assert.equal(readJson(g.marker).accountUuid, undefined, "the stale account is dropped from the marker");
+    await mod.activateClaudeCliAccount(g.store, ACCOUNT_A, {
+      knownProfileIds: async () => ["personal", ACCOUNT_A],
+    });
+    const personal = readJson(g.vault("personal"));
+    assert.equal(personal.store.claudeAiOauth.refreshToken, "refresh-own", "the own login is saved as personal");
+    assert.equal(personal.oauthAccount, undefined, "without the managed account's identity");
+    assert.equal(readJson(g.liveConfig).oauthAccount.accountUuid, "uuid-main");
+
+    // Recording another account replaces the record whole; the same account merges.
+    await mod.writeClaudeProfileIdentity(g.store, "personal", { accountUuid: "uuid-own", emailAddress: "own@example.com" });
+    await mod.writeClaudeProfileIdentity(g.store, "personal", { accountUuid: "uuid-own", organizationUuid: "org-own" });
+    assert.deepEqual(readJson(g.vault("personal")).oauthAccount, {
+      accountUuid: "uuid-own",
+      emailAddress: "own@example.com",
+      organizationUuid: "org-own",
+    });
+    await mod.writeClaudeProfileIdentity(g.store, "personal", { accountUuid: "uuid-other", emailAddress: "other@example.com" });
+    assert.deepEqual(readJson(g.vault("personal")).oauthAccount, {
+      accountUuid: "uuid-other",
+      emailAddress: "other@example.com",
+    });
+    await mod.forgetClaudeVaultIdentity(g.store, "personal");
+    assert.equal(readJson(g.vault("personal")).oauthAccount, undefined);
+    assert.equal(readJson(g.vault("personal")).store.claudeAiOauth.refreshToken, "refresh-own", "the login stays");
+    await mod.forgetClaudeVaultIdentity(g.store, ACCOUNT_A);
+    assert.equal(readJson(g.liveConfig).oauthAccount.accountUuid, "uuid-main", "a live identity is Claude Code's");
+    console.log("PASS an identity is never filed under another account's login");
+  }
+
   console.log("\nPASS Claude accounts in one home");
 }
 

@@ -196,6 +196,18 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    * for Account 1 while another account is live may be.
    */
   mayCreatePersonalSlot?(location: Loc): Promise<boolean>;
+  /**
+   * A CLI slot that held no login was just filled from the Cora half.
+   * Providers that record the account beside opaque tokens (Claude) learn
+   * whose login the slot now holds here; an identity record left from an
+   * earlier login would otherwise name the wrong account, and the foreign
+   * check would then shut the pair out for good.
+   */
+  afterCliSlotFilled?(
+    location: Loc,
+    canonical: CanonicalCredential,
+    expectedFingerprint: string | undefined,
+  ): Promise<void>;
 }
 
 export interface CredentialPair<Loc = unknown, Raw = unknown> {
@@ -374,6 +386,7 @@ export async function reconcilePair<Loc, Raw>(
   }
 
   if (verdict === "pi-newer" || verdict === "pi-only") {
+    let filledEmptySlot = false;
     // A managed half is created by ensureCliHalf alone. Its directory being
     // gone here means the account is mid-delete; writing would resurrect it.
     if (!personal && !(await adapter.cliSideExists(pair.location))) return result;
@@ -406,7 +419,13 @@ export async function reconcilePair<Loc, Raw>(
       }
       await adapter.writeCli(pair.location, record);
       result.wrote = "cli";
+      filledEmptySlot = latestVerdict === "pi-only";
     });
+    if (filledEmptySlot && adapter.afterCliSlotFilled && !options.cancelled?.()) {
+      await adapter
+        .afterCliSlotFilled(pair.location, piCanonical!, pair.identityFingerprint)
+        .catch(() => undefined);
+    }
     return result;
   }
 

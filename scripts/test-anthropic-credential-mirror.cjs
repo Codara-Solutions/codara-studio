@@ -711,6 +711,55 @@ async function main() {
     pass("watchers converge both ways with self-write suppression and serialized reconciles");
   }
 
+  // Account 1's vault refilled from Cora while another account is live: the
+  // vault learns whose login it now holds. A record left from an earlier
+  // login (here, another account's) would otherwise make every later
+  // reconcile read the pair as foreign, and a switch name the wrong account.
+  {
+    const { pair, meta } = makePair({ personal: true });
+    fs.writeFileSync(meta.markerFile, JSON.stringify({ version: 1, profileId: CLI_ID }), { mode: 0o600 });
+    const vaultFile = pair.location.vaultFile;
+    const writeVault = (oauthAccount) =>
+      fs.writeFileSync(vaultFile, JSON.stringify({ version: 1, store: {}, oauthAccount }), { mode: 0o600 });
+    const probe = mod.claudeAdapter.createClaudeAccountAdapter({ store: meta.store, fileOnly: true, platform: "linux" });
+    writeVault({ accountUuid: "own-uuid" });
+    const ownFingerprint = await probe.cliIdentityFingerprint(pair.location);
+    assert.ok(ownFingerprint);
+    const stale = { accountUuid: "other-uuid", emailAddress: "other@example.com", displayName: "Other" };
+    const withLookup = (answer) => {
+      const adapter = mod.claudeAdapter.createClaudeAccountAdapter({
+        store: meta.store,
+        fileOnly: true,
+        platform: "linux",
+        readIdentity: async () => answer,
+      });
+      return { ...pair, adapter, location: adapter.locate("personal"), identityFingerprint: ownFingerprint };
+    };
+
+    writeVault(stale);
+    writePi(pair, pi(5));
+    const online = withLookup({ accountUuid: "own-uuid", fingerprint: ownFingerprint, email: "own@example.com" });
+    const filled = await reconcile(online);
+    assert.equal(filled.wrote, "cli");
+    const vault = JSON.parse(fs.readFileSync(vaultFile, "utf8"));
+    assert.equal(vault.store.claudeAiOauth.accessToken, "pi-access-5");
+    assert.deepEqual(vault.oauthAccount, { accountUuid: "own-uuid", emailAddress: "own@example.com" });
+    writePi(pair, pi(6));
+    const next = await reconcile(online);
+    assert.notEqual(next.verdict, "foreign", "the pair keeps mirroring");
+    assert.equal(next.wrote, "cli");
+
+    // Offline: a record that disagrees with the row is dropped, not kept.
+    writeVault(stale);
+    writePi(pair, pi(7));
+    const offline = withLookup({});
+    assert.equal((await reconcile(offline)).wrote, "cli");
+    const forgotten = JSON.parse(fs.readFileSync(vaultFile, "utf8"));
+    assert.equal(forgotten.oauthAccount, undefined);
+    assert.equal(forgotten.store.claudeAiOauth.accessToken, "pi-access-7");
+    pass("a vault refilled from Cora records the account it now holds, never a stale one");
+  }
+
   // Every file the mirror produced is owner-only.
   {
     const offending = [];
