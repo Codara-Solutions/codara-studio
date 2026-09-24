@@ -22,12 +22,15 @@ live in [AGENTS.md](./AGENTS.md).
 
 - **Terminals and workspaces.** Split panes, tabs, and workspaces per project
   folder (local or over SSH), with shell integration for zsh, bash, and
-  PowerShell. Every terminal Codara opens knows which agent account it should
-  sign in as.
+  PowerShell. Claude Code, Codex, Grok and Pi each open in a pane from the +
+  menu. Every terminal Codara opens knows which agent account it should sign
+  in as.
 - **Cora.** A built-in orchestrator that plans work, spawns Claude, Codex, Grok,
   or Pi workers in their own panes, keeps a kanban board and a whiteboard per
-  conversation, and asks you only when it has to. Cora runs on the bundled Pi
-  coding-agent runtime with a Codara extension.
+  conversation, and asks you only when it has to. Cora runs on the Pi coding
+  agent you install (`npm install -g @earendil-works/pi-coding-agent`, or one
+  click in Settings) with a Codara extension; you update Pi yourself, and the
+  same `pi` works in any terminal.
 - **Runs, boards, and whiteboards.** Every Cora conversation is a run with a
   live graph of workers, a task board, and a canvas, all persisted on disk and
   readable with the app closed.
@@ -131,8 +134,8 @@ the app is launched with `CODARA_DEV_TOOLS=1`.
 
 ## Accounts
 
-An account has two halves: a Cora half (an OAuth subscription the bundled Pi
-runtime uses) and a CLI half (the account's Claude Code, Codex, or Grok
+An account has two halves: a Cora half (an OAuth subscription Cora's Pi
+sessions use) and a CLI half (the account's Claude Code, Codex, or Grok
 login). Add and manage them in Settings, Agents tab, Accounts, or with
 `cora auth`.
 
@@ -143,9 +146,12 @@ everywhere at once, including terminals outside Codara such as Ghostty, and
 MCP sign-ins, settings, chats, the `/resume` list, history and project trust
 all stay, because there is only one copy of each. Running Claude Code
 sessions pick up the new account on their next request; running Codex
-sessions are closed after you confirm. Grok keeps a private home per managed
-account, with your personal state linked into it. Codara never edits your
-shell startup files.
+sessions are closed after you confirm. It works the other way too: a
+`/login` or `codex login` in any terminal as an account Codara knows makes
+that account the Active one here within a minute. Grok keeps a private home
+per managed account, with your personal state linked into it. Pi, in its own
+panes, runs as you installed it with its own `~/.pi` and sign-ins. Codara
+never edits your shell startup files.
 
 Codara mirrors the OAuth credential between an account's two halves so both
 stay signed in. Codara is the one refresher of a Claude login: it renews the

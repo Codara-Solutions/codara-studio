@@ -77,11 +77,15 @@ outside Codara; events without a pane id are dropped.
 Everything under `src/main/orchestration/`. The vocabulary is in
 [glossary.md](./glossary.md).
 
-- **Runtime.** Cora runs on the bundled Pi coding-agent
-  (`@earendil-works/pi-coding-agent`) with the extension in
-  `resources/pi-cora/` (prompt, worker policy, repeat guard, compaction, MCP
-  bridge, deep search, peer comms). `pi-runtime.ts` and `pi-backend.ts` host
-  it; `pi-account-router.ts` picks the subscription.
+- **Runtime.** Cora runs on the Pi coding agent the user installed
+  (`@earendil-works/pi-coding-agent`, 0.85.1 or newer, found through the
+  `pi` on their PATH; Settings offers `npm install -g`, and updates are the
+  user's) with the extension in `resources/pi-cora/` (prompt, worker policy,
+  repeat guard, compaction, MCP bridge, deep search, peer comms, Claude login
+  renewal). `pi-runtime.ts` and `pi-backend.ts` host it;
+  `pi-account-router.ts` picks the subscription. Codara's main process keeps
+  its own bundled Pi 0.85.1 as a library (credential storage, sign-in flows,
+  the model catalog), which never runs a session.
 - **Run store.** `run-store.ts` (20k lines, the largest file in the repo) is
   the state machine for runs: steps, worker tasks and attempts, human
   messages, questions, board, whiteboard, events. State lives in
@@ -140,7 +144,13 @@ when it is still good, otherwise renews it through the account's Claude slot
 (the live home or its vault) and Pi stores the answer. Imported-PR processes
 have no socket authority for this and keep Pi's own refresh. A login Claude
 Code blanks after a spent refresh token is repaired from the Cora half, never
-read as a logout.
+read as a logout. A sign-in made in a terminal (`/login`,
+`codex login`) as another known account is followed once a minute
+(`UnifiedAccountService.followNativeLogin`): Claude's is recognized by the
+account Claude Code records in `.claude.json`, confirmed against the token
+itself, Codex's by the account id in `auth.json`; that profile's slot takes
+the live login and the marker and both defaults move to it, without touching
+the login.
 
 ## Notifications
 
