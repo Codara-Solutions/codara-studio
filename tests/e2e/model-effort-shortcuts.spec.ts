@@ -36,8 +36,8 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
     const modelLabel = page.locator(".composer-model .composer-pill-label").first();
     const thinkingLabel = page.locator(".composer-thinking-label").first();
     await expect(modelLabel).toBeVisible({ timeout: 60_000 });
-    // The draft default resolves asynchronously (agents.runtimes → first
-    // visible model); settle before treating the label as a baseline.
+    // The draft default resolves asynchronously (to the first visible
+    // model); settle before treating the label as a baseline.
     await expect(thinkingLabel).toBeVisible();
     await page.waitForTimeout(500);
 

@@ -29,7 +29,6 @@ import type {
   RunStatus,
   StartDirectWorkerRunInput,
   WorkerAttemptStatus,
-  InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   PauseRunInput,
@@ -46,7 +45,6 @@ import type {
   PlannedStepAgent,
   PrepareWorkerTaskInput,
   PtyExitInfo,
-  RunArtifactPaths,
   RunAssumption,
   RunBlocker,
   HumanRunMessage,
@@ -61,13 +59,11 @@ import type {
   RunState,
   RuntimeState,
   SparkCall,
-  SparkEvent,
   StartAutopilotInput,
   StepState,
   TaskComplexity,
   UpdateRunStatusInput,
   UpdateStepInput,
-  UpdateWorkerTaskInput,
   WorkerRuntime,
   WorkerTask,
   WorkerTaskStatus,
@@ -157,7 +153,6 @@ import {
   appendFanOutDowngradedEvent,
   appendRegressionRevertEvent,
   appendWriteScopesDerivedEvent,
-  eventsPath,
   forgetRunEventState,
   listEvents,
   runDir,
@@ -1107,40 +1102,6 @@ export async function reassignCoraProfileRuns(
     if (updated.coraProfileId === replacement) reassigned += 1;
   }
   return reassigned;
-}
-
-export async function getRunArtifactPaths(runId: string): Promise<RunArtifactPaths> {
-  const run = await getRun(runId);
-  return {
-    runDir: runDir(runId),
-    runJson: runPath(runId),
-    eventsJsonl: eventsPath(runId),
-    workerArtifacts:
-      run?.workerAttempts.map((attempt) => {
-        const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
-        return workerArtifactPaths(runId, task?.stepId, attempt.workerTaskId, attempt.id);
-      }) ?? [],
-  };
-}
-
-export async function appendTestEvent(runId: string, message?: string): Promise<SparkEvent> {
-  const run = await getRun(runId);
-  if (!run) throw new Error(`Run not found: ${runId}`);
-
-  const event = await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    type: "test.event",
-    message: message?.trim() || "Test event appended",
-    payload: {
-      count: (await listEvents(run.id)).length + 1,
-      runStatus: run.status,
-    },
-  });
-
-  run.updatedAt = event.timestamp;
-  await saveRun(run);
-  return event;
 }
 
 // A run is a chat in the panel, so it needs a title the user can tell apart
@@ -10099,48 +10060,6 @@ export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   });
 }
 
-export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise<RunState> {
-  const run = await requireRun(input.runId);
-  const reason = input.reason?.trim() || "Stop after current workers finish";
-  const recordPauseMessage = shouldRecordPauseReasonAsUserNote(reason);
-  return commitRunChange(run, {
-    type: "run.pause_after_workers",
-    message: reason,
-    payload: {
-      reason,
-      activeWorkerAttempts: activeWorkersForRun(run.id).map((worker) => worker.attemptId),
-      controlSignal: "none",
-      messageRecorded: recordPauseMessage,
-    },
-    mutate: (draft, timestamp) => {
-      if (recordPauseMessage) {
-        draft.humanMessages.push({
-          id: makeId("msg"),
-          runId: draft.id,
-          author: "user",
-          kind: "note",
-          message: reason,
-          intent: "turn",
-          deliveryState: "acknowledged",
-          conversationEpoch: conversationEpoch(draft),
-          createdAt: timestamp,
-        });
-      }
-      abandonRunQuestionOwnership(draft);
-      draft.status = "paused";
-      draft.autopilot = {
-        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
-        status: "paused",
-        lastAction: "pause_after_current_workers",
-        stopReason: reason,
-        pausedAt: timestamp,
-        updatedAt: timestamp,
-      };
-      draft.updatedAt = timestamp;
-    },
-  });
-}
-
 export type ManagerTurnRecoveryAccountSelection = {
   kind: "subscription";
   profileId: string;
@@ -11755,133 +11674,6 @@ function fileMimeTypeForPath(path: string): string {
   }
 }
 
-// Append a user message AND interrupt the in-flight run so the manager picks
-// the message up on its next decision. Two interrupt modes:
-//
-//   "graceful" — push the message, send ESC to active worker ptys (the same
-//                signal pauseRun uses), set status=paused. Workers may still
-//                emit a final report; nothing is killed mid-syscall. Resume
-//                folds the message into the resume prompt via the existing
-//                buildResumePrompt path.
-//
-//   "hard"     — same message + pause, but additionally pty.dispose() each
-//                active worker session (forcing an immediate kill) and
-//                transition their attempts/tasks to cancelled so the
-//                autopilot won't wait on a final report that will never
-//                land. The user can still resume the run; the manager will
-//                see the cancelled attempts on its next worker_result_review
-//                and replan with the new message in context.
-export async function interruptRunWithMessage(
-  input: InterruptRunWithMessageInput,
-): Promise<RunState> {
-  const message = input.message.trim();
-  if (!message) throw new Error("Message is required.");
-  const reason = input.reason?.trim() || "Paused for user message";
-  const kind = input.kind ?? "note";
-  const mode = input.mode;
-
-  // 1. Append the user message first so resume / replan paths see it as the
-  // most recent humanMessage.
-  let run = await addRunMessage({
-    runId: input.runId,
-    clientMessageId: input.clientMessageId,
-    author: "user",
-    kind,
-    message,
-    attachments: input.attachments,
-  });
-
-  // 2. Send ESC + record the pause. This mirrors pauseRun without re-emitting
-  // the user note we just pushed.
-  const activeWorkers = activeWorkersForRun(run.id);
-  await sendPauseSignals(run, reason);
-  run = await commitRunChange(run, {
-    type: "run.paused",
-    message: reason,
-    payload: {
-      reason,
-      activeWorkerAttempts: activeWorkers.map((worker) => worker.attemptId),
-      controlSignal: "escape",
-      messageRecorded: false,
-      interrupt: { mode, byMessage: true },
-    },
-    mutate: (draft, timestamp) => {
-      abandonRunQuestionOwnership(draft);
-      draft.status = "paused";
-      draft.autopilot = {
-        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
-        status: "paused",
-        lastAction: mode === "hard" ? "interrupted_hard" : "interrupted_graceful",
-        stopReason: reason,
-        pausedAt: timestamp,
-        updatedAt: timestamp,
-      };
-      draft.updatedAt = timestamp;
-    },
-  });
-
-  // 3. Hard mode: dispose active worker ptys and transition attempts/tasks to
-  // cancelled. We dispose AFTER the pause commit so the run snapshot already
-  // reflects status=paused before the pty exit handlers fire.
-  if (mode === "hard" && activeWorkers.length > 0) {
-    for (const worker of activeWorkers) {
-      try {
-        pty.dispose(worker.attemptId, { sanctioned: true });
-      } catch {
-        /* the session may have already exited between sendPauseSignals and
-           here — disposing twice is a no-op in pty-manager. */
-      }
-    }
-    const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
-    const cancelledTaskIds = new Set(
-      activeWorkers
-        .map((w) => w.workerTaskId)
-        .filter((id): id is string => Boolean(id)),
-    );
-    run = await commitRunChange(run, {
-      type: "run.interrupted_hard",
-      message: `Hard-cancelled ${activeWorkers.length} active worker attempt(s)`,
-      payload: {
-        reason,
-        cancelledAttemptIds: [...cancelledAttemptIds],
-        cancelledTaskIds: [...cancelledTaskIds],
-      },
-      mutate: (draft, timestamp) => {
-        for (const attempt of draft.workerAttempts) {
-          if (!cancelledAttemptIds.has(attempt.id)) continue;
-          if (
-            attempt.status === "preparing" ||
-            attempt.status === "prompt_ready" ||
-            attempt.status === "launching" ||
-            attempt.status === "running" ||
-            attempt.status === "finishing"
-          ) {
-            attempt.status = "cancelled";
-            attempt.finishedAt = attempt.finishedAt ?? timestamp;
-          }
-        }
-        for (const task of draft.workerTasks) {
-          if (!cancelledTaskIds.has(task.id)) continue;
-          if (
-            task.status === "created" ||
-            task.status === "queued" ||
-            task.status === "claimed" ||
-            task.status === "running" ||
-            task.status === "needs_review" ||
-            task.status === "retry_queued"
-          ) {
-            task.status = "cancelled";
-            task.updatedAt = timestamp;
-          }
-        }
-        draft.updatedAt = timestamp;
-      },
-    });
-  }
-
-  return run;
-}
-
 export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   return commitRunChange(run, {
@@ -12964,42 +12756,6 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
           }
         }
       }
-      draft.updatedAt = timestamp;
-    },
-  });
-}
-
-export async function updateWorkerTask(input: UpdateWorkerTaskInput): Promise<RunState> {
-  const run = await requireRun(input.runId);
-  const task = run.workerTasks.find((item) => item.id === input.workerTaskId);
-  if (!task) throw new Error(`Worker task not found: ${input.workerTaskId}`);
-
-  return commitRunChange(run, {
-    type: "worker_task.updated",
-    message: `Worker task updated: ${task.title}`,
-    stepId: task.stepId,
-    workerTaskId: task.id,
-    payload: {
-      workerTaskId: task.id,
-      status: input.status ?? task.status,
-      changedFields: changedFields(input, ["runId", "workerTaskId"]),
-    },
-    mutate: (draft, timestamp) => {
-      const target = draft.workerTasks.find((item) => item.id === input.workerTaskId);
-      if (!target) throw new Error(`Worker task not found: ${input.workerTaskId}`);
-      if (input.title !== undefined) target.title = input.title.trim();
-      if (input.description !== undefined) target.description = input.description.trim();
-      if (input.status !== undefined) target.status = input.status;
-      if (input.runtimePreference !== undefined) target.runtimePreference = input.runtimePreference;
-      if (input.modelHint !== undefined) target.modelHint = input.modelHint;
-      if (input.effortHint !== undefined) target.effortHint = input.effortHint;
-      if (input.allowedPaths !== undefined) target.allowedPaths = input.allowedPaths;
-      if (input.forbiddenPaths !== undefined) target.forbiddenPaths = input.forbiddenPaths;
-      if (input.expectedOutputs !== undefined) target.expectedOutputs = input.expectedOutputs;
-      if (input.verificationCommands !== undefined) target.verificationCommands = input.verificationCommands;
-      if (input.canRunParallel !== undefined) target.canRunParallel = input.canRunParallel;
-      if (input.conflictsWith !== undefined) target.conflictsWith = input.conflictsWith;
-      target.updatedAt = timestamp;
       draft.updatedAt = timestamp;
     },
   });
@@ -17774,12 +17530,7 @@ const WORKER_PTY_CRASH_SETTLE_MS = 2_500;
  * where recoverOrphanedManagedWorkerAttempts finally cleared it.
  *
  * Scope: this covers the pane itself going away (the user closes the worker
- * pane, the shell dies, the host is swept after wake). It does NOT cover the
- * agent CLI dying on its own, because a CLI worker's pty is an interactive
- * shell and claude/codex is a child of it: `kill -9` on the CLI leaves the
- * shell at its prompt and no pty exit is ever emitted. runWorkerSession watches
- * that case separately via watchAgentCliExit (shell-integration command-done
- * marker) and routes it to markWorkerProcessDeath below.
+ * pane, the shell dies, the host is swept after wake).
  *
  * A Pi worker's pty is a display shell in front of a main-process RPC child, so
  * its death says nothing about the worker's health; that path reports its own
@@ -17807,9 +17558,8 @@ async function settleWorkerPtyCrash(attemptId: string, info: PtyExitInfo): Promi
   await markWorkerProcessDeath(attemptId, note);
 }
 
-// Brand an attempt whose worker process died without Cora asking for it.
-// Shared by the pty-exit watcher and runWorkerSession's agent-CLI-exit watcher
-// so both deaths produce the same "exit"-sourced state.
+// Brand an attempt whose worker process died without Cora asking for it,
+// with an "exit"-sourced state.
 async function markWorkerProcessDeath(attemptId: string, note: string): Promise<void> {
   const match = findAttemptByPaneId(attemptId);
   if (!match) return;

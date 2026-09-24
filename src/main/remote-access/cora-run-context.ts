@@ -22,7 +22,7 @@ export interface RemoteCoraRunContextSource {
   sparkCalls: readonly SparkCall[];
 }
 
-// Exactly the four modes askManagerBackend dispatches today (SparkManagerMode),
+// Exactly the four modes askManagerBackend dispatches today,
 // every one of them a turn on the manager's OWN conversational session — so the
 // occupancy they report is this chat's occupancy. The remaining SparkCall.mode
 // members are legacy and never written. A mode that runs against a separate

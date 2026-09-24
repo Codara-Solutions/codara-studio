@@ -1248,40 +1248,6 @@ export const LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS = [
   "google/gemini-3.1-flash-lite",
 ] as const;
 
-// Curated picks for the inline-AI model selector in Settings. Free text
-// still works for any other OpenRouter model id; this list is just the
-// one-click affordance for the models we've validated against the
-// completion prompt.
-export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
-  id: string;
-  label: string;
-  hint: string;
-  detail: string;
-  badge?: string;
-}> = [
-  {
-    id: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
-    label: "Gemini 3.5 Flash",
-    hint: "Recommended for editor ghost text.",
-    detail: "Flash latency, 1M context, minimal thinking in Codara.",
-    badge: "Default",
-  },
-  {
-    id: "google/gemini-3.5-flash:nitro",
-    label: "Gemini 3.5 Flash Nitro",
-    hint: "Same model on OpenRouter's highest-throughput route.",
-    detail: "Use when autocomplete latency matters more than routing cost.",
-    badge: "Fast",
-  },
-  {
-    id: "z-ai/glm-4.7:nitro",
-    label: "GLM-4.7 Nitro",
-    hint: "Z.ai GLM model on OpenRouter's nitro route.",
-    detail: "Use as a custom fast route for inline suggestions.",
-    badge: "Nitro",
-  },
-];
-
 export const DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS = 0;
 
 export const INLINE_AI_DELAY_PRESETS: ReadonlyArray<{
@@ -1913,12 +1879,6 @@ export interface FsWriteConflict {
 }
 
 export type FsWriteResult = FsWriteOk | FsWriteConflict;
-
-export interface PlanFile {
-  name: string;
-  path: string;
-  relativePath: string;
-}
 
 export interface FileListResult {
   files: FsEntry[];
@@ -3190,13 +3150,6 @@ export interface HumanRunMessage {
   resumesMessageId?: string;
 }
 
-export interface RunArtifactPaths {
-  runDir: string;
-  runJson: string;
-  eventsJsonl: string;
-  workerArtifacts: WorkerArtifactPaths[];
-}
-
 export interface WorkerArtifactPaths {
   workerTaskId: string;
   attemptId: string;
@@ -3921,8 +3874,8 @@ export interface SparkCall {
   contextWindowTokens?: number;
   contextWindowSource?: "known" | "default";
   /**
-   * Cost / token-split fields populated after a successful manager call via
-   * `priceCall(...)` in `src/main/model-prices.ts`. `costUsd` is zero when
+   * Cost / token-split fields populated after a successful manager call from
+   * the price table in `src/main/model-prices.ts`. `costUsd` is zero when
    * the model isn't in the price table or the response carried no usage block;
    * the token counts still populate so the Costs tab can show usage even when
    * the dollar number is unknown.
@@ -3938,8 +3891,6 @@ export interface SparkCall {
   createdAt: string;
   completedAt?: string;
 }
-
-export type SparkManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
 export interface SparkEvent {
   id: string;
@@ -4292,23 +4243,6 @@ export interface CreateWorkerTaskInput {
   autoVerifierForTaskId?: string;
 }
 
-export interface UpdateWorkerTaskInput {
-  runId: string;
-  workerTaskId: string;
-  title?: string;
-  description?: string;
-  status?: WorkerTaskStatus;
-  runtimePreference?: WorkerRuntime;
-  modelHint?: string;
-  effortHint?: WorkerTask["effortHint"];
-  allowedPaths?: string[];
-  forbiddenPaths?: string[];
-  expectedOutputs?: string[];
-  verificationCommands?: string[];
-  canRunParallel?: boolean;
-  conflictsWith?: string[];
-}
-
 export interface PrepareWorkerTaskInput {
   runId: string;
   workerTaskId: string;
@@ -4373,24 +4307,6 @@ export interface StartAutopilotInput {
   // run's chatMode is "plan" — run-store forces a council batch instead of normal
   // planning. The composer threads this for plan-mode sends; the queue can too.
   council?: CouncilDirective;
-}
-
-// ── Daemon split scaffold ───────────────────────────────────────────────────
-// Cross-boundary handshake descriptor for the detached orchestration daemon
-// (docs/daemon-split-PLAN.md). The daemon host writes this JSON to
-// codaraHome()/<handshake file> on startup — the same loopback-HTTP + bearer
-// pattern agent-socket.ts uses (see writeHandshakeFile there); out-of-process
-// clients (and, in a later phase, the renderer) read it to discover the
-// 127.0.0.1 RPC endpoint and per-launch token. Shape mirrors the agent-socket
-// handshake payload exactly so the two stay swappable. Defined here (not in the
-// main-only daemon-ipc.ts seam) so the renderer can type the file it reads
-// without importing a main-process module across the @shared boundary.
-// Additive scaffold type — not yet consumed by the renderer.
-export interface DaemonHandshake {
-  url: string;
-  token: string;
-  pid: number;
-  writtenAt: string;
 }
 
 export interface PauseRunInput {
@@ -4472,16 +4388,6 @@ export interface AddRunMessageAttachmentInput {
 //                attempts transition to cancelled. Faster turnaround but
 //                discards any partial worker output.
 export type RunInterruptMode = "graceful" | "hard";
-
-export interface InterruptRunWithMessageInput {
-  runId: string;
-  clientMessageId?: string;
-  message: string;
-  kind?: HumanRunMessageKind;
-  mode: RunInterruptMode;
-  reason?: string;
-  attachments?: AddRunMessageAttachmentInput[];
-}
 
 // ── Project-wide content search ─────────────────────────────────────────────
 // Streaming find-in-files driven by a bundled ripgrep binary. The renderer
