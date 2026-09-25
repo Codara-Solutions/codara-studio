@@ -1244,10 +1244,10 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // `!input.runId` mis-skipped fresh chats too whenever the caller had
   // pre-created the run via createRun() to thread chip config — which is
   // what the v1 chip flow does.
-  // First-class parallel fan-out: when the composer/explorer seeded a
-  // FanOutDirective (structured input.fanOut, or a marker-bearing initial
-  // note), run-store synthesizes the parallel batch deterministically instead
-  // of round-tripping plan_analysis. Resolve it up front so the note-handling
+  // First-class parallel fan-out: when the caller passes a FanOutDirective
+  // (structured input.fanOut, or a marker-bearing initial note), run-store
+  // synthesizes the parallel batch deterministically instead of round-tripping
+  // plan_analysis. Resolve it up front so the note-handling
   // early-returns below don't divert a fan-out into the chat/plan path.
   const fanOutDirective = resolveFanOutDirective(input);
   const councilDirective = resolveCouncilDirective(run, input);
@@ -7043,13 +7043,12 @@ async function chooseUiLogicRuntimes(): Promise<{
 }
 
 // --- First-class parallel fan-out -------------------------------------------
-// A FanOutDirective (seeded by the composer "Fan out" button or the Explorer
-// multi-select context action) asks the run to apply ONE instruction across an
-// explicit set of per-target files. run-store synthesizes the batch
-// deterministically — one parallel worker per target, each scoped to exactly
-// its own file — so correctness never depends on the LLM manager honoring the
-// prose [FAN OUT] contract. The manager profile is also taught the marker, but
-// this path is what actually guarantees the disjoint parallel scopes.
+// A FanOutDirective (startAutopilot's input.fanOut, or an initial note that
+// starts with FAN_OUT_DIRECTIVE_MARKER) asks the run to apply ONE instruction
+// across an explicit set of per-target files. run-store synthesizes the batch
+// deterministically, one parallel worker per target, each scoped to exactly
+// its own file, so the disjoint parallel scopes never depend on the LLM
+// manager.
 
 // Distribute fan-out workers across the providers Cora can actually assign to
 // so a multi-target fan-out is not single-provider by default. Falls back to a
@@ -7066,11 +7065,10 @@ async function chooseFanOutRuntimes(): Promise<WorkerRuntime[]> {
   return ordered.length > 0 ? ordered : ["manual"];
 }
 
-// Reconstruct a FanOutDirective from a seeded note body whose first line is the
-// FAN_OUT_DIRECTIVE_MARKER. Mirrors formatFanOutDirective's layout (marker on
-// line 1, then one target per line, then a blank line + optional instruction)
-// so a note seeded by the renderer round-trips even when input.fanOut was not
-// threaded (e.g. a live-run addRunMessage steer).
+// Reconstruct a FanOutDirective from a note body whose first line is the
+// FAN_OUT_DIRECTIVE_MARKER: the marker on line 1, then one target per line,
+// then a blank line + optional instruction. Only startAutopilot's initial note
+// is parsed; a message added to a live run is never read as a directive.
 function parseFanOutDirectiveFromNote(note: string): FanOutDirective | null {
   const trimmed = note.trim();
   if (!trimmed.startsWith(FAN_OUT_DIRECTIVE_MARKER)) return null;

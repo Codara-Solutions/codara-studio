@@ -3244,14 +3244,13 @@ export interface PlannedStepAgent {
   taskClass?: PlannedStepAgentTaskClass;
 }
 
-// First-class parallel fan-out. The renderer (composer "Fan out" button or the
-// Explorer multi-select context action) builds a FanOutDirective describing one
-// worker per target file, and seeds it onto the run via startAutopilot(fanOut)
-// or addRunMessage. run-store deterministically synthesizes a single
-// worker_batch — one worker per target, allowedPaths = [that file],
-// canRunParallel = true, disjoint scopes — so correctness does not depend on the
-// LLM manager honoring prose. The manager profile is also taught the
-// FAN_OUT_DIRECTIVE_MARKER contract so a seeded note is recognized.
+// First-class parallel fan-out: one instruction applied across an explicit
+// set of target files. startAutopilot takes it as input.fanOut, or parses it
+// from an initial note that starts with FAN_OUT_DIRECTIVE_MARKER (a typed
+// first chat message can carry one); no app surface builds a directive.
+// run-store deterministically synthesizes a single worker_batch (one worker
+// per target, allowedPaths = [that file], canRunParallel = true, disjoint
+// scopes) so correctness does not depend on the LLM manager honoring prose.
 export interface FanOutDirective {
   // Absolute or repo-relative target files; one parallel worker is forced per
   // entry, each scoped to exactly its own path.
@@ -3278,22 +3277,11 @@ export interface CouncilDirective {
   origin?: "composer" | "queue";
 }
 
-// Stable, machine-recognizable prefix for a fan-out note body. Written by the
-// renderer (formatFanOutDirective) and detected by run-store + the manager
-// prompt-profile so a seeded directive is honored deterministically.
+// Stable, machine-recognizable first line of a fan-out note body: the marker,
+// then one target per line, then a blank line and the optional instruction.
+// run-store (parseFanOutDirectiveFromNote) detects it in startAutopilot's
+// initial note.
 export const FAN_OUT_DIRECTIVE_MARKER = "[FAN OUT]";
-
-// Render a FanOutDirective into a stable note body: the marker on its own line,
-// then one target per line, then the optional instruction. Kept deterministic
-// (no timestamps / ordering churn) so detection on the receiving side is exact.
-export function formatFanOutDirective(d: FanOutDirective): string {
-  const lines: string[] = [FAN_OUT_DIRECTIVE_MARKER, ...d.targets];
-  const instruction = d.instruction?.trim();
-  if (instruction) {
-    lines.push("", instruction);
-  }
-  return lines.join("\n");
-}
 
 // Single source of truth for the new fan-out event `type` strings shared by
 // event-log.ts (typed helpers) and run-store.ts (emit sites). appendEvent takes
@@ -4290,11 +4278,10 @@ export interface StartAutopilotInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
-  // First-class parallel fan-out. When set, the explorer/composer is asking the
-  // run to fan a single instruction across explicit per-target files. startAutopilot
-  // seeds it (via initialUserNote using formatFanOutDirective) and run-store
-  // deterministically synthesizes one forced worker_batch — one parallel worker
-  // per target, each scoped to its own path — instead of relying on the manager.
+  // First-class parallel fan-out (see FanOutDirective): run-store synthesizes
+  // one forced worker_batch, one parallel worker per target, each scoped to its
+  // own path, instead of relying on the manager. A marker-bearing
+  // initialUserNote is parsed into the same directive when this is unset.
   fanOut?: FanOutDirective;
   // Plan-mode Best-of-N council (see CouncilDirective). When set — or when the
   // run's chatMode is "plan" — run-store forces a council batch instead of normal
