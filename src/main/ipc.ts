@@ -97,10 +97,7 @@ import {
   resolveFrozenNativeClaudeProfile,
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
-import {
-  nativeCliAccounts,
-  NativeCliAccountError,
-} from "./orchestration/native-cli-accounts";
+import { nativeCliAccounts } from "./orchestration/native-cli-accounts";
 import {
   codexAccounts,
   grokAccounts,
@@ -2540,17 +2537,11 @@ export function registerIpc(): void {
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
-        nativeCliLoginToken?: string;
         mirror?: boolean;
         preserveSizeOnAttach?: boolean;
       },
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
-      // CLI sign-ins no longer run in a Studio terminal: one browser sign-in
-      // through the account card writes both halves.
-      if (args?.nativeCliLoginToken !== undefined) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED");
-      }
       let projectPolicyMode: ProjectPolicyMode | undefined;
       if (parseManualAgentStartupCommand(args.startupCommand)) {
         // Security boundary: trust for a managed agent autorun comes only from

@@ -161,9 +161,6 @@ export interface TerminalLeaf {
   // durable session pointer has been discovered.
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
-  // Runtime-only one-shot native-account login plan. This is an opaque token;
-  // executable/argv/environment/config paths never enter the renderer.
-  nativeCliLoginToken?: string;
 }
 
 export interface TerminalLeafWorker {

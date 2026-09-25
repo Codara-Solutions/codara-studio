@@ -965,9 +965,6 @@ const api = {
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
       nativeGrokProfileId?: string;
-      // Opaque, one-shot login handle. Main resolves the direct executable,
-      // argv, config home, and exact child environment.
-      nativeCliLoginToken?: string;
       // Mirror attach: observe an EXISTING session without touching its
       // state (no resize / no sink change / no tail replay). Set by readOnly
       // TerminalPanes; throws if the session does not exist.

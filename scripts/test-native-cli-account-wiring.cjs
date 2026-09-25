@@ -111,13 +111,19 @@ for (const forbidden of [
 }
 
 // CLI sign-ins no longer run in a Studio terminal: one browser sign-in
-// through the account card writes both halves, so a login token reaching
-// pty.spawn is refused and main never resolves an executable for it.
-assert.match(
-  ipc,
-  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*throw new NativeCliAccountError\("NATIVE_CLI_ACCOUNT_UNIFIED"\)/,
-);
+// through the account card writes both halves, so no login token travels
+// from a pane to pty.spawn and main never resolves an executable for one.
 assert.doesNotMatch(ipc, /launchPreparedLogin|spawnPreparedNativeCliLogin|spawnExactExecutable\(\{/);
+for (const [name, source] of [
+  ["ipc.ts", ipc],
+  ["preload", preload],
+  ["useTerminalSession.ts", session],
+  ["useTabs.ts", tabs],
+  ["TerminalStack.tsx", terminalStack],
+  ["App.tsx", app],
+]) {
+  assert.doesNotMatch(source, /nativeCliLoginToken/, `${name} must not carry a CLI login token`);
+}
 assert.doesNotMatch(
   preloadAccountApi,
   /launchPreparedLogin|spawnExactExecutable|spec\.(?:executable|args|env)/,
@@ -130,18 +136,6 @@ assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*cons
 // built from process.env plus Studio's own variables.
 assert.doesNotMatch(pty, /spawnExactExecutable|exactEnvironment|requireFreshSession/);
 
-// Tokens are one-shot in both main (service test exercises consumption) and
-// renderer remounts, and they are stripped from every persisted/cold layout.
-assert.match(session, /nativeCliLoginTokenFiredSessions/);
-assert.match(
-  session,
-  /nativeCliLoginTokenFiredSessions\.add\(sessionId\)/,
-);
-assert.match(tabs, /delete node\.nativeCliLoginToken/);
-assert.match(
-  tabs,
-  /nativeCliLoginToken:\s*_nativeCliLoginToken/,
-);
 // Settings no longer opens a sign-in terminal or a fresh session after a
 // switch: the one browser sign-in and the switch both live in main.
 assert.doesNotMatch(app, /cancelLogin|spark:open-native-cli-login|spark:open-native-cli-account|onLoginError/);

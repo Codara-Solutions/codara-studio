@@ -49,11 +49,10 @@ assert.doesNotMatch(
 
 // Managed CLI sign-ins no longer run in a Studio terminal: one browser
 // sign-in through the account card writes both halves, so there is no login
-// terminal to return from and pty:spawn refuses a login token outright.
-assert.doesNotMatch(ipc, /launchPreparedLogin|isNativeCliLoginCancellation|native-cli-accounts:login-error/);
-assert.match(
+// terminal to return from and pty:spawn takes no login token at all.
+assert.doesNotMatch(
   ipc,
-  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*throw new NativeCliAccountError\("NATIVE_CLI_ACCOUNT_UNIFIED"\)/,
+  /launchPreparedLogin|isNativeCliLoginCancellation|native-cli-accounts:login-error|nativeCliLoginToken/,
 );
 
 // ---------------------------------------------------------------------------

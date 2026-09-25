@@ -4749,7 +4749,6 @@ export default function App() {
         title: input.title,
         origin: input.origin,
         nativeClaudeProfileId: input.nativeClaudeProfileId,
-        nativeCliLoginToken: input.nativeCliLoginToken,
         placeAfter,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
@@ -4767,9 +4766,6 @@ export default function App() {
         return { ...minted, cwd };
       }
       const { tabId, paneId } = tabs.newAgentTerminalTab(options);
-      // Account sign-in is explicitly user-initiated from `cora auth cli`, so
-      // unlike agent-created terminals it should come to the foreground.
-      if (input.nativeCliLoginToken) tabs.setActiveTab(tabId);
       const placementWorkspaceId =
         targetWorkspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
       agentTerminalPlacementsRef.current.set(tabId, {
