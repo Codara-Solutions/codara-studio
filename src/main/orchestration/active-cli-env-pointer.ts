@@ -147,9 +147,3 @@ export async function refreshActiveCliEnvPointer(
 ): Promise<void> {
   await writeActiveCliEnvPointer(() => activeCliEnvSelectors(options), options);
 }
-
-/** Test seam: forget the last revision so a suite can start from a clean clock. */
-export function resetActiveCliEnvPointerForTests(): void {
-  lastRevision = 0;
-  tail = Promise.resolve();
-}

@@ -27,13 +27,6 @@ import type {
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { inspectPiAccountProfileAuthStore } from "./pi-account-auth-store";
 
-/** The autonomous runtimePreference values, and the provider each selects. */
-export const PI_PROVIDER_FOR_WORKER_RUNTIME = {
-  claude: "anthropic",
-  codex: "openai-codex",
-  grok: "xai",
-} as const satisfies Record<"claude" | "codex" | "grok", PiSubscriptionProvider>;
-
 export function piProviderForWorkerRuntime(
   runtime: WorkerRuntime,
 ): PiSubscriptionProvider | null {
