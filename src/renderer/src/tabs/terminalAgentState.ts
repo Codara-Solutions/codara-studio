@@ -1,13 +1,15 @@
-import type { RuntimeState } from "@shared/types";
+import type { RuntimeState, TerminalAgentRuntime } from "@shared/types";
 import type { Tab, TerminalAgentSession, TerminalLeafWorker } from "./types";
 import { collectLeaves } from "./paneTree";
 
-type LiveAgentRuntime = TerminalAgentSession["runtime"];
+type LiveAgentRuntime = TerminalAgentRuntime;
 
 function liveAgentRuntime(
   value: string | null | undefined,
 ): LiveAgentRuntime | null {
-  return value === "claude" || value === "codex" || value === "grok" ? value : null;
+  return value === "claude" || value === "codex" || value === "grok" || value === "pi"
+    ? value
+    : null;
 }
 
 export function createManualAgentLaunchWorker(

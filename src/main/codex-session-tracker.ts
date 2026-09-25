@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { runtimeFromProcessCommand } from "@shared/agent-patterns";
+import { runtimeFromProcessCommand, type PublicAgentRuntime } from "@shared/agent-patterns";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { resolveCodexTranscriptPath, resolveCodexHomePaths, pathIsInsideCodexHome } from "./orchestration/codex-home";
 import { extractSessionUuid, readRolloutHeader } from "./orchestration/codex-sessions";
@@ -17,7 +17,7 @@ export interface CodexTrackedPane {
 
 // The outer CLI owns the pane. Its child agents must not replace its session.
 export function agentProcessForPane(rootPid: number, processes: readonly ProcessEntry[]): {
-  pid: number; runtime: "claude" | "codex" | "grok";
+  pid: number; runtime: PublicAgentRuntime;
 } | null {
   let level = [rootPid];
   const seen = new Set<number>();

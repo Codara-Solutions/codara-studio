@@ -663,6 +663,80 @@ check(
   true,
 );
 
+// ── Pi (frames copied from a live pi 0.85.1 pty capture) ──
+// Startup header at 120 and at 80 columns (the key-hint line wraps there).
+const PI_BANNER_120 =
+  "\x1b[?2026h\x1b[0m\x1b]8;;\x07\r\r\n \x1b[1m\x1b[38;2;138;190;183mpi\x1b[39m\x1b[22m\x1b[38;2;102;102;102m v0.85.1\x1b[39m          \x1b[0m\x1b]8;;\x07\r\r\n \x1b[38;2;102;102;102mescape\x1b[39m\x1b[38;2;128;128;128m interrupt\x1b[39m\x1b[38;2;128;128;128m · \x1b[39m\x1b[38;2;102;102;102mctrl+c/ctrl+d\x1b[39m\x1b[38;2;128;128;128m clear/exit\x1b[39m";
+const PI_ONBOARDING_80 =
+  " \x1b[38;2;102;102;102mPi can explain its own features and look up its docs. Ask it how to use or    \x1b[0m\x1b]8;;\x07\r\r\n \x1b[38;2;102;102;102mextend Pi.\x1b[39m";
+const PI_FOOTER =
+  "\x1b[38;2;102;102;102m0.0%/200k (auto)\x1b[39m\x1b[38;2;102;102;102m                                                      fake-model\x1b[39m\x1b[0m\x1b]8;;\x07\x1b[?2026l";
+// While a turn runs, the input box's top border carries the spinner, and
+// every repaint is one synchronized-output line rewrite, 80 ms apart.
+const PI_WORKING_FRAME =
+  "\x1b[?2026h\x1b[1A\r\x1b[2K\x1b[38;2;80;80;80m── \x1b[39m\x1b[38;2;80;80;80m⠙\x1b[39m \x1b[38;2;80;80;80mWorking\x1b[39m\x1b[38;2;80;80;80m ─────────────────\x1b[39m\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[1B\x1b[1G";
+// The turn's final frame: the border is plain again and nothing follows.
+const PI_TURN_END_FRAME =
+  "\x1b[?2026h\x1b[3A\r\x1b[2K\x1b]133;B\x07\x1b]133;C\x07 Here is a slow answer streamed over several seconds so the working spinner stays up.   \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[38;2;80;80;80m──────────────────────\x1b[39m\x1b[0m\x1b]8;;\x07\x1b[?2026l\x1b[1B\x1b[1G\x1b[?25l";
+// A permission-gate extension's ctx.ui.select, mid-turn.
+const PI_SELECTOR =
+  " \x1b[38;2;138;190;183m\x1b[1mAllow?\x1b[22m\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K \x1b[38;2;138;190;183m→ \x1b[39m\x1b[38;2;138;190;183mYes\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K   \x1b[38;2;212;212;212mNo\x1b[39m    \x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K\x1b[0m\x1b]8;;\x07\r\r\n\x1b[2K \x1b[38;2;102;102;102m↑↓\x1b[39m\x1b[38;2;128;128;128m navigate\x1b[39m  \x1b[38;2;102;102;102menter\x1b[39m\x1b[38;2;128;128;128m select\x1b[39m  \x1b[38;2;102;102;102mescape/ctrl+c\x1b[39m\x1b[38;2;128;128;128m cancel\x1b[39m";
+check("pi banner (120 cols)", ap.sniffRuntime(PI_BANNER_120), "pi");
+check("pi onboarding line (80 cols, wrapped)", ap.sniffRuntime(PI_ONBOARDING_80), "pi");
+check("pi is a public runtime", ap.coercePublicRuntime("pi"), "pi");
+check("a bare `Pi v2` mention is not a Pi banner", ap.sniffRuntime("Pi v2 shipped last week"), null);
+check("`pi v0.85.1` alone is not a Pi banner", ap.sniffRuntime("npm view: pi v0.85.1"), null);
+check("pi footer identifies a quiet-startup Pi", ap.sniffLiveRuntime(PI_FOOTER), "pi");
+check("pi footer after compaction identifies Pi", ap.sniffLiveRuntime("?/200k (auto)   claude-sonnet"), "pi");
+check("claude identity still wins over a Pi-like footer", ap.sniffLiveRuntime(`⏸ manual mode on\n${PI_FOOTER}`), "claude");
+check("pi footer keeps the Pi UI present", ap.agentUiPresent("pi", PI_FOOTER), true);
+check("pi footer alone is not working", ap.classifyTail("pi", PI_FOOTER), null);
+check("pi working border", ap.classifyTail("pi", PI_WORKING_FRAME), "working");
+check("pi spinner-only border (overflow label)", ap.classifyTail("pi", "── ⠼ ──────── ↑ 3 more ───"), "working");
+check("pi compaction loader", ap.classifyTail("pi", "⠋ Compacting context... (escape to cancel)"), "working");
+check("pi auto-compaction loader", ap.classifyTail("pi", "⠋ Auto-compacting... (escape to cancel)"), "working");
+check("pi retry loader", ap.classifyTail("pi", "⠋ Retrying (1/3) in 4s... (escape to cancel)"), "working");
+check("pi turn-end frame is not working", ap.classifyTail("pi", PI_TURN_END_FRAME), null);
+check("pi prose about working is not working", ap.classifyTail("pi", " Working on the parser now."), null);
+check("pi extension selector needs you", ap.classifyTail("pi", PI_SELECTOR), "blocked");
+check(
+  "pi extension input needs you",
+  ap.classifyTail("pi", " Branch name\r\n > feat/x\r\n enter submit  escape/ctrl+c cancel"),
+  "blocked",
+);
+check(
+  "pi extension editor needs you",
+  ap.classifyTail("pi", " enter submit  shift+enter newline  escape/ctrl+c cancel  ctrl+g external editor"),
+  "blocked",
+);
+check("pi /trust selector (user opened it) is not blocked", ap.classifyTail("pi", "↑↓ navigate  enter save  escape/ctrl+c cancel"), null);
+check(
+  "pi selector hint in the carry does not re-block",
+  ap.classifyTail("pi", PI_SELECTOR + PI_TURN_END_FRAME, ap.stripAnsi(PI_SELECTOR).length),
+  null,
+);
+check("pi command line", ap.runtimeFromCommandLine("pi"), "pi");
+check("pi command line with flags", ap.sniffOsc633CommandRuntime("\x1b]633;E;pi --session 01a0d846\x07"), "pi");
+check("npx pi package", ap.runtimeFromCommandLine("npx @earendil-works/pi-coding-agent"), "pi");
+check("`echo pi` is not a Pi launch", ap.runtimeFromCommandLine("echo pi"), null);
+check("`pip install` is not a Pi launch", ap.runtimeFromCommandLine("pip install requests"), null);
+// Pi's own OSC 133 zones (BEL) must not read as the shell prompt returning.
+const PI_ZONE = "\x1b]133;A\x07 please be slow \x1b]133;B\x07\x1b]133;C\x07";
+check("default markers treat a BEL 133;A as prompt", ap.promptMarkerPattern("claude").test(PI_ZONE), true);
+check("pi ignores its own BEL-terminated 133 zones", ap.promptMarkerPattern("pi").test(PI_ZONE), false);
+check("pi sees the zsh prompt (ST 133;A)", ap.promptMarkerPattern("pi").test("\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\"), true);
+check("pi sees the pwsh prompt (633;A)", ap.promptMarkerPattern("pi").test("\x1b]633;A\x07\x1b]133;A\x07"), true);
+check(
+  "pi exit line",
+  ap.PI_EXIT_LINE_RE.test(ap.stripAnsi("\x1b]0;π - proj\x07\x1b[2mTo resume this session:\x1b[22m pi --session 01a0d846-6ded-7009-8e06-51c7f805f522\r\n")),
+  true,
+);
+check(
+  "pi exit line quoted in the chat is not an exit",
+  ap.PI_EXIT_LINE_RE.test(" Pi said: To resume this session: pi --session abc"),
+  false,
+);
+
 // Process-tree identity: which agent a RUNNING process is, from its ps args.
 for (const [command, expected] of [
   ["claude --dangerously-skip-permissions --resume abc", "claude"],
@@ -670,6 +744,11 @@ for (const [command, expected] of [
   ["/x/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex-aarch64-apple-darwin", "codex"],
   ["codex-aarch64-apple-darwin exec", "codex"],
   ["grok --yolo", "grok"],
+  // Pi sets process.title = "pi"; through its npm shim it is `node …/bin/pi`.
+  ["pi", "pi"],
+  ["node /opt/homebrew/bin/pi --session abc", "pi"],
+  ["pi-hole status", null],
+  ["pip install requests", null],
   // The shell hosting the agent names it in -c but is not the agent.
   ["/bin/zsh -f -ic claude --resume abc; exec zsh -i", null],
   ["bash -lc codex", null],

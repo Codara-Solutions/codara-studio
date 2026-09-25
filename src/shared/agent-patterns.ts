@@ -10,12 +10,13 @@ import type { RuntimeState } from "./types";
 // no Electron, no Node imports — so it is safe to import from any process.
 
 // Internal-only union of every agent CLI we can detect from terminal output.
-// Codara's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
-// only models the two first-party runtimes — anything outside that set is
-// coerced to `null` at the onAgentState boundary so the UI accent / tab-type
-// machinery doesn't need to grow new cases for each new banner we recognise.
-// Detection is still useful even when coerced: the running=true edge fires,
-// which is enough to keep the activity indicator in sync.
+// Codara's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) only
+// models the runtimes a pane can launch (Claude Code, Codex, Grok, Pi);
+// anything outside that set is coerced to `null` at the onAgentState boundary
+// so the UI accent / tab-type machinery doesn't need to grow new cases for
+// each new banner we recognise. Detection is still useful even when coerced:
+// the running=true edge fires, which is enough to keep the activity indicator
+// in sync.
 export type AgentRuntime =
   | "claude"
   | "codex"
@@ -32,15 +33,18 @@ export type AgentRuntime =
   | "copilot"
   | "cline";
 
-// Public runtime tag emitted through onAgentState. Mirrors the two runtimes
-// the rest of the app already knows how to render. The boundary in
-// useTerminalSession coerces every other AgentRuntime down to `null`.
-export type PublicAgentRuntime = "claude" | "codex" | "grok";
+// Public runtime tag emitted through onAgentState. Mirrors the runtimes the
+// rest of the app already knows how to render. The boundary in
+// useTerminalSession coerces every other AgentRuntime down to `null`. Pi is
+// public for terminal tracking only: it is the user's own `pi`, not one of
+// the account families in agent-families.ts.
+export type PublicAgentRuntime = "claude" | "codex" | "grok" | "pi";
 
 export const KNOWN_PUBLIC_RUNTIMES: ReadonlySet<AgentRuntime> = new Set([
   "claude",
   "codex",
   "grok",
+  "pi",
 ]);
 
 export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime | null {
@@ -56,9 +60,6 @@ export function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime |
 // upstream catalogue these came from.
 //
 // Caveats per herdr:
-//   - pi:     `Pi v` is generic; false positives are plausible in noisy
-//             shell output. Documented here rather than dropped because
-//             first-mover detection is still useful when we have it.
 //   - cline:  detection is unreliable upstream; we keep the banner regex
 //             for the running=true edge but expect misses.
 //   - copilot: structural-only per herdr (e.g. `esc to cancel` for the
@@ -88,10 +89,18 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "kimi",       pattern: /\bKimi\s*v\d|\bkimi-code\b/i },
   { runtime: "kiro",       pattern: /\bKiro\s*v\d|\bkiro-cli\b/i },
   { runtime: "opencode",   pattern: /\bOpenCode\s*v\d|\bopencode\b/i },
-  // `Pi v` is generic enough that it can plausibly fire on unrelated
-  // shell output. Keep it last in the iteration order so any more specific
-  // pattern above wins first.
-  { runtime: "pi",         pattern: /\bPi\s*v\d/ },
+  // Pi's startup header (verified against a live pi 0.85.1 pty capture): a
+  // lowercase `pi v0.85.1` line directly followed by the key-hint line
+  // (`escape interrupt · ctrl+c/ctrl+d clear/exit · …`, or `escape to
+  // interrupt` when expanded), then the fixed onboarding sentence. A bare
+  // `pi v1` is too generic for shell output, so the version must be followed
+  // by the interrupt hint, or the onboarding sentence must appear. Kept last
+  // so any more specific pattern above wins first. `quietStartup` hides the
+  // whole header; PI_LIVE_IDENTITY and the process tree cover that case.
+  {
+    runtime: "pi",
+    pattern: /\bpi\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b|\bPi\s*can\s*explain\s*its\s*own\s*features\b/,
+  },
 ];
 
 // Resume-refusal signature. `claude --resume <id>` prints this (then exits to
@@ -202,6 +211,15 @@ const GROK_LIVE_IDENTITY: RegExp[] = [
   /\b\/always-approve\b/i,
 ];
 
+// Pi's footer stats line (live pi 0.85.1 capture): context use against the
+// model window with the auto-compaction marker, `0.0%/200k (auto)` or
+// `?/200k (auto)` right after a compaction. Painted on every frame, idle or
+// busy, and present even with `quietStartup` hiding the header.
+const PI_FOOTER_CONTEXT_RE = /(?:\b\d{1,3}\.\d%|\?)\/\d+(?:\.\d+)?[kM]\b/;
+const PI_LIVE_IDENTITY: RegExp[] = [
+  new RegExp(`${PI_FOOTER_CONTEXT_RE.source}\\s*\\(auto\\)`),
+];
+
 export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   const fromBanner = sniffRuntime(text);
   if (fromBanner) return coercePublicRuntime(fromBanner);
@@ -214,6 +232,9 @@ export function sniffLiveRuntime(text: string): PublicAgentRuntime | null {
   }
   for (const re of GROK_LIVE_IDENTITY) {
     if (re.test(stripped)) return "grok";
+  }
+  for (const re of PI_LIVE_IDENTITY) {
+    if (re.test(stripped)) return "pi";
   }
   return null;
 }
@@ -265,6 +286,14 @@ function runtimeFromExecutable(exe: string): AgentRuntime | null {
   ) {
     return "grok";
   }
+  if (
+    normalized === "pi" ||
+    normalized === "@earendil-works/pi-coding-agent" ||
+    normalized.endsWith("/pi") ||
+    normalized.endsWith("\\pi")
+  ) {
+    return "pi";
+  }
   return null;
 }
 
@@ -290,7 +319,11 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
 // versioned native binary ("codex-aarch64-apple-darwin"), a script under a
 // runtime ("node .../codex.js"), or the bare name. A shell that merely
 // carries the agent's name in its own `-c` string is not the agent.
-const AGENT_PROCESS_BASENAME_RE = /^(claude|codex|grok)(?:[-.][\w.-]*)?$/;
+// Pi sets `process.title = "pi"`, so `ps` shows the bare name; launched
+// through its npm shim it reads `node …/bin/pi`. Unlike the others it ships
+// no versioned binaries, and a two-letter prefix would also claim unrelated
+// `pi-*` tools, so only the exact name counts.
+const AGENT_PROCESS_BASENAME_RE = /^(?:(claude|codex|grok)(?:[-.][\w.-]*)?|(pi))$/;
 // A running agent script shows its interpreter first ("node …/codex.js"),
 // which never appears in a typed launch command, hence the wider set here.
 const AGENT_PROCESS_WRAPPERS = new Set([...AGENT_LAUNCH_WRAPPERS, "node", "nodejs", "python", "python3"]);
@@ -309,7 +342,7 @@ export function runtimeFromProcessCommand(command: string): PublicAgentRuntime |
   for (const token of candidates) {
     const name = basename(token).replace(/\.(?:js|cjs|mjs|exe)$/, "");
     const match = AGENT_PROCESS_BASENAME_RE.exec(name);
-    if (match) return match[1] as PublicAgentRuntime;
+    if (match) return (match[1] ?? match[2]) as PublicAgentRuntime;
   }
   return null;
 }
@@ -386,7 +419,7 @@ export function advanceGenericArm(
 //              waiting for the debounce window.
 //
 // Patterns were lifted from herdr's hand-tuned table (research/HERDR_LEARNINGS
-// quick-win B), trimmed to the three runtimes Codara spawns today. The patterns
+// quick-win B), trimmed to the runtimes Codara spawns today. The patterns
 // match against the CSI/OSC-stripped tail string so Ink's per-character cursor
 // moves do not interleave bytes inside the literal we're looking for.
 export interface RuntimePatterns {
@@ -481,6 +514,37 @@ export const RUNTIME_PATTERNS: Record<PublicAgentRuntime, RuntimePatterns> = {
       /Session\s*(?:ended|complete)\./i,
       /\bGoodbye\b!?/i,
     ],
+  },
+  // Pi (the user's own `pi`). VERIFIED against a live pi 0.85.1 pty capture
+  // and its interactive-mode source. From turn start to agent end Pi embeds
+  // a braille spinner plus "Working" in the input box's top border
+  // (`── ⠋ Working ───`), repainted every 80 ms, and removes it the moment
+  // the turn ends, so no finished-turn frame is left behind. The border
+  // shows the spinner alone when a long draft's overflow label takes the
+  // room. Compaction, retry and branch-summary loaders replace it with their
+  // own "… (escape to cancel)" lines. Pi never asks for tool permission
+  // itself: it waits on the user only in extension prompts (ctx.ui.select /
+  // confirm / input / editor, e.g. a permission-gate extension) and the
+  // startup "Trust project folder?" selector, all of which end with a fixed
+  // key-hint row. Pi prints no completion line; a turn ends when the spinner
+  // stops.
+  pi: {
+    working: [
+      /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Working\b/,
+      /──\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*─/,
+      /\bcompacting(?:\s*context)?\.\.\.\s*\(\S+\s*to\s*cancel\)/i,
+      /\bRetrying\s*\(\d+\/\d+\)\s*in\s*\d+s\.\.\./,
+      /\bSummarizing\s*branch\.\.\.\s*\(\S+\s*to\s*cancel\)/,
+    ],
+    blocked: [
+      // Extension select / confirm, and the trust prompt:
+      // `↑↓ navigate  enter select  escape/ctrl+c cancel`.
+      /↑↓\s*navigate\s+\S+\s+select\s+\S+\s+cancel\b/,
+      // Extension input and editor: `enter submit  escape/ctrl+c cancel`,
+      // the editor adding `shift+enter newline` in between.
+      /\bsubmit\s+(?:\S+\s+newline\s+)?\S+\s+cancel\b/,
+    ],
+    done: [],
   },
 };
 
@@ -730,6 +794,23 @@ export function hasPromptMarker(text: string): boolean {
   return PROMPT_MARKER_RE.test(text);
 }
 
+// Pi paints OSC 133 zones of its own around every chat message
+// (`ESC]133;A BEL`, then 133;B and 133;C; live pi 0.85.1 capture), always
+// BEL-terminated, while it is still running. Codara's zsh and bash
+// integration terminate their prompt markers with ST, and pwsh adds 633;A,
+// so inside a Pi pane only those mean the shell is back.
+export const PI_PROMPT_MARKER_RE = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD]\x1b\\/;
+export function promptMarkerPattern(runtime: PublicAgentRuntime | null): RegExp {
+  return runtime === "pi" ? PI_PROMPT_MARKER_RE : PROMPT_MARKER_RE;
+}
+
+// Pi's interactive quit (Ctrl+D, Ctrl+C twice, /quit) stops the TUI and then
+// prints `To resume this session: pi --session <id>` at the start of a line,
+// right before the process exits, once the session has a conversation (live
+// pi 0.85.1 capture). A positive exit signal even in a pane without shell
+// integration; chat text never starts a line there, Pi indents it.
+export const PI_EXIT_LINE_RE = /(?:^|[\r\n])To\s*resume\s*this\s*session:\s*pi\s/;
+
 // ── Persistent agent-UI chrome detector ───────────────────────────────────
 // Returns true when the agent's PERSISTENT TUI chrome (the input box, footer
 // hint line, and statusline that frame the agent whether it is working OR
@@ -804,6 +885,13 @@ const AGENT_UI_ANCHORS: Record<PublicAgentRuntime, RegExp[]> = {
     /\balways-approve\b/i,
     /\?\s*for\s*shortcuts/i,
     /Shift\s*\+?\s*Tab/,
+  ],
+  // Pi's footer stats line is painted on every frame, idle or busy; the
+  // `(auto)` suffix is absent when auto-compaction is off, so the anchor
+  // does not require it.
+  pi: [
+    PI_FOOTER_CONTEXT_RE,
+    /\bpi\s*v\d+\.\d+\.\d+\s+\S+\s+(?:to\s+)?interrupt\b/,
   ],
 };
 

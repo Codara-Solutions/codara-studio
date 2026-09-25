@@ -49,14 +49,17 @@ ends. The shell files come from the app and are started with it. Your own
 `~/.zshrc`, `~/.bashrc` and PowerShell profile are never edited.
 
 `terminal-agent-notify.ts` also reads every pane's raw output. It recognizes
-Claude Code, Codex and Grok from their banners and footers
+Claude Code, Codex, Grok and Pi from their banners and footers
 (`src/shared/agent-patterns.ts`), tracks working, blocked and idle, and
 raises "finished" and "needs you" notifications. This runs in main rather
 than in the renderer because the renderer cannot see hidden panes. An agent's
 exit comes from the shell's prompt markers or from leaving the alternate
 screen when those exist. Otherwise it comes from the process tree: once the
 agent's process has been seen under the pane's shell, its disappearance is
-the exit (`owned-process-tree.ts`, one shared `ps` listing per sweep).
+the exit (`owned-process-tree.ts`, one shared `ps` listing per sweep). Pi
+paints OSC 133 marks of its own around every chat message, so in a Pi pane
+only the shell's ST-terminated marks count, and the resume line Pi prints
+when you quit it is also an exit.
 
 ## The agent socket and the MCP server
 

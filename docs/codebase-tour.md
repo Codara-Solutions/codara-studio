@@ -106,7 +106,7 @@ tabs and panes belong to the renderer.
    tell Codara where each command starts and ends. They also let a running
    shell follow a later account switch.
 6. **After launch.** `terminal-agent-notify.ts` taps every pane's raw output.
-   It recognizes Claude Code, Codex and Grok with the patterns in
+   It recognizes Claude Code, Codex, Grok and Pi with the patterns in
    `src/shared/agent-patterns.ts` and tracks working, blocked and idle. It
    raises notifications through `src/main/notify/`. For Claude Code, the hook
    events handled by `hook-watcher.ts` add detail, and

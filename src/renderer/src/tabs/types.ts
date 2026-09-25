@@ -8,9 +8,9 @@
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
 import type {
-  AgentRuntimeKind,
   FsEntry,
   RuntimeState,
+  TerminalAgentRuntime,
 } from "@shared/types";
 
 export type TabId = string;
@@ -167,7 +167,7 @@ export interface TerminalLeaf {
 }
 
 export interface TerminalLeafWorker {
-  runtime?: AgentRuntimeKind;
+  runtime?: TerminalAgentRuntime;
   /** Frozen native Codex account for CLI-backed worker panes. */
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI-backed worker panes. */

@@ -1397,7 +1397,7 @@ export interface TerminalAgentStatePayload {
   workspaceId: string;
   tabId: string;
   paneId: string;
-  runtime: AgentFamilyRuntime | null;
+  runtime: TerminalAgentRuntime | null;
   state: RuntimeState;
 }
 
@@ -1560,6 +1560,11 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
 }
 
 export type AgentRuntimeKind = AgentFamilyRuntime;
+
+// An agent CLI a terminal pane can run and Codara tracks: the account
+// families plus Pi, which a pane runs as the user's own `pi` with no Codara
+// account behind it.
+export type TerminalAgentRuntime = AgentFamilyRuntime | "pi";
 
 export type WorkerSessionRuntime = WorkerSessionFamily;
 
@@ -2378,7 +2383,7 @@ export type RuntimeState =
 // pointers are deactivated only for confirmed exits; heuristic loss still
 // clears the cosmetic worker chip but must not disable restart restoration.
 export interface TerminalAgentForegroundState {
-  runtime: AgentFamilyRuntime | null;
+  runtime: TerminalAgentRuntime | null;
   running: boolean;
   exitConfirmed?: boolean;
 }

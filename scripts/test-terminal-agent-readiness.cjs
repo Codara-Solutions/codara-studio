@@ -142,6 +142,11 @@ assert.equal(
 );
 assert.equal(state.liveTerminalRuntime(null), null);
 assert.equal(
+  state.liveTerminalRuntime({ ...liveWorker, runtime: "pi" }),
+  "pi",
+  "a live Pi chip paints the Pi mark on its tab",
+);
+assert.equal(
   state.liveTerminalRuntime({
     ...liveWorker,
     source: "spark",

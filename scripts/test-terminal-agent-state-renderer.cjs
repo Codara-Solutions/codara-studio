@@ -38,7 +38,7 @@ const compiled = { exports: {} };
 new Function("module", harness.code)(compiled);
 const createHarness = compiled.exports;
 
-for (const runtime of ["codex", "claude"]) {
+for (const runtime of ["codex", "claude", "pi"]) {
   const adapter = createHarness(runtime);
   const event = state => ({ paneId: "pane", runtime, state });
   adapter.observe(event("idle"));
@@ -65,4 +65,29 @@ assert.deepEqual(mirror.states, ["working"], "read-only mirrors display authorit
 assert.deepEqual(mirror.reports, [], "mirrors cannot report activity back into the owning run");
 mirror.observe({ paneId: "pane", runtime: "codex", state: "done" });
 assert.deepEqual(mirror.exits, [{ exitSignal: true }], "a real Codex exit still clears the agent phase");
+
+// A Pi pane launched or restored without shell integration has no prompt
+// marker; main's process tree or Pi's resume line is what reports the exit.
+const pi = createHarness("pi");
+pi.observe({ paneId: "pane", runtime: "pi", state: "done" });
+assert.deepEqual(pi.exits, [{ exitSignal: true }], "main's done clears a Pi agent phase");
+const claude = createHarness("claude");
+claude.observe({ paneId: "pane", runtime: "claude", state: "done" });
+assert.deepEqual(claude.exits, [], "Claude keeps relying on its own exit signals");
+
+// Shift+Enter: Pi reads ESC CR as Alt+Enter (queue follow-up, which submits
+// an idle draft), so an agent newline in a Pi pane is LF (its Ctrl+J).
+const newline = between("const payload = shouldUseAgentNewline()", ";");
+const payloadFor = (agent, activeRuntime, recentAgentInputRuntime = null) =>
+  new Function(
+    "shouldUseAgentNewline",
+    "activeRuntime",
+    "recentAgentInputRuntime",
+    `${newline}; return payload;`,
+  )(() => agent, activeRuntime, recentAgentInputRuntime);
+assert.equal(payloadFor(true, "pi"), "\n", "Pi gets its Ctrl+J newline");
+assert.equal(payloadFor(true, null, "pi"), "\n", "a recently interrupted Pi still gets Ctrl+J");
+assert.equal(payloadFor(true, "claude"), "\x1b\r", "Claude keeps ESC CR");
+assert.equal(payloadFor(true, "codex"), "\x1b\r", "Codex keeps ESC CR");
+assert.equal(payloadFor(false, null), "\\\n", "a shell keeps the backslash continuation");
 console.log("Terminal agent state delivery and poller ordering checks passed.");
