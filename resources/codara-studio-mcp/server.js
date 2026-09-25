@@ -1825,72 +1825,73 @@ function validatedAgentSocketConnection(urlValue, tokenValue, source) {
   return { url: parsed.origin, token };
 }
 
-function readHandshake() {
-  const capability = (process.env.SPARK_AGENT_CAPABILITY || "").trim();
-  const envUrl = process.env.SPARK_AGENT_SOCKET;
-  const envToken = process.env.SPARK_AGENT_TOKEN;
-  if (capability) {
-    // A scoped process capability always uses its exact launch-time
-    // credentials. Missing or malformed env must fail closed: falling back to
-    // the mode-600 handshake would silently upgrade an imported-PR
-    // manager/worker to the process-global user authority.
-    if (capability !== "scoped") {
-      const e = new Error("Codara agent capability marker is unsupported");
-      e.code = "SPARK_OFFLINE";
-      throw e;
-    }
-    try {
-      return validatedAgentSocketConnection(envUrl, envToken, "scoped");
-    } catch (err) {
-      const e = new Error(`Codara scoped agent capability is unavailable. Cause: ${err.message}`);
-      e.code = "SPARK_OFFLINE";
-      throw e;
-    }
-  }
+function offlineError(message) {
+  const e = new Error(message);
+  e.code = "SPARK_OFFLINE";
+  return e;
+}
 
-  // Trusted/global callers deliberately prefer the mode-600 handshake on
-  // every call. Their inherited PTY credentials are process-lifetime values;
-  // after Codara restarts those values are stale while the handshake points at
-  // the new socket and token. A complete env pair remains a startup fallback
-  // for the best-effort window where the handshake write has not landed yet.
-  const file = path.join(resolveSparkHome(), HANDSHAKE_FILE);
+// A scoped process capability (an imported pull request's manager or worker)
+// always uses its exact launch-time credentials. Missing or malformed env must
+// fail closed: falling back to the mode-600 handshake would silently upgrade
+// it to the process-global user authority. Returns null for an unmarked
+// (trusted) caller.
+function readScopedConnection() {
+  const capability = (process.env.SPARK_AGENT_CAPABILITY || "").trim();
+  if (!capability) return null;
+  if (capability !== "scoped") {
+    throw offlineError("Codara agent capability marker is unsupported");
+  }
   try {
-    const raw = fs.readFileSync(file, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed.url !== "string" || typeof parsed.token !== "string") {
-      throw new Error("handshake file is malformed");
-    }
-    return validatedAgentSocketConnection(parsed.url, parsed.token, "handshake");
-  } catch (handshakeError) {
-    if (envUrl !== undefined || envToken !== undefined) {
-      try {
-        return validatedAgentSocketConnection(envUrl, envToken, "trusted environment");
-      } catch (envError) {
-        const e = new Error(
-          `Codara appears to be offline (could not read ${file}, and inherited credentials were unusable). ` +
-          `Handshake cause: ${handshakeError.message}. Environment cause: ${envError.message}`,
-        );
-        e.code = "SPARK_OFFLINE";
-        throw e;
-      }
-    }
-    const e = new Error(
-      `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${handshakeError.message}`,
+    return validatedAgentSocketConnection(
+      process.env.SPARK_AGENT_SOCKET,
+      process.env.SPARK_AGENT_TOKEN,
+      "scoped",
     );
-    e.code = "SPARK_OFFLINE";
-    throw e;
+  } catch (err) {
+    throw offlineError(`Codara scoped agent capability is unavailable. Cause: ${err.message}`);
   }
 }
 
-function postJsonRpc(method, params, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    let handshake;
+function readHandshakeFile() {
+  const raw = fs.readFileSync(path.join(resolveSparkHome(), HANDSHAKE_FILE), "utf8");
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed.url !== "string" || typeof parsed.token !== "string") {
+    throw new Error("handshake file is malformed");
+  }
+  return validatedAgentSocketConnection(parsed.url, parsed.token, "handshake");
+}
+
+// Trusted callers read the mode-600 handshake on every call, so they follow
+// an app restart to its new socket and token. Codara does not export its root
+// token into terminals, so the file is the only source: while Codara starts,
+// it is written just after the socket listens, and a call in that moment
+// waits briefly for it instead of failing.
+const HANDSHAKE_WAIT_MS = 3_000;
+const HANDSHAKE_POLL_MS = 100;
+
+async function readHandshake() {
+  const scoped = readScopedConnection();
+  if (scoped) return scoped;
+  const deadline = Date.now() + HANDSHAKE_WAIT_MS;
+  for (;;) {
     try {
-      handshake = readHandshake();
+      return readHandshakeFile();
     } catch (err) {
-      reject(err);
-      return;
+      if (Date.now() >= deadline) {
+        const file = path.join(resolveSparkHome(), HANDSHAKE_FILE);
+        throw offlineError(
+          `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${err.message}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_POLL_MS));
     }
+  }
+}
+
+async function postJsonRpc(method, params, timeoutMs) {
+  const handshake = await readHandshake();
+  return new Promise((resolve, reject) => {
     const body = JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params: params || {} });
     let target;
     try {

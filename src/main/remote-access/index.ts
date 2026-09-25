@@ -59,6 +59,7 @@ import {
   type RemoteTerminalHandle,
   type RemoteWorkerTerminalOpenRequest,
 } from "./rpc";
+import { DeviceRateLimiter } from "./device-rate-limit";
 import { DurableMutationLedger } from "./mutation-ledger";
 import { stableRemoteAccessPortCandidates } from "./stable-port";
 import {
@@ -97,6 +98,9 @@ const MAX_TOTAL_SESSIONS = 16;
 // derive the session keys to send a real hello, so it never becomes proven;
 // this deadline is what stops such phantom sessions from lingering.
 const SESSION_HELLO_DEADLINE_MS = 15_000;
+// cora.send budget per paired device: 20 at once, then one every 3 seconds.
+export const CORA_SEND_BURST = 20;
+export const CORA_SEND_REFILL_MS = 3_000;
 
 export interface RemoteAccessDeps {
   // <spark-home>/remote in production; a temp dir in tests.
@@ -264,9 +268,18 @@ export class RemoteAccessService {
   // Socket generations only attach subscribers to these leases.
   private readonly terminalLeases: RemoteTerminalLeaseRegistry;
   private readonly workerTerminalControls: WorkerTerminalControlRegistry;
+  // Each cora.send can start a manager turn on the user's subscription. A
+  // person does not send more than a few messages a minute, and an outbox
+  // flushed after a reconnect fits in the burst; a looping phone does not.
+  private readonly coraSendLimiter: DeviceRateLimiter;
 
   constructor(private readonly deps: RemoteAccessDeps) {
     this.devices = new PairedDeviceStore(deps.remoteDir);
+    this.coraSendLimiter = new DeviceRateLimiter({
+      burst: CORA_SEND_BURST,
+      refillMs: CORA_SEND_REFILL_MS,
+      now: deps.now,
+    });
     this.terminalLeases = new RemoteTerminalLeaseRegistry({
       createTerminal: deps.createTerminal,
       now: deps.now,
@@ -736,6 +749,7 @@ export class RemoteAccessService {
   async revokeDevice(publicKeyB64: string): Promise<boolean> {
     this.terminalLeases.revokeOwner(publicKeyB64);
     this.workerTerminalControls.revokeOwner(publicKeyB64);
+    this.coraSendLimiter.forget(publicKeyB64);
     const sessions = this.sessions.get(publicKeyB64);
     if (sessions) {
       for (const session of sessions) {
@@ -999,6 +1013,7 @@ export class RemoteAccessService {
             )
         : undefined,
       sendCoraMessage: this.deps.sendCoraMessage,
+      allowCoraSend: () => this.coraSendLimiter.take(keyB64),
       resumeCoraRun: this.deps.resumeCoraRun
         ? (input) =>
             this.executeRecoverableMutation(

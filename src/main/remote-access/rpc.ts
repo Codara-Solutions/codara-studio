@@ -1244,12 +1244,28 @@ export interface RemoteTerminalHandle {
   resume?(): void;
 }
 
+// A server-owned launch profile: the phone names one, Studio picks the
+// command (terminal-launch.ts), so no command line ever crosses the wire.
+export type RemoteTerminalProfile = "shell" | "claude" | "codex" | "grok" | "pi";
+
+const REMOTE_TERMINAL_PROFILES: readonly string[] = [
+  "shell",
+  "claude",
+  "codex",
+  "grok",
+  "pi",
+] satisfies readonly RemoteTerminalProfile[];
+
+function isRemoteTerminalProfile(value: unknown): value is RemoteTerminalProfile {
+  return typeof value === "string" && REMOTE_TERMINAL_PROFILES.includes(value);
+}
+
 export interface RemoteTerminalCreateRequest {
   workspaceId: string;
   cols: number;
   rows: number;
   cwd?: string;
-  profile: "shell" | "claude" | "codex" | "grok";
+  profile: RemoteTerminalProfile;
   resumeSessionId?: string;
   title?: string;
   // Stamped by the authenticated desktop session; never supplied by the phone.
@@ -1413,6 +1429,10 @@ export interface RemoteRpcServices {
     model?: string;
     effort?: RemoteCoraThinkingLevel;
   }): Promise<RemoteCoraRunProjection>;
+  // Spends one cora.send from the authenticated phone's budget; false when it
+  // is empty. The service keys the budget by the Noise peer key, so a phone
+  // cannot refill it by reconnecting.
+  allowCoraSend?(): boolean;
   resumeCoraRun?(input: {
     workspaceId: string;
     runId: string;
@@ -3530,6 +3550,17 @@ export class RpcSession {
             );
             return;
           }
+          // Checked after validation so malformed frames cost nothing, and
+          // answered with a code the phone's outbox treats as transient: the
+          // message stays queued in order and is retried after its backoff.
+          if (this.services.allowCoraSend && !this.services.allowCoraSend()) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "This phone is sending Cora messages too quickly. It will try again shortly.",
+            );
+            return;
+          }
           const projection = await this.services.sendCoraMessage({
             workspaceId: p.workspaceId,
             ...(typeof p.runId === "string" && p.runId
@@ -5065,10 +5096,7 @@ export class RpcSession {
     }
     if (
       p.profile !== undefined &&
-      p.profile !== "shell" &&
-      p.profile !== "claude" &&
-      p.profile !== "codex" &&
-      p.profile !== "grok"
+      !isRemoteTerminalProfile(p.profile)
     ) {
       this.replyError(
         id,

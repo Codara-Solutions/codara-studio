@@ -305,6 +305,9 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         CODARA_HOME_DIR: userDataDir,
         SPARK_HOME_DIR: userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
+        // The test saves an OpenRouter key. Keep the OS keychain out of it:
+        // the key stays in plain text, as on a system without encryption.
+        CODARA_DISABLE_KEYCHAIN: "1",
       },
     });
     const page = await app.firstWindow();

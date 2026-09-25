@@ -7,12 +7,42 @@
 > [codebase-tour.md](../codebase-tour.md). The review moved here from
 > `REVIEW.md` at the repository root.
 
-## Status on 24 September 2026
+## Status on 25 September 2026
 
-Only the items below were checked again. Everything else is as the review
-left it: open until someone checks it.
+Only the items below were checked again, on 24 and 25 September. Everything
+else is as the review left it: open until someone checks it.
 
-Addressed:
+Addressed on 25 September 2026:
+
+- **A phone can add `$HOME` as a workspace (4, Critical).** `workspaces.add`
+  from a phone now refuses a disk root, the home folder, Codara's own home
+  and the folders where tools keep settings and sign-ins (dot folders in the
+  home folder, `~/Library`, `AppData`): `phoneWorkspaceRefusal` in
+  `remote-access/local-policy.ts`. Workspaces added on the desktop are the
+  desktop user's choice and still reach the phone.
+- **The root agent-socket token in every PTY (4, High).** Panes now get only
+  `SPARK_AGENT_PANE_ID`, and inherited socket variables are dropped. The MCP
+  server's trusted path reads only `agent-socket.json` and waits briefly for
+  it at startup; imported pull request runs keep their scoped token. This
+  keeps the token out of every child's environment; a process running as
+  the user can still read the mode 0600 file.
+- **Phone `terminal.create` skips permission prompts (4, High), checked.**
+  The desktop's own pane menu launches the same commands
+  (`workers/launch-commands.ts`), so a phone has the authority of a desktop
+  pane, not more. The phone's commands now come from
+  `remote-access/terminal-launch.ts`, pinned to the desktop's by
+  `test-remote-access-terminal-launch`. The swallowed Codex trust failure
+  matches the desktop too: `pty-manager.ts` swallows it the same way. The
+  phone may now also open Pi.
+- **The OpenRouter key in plain text (4, Medium), in part.** `storage.ts`
+  encrypts it at rest with `safeStorage` and migrates a plaintext key on
+  first load. It is still returned whole to the renderer, which edits it in
+  the settings dialog.
+- **`cora.send` is not rate limited** (listed in `remote-access.md`). Each
+  paired phone now has a budget of 20 messages, then one every 3 seconds
+  (`remote-access/device-rate-limit.ts`).
+
+Addressed on 24 September 2026:
 
 - **Two refreshers, one grant (2.1, class 1), for Claude.**
   `claude-login-keeper.ts` is now the only thing that refreshes the live
@@ -47,15 +77,15 @@ Checked and still open:
 
 - 1.1: every terminal pane still gets `writeWhileHidden`. `TerminalStack.tsx`
   now has a comment saying this is intentional.
-- 4, High: the root agent-socket token is still exported into every PTY
-  (`pty-manager.ts`).
-- 4, High: `terminal.create` from the phone still launches
-  `claude --dangerously-skip-permissions` and `codex --yolo`
-  (`remote-access/production.ts`).
+- 4, follow-up to the phone terminal item: every agent pane, on the
+  desktop or from a phone, still starts Claude Code with
+  `--dangerously-skip-permissions` and Codex and Grok with `--yolo`
+  (`workers/launch-commands.ts`, `manual-agent-startup.ts`,
+  `providers/`). Changing that is a product decision for both.
 - 4, Medium: the file write, rename and delete IPC handlers still take any
   path. A comment in `ipc.ts` says they rely on the trusted-sender gate.
-- 4, Medium: the OpenRouter key is still stored in plain text in the
-  settings file (`storage.ts`).
+- 4, Medium: the renderer still receives the whole OpenRouter key through
+  `settings:load`.
 - 5.5: there is no ESLint or Prettier. `esbuild` and the bare `playwright`
   package are still not direct dependencies. `test-cora-direct-mode.ts` is
   still outside the registry.

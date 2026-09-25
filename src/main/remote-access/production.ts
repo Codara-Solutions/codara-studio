@@ -186,7 +186,12 @@ import {
   type RemoteImageUploadRequest,
 } from "./image-upload";
 import {
+  remoteTerminalLaunchCommand,
+  remoteTerminalProfileLabel,
+} from "./terminal-launch";
+import {
   isStudioExplorerIgnoredDirectory,
+  phoneWorkspaceRefusal,
   resolveExistingInside,
   toWireRelative,
   truncateUtf8,
@@ -1028,6 +1033,11 @@ async function addWorkspaceForRemote(input: {
       allowAbsolute: true,
       directory: true,
     });
+    const refusal = phoneWorkspaceRefusal(selected.path, {
+      home: selected.root,
+      codaraHome: await realpath(codaraHome()).catch(() => resolve(codaraHome())),
+    });
+    if (refusal) throw new Error(refusal);
     const state = await loadState();
     for (const workspace of state.workspaces) {
       if (isRemotePath(workspace.cwd)) continue;
@@ -3844,26 +3854,11 @@ async function createRemoteTerminal(
   if (request.profile === "codex") {
     await ensureCodexProjectTrust(cwd.path).catch(() => undefined);
   }
-  const command =
-    request.profile === "claude"
-      ? resumeSession
-        ? `claude --dangerously-skip-permissions --resume ${resumeSession.sessionId}`
-        : "claude --dangerously-skip-permissions"
-      : request.profile === "codex"
-        ? resumeSession
-          ? `codex resume ${resumeSession.sessionId} --yolo`
-          : "codex --yolo"
-        : request.profile === "grok"
-          ? "grok --yolo"
-          : undefined;
-  const profileLabel =
-    request.profile === "claude"
-      ? "Claude"
-      : request.profile === "codex"
-        ? "Codex"
-        : request.profile === "grok"
-          ? "Grok"
-          : "Terminal";
+  const command = remoteTerminalLaunchCommand(
+    request.profile,
+    resumeSession?.sessionId,
+  );
+  const profileLabel = remoteTerminalProfileLabel(request.profile);
   const title =
     request.title?.trim() ||
     `${truncateUtf8(request.origin.deviceName, 80)} · ${profileLabel}`;

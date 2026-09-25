@@ -83,11 +83,15 @@ failure.
   `test-claude-cli-account-profiles`, `test-claude-cli-credentials`,
   `test-claude-cli-live-login`, `test-claude-login-keeper`,
   `test-pi-subscription-refresh` and `test-unified-account-migration`. A new
-  suite that reaches that module must set it too.
+  suite that reaches that module must set it too. The same variable keeps
+  `storage.ts` from encrypting the OpenRouter key with Electron
+  `safeStorage`, which uses the Keychain; `test-storage-openrouter-key`
+  replaces `safeStorage` with a fake keyring instead, and Playwright specs
+  that save a key set the variable.
 - A shell inside a Studio pane exports Codara variables (`SPARK_PANE_ID`,
-  `SPARK_AGENT_SOCKET`, `SPARK_HOME_DIR`, and so on). Suites that could pick
-  them up set their own values or delete them. If a suite behaves differently
-  inside Studio than in a plain terminal, suspect a variable it inherited.
+  `SPARK_HOME_DIR`, and so on). Suites that could pick them up set their own
+  values or delete them. If a suite behaves differently inside Studio than in
+  a plain terminal, suspect a variable it inherited.
 
 ## How a suite is put together
 
@@ -187,7 +191,7 @@ calls.
 
 | Suites | Covers |
 |---|---|
-| `test-pty-inherited-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane, backpressure, spawning, cleaning up child processes. |
+| `test-pty-inherited-env`, `test-pty-agent-socket-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane (no agent-socket token), backpressure, spawning, cleaning up child processes. |
 | `test-terminal-agent-notify`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen` | Telling from a pane's output that an agent is running, blocked or idle (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`). |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
 | `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
@@ -218,7 +222,8 @@ renderer's JavaScript).
 ### App state, files and system meters
 
 `test-storage-state-transaction` (a failed write of `spark-state.json` does
-not leave half-saved workspaces in memory), `test-fs-watcher-lifecycle` (the
+not leave half-saved workspaces in memory), `test-storage-openrouter-key`
+(the OpenRouter key is encrypted at rest and never lost), `test-fs-watcher-lifecycle` (the
 file watcher behind the explorer, `src/main/fs-watcher.ts`),
 `test-system-metrics` (the memory figure in the title-bar meters,
 `src/main/system-metrics.ts`).
@@ -229,7 +234,8 @@ file watcher behind the explorer, `src/main/fs-watcher.ts`),
 |---|---|
 | `test-remote-access`, `test-remote-access-hostile.mjs`, `test-remote-relay-client`, `test-mutation-ledger` | `src/main/remote-access/`: pairing, the protocol, the relay, idempotent writes, attacks before sign-in. |
 | `test-remote-cora-contract`, `test-cora-history-interop`, `test-cora-run-interop`, `test-cora-run-message-window` | The exact data the phone app receives for Cora chats. |
-| `test-terminal-leases`, `test-studio-terminal-share`, `test-phone-terminal-spawn`, `test-worker-terminal-controls` | Terminals used from the phone. |
+| `test-terminal-leases`, `test-studio-terminal-share`, `test-phone-terminal-spawn`, `test-worker-terminal-controls`, `test-remote-access-terminal-launch` | Terminals used from the phone, and that they run the desktop's own launch commands. |
+| `test-remote-access-workspace-roots`, `test-remote-access-cora-send-rate` | What a phone may not do: add the home folder or a credentials folder as a workspace, or send Cora messages faster than its budget. |
 | `test-phone-notify`, `test-terminal-phone-notify` | Notifications sent to the phone. |
 | `test-remote-connection-lifecycle`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
 

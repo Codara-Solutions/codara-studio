@@ -62,7 +62,7 @@ Some files are very large. Search inside them rather than reading from the top:
 | Main | Electron | `src/main/index.ts` (boot is the `app.whenReady()` block) | - |
 | Renderer | `createWindow()` in `index.ts` | `src/renderer/src/` | `window.spark.*` calls become `ipcRenderer.invoke` on channels handled in `ipc.ts`. Main pushes events back with `webContents.send`. |
 | Preview pages | the `<webview>` in `BrowserPane.tsx` | any web page, plus `src/preload/inspector-preload.ts` | None: they are untrusted. The renderer runs DOM actions in them with `executeJavaScript`, and main sends trusted input over the Chrome DevTools Protocol. |
-| Shells and agent CLIs | `pty-manager.ts` (node-pty) | your shell, `claude`, `codex`, `grok`, `pi` | Terminal bytes. Every PTY gets `SPARK_PANE_ID` and the agent socket's address and token in its environment. |
+| Shells and agent CLIs | `pty-manager.ts` (node-pty) | your shell, `claude`, `codex`, `grok`, `pi` | Terminal bytes. Every PTY gets `SPARK_PANE_ID` and `SPARK_AGENT_PANE_ID`, but not the agent socket's token: tools that call the app read `agent-socket.json`. |
 | Pi (Cora's manager and workers) | `pi-rpc-client.ts` | the Pi package, run with `--mode rpc` and the extension in `resources/pi-cora/` | Pi's RPC protocol on stdin and stdout. The extension loads the MCP server's code in-process and calls the agent socket. |
 | `codara-studio` MCP server | Claude Code, Codex or Grok, from their MCP config | `resources/codara-studio-mcp/server.js` | HTTP JSON-RPC to the agent socket. `mcp-installer.ts` writes the config entry. |
 | `cora` CLI | you | `cli/cora.cjs` | HTTP JSON-RPC to the agent socket. Reads run files directly when the app is closed. |
@@ -289,7 +289,7 @@ owns each file:
 
 | Path | Owner |
 |---|---|
-| `spark-state.json` (workspaces), `spark-settings.json` (`AppSettings`) | `storage.ts` |
+| `spark-state.json` (workspaces), `spark-settings.json` (`AppSettings`; the OpenRouter key is encrypted with `safeStorage`) | `storage.ts` |
 | `spark-preferences.json` | `preferences-store.ts` |
 | `runs/<id>/run.json`, `runs/<id>/events.jsonl`, `runs/<id>/steps/...` (prompts, logs, reports of each attempt), `runs/<id>/result-manifest.json` | `run-store.ts`, `event-log.ts` |
 | `agent-socket.json` (socket URL and token, mode 0600) | `agent-socket.ts` |

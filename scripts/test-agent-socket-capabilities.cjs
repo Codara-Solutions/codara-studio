@@ -165,8 +165,13 @@ const bridgeSource = fs.readFileSync(
 );
 assert.match(
   bridgeSource,
-  /const capability = [\s\S]*if \(capability\)[\s\S]*capability !== "scoped"[\s\S]*validatedAgentSocketConnection\(envUrl, envToken, "scoped"\)/,
+  /function readScopedConnection\(\) \{\s*const capability = [\s\S]*?if \(!capability\) return null;[\s\S]*?capability !== "scoped"[\s\S]*?validatedAgentSocketConnection\(\s*process\.env\.SPARK_AGENT_SOCKET,\s*process\.env\.SPARK_AGENT_TOKEN,\s*"scoped",?\s*\)/,
   "the Pi bridge must use the scoped marker as its fail-closed credential boundary",
+);
+assert.match(
+  bridgeSource,
+  /async function readHandshake\(\) \{\s*const scoped = readScopedConnection\(\);\s*if \(scoped\) return scoped;/,
+  "a scoped process must resolve its credentials before the root handshake is ever read",
 );
 
 capabilities.setAgentSocketCapabilityEndpoint(null);

@@ -468,6 +468,48 @@ function sortedEqual(actual, expected, label) {
       "an unmarked trusted caller must adopt a rewritten handshake on its next call",
     );
 
+    // Panes no longer carry the root token, so the handshake file is a
+    // trusted caller's only source. While Codara starts, the file lands just
+    // after the socket listens: a call in that moment waits for it, and an
+    // inherited env token is never used, even when the file never appears.
+    const handshakePath = path.join(HOME, "agent-socket.json");
+    const handshakeBody = JSON.stringify({
+      url: `http://127.0.0.1:${address.port}`,
+      token: "d".repeat(64),
+    });
+    fs.rmSync(handshakePath, { force: true });
+    const callsBeforeWait = receivedAuthorization.length;
+    const landing = setTimeout(() => fs.writeFileSync(handshakePath, handshakeBody), 400);
+    const waitedCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    clearTimeout(landing);
+    assert.notStrictEqual(waitedCall.isError, true, "a call in the startup window waits for the handshake");
+    assert.deepStrictEqual(
+      receivedAuthorization.slice(callsBeforeWait),
+      [`Bearer ${"d".repeat(64)}`],
+      "the waiting call must use the handshake token, never the inherited one",
+    );
+    fs.rmSync(handshakePath, { force: true });
+    const callsBeforeOffline = receivedAuthorization.length;
+    const offlineStartedAt = Date.now();
+    const offlineCall = await directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+    );
+    assert.strictEqual(offlineCall.isError, true);
+    assert.match(offlineCall.content[0].text, /appears to be offline/i);
+    assert.ok(Date.now() - offlineStartedAt < 10_000, "the wait for a missing handshake is bounded");
+    assert.strictEqual(
+      receivedAuthorization.length,
+      callsBeforeOffline,
+      "a trusted caller must not fall back to an inherited root token",
+    );
+    fs.writeFileSync(handshakePath, handshakeBody);
+    delete process.env.SPARK_AGENT_SOCKET;
+    delete process.env.SPARK_AGENT_TOKEN;
+
     process.env.CODARA_PI_DIRECT_TASK = "1";
     delete require.cache[require.resolve(SERVER)];
     const directMemoryBridge = require(SERVER);
