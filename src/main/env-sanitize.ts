@@ -19,6 +19,8 @@
 // via CliSessionOptions.env / SpawnOptions.env) are applied AFTER this strip,
 // so they always survive.
 
+import { delimiter, dirname, join, resolve } from "node:path";
+
 // Exact-name nesting markers that don't share the CLAUDE_CODE_ prefix.
 const NESTED_AGENT_ENV_EXACT = new Set([
   "CLAUDECODE",
@@ -86,7 +88,56 @@ export function sanitizeElectronViteDevEnv(env: Record<string, string | undefine
 export function processEnvWithoutElectronViteDev(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   sanitizeElectronViteDevEnv(env);
+  sanitizeNpmRunScriptEnv(env);
   return env;
+}
+
+// npm run-script wiring.
+//
+// `npm run dev` starts the app through npm's run-script, which prepends
+// node_modules/.bin for the package directory and each of its ancestors,
+// plus npm's node-gyp shim, to PATH, and exports npm_* variables and
+// INIT_CWD. Inherited by a pane, that PATH runs this repository's own `pi`,
+// `tsc` or `electron-vite` ahead of the user's installs (so `pi update`
+// tries to update the copy in node_modules), and Codara takes the
+// repository's Pi for the user's. Only a process npm started carries
+// npm_lifecycle_event, so an app started any other way is unchanged.
+const NPM_NODE_GYP_BIN = /[\\/]@npmcli[\\/]run-script[\\/]lib[\\/]node-gyp-bin$/;
+
+/** `path` without the entries npm's run-script prepended for `env`'s run. */
+export function withoutNpmRunScriptPath(
+  path: string,
+  env: Record<string, string | undefined>,
+): string {
+  if (env.npm_lifecycle_event === undefined) return path;
+  const injected = new Set<string>();
+  if (env.npm_package_json) {
+    let dir = dirname(resolve(env.npm_package_json));
+    for (;;) {
+      injected.add(join(dir, "node_modules", ".bin"));
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return path
+    .split(delimiter)
+    .filter((entry) => !injected.has(entry) && !NPM_NODE_GYP_BIN.test(entry))
+    .join(delimiter);
+}
+
+/** Delete npm's run-script wiring from `env`, in place. */
+export function sanitizeNpmRunScriptEnv(env: Record<string, string | undefined>): void {
+  if (env.npm_lifecycle_event === undefined) return;
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" && env[key] !== undefined) {
+      env[key] = withoutNpmRunScriptPath(env[key]!, env);
+    }
+  }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("npm_")) delete env[key];
+  }
+  delete env.INIT_CWD;
 }
 
 // Codara's zsh integration dir. Must match the cache layout shell-init.ts

@@ -34,6 +34,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter } from "node:path";
+import { withoutNpmRunScriptPath } from "./env-sanitize";
 
 const SHELL_TIMEOUT_MS = 3000;
 const REGISTRY_TIMEOUT_MS = 3000;
@@ -134,7 +135,9 @@ export function injectEnrichedPath(env: Record<string, string>): void {
 }
 
 async function computeEnrichedPath(): Promise<string> {
-  const fallback = process.env.PATH ?? process.env.Path ?? "";
+  // A dev app started by `npm run dev` must not hand panes or binary lookups
+  // the repository's node_modules/.bin (see env-sanitize.ts).
+  const fallback = withoutNpmRunScriptPath(process.env.PATH ?? process.env.Path ?? "", process.env);
   try {
     if (process.platform === "win32") {
       return await computeWindowsPath(fallback);

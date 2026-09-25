@@ -204,6 +204,7 @@ function stubPlugin() {
     "./env-sanitize": `
       export function sanitizeNestedAgentEnv() {}
       export function sanitizeElectronViteDevEnv() {}
+      export function sanitizeNpmRunScriptEnv() {}
       export function restoreUserZdotdir() {}
       export function userZdotdirFromEnv() { return undefined; }
     `,

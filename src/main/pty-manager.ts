@@ -13,7 +13,12 @@ import type {
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
-import { restoreUserZdotdir, sanitizeElectronViteDevEnv, sanitizeNestedAgentEnv } from "./env-sanitize";
+import {
+  restoreUserZdotdir,
+  sanitizeElectronViteDevEnv,
+  sanitizeNestedAgentEnv,
+  sanitizeNpmRunScriptEnv,
+} from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { resolveBinary } from "./binary-resolver";
 import { getHookRpcEnvSafe } from "./hook-rpc";
@@ -1262,6 +1267,7 @@ function doSpawn(
   // both carry their launcher's wiring; the shell must look like one opened
   // from a plain terminal. See env-sanitize.ts.
   sanitizeElectronViteDevEnv(env);
+  sanitizeNpmRunScriptEnv(env);
   restoreUserZdotdir(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
