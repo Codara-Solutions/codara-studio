@@ -126,19 +126,9 @@ assert.doesNotMatch(
 // runtime.
 assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const \{ deleted \} = await unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
 
-// Exact means exact: pty-manager copies the selected environment instead of
-// process.env, and every Studio/env enrichment is inside the non-exact branch.
-assert.match(
-  pty,
-  /const environmentSource = opts\.exactEnvironment \?\? process\.env/,
-);
-assert.match(pty, /if \(opts\.exactEnvironment === undefined\) \{/);
-assert.match(pty, /exactEnvironment:\s*\{ \.\.\.opts\.env \}/);
-assert.match(pty, /requireFreshSession:\s*true/);
-assert.match(
-  pty,
-  /if \(opts\.requireFreshSession\) \{\s*throw new Error/,
-);
+// pty-manager keeps no direct-executable seam for a sign-in: every PTY is
+// built from process.env plus Studio's own variables.
+assert.doesNotMatch(pty, /spawnExactExecutable|exactEnvironment|requireFreshSession/);
 
 // Tokens are one-shot in both main (service test exercises consumption) and
 // renderer remounts, and they are stripped from every persisted/cold layout.
