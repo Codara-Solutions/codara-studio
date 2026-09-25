@@ -27,6 +27,7 @@ fs.writeFileSync(
   [
     `export * from ${source("anthropic-account-identity.ts")};`,
     `export * from ${source("native-cli-account-identity.ts")};`,
+    `export { claudeIdentityOf } from ${source("claude-cli-live-login.ts")};`,
   ].join("\n"),
 );
 
@@ -61,7 +62,7 @@ function jsonResponse(body, ok = true) {
 async function main() {
   await test("the profile endpoint's account uuid becomes the digest", async () => {
     const calls = [];
-    const fingerprint = await mod.readAnthropicAccountFingerprint("sk-ant-oat01-token", {
+    const { fingerprint } = await mod.readAnthropicAccountProfile("sk-ant-oat01-token", {
       fetchImpl: async (url, init) => {
         calls.push({ url, init });
         return jsonResponse({
@@ -86,7 +87,7 @@ async function main() {
   });
 
   await test("the same read reports the account's email for the card", async () => {
-    const identity = await mod.readAnthropicAccountIdentity("sk-ant-oat01-token", {
+    const identity = await mod.readAnthropicAccountProfile("sk-ant-oat01-token", {
       fetchImpl: async () =>
         jsonResponse({
           account: {
@@ -99,10 +100,17 @@ async function main() {
     });
     assert.deepEqual(identity, {
       fingerprint: EXPECTED,
+      accountUuid: ACCOUNT_UUID,
+      organizationUuid: "org-uuid",
       email: "someone@example.com",
     });
     // Nothing else in the response is kept, whatever the endpoint sends.
-    assert.deepEqual(Object.keys(identity).sort(), ["email", "fingerprint"]);
+    assert.deepEqual(Object.keys(identity).sort(), [
+      "accountUuid",
+      "email",
+      "fingerprint",
+      "organizationUuid",
+    ]);
   });
 
   await test("an unusable or missing address leaves the card without one", async () => {
@@ -114,15 +122,15 @@ async function main() {
       { uuid: ACCOUNT_UUID, email_address: `someone@example.com\nX-Injected: 1` },
     ]) {
       assert.deepEqual(
-        await mod.readAnthropicAccountIdentity("sk-ant-oat01-token", {
+        await mod.readAnthropicAccountProfile("sk-ant-oat01-token", {
           fetchImpl: async () => jsonResponse({ account }),
         }),
-        { fingerprint: EXPECTED },
+        { fingerprint: EXPECTED, accountUuid: ACCOUNT_UUID },
       );
     }
     // An address with no uuid still identifies the card, just not its pairing.
     assert.deepEqual(
-      await mod.readAnthropicAccountIdentity("sk-ant-oat01-token", {
+      await mod.readAnthropicAccountProfile("sk-ant-oat01-token", {
         fetchImpl: async () =>
           jsonResponse({ account: { email: "someone@example.com" } }),
       }),
@@ -131,30 +139,20 @@ async function main() {
   });
 
   await test("a Claude Code sign-in for the same account hashes identically", async () => {
-    const configDir = fs.mkdtempSync(path.join(TMP, "claude-"));
-    const home = fs.mkdtempSync(path.join(TMP, "home-"));
-    fs.writeFileSync(
-      path.join(home, ".claude.json"),
-      JSON.stringify({
-        oauthAccount: {
-          accountUuid: ACCOUNT_UUID,
-          emailAddress: "someone@example.com",
-          organizationUuid: "org-uuid",
-        },
-        projects: {},
-      }),
-    );
-    const fingerprint = await mod.readClaudeCliAccountFingerprint(
-      configDir,
-      null,
-      home,
-    );
-    assert.equal(fingerprint, EXPECTED);
-    // Same file, same read: the address Claude Code stored is what its card
-    // shows, and nothing else in that config is looked at.
+    // The oauthAccount block Claude Code stores beside its login: only the
+    // uuid and the address are looked at.
     assert.deepEqual(
-      await mod.readClaudeCliAccountIdentity(configDir, null, home),
+      mod.claudeIdentityOf({
+        accountUuid: ACCOUNT_UUID,
+        emailAddress: "someone@example.com",
+        organizationUuid: "org-uuid",
+      }),
       { fingerprint: EXPECTED, email: "someone@example.com" },
+    );
+    // An unusable address still pairs on the uuid.
+    assert.deepEqual(
+      mod.claudeIdentityOf({ accountUuid: ACCOUNT_UUID, emailAddress: "not an address" }),
+      { fingerprint: EXPECTED },
     );
   });
 
@@ -166,82 +164,10 @@ async function main() {
     assert.equal(mod.anthropicAccountFingerprint(` ${ACCOUNT_UUID} `), EXPECTED);
   });
 
-  await test("CLAUDE_CONFIG_DIR moves where the account is looked for", async () => {
-    const configDir = fs.mkdtempSync(path.join(TMP, "managed-"));
-    const home = fs.mkdtempSync(path.join(TMP, "otherhome-"));
-    fs.writeFileSync(
-      path.join(configDir, ".claude.json"),
-      JSON.stringify({ oauthAccount: { accountUuid: ACCOUNT_UUID } }),
-    );
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, configDir, home),
-      EXPECTED,
-    );
-    // The same profile with no CLAUDE_CONFIG_DIR reads the home file instead,
-    // which is empty here, so it pairs with nothing.
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      undefined,
-    );
-  });
-
-  await test("a legacy .config.json wins over the home file", async () => {
-    const configDir = fs.mkdtempSync(path.join(TMP, "legacy-"));
-    const home = fs.mkdtempSync(path.join(TMP, "legacyhome-"));
-    const other = "11111111-2222-4333-8444-555555555555";
-    fs.writeFileSync(
-      path.join(configDir, ".config.json"),
-      JSON.stringify({ oauthAccount: { accountUuid: ACCOUNT_UUID } }),
-    );
-    fs.writeFileSync(
-      path.join(home, ".claude.json"),
-      JSON.stringify({ oauthAccount: { accountUuid: other } }),
-    );
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      EXPECTED,
-    );
-  });
-
-  await test("a signed-out or unreadable config simply has no digest", async () => {
-    const configDir = fs.mkdtempSync(path.join(TMP, "empty-"));
-    const home = fs.mkdtempSync(path.join(TMP, "emptyhome-"));
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      undefined,
-    );
-    fs.writeFileSync(path.join(home, ".claude.json"), "{ not json");
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      undefined,
-    );
-    fs.writeFileSync(
-      path.join(home, ".claude.json"),
-      JSON.stringify({ projects: {} }),
-    );
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      undefined,
-    );
-    assert.deepEqual(
-      await mod.readClaudeCliAccountIdentity(configDir, null, home),
-      {},
-    );
-  });
-
-  await test("a symlinked config is refused rather than followed", async () => {
-    const configDir = fs.mkdtempSync(path.join(TMP, "link-"));
-    const home = fs.mkdtempSync(path.join(TMP, "linkhome-"));
-    const real = path.join(configDir, "real.json");
-    fs.writeFileSync(
-      real,
-      JSON.stringify({ oauthAccount: { accountUuid: ACCOUNT_UUID } }),
-    );
-    fs.symlinkSync(real, path.join(home, ".claude.json"));
-    assert.equal(
-      await mod.readClaudeCliAccountFingerprint(configDir, null, home),
-      undefined,
-    );
+  await test("a signed-out Claude Code login simply has no digest", async () => {
+    assert.deepEqual(mod.claudeIdentityOf(null), {});
+    assert.deepEqual(mod.claudeIdentityOf({}), {});
+    assert.deepEqual(mod.claudeIdentityOf({ accountUuid: "  " }), {});
   });
 
   await test("a refused, offline, or nonsense profile read pairs nothing", async () => {
@@ -256,9 +182,8 @@ async function main() {
     ];
     for (const fetchImpl of cases) {
       assert.equal(
-        await mod.readAnthropicAccountFingerprint("sk-ant-oat01-token", {
-          fetchImpl,
-        }),
+        (await mod.readAnthropicAccountProfile("sk-ant-oat01-token", { fetchImpl }))
+          .fingerprint,
         undefined,
       );
     }
@@ -266,7 +191,7 @@ async function main() {
 
   await test("a hung endpoint gives up instead of holding the login", async () => {
     let aborted = false;
-    const fingerprint = await mod.readAnthropicAccountFingerprint("sk-ant-oat01-token", {
+    const { fingerprint } = await mod.readAnthropicAccountProfile("sk-ant-oat01-token", {
       timeoutMs: 20,
       fetchImpl: (_url, init) =>
         new Promise((_resolve, reject) => {
@@ -286,18 +211,8 @@ async function main() {
       called = true;
       return jsonResponse({ account: { uuid: ACCOUNT_UUID } });
     };
-    assert.equal(
-      await mod.readAnthropicAccountFingerprint("", { fetchImpl }),
-      undefined,
-    );
-    assert.equal(
-      await mod.readAnthropicAccountFingerprint("   ", { fetchImpl }),
-      undefined,
-    );
-    assert.deepEqual(
-      await mod.readAnthropicAccountIdentity("", { fetchImpl }),
-      {},
-    );
+    assert.deepEqual(await mod.readAnthropicAccountProfile("", { fetchImpl }), {});
+    assert.deepEqual(await mod.readAnthropicAccountProfile("   ", { fetchImpl }), {});
     assert.equal(called, false);
   });
 

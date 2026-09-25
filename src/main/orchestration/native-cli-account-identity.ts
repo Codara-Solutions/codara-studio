@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
 
 /**
  * Account identity for native CLI sign-ins: an anonymous fingerprint, plus the
@@ -24,12 +23,13 @@ import { join } from "node:path";
  * which is exactly the id Pi stores as `accountId` for an openai-codex
  * credential. Claude Code stores the Anthropic account uuid it was issued
  * (`oauthAccount.accountUuid`), which is the same uuid Anthropic's OAuth
- * profile endpoint reports for a Cora connection. Grok Build writes a
- * keyed-by-issuer `auth.json` whose `user_id` (and the access token's `sub`)
- * is the same uuid Pi hashes from an xAI Cora credential. All three hash
- * into one id space per provider.
+ * profile endpoint reports for a Cora connection; claudeIdentityOf in
+ * claude-cli-live-login.ts hashes it with anthropicAccountFingerprint below.
+ * Grok Build writes a keyed-by-issuer `auth.json` whose `user_id` (and the
+ * access token's `sub`) is the same uuid Pi hashes from an xAI Cora
+ * credential. All three hash into one id space per provider.
  *
- * Everything here is read-only. The credential and config files are opened for
+ * Everything here is read-only. The credential files are opened for
  * reading, are never written, moved, refreshed, or copied, and only the
  * account-id and email fields are looked at. Any failure (missing file, wrong
  * permissions, unparseable JSON, API-key auth with no account id) yields
@@ -46,13 +46,6 @@ export interface NativeCliAccountIdentity {
 
 /** Credential files are a few kilobytes; refuse to read anything larger. */
 export const NATIVE_CLI_CREDENTIAL_MAX_BYTES = 256 * 1024;
-
-/**
- * Claude Code keeps per-project history in the same file as its account
- * metadata, so this one is routinely hundreds of kilobytes. The cap only has
- * to stop an unbounded read.
- */
-export const CLAUDE_CLI_CONFIG_MAX_BYTES = 16 * 1024 * 1024;
 
 /** RFC 5321 caps an address at 254 characters; anything longer is not one. */
 export const ACCOUNT_EMAIL_MAX_LENGTH = 254;
@@ -159,19 +152,6 @@ function codexAccountEmailFrom(parsed: unknown): string | undefined {
   return jwtEmailClaim(tokens.id_token) ?? jwtEmailClaim(tokens.access_token);
 }
 
-function claudeAccountEmailFrom(parsed: unknown): string | undefined {
-  if (!isRecord(parsed)) return undefined;
-  const account = parsed.oauthAccount;
-  return isRecord(account) ? normalizeAccountEmail(account.emailAddress) : undefined;
-}
-
-function claudeAccountUuidFrom(parsed: unknown): string | undefined {
-  if (!isRecord(parsed)) return undefined;
-  const account = parsed.oauthAccount;
-  const raw = isRecord(account) ? account.accountUuid : undefined;
-  return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
-}
-
 export function nativeCliAccountFingerprint(accountId: string): string {
   return createHash("sha256").update(accountId).digest("hex");
 }
@@ -222,13 +202,6 @@ export async function readCodexCliAccountIdentity(
     // token bytes out of any error that could escape.
     return {};
   }
-}
-
-/** Fingerprint-only view of the above, kept for callers that pair accounts. */
-export async function readCodexCliAccountFingerprint(
-  authFile: string,
-): Promise<string | undefined> {
-  return (await readCodexCliAccountIdentity(authFile)).fingerprint;
 }
 
 /**
@@ -329,70 +302,4 @@ export async function readGrokCliAccountIdentity(
   } catch {
     return {};
   }
-}
-
-/**
- * The config files a Claude Code sign-in may have written its account metadata
- * into, most specific first. Claude Code prefers a legacy `.config.json` inside
- * its config directory when one exists, and otherwise writes `.claude.json`
- * into CLAUDE_CONFIG_DIR, or into the home directory when that variable is
- * unset, which is the case for the personal profile.
- *
- * `homeDir` is passed in rather than read from the process so that a store
- * pointed at a sandbox directory can never reach the real home directory.
- */
-export function claudeCliConfigFileCandidates(
-  configDir: string,
-  configDirEnv: string | null,
-  homeDir: string,
-): string[] {
-  return [
-    join(configDir, ".config.json"),
-    join(configDirEnv ?? homeDir, ".claude.json"),
-  ];
-}
-
-/**
- * The account digest and email a Claude Code sign-in recorded, or an empty
- * identity when there is nothing safe to read. Only `oauthAccount.accountUuid`
- * and `oauthAccount.emailAddress` are looked at; the organization, the project
- * history, and every other field in that file are ignored. Never throws.
- */
-export async function readClaudeCliAccountIdentity(
-  configDir: string,
-  configDirEnv: string | null,
-  homeDir: string,
-): Promise<NativeCliAccountIdentity> {
-  for (const candidate of claudeCliConfigFileCandidates(
-    configDir,
-    configDirEnv,
-    homeDir,
-  )) {
-    try {
-      const parsed = await readJsonUnderCap(candidate, CLAUDE_CLI_CONFIG_MAX_BYTES);
-      const accountUuid = claudeAccountUuidFrom(parsed);
-      const email = claudeAccountEmailFrom(parsed);
-      if (accountUuid || email) {
-        return {
-          ...(accountUuid
-            ? { fingerprint: anthropicAccountFingerprint(accountUuid) }
-            : {}),
-          ...(email ? { email } : {}),
-        };
-      }
-    } catch {
-      // Try the next candidate; a missing or malformed config is not an error.
-    }
-  }
-  return {};
-}
-
-/** Fingerprint-only view of the above, kept for callers that pair accounts. */
-export async function readClaudeCliAccountFingerprint(
-  configDir: string,
-  configDirEnv: string | null,
-  homeDir: string,
-): Promise<string | undefined> {
-  return (await readClaudeCliAccountIdentity(configDir, configDirEnv, homeDir))
-    .fingerprint;
 }

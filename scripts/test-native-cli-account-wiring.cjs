@@ -243,13 +243,9 @@ assert.match(identity, /createHash\("sha256"\)\.update\(accountId\)\.digest\("he
 assert.match(piStore, /createHash\("sha256"\)\.update\(accountId\)\.digest\("hex"\)/);
 assert.match(identity, /tokens\.account_id/);
 assert.match(identity, /jwtEmailClaim\(tokens\.id_token\)/);
-assert.match(identity, /account\.emailAddress/);
 assert.match(identity, /Buffer\.from\(payload, "base64url"\)/);
 assert.doesNotMatch(identity, /createVerify|jwt\.verify|crypto\.verify/);
-assert.match(identity, /account\.accountUuid/);
-assert.match(identity, /oauthAccount/);
 assert.match(identity, /accountUuid\.trim\(\)\.toLowerCase\(\)/);
-assert.match(identity, /join\(configDirEnv \?\? homeDir, "\.claude\.json"\)/);
 assert.doesNotMatch(identity, /homedir\(\)/);
 assert.match(identity, /https:\/\/auth\.x\.ai::/);
 assert.match(identity, /typeof nested\.user_id === "string"/);
@@ -263,6 +259,12 @@ assert.doesNotMatch(
 );
 assert.match(identity, /return undefined;/);
 assert.match(identity, /\} catch \{/);
+// Claude Code's side is the oauthAccount block beside its one-home login:
+// only the uuid and the address are read, and the uuid is hashed the same way.
+const liveLogin = read("src/main/orchestration/claude-cli-live-login.ts");
+assert.match(liveLogin, /oauthAccount\?\.accountUuid/);
+assert.match(liveLogin, /normalizeAccountEmail\(oauthAccount\?\.emailAddress\)/);
+assert.match(liveLogin, /anthropicAccountFingerprint\(accountUuid\)/);
 
 // Anthropic's account profile is read exactly once on the connect path, from
 // the endpoint that answers the access token the login just produced. It is
@@ -363,5 +365,5 @@ assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(pr
 assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 
 console.log(
-  "PASS native CLI account IPC is sanitized, login tokens are refused in main, every provider switches and deletes through the unified account services, and one card model serves all three providers",
+  "PASS native CLI account IPC is sanitized, no CLI login token reaches a pane or main, every provider switches and deletes through the unified account services, and one card model serves all three providers",
 );

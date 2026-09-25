@@ -21,12 +21,13 @@ import {
  *    received. It never reads a stored credential and never refreshes one.
  *  - One request, short timeout, no retries. A failure means no fingerprint,
  *    which means the account stays on its own card — never a guessed match.
- *  - Only `account.uuid` and `account.email_address` are read. The display
- *    name, organization, and plan fields in the response are discarded, the
- *    access token is never stored or logged, and the digest and the email are
- *    the only values that leave this module. The email is shown on the Settings
- *    card so one account is tellable from another; it is stripped from every
- *    remote projection, so a paired phone never receives it.
+ *  - Only `account.uuid`, `account.email_address` and `organization.uuid`
+ *    are read. The display name, organization name, and plan fields in the
+ *    response are discarded, and the access token is never stored or logged.
+ *    The raw uuids stay in the main process; the digest and the email are the
+ *    only values that cross IPC. The email is shown on the Settings card so
+ *    one account is tellable from another; it is stripped from every remote
+ *    projection, so a paired phone never receives it.
  */
 
 export const ANTHROPIC_OAUTH_PROFILE_URL =
@@ -86,23 +87,10 @@ function accountEmailFrom(parsed: unknown): string | undefined {
 }
 
 /**
- * The sha256 of the Anthropic account uuid behind an access token, plus that
- * account's email address, or an empty identity when the account cannot be
- * identified. Never throws, and never surfaces the uuid, the token, or the
- * response body.
+ * The account's digest and email plus the raw uuids, for main-process
+ * consumers only. Never throws, and never surfaces the token or the response
+ * body.
  */
-export async function readAnthropicAccountIdentity(
-  accessToken: string,
-  options: { fetchImpl?: FetchLike; timeoutMs?: number } = {},
-): Promise<NativeCliAccountIdentity> {
-  const profile = await readAnthropicAccountProfile(accessToken, options);
-  return {
-    ...(profile.fingerprint ? { fingerprint: profile.fingerprint } : {}),
-    ...(profile.email ? { email: profile.email } : {}),
-  };
-}
-
-/** The identity plus the raw uuids, for main-process consumers only. */
 export async function readAnthropicAccountProfile(
   accessToken: string,
   options: { fetchImpl?: FetchLike; timeoutMs?: number } = {},
@@ -151,12 +139,4 @@ export async function readAnthropicAccountProfile(
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** Fingerprint-only view of the above, kept for callers that pair accounts. */
-export async function readAnthropicAccountFingerprint(
-  accessToken: string,
-  options: { fetchImpl?: FetchLike; timeoutMs?: number } = {},
-): Promise<string | undefined> {
-  return (await readAnthropicAccountIdentity(accessToken, options)).fingerprint;
 }
