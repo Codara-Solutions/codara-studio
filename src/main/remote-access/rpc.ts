@@ -1413,6 +1413,10 @@ export interface RemoteRpcServices {
     model?: string;
     effort?: RemoteCoraThinkingLevel;
   }): Promise<RemoteCoraRunProjection>;
+  // Spends one cora.send from the authenticated phone's budget; false when it
+  // is empty. The service keys the budget by the Noise peer key, so a phone
+  // cannot refill it by reconnecting.
+  allowCoraSend?(): boolean;
   resumeCoraRun?(input: {
     workspaceId: string;
     runId: string;
@@ -3527,6 +3531,17 @@ export class RpcSession {
               id,
               "invalid-params",
               "cora.send needs workspaceId, message, clientMessageId, and optional runId, model, and effort.",
+            );
+            return;
+          }
+          // Checked after validation so malformed frames cost nothing, and
+          // answered with a code the phone's outbox treats as transient: the
+          // message stays queued in order and is retried after its backoff.
+          if (this.services.allowCoraSend && !this.services.allowCoraSend()) {
+            this.replyError(
+              id,
+              "rate-limited",
+              "This phone is sending Cora messages too quickly. It will try again shortly.",
             );
             return;
           }
