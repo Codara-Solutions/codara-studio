@@ -86,6 +86,7 @@ import {
   resolveNewNativeGrokProfile,
 } from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
+import { findPiSessionFile } from "./pi-session-tracker";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
@@ -2963,7 +2964,7 @@ export function registerIpc(): void {
     async (
       _e,
       args: {
-        runtime: "claude" | "codex" | "grok";
+        runtime: "claude" | "codex" | "grok" | "pi";
         sessionId: string;
         cwd: string;
         transcriptPath?: string;
@@ -2973,6 +2974,12 @@ export function registerIpc(): void {
       },
     ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
+      if (args.runtime === "pi") {
+        // `pi --session <id>` looks the id up in the pane's cwd. Pi writes a
+        // session file only once it has a reply, so a file is resumable.
+        const path = await findPiSessionFile(args.cwd, args.sessionId).catch(() => null);
+        return path ? { exists: true, resumable: true, transcriptPath: path } : { exists: false };
+      }
       if (args.runtime === "grok") {
         const execution = await resolveFrozenNativeGrokProfile(
           args.nativeGrokProfileId,

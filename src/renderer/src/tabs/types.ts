@@ -8,9 +8,9 @@
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
 import type {
-  AgentRuntimeKind,
   FsEntry,
   RuntimeState,
+  TerminalAgentRuntime,
 } from "@shared/types";
 
 export type TabId = string;
@@ -46,7 +46,7 @@ export interface EditorTab extends BaseTab {
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
 export interface TerminalAgentSession {
-  runtime: "claude" | "codex" | "grok";
+  runtime: "claude" | "codex" | "grok" | "pi";
   /** Frozen native Claude account. Undefined is legacy personal/unset. */
   nativeClaudeProfileId?: string;
   /** Frozen native Codex account home. Undefined is legacy/personal. */
@@ -54,8 +54,9 @@ export interface TerminalAgentSession {
   /** Frozen native Grok Build account home. Undefined is legacy/personal. */
   nativeGrokProfileId?: string;
   // Claude: UUID we forced with `--session-id`. Codex: UUID discovered from the
-  // rollout filename after launch. Empty string means "capture still pending"
-  // (Codex, before discovery resolves).
+  // rollout filename after launch. Pi: the id main attributes to the pane's Pi
+  // process (pi-session-tracker.ts), resumed with `pi --session <id>`. Empty
+  // string means "capture still pending" (Codex, before discovery resolves).
   sessionId: string;
   // The exact cwd the session was launched from. Claude resume is scoped to this
   // directory's project bucket, so restore must relaunch from the same cwd.
@@ -164,7 +165,7 @@ export interface TerminalLeaf {
 }
 
 export interface TerminalLeafWorker {
-  runtime?: AgentRuntimeKind;
+  runtime?: TerminalAgentRuntime;
   /** Frozen native Codex account for CLI-backed worker panes. */
   nativeCodexProfileId?: string;
   /** Frozen native Claude account for CLI-backed worker panes. */

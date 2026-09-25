@@ -5,6 +5,7 @@ import {
   classifyTail,
   coercePublicRuntime,
   countTeammateEvents,
+  PI_EXIT_LINE_RE,
   runtimeFromCommandLine,
   runtimeFromProcessCommand,
   sniffLiveRuntime,
@@ -25,9 +26,9 @@ import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify"
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
-// Terminal-agent notifier: tells the user when a Claude / Codex CLI
-// they ran in a NORMAL terminal pane stops working — finished a turn, or
-// stopped to ask for permission — while they are looking somewhere else.
+// Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
+// or Pi CLI they ran in a NORMAL terminal pane stops working (finished a
+// turn, or stopped to ask for permission) while they are looking elsewhere.
 // Orchestration runs already alert through run-store events; this module
 // covers the "I just typed `claude` in a shell" workflow that previously had
 // no completion signal at all.
@@ -46,11 +47,12 @@ import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 //      OSC 777;notify (rxvt style). Codex emits OSC 9 natively when
 //      `tui.notifications` is enabled; any other CLI tool that emits these
 //      gets surfaced too, same as a real terminal emulator would.
-//   2. Stream heuristic for the three first-party agent CLIs — while an
-//      agent works, its Ink footer ("esc to interrupt" + a ticking timer)
-//      repaints at least once a second, so the byte stream continuously
-//      re-matches the `working` patterns. When the matches stop for
-//      TURN_QUIET_MS the turn is over → "done". A `blocked` pattern match
+//   2. Stream heuristic for the agent CLIs a pane can launch. While an
+//      agent works, its footer ("esc to interrupt" + a ticking timer, or
+//      Pi's spinning "Working" border) repaints at least once a second,
+//      so the byte stream continuously re-matches the `working` patterns.
+//      When the matches stop for TURN_QUIET_MS the turn is over → "done".
+//      A `blocked` pattern match
 //      (permission prompt) while working → "needs you". Pattern tables are
 //      shared with the renderer poller (src/shared/agent-patterns.ts).
 //
@@ -294,6 +296,12 @@ export interface TerminalNotifyPaneEntry {
   runtimeHint?: PublicAgentRuntime | null;
 }
 
+function knownRuntimeHint(value: unknown): PublicAgentRuntime | null {
+  return value === "claude" || value === "codex" || value === "grok" || value === "pi"
+    ? value
+    : null;
+}
+
 // Renderer-driven registry sync, one call per workspace layout change. The
 // renderer is the only side that knows which pty sessions are user-facing
 // terminal panes (vs chat backends / headless eval ptys) and which tab each
@@ -318,12 +326,7 @@ export function syncTerminalNotifyPanes(input: {
       existing.tabId = String(entry.tabId ?? "");
       existing.tabTitle = String(entry.tabTitle ?? "Terminal");
       existing.excluded = Boolean(entry.excluded);
-      existing.runtimeHint =
-        entry.runtimeHint === "claude" ||
-        entry.runtimeHint === "codex" ||
-        entry.runtimeHint === "grok"
-          ? entry.runtimeHint
-          : null;
+      existing.runtimeHint = knownRuntimeHint(entry.runtimeHint);
       if (!existing.runtime && existing.runtimeHint) existing.runtime = existing.runtimeHint;
       if (!existing.attached) attach(existing);
       continue;
@@ -342,18 +345,8 @@ export function syncTerminalNotifyPanes(input: {
       decoder: new TextDecoder("utf-8", { fatal: false }),
       ring: "",
       carry: "",
-      runtime:
-        entry.runtimeHint === "claude" ||
-        entry.runtimeHint === "codex" ||
-        entry.runtimeHint === "grok"
-          ? entry.runtimeHint
-          : null,
-      runtimeHint:
-        entry.runtimeHint === "claude" ||
-        entry.runtimeHint === "codex" ||
-        entry.runtimeHint === "grok"
-          ? entry.runtimeHint
-          : null,
+      runtime: knownRuntimeHint(entry.runtimeHint),
+      runtimeHint: knownRuntimeHint(entry.runtimeHint),
       state: "idle",
       userTurnArmed: false,
       disposing: false,
@@ -641,6 +634,11 @@ const OSC21337_G = /\x1b\]21337;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 // (`text = w.carry + decoded`, CARRY_MAX=1024) already bridges a marker split
 // across PTY chunk boundaries, so no further carry change is needed here.
 const PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD](?:\x07|\x1b\\)/g;
+// Pi paints BEL-terminated OSC 133 zones around every chat message while it
+// runs; in a Pi pane only the shell's ST-terminated 133 (and any 633) marker
+// means the prompt is back. Kept in sync with the shared PI_PROMPT_MARKER_RE.
+const PI_PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD]\x1b\\/g;
+const PI_EXIT_LINE_G = new RegExp(PI_EXIT_LINE_RE.source, "g");
 const ALT_SCREEN_LEAVE = "\x1b[?1049l";
 
 // High-confidence terminal problems that deserve a richer outcome than the
@@ -1239,7 +1237,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
     const cls = applyProblem || w.codexScreen ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
-    if (cls === "blocked" && w.runtime === "claude") {
+    if (cls === "blocked" && (w.runtime === "claude" || w.runtime === "pi")) {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can
       // appear within the first second of a turn, and missing a real
@@ -1302,15 +1300,18 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // sweep reads it to pick the normal vs stall quiet window.
     w.lastChunkAssertedWorking = chunkAssertedWorking;
 
-    // Agent exit: the shell prompt is back (spark.ps1's OSC 633/133 markers)
-    // or the TUI left the alt screen. A turn that was still mid-work when the
+    // Agent exit: the shell prompt is back (spark.ps1's OSC 633/133 markers),
+    // the TUI left the alt screen, or Pi printed the resume line it writes on
+    // an interactive quit. A turn that was still mid-work when the
     // TUI vanished ended *somehow* — surface it; the suppression policy
     // swallows the alert when the user themselves quit the agent (they're
     // looking at that tab, by definition).
-    const promptReturned = newMatches(PROMPT_MARKER_G, text, carryLen).length > 0;
+    const promptReturned =
+      newMatches(w.runtime === "pi" ? PI_PROMPT_MARKER_G : PROMPT_MARKER_G, text, carryLen).length > 0;
     const leftAltScreen = text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
-    if (promptReturned || (leftAltScreen && !w.codexScreen)) {
-      markAgentExited(w, now, "prompt marker / alt-screen leave");
+    const piQuit = w.runtime === "pi" && newMatches(PI_EXIT_LINE_G, plain, fresh).length > 0;
+    if (promptReturned || (leftAltScreen && !w.codexScreen) || piQuit) {
+      markAgentExited(w, now, piQuit ? "pi exit line" : "prompt marker / alt-screen leave");
     }
     // Codex also leaves the alternate screen when closing transcript views.
     // Its process exit or a shell prompt marker confirms when the agent left.
@@ -1539,6 +1540,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   if (runtime === "claude") return "Claude Code";
   if (runtime === "codex") return "Codex";
+  if (runtime === "pi") return "Pi";
   return "Terminal";
 }
 

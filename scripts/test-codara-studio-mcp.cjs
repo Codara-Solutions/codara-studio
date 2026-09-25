@@ -192,6 +192,12 @@ function sortedEqual(actual, expected, label) {
       askUser.inputSchema.properties.recommendedOptionId,
       "codara_ask_user must expose recommendedOptionId",
     );
+    const spawnTerminals = execute.definitions.find((tool) => tool.name === "codara_spawn_terminals");
+    assert.deepStrictEqual(
+      spawnTerminals?.inputSchema.properties.terminals.items.properties.runtime.enum,
+      ["claude", "codex", "grok", "pi"],
+      "codara_spawn_terminals must offer every agent the + menu opens",
+    );
     const complete = execute.definitions.find((tool) => tool.name === "codara_complete");
     assert.match(
       complete?.description ?? "",

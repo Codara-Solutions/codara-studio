@@ -800,6 +800,26 @@ async function main() {
       JSON.stringify(status).slice(0, 140),
     );
 
+    // codara_spawn_terminals opens every agent the + menu offers.
+    const standing = await rpc(handshake, "orchestrator.spawn_terminals", {
+      runId: "run-execute-chat",
+      terminals: [{ runtime: "grok", count: 1 }, { runtime: "pi", count: 2 }],
+    });
+    check(
+      "spawn_terminals accepts Grok and Pi panes",
+      standing.result?.ok === true && standing.result?.terminal_count === 3,
+      JSON.stringify(standing).slice(0, 180),
+    );
+    const unknownStanding = await rpc(handshake, "orchestrator.spawn_terminals", {
+      runId: "run-execute-chat",
+      terminals: [{ runtime: "aider", count: 1 }],
+    });
+    check(
+      "spawn_terminals rejects a runtime no pane can launch",
+      Boolean(unknownStanding.error),
+      JSON.stringify(unknownStanding).slice(0, 180),
+    );
+
     // Cora's visual explanation is a first-class run artifact. Exercise the
     // exact RPC path used by the bundled Pi/Claude/Codex bridge, then read it
     // back from durable run state rather than trusting the update response.

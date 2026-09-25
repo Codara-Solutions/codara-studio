@@ -85,7 +85,7 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 | `codara_terminal_write` | Types into a terminal the agent created, submitting with Enter by default. |
 | `codara_terminal_read` | Reads the recent output of a terminal pane, without escape codes. |
 | `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
-| `codara_spawn_terminals` | Opens one tab split into Claude Code or Codex panes for you to drive. |
+| `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
 
 ## Whiteboard and board
 

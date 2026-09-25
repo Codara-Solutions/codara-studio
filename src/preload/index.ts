@@ -215,7 +215,7 @@ function isMissingIpcHandlerError(err: unknown, channel: string): boolean {
 // local so the preload stays free of main-process imports.
 interface AgentSessionStartRecord {
   paneId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "pi";
   nativeClaudeProfileId?: string;
   nativeCodexProfileId?: string;
   active?: boolean;
@@ -1101,7 +1101,7 @@ const api = {
     // (has a real user message; stillborn transcripts make `--resume` refuse)
     // — before resuming it.
     probe: (args: {
-      runtime: "claude" | "codex" | "grok";
+      runtime: "claude" | "codex" | "grok" | "pi";
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
@@ -1171,7 +1171,7 @@ const api = {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | "grok" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | "pi" | null;
       }>;
     }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
     // Level-triggered recovery for renderer reload/cold hydration. Live events

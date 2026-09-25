@@ -2496,8 +2496,13 @@ function handleOrchestratorSpawnTerminals(
       return errorResponse(id, ERR_INVALID_PARAMS, "each terminal entry must be an object");
     }
     const terminal = raw as Record<string, unknown>;
-    if (terminal.runtime !== "claude" && terminal.runtime !== "codex" && terminal.runtime !== "grok") {
-      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude, codex, or grok");
+    if (
+      terminal.runtime !== "claude" &&
+      terminal.runtime !== "codex" &&
+      terminal.runtime !== "grok" &&
+      terminal.runtime !== "pi"
+    ) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude, codex, grok, or pi");
     }
     if (
       typeof terminal.count !== "number" ||

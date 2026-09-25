@@ -1,5 +1,5 @@
-// Pure decision helpers for Claude/Codex terminal-session resume. Kept in a
-// dep-free module (no xterm / React imports) so scripts/test-transcript-repair
+// Pure decision helpers for Claude/Codex/Grok/Pi terminal-session resume.
+// Kept in a dep-free module (no xterm / React imports) so scripts/test-transcript-repair
 // and scripts/test-session-restore can bundle and unit-test the branch logic
 // without pulling the whole terminal stack. useTerminalSession consumes these
 // for BOTH the boot-once restore path and the in-place death re-arm path.
@@ -23,7 +23,8 @@ export type ResumeDecision =
   | { kind: "resume" }
   // Claude transcript tail truncated → repair in place, then resume.
   | { kind: "repair-resume" }
-  // Claude, not resumable → self-heal by launching a FRESH forced-id session.
+  // Claude, Grok or Pi, not resumable → self-heal by launching a FRESH
+  // session (Claude and Grok with a forced id, Pi plain).
   | { kind: "fresh" }
   // Codex, not resumable → clear the pointer, leave a plain shell (Codex can't
   // force a session id, so there's nothing deterministic to relaunch).
@@ -34,7 +35,7 @@ export type ResumeDecision =
 // PTY, no IPC, and no filesystem.
 export function decideResume(
   probe: ResumeProbe,
-  runtime: "claude" | "codex" | "grok",
+  runtime: "claude" | "codex" | "grok" | "pi",
 ): ResumeDecision {
   const resumable = probe.exists && probe.resumable !== false;
   if (resumable) {
@@ -47,7 +48,7 @@ export function decideResume(
 // Structural twin of tabs/types.ts TerminalAgentSession, redeclared here so
 // this module stays dep-free for the node test harnesses.
 export interface AgentSessionPointer {
-  runtime: "claude" | "codex" | "grok";
+  runtime: "claude" | "codex" | "grok" | "pi";
   nativeClaudeProfileId?: string;
   nativeCodexProfileId?: string;
   nativeGrokProfileId?: string;
@@ -62,7 +63,7 @@ export interface AgentSessionPointer {
 // (src/main/agent-session-registry.ts).
 export interface SessionStartRecord {
   paneId?: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "pi";
   active?: boolean;
   restoreOnBoot?: boolean;
   nativeClaudeProfileId?: string;

@@ -73,7 +73,8 @@ export interface SparkManagerDecision {
 }
 
 export interface SparkManagerTerminalRequest {
-  runtime: "claude" | "codex" | "grok";
+  // Pi is the user's own `pi`, opened as the + menu opens it.
+  runtime: "claude" | "codex" | "grok" | "pi";
   count: number;
   model?: string;
   effort?: string;

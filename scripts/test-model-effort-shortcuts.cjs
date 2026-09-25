@@ -102,6 +102,12 @@ assert.match(
   /target\.runtime === "codex"[\s\S]*?pty\.inject\(target\.paneId, "\/model", \{ submit: true \}\)/,
 );
 assert.doesNotMatch(effortHandler[0], /fixed for this session/);
+// Pi's reasoning depth is its thinking level; `/thinking` opens that picker
+// (verified against pi 0.85.1). It has no stash key, like Grok.
+assert.match(
+  effortHandler[0],
+  /target\.runtime === "pi"[\s\S]*?pty\.inject\(target\.paneId, "\/thinking", \{ submit: true \}\)/,
+);
 // The stash keystroke is plumbed through every layer as an explicit option and
 // written BEFORE the bracketed paste, outside it (0x13 inside a paste is just
 // text to the CLI). Only Claude Code binds Ctrl+S to chat:stash; a plain shell
@@ -239,6 +245,27 @@ async function main() {
     paneId: "pane-live",
     runtime: "codex",
   });
+
+  // A Pi pane has no session pointer until Pi's first reply; its live chip
+  // is enough. Other runtimes still need their pointer.
+  const piLive = terminalTab(
+    "t7",
+    { kind: "leaf", paneId: "pane-pi", worker: { runtime: "pi", source: "manual", agentRunning: true } },
+    "pane-pi",
+  );
+  assert.deepEqual(resolve([piLive], "t7"), { kind: "terminal", paneId: "pane-pi", runtime: "pi" });
+  const piGone = terminalTab(
+    "t8",
+    { kind: "leaf", paneId: "pane-pi", worker: { runtime: "pi", source: "manual", agentRunning: false } },
+    "pane-pi",
+  );
+  assert.deepEqual(resolve([piGone], "t8"), { kind: "none" });
+  const claudeChipOnly = terminalTab(
+    "t9",
+    { kind: "leaf", paneId: "pane-cc", worker: { runtime: "claude", source: "manual", agentRunning: true } },
+    "pane-cc",
+  );
+  assert.deepEqual(resolve([claudeChipOnly], "t9"), { kind: "none" });
 
   // Non-chat, non-terminal surfaces, and a missing/None active tab.
   assert.deepEqual(resolve([{ kind: "editor", id: "t6", path: "a.md" }], "t6"), { kind: "none" });

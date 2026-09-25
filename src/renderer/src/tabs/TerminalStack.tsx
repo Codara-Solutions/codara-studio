@@ -2852,6 +2852,7 @@ interface ChipTone {
 }
 
 function workerBrandColor(worker: TerminalLeafWorker): string {
+  if (worker.runtime === "pi") return agentBrandColor("pi");
   const runtime = agentBrandRuntime(worker.runtime);
   return runtime ? agentBrandColor(runtime) : "var(--accent)";
 }

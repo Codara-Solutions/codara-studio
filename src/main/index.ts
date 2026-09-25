@@ -42,6 +42,7 @@ import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
+import { createPiSessionTracker } from "./pi-session-tracker";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
 import { activeTerminalAgentPaneIds, manualTerminalPaneIds, noteHostResume } from "./terminal-agent-notify";
@@ -1165,6 +1166,7 @@ app.whenReady().then(async () => {
     console.warn("[main] agent-session registry failed to init:", err);
   }
   codexSessionTracker.start();
+  piSessionTracker.start();
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
@@ -1480,6 +1482,15 @@ const codexSessionTracker = createCodexSessionTracker({
   },
 });
 
+const piSessionTracker = createPiSessionTracker({
+  panes: () => {
+    const manual = manualTerminalPaneIds();
+    return pty.resourceSnapshot().sessions
+      .filter((session) => manual.has(session.id) && !session.remote)
+      .map((session) => ({ paneId: session.id, pid: session.pid, generationId: session.generationId }));
+  },
+});
+
 // Electron does NOT await async before-quit listeners, so everything after the
 // first await would race process teardown — dropping the final flushAllStores()
 // on macOS Cmd+Q, updater quitAndInstall, and OS-initiated quits. Use the
@@ -1519,8 +1530,9 @@ app.on("before-quit", (event) => {
   void (async () => {
     try {
       let censusDeadline: NodeJS.Timeout | undefined;
-      const [, processes] = await Promise.all([
+      const [, , processes] = await Promise.all([
         codexSessionTracker.flush(),
+        piSessionTracker.flush(),
         Promise.race([
           listProcessesWithCommands(),
           new Promise<null>((resolve) => { censusDeadline = setTimeout(() => resolve(null), 1000); }),

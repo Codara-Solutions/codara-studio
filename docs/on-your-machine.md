@@ -47,6 +47,12 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |
 
+For Pi, Codara reads without editing: while a Pi pane runs, it lists the
+session files of that folder in `~/.pi/agent/sessions/` (names and
+modification times, never their contents), so the pane can come back in the
+same Pi session when Codara reopens. It records the session id in
+`agent-session-starts.json`. Cora itself never reads `~/.pi`.
+
 Everything about accounts is explained in [accounts.md](./accounts.md).
 
 ## Environment variables in Studio terminals

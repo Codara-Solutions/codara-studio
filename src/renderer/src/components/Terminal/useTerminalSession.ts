@@ -19,8 +19,8 @@ import {
   classifyTail,
   classifyCodexScreen,
   coercePublicRuntime,
-  hasPromptMarker,
   promoteGenericArm,
+  promptMarkerPattern,
   runtimeFromCommandLine,
   sniffLiveRuntime,
   sniffOsc633CommandRuntime,
@@ -48,6 +48,7 @@ import {
   buildClaudeLaunch,
   buildGrokLaunch,
   isAgentSessionLaunchCommand,
+  PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
 import {
@@ -263,6 +264,17 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     };
   }
   if (decision.kind === "fresh") {
+    if (restore.runtime === "pi") {
+      // Pi's session file is gone (pruned, or the cwd moved). A plain `pi`
+      // brings the pane back; main binds its new session after the first
+      // reply, so there is no replacement pointer to hand over yet.
+      return {
+        resumeCommand: PI_LAUNCH_COMMAND,
+        resumeIsFreshFallback: true,
+        fallbackNotice: "previous Pi session couldn't be resumed, starting a fresh one",
+        fallbackSession: null,
+      };
+    }
     if (restore.runtime === "grok") {
       const fresh = buildGrokLaunch();
       return {
@@ -1279,6 +1291,10 @@ export function useTerminalSession({
         //     panes because Ctrl+C can clear the running chip while leaving
         //     the TUI input box focused. Sending backslash + LF there renders
         //     a literal `\`.
+        //   - Pi reads `\x1b\r` as Alt+Enter, its "queue follow-up" key,
+        //     which submits the draft when no turn is running. Its newline
+        //     keys are Shift+Enter and Ctrl+J, and xterm.js has no way to
+        //     send Pi a distinct Shift+Enter, so a Pi pane gets LF (Ctrl+J).
         //   - Bare shells (bash/zsh/pwsh) treat backslash + LF as a
         //     multi-line continuation marker, which is the muscle-memory
         //     behaviour at a shell prompt.
@@ -1291,7 +1307,11 @@ export function useTerminalSession({
         ) {
           event.preventDefault();
           if (!readOnlyRef.current && !inputBlockedRef.current) {
-            const payload = shouldUseAgentNewline() ? "\x1b\r" : "\\\n";
+            const payload = shouldUseAgentNewline()
+              ? (activeRuntime ?? recentAgentInputRuntime) === "pi"
+                ? "\n"
+                : "\x1b\r"
+              : "\\\n";
             void window.spark.pty.write(sessionId, payload);
           }
           return false;
@@ -1832,9 +1852,9 @@ export function useTerminalSession({
       // re-promote to "working" while the tail is byte-identical to it: a genuine
       // new turn repaints the footer (fresh spinner / "(0s ·" / the echoed prompt)
       // so the tail differs and promotion proceeds normally. Cleared when we leave
-      // idle and reset across agent enter/exit. Claude-only, mirroring D4:
-      // Codex turn-completion is driven by the focus-independent notifier, and
-      // its idle composer doesn't classify as "working" anyway.
+      // idle and reset across agent enter/exit. Claude and Pi only, mirroring
+      // D4: Codex turn-completion is driven by the focus-independent notifier,
+      // and its idle composer doesn't classify as "working" anyway.
       let idleFrozenTail: string | null = null;
       // Bug B (baseline idle): a launched-but-never-worked agent (the user
       // typed `claude`, the idle box is up, nothing run yet) classifies as
@@ -1930,7 +1950,7 @@ export function useTerminalSession({
         // captured on the previous tick; the UI-gone / exit-detection block keeps
         // using the unmodified `raw` so its semantics are unchanged.
         //
-        // CLAUDE ONLY. Claude repaints its footer's elapsed-seconds counter at
+        // CLAUDE AND PI ONLY. Claude repaints its footer's elapsed-seconds counter at
         // least once a second while working, so a live turn's tail always changes
         // within the 1.2s idle debounce — a byte-identical tail reliably means the
         // turn finished. Codex repaints its footer rarely (it only
@@ -1939,8 +1959,12 @@ export function useTerminalSession({
         // byte-identical mid-turn and false-flip to "ready". For those runtimes we
         // do NOT use absence-of-tail-change as an idle signal — the focus-
         // independent notifier (emitPaneState) drives their turn-complete instead.
+        // Pi qualifies like Claude: its border spinner advances every 80 ms for
+        // the whole turn, so a byte-identical "Working" tail is text in the
+        // transcript, not a live turn.
+        const frozenTailMeansIdle = activeRuntime === "claude" || activeRuntime === "pi";
         let effectiveRaw = raw;
-        if (activeRuntime === "claude" && confirmedState === "working" && raw === "working") {
+        if (frozenTailMeansIdle && confirmedState === "working" && raw === "working") {
           if (lastWorkingTail !== null && tail === lastWorkingTail) {
             // Byte-identical footer for a full tick → not live working anymore.
             effectiveRaw = null;
@@ -1961,9 +1985,9 @@ export function useTerminalSession({
         // drag the chip back to "working" ~600ms after every idle, and D4 would
         // debounce it back to "idle" ~1.2s later — the reported working↔ready
         // oscillation. A genuine new turn repaints the footer, so tail differs
-        // from idleFrozenTail and promotion proceeds. Claude-only, mirroring D4.
+        // from idleFrozenTail and promotion proceeds. Mirrors D4's runtimes.
         if (
-          activeRuntime === "claude" &&
+          frozenTailMeansIdle &&
           confirmedState === "idle" &&
           raw === "working" &&
           idleFrozenTail !== null &&
@@ -2308,9 +2332,12 @@ export function useTerminalSession({
       const observeAgentState = (state: { paneId: string; runtime: string | null; state: RuntimeState }) => {
         if (disposed || state.paneId !== sessionId) return;
         agentStateRevision += 1;
-        authoritativeAgentState = state.runtime === "codex" || state.runtime === "claude"
+        authoritativeAgentState = state.runtime === "codex" || state.runtime === "claude" || state.runtime === "pi"
           ? { runtime: state.runtime, state: state.state } : null;
-        if (activeRuntime === "codex" && state.state === "done") {
+        // Main's "done" for these means the TUI is gone (prompt marker or the
+        // process tree), which a Pi pane without shell integration, as after a
+        // restore, cannot show the renderer any other way.
+        if ((activeRuntime === "codex" || activeRuntime === "pi") && state.state === "done") {
           resetAgentPhase({ exitSignal: true });
           return;
         }
@@ -2368,8 +2395,11 @@ export function useTerminalSession({
       // spark.ps1 alongside 633;A. Treating it as a second source means a
       // missed or out-of-order 633 sequence doesn't strand the chip in
       // "running" forever.
+      // Pi paints 133;A zones around its own chat messages while it runs, so
+      // a Pi pane leaves prompt-return detection to the byte-level scan,
+      // which tells the shell's ST-terminated marker apart from Pi's.
       const osc133Dispose = term.parser.registerOscHandler(133, (data) => {
-        if (data.startsWith("A")) resetAgentPhase({ exitSignal: true });
+        if (data.startsWith("A") && activeRuntime !== "pi") resetAgentPhase({ exitSignal: true });
         return false;
       });
       cleanups.push(() => osc133Dispose.dispose());
@@ -2403,7 +2433,7 @@ export function useTerminalSession({
         agentMarkerCarry = markerScan.slice(-MARKER_CARRY_MAX);
         const sawAltScreenLeave = markerScan.includes("\x1b[?1049l");
         if (markerScan.includes("\x1b[?1049h")) lastAltScreenEnterAt = Date.now();
-        const sawPromptMarker = hasPromptMarker(markerScan);
+        const sawPromptMarker = promptMarkerPattern(activeRuntime).test(markerScan);
         if (
           agentPhase === "idle" &&
           recentAgentInputRuntime &&
@@ -3106,7 +3136,8 @@ export function useTerminalSession({
           if (
             restoredRuntime === "claude" ||
             restoredRuntime === "codex" ||
-            restoredRuntime === "grok"
+            restoredRuntime === "grok" ||
+            restoredRuntime === "pi"
           ) {
             setAgentRunning(restoredRuntime);
           }
@@ -4039,4 +4070,4 @@ const UI_GONE_TICKS = 14;
 // UI_GONE_TICKS poller debounce is the backstop.
 const CTRL_C_EXIT_PROBE_MS = 2_000;
 
-// unescapeOsc633 / hasPromptMarker now come from @shared/agent-patterns.
+// unescapeOsc633 / promptMarkerPattern now come from @shared/agent-patterns.

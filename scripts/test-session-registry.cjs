@@ -83,6 +83,11 @@ async function main() {
       "apply: second pane coexists",
       applySessionStart(map, rec({ paneId: "pane-2", sessionId: "sess-z" })) === true && map.size === 2,
     );
+    check(
+      "apply: a Pi record from the session tracker is accepted",
+      applySessionStart(map, rec({ paneId: "pi-pane", runtime: "pi", sessionId: "01a0d846-6ded-7009-8e06-51c7f805f522" })) === true,
+    );
+    check("apply: an unknown runtime is rejected", applySessionStart(map, rec({ paneId: "x-pane", runtime: "aider" })) === false);
   }
 
   // ── applySessionStart: entry cap prunes oldest-by-timestamp ──
@@ -246,13 +251,15 @@ async function main() {
     recordSessionStart(rec({ paneId: "closed-claude", active: true }));
     recordSessionStart(rec({ paneId: "replaced-claude", active: true }));
     recordSessionStart(rec({ paneId: "live-codex", runtime: "codex", active: true }));
-    snapshotAgentSessionsForQuit(new Map([["live-claude", "claude"], ["live-codex", "codex"], ["replaced-claude", "codex"]]));
+    recordSessionStart(rec({ paneId: "live-pi", runtime: "pi", sessionId: "01a0d846-pi", active: true }));
+    snapshotAgentSessionsForQuit(new Map([["live-claude", "claude"], ["live-codex", "codex"], ["replaced-claude", "codex"], ["live-pi", "pi"]]));
     recordSessionStart(rec({ paneId: "live-claude", sessionId: "teardown-hook", timestamp: "2099-01-01T00:00:00Z" }));
     await flushAgentSessionRegistry();
     __resetAgentSessionRegistryForTest();
     await initAgentSessionRegistry({ dir: quitDir });
     check("quit snapshot restores the live Claude conversation", latestSessionStart("live-claude")?.restoreOnBoot === true && latestSessionStart("live-claude")?.sessionId === "sess-a");
     check("quit snapshot restores live Codex", latestSessionStart("live-codex")?.restoreOnBoot === true);
+    check("quit snapshot restores a live Pi pane", latestSessionStart("live-pi")?.restoreOnBoot === true && latestSessionStart("live-pi")?.runtime === "pi");
     check("quit snapshot closes a stale Claude pointer", latestSessionStart("closed-claude")?.active === false);
     check("quit snapshot cannot restore the wrong runtime", latestSessionStart("replaced-claude")?.active === false);
     fs.rmSync(quitDir, { recursive: true, force: true });

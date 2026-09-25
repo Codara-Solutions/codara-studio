@@ -104,9 +104,11 @@ The two cycle chords follow what you are looking at:
 - **Over a terminal pane running an agent** they type that CLI's own command:
   `/model` for the model, `/effort` for the effort. Codex has no effort
   command, so the effort chord opens its `/model` picker, where Codex sets
-  reasoning depth. For Claude Code, Codara first sends Ctrl+S (Claude Code's
-  stash) so a half-written message is parked instead of being submitted with
-  the command glued on; Claude Code restores it when the picker closes.
+  reasoning depth. Pi calls it a thinking level and gets `/thinking`; a Pi
+  pane takes both chords as soon as Pi is detected in it. For Claude Code,
+  Codara first sends Ctrl+S (Claude Code's stash) so a half-written message
+  is parked instead of being submitted with the command glued on; Claude
+  Code restores it when the picker closes.
 
 The two picker chords always open the pickers of a Cora chat.
 
@@ -124,7 +126,7 @@ Open Settings with `Mod+,`. The tabs, top to bottom:
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and a note pointing to the Capability Center for MCP servers and skills. |
-| Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions resume when Codara reopens. |
+| Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |

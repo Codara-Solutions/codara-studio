@@ -1,17 +1,17 @@
-import type { AgentRuntimeKind, RunState } from "@shared/types";
+import type { RunState, TerminalAgentRuntime } from "@shared/types";
 import type { PaneNode, Tab } from "../tabs/types";
 
 // A live worker pane that the routing menu can address by paneId via
 // pty.inject. Includes both Cora-orchestrated workers (which carry a
-// runId pointing at the parent chat) and manually-launched claude/codex
-// panes (no parent chat, label falls back to "Manual <Runtime>").
+// runId pointing at the parent chat) and manually-launched claude, codex,
+// grok or pi panes (no parent chat, label falls back to "Manual <Runtime>").
 
 export interface OpenWorker {
   // The id we hand to pty.inject. For Cora workers this is the attemptId
   // (== pty session id); for manual panes it is the leaf paneId. Both are
   // registered with main as the same key, so the call site is uniform.
   injectId: string;
-  runtime: AgentRuntimeKind;
+  runtime: TerminalAgentRuntime;
   source: "spark" | "manual";
   // chat title (for "Claude · Fix login form") or undefined for manual.
   runLabel?: string;
@@ -25,6 +25,8 @@ function runtimeName(runtime: OpenWorker["runtime"]): string {
       return "Codex";
     case "grok":
       return "Grok";
+    case "pi":
+      return "Pi";
   }
 }
 
@@ -44,7 +46,7 @@ function walkLeaves(node: PaneNode, out: OpenWorker[], runs: RunState[]): void {
     // land at the shell, not the CLI agent, and quietly corrupt the line.
     if (worker.agentRunning === false) return;
     const runtime = worker.runtime;
-    if (runtime !== "claude" && runtime !== "codex" && runtime !== "grok") {
+    if (runtime !== "claude" && runtime !== "codex" && runtime !== "grok" && runtime !== "pi") {
       return;
     }
     const runLabel =

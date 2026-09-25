@@ -192,15 +192,16 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-pty-inherited-env`, `test-pty-agent-socket-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane (no agent-socket token), backpressure, spawning, cleaning up child processes. |
-| `test-terminal-agent-notify`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen` | Telling from a pane's output that an agent is running, blocked or idle (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`). |
+| `test-terminal-agent-notify`, `test-terminal-agent-notify-pi`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen` | Telling from a pane's output that an agent is running, blocked or idle (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`). |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
-| `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
+| `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
 
 ### Claude hooks, the MCP server and the agent socket
 
 `test-hook-installer`, `test-hook-watcher-lifecycle`, `test-codara-studio-mcp`
-(the tool list for each `SPARK_MCP_MODE`), `test-builtin-mcp-opt-out`,
+(the tool list for each `SPARK_MCP_MODE`), `test-standing-terminals` (what
+`codara_spawn_terminals` opens), `test-builtin-mcp-opt-out`,
 `test-builtin-mcp-ownership`, `test-grok-mcp-copy`,
 `test-capability-center-ui`, `test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket` (needs a build).
@@ -256,6 +257,7 @@ tricks it tries).
 
 These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
+`test-enumerate-open-workers`,
 `test-dock-layout`, `test-split-drop`, `test-tab-reorder`,
 `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,
 `test-workspace-colors`, `test-explorer-clipboard`, `test-file-tree-marquee`,
