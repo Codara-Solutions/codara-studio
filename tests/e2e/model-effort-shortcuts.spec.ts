@@ -85,8 +85,9 @@ test("Ctrl+M and Ctrl+N steer the chat's model and thinking effort, and the shif
     const modelMenu = page.locator(".composer-model-thinking-menu");
     await expect(modelMenu).toBeVisible({ timeout: 10_000 });
     await expect(modelMenu.getByText("Choose model")).toBeVisible();
-    // Focus lands inside the listbox, so the arrows have somewhere to start.
-    await expect(modelMenu.getByRole("option").first()).toBeFocused();
+    // Focus lands inside the listbox, on the current model, so the arrows
+    // start from where the user is (AnchoredMenu focuses the selected row).
+    await expect(modelMenu.getByRole("option", { selected: true })).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await expect(modelMenu.getByText("Choose thinking depth")).toBeVisible();

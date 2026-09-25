@@ -37,15 +37,15 @@ test("trusted preview keys operate native controls while the app is hidden", asy
     await request("preview.navigate", { url: fixture.url });
     await request("preview.wait_for", { selector: '[data-ticket="OPS-180"]' });
     const initialSnapshot = await request("preview.snapshot");
-    expect(initialSnapshot.snapshot).not.toContain("<dialog");
-    expect(initialSnapshot.snapshot).toContain("<button#previous> name=\"Previous page\" disabled");
+    expect(initialSnapshot.snapshot).not.toMatch(/^\s*dialog\b/m);
+    expect(initialSnapshot.snapshot).toMatch(/button @\S+ #previous "Previous page" disabled/);
     await request("preview.click", { selector: '[data-ticket="OPS-180"]' });
     expect(await request("preview.wait_for", { selector: "#editor", state: "visible", timeoutMs: 1000 })).toMatchObject({ ok: true });
     const openSnapshot = await request("preview.snapshot");
-    expect(openSnapshot.snapshot).toContain('<dialog#editor> name="Edit OPS-180"');
-    expect(openSnapshot.snapshot).not.toContain("<dialog#confirmation>");
-    expect(openSnapshot.snapshot).toContain('<select#priority> name="Priority" value="Normal"');
-    expect(openSnapshot.snapshot).not.toContain("<button#reload>");
+    expect(openSnapshot.snapshot).toMatch(/dialog(?: @\S+)? #editor "Edit OPS-180"/);
+    expect(openSnapshot.snapshot).not.toMatch(/dialog(?: @\S+)? #confirmation\b/);
+    expect(openSnapshot.snapshot).toMatch(/combobox @\S+ #priority "Priority" value="Normal"/);
+    expect(openSnapshot.snapshot).not.toMatch(/button @\S+ #reload\b/);
     await request("preview.evaluate", { code: 'window.keyEvents=[]; document.addEventListener("keydown", event => window.keyEvents.push({key:event.key,trusted:event.isTrusted}));' });
     await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.hide(); });
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isFocused()))).toBe(false);
@@ -70,7 +70,7 @@ test("trusted preview keys operate native controls while the app is hidden", asy
     await request("preview.key", { key: "Tab" });
     await expect.poll(async () => (await request("preview.evaluate", { code: "document.activeElement.id" })).value).toBe("save");
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isFocused()))).toBe(false);
-    await expect(request("preview.press_key", { selector: "#missing", key: "Enter" })).rejects.toThrow(/missing or not focusable/);
+    await expect(request("preview.press_key", { selector: "#missing", key: "Enter" })).rejects.toThrow(/Cannot interact with #missing: not found/);
   } finally {
     await app.close();
     await fixture.close();

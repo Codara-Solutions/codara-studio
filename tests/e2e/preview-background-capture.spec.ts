@@ -34,8 +34,24 @@ test("background screenshots capture the correct guest without selecting or reve
     await page.waitForLoadState("domcontentloaded");
     await expect(page.getByText("Capture test", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => request("app.info").then(() => true).catch(() => false)).toBe(true);
-    const first = await request("preview.navigate", { url: fixture.url, runId: "capture-first" });
-    const second = await request("preview.navigate", { url: fixture.url, runId: "capture-second" });
+    // A browser run must exist in a workspace; the tools refuse an unknown
+    // run id rather than fall back to the selected tab. Two runs get two tabs.
+    const [firstRunId, secondRunId] = await page.evaluate(async (cwd) => {
+      const spark = (window as unknown as { spark: any }).spark;
+      const ids: string[] = [];
+      for (const title of ["Capture first", "Capture second"]) {
+        const run = await spark.orchestration.createRun({
+          workspaceId: "ws-keys",
+          workspaceName: "Capture test",
+          cwd,
+          title,
+        });
+        ids.push(run.id);
+      }
+      return ids;
+    }, workspaceDir);
+    const first = await request("preview.navigate", { url: fixture.url, runId: firstRunId });
+    const second = await request("preview.navigate", { url: fixture.url, runId: secondRunId });
     expect(first.tabId).not.toBe(second.tabId);
     for (const tabId of [first.tabId, second.tabId]) {
       await request("preview.wait_for", { tabId, selector: '[data-ticket="OPS-180"]' });
