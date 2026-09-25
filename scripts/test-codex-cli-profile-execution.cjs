@@ -192,21 +192,9 @@ async function main() {
   assert.equal(selected.env.OPENAI_API_KEY, undefined);
   assert.equal(baseEnv.CODEX_HOME, "/wrong/home");
 
-  assert.equal(mod.frozenCodexCliProfileId(undefined), "personal");
-  assert.equal(mod.frozenCodexCliProfileId(null), "personal");
-  assert.equal(mod.frozenCodexCliProfileId(PROFILE_ID), PROFILE_ID);
-  assert.equal(
-    mod.preserveFrozenCodexCliProfileId(PROFILE_ID, PROFILE_ID),
-    PROFILE_ID,
-  );
-  assert.equal(
-    mod.preserveFrozenCodexCliProfileId(undefined, undefined),
-    "personal",
-  );
-  assert.throws(
-    () => mod.preserveFrozenCodexCliProfileId(PROFILE_ID, OTHER_ID),
-    /changed during one frozen execution/i,
-  );
+  assert.equal(mod.normalizeCodexCliProfileId(undefined), "personal");
+  assert.equal(mod.normalizeCodexCliProfileId(null), "personal");
+  assert.equal(mod.normalizeCodexCliProfileId(PROFILE_ID), PROFILE_ID);
 
   // Leases are exact, owner-stable, ref-counted by owner identity, and release
   // functions are idempotent.

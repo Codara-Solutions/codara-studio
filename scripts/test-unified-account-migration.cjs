@@ -423,9 +423,9 @@ async function main() {
 
   // The registry maps providers to runtimes both ways and reports terminal
   // statuses per provider.
-  assert.equal(H.registry.cliRuntimeFor("anthropic"), "claude");
-  assert.equal(H.registry.cliRuntimeFor("openai-codex"), "codex");
-  assert.equal(H.registry.cliRuntimeFor("xai"), "grok");
+  assert.equal(H.registry.unifiedAccountsFor("anthropic").adapter.runtime, "claude");
+  assert.equal(H.registry.unifiedAccountsFor("openai-codex").adapter.runtime, "codex");
+  assert.equal(H.registry.unifiedAccountsFor("xai").adapter.runtime, "grok");
   assert.equal(H.registry.providerForRuntime("grok"), "xai");
   assert.equal(H.registry.providerForRuntime("codex"), "openai-codex");
   assert.deepEqual(H.registry.UNIFIED_ACCOUNT_PROVIDERS, ["anthropic", "openai-codex", "xai"]);

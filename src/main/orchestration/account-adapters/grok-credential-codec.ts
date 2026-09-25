@@ -203,5 +203,3 @@ export function createGrokCredentialCodec(
       grokFileFromCanonical(canonical, previous, options),
   };
 }
-
-export const grokCredentialCodec = createGrokCredentialCodec();

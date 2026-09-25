@@ -20,10 +20,6 @@ export interface PiExecutionAccount {
   configDir: string;
 }
 
-export type PiExecutionAccountResolver = (
-  request: Readonly<PiExecutionAccountRequest>,
-) => PiExecutionAccount | Promise<PiExecutionAccount>;
-
 export function selectPiWorkerAccountProfile(input: {
   persistedAttemptProfileId?: string;
   runManagerProfileId?: string;

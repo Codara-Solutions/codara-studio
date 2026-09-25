@@ -71,7 +71,6 @@ async function main() {
     PiAccountProfileRegistry,
     nextDefaultAfterDeletion,
     rankPiAccountCandidates,
-    selectPiAccountCandidate,
   } = require(outfile);
 
   // Empty roots are read-only until the first mutation.
@@ -363,13 +362,13 @@ async function main() {
   );
   check(
     "unavailable and limited accounts are ineligible",
-    selectPiAccountCandidate(routingSnapshot, "anthropic", excludedSignals)?.profile.id ===
+    rankPiAccountCandidates(routingSnapshot, "anthropic", excludedSignals)[0]?.profile.id ===
       IDS.c,
     JSON.stringify(excludedSignals),
   );
   check(
     "missing signals do not make an account implicitly eligible",
-    selectPiAccountCandidate(routingSnapshot, "anthropic", []) === null,
+    rankPiAccountCandidates(routingSnapshot, "anthropic", []).length === 0,
   );
 
   const equalSignals = [
@@ -378,7 +377,7 @@ async function main() {
   ];
   check(
     "provider default deterministically breaks equal-headroom ties",
-    selectPiAccountCandidate(routingSnapshot, "anthropic", equalSignals)?.profile.id ===
+    rankPiAccountCandidates(routingSnapshot, "anthropic", equalSignals)[0]?.profile.id ===
       IDS.a,
   );
   await expectThrows(

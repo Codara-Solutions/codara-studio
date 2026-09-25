@@ -32,7 +32,6 @@ import {
   renamePiAccountProfile,
   resolvePiAccountRuntimeProfile,
   setDefaultPiAccountProfile,
-  type PiAccountProfileOwnershipGuard,
   PiOAuthLoginGate,
 } from "./pi-account-auth-store";
 import {
@@ -932,23 +931,6 @@ export async function refreshPiSubscriptionProfileCredential(
     await service.reconcileProfile(profileId).catch(() => null);
   }
   return outcome.access;
-}
-
-export async function deletePiSubscriptionProfile(
-  rawProfileId: unknown,
-  options: { ownershipGuard?: PiAccountProfileOwnershipGuard } = {},
-): Promise<PiSubscriptionOverview> {
-  const profileId = typeof rawProfileId === "string" ? rawProfileId : "";
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
-  if (!profile) throw new Error(`Pi account profile not found: ${profileId}`);
-  await deletePiAccountCredentialProfile(profile.id, options);
-  const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
-  invalidatePiSubscriptionUsageCache();
-  const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
-  invalidatePiModelCatalogCache();
-  broadcastSubscriptionsChanged(profile.provider);
-  return inspectPiSubscriptions();
 }
 
 export { renamePiAccountProfile, setDefaultPiAccountProfile };

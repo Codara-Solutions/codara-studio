@@ -183,7 +183,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   private broadcastHook: (() => void) | null;
   private sessionsHook: UnifiedTerminalSessions | null;
   private sessionShutdownHook: UnifiedSessionShutdown | null;
-  private defaultsChangedHook: (() => void | Promise<void>) | null;
+  private readonly defaultsChangedHook: (() => void | Promise<void>) | null;
 
   constructor(adapter: AccountProviderAdapter<Loc, Raw>, options: UnifiedAccountServiceOptions = {}) {
     this.adapter = adapter;
@@ -262,10 +262,6 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
 
   setSessionShutdown(hook: UnifiedSessionShutdown | null): void {
     this.sessionShutdownHook = hook;
-  }
-
-  setDefaultsChanged(hook: (() => void | Promise<void>) | null): void {
-    this.defaultsChangedHook = hook;
   }
 
   /** Best effort and off the mutation path: a pointer write never fails an account mutation. */
@@ -1386,10 +1382,6 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       this.startPersonalProbe();
     }
     return pairs;
-  }
-
-  rearmMirror(): void {
-    this.mirror.rearm();
   }
 
   stop(): void {
