@@ -28,23 +28,29 @@ the listener and the relay connection.
 A paired phone can:
 
 - list and add workspaces, and browse, read, create, rename, move and delete
-  files in them;
+  files in them. A phone cannot add the home folder itself, a disk root,
+  Codara's own folder, or a folder where apps keep settings and sign-ins
+  (the dot folders in your home folder, such as `~/.ssh`, and `~/Library` or
+  `AppData`). Add those on the computer if you really need them;
 - read git status and history, and work with GitHub pull requests and issues
   (review, publish, merge, auto-merge);
 - follow Cora runs, send messages, stop, resume and undo, and edit a run's
   board;
 - run, pause, resume and toggle automations, and use their worker terminals;
-- open, attach to and type into terminals (up to eight per device);
+- open, attach to and type into terminals (up to eight per device): a shell,
+  or Claude Code, Codex, Grok or Pi (Pi once the phone app offers it). Studio
+  picks the command, and it is the one the desktop's pane menu runs, so
+  Claude Code starts with `--dangerously-skip-permissions` and Codex and Grok
+  with `--yolo`, as they do on the desktop;
 - read and change Capability Center items, Cora memory and profiles;
 - receive notifications.
 
 There are no permission tiers yet: a paired device has the same authority as
-the desktop UI. Treat pairing like handing someone your unlocked laptop.
-Known gaps (see also the security section of
-[the September 2026 review](./reviews/2026-09-codebase-review.md#4-security)):
-a phone can add your home folder itself as a workspace, terminals it opens
-start Claude Code and Codex with permission prompts skipped, and `cora.send`
-is not rate limited.
+the desktop UI, never more. Treat pairing like handing someone your unlocked
+laptop. Messages to Cora are limited to 20 at once per phone, then one every
+3 seconds; a phone over the limit keeps the message queued and sends it a
+little later. See also the security section of
+[the September 2026 review](./reviews/2026-09-codebase-review.md#4-security).
 
 ## Identity and pairing
 
@@ -84,7 +90,12 @@ is not rate limited.
 encrypted stream, and `production.ts` binds it to the app's live services.
 
 - Inbound limits: 1 MiB per frame, 32 requests in flight, a 4 MiB write
-  backlog, and 8 terminals per device (`rpc.ts`, `terminal-leases.ts`).
+  backlog, 8 terminals per device (`rpc.ts`, `terminal-leases.ts`), and a
+  `cora.send` budget per device (`device-rate-limit.ts`, owned by the
+  service so reconnecting does not refill it).
+- Terminals are launched from a profile name (`shell`, `claude`, `codex`,
+  `grok`, `pi`); no command line crosses the wire. `terminal-launch.ts` maps
+  each profile to the desktop's own launch command.
 - Mutations carry idempotency keys recorded in a ledger
   (`mutation-ledger.ts`), so a retry over a flaky link never applies twice.
 - Notifications reach the phone through `phone-notify.ts`, which bridges the

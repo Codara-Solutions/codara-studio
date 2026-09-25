@@ -63,9 +63,10 @@ the exit (`owned-process-tree.ts`, one shared `ps` listing per sweep).
 `agent-socket.ts` runs an HTTP JSON-RPC server on `127.0.0.1`. Callers need
 a bearer token: 32 random bytes, compared in constant time. The URL and token
 are written to `~/.codarastudio/agent-socket.json` (mode 0600) at every
-start, and every PTY also gets them in `SPARK_AGENT_SOCKET` and
-`SPARK_AGENT_TOKEN`. That is how anything running on the machine for you
-finds the app: the MCP server, the `cora` CLI, Cora's Pi processes. The
+start. That file is how anything running on the machine for you finds the
+app: the MCP server, the `cora` CLI, Cora's Pi processes. Terminals get only
+their pane id (`SPARK_AGENT_PANE_ID`), never the token, so programs a pane
+runs do not inherit it; a program running as you can still read the file. The
 methods cover terminals, preview, chat, accounts, runs, workers,
 automations and boards. A dev-only `app.*` namespace lets you inspect the UI
 from a terminal. Runs of imported pull requests get a scoped token instead,
@@ -287,6 +288,11 @@ relay.
 - **Devices** can be revoked one by one.
 - **An idempotency ledger** makes a retried write apply once.
 - **Terminal leases** let a phone's terminal survive a dropped connection.
+- **No more than the desktop.** A phone names a terminal profile and Studio
+  picks the command (`terminal-launch.ts`), the same one the desktop's pane
+  menu runs. It may not add the home folder, a disk root, Codara's own home
+  or a credentials folder as a workspace (`local-policy.ts`), and its
+  `cora.send` calls share a per-device budget.
 
 `rpc.ts` is the wire protocol, and `production.ts` binds it to the live
 services. SSH workspaces (`src/main/remote/`) are a separate feature. See
@@ -296,7 +302,9 @@ services. SSH workspaces (`src/main/remote/`) are a separate feature. See
 
 Everything Codara owns lives under `~/.codarastudio/` (override with
 `CODARA_HOME_DIR`). Settings, workspaces and preferences are JSON files that
-keep their legacy `spark-` names as an on-disk contract. Runs are folders of
+keep their legacy `spark-` names as an on-disk contract. The secrets Codara
+keeps itself, the OpenRouter key and saved SSH passwords, are encrypted by
+the operating system through Electron `safeStorage`. Runs are folders of
 files. The complete list, with the module that owns each file, is in the
 [codebase tour](./codebase-tour.md#4-where-state-lives-on-disk). The
 user-facing version is [on-your-machine.md](./on-your-machine.md).
