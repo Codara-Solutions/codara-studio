@@ -87,35 +87,6 @@ export async function resolveGrokCliExecutionProfile(
   };
 }
 
-/**
- * Persisted pre-feature absence is always the personal home, never the mutable
- * configured default. New-session callers resolve the default explicitly and
- * persist the resulting concrete id before launch.
- */
-export function frozenGrokCliProfileId(
-  value: string | null | undefined,
-): GrokCliProfileId {
-  return normalizeGrokCliProfileId(value);
-}
-
-export function preserveFrozenGrokCliProfileId(
-  frozenValue: string | null | undefined,
-  resultValue: string | null | undefined,
-): GrokCliProfileId {
-  const frozen = frozenGrokCliProfileId(frozenValue);
-  const result =
-    resultValue === undefined || resultValue === null || resultValue === ""
-      ? frozen
-      : normalizeGrokCliProfileId(
-          resultValue,
-          "Resolved native Grok account profile id",
-        );
-  if (result !== frozen) {
-    throw new Error("Native Grok account changed during one frozen execution");
-  }
-  return frozen;
-}
-
 export class GrokCliProfileLeaseRegistry {
   private readonly ownerToProfile = new Map<
     string,

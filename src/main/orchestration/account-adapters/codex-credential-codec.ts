@@ -71,10 +71,6 @@ export function codexAccountIdFromAccessToken(accessToken: unknown): string | un
   return nonEmpty(accountId) ? accountId : undefined;
 }
 
-export function isCodexAuthFile(value: unknown): value is CodexAuthFile {
-  return isRecord(value) && (value.tokens === undefined || isRecord(value.tokens));
-}
-
 export function canonicalFromCodexFile(
   raw: CodexAuthFile | null | undefined,
 ): CanonicalCredential | null {
@@ -208,5 +204,3 @@ export function createCodexCredentialCodec(
       codexFileFromCanonical(canonical, previous, options),
   };
 }
-
-export const codexCredentialCodec = createCodexCredentialCodec();

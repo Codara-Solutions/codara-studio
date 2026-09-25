@@ -111,35 +111,6 @@ export async function resolveCodexCliExecutionProfile(
   };
 }
 
-/**
- * Persisted pre-feature absence is always the personal home, never the mutable
- * configured default. New-session callers resolve the default explicitly and
- * persist the resulting concrete id before launch.
- */
-export function frozenCodexCliProfileId(
-  value: string | null | undefined,
-): CodexCliProfileId {
-  return normalizeCodexCliProfileId(value);
-}
-
-export function preserveFrozenCodexCliProfileId(
-  frozenValue: string | null | undefined,
-  resultValue: string | null | undefined,
-): CodexCliProfileId {
-  const frozen = frozenCodexCliProfileId(frozenValue);
-  const result =
-    resultValue === undefined || resultValue === null || resultValue === ""
-      ? frozen
-      : normalizeCodexCliProfileId(
-          resultValue,
-          "Resolved native Codex account profile id",
-        );
-  if (result !== frozen) {
-    throw new Error("Native Codex account changed during one frozen execution");
-  }
-  return frozen;
-}
-
 export class CodexCliProfileLeaseRegistry {
   private readonly ownerToProfile = new Map<
     string,

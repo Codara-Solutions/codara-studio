@@ -636,15 +636,6 @@ export function rankPiAccountCandidates(
     });
 }
 
-export function selectPiAccountCandidate(
-  snapshot: PiAccountProfilesSnapshot,
-  provider: PiSubscriptionProvider,
-  headroom: readonly PiAccountSanitizedHeadroom[],
-  options: RankPiAccountCandidatesOptions = {},
-): PiAccountCandidate | null {
-  return rankPiAccountCandidates(snapshot, provider, headroom, options)[0] ?? null;
-}
-
 export class PiAccountProfileRegistry {
   readonly rootDir: string;
   readonly filePath: string;

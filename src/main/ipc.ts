@@ -97,10 +97,7 @@ import {
   resolveFrozenNativeClaudeProfile,
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
-import {
-  nativeCliAccounts,
-  NativeCliAccountError,
-} from "./orchestration/native-cli-accounts";
+import { nativeCliAccounts } from "./orchestration/native-cli-accounts";
 import {
   codexAccounts,
   grokAccounts,
@@ -389,7 +386,6 @@ import type {
   ExportCoraWhiteboardFileInput,
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
-  NativeCliAccountCreateInput,
   NativeCliAccountDeleteResult,
   NativeCliAccountMutationResult,
   NativeCliAccountProfileInput,
@@ -767,20 +763,6 @@ export function registerIpc(): void {
     },
   );
   handle(
-    "native-cli-accounts:create",
-    async (
-      _event,
-      rawInput: Partial<NativeCliAccountCreateInput> | null,
-    ): Promise<NativeCliAccountMutationResult> => {
-      await unifiedAccountsReady();
-      // A CLI profile is created by signing in through the account card:
-      // one sign-in writes both halves.
-      return nativeCliAccounts.assertNotUnified(
-        nativeCliAccountRuntimeFromIpc(rawInput?.runtime),
-      );
-    },
-  );
-  handle(
     "native-cli-accounts:rename",
     async (
       _event,
@@ -795,58 +777,6 @@ export function registerIpc(): void {
       const result = await nativeCliAccounts.rename(input);
       broadcastNativeCliAccountsChanged();
       return result;
-    },
-  );
-  handle(
-    "native-cli-accounts:set-default",
-    async (
-      _event,
-      rawInput: Partial<NativeCliAccountProfileInput> | null,
-    ): Promise<NativeCliAccountMutationResult> => {
-      await unifiedAccountsReady();
-      const input = nativeCliAccountProfileInputFromIpc(rawInput);
-      // A CLI profile is one half of an account: switching it switches the
-      // whole account, Cora included. Until the Accounts panel speaks in
-      // account ids, a terminal id is mapped to its row.
-      const provider = providerForRuntime(input.runtime);
-      const accounts = unifiedAccountsFor(provider);
-      const row = await accounts.coraProfileForCli(input.profileId);
-      if (!row) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
-          runtime: input.runtime,
-          profileId: input.profileId,
-        });
-      }
-      let closedSessionCount = 0;
-      try {
-        closedSessionCount = (await accounts.useAccount(row.id)).closedSessionCount;
-      } catch (error) {
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
-      const inspection = (await nativeCliAccounts.inspect(input.runtime)).runtimes[0];
-      const profile = inspection.profiles.find((entry) => entry.id === input.profileId);
-      if (!profile) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_NOT_FOUND", {
-          runtime: input.runtime,
-          profileId: input.profileId,
-        });
-      }
-      return { profile, inspection, closedSessionCount };
-    },
-  );
-  handle("native-cli-accounts:prepare-login", async (_event, rawInput: unknown) => {
-    await unifiedAccountsReady();
-    const input = nativeCliAccountProfileInputFromIpc(rawInput);
-    return nativeCliAccounts.assertNotUnified(input.runtime, input.profileId);
-  });
-  handle("native-cli-accounts:cancel-login", async (): Promise<boolean> => false);
-  handle(
-    "native-cli-accounts:logout",
-    async (_event, rawInput: unknown): Promise<NativeCliAccountsInspection> => {
-      await unifiedAccountsReady();
-      const input = nativeCliAccountProfileInputFromIpc(rawInput);
-      return nativeCliAccounts.assertNotUnified(input.runtime, input.profileId);
     },
   );
   handle(
@@ -884,11 +814,6 @@ export function registerIpc(): void {
     await unifiedAccountsReady();
     const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
     return inspectPiSubscriptions();
-  });
-  handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
-    await unifiedAccountsReady();
-    const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
-    return startPiSubscriptionLogin(input?.provider, event.sender);
   });
   handle(
     "pi-subscriptions:add-account",
@@ -1022,36 +947,6 @@ export function registerIpc(): void {
     await unifiedAccountsReady();
     const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
-  });
-  handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
-    await unifiedAccountsReady();
-    const provider = piSubscriptionProviderFromIpc(input?.provider);
-    const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
-    const overview = await inspectPiSubscriptions();
-    const target =
-      overview.profiles?.find(
-        (profile) => profile.provider === provider && profile.isDefault,
-      ) ??
-      overview.profiles?.find((profile) => profile.provider === provider);
-    if (!target) return overview;
-    // A row is one half of an account: the unified delete hands the defaults
-    // off and removes the CLI half with it. Account 1 is the user's own CLI
-    // login and is never deleted from here.
-    const accounts = unifiedAccountsFor(provider);
-    if (target.builtIn) {
-      const { loginHint } = accounts.adapter.labels;
-      throw new Error(
-        `Account 1 is your own ${loginHint}. Sign out in a terminal to remove it.`,
-      );
-    }
-    await accounts.deleteAccount(target.id, {
-      ownershipGuard: async (profile) => {
-        await assertPiAccountProfileIsNotActive(profile.id);
-        return false;
-      },
-    });
-    broadcastNativeCliAccountsChanged();
-    return inspectAfterPiAccountMetadataChange(provider);
   });
   handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
@@ -2642,17 +2537,11 @@ export function registerIpc(): void {
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
-        nativeCliLoginToken?: string;
         mirror?: boolean;
         preserveSizeOnAttach?: boolean;
       },
     ) => {
       // Spawning a pty starts a real OS process; only the trusted renderer may.
-      // CLI sign-ins no longer run in a Studio terminal: one browser sign-in
-      // through the account card writes both halves.
-      if (args?.nativeCliLoginToken !== undefined) {
-        throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED");
-      }
       let projectPolicyMode: ProjectPolicyMode | undefined;
       if (parseManualAgentStartupCommand(args.startupCommand)) {
         // Security boundary: trust for a managed agent autorun comes only from

@@ -480,75 +480,6 @@ export interface SpawnOptions {
    * Cora workers (SPARK_RUN_ID) never carry it. Set by spawn() itself.
    */
   agentShellFollowsActiveAccount?: boolean;
-  /**
-   * Main-process-only exact child environment. When present, pty-manager does
-   * not inherit, enrich, or append Studio/provider variables. Renderer IPC
-   * deliberately never forwards this field.
-   */
-  exactEnvironment?: NodeJS.ProcessEnv;
-  /** Main-process-only: a prepared login must never attach to another PTY. */
-  requireFreshSession?: boolean;
-}
-
-export interface ExactExecutablePtyOptions {
-  id: string;
-  cwd: string;
-  cols: number;
-  rows: number;
-  webContents: WebContents | null;
-  executable: string;
-  args: readonly string[];
-  env: NodeJS.ProcessEnv;
-}
-
-export interface ExactExecutablePtyLaunch {
-  spawn: {
-    id: string;
-    pid: number;
-    startupCommandHandled?: boolean;
-    attached?: boolean;
-  };
-  exit: Promise<PtyExitInfo>;
-}
-
-/**
- * Main-only direct-executable seam for interactive native-account login.
- * Register the exit waiter before spawning so even an immediately exiting CLI
- * keeps the account mutation guard alive through its complete PTY lifetime.
- */
-export async function spawnExactExecutable(
-  opts: ExactExecutablePtyOptions,
-): Promise<ExactExecutablePtyLaunch> {
-  let resolveExit!: (info: PtyExitInfo) => void;
-  const exit = new Promise<PtyExitInfo>((resolve) => {
-    resolveExit = resolve;
-  });
-  const offExit = onExit(opts.id, (info) => {
-    offExit();
-    resolveExit(info);
-  });
-  try {
-    const spawned = await spawn({
-      id: opts.id,
-      shell: {
-        id: "native-cli-account-login",
-        label: "Native CLI account sign-in",
-        exe: opts.executable,
-        args: [...opts.args],
-        family: "other",
-      },
-      cwd: opts.cwd,
-      cols: opts.cols,
-      rows: opts.rows,
-      webContents: opts.webContents,
-      exactEnvironment: { ...opts.env },
-      requireFreshSession: true,
-    });
-    return { spawn: spawned, exit };
-  } catch (error) {
-    offExit();
-    throw error;
-  }
 }
 
 // node-pty on POSIX (macOS/Linux) never execs the target program directly.
@@ -717,9 +648,6 @@ async function spawnWithSessionLock(
 
   const existing = sessions.get(opts.id);
   if (existing) {
-    if (opts.requireFreshSession) {
-      throw new Error(`pty session '${opts.id}' already exists`);
-    }
     if (
       opts.nativeCodexProfileId !== undefined &&
       opts.nativeCodexProfileId !== existing.nativeCodexProfileId
@@ -838,14 +766,6 @@ async function spawnWithSessionLock(
       throw new Error("Native agent account profiles are only available in local terminals.");
     }
     return doSpawnRemote(opts);
-  }
-
-  // Prepared native-account login is already fully resolved and sanitized by
-  // native-cli-accounts. It launches the executable directly, with no shell,
-  // account re-resolution, hook install, or environment augmentation at this
-  // layer.
-  if (opts.exactEnvironment !== undefined) {
-    return doSpawn(opts, null, false);
   }
 
   let preparedOpts = opts;
@@ -1327,11 +1247,9 @@ function doSpawn(
   const rows = Math.max(1, opts.rows | 0);
 
   const env: Record<string, string> = {};
-  const environmentSource = opts.exactEnvironment ?? process.env;
-  for (const [k, v] of Object.entries(environmentSource)) {
+  for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") env[k] = v;
   }
-  if (opts.exactEnvironment === undefined) {
   // Strip inherited Claude Code nesting markers (CLAUDECODE, CLAUDE_CODE_*…)
   // BEFORE the per-shell / per-spawn override layers below, so callers that
   // deliberately set a CLAUDE_CODE_* var still win. When Codara is launched
@@ -1474,7 +1392,6 @@ function doSpawn(
   if (opts.plainShellFollowsActiveAccount || opts.agentShellFollowsActiveAccount) {
     env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
     Object.assign(env, personalCliShellHomeEnvironment());
-  }
   }
 
   const cwd =

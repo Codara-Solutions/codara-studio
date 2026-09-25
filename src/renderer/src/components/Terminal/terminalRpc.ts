@@ -86,7 +86,6 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   // pane's spawn re-resolve a default that may have changed since that
   // validation, launching under a different account than main checked.
   const nativeClaudeProfileId = readString(params, "nativeClaudeProfileId");
-  const nativeCliLoginToken = readString(params, "nativeCliLoginToken");
   const origin = readPhoneOrigin(params.origin);
   return createAgentTerminal({
     cwd: cwd ?? undefined,
@@ -96,7 +95,6 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     workspaceCwd: workspaceCwd ?? undefined,
     callerPaneId: callerPaneId ?? undefined,
     nativeClaudeProfileId: nativeClaudeProfileId ?? undefined,
-    nativeCliLoginToken: nativeCliLoginToken ?? undefined,
     origin: origin ?? undefined,
   });
 }

@@ -239,21 +239,9 @@ async function main() {
     "managed profile selectors must be NFC-normalized",
   );
 
-  assert.equal(mod.frozenClaudeCliProfileId(undefined), "personal");
-  assert.equal(mod.frozenClaudeCliProfileId(null), "personal");
-  assert.equal(mod.frozenClaudeCliProfileId(PROFILE_ID), PROFILE_ID);
-  assert.equal(
-    mod.preserveFrozenClaudeCliProfileId(PROFILE_ID, PROFILE_ID),
-    PROFILE_ID,
-  );
-  assert.equal(
-    mod.preserveFrozenClaudeCliProfileId(undefined, undefined),
-    "personal",
-  );
-  assert.throws(
-    () => mod.preserveFrozenClaudeCliProfileId(PROFILE_ID, OTHER_ID),
-    /changed during one frozen execution/i,
-  );
+  assert.equal(mod.normalizeClaudeCliProfileId(undefined), "personal");
+  assert.equal(mod.normalizeClaudeCliProfileId(null), "personal");
+  assert.equal(mod.normalizeClaudeCliProfileId(PROFILE_ID), PROFILE_ID);
 
   // Leases are owner-stable and reference-counted. A profile cannot be
   // deleted or newly acquired while an exclusive deletion guard owns it.
@@ -346,8 +334,6 @@ async function main() {
   assert.equal(leases.isLeased("personal"), true);
   leases.clear();
   assert.equal(leases.isLeased("personal"), false);
-  assert.equal(mod.isPersonalClaudeCliProfile("personal"), true);
-  assert.equal(mod.isPersonalClaudeCliProfile(OTHER_ID), false);
 
   // Production routing is deliberately funneled through the process-wide
   // runtime module. PTY needs the pure env builder for its final overlay; all
@@ -382,7 +368,6 @@ async function main() {
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
       "src/main/orchestration/account-adapters/claude-account-adapter.ts",
-      "src/main/orchestration/anthropic-accounts.ts",
       "src/main/orchestration/claude-live-slot-undo.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",

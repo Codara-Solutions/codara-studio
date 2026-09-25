@@ -216,6 +216,8 @@ test("plain conversational Cora turns omit empty technical disclosures", async (
 });
 
 test("message roles stay explicit, explicit rewind works, and Stop preserves chat", async () => {
+  // Waits on a real worker launch before steering, on top of the rewinds.
+  test.setTimeout(60_000);
   const fixture = await prepareFixture("codara-rewind-roles-");
   const seededRunId = "run-rewind-seeded";
   const manualRunId = "run-rewind-manual";
@@ -248,6 +250,17 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
         SPARK_HOME_DIR: fixture.userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
+        // The roles run below needs Cora to be working when the steering
+        // message arrives. With no subscription in this throwaway home the
+        // manager yields no decision, and manual fallback turns that into one
+        // plain-shell worker that stays live until Stop kills it (the same
+        // route orchestration-smoke drives). The CLI homes are pinned too:
+        // Account 1 is adopted from the machine's own Claude Code, Codex or
+        // Grok login, which would otherwise run a real manager turn.
+        SPARK_ENABLE_MANUAL_FALLBACK: "1",
+        CODEX_HOME: join(fixture.root, "codex-home"),
+        CLAUDE_CONFIG_DIR: join(fixture.root, "claude-home"),
+        GROK_HOME: join(fixture.root, "grok-home"),
       },
     });
     const page = await app.firstWindow();
@@ -300,15 +313,41 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
         kind: "note",
         message: "Cora answer",
       });
-      await spark.orchestration.updateRunStatus({ runId: run.id, status: "planning" });
-      await spark.orchestration.addRunMessage({
+      // Start Cora on the run the way a chat does, so the next message is
+      // sent while she works and the run itself classifies it as steering.
+      await spark.orchestration.startAutopilot({
+        workspaceId: "ws-e2e",
+        workspaceName: "workspace",
+        cwd,
         runId: run.id,
+      });
+      return run.id as string;
+    }, fixture.workspaceDir);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (runId) => {
+            const spark = (window as unknown as { spark: any }).spark;
+            const current = await spark.orchestration.getRun(runId);
+            return (
+              current.status === "running" &&
+              current.workerAttempts.some((attempt: any) =>
+                ["launching", "running"].includes(attempt.status),
+              )
+            );
+          }, roleRunId),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+    await page.evaluate(async (runId) => {
+      const spark = (window as unknown as { spark: any }).spark;
+      await spark.orchestration.addRunMessage({
+        runId,
         author: "user",
         kind: "note",
         message: "Steering queued while Cora works",
       });
-      return run.id as string;
-    }, fixture.workspaceDir);
+    }, roleRunId);
 
     await selectCoraTab(page);
     await selectChatFromHistory(page, "Message roles", roleRunId);
@@ -389,20 +428,6 @@ async function prepareFixture(prefix: string): Promise<{
   return { root, userDataDir, workspaceDir };
 }
 
-/**
- * A native-Codex manager only launches once the selected account resolves as
- * connected (codex-cli-account-profiles.ts:964). For the personal profile —
- * the one every fixture here uses, since the fake ~/.codarastudio holds no managed
- * accounts — connectivity is pure filesystem state: defaultCodexCliAuthChecker
- * (codex-cli-account-profiles.ts:539) wants $CODEX_HOME to be a real directory
- * (not a symlink) holding a regular auth.json that is not readable by group or
- * other users. A bare ~/.codex directory reads as "missing" and the launch
- * fails before any argv is captured.
- *
- * The credential shape mirrors scripts/test-native-cli-accounts.cjs so the
- * account-card identity reader finds the fields it expects; nothing in these
- * tests reads the values back.
- */
 async function seedConversation(page: Page, cwd: string): Promise<string> {
   return page.evaluate(async (workspaceCwd) => {
     const spark = (window as unknown as { spark: any }).spark;

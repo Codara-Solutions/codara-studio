@@ -61,8 +61,9 @@ import { isAgentRuntimeKind } from "../../shared/agent-families";
  * The token-blind view of the three native CLI profile stores, plus rename.
  * Every other mutation of a CLI profile (create, sign in, switch, sign out,
  * delete) belongs to the unified account service of its provider: one
- * sign-in serves Cora and the CLI together, and this facade refuses them
- * with one typed code so a caller learns where to go.
+ * sign-in serves Cora and the CLI together. The agent socket answers the
+ * retired nativeAccounts methods with NATIVE_CLI_ACCOUNT_UNIFIED so an old
+ * caller learns where to go.
  */
 
 export type NativeCliAccountRuntime = "claude" | "codex" | "grok";
@@ -131,14 +132,6 @@ export interface NativeCliAccountRenameInput
 export interface NativeCliAccountMutationResult {
   profile: NativeCliAccountProfile;
   inspection: NativeCliAccountRuntimeInspection;
-  /** Sessions closed before an account activation; absent for other mutations. */
-  closedSessionCount?: number;
-}
-
-export interface NativeCliAccountDeleteResult {
-  runtime: NativeCliAccountRuntime;
-  profileId: string;
-  deleted: boolean;
 }
 
 /**
@@ -489,18 +482,6 @@ export class NativeCliAccountService {
       });
     }
     return profile;
-  }
-
-  /**
-   * Every mutation but rename belongs to the unified account service of the
-   * CLI's provider: one sign-in through the account card writes both halves,
-   * and the service owns switching, sharing and deletion.
-   */
-  assertNotUnified(runtime: NativeCliAccountRuntime, profileId?: string): never {
-    throw new NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
-      runtime,
-      ...(profileId ? { profileId } : {}),
-    });
   }
 
   async rename(

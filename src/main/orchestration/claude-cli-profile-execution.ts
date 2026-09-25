@@ -3,7 +3,6 @@ import type {
   ClaudeCliResolvedProfile,
 } from "./claude-cli-account-profiles";
 import {
-  CLAUDE_CLI_PERSONAL_PROFILE_ID,
   ClaudeCliAccountProfileLeasedError,
   ClaudeCliAccountProfileStore,
   normalizeClaudeCliProfileId,
@@ -45,35 +44,6 @@ export async function resolveClaudeCliExecutionProfile(
       resolved.configDirEnv,
     ),
   };
-}
-
-/**
- * Persisted pre-feature absence is always the personal config directory, never
- * the mutable configured default. New-session callers must resolve the default
- * explicitly and persist the resulting concrete id before launch.
- */
-export function frozenClaudeCliProfileId(
-  value: string | null | undefined,
-): ClaudeCliProfileId {
-  return normalizeClaudeCliProfileId(value);
-}
-
-export function preserveFrozenClaudeCliProfileId(
-  frozenValue: string | null | undefined,
-  resultValue: string | null | undefined,
-): ClaudeCliProfileId {
-  const frozen = frozenClaudeCliProfileId(frozenValue);
-  const result =
-    resultValue === undefined || resultValue === null || resultValue === ""
-      ? frozen
-      : normalizeClaudeCliProfileId(
-          resultValue,
-          "Resolved native Claude account profile id",
-        );
-  if (result !== frozen) {
-    throw new Error("Native Claude account changed during one frozen execution");
-  }
-  return frozen;
 }
 
 export class ClaudeCliProfileLeaseRegistry {
@@ -195,10 +165,4 @@ let defaultLeases: ClaudeCliProfileLeaseRegistry | null = null;
 export function defaultClaudeCliProfileLeases(): ClaudeCliProfileLeaseRegistry {
   defaultLeases ??= new ClaudeCliProfileLeaseRegistry();
   return defaultLeases;
-}
-
-export function isPersonalClaudeCliProfile(
-  profileId: ClaudeCliProfileId,
-): profileId is typeof CLAUDE_CLI_PERSONAL_PROFILE_ID {
-  return profileId === CLAUDE_CLI_PERSONAL_PROFILE_ID;
 }

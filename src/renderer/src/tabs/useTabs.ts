@@ -464,7 +464,6 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     delete node.autorun;
     delete node.origin;
     delete node.nativeClaudeProfileId;
-    delete node.nativeCliLoginToken;
     // Scrollback is durable here: when the restore preference is off,
     // persist() already stripped it, so whatever survived to hydration is
     // meant to replay.
@@ -572,7 +571,6 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       !("autorun" in node) &&
       !("origin" in node) &&
       !("nativeClaudeProfileId" in node) &&
-      !("nativeCliLoginToken" in node) &&
       !("bootResume" in node) &&
       !dropProcessState
     ) {
@@ -583,7 +581,6 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       autorun: _autorun,
       origin: _origin,
       nativeClaudeProfileId: _nativeClaudeProfileId,
-      nativeCliLoginToken: _nativeCliLoginToken,
       bootResume: _bootResume,
       ...rest
     } = node;
@@ -922,7 +919,6 @@ export interface AgentTerminalTabOptions {
   origin?: TerminalLeafOrigin;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
-  nativeCliLoginToken?: string;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -952,9 +948,6 @@ export function appendAgentTerminalToWorkspaceLayout(
         : {}),
       ...(options?.nativeGrokProfileId
         ? { nativeGrokProfileId: options.nativeGrokProfileId }
-        : {}),
-      ...(options?.nativeCliLoginToken
-        ? { nativeCliLoginToken: options.nativeCliLoginToken }
         : {}),
     },
     activePaneId: paneId,
@@ -1066,7 +1059,6 @@ export interface UseTabsApi {
     options?: {
       focus?: boolean;
       agentSession?: TerminalAgentSession | null;
-      nativeCliLoginToken?: string;
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
       nativeGrokProfileId?: string;
@@ -1865,7 +1857,6 @@ export function useTabs(
       options?: {
         focus?: boolean;
         agentSession?: TerminalAgentSession | null;
-        nativeCliLoginToken?: string;
         nativeCodexProfileId?: string;
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
@@ -1882,9 +1873,6 @@ export function useTabs(
       if (options?.agentSession) root.agentSession = options.agentSession;
       if (options?.manualAgentRuntime) {
         root.worker = createManualAgentLaunchWorker(options.manualAgentRuntime, paneId);
-      }
-      if (options?.nativeCliLoginToken) {
-        root.nativeCliLoginToken = options.nativeCliLoginToken;
       }
       if (root.worker && options?.nativeCodexProfileId) {
         root.worker.nativeCodexProfileId = options.nativeCodexProfileId;
@@ -1923,9 +1911,6 @@ export function useTabs(
           : {}),
         ...(options?.nativeGrokProfileId
           ? { nativeGrokProfileId: options.nativeGrokProfileId }
-          : {}),
-        ...(options?.nativeCliLoginToken
-          ? { nativeCliLoginToken: options.nativeCliLoginToken }
           : {}),
       };
       const title = options?.title?.trim() || "terminals";

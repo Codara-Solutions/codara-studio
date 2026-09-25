@@ -54,7 +54,8 @@ async function buildHarness() {
   fs.writeFileSync(
     entry,
     [
-      `export * as accounts from ${JSON.stringify(orchestration("anthropic-accounts.ts"))};`,
+      `export * as accounts from ${JSON.stringify(orchestration("unified-accounts.ts"))};`,
+      `export * as claudeAdapter from ${JSON.stringify(orchestration("account-adapters/claude-account-adapter.ts"))};`,
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as claudeProfiles from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("claude-cli-profile-execution.ts"))};`,
@@ -105,6 +106,24 @@ async function buildHarness() {
     ],
   });
   return require(out);
+}
+
+// The Claude account service is the unified service over the Claude adapter,
+// built from the same seams the registry wires in production.
+function claudeAccountService(H, options) {
+  const { claudeStore, leases, backend, fileOnly, readIdentity, platform, ...rest } = options;
+  return new H.accounts.UnifiedAccountService(
+    H.claudeAdapter.createClaudeAccountAdapter({
+      ...(claudeStore ? { store: claudeStore } : {}),
+      ...(leases ? { leases } : {}),
+      ...(backend ? { backend } : {}),
+      ...(fileOnly ? { fileOnly } : {}),
+      ...(readIdentity ? { readIdentity } : {}),
+      ...(platform ? { platform } : {}),
+      ...(rest.log ? { log: rest.log } : {}),
+    }),
+    rest,
+  );
 }
 
 async function loadAuthStorage() {
@@ -204,7 +223,7 @@ async function main() {
   const liveOwners = new Set();
   const disposed = [];
   const logs = [];
-  const service = new H.accounts.AnthropicAccountService({
+  const service = claudeAccountService(H, {
     piStore,
     claudeStore,
     leases,
@@ -336,7 +355,7 @@ async function main() {
 
   // A failure while building the half leaves no directory and no link.
   const fragile = await connectCora("Fragile", 3);
-  const fragileService = new H.accounts.AnthropicAccountService({
+  const fragileService = claudeAccountService(H, {
     piStore,
     claudeStore,
     leases,
@@ -404,7 +423,7 @@ async function main() {
   refusingStore.setDefaultProfile = async () => {
     throw new Error("claude store refused");
   };
-  const refusingService = new H.accounts.AnthropicAccountService({
+  const refusingService = claudeAccountService(H, {
     piStore,
     claudeStore: refusingStore,
     leases,
@@ -593,7 +612,7 @@ async function main() {
     const liveOwners2 = new Set();
     const logs2 = [];
     let deletingCora = null;
-    const service2 = new H.accounts.AnthropicAccountService({
+    const service2 = claudeAccountService(H, {
       piStore: piStore2,
       claudeStore: claudeStore2,
       leases: leases2,

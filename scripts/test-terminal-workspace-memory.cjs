@@ -193,7 +193,6 @@ async function main() {
     "closed panes release every terminal remount guard without evicting live panes",
     source.includes("export function forgetTerminalSessionMemory") &&
       source.includes("autorunFiredSessions.delete(sessionId)") &&
-      source.includes("nativeCliLoginTokenFiredSessions.delete(sessionId)") &&
       source.includes("autoResumeAttempts.delete(sessionId)") &&
       source.includes("resumeHintShown.delete(sessionId)") &&
       appSource.includes("forgetTerminalSessionMemory(paneId)"),

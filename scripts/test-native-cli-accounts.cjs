@@ -389,17 +389,17 @@ async function main() {
   // Unreadable, absent, and API-key-only credentials pair with nothing rather
   // than failing the inspection.
   assert.equal(
-    await mod.readCodexCliAccountFingerprint(path.join(TMP, "missing-auth.json")),
+    (await mod.readCodexCliAccountIdentity(path.join(TMP, "missing-auth.json"))).fingerprint,
     undefined,
   );
   const malformed = path.join(TMP, "malformed-auth.json");
   privateFile(malformed, "{not json");
-  assert.equal(await mod.readCodexCliAccountFingerprint(malformed), undefined);
+  assert.equal((await mod.readCodexCliAccountIdentity(malformed)).fingerprint, undefined);
   const apiKeyOnly = path.join(TMP, "api-key-auth.json");
   privateFile(apiKeyOnly, JSON.stringify({ OPENAI_API_KEY: "SECRET" }));
-  assert.equal(await mod.readCodexCliAccountFingerprint(apiKeyOnly), undefined);
+  assert.equal((await mod.readCodexCliAccountIdentity(apiKeyOnly)).fingerprint, undefined);
   assert.equal(
-    await mod.readCodexCliAccountFingerprint(personalCodexAuth),
+    (await mod.readCodexCliAccountIdentity(personalCodexAuth)).fingerprint,
     EXPECTED_FINGERPRINT,
   );
   assert.deepEqual(await mod.readCodexCliAccountIdentity(personalCodexAuth), {
@@ -504,52 +504,22 @@ async function main() {
   assert.equal(mod.jwtEmailClaim(jwt({ email: CODEX_EMAIL })), CODEX_EMAIL);
   assert.equal(mod.jwtEmailClaim(undefined), undefined);
 
-  // The Claude config is read the same way: only the two account fields, and a
-  // config with an unusable address still pairs on its uuid.
-  const brokenEmailConfig = path.join(TMP, "broken-email", ".claude.json");
-  privateFile(
-    brokenEmailConfig,
-    JSON.stringify({
-      oauthAccount: {
-        accountUuid: ANTHROPIC_ACCOUNT_UUID,
-        emailAddress: "not an address",
-      },
-    }),
-  );
-  assert.deepEqual(
-    await mod.readClaudeCliAccountIdentity(
-      path.join(TMP, "broken-email", "config"),
-      null,
-      path.join(TMP, "broken-email"),
-    ),
-    { fingerprint: EXPECTED_CLAUDE_FINGERPRINT },
-  );
-  assert.deepEqual(
-    await mod.readClaudeCliAccountIdentity(
-      path.join(TMP, "missing-config"),
-      null,
-      path.join(TMP, "missing-config"),
-    ),
-    {},
-  );
-
   fs.rmSync(personalCodexAuth, { force: true });
 
-  // Every CLI profile is one half of an account now: every mutation that
-  // used to go through this facade is refused with one typed code, so a
-  // caller learns to use the account card (accounts.login.start /
-  // accounts.use on the socket). Inspection and rename still work.
-  for (const runtime of ["claude", "codex", "grok"]) {
-    await expectCode(
-      async () => service.assertNotUnified(runtime, "personal"),
-      "NATIVE_CLI_ACCOUNT_UNIFIED",
-    );
-    for (const gone of ["create", "setDefault", "prepareLogin", "logout", "delete", "launchPreparedLogin", "cancelPreparedLogin", "setSessionShutdown"]) {
-      assert.equal(typeof service[gone], "undefined", `${gone} must not exist on the facade`);
-    }
+  // Every CLI profile is one half of an account now: the facade offers no
+  // mutation but rename, and the agent socket answers the retired
+  // nativeAccounts methods with one typed code, so a caller learns to use
+  // the account card (accounts.login.start / accounts.use on the socket).
+  for (const gone of ["create", "setDefault", "prepareLogin", "logout", "delete", "launchPreparedLogin", "cancelPreparedLogin", "setSessionShutdown", "assertNotUnified"]) {
+    assert.equal(typeof service[gone], "undefined", `${gone} must not exist on the facade`);
   }
   const unified = await expectCode(
-    async () => service.assertNotUnified("codex", "personal"),
+    async () => {
+      throw new mod.NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
+        runtime: "codex",
+        profileId: "personal",
+      });
+    },
     "NATIVE_CLI_ACCOUNT_UNIFIED",
   );
   assert.equal(unified.runtime, "codex");
@@ -658,7 +628,7 @@ async function main() {
   assert.doesNotMatch(serviceSource, /prepareLogin|logout|setDefault|sessionShutdown/);
 
   console.log(
-    "PASS native CLI account facade: sanitized unified DTOs, hash-only Codex, Claude and Grok account fingerprints from read-only credential and config access, every mutation but rename refused in favour of the unified account services, and typed store failures",
+    "PASS native CLI account facade: sanitized unified DTOs, hash-only Codex, Claude and Grok account fingerprints from read-only credential and config access, no mutation but rename, which the unified account services own, and typed store failures",
   );
 }
 

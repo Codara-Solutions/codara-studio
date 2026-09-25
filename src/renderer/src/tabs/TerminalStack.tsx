@@ -1245,7 +1245,6 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               shell={leaf.worker?.harness === "pi" ? PI_WORKER_DISPLAY_SHELL : shell}
               initialCwd={leaf.cwd}
               initialCommand={leaf.autorun}
-              nativeCliLoginToken={leaf.nativeCliLoginToken}
               agentSession={leaf.agentSession}
               nativeCodexProfileId={
                 leaf.agentSession?.nativeCodexProfileId ??

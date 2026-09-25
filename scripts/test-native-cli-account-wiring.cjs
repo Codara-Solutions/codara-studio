@@ -42,8 +42,8 @@ for (const channel of [
     `${channel} must be exposed by preload`,
   );
 }
-// Sign-in, switch and sign-out are account actions now. Main keeps refusing
-// the retired channels for any caller; preload no longer offers them.
+// Sign-in, switch and sign-out are account actions now: neither main nor
+// preload carries the retired channels.
 for (const channel of [
   "native-cli-accounts:create",
   "native-cli-accounts:set-default",
@@ -51,10 +51,7 @@ for (const channel of [
   "native-cli-accounts:cancel-login",
   "native-cli-accounts:logout",
 ]) {
-  assert.ok(
-    ipc.includes(`"${channel}"`),
-    `${channel} must still be answered (refused) in main`,
-  );
+  assert.equal(ipc.includes(`"${channel}"`), false, `${channel} must not be registered in main`);
   assert.equal(
     preload.includes(`ipcRenderer.invoke("${channel}"`),
     false,
@@ -114,52 +111,31 @@ for (const forbidden of [
 }
 
 // CLI sign-ins no longer run in a Studio terminal: one browser sign-in
-// through the account card writes both halves, so a login token reaching
-// pty.spawn is refused and main never resolves an executable for it.
-assert.match(
-  ipc,
-  /if \(args\?\.nativeCliLoginToken !== undefined\) \{\s*throw new NativeCliAccountError\("NATIVE_CLI_ACCOUNT_UNIFIED"\)/,
-);
+// through the account card writes both halves, so no login token travels
+// from a pane to pty.spawn and main never resolves an executable for one.
 assert.doesNotMatch(ipc, /launchPreparedLogin|spawnPreparedNativeCliLogin|spawnExactExecutable\(\{/);
+for (const [name, source] of [
+  ["ipc.ts", ipc],
+  ["preload", preload],
+  ["useTerminalSession.ts", session],
+  ["useTabs.ts", tabs],
+  ["TerminalStack.tsx", terminalStack],
+  ["App.tsx", app],
+]) {
+  assert.doesNotMatch(source, /nativeCliLoginToken/, `${name} must not carry a CLI login token`);
+}
 assert.doesNotMatch(
   preloadAccountApi,
   /launchPreparedLogin|spawnExactExecutable|spec\.(?:executable|args|env)/,
 );
-// The set-default, delete, create and login channels dispatch through the
-// unified services (or refuse) for every runtime.
-assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const accounts = unifiedAccountsFor\(provider\);/);
-assert.match(ipc, /await accounts\.useAccount\(row\.id\)/);
-assert.match(ipc, /unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
-assert.match(ipc, /"native-cli-accounts:create",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
-assert.match(ipc, /"native-cli-accounts:prepare-login",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
-assert.match(ipc, /"native-cli-accounts:logout",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
+// The delete channel dispatches through the unified service for every
+// runtime.
+assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const \{ deleted \} = await unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
 
-// Exact means exact: pty-manager copies the selected environment instead of
-// process.env, and every Studio/env enrichment is inside the non-exact branch.
-assert.match(
-  pty,
-  /const environmentSource = opts\.exactEnvironment \?\? process\.env/,
-);
-assert.match(pty, /if \(opts\.exactEnvironment === undefined\) \{/);
-assert.match(pty, /exactEnvironment:\s*\{ \.\.\.opts\.env \}/);
-assert.match(pty, /requireFreshSession:\s*true/);
-assert.match(
-  pty,
-  /if \(opts\.requireFreshSession\) \{\s*throw new Error/,
-);
+// pty-manager keeps no direct-executable seam for a sign-in: every PTY is
+// built from process.env plus Studio's own variables.
+assert.doesNotMatch(pty, /spawnExactExecutable|exactEnvironment|requireFreshSession/);
 
-// Tokens are one-shot in both main (service test exercises consumption) and
-// renderer remounts, and they are stripped from every persisted/cold layout.
-assert.match(session, /nativeCliLoginTokenFiredSessions/);
-assert.match(
-  session,
-  /nativeCliLoginTokenFiredSessions\.add\(sessionId\)/,
-);
-assert.match(tabs, /delete node\.nativeCliLoginToken/);
-assert.match(
-  tabs,
-  /nativeCliLoginToken:\s*_nativeCliLoginToken/,
-);
 // Settings no longer opens a sign-in terminal or a fresh session after a
 // switch: the one browser sign-in and the switch both live in main.
 assert.doesNotMatch(app, /cancelLogin|spark:open-native-cli-login|spark:open-native-cli-account|onLoginError/);
@@ -267,13 +243,9 @@ assert.match(identity, /createHash\("sha256"\)\.update\(accountId\)\.digest\("he
 assert.match(piStore, /createHash\("sha256"\)\.update\(accountId\)\.digest\("hex"\)/);
 assert.match(identity, /tokens\.account_id/);
 assert.match(identity, /jwtEmailClaim\(tokens\.id_token\)/);
-assert.match(identity, /account\.emailAddress/);
 assert.match(identity, /Buffer\.from\(payload, "base64url"\)/);
 assert.doesNotMatch(identity, /createVerify|jwt\.verify|crypto\.verify/);
-assert.match(identity, /account\.accountUuid/);
-assert.match(identity, /oauthAccount/);
 assert.match(identity, /accountUuid\.trim\(\)\.toLowerCase\(\)/);
-assert.match(identity, /join\(configDirEnv \?\? homeDir, "\.claude\.json"\)/);
 assert.doesNotMatch(identity, /homedir\(\)/);
 assert.match(identity, /https:\/\/auth\.x\.ai::/);
 assert.match(identity, /typeof nested\.user_id === "string"/);
@@ -287,6 +259,12 @@ assert.doesNotMatch(
 );
 assert.match(identity, /return undefined;/);
 assert.match(identity, /\} catch \{/);
+// Claude Code's side is the oauthAccount block beside its one-home login:
+// only the uuid and the address are read, and the uuid is hashed the same way.
+const liveLogin = read("src/main/orchestration/claude-cli-live-login.ts");
+assert.match(liveLogin, /oauthAccount\?\.accountUuid/);
+assert.match(liveLogin, /normalizeAccountEmail\(oauthAccount\?\.emailAddress\)/);
+assert.match(liveLogin, /anthropicAccountFingerprint\(accountUuid\)/);
 
 // Anthropic's account profile is read exactly once on the connect path, from
 // the endpoint that answers the access token the login just produced. It is
@@ -387,5 +365,5 @@ assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(pr
 assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 
 console.log(
-  "PASS native CLI account IPC is sanitized, login tokens are refused in main, every provider switches and deletes through the unified account services, and one card model serves all three providers",
+  "PASS native CLI account IPC is sanitized, no CLI login token reaches a pane or main, every provider switches and deletes through the unified account services, and one card model serves all three providers",
 );

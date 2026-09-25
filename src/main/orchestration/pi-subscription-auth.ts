@@ -32,7 +32,6 @@ import {
   renamePiAccountProfile,
   resolvePiAccountRuntimeProfile,
   setDefaultPiAccountProfile,
-  type PiAccountProfileOwnershipGuard,
   PiOAuthLoginGate,
 } from "./pi-account-auth-store";
 import {
@@ -802,27 +801,6 @@ export async function startPiSubscriptionProfileLogin(
   return startPiSubscriptionProfileLoginForOwner(input, webContentsAuthOwner(owner));
 }
 
-/** Compatibility entry point: reconnect the provider default, or create it. */
-export async function startPiSubscriptionLogin(
-  rawProvider: unknown,
-  owner: WebContents,
-): Promise<PiSubscriptionProfileLoginRequest> {
-  const provider = providerFrom(rawProvider);
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const defaultId = inspection.snapshot.defaults[provider];
-  const existing =
-    inspection.snapshot.profiles.find((profile) => profile.id === defaultId) ??
-    inspection.snapshot.profiles.find((profile) => profile.provider === provider);
-  return startPiSubscriptionProfileLogin(
-    {
-      provider,
-      ...(existing ? { profileId: existing.id } : { label: PROVIDER_META[provider].label }),
-      makeDefault: true,
-    },
-    owner,
-  );
-}
-
 export function answerPiSubscriptionPrompt(
   input: { requestId?: unknown; promptId?: unknown; value?: unknown },
   owner: WebContents,
@@ -953,23 +931,6 @@ export async function refreshPiSubscriptionProfileCredential(
     await service.reconcileProfile(profileId).catch(() => null);
   }
   return outcome.access;
-}
-
-export async function deletePiSubscriptionProfile(
-  rawProfileId: unknown,
-  options: { ownershipGuard?: PiAccountProfileOwnershipGuard } = {},
-): Promise<PiSubscriptionOverview> {
-  const profileId = typeof rawProfileId === "string" ? rawProfileId : "";
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
-  if (!profile) throw new Error(`Pi account profile not found: ${profileId}`);
-  await deletePiAccountCredentialProfile(profile.id, options);
-  const { invalidatePiSubscriptionUsageCache } = await import("./pi-subscription-usage");
-  invalidatePiSubscriptionUsageCache();
-  const { invalidatePiModelCatalogCache } = await import("./pi-model-catalog");
-  invalidatePiModelCatalogCache();
-  broadcastSubscriptionsChanged(profile.provider);
-  return inspectPiSubscriptions();
 }
 
 export { renamePiAccountProfile, setDefaultPiAccountProfile };

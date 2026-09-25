@@ -78,16 +78,16 @@ failure.
   `CODARA_DISABLE_KEYCHAIN=1`. This is a test seam in
   `src/main/orchestration/claude-cli-credentials.ts`: with it set, the real
   credential backend never runs `/usr/bin/security`, so no macOS Keychain
-  item is read or written. Nine suites use it: `test-anthropic-accounts`,
-  `test-anthropic-account-migration`, `test-anthropic-credential-mirror`,
-  `test-claude-cli-account-profiles`, `test-claude-cli-credentials`,
-  `test-claude-cli-live-login`, `test-claude-login-keeper`,
-  `test-pi-subscription-refresh` and `test-unified-account-migration`. A new
-  suite that reaches that module must set it too. The same variable keeps
-  `storage.ts` from encrypting the OpenRouter key with Electron
-  `safeStorage`, which uses the Keychain; `test-storage-openrouter-key`
-  replaces `safeStorage` with a fake keyring instead, and Playwright specs
-  that save a key set the variable.
+  item is read or written. Ten suites use it: `test-anthropic-accounts`,
+  `test-anthropic-account-identity`, `test-anthropic-account-migration`,
+  `test-anthropic-credential-mirror`, `test-claude-cli-account-profiles`,
+  `test-claude-cli-credentials`, `test-claude-cli-live-login`,
+  `test-claude-login-keeper`, `test-pi-subscription-refresh` and
+  `test-unified-account-migration`. A new suite that reaches that module
+  must set it too. The same variable keeps `storage.ts` from encrypting the
+  OpenRouter key with Electron `safeStorage`, which uses the Keychain;
+  `test-storage-openrouter-key` replaces `safeStorage` with a fake keyring
+  instead, and Playwright specs that save a key set the variable.
 - A shell inside a Studio pane exports Codara variables (`SPARK_PANE_ID`,
   `SPARK_HOME_DIR`, and so on). Suites that could pick them up set their own
   values or delete them. If a suite behaves differently inside Studio than in

@@ -135,9 +135,6 @@ const RECENT_AGENT_INPUT_GRACE_MS = 10_000;
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
 const autorunFiredSessions = new Set<string>();
-// Prepared native-account login tokens are one-shot. A React/HMR remount may
-// attach to the same PTY, but it must never submit the consumed token again.
-const nativeCliLoginTokenFiredSessions = new Set<string>();
 // Per-sessionId timestamps of in-place auto-resume attempts (a PTY that died
 // while an agent was live got its shell respawned with `--resume`). Module-level
 // so the crash-loop guard survives StrictMode/HMR remounts, like the set above.
@@ -166,7 +163,6 @@ const bracketedPasteModes = new Map<string, boolean>();
 export function forgetTerminalSessionMemory(sessionId: string): void {
   bracketedPasteModes.delete(sessionId);
   autorunFiredSessions.delete(sessionId);
-  nativeCliLoginTokenFiredSessions.delete(sessionId);
   autoResumeAttempts.delete(sessionId);
   resumeHintShown.delete(sessionId);
 }
@@ -500,7 +496,6 @@ interface Options {
   nativeCodexProfileId?: string;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
-  nativeCliLoginToken?: string;
   // One-shot boot-restore marker, minted on the leaf ONLY at hydration
   // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
   // running at quit). The restore precompute below requires it, so a restore
@@ -572,7 +567,6 @@ export function useTerminalSession({
   nativeCodexProfileId,
   nativeClaudeProfileId,
   nativeGrokProfileId,
-  nativeCliLoginToken,
   bootResume,
   onResumeUnavailable,
   onResumeFallback,
@@ -3056,14 +3050,6 @@ export function useTerminalSession({
       const spawnEnv = agentPane
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
-      const preparedNativeCliLoginToken =
-        nativeCliLoginToken &&
-        !nativeCliLoginTokenFiredSessions.has(sessionId)
-          ? nativeCliLoginToken
-          : undefined;
-      if (preparedNativeCliLoginToken) {
-        nativeCliLoginTokenFiredSessions.add(sessionId);
-      }
       try {
         const spawnResult = await window.spark.pty.spawn({
           id: sessionId,
@@ -3085,7 +3071,6 @@ export function useTerminalSession({
             agentSessionRef.current?.nativeGrokProfileId ??
             agentSession?.nativeGrokProfileId ??
             nativeGrokProfileId,
-          nativeCliLoginToken: preparedNativeCliLoginToken,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
           // branch a pure no-op — critically it skips the pty resize to OUR

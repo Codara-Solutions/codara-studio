@@ -48,10 +48,6 @@ export function unifiedAccountsFor(provider: PiSubscriptionProvider): UnifiedAcc
   return service;
 }
 
-export function cliRuntimeFor(provider: PiSubscriptionProvider): CliRuntime {
-  return unifiedAccountsFor(provider).adapter.runtime;
-}
-
 export function providerForRuntime(runtime: CliRuntime): PiSubscriptionProvider {
   for (const provider of UNIFIED_ACCOUNT_PROVIDERS) {
     if (services[provider].adapter.runtime === runtime) return provider;
