@@ -1244,12 +1244,28 @@ export interface RemoteTerminalHandle {
   resume?(): void;
 }
 
+// A server-owned launch profile: the phone names one, Studio picks the
+// command (terminal-launch.ts), so no command line ever crosses the wire.
+export type RemoteTerminalProfile = "shell" | "claude" | "codex" | "grok" | "pi";
+
+const REMOTE_TERMINAL_PROFILES: readonly string[] = [
+  "shell",
+  "claude",
+  "codex",
+  "grok",
+  "pi",
+] satisfies readonly RemoteTerminalProfile[];
+
+function isRemoteTerminalProfile(value: unknown): value is RemoteTerminalProfile {
+  return typeof value === "string" && REMOTE_TERMINAL_PROFILES.includes(value);
+}
+
 export interface RemoteTerminalCreateRequest {
   workspaceId: string;
   cols: number;
   rows: number;
   cwd?: string;
-  profile: "shell" | "claude" | "codex" | "grok";
+  profile: RemoteTerminalProfile;
   resumeSessionId?: string;
   title?: string;
   // Stamped by the authenticated desktop session; never supplied by the phone.
@@ -5080,10 +5096,7 @@ export class RpcSession {
     }
     if (
       p.profile !== undefined &&
-      p.profile !== "shell" &&
-      p.profile !== "claude" &&
-      p.profile !== "codex" &&
-      p.profile !== "grok"
+      !isRemoteTerminalProfile(p.profile)
     ) {
       this.replyError(
         id,
