@@ -196,7 +196,8 @@ calls.
 ### Claude hooks, the MCP server and the agent socket
 
 `test-hook-installer`, `test-hook-watcher-lifecycle`, `test-codara-studio-mcp`
-(the tool list for each `SPARK_MCP_MODE`), `test-builtin-mcp-opt-out`,
+(the tool list for each `SPARK_MCP_MODE`), `test-standing-terminals` (what
+`codara_spawn_terminals` opens), `test-builtin-mcp-opt-out`,
 `test-builtin-mcp-ownership`, `test-grok-mcp-copy`,
 `test-capability-center-ui`, `test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket` (needs a build).

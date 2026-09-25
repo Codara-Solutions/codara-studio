@@ -60,11 +60,12 @@ export function normalizeCliTerminalRequests(
   for (const item of value) {
     if (remaining <= 0 || !isRecord(item)) break;
     const runtime =
-      item.runtime === "claude"
-        ? "claude"
-        : item.runtime === "codex"
-          ? "codex"
-          : null;
+      item.runtime === "claude" ||
+      item.runtime === "codex" ||
+      item.runtime === "grok" ||
+      item.runtime === "pi"
+        ? item.runtime
+        : null;
     if (!runtime) continue;
 
     const requested =

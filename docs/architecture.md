@@ -140,7 +140,7 @@ CLI (`pi-worker-providers.ts`). A worker can never call orchestration tools
 PTY, and the renderer attaches a pane to it, so a worker looks like a
 terminal but cannot be typed into as a shell. `src/shared/parallel-wave.ts`
 decides which ready tasks can run side by side. Cora can also open real
-terminals: interactive Claude Code or Codex sessions for you to drive
+terminals: interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 (`codara_spawn_terminals`), and terminals the agent drives itself
 (`codara_terminal_create`, tracked by `agent-terminal-lifecycle.ts` and
 closed when the run ends).

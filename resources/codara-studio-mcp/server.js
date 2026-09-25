@@ -1142,7 +1142,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_spawn_terminals",
     description:
-      "Open ONE persistent terminal tab for the user, split into one interactive pane per requested Claude Code or Codex session. Use this when the user explicitly asks to open/spawn terminals, sessions, or agents that THEY will drive. This is NOT worker orchestration: do not call codara_spawn_workers, codara_wait_for_workers, or codara_complete for the same request. Codara launches Claude with --dangerously-skip-permissions and Codex with --yolo. After this tool succeeds, end the turn; Codara applies the terminal decision and posts the confirmation.",
+      "Open ONE persistent terminal tab for the user, split into one interactive pane per requested Claude Code, Codex, Grok or Pi session. Use this when the user explicitly asks to open/spawn terminals, sessions, or agents that THEY will drive. This is NOT worker orchestration: do not call codara_spawn_workers, codara_wait_for_workers, or codara_complete for the same request. Codara launches Claude with --dangerously-skip-permissions, Codex and Grok with --yolo, and Pi as the user installed it, with their own Pi settings. After this tool succeeds, end the turn; Codara applies the terminal decision and posts the confirmation.",
     inputSchema: {
       type: "object",
       required: ["terminals"],
@@ -1164,7 +1164,7 @@ const EXECUTE_TOOLS = [
             properties: {
               runtime: {
                 type: "string",
-                enum: ["claude", "codex"],
+                enum: ["claude", "codex", "grok", "pi"],
                 description: "Agent CLI to launch in each pane.",
               },
               count: {
@@ -1175,12 +1175,12 @@ const EXECUTE_TOOLS = [
               },
               model: {
                 type: "string",
-                description: "Optional engine-native model id. Omit to use the CLI default.",
+                description: "Optional engine-native model id (for Pi, a Pi model pattern such as provider/id). Omit to use the CLI default.",
               },
               effort: {
                 type: "string",
                 enum: ["low", "medium", "high", "xhigh", "max"],
-                description: "Optional reasoning effort. Omit to use the CLI default.",
+                description: "Optional reasoning effort (Pi's thinking level). Omit to use the CLI default.",
               },
             },
             additionalProperties: false,

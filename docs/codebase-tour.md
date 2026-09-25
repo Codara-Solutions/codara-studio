@@ -172,7 +172,8 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
     `components/RunsView.tsx` and `components/runs/`.
 
 Cora can also open real terminals. `codara_spawn_terminals` opens
-interactive Claude Code or Codex sessions for you to drive.
+interactive Claude Code, Codex, Grok or Pi sessions for you to drive
+(`standing-terminals.ts` builds their commands).
 `codara_terminal_create` opens a terminal the agent drives itself, for
 example to run a dev server; `agent-terminal-registry.ts` and
 `agent-terminal-lifecycle.ts` track those and close them when the run ends.

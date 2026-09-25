@@ -6,9 +6,12 @@ import { normalizeCodexModelId } from "@shared/model-catalog";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
 
+export type StandingTerminalRuntime = "claude" | "codex" | "grok" | "pi";
+
 // Effort levels accepted by the current Claude and Codex CLIs for standing
 // interactive terminals. GPT-5.6 adds Max as a first-class quality setting;
 // both providers receive the explicit choice instead of silently ignoring it.
+// Pi takes all of them as `--thinking` levels.
 const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // Build the launch command for a standing interactive terminal: a plain
@@ -17,9 +20,11 @@ const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "ma
 //
 // The CLI-specific argv is produced by the runtime's `CliProvider`
 // (see src/main/providers/) so adding a new CLI later only requires a new
-// provider file.
+// provider file. Pi has no provider: it is not a Cora worker runtime, and a
+// pane runs it as the + menu does, the user's own `pi` with their own
+// settings, adding only the model and thinking level asked for.
 export function buildStandingTerminalCommand(
-  runtime: "claude" | "codex" | "grok",
+  runtime: StandingTerminalRuntime,
   model?: string,
   effort?: string,
 ): string {
@@ -31,6 +36,14 @@ export function buildStandingTerminalCommand(
   let effectiveModel = model?.trim() || undefined;
   if (runtime === "codex" && effectiveModel) {
     effectiveModel = normalizeCodexModelId(effectiveModel);
+  }
+
+  if (runtime === "pi") {
+    const args = [
+      ...(effectiveModel ? ["--model", effectiveModel] : []),
+      ...(effectiveEffort ? ["--thinking", effectiveEffort] : []),
+    ];
+    return ["pi", ...args.map((arg) => quoteShellArg(arg))].join(" ");
   }
 
   const provider = getProvider(runtime);
@@ -45,19 +58,25 @@ export function buildStandingTerminalCommand(
   return [head, ...tail].join(" ");
 }
 
-export function standingTerminalTitle(runtime: "claude" | "codex" | "grok", model?: string): string {
-  const base = runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : "Claude";
+function runtimeLabel(runtime: string): string {
+  if (runtime === "codex") return "Codex";
+  if (runtime === "grok") return "Grok";
+  if (runtime === "pi") return "Pi";
+  return "Claude";
+}
+
+export function standingTerminalTitle(runtime: StandingTerminalRuntime, model?: string): string {
+  const base = runtimeLabel(runtime);
   return model ? `${base} ${model}` : base;
 }
 
 // One-line chat confirmation for a spawn_terminals decision, e.g. "Opened 2
-// Claude and 1 Codex standing terminals ...". Counts by runtime (claude,
-// codex) so the user gets concrete acknowledgement that the request landed.
+// Claude and 1 Codex standing terminals ...". Counts by runtime so the user
+// gets concrete acknowledgement that the request landed.
 export function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label =
-      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
+    const label = runtimeLabel(terminal.runtime);
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${n} ${label}`);
@@ -72,8 +91,7 @@ export function describeSpawnedTerminals(terminals: Array<{ runtime: string }>):
 export function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label =
-      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
+    const label = runtimeLabel(terminal.runtime);
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${label} x${n}`);
