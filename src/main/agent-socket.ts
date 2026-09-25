@@ -138,8 +138,9 @@ import type {
 
 const HANDSHAKE_FILE = "agent-socket.json";
 
-// JSON-RPC server hosted by main, exposed to sub-agents via SPARK_AGENT_SOCKET +
-// SPARK_AGENT_TOKEN env vars. Sub-agents POST {jsonrpc:"2.0",method,params,id}
+// JSON-RPC server hosted by main. Trusted callers find it through the mode-600
+// handshake file (agent-socket.json); scoped Pi processes get SPARK_AGENT_SOCKET
+// and a scoped SPARK_AGENT_TOKEN. Callers POST {jsonrpc:"2.0",method,params,id}
 // to /rpc with Authorization: Bearer <token> and get the matching response back.
 //
 // The server only binds 127.0.0.1 and uses a constant-time token comparison so a
@@ -285,11 +286,10 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   const url = `http://127.0.0.1:${address.port}`;
   currentHandle = { server, url, token };
   setAgentSocketCapabilityEndpoint(url);
-  pty.setAgentSocketEnv({ url, token });
-  // Persist a handshake file so MCP servers spawned by external runtimes
-  // (Claude Code, Codex) - which do not inherit Codara's pty env - can pick
-  // up the current URL + token. Best-effort: a failed write only means the
-  // codara-studio MCP server has to back off and retry.
+  // The handshake file is how every trusted caller (the codara-studio MCP
+  // server, the cora CLI, Cora's Pi processes) finds the socket: the root
+  // token is never exported into terminals. Best-effort: a failed write
+  // leaves those callers reporting Codara as offline.
   void writeHandshakeFile({ url, token }).catch((err) =>
     console.warn("[agent-socket] failed to write handshake file:", err),
   );
@@ -302,7 +302,6 @@ export async function stopAgentSocket(): Promise<void> {
   if (!handle) return;
   currentHandle = null;
   setAgentSocketCapabilityEndpoint(null);
-  pty.setAgentSocketEnv(null);
   // Remove the handshake file so any MCP server child that survived Codara's
   // shutdown returns "Codara offline" on next call instead of speaking to a
   // closed port.

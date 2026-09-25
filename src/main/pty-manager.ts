@@ -361,16 +361,13 @@ function announceReplay(s: Session, byteLength: number): void {
 // backlog is FIFO-trimmed past the cap.
 const DETACHED_BACKLOG_BYTES = 16 * 1024 * 1024;
 
-// Env vars that agent-socket asks pty-manager to inject into every spawned
-// pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
-// socket server is listening; sub-agent CLIs running inside the pty read
-// these to dial back into Codara over JSON-RPC.
-let agentSocketEnv: { url: string; token: string } | null = null;
-
-/** Called by agent-socket once its HTTP server is listening. */
-export function setAgentSocketEnv(env: { url: string; token: string } | null): void {
-  agentSocketEnv = env;
-}
+// Agent-socket credentials a pane must never inherit. Scoped capabilities
+// carry them for Cora's Pi processes, which are not PTYs.
+const AGENT_SOCKET_ENV_KEYS = [
+  "SPARK_AGENT_SOCKET",
+  "SPARK_AGENT_TOKEN",
+  "SPARK_AGENT_CAPABILITY",
+] as const;
 
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
@@ -1426,20 +1423,19 @@ function doSpawn(
     delete env.SPARK_FOLLOW_ACTIVE_ACCOUNT;
   }
 
-  // Agent-socket handshake. Every pty we spawn — user panes and worker panes
-  // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
-  // running inside the pty can dial back into Codara over JSON-RPC. The
-  // socket is localhost-only and token-protected (see src/main/agent-socket.ts),
-  // so exposing the env vars to user panes does not widen the trust surface
-  // beyond "any local process the user already trusted with a shell prompt".
-  if (agentSocketEnv) {
-    env.SPARK_AGENT_SOCKET = agentSocketEnv.url;
-    env.SPARK_AGENT_TOKEN = agentSocketEnv.token;
-    // Best-effort hint to sub-agents about which pty they're running in.
-    // Lets terminal.read RPC default to "read my own tail" if a CLI ever
-    // wants that, without forcing the caller to know its own attemptId.
-    env.SPARK_AGENT_PANE_ID = opts.id;
+  // Agent-socket handshake. A pane gets its own id but not the socket's root
+  // token: every process in the pane (and everything those start) inherits
+  // the environment, and the root token reaches every agent-socket method.
+  // Tools that call back into Codara (the codara-studio MCP server, the cora
+  // CLI) read the URL and token from the mode-600 agent-socket.json in the
+  // Codara home instead. Inherited values go too, so a Studio started from
+  // another Studio's pane cannot hand its panes the outer app's credentials.
+  for (const key of AGENT_SOCKET_ENV_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(opts.env ?? {}, key)) delete env[key];
   }
+  // Lets the MCP server place the terminals an agent opens beside its own
+  // pane (terminal.create callerPaneId).
+  env.SPARK_AGENT_PANE_ID = opts.id;
   if (opts.nativeCodexHome) {
     const selectedEnv = buildCodexCliSharedEnvironment(env, opts.nativeCodexHome);
     for (const key of Object.keys(env)) delete env[key];
