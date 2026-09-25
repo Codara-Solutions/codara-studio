@@ -11,6 +11,9 @@
 // and Pi one-shot spawn (real subscription accounts from ~/.codara), stubbing
 // only the Electron shell (storage/app). Prints the generated message / plan
 // so prompt changes can be evaluated on real diffs instead of shipped blind.
+//
+// The app stores the OpenRouter key encrypted, which only Electron can read,
+// so an OpenRouter model needs the key in OPENROUTER_API_KEY.
 
 const fs = require("node:fs");
 const os = require("node:os");
@@ -38,6 +41,8 @@ async function main() {
   const settingsFile = path.join(codaraHome, "spark-settings.json");
   const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
   if (model) settings.commitMessageModel = model;
+  delete settings.openRouterApiKeyEncrypted;
+  if (process.env.OPENROUTER_API_KEY) settings.openRouterApiKey = process.env.OPENROUTER_API_KEY;
   console.error(`[preview] repo=${repo}`);
   console.error(`[preview] commitMessageModel=${settings.commitMessageModel ?? "auto"}`);
 
