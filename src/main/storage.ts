@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
 } from "@shared/types";
 import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
+import { logMain } from "./file-log";
 import { writeFileAtomic } from "./fs-atomic";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
@@ -59,10 +60,29 @@ const EMPTY_SETTINGS: AppSettings = {
   openAiFastMode: false,
 };
 
+// The OpenRouter key is stored encrypted by the operating system (Electron
+// safeStorage: the Keychain on macOS, DPAPI on Windows, libsecret or KWallet
+// on Linux) under this field, in place of openRouterApiKey. Only the file
+// differs: in memory and over IPC the key stays plain, so every reader works
+// as before.
+const ENCRYPTED_OPENROUTER_KEY = "openRouterApiKeyEncrypted";
+
+type SettingsFile = Partial<AppSettings> & { [ENCRYPTED_OPENROUTER_KEY]?: unknown };
+type SettingsOnDisk = Omit<AppSettings, "openRouterApiKey"> & {
+  openRouterApiKey?: string;
+  [ENCRYPTED_OPENROUTER_KEY]?: string;
+};
+
 let cache: AppState | null = null;
 let settingsCache: AppSettings | null = null;
+let settingsLoading: Promise<AppSettings> | null = null;
 let writing: Promise<void> = Promise.resolve();
 let settingsWriting: Promise<void> = Promise.resolve();
+// An encrypted key this session could not decrypt (the keyring is locked or
+// was replaced). It is written back unchanged until the user enters another
+// key, so a save made meanwhile never drops it.
+let undecryptableOpenRouterKey: string | null = null;
+const loggedKeyStorageNotes = new Set<string>();
 const stateSavedListeners = new Set<(state: AppState) => void>();
 
 function statePath(): string {
@@ -106,15 +126,104 @@ async function readFromDisk(): Promise<AppState> {
   }
 }
 
-async function readSettingsFromDisk(): Promise<AppSettings> {
+async function readSettingsFromDisk(): Promise<{
+  settings: AppSettings;
+  plaintextKey: boolean;
+}> {
+  let parsed: SettingsFile;
   try {
-    const raw = await fs.readFile(settingsPath(), "utf8");
-    return normalizeSettings(JSON.parse(raw) as Partial<AppSettings>);
+    parsed = JSON.parse(await fs.readFile(settingsPath(), "utf8")) as SettingsFile;
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY_SETTINGS };
-    console.error("[storage] failed to read settings, starting with defaults:", err);
-    return { ...EMPTY_SETTINGS };
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error("[storage] failed to read settings, starting with defaults:", err);
+    }
+    return { settings: { ...EMPTY_SETTINGS }, plaintextKey: false };
   }
+  const settings = normalizeSettings(parsed);
+  const encrypted = typeof parsed[ENCRYPTED_OPENROUTER_KEY] === "string"
+    ? parsed[ENCRYPTED_OPENROUTER_KEY].trim()
+    : "";
+  // This build never writes both fields. A plain key beside an encrypted one
+  // came later, from an older build or a hand edit, so it wins.
+  if (settings.openRouterApiKey || !encrypted) {
+    return { settings, plaintextKey: settings.openRouterApiKey !== "" };
+  }
+  const key = decryptOpenRouterKey(encrypted);
+  if (key === null) {
+    undecryptableOpenRouterKey = encrypted;
+    noteKeyStorage(
+      "undecryptable",
+      "The saved OpenRouter key could not be decrypted with this system's keyring. It is kept on disk as it is; enter the key again in Settings to use it now.",
+    );
+    return { settings, plaintextKey: false };
+  }
+  return { settings: { ...settings, openRouterApiKey: key }, plaintextKey: false };
+}
+
+// Test seam shared with claude-cli-credentials.ts: with
+// CODARA_DISABLE_KEYCHAIN=1 the OS keyring is never touched and the key
+// stays in plain text, as on a system without one.
+function keyEncryption(): typeof safeStorage | null {
+  if (process.env.CODARA_DISABLE_KEYCHAIN === "1") return null;
+  try {
+    return safeStorage?.isEncryptionAvailable() ? safeStorage : null;
+  } catch {
+    return null;
+  }
+}
+
+function decryptOpenRouterKey(encoded: string): string | null {
+  const encryption = keyEncryption();
+  if (!encryption) return null;
+  try {
+    const key = encryption.decryptString(Buffer.from(encoded, "base64")).trim();
+    return key || null;
+  } catch {
+    return null;
+  }
+}
+
+// Returns null unless the ciphertext decrypts back to the key, so a keyring
+// that encrypts but cannot read its own output never costs the user the key.
+function encryptOpenRouterKey(key: string): string | null {
+  const encryption = keyEncryption();
+  if (!encryption) return null;
+  try {
+    const encrypted = encryption.encryptString(key);
+    if (encryption.decryptString(encrypted) !== key) return null;
+    return encrypted.toString("base64");
+  } catch {
+    return null;
+  }
+}
+
+// Once per session and kind, and never with the key itself.
+function noteKeyStorage(kind: string, message: string): void {
+  if (loggedKeyStorageNotes.has(kind)) return;
+  loggedKeyStorageNotes.add(kind);
+  logMain("storage", message);
+}
+
+function notePlaintextKey(): void {
+  noteKeyStorage(
+    "plaintext",
+    "The operating system offers no encryption for app secrets here, so the OpenRouter key is stored in plain text in spark-settings.json (mode 0600).",
+  );
+}
+
+function settingsForDisk(settings: AppSettings): SettingsOnDisk {
+  const { openRouterApiKey, ...rest } = settings;
+  if (!openRouterApiKey) {
+    return undecryptableOpenRouterKey
+      ? { ...rest, [ENCRYPTED_OPENROUTER_KEY]: undecryptableOpenRouterKey }
+      : settings;
+  }
+  const encrypted = encryptOpenRouterKey(openRouterApiKey);
+  if (encrypted === null) {
+    notePlaintextKey();
+    return settings;
+  }
+  return { ...rest, [ENCRYPTED_OPENROUTER_KEY]: encrypted };
 }
 
 function normalize(w: Workspace): Workspace {
@@ -298,9 +407,14 @@ async function writeToDisk(state: AppState): Promise<void> {
   await writeFileAtomic(statePath(), json);
 }
 
-async function writeSettingsToDisk(settings: AppSettings): Promise<void> {
-  const json = JSON.stringify(normalizeSettings(settings), null, 2);
-  await writeFileAtomic(settingsPath(), json);
+/** Resolves true when the written file holds the key encrypted. */
+async function writeSettingsToDisk(settings: AppSettings): Promise<boolean> {
+  const normalized = normalizeSettings(settings);
+  const onDisk = settingsForDisk(normalized);
+  await writeFileAtomic(settingsPath(), JSON.stringify(onDisk, null, 2), { mode: 0o600 });
+  // A key the user entered replaces one this session could not decrypt.
+  if (normalized.openRouterApiKey) undecryptableOpenRouterKey = null;
+  return typeof onDisk[ENCRYPTED_OPENROUTER_KEY] === "string";
 }
 
 /** The last durable state, without touching disk; null before the first load. */
@@ -408,20 +522,54 @@ function normalizeWorkspaceGitHubOrigin(workspace: Workspace): Workspace {
 
 export async function loadSettings(): Promise<AppSettings> {
   if (settingsCache) return settingsCache;
-  settingsCache = await readSettingsFromDisk();
-  return settingsCache;
+  settingsLoading ??= (async () => {
+    try {
+      const { settings, plaintextKey } = await readSettingsFromDisk();
+      // A save that landed during the read is newer than the file, and its
+      // own write already stored the key the current way.
+      if (settingsCache) return settingsCache;
+      settingsCache = settings;
+      // Settings files from before encryption hold the key in plain text.
+      // Rewrite them once; the write encrypts the key when the system can,
+      // and keeps it in plain text otherwise, so the key is never dropped.
+      if (plaintextKey && keyEncryption()) {
+        void enqueueSettingsWrite()
+          .then((encrypted) => {
+            if (encrypted) noteKeyStorage("migrated", "Moved the OpenRouter key into OS-encrypted storage.");
+          })
+          .catch(() => undefined);
+      } else if (plaintextKey) {
+        notePlaintextKey();
+        // Older builds wrote the file with the default mode.
+        void fs.chmod(settingsPath(), 0o600).catch(() => undefined);
+      }
+      return settingsCache;
+    } finally {
+      settingsLoading = null;
+    }
+  })();
+  return settingsLoading;
 }
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
   settingsCache = normalizeSettings(settings);
+  await enqueueSettingsWrite();
+  return settingsCache;
+}
+
+// Writes whatever settingsCache holds when the queued write runs, so a
+// migration rewrite queued at load never overwrites a later save.
+function enqueueSettingsWrite(): Promise<boolean> {
   // See saveState for the dual-handle rationale: the awaited promise rejects to
   // the IPC caller on disk failure, the queue chain keeps going regardless.
   const write = settingsWriting.then(() => writeSettingsToDisk(settingsCache!));
-  settingsWriting = write.catch((err) => {
-    console.error("[storage] settings write failed:", err);
-  });
-  await write;
-  return settingsCache;
+  settingsWriting = write.then(
+    () => undefined,
+    (err) => {
+      console.error("[storage] settings write failed:", err);
+    },
+  );
+  return write;
 }
 
 export async function flush(): Promise<void> {
