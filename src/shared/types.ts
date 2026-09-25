@@ -831,11 +831,6 @@ export interface NativeCliAccountProfileInput {
   profileId: string;
 }
 
-export interface NativeCliAccountCreateInput {
-  runtime: NativeCliAccountRuntime;
-  label: string;
-}
-
 export interface NativeCliAccountRenameInput extends NativeCliAccountProfileInput {
   label: string;
 }
@@ -843,8 +838,6 @@ export interface NativeCliAccountRenameInput extends NativeCliAccountProfileInpu
 export interface NativeCliAccountMutationResult {
   profile: NativeCliAccountProfile;
   inspection: NativeCliAccountRuntimeInspection;
-  /** Number of live CLI sessions closed before an account activation. */
-  closedSessionCount?: number;
 }
 
 export interface NativeCliAccountDeleteResult {

@@ -912,14 +912,6 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     });
   }
 
-  /**
-   * The Cora row a CLI profile id stands for, for callers that still speak
-   * in terminal ids: the linked row, or Account 1 for "personal".
-   */
-  async coraProfileForCli(cliProfileId: string): Promise<PiAccountProfile | undefined> {
-    return this.piStore.registry.profileForCliProfileId(this.provider, cliProfileId);
-  }
-
   async shareLogin(
     input: PiSubscriptionShareLoginInput,
   ): Promise<{ coraProfileId: string; cliProfileId: string }> {

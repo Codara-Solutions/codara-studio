@@ -535,21 +535,20 @@ async function main() {
 
   fs.rmSync(personalCodexAuth, { force: true });
 
-  // Every CLI profile is one half of an account now: every mutation that
-  // used to go through this facade is refused with one typed code, so a
-  // caller learns to use the account card (accounts.login.start /
-  // accounts.use on the socket). Inspection and rename still work.
-  for (const runtime of ["claude", "codex", "grok"]) {
-    await expectCode(
-      async () => service.assertNotUnified(runtime, "personal"),
-      "NATIVE_CLI_ACCOUNT_UNIFIED",
-    );
-    for (const gone of ["create", "setDefault", "prepareLogin", "logout", "delete", "launchPreparedLogin", "cancelPreparedLogin", "setSessionShutdown"]) {
-      assert.equal(typeof service[gone], "undefined", `${gone} must not exist on the facade`);
-    }
+  // Every CLI profile is one half of an account now: the facade offers no
+  // mutation but rename, and the agent socket answers the retired
+  // nativeAccounts methods with one typed code, so a caller learns to use
+  // the account card (accounts.login.start / accounts.use on the socket).
+  for (const gone of ["create", "setDefault", "prepareLogin", "logout", "delete", "launchPreparedLogin", "cancelPreparedLogin", "setSessionShutdown", "assertNotUnified"]) {
+    assert.equal(typeof service[gone], "undefined", `${gone} must not exist on the facade`);
   }
   const unified = await expectCode(
-    async () => service.assertNotUnified("codex", "personal"),
+    async () => {
+      throw new mod.NativeCliAccountError("NATIVE_CLI_ACCOUNT_UNIFIED", {
+        runtime: "codex",
+        profileId: "personal",
+      });
+    },
     "NATIVE_CLI_ACCOUNT_UNIFIED",
   );
   assert.equal(unified.runtime, "codex");

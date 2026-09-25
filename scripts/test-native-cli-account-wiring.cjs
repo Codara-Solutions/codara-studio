@@ -42,8 +42,8 @@ for (const channel of [
     `${channel} must be exposed by preload`,
   );
 }
-// Sign-in, switch and sign-out are account actions now. Main keeps refusing
-// the retired channels for any caller; preload no longer offers them.
+// Sign-in, switch and sign-out are account actions now: neither main nor
+// preload carries the retired channels.
 for (const channel of [
   "native-cli-accounts:create",
   "native-cli-accounts:set-default",
@@ -51,10 +51,7 @@ for (const channel of [
   "native-cli-accounts:cancel-login",
   "native-cli-accounts:logout",
 ]) {
-  assert.ok(
-    ipc.includes(`"${channel}"`),
-    `${channel} must still be answered (refused) in main`,
-  );
+  assert.equal(ipc.includes(`"${channel}"`), false, `${channel} must not be registered in main`);
   assert.equal(
     preload.includes(`ipcRenderer.invoke("${channel}"`),
     false,
@@ -125,14 +122,9 @@ assert.doesNotMatch(
   preloadAccountApi,
   /launchPreparedLogin|spawnExactExecutable|spec\.(?:executable|args|env)/,
 );
-// The set-default, delete, create and login channels dispatch through the
-// unified services (or refuse) for every runtime.
-assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const accounts = unifiedAccountsFor\(provider\);/);
-assert.match(ipc, /await accounts\.useAccount\(row\.id\)/);
-assert.match(ipc, /unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
-assert.match(ipc, /"native-cli-accounts:create",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
-assert.match(ipc, /"native-cli-accounts:prepare-login",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
-assert.match(ipc, /"native-cli-accounts:logout",[\s\S]*?nativeCliAccounts\.assertNotUnified\(/);
+// The delete channel dispatches through the unified service for every
+// runtime.
+assert.match(ipc, /const provider = providerForRuntime\(input\.runtime\);\s*const \{ deleted \} = await unifiedAccountsFor\(provider\)\.deleteTerminalOnlyProfile\(/);
 
 // Exact means exact: pty-manager copies the selected environment instead of
 // process.env, and every Studio/env enrichment is inside the non-exact branch.

@@ -802,27 +802,6 @@ export async function startPiSubscriptionProfileLogin(
   return startPiSubscriptionProfileLoginForOwner(input, webContentsAuthOwner(owner));
 }
 
-/** Compatibility entry point: reconnect the provider default, or create it. */
-export async function startPiSubscriptionLogin(
-  rawProvider: unknown,
-  owner: WebContents,
-): Promise<PiSubscriptionProfileLoginRequest> {
-  const provider = providerFrom(rawProvider);
-  const inspection = await inspectPiAccountProfileAuthStore();
-  const defaultId = inspection.snapshot.defaults[provider];
-  const existing =
-    inspection.snapshot.profiles.find((profile) => profile.id === defaultId) ??
-    inspection.snapshot.profiles.find((profile) => profile.provider === provider);
-  return startPiSubscriptionProfileLogin(
-    {
-      provider,
-      ...(existing ? { profileId: existing.id } : { label: PROVIDER_META[provider].label }),
-      makeDefault: true,
-    },
-    owner,
-  );
-}
-
 export function answerPiSubscriptionPrompt(
   input: { requestId?: unknown; promptId?: unknown; value?: unknown },
   owner: WebContents,
