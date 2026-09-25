@@ -1540,6 +1540,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   if (runtime === "claude") return "Claude Code";
   if (runtime === "codex") return "Codex";
+  if (runtime === "grok") return "Grok";
   if (runtime === "pi") return "Pi";
   return "Terminal";
 }
