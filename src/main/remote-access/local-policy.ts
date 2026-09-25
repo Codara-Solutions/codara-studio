@@ -1,5 +1,5 @@
 import { lstat, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 
 export interface ResolvedLocalPath {
   root: string;
@@ -32,6 +32,46 @@ export function isStudioExplorerIgnoredDirectory(name: string): boolean {
 export function isPathInside(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+// Folders directly in the home folder where the system and apps keep settings
+// and sign-ins, beyond the dot folders every platform uses for the same.
+const HOME_SETTINGS_FOLDERS: Partial<Record<NodeJS.Platform, readonly string[]>> = {
+  darwin: ["library"],
+  win32: ["appdata"],
+};
+
+/**
+ * Why a phone may not add `target` as a workspace, or null when it may.
+ *
+ * A workspace opens its whole tree to the phone (files, terminals, agents),
+ * so a phone may add a project folder but not one that holds the user's keys:
+ * a disk root or the home folder (they contain everything else), Codara's own
+ * home (the remote-access private key, the agent-socket token, Cora's
+ * logins), or a folder where tools keep credentials (~/.ssh, ~/.aws,
+ * ~/.claude, ~/Library, ...). Every path must already be canonical.
+ */
+export function phoneWorkspaceRefusal(
+  target: string,
+  context: { home: string; codaraHome: string; platform?: NodeJS.Platform },
+): string | null {
+  if (parse(target).root === target) {
+    return "A disk root cannot be a workspace. Choose a project folder.";
+  }
+  if (target === context.home) {
+    return "Your home folder cannot be a workspace from the phone. Choose a project folder inside it.";
+  }
+  if (isPathInside(target, context.codaraHome) || isPathInside(context.codaraHome, target)) {
+    return "Codara's own folder cannot be a workspace.";
+  }
+  if (isPathInside(context.home, target)) {
+    const top = relative(context.home, target).split(sep)[0] ?? "";
+    const settingsFolders = HOME_SETTINGS_FOLDERS[context.platform ?? process.platform] ?? [];
+    if (top.startsWith(".") || settingsFolders.includes(top.toLowerCase())) {
+      return "Folders where apps keep settings and sign-ins cannot be a workspace from the phone. Add it on the computer if you need it.";
+    }
+  }
+  return null;
 }
 
 // Resolve an existing local path against a canonical security root. Both the

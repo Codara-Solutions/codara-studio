@@ -187,6 +187,7 @@ import {
 } from "./image-upload";
 import {
   isStudioExplorerIgnoredDirectory,
+  phoneWorkspaceRefusal,
   resolveExistingInside,
   toWireRelative,
   truncateUtf8,
@@ -1028,6 +1029,11 @@ async function addWorkspaceForRemote(input: {
       allowAbsolute: true,
       directory: true,
     });
+    const refusal = phoneWorkspaceRefusal(selected.path, {
+      home: selected.root,
+      codaraHome: await realpath(codaraHome()).catch(() => resolve(codaraHome())),
+    });
+    if (refusal) throw new Error(refusal);
     const state = await loadState();
     for (const workspace of state.workspaces) {
       if (isRemotePath(workspace.cwd)) continue;
