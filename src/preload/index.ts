@@ -152,7 +152,6 @@ import type {
   UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
-  UpdateRunStatusInput,
   UpdateScheduledJobInput,
   WorkerReport,
   WorkerTaskEnvelope,
@@ -860,8 +859,6 @@ const api = {
       ipcRenderer.invoke("orchestration:deliverQueuedMessagesNow", runId),
     undoToCheckpoint: (input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> =>
       ipcRenderer.invoke("orchestration:undoToCheckpoint", input),
-    updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
-      ipcRenderer.invoke("orchestration:updateRunStatus", input),
     markRunSeen: (input: MarkRunSeenInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:markRunSeen", input),
     renameRun: (input: RenameRunInput): Promise<RunState> =>
