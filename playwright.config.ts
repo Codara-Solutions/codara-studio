@@ -1,5 +1,6 @@
 import { defineConfig } from "@playwright/test";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { restoreUserZdotdir, sanitizeElectronViteDevEnv } from "./src/main/env-sanitize";
 
@@ -49,6 +50,31 @@ for (const key of [
 }
 sanitizeElectronViteDevEnv(process.env);
 restoreUserZdotdir(process.env);
+
+// A test app left on the default CLI homes adopts this machine's own Claude
+// Code, Codex and Grok logins as Account 1 and runs real Cora turns on the
+// user's subscription (and can read or write the login Keychain item). Every
+// run gets empty homes of its own and no Keychain, unless a live suite asked
+// for the real accounts. Specs that pin a home themselves still win.
+const liveAccountSuite = [
+  "SPARK_E2E_CLAUDE_LIVE",
+  "CODARA_E2E_PI_MANAGER_LIVE",
+  "CODARA_E2E_PI_WORKER_LIVE",
+].some((key) => process.env[key] === "1");
+if (!liveAccountSuite) {
+  const cliHomes = mkdtempSync(join(tmpdir(), "codara-e2e-cli-homes-"));
+  process.on("exit", () => rmSync(cliHomes, { recursive: true, force: true }));
+  for (const [key, name] of [
+    ["CLAUDE_CONFIG_DIR", "claude"],
+    ["CODEX_HOME", "codex"],
+    ["GROK_HOME", "grok"],
+  ] as const) {
+    const home = join(cliHomes, name);
+    mkdirSync(home);
+    process.env[key] = home;
+  }
+  process.env.CODARA_DISABLE_KEYCHAIN = "1";
+}
 
 export default defineConfig({
   testDir: "./tests/e2e",
