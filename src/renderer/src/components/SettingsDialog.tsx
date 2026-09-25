@@ -2700,13 +2700,27 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             same Cora chats.
           </div>
         ) : overview ? (
-          <PiRuntimeInstallRow
-            expectedVersion={overview.runtimeExpectedVersion}
-            runtimeError={overview.runtimeError}
-            bundledVersion={overview.runtimeSource === "bundled" ? overview.runtimeVersion ?? undefined : undefined}
-            install={install}
-            onInstall={installRuntime}
-          />
+          <>
+            <PiRuntimeInstallRow
+              expectedVersion={overview.runtimeExpectedVersion}
+              runtimeError={overview.runtimeError}
+              bundledVersion={overview.runtimeSource === "bundled" ? overview.runtimeVersion ?? undefined : undefined}
+              install={install}
+              onInstall={installRuntime}
+            />
+            <div
+              style={{
+                padding: "3px 3px 0",
+                color: "var(--muted)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 11,
+                lineHeight: 1.4,
+              }}
+            >
+              Each account keeps its own private sign-in, and they all share the
+              same Cora chats.
+            </div>
+          </>
         ) : null}
       </div>
 
