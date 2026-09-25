@@ -5107,6 +5107,12 @@ export default function App() {
             );
             return;
           }
+          // Pi calls reasoning depth its thinking level; `/thinking` with no
+          // argument opens its picker.
+          if (target.runtime === "pi") {
+            void window.spark.pty.inject(target.paneId, "/thinking", { submit: true });
+            return;
+          }
           // Grok has no Ctrl+S stash either, so only Claude Code gets the
           // draft parked before the command.
           void window.spark.pty.inject(target.paneId, "/effort", {

@@ -41,6 +41,13 @@ export function resolveAgentChordTarget(
         runtime: leaf.agentSession.runtime,
       };
     }
+    // A Pi pane gets its session pointer only after Pi's first reply, and
+    // picking a model is often what comes before it. Its live chip is the
+    // same detector's word that Pi is in the pane now.
+    const worker = leaf?.worker;
+    if (leaf && worker?.runtime === "pi" && worker.source === "manual" && worker.agentRunning !== false) {
+      return { kind: "terminal", paneId: leaf.paneId, runtime: "pi" };
+    }
   }
   return { kind: "none" };
 }

@@ -251,6 +251,7 @@ tricks it tries).
 
 These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
+`test-enumerate-open-workers`,
 `test-dock-layout`, `test-split-drop`, `test-tab-reorder`,
 `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,
 `test-workspace-colors`, `test-explorer-clipboard`, `test-file-tree-marquee`,

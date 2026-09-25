@@ -104,9 +104,11 @@ The two cycle chords follow what you are looking at:
 - **Over a terminal pane running an agent** they type that CLI's own command:
   `/model` for the model, `/effort` for the effort. Codex has no effort
   command, so the effort chord opens its `/model` picker, where Codex sets
-  reasoning depth. For Claude Code, Codara first sends Ctrl+S (Claude Code's
-  stash) so a half-written message is parked instead of being submitted with
-  the command glued on; Claude Code restores it when the picker closes.
+  reasoning depth. Pi calls it a thinking level and gets `/thinking`; a Pi
+  pane takes both chords as soon as Pi is detected in it. For Claude Code,
+  Codara first sends Ctrl+S (Claude Code's stash) so a half-written message
+  is parked instead of being submitted with the command glued on; Claude
+  Code restores it when the picker closes.
 
 The two picker chords always open the pickers of a Cora chat.
 
