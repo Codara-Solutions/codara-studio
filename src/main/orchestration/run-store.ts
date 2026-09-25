@@ -119,7 +119,7 @@ import {
   whiteboardNodeSizeLimits,
   normalizeWhiteboardEvidence,
 } from "@shared/cora-whiteboard-file";
-import { CODEX_MODEL_BY_TIER, loomRuntimeForModel, normalizeCodexModelId } from "@shared/model-catalog";
+import { CODEX_MODEL_BY_TIER, loomRuntimeForModel } from "@shared/model-catalog";
 import {
   applyUserBoardUpdate,
   composeBoardNudgeMessage,
@@ -284,8 +284,12 @@ import {
   settleAgentTerminalRun,
 } from "../agent-terminal-lifecycle";
 import { detectWorkerAssignableRuntimes } from "./pi-worker-providers";
-import { getProvider } from "../providers";
-import type { SpawnOpts } from "../providers/types";
+import {
+  buildStandingTerminalCommand,
+  describeSpawnedTerminals,
+  spawnedTerminalsTitle,
+  standingTerminalTitle,
+} from "./standing-terminals";
 import {
   buildManagerTurnPrompt,
   isCheckpointJobCurrent,
@@ -8208,81 +8212,6 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   });
 
   return next;
-}
-
-// Effort levels accepted by the current Claude and Codex CLIs for standing
-// interactive terminals. GPT-5.6 adds Max as a first-class quality setting;
-// both providers receive the explicit choice instead of silently ignoring it.
-const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-
-// Build the launch command for a standing interactive terminal: a plain
-// claude/codex session the user drives. Like buildLaunchCommandLine, but
-// without the worker-task wiring — these are not Cora workers.
-//
-// The CLI-specific argv is produced by the runtime's `CliProvider`
-// (see src/main/providers/) so adding a new CLI later only requires a new
-// provider file.
-function buildStandingTerminalCommand(
-  runtime: "claude" | "codex" | "grok",
-  model?: string,
-  effort?: string,
-): string {
-  let effectiveEffort: SpawnOpts["effort"];
-  if (effort && STANDING_TERMINAL_EFFORTS.has(effort)) {
-    effectiveEffort = effort as SpawnOpts["effort"];
-  }
-
-  let effectiveModel = model?.trim() || undefined;
-  if (runtime === "codex" && effectiveModel) {
-    effectiveModel = normalizeCodexModelId(effectiveModel);
-  }
-
-  const provider = getProvider(runtime);
-  const providerArgs = provider.buildArgs({
-    cwd: "",
-    model: effectiveModel,
-    effort: effectiveEffort,
-  });
-
-  const head = provider.binaryName;
-  const tail = providerArgs.map((arg) => quoteShellArg(arg));
-  return [head, ...tail].join(" ");
-}
-
-function standingTerminalTitle(runtime: "claude" | "codex" | "grok", model?: string): string {
-  const base = runtime === "codex" ? "Codex" : runtime === "grok" ? "Grok" : "Claude";
-  return model ? `${base} ${model}` : base;
-}
-
-// One-line chat confirmation for a spawn_terminals decision, e.g. "Opened 2
-// Claude and 1 Codex standing terminals ...". Counts by runtime (claude,
-// codex) so the user gets concrete acknowledgement that the request landed.
-function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
-  const counts = new Map<string, number>();
-  for (const terminal of terminals) {
-    const label =
-      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  const parts = [...counts].map(([label, n]) => `${n} ${label}`);
-  const list =
-    parts.length <= 1
-      ? parts.join("")
-      : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
-  const noun = terminals.length === 1 ? "terminal" : "terminals";
-  return `Opened ${list} standing ${noun} in the workbench, yours to prompt and drive directly.`;
-}
-
-function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
-  const counts = new Map<string, number>();
-  for (const terminal of terminals) {
-    const label =
-      terminal.runtime === "codex" ? "Codex" : terminal.runtime === "grok" ? "Grok" : "Claude";
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  const parts = [...counts].map(([label, n]) => `${label} x${n}`);
-  if (parts.length === 0) return "Agent terminals";
-  return `${parts.join(" + ")} terminals`;
 }
 
 // Handle a spawn_terminals manager decision: the user asked Codara to open
@@ -19934,11 +19863,6 @@ async function runWorkerSession({
   } finally {
     activeWorkerProcesses.delete(attemptId);
   }
-}
-
-function quoteShellArg(value: string): string {
-  if (/^[A-Za-z0-9_./:@+=,-]+$/.test(value)) return value;
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function runPath(runId: string): string {
