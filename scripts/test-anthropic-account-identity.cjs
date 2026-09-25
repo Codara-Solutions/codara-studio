@@ -14,6 +14,9 @@ const path = require("node:path");
 const { buildSync } = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
+// claudeIdentityOf's module bundles Claude Code's credential store; nothing
+// here reads it, but the Keychain stays out of reach all the same.
+process.env.CODARA_DISABLE_KEYCHAIN = "1";
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-anthropic-identity-"));
 const ENTRY = path.join(TMP, "entry.ts");
 const OUT = path.join(TMP, "bundle.cjs");

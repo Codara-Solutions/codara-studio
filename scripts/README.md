@@ -78,12 +78,13 @@ failure.
   `CODARA_DISABLE_KEYCHAIN=1`. This is a test seam in
   `src/main/orchestration/claude-cli-credentials.ts`: with it set, the real
   credential backend never runs `/usr/bin/security`, so no macOS Keychain
-  item is read or written. Nine suites use it: `test-anthropic-accounts`,
-  `test-anthropic-account-migration`, `test-anthropic-credential-mirror`,
-  `test-claude-cli-account-profiles`, `test-claude-cli-credentials`,
-  `test-claude-cli-live-login`, `test-claude-login-keeper`,
-  `test-pi-subscription-refresh` and `test-unified-account-migration`. A new
-  suite that reaches that module must set it too.
+  item is read or written. Ten suites use it: `test-anthropic-accounts`,
+  `test-anthropic-account-identity`, `test-anthropic-account-migration`,
+  `test-anthropic-credential-mirror`, `test-claude-cli-account-profiles`,
+  `test-claude-cli-credentials`, `test-claude-cli-live-login`,
+  `test-claude-login-keeper`, `test-pi-subscription-refresh` and
+  `test-unified-account-migration`. A new suite that reaches that module
+  must set it too.
 - A shell inside a Studio pane exports Codara variables (`SPARK_PANE_ID`,
   `SPARK_AGENT_SOCKET`, `SPARK_HOME_DIR`, and so on). Suites that could pick
   them up set their own values or delete them. If a suite behaves differently
