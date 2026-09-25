@@ -49,7 +49,8 @@ async function buildHarness() {
   fs.writeFileSync(
     entry,
     [
-      `export * as accounts from ${JSON.stringify(orchestration("anthropic-accounts.ts"))};`,
+      `export * as accounts from ${JSON.stringify(orchestration("unified-accounts.ts"))};`,
+      `export * as claudeAdapter from ${JSON.stringify(orchestration("account-adapters/claude-account-adapter.ts"))};`,
       `export * as migration from ${JSON.stringify(orchestration("unified-account-migration.ts"))};`,
       `export * as liveSlot from ${JSON.stringify(orchestration("claude-live-slot-undo.ts"))};`,
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
@@ -102,6 +103,24 @@ async function buildHarness() {
     ],
   });
   return require(out);
+}
+
+// The Claude account service is the unified service over the Claude adapter,
+// built from the same seams the registry wires in production.
+function claudeAccountService(H, options) {
+  const { claudeStore, leases, backend, fileOnly, readIdentity, platform, ...rest } = options;
+  return new H.accounts.UnifiedAccountService(
+    H.claudeAdapter.createClaudeAccountAdapter({
+      ...(claudeStore ? { store: claudeStore } : {}),
+      ...(leases ? { leases } : {}),
+      ...(backend ? { backend } : {}),
+      ...(fileOnly ? { fileOnly } : {}),
+      ...(readIdentity ? { readIdentity } : {}),
+      ...(platform ? { platform } : {}),
+      ...(rest.log ? { log: rest.log } : {}),
+    }),
+    rest,
+  );
 }
 
 async function loadAuthStorage() {
@@ -295,7 +314,7 @@ async function main() {
     retryDelayMs: 20,
   });
   const logs = [];
-  const service = new H.accounts.AnthropicAccountService({
+  const service = claudeAccountService(H, {
     piStore,
     claudeStore,
     leases,

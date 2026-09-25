@@ -382,7 +382,6 @@ async function main() {
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
       "src/main/orchestration/account-adapters/claude-account-adapter.ts",
-      "src/main/orchestration/anthropic-accounts.ts",
       "src/main/orchestration/claude-live-slot-undo.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
