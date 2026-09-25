@@ -48,6 +48,7 @@ import {
   buildClaudeLaunch,
   buildGrokLaunch,
   isAgentSessionLaunchCommand,
+  PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
 import {
@@ -267,6 +268,17 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     };
   }
   if (decision.kind === "fresh") {
+    if (restore.runtime === "pi") {
+      // Pi's session file is gone (pruned, or the cwd moved). A plain `pi`
+      // brings the pane back; main binds its new session after the first
+      // reply, so there is no replacement pointer to hand over yet.
+      return {
+        resumeCommand: PI_LAUNCH_COMMAND,
+        resumeIsFreshFallback: true,
+        fallbackNotice: "previous Pi session couldn't be resumed, starting a fresh one",
+        fallbackSession: null,
+      };
+    }
     if (restore.runtime === "grok") {
       const fresh = buildGrokLaunch();
       return {
@@ -3139,7 +3151,8 @@ export function useTerminalSession({
           if (
             restoredRuntime === "claude" ||
             restoredRuntime === "codex" ||
-            restoredRuntime === "grok"
+            restoredRuntime === "grok" ||
+            restoredRuntime === "pi"
           ) {
             setAgentRunning(restoredRuntime);
           }

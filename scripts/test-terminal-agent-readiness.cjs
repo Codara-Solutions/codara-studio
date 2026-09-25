@@ -70,6 +70,18 @@ assert.equal(
   "codex",
 );
 assert.equal(launches.runtimeFromAgentSessionLaunchCommand("npm test"), null);
+// A Pi launch stays an ordinary command in an integrated shell; only its
+// restore command runs the way agent launches do.
+assert.equal(launches.runtimeFromAgentSessionLaunchCommand(launches.PI_LAUNCH_COMMAND), null);
+assert.equal(
+  launches.buildAgentResumeCommand({ runtime: "pi", sessionId: "01a0d846-6ded-7009-8e06-51c7f805f522" }),
+  "pi --session 01a0d846-6ded-7009-8e06-51c7f805f522",
+  "Pi resumes with the command it prints when you quit it",
+);
+assert.equal(
+  launches.buildAgentResumeCommand({ runtime: "grok", sessionId: "g" }),
+  "grok --yolo --resume g",
+);
 
 for (const runtime of ["claude", "codex"]) {
   const worker = state.createManualAgentLaunchWorker(runtime, `pane-${runtime}`);

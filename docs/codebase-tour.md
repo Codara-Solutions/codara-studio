@@ -111,7 +111,9 @@ tabs and panes belong to the renderer.
    raises notifications through `src/main/notify/`. For Claude Code, the hook
    events handled by `hook-watcher.ts` add detail, and
    `agent-session-registry.ts` records the session id so the pane can resume
-   it after a restart. Codex sessions are found by `codex-session-tracker.ts`.
+   it after a restart. Codex sessions are found by `codex-session-tracker.ts`,
+   and Pi sessions by `pi-session-tracker.ts`, which matches the session
+   files Pi names by creation time to the Pi process running in each pane.
 
 Related: `agent-runtimes.ts` checks which CLIs are installed (for the UI).
 `providers/` describes the Claude, Codex and Grok command lines; it is used

@@ -1434,13 +1434,13 @@ function GeneralSettings({
 
       <SectionTitle
         title="Agent sessions"
-        detail="Continue Claude/Codex terminal conversations across app restarts."
+        detail="Continue Claude Code, Codex, Grok and Pi terminal conversations across app restarts."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
           <ToggleRow
             title="Resume agent sessions on relaunch"
-            desc="Panes whose Claude/Codex agent was running at quit relaunch it with --resume, terminal output is restored, and a pane whose shell dies under a live agent (sleep, crash) resumes in place. When off, every relaunch starts fresh shells."
+            desc="Panes whose Claude Code, Codex, Grok or Pi agent was running at quit relaunch it in the same session, terminal output is restored, and a pane whose shell dies under a live agent (sleep, crash) resumes in place. When off, every relaunch starts fresh shells."
             checked={preferences.restoreAgentSessions === true}
             onChange={(v) => void setPreference("restoreAgentSessions", v)}
           />
@@ -3425,7 +3425,7 @@ function SessionsSettings({
       {hydrated ? (
         <ToggleRow
           title="Resume running agent sessions when Codara reopens"
-          desc="Reopens terminal tabs that still had Claude or Codex running and resumes their exact local session. Shell tabs and agents you already exited still start normally."
+          desc="Reopens terminal tabs that still had Claude Code, Codex, Grok or Pi running and resumes their exact local session. Shell tabs and agents you already exited still start normally."
           checked={preferences.restoreAgentSessions === true}
           onChange={(next) => void setPreference("restoreAgentSessions", next)}
         />

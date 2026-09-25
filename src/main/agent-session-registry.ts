@@ -1,5 +1,6 @@
-// Session identity for each pane, fed by Claude SessionStart hooks and
-// Codex process-owned transcript tracking.
+// Session identity for each pane, fed by Claude SessionStart hooks, Codex
+// process-owned transcript tracking, and Pi session attribution
+// (pi-session-tracker.ts).
 //
 // Why this exists: the renderer's restore pointer was captured by filesystem
 // discovery ("newest transcript CREATED in this cwd within 60s"), which is
@@ -22,7 +23,7 @@ import { join } from "node:path";
 
 export interface SessionStartRecord {
   paneId: string;
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "pi";
   nativeCodexProfileId?: string;
   /** Process-confirmed presence, retained through app shutdown. */
   active?: boolean;
@@ -78,7 +79,7 @@ function isValidRecord(rec: unknown): rec is SessionStartRecord {
     r.paneId.length > 0 &&
     typeof r.sessionId === "string" &&
     /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(r.sessionId) &&
-    (r.runtime === "claude" || r.runtime === "codex") &&
+    (r.runtime === "claude" || r.runtime === "codex" || r.runtime === "pi") &&
     (r.active === undefined || typeof r.active === "boolean") &&
     typeof r.timestamp === "string"
   );

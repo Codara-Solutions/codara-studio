@@ -2565,7 +2565,7 @@ export default function App() {
         tabId: string;
         tabTitle: string;
         excluded: boolean;
-        runtimeHint?: "claude" | "codex" | "grok" | null;
+        runtimeHint?: "claude" | "codex" | "grok" | "pi" | null;
       }> = [];
       for (const tab of layout.tabs) {
         if (tab.kind !== "terminal") continue;
@@ -4683,7 +4683,12 @@ export default function App() {
               workspaceId: layout.workspaceId,
               title: tab.title,
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
-              profile: leaf.agentSession?.runtime ?? "shell",
+              // The phone protocol has no Pi profile; a Pi pane is shared
+              // as the shell it runs in.
+              profile:
+                leaf.agentSession?.runtime === "pi"
+                  ? "shell"
+                  : leaf.agentSession?.runtime ?? "shell",
             });
           });
         }
@@ -5484,7 +5489,7 @@ export default function App() {
       //   failure is that restore opens that pane's previous conversation.
       if (
         state.running &&
-        (state.runtime === "claude" || state.runtime === "codex") &&
+        (state.runtime === "claude" || state.runtime === "codex" || state.runtime === "pi") &&
         leaf.agentSession?.sessionId &&
         leaf.agentSession.runtime === state.runtime &&
         leaf.agentSession.active !== true

@@ -74,6 +74,8 @@ async function main() {
     "claude missing transcript → fresh",
     decideResume({ exists: false }, "claude").kind === "fresh",
   );
+  check("pi session file present → resume", decideResume({ exists: true, resumable: true }, "pi").kind === "resume");
+  check("pi session file gone → fresh pi", decideResume({ exists: false }, "pi").kind === "fresh");
   check(
     "codex not resumable → clear",
     decideResume({ exists: true, resumable: false }, "codex").kind === "clear",
@@ -195,6 +197,21 @@ async function main() {
   check(
     "merge: newer claude record replaces codex pointer",
     codexHealed !== null && codexHealed.runtime === "claude" && codexHealed.sessionId === "new-id",
+  );
+  // Pi pointers only ever come from main's attribution, so a pane that never
+  // had one adopts it, carrying the process-confirmed `active`.
+  const piAdopted = mergeSessionStart(null, rec({ runtime: "pi", sessionId: "01a0d846-pi", active: true }));
+  check(
+    "merge: a Pi record creates the pane's pointer with its active flag",
+    piAdopted !== null && piAdopted.runtime === "pi" && piAdopted.sessionId === "01a0d846-pi" && piAdopted.active === true,
+  );
+  const piNewSession = mergeSessionStart(
+    ptr({ runtime: "pi", sessionId: "01a0d846-pi" }),
+    rec({ runtime: "pi", sessionId: "01a0d900-pi" }),
+  );
+  check(
+    "merge: a Pi /new session replaces the older Pi pointer",
+    piNewSession !== null && piNewSession.runtime === "pi" && piNewSession.sessionId === "01a0d900-pi",
   );
   check(
     "merge: pointer with unparseable capturedAt treated as oldest → heals",

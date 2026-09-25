@@ -9,10 +9,13 @@ export const GROK_LAUNCH_COMMAND = "grok --yolo";
 // Pi runs as the user installed it: their own `pi` in their own shell, with
 // their own ~/.pi (logins, settings, extensions). No flags: their own Pi
 // settings decide, and `pi --resume` inside the pane picks a past session.
+// The pane keeps its shell integration (runtimeFromAgentSessionLaunchCommand
+// does not claim `pi`): it is typed into an ordinary shell, whose prompt
+// markers tell Codara when Pi exits.
 export const PI_LAUNCH_COMMAND = "pi";
 
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
-export type AgentSessionRuntime = "claude" | "codex" | "grok";
+export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi";
 
 // Fresh Claude launch with a Codara-minted session id. Forcing `--session-id`
 // makes the transcript path deterministic (~/.claude/projects/<enc-cwd>/<id>.jsonl)
@@ -73,11 +76,18 @@ export function buildGrokResumeCommand(sessionId: string): string {
   return `${GROK_LAUNCH_COMMAND} --resume ${sessionId}`;
 }
 
+// The command Pi itself prints when you quit it. Main attributes the id to
+// the pane (pi-session-tracker.ts); nothing is forced at launch.
+export function buildPiResumeCommand(sessionId: string): string {
+  return `${PI_LAUNCH_COMMAND} --session ${sessionId}`;
+}
+
 export function buildAgentResumeCommand(session: {
   runtime: AgentSessionRuntime;
   sessionId: string;
 }): string {
   if (session.runtime === "claude") return buildClaudeResumeCommand(session.sessionId);
   if (session.runtime === "grok") return buildGrokResumeCommand(session.sessionId);
+  if (session.runtime === "pi") return buildPiResumeCommand(session.sessionId);
   return buildCodexResumeCommand(session.sessionId);
 }

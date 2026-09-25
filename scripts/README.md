@@ -190,7 +190,7 @@ calls.
 | `test-pty-inherited-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane, backpressure, spawning, cleaning up child processes. |
 | `test-terminal-agent-notify`, `test-terminal-agent-notify-pi`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen` | Telling from a pane's output that an agent is running, blocked or idle (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`). |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
-| `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
+| `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
 
 ### Claude hooks, the MCP server and the agent socket
