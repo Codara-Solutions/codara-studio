@@ -4,7 +4,7 @@ import { dirname, join, relative } from "node:path";
 import { runtimeFromProcessCommand, type PublicAgentRuntime } from "@shared/agent-patterns";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { resolveCodexTranscriptPath, resolveCodexHomePaths, pathIsInsideCodexHome } from "./orchestration/codex-home";
-import { extractSessionUuid, readRolloutHeader } from "./orchestration/codex-sessions";
+import { extractSessionUuid, isInteractiveCodexSource, readRolloutHeader } from "./orchestration/codex-sessions";
 import { latestSessionStart, recordSessionStart, type SessionStartRecord } from "./agent-session-registry";
 
 interface ProcessEntry { pid: number; parentPid: number; command: string }
@@ -99,10 +99,12 @@ export async function sessionFromOpenRollouts(paths: readonly string[], explicit
         transcriptPath = resolveCodexTranscriptPath(join(sessionsRoot, relative(realRoot, realPath)), explicitHome);
       }
       handle = await fs.open(path, "r");
-      const entry = await readRolloutHeader(handle) as { type?: string; payload?: { source?: unknown; cwd?: unknown; id?: string } } | null;
+      const entry = await readRolloutHeader(handle) as {
+        type?: string; payload?: { source?: unknown; originator?: unknown; cwd?: unknown; id?: string };
+      } | null;
       const meta = entry?.payload;
       const sessionId = extractSessionUuid(path);
-      if (entry?.type !== "session_meta" || meta?.source !== "cli" ||
+      if (entry?.type !== "session_meta" || !isInteractiveCodexSource(meta?.source, meta?.originator) ||
           typeof meta?.cwd !== "string" || !meta.cwd || !sessionId ||
           meta?.id?.toLowerCase() !== sessionId.toLowerCase()) return null;
       const stat = await handle.stat();
