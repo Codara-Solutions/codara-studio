@@ -65,6 +65,18 @@ async function main() {
     plugins: [harnessPlugin],
   });
 
+  const envSanitizeOutfile = path.join(tmp, "env-sanitize.bundle.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "env-sanitize.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: envSanitizeOutfile,
+    logLevel: "silent",
+  });
+  // `npm test` runs this under npm's run-script, whose PATH entries steps drop.
+  const { withoutNpmRunScriptPath } = require(envSanitizeOutfile);
+
   // Seed the scripted shell BEFORE requiring the bundle (the stub `??=`s it).
   globalThis.__LP = { shell: {}, calls: [] };
   const P = require(outfile);
@@ -177,7 +189,8 @@ async function main() {
           env.ELECTRON_EXEC_PATH === undefined &&
           env.NODE_ENV_ELECTRON_VITE === undefined,
       );
-      ok("tests: the rest of the app env is inherited", env.SPARK_HOME_DIR === "/codara-home" && env.PATH === process.env.PATH);
+      ok("tests: the rest of the app env is inherited", env.SPARK_HOME_DIR === "/codara-home" &&
+        env.PATH === withoutNpmRunScriptPath(process.env.PATH, process.env));
       await P.evaluateGuardPredicate({ type: "command", command: "make check" }, ctx());
       env = lastEnv();
       ok("command: dev app's NODE_ENV and ELECTRON_RENDERER_URL are not inherited", env.NODE_ENV === undefined && env.ELECTRON_RENDERER_URL === undefined);
