@@ -18,7 +18,21 @@ import {
   resolveCodexTranscriptPath,
 } from "./codex-home";
 
-export const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
+// Codex 0.157+ continues a long conversation in segment files named
+// `rollout-<ts>-<session>_<segment>.jsonl`; the session id is the first UUID.
+const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+export const ROLLOUT_FILENAME_UUID_RE = new RegExp(
+  `rollout-.*?-(${UUID_PATTERN})(?:_${UUID_PATTERN})?\\.jsonl$`,
+  "i",
+);
+
+// Interactive terminal sessions only: exec runs, subagents, and the desktop,
+// browser and IDE clients are someone else's conversation. Codex 0.157+ can
+// record a terminal session as `source: "vscode"` (its app-server transport);
+// the originator still names the terminal UI.
+export function isInteractiveCodexSource(source: unknown, originator: unknown): boolean {
+  return source === "cli" || (source === "vscode" && originator === "codex-tui");
+}
 
 export function codexHomeDir(explicitHome?: string | null): string {
   return resolveCodexHomeDir(explicitHome);

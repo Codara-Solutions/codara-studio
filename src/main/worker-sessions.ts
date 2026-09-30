@@ -21,7 +21,7 @@ import {
   resolveCodexHomePaths,
   resolveCodexTranscriptPath,
 } from "./orchestration/codex-home";
-import { extractSessionUuid } from "./orchestration/codex-sessions";
+import { extractSessionUuid, isInteractiveCodexSource } from "./orchestration/codex-sessions";
 import {
   grokHomeDir,
   grokSessionDir,
@@ -180,18 +180,21 @@ export function parseCodexSessionHead(text: string): {
   startedAtMs: number | null;
   title: string | null;
   source: string | null;
+  originator: string | null;
   isSubagent: boolean;
 } {
   let cwd: string | null = null;
   let startedAtMs: number | null = null;
   let fallbackTitle: string | null = null;
   let source: string | null = null;
+  let originator: string | null = null;
   let isSubagent = false;
 
   for (const record of recordsFromHead(text)) {
     const payload = isRecord(record.payload) ? record.payload : null;
     if (record.type === "session_meta" && payload) {
       if (!cwd && typeof payload.cwd === "string") cwd = payload.cwd;
+      if (typeof payload.originator === "string") originator = payload.originator;
       if (typeof payload.source === "string") {
         source = payload.source;
       } else if (isRecord(payload.source) && "subagent" in payload.source) {
@@ -225,7 +228,7 @@ export function parseCodexSessionHead(text: string): {
     }
   }
 
-  return { cwd, startedAtMs, title: fallbackTitle, source, isSubagent };
+  return { cwd, startedAtMs, title: fallbackTitle, source, originator, isSubagent };
 }
 
 function normalizedPath(path: string): string {
@@ -329,6 +332,27 @@ async function collectCodexRollouts(root: string): Promise<string[]> {
   return paths;
 }
 
+// A long Codex conversation spans several `<session>_<segment>` rollouts that
+// share one session id. List it once, at its newest activity, keeping the
+// title from a segment that still holds the first prompt.
+function mergeCodexSegments(sessions: WorkerSessionSummary[]): WorkerSessionSummary[] {
+  const byId = new Map<string, WorkerSessionSummary>();
+  for (const session of sessions) {
+    const key = session.sessionId.toLowerCase();
+    const existing = byId.get(key);
+    if (!existing) {
+      byId.set(key, session);
+      continue;
+    }
+    const sessionIsNewer = Date.parse(session.updatedAt) >= Date.parse(existing.updatedAt);
+    const newer = sessionIsNewer ? session : existing;
+    const older = sessionIsNewer ? existing : session;
+    const title = older.title !== "Untitled session" ? older.title : newer.title;
+    byId.set(key, { ...newer, title });
+  }
+  return [...byId.values()];
+}
+
 async function listCodexSessions(
   cwd: string,
   codexHome?: string | null,
@@ -340,7 +364,7 @@ async function listCodexSessions(
   ]);
   const targetCwd = normalizedPath(cwd);
 
-  return mapLimited(paths, async (path) => {
+  const sessions = await mapLimited(paths, async (path) => {
     try {
       const sessionId = extractSessionUuid(path);
       if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
@@ -348,7 +372,7 @@ async function listCodexSessions(
       const parsed = parseCodexSessionHead(head);
       if (
         parsed.isSubagent ||
-        (parsed.source !== null && parsed.source !== "cli") ||
+        (parsed.source !== null && !isInteractiveCodexSource(parsed.source, parsed.originator)) ||
         !parsed.cwd ||
         normalizedPath(parsed.cwd) !== targetCwd
       ) {
@@ -369,6 +393,7 @@ async function listCodexSessions(
       return null;
     }
   });
+  return mergeCodexSegments(sessions);
 }
 
 async function listGrokSessions(
@@ -521,7 +546,7 @@ async function listAllCodexSessions(
     ),
     sessionIdsFromHistory(pathsForHome.historyPath),
   ]);
-  return mapLimited(paths, async (path) => {
+  const sessions = await mapLimited(paths, async (path) => {
     try {
       const sessionId = extractSessionUuid(path);
       if (!sessionId || !interactiveIds.has(sessionId.toLowerCase())) return null;
@@ -529,7 +554,7 @@ async function listAllCodexSessions(
       const parsed = parseCodexSessionHead(head);
       if (
         parsed.isSubagent ||
-        (parsed.source !== null && parsed.source !== "cli") ||
+        (parsed.source !== null && !isInteractiveCodexSource(parsed.source, parsed.originator)) ||
         !parsed.cwd ||
         !isAbsolute(parsed.cwd)
       ) {
@@ -549,6 +574,7 @@ async function listAllCodexSessions(
       return null;
     }
   });
+  return mergeCodexSegments(sessions);
 }
 
 async function listAllGrokSessions(

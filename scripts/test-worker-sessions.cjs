@@ -530,6 +530,54 @@ async function main() {
       otherCodexSessions[0].sessionId === otherCodexId &&
       codexSessions.every((item) => item.sessionId !== otherCodexId),
   );
+
+  // Codex 0.157+ terminal sessions: `source: "vscode"` with a codex-tui
+  // originator, continued across `<session>_<segment>` rollouts.
+  const segmentedCodexHome = path.join(fixtureRoot, "segmented-codex-home");
+  const segmentedCodexId = "01a0ef0d-0bf8-7473-aba0-27ae2adba02d";
+  const sidepanelCodexId = "01a0f23b-06a8-7be1-89d5-e0b0a6266923";
+  const segmentedCodexDir = path.join(segmentedCodexHome, "sessions", "2026", "07", "17");
+  fs.mkdirSync(segmentedCodexDir, { recursive: true });
+  const segmentMeta = (id, originator, timestamp) => ({
+    type: "session_meta",
+    payload: { id, cwd: workspace, originator, source: "vscode", timestamp },
+  });
+  const firstSegment = path.join(segmentedCodexDir, `rollout-2026-07-17T11-00-00-${segmentedCodexId}.jsonl`);
+  const laterSegment = path.join(
+    segmentedCodexDir,
+    `rollout-2026-07-17T12-00-00-${segmentedCodexId}_01a0efa9-b107-7c93-9f39-749c2959a034.jsonl`,
+  );
+  fs.writeFileSync(
+    firstSegment,
+    jsonl(
+      segmentMeta(segmentedCodexId, "codex-tui", "2026-07-17T11:00:00.000Z"),
+      { type: "event_msg", payload: { type: "user_message", message: "Segmented Codex conversation" } },
+    ),
+  );
+  fs.writeFileSync(laterSegment, jsonl(segmentMeta(segmentedCodexId, "codex-tui", "2026-07-17T12:00:00.000Z")));
+  fs.writeFileSync(
+    path.join(segmentedCodexDir, `rollout-2026-07-17T12-30-00-${sidepanelCodexId}.jsonl`),
+    jsonl(
+      segmentMeta(sidepanelCodexId, "codex-chrome-extension-sidepanel", "2026-07-17T12:30:00.000Z"),
+      { type: "event_msg", payload: { type: "user_message", message: "Browser side panel" } },
+    ),
+  );
+  fs.utimesSync(firstSegment, new Date("2026-07-17T11:30:00Z"), new Date("2026-07-17T11:30:00Z"));
+  fs.utimesSync(laterSegment, new Date("2026-07-17T12:10:00Z"), new Date("2026-07-17T12:10:00Z"));
+  fs.writeFileSync(
+    path.join(segmentedCodexHome, "history.jsonl"),
+    [segmentedCodexId, sidepanelCodexId]
+      .map((session_id, ts) => JSON.stringify({ session_id, ts, text: "fixture" }))
+      .join("\n") + "\n",
+  );
+  const segmentedSessions = await listWorkerSessions("codex", workspace, { codexHome: segmentedCodexHome });
+  check(
+    "Current Codex terminal sessions list once across their segments",
+    segmentedSessions.length === 1 &&
+      segmentedSessions[0].sessionId === segmentedCodexId &&
+      segmentedSessions[0].transcriptPath === laterSegment &&
+      segmentedSessions[0].title === "Segmented Codex conversation",
+  );
   const otherClaudeSessions = await listWorkerSessions("claude", workspace, {
     claudeStateDir: otherClaudeHome,
   });

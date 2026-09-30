@@ -54,6 +54,24 @@ const esbuild = require("esbuild");
   await fs.utimes(paths[0], 500, 500);
   assert.equal((await sessionFromOpenRollouts(paths)).sessionId, ids[0], "resuming an older conversation follows its new activity");
 
+  // Codex 0.157+: the terminal UI records `source: "vscode"` and continues long
+  // conversations in `<session>_<segment>` files.
+  const session = "01a0ef0d-0bf8-7473-aba0-27ae2adba02d";
+  const segment = path.join(dir, `rollout-2026-08-01T02-14-30-${session}_01a0efa9-b107-7c93-9f39-749c2959a034.jsonl`);
+  const sidepanel = path.join(dir, "rollout-2026-08-01T02-15-00-01a0f23b-06a8-7be1-89d5-e0b0a6266923.jsonl");
+  await fs.writeFile(segment, JSON.stringify({ type: "session_meta", payload: {
+    session_id: session, id: session, cwd: "/same/project", originator: "codex-tui", source: "vscode",
+    timestamp: "2026-08-01T02:14:30Z",
+  } }) + "\n");
+  await fs.writeFile(sidepanel, JSON.stringify({ type: "session_meta", payload: {
+    id: "01a0f23b-06a8-7be1-89d5-e0b0a6266923", cwd: "/same/project",
+    originator: "codex-chrome-extension-sidepanel", source: "vscode", timestamp: "2026-08-01T02:15:00Z",
+  } }) + "\n");
+  const current = await sessionFromOpenRollouts([segment]);
+  assert.equal(current.sessionId, session, "a segment file binds the conversation's session id");
+  assert.equal(current.transcriptPath, segment);
+  assert.equal(await sessionFromOpenRollouts([sidepanel]), null, "other Codex clients are not a terminal conversation");
+
   let panes = [{ paneId: "a", pid: 100, generationId: "a1" }, { paneId: "b", pid: 200, generationId: "b1" }];
   let files = new Map();
   const records = new Map();
