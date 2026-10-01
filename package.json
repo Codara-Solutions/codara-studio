@@ -314,6 +314,132 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
+      "fileAssociations": [
+        {
+          "ext": [
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "gif",
+            "bmp",
+            "ico",
+            "avif",
+            "svg"
+          ],
+          "name": "Image",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "pdf"
+          ],
+          "name": "PDF document",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "html",
+            "htm"
+          ],
+          "name": "Web page",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "mp4",
+            "webm",
+            "ogv",
+            "m4v",
+            "mov"
+          ],
+          "name": "Video",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "mp3",
+            "wav",
+            "ogg",
+            "oga",
+            "flac",
+            "m4a",
+            "aac"
+          ],
+          "name": "Audio",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "docx",
+            "docm",
+            "dotx",
+            "dotm"
+          ],
+          "name": "Word document",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "pptx",
+            "pptm",
+            "ppsx",
+            "ppsm",
+            "potx",
+            "potm"
+          ],
+          "name": "PowerPoint presentation",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "xlsx",
+            "xlsm",
+            "xltx",
+            "xltm"
+          ],
+          "name": "Excel workbook",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "csv",
+            "tsv",
+            "psv"
+          ],
+          "name": "Delimited text",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "md",
+            "markdown",
+            "mdown",
+            "mkd",
+            "mkdn"
+          ],
+          "name": "Markdown document",
+          "role": "Viewer",
+          "rank": "Alternate"
+        },
+        {
+          "ext": [
+            "coraboard"
+          ],
+          "name": "Codara whiteboard",
+          "role": "Viewer",
+          "rank": "Alternate"
+        }
+      ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",

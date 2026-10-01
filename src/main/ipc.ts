@@ -8,6 +8,7 @@ import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { takePendingOpenPaths } from "./open-with";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
 import {
@@ -3231,6 +3232,9 @@ export function registerIpc(): void {
 
   handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   handle("app:home", async (): Promise<string> => app.getPath("home"));
+  // Files handed over by Finder or Explorer, already allowed in the fs
+  // sandbox. Draining hands each one to exactly one renderer load.
+  handle("app:takeOpenPaths", async (): Promise<string[]> => takePendingOpenPaths());
 
   // Resolve the absolute file:// URL of the webview-side inspector preload
   // bundle so the renderer can attach it via `<webview preload="...">`.

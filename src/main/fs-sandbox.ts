@@ -51,6 +51,10 @@ import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-p
 
 let seededRoots: string[] = [];
 let workspaceRoots: string[] = [];
+// Single files the user handed to Studio from Finder or Explorer. Exact paths
+// only, never their folders: opening one document must not expose its
+// siblings to the read primitives.
+const openedFiles = new Set<string>();
 
 function resolveAll(roots: string[]): string[] {
   return roots
@@ -68,6 +72,10 @@ export function setSeededRoots(roots: string[]): void {
 
 export function setAllowedRoots(roots: string[]): void {
   workspaceRoots = resolveAll(roots);
+}
+
+export function allowOpenedFile(file: string): void {
+  openedFiles.add(path.resolve(file));
 }
 
 function home(seg: string): string {
@@ -122,6 +130,7 @@ export function isAllowedReadPath(target: string): boolean {
   // handler was routed there for an active remote workspace.
   if (isRemotePath(target)) return true;
   const abs = path.resolve(target);
+  if (openedFiles.has(abs)) return true;
   const roots = [...seededRoots, ...workspaceRoots, ...staticAllowed()];
   return roots.some((root) => isInside(root, abs));
 }
