@@ -126,6 +126,27 @@ function scheduleFlush(state: State, webContents: WebContents): void {
   }, DEBOUNCE_MS);
 }
 
+// A Dirent describes the link itself, so a top-level symlink to a folder
+// (a workspace's `SharePoint` shortcut into OneDrive, say) reports
+// isDirectory() false and was never watched: its contents only refreshed when
+// the tree remounted. A recursive watch opened on the link path follows it and
+// reports names relative to the link, which are the paths the tree shows.
+async function listTopLevelDirs(root: string): Promise<string[]> {
+  const entries = await fsp.readdir(root, { withFileTypes: true });
+  const dirs: string[] = [];
+  for (const entry of entries) {
+    if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
+    const absolute = resolve(root, entry.name);
+    if (entry.isDirectory()) {
+      dirs.push(absolute);
+    } else if (entry.isSymbolicLink()) {
+      const target = await fsp.stat(absolute).catch(() => null);
+      if (target?.isDirectory()) dirs.push(absolute);
+    }
+  }
+  return dirs;
+}
+
 function watchTopLevelDir(state: State, dirAbsolute: string): void {
   if (state.recursiveDirs.has(dirAbsolute)) return;
   state.recursiveDirs.add(dirAbsolute);
@@ -316,9 +337,9 @@ export async function addWatchRoot(webContents: WebContents, root: string): Prom
   // opening a large workspace. Enumerate asynchronously, then hand recursive
   // registration to a worker thread. Failures are non-fatal: the root watcher
   // above still observes top-level activity.
-  let entries: import("node:fs").Dirent[];
+  let topLevelDirs: string[];
   try {
-    entries = await fsp.readdir(root, { withFileTypes: true });
+    topLevelDirs = await listTopLevelDirs(root);
   } catch (err) {
     console.warn("[fs-watcher] failed to enumerate", root, err);
     return;
@@ -330,11 +351,7 @@ export async function addWatchRoot(webContents: WebContents, root: string): Prom
   // dead state.
   if (getState(id, root) !== state || webContents.isDestroyed()) return;
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
-    watchTopLevelDir(state, resolve(root, entry.name));
-  }
+  for (const dir of topLevelDirs) watchTopLevelDir(state, dir);
   // The root watcher is already active, but nested directory events are not
   // observable until the worker has actually registered its fs.watch handles.
   // Await its ready handshake (bounded inside startRecursiveWatcher) so the

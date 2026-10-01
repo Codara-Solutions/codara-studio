@@ -226,6 +226,8 @@ renderer's JavaScript).
 not leave half-saved workspaces in memory), `test-storage-openrouter-key`
 (the OpenRouter key is encrypted at rest and never lost), `test-fs-watcher-lifecycle` (the
 file watcher behind the explorer, `src/main/fs-watcher.ts`),
+`test-fs-watcher-events` (runs that watcher on a temporary workspace: changes
+in nested and symlinked folders reach the explorer),
 `test-system-metrics` (the memory figure in the title-bar meters,
 `src/main/system-metrics.ts`).
 
