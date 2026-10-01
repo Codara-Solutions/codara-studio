@@ -218,7 +218,8 @@ navigation, registry, workspace), `test-browser-pane-webview-liveness`,
 `test-navigation-allowlist`, `test-declared-deps` (every module the main and
 preload bundles load at runtime is a declared dependency),
 `test-bundled-resources`, `test-renderer-chunks.mjs` (size budget of the
-renderer's JavaScript).
+renderer's JavaScript), `test-open-with` (Finder and Explorer "Open in Codara
+Studio": registered types, launch arguments, sandbox grant, generated entries).
 
 ### App state, files and system meters
 
