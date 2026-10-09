@@ -722,14 +722,22 @@ function createWindow(): void {
   // synchronously at notify time.
   registerMainWindow(windowForEvents);
 
-  windowForEvents.once("ready-to-show", () => {
+  let firstShowDone = false;
+  const showFirstTime = (): void => {
+    if (firstShowDone || windowForEvents.isDestroyed()) return;
+    firstShowDone = true;
     // Under an e2e run the window renders normally but is invisible to the
     // person at the machine — see hideWindowFromDesktop for why it is done
     // that way and not by hiding or moving the window.
     if (E2E_BACKGROUND) hideWindowFromDesktop(windowForEvents);
     else windowForEvents.show();
     registerUpdaterAfterFirstPaint(windowForEvents);
-  });
+  };
+  windowForEvents.once("ready-to-show", showFirstTime);
+  // Some Wayland compositors (COSMIC 1.10) never paint a window that has not
+  // been mapped yet, so ready-to-show never fires and the app would run with
+  // no window at all. Once the page has loaded, show it anyway.
+  windowForEvents.webContents.once("did-finish-load", showFirstTime);
 
   // Close-to-tray: only hide when the tray actually exists AND the user has
   // opted into background running. The live-tray precondition is a deliberate
