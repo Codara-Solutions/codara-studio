@@ -1236,6 +1236,14 @@ const api = {
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
     inspectorPreloadUrl: (): Promise<string> =>
       ipcRenderer.invoke("app:inspectorPreloadUrl"),
+    // Files the user opened in Studio from Finder or Explorer. Main queues
+    // them until a renderer takes them; `onOpenPaths` only says more arrived.
+    takeOpenPaths: (): Promise<string[]> => ipcRenderer.invoke("app:takeOpenPaths"),
+    onOpenPaths: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("app:open-paths", listener);
+      return () => ipcRenderer.off("app:open-paths", listener);
+    },
     // Fired by main just before the OS suspends (system sleep). The renderer
     // should synchronously flush any state it wouldn't want to lose if the
     // process is torn down during sleep (terminal tab tree + scrollback).
