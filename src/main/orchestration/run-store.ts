@@ -1444,10 +1444,15 @@ async function directChatPassModel(run: RunState): Promise<string> {
 }
 
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
+  // "Always verify edits with a worker" promises a verifier on every change,
+  // which only the managed path provides; an explicit direct request from the
+  // caller still wins.
+  const alwaysVerifyEdits = !input.runId && (await loadSettings()).coraAlwaysVerifyEdits === true;
   const directExecutionRequested =
     !input.runId &&
     (await shouldUseDirectExecution({
-      strategy: input.executionStrategy,
+      strategy:
+        alwaysVerifyEdits && input.executionStrategy !== "direct" ? "managed" : input.executionStrategy,
       cwd: input.cwd,
       prompt: input.initialUserNote,
       chatMode: input.chatMode,
@@ -12264,7 +12269,7 @@ export async function addRunMessage(
     input.author === "user" &&
     input.kind === "note" &&
     isTerminalRunStatus(run.status) &&
-    followUpNeedsManager(input.message)
+    (followUpNeedsManager(input.message) || (await loadSettings()).coraAlwaysVerifyEdits === true)
   ) {
     run = await commitRunChange(run, {
       type: "run.escalated_to_manager",

@@ -63,10 +63,23 @@ const resolveDirect = functionBody(runStore, "async function resolveDirectWorker
 assert.match(resolveDirect, /coraWorkerModelAvailability\(/, "only connected models are candidates");
 assert.match(resolveDirect, /pickDirectWorkerModel\(chipModel, connected\)/);
 
+// "Always verify edits with a worker" keeps first messages and follow-ups off
+// the direct lane, which has no verifier.
+assert.match(startAutopilot, /\(await loadSettings\(\)\)\.coraAlwaysVerifyEdits === true/);
+assert.match(
+  startAutopilot,
+  /alwaysVerifyEdits && input\.executionStrategy !== "direct" \? "managed" : input\.executionStrategy/,
+  "the setting forces the managed strategy unless the caller asked for direct",
+);
+
 // 3. A finished direct chat escalates to the manager for a follow-up the
 // direct worker cannot serve, and that first manager turn replays the dialogue.
 const addRunMessage = functionBody(runStore, "export async function addRunMessage(");
-assert.match(addRunMessage, /followUpNeedsManager\(input\.message\)/);
+assert.match(
+  addRunMessage,
+  /followUpNeedsManager\(input\.message\) \|\| \(await loadSettings\(\)\)\.coraAlwaysVerifyEdits === true/,
+  "with the setting on, every follow-up in a finished direct chat escalates",
+);
 assert.match(addRunMessage, /draft\.executionMode = "managed"/);
 assert.ok(
   addRunMessage.indexOf("run.escalated_to_manager") < addRunMessage.indexOf("return addDirectIteration("),
