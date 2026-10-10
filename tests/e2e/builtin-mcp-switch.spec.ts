@@ -63,7 +63,7 @@ test("the Capability Center switches the built-in server off for one CLI", async
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await page.getByTitle("MCP and skills").first().click();
+    await page.getByTitle("Tools & skills (Capability Center)").first().click();
     const dialog = page.getByRole("dialog", { name: "Capability Center" });
     await expect(dialog).toBeVisible();
     const claude = dialog.getByRole("switch", { name: "Codara Studio tools for the Claude CLI" });

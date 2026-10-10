@@ -362,7 +362,7 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
     await expect(steering).toContainText("Steering queued while Cora works");
     await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Cora answer");
     await expect(page.getByRole("button", { name: "Queue", exact: true })).toBeVisible();
-    const stop = page.getByRole("button", { name: "Stop run" });
+    const stop = page.getByRole("button", { name: "Stop Cora" });
     await expect(stop).toBeVisible();
     await stop.click();
 

@@ -96,6 +96,7 @@ these has a default chord.
 | Cycle thinking effort | Mod+N | `agent.cycleEffort` |
 | Open model picker | Mod+Shift+M | `agent.openModelPicker` |
 | Open thinking effort picker | Mod+Shift+N | `agent.openEffortPicker` |
+| Stop Cora | Mod+. | `chat.stop` |
 
 The two cycle chords follow what you are looking at:
 
@@ -111,6 +112,10 @@ The two cycle chords follow what you are looking at:
   Code restores it when the picker closes.
 
 The two picker chords always open the pickers of a Cora chat.
+
+`chat.stop` does what the composer's stop button does in the visible Cora
+chat: it ends the current turn and stops its live workers, keeping the
+conversation and finished work. It does nothing when that chat is idle.
 
 On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 `agent.cycleModel` if the window minimizes instead.
@@ -138,7 +143,7 @@ Failed closes retry automatically.
 
 ## The Capability Center
 
-The **MCP and skills** button in the Cora composer opens the Capability
+The **Tools & skills** button in the Cora composer opens the Capability
 Center, a separate dialog with five tabs:
 
 | Tab | What lives there |

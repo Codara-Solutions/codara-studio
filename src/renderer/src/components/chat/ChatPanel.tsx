@@ -18,6 +18,7 @@ import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
 import { openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
+import DismissErrorButton from "./DismissErrorButton";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
@@ -42,6 +43,7 @@ interface Props {
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
   error: string | null;
+  onDismissError?: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   collapsible?: boolean;
@@ -72,7 +74,7 @@ interface Props {
     attachments?: AddRunMessageAttachmentInput[],
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
-  onForcePauseRun: () => void;
+  onForcePauseRun: () => void | Promise<unknown>;
   // Open a past chat from the history popover. The handler is expected to
   // both select the run (so the conversation switches) and surface the
   // chat tab in the top strip; OrchestrationSidebar's handleSelectRun
@@ -92,6 +94,7 @@ export default function ChatPanel({
   composerDraftKey,
   suspendGlobalEvents,
   error,
+  onDismissError,
   collapsed,
   onToggleCollapse,
   collapsible = true,
@@ -189,7 +192,7 @@ export default function ChatPanel({
       />
       {!collapsed && (
         <>
-          {error && <ErrorBar message={error} />}
+          {error && <ErrorBar message={error} onDismiss={onDismissError} />}
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
@@ -1160,11 +1163,15 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   );
 }
 
-function ErrorBar({ message }: { message: string }) {
+function ErrorBar({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
     <div
+      role="alert"
       style={{
         flex: "0 0 auto",
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
         padding: "7px 12px",
         background: "var(--danger-soft)",
         borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
@@ -1173,7 +1180,8 @@ function ErrorBar({ message }: { message: string }) {
         lineHeight: 1.4,
       }}
     >
-      {message}
+      <span style={{ flex: "1 1 auto", minWidth: 0 }}>{message}</span>
+      {onDismiss ? <DismissErrorButton onClick={onDismiss} /> : null}
     </div>
   );
 }

@@ -65,7 +65,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     // click would KILL the pty — forcePauseRun has no graceful ESC path — and
     // a manual-fallback run has no manager to relaunch the task afterwards, so
     // we assert its presence without clicking it).
-    await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Stop Cora" })).toBeVisible();
 
     // Play the worker: write its final report (partial). The launch driver
     // polls final-report.json every 750ms and settles the attempt once it
@@ -429,7 +429,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     // The Capability Center shares Settings' footprint. Its shell must also
     // paint without the SVG lens/full-screen blur combination that made
     // opening and typing visibly trail the pointer.
-    const capabilityOpenLatencyMs = await page.getByTitle("MCP and skills").evaluate((button) => new Promise<number>((resolve) => {
+    const capabilityOpenLatencyMs = await page.getByTitle("Tools & skills (Capability Center)").evaluate((button) => new Promise<number>((resolve) => {
       const startedAt = performance.now();
       const observer = new MutationObserver(() => {
         if (!document.querySelector("[data-agent-capabilities-surface]")) return;

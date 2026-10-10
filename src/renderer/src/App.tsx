@@ -5143,6 +5143,11 @@ export default function App() {
           window.dispatchEvent(new CustomEvent("spark:open-thinking-picker"));
         });
       },
+      // Only the visible chat's composer listens (suspendGlobalEvents), and it
+      // acts only while its run has something to stop.
+      "chat.stop": () => {
+        window.dispatchEvent(new CustomEvent("spark:stop-chat"));
+      },
       "markdown.togglePreview": () => {
         let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (active?.kind === "terminal") {

@@ -1995,6 +1995,31 @@ a { color: inherit; }
   color: var(--ink-dim);
 }
 
+.cora-error-dismiss {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  margin: -1px -4px -1px 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: default;
+}
+.cora-error-dismiss:hover {
+  opacity: 1;
+  background: color-mix(in oklch, var(--danger) 16%, transparent);
+}
+.cora-error-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 /* The one action a failure card offers (open the accounts tab). */
 .cora-failure-action {
   appearance: none;
@@ -2467,6 +2492,14 @@ a { color: inherit; }
 }
 .composer-model-group.is-unconnected .composer-picker-row {
   opacity: 0.55;
+}
+.composer-stop-glyph.is-stopping {
+  animation: runs-pulse 900ms ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-stop-glyph.is-stopping {
+    animation: none;
+  }
 }
 .composer-model-connect {
   appearance: none;

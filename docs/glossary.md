@@ -65,7 +65,7 @@ that defines it (types are in `src/shared/types.ts` unless noted).
 - **Browser tab, preview.** The built-in Chromium tab. The UI calls it the
   browser; the MCP tools that drive it are named `codara_preview_*`.
 - **Capability Center.** The dialog for MCP servers, skills, Cora memory,
-  worker models and session policy, opened with the **MCP and skills** button
+  worker models and session policy, opened with the **Tools & skills** button
   in the Cora composer
   (`src/renderer/src/components/AgentCapabilitiesDialog.tsx`).
 
