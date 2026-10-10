@@ -202,6 +202,14 @@ export type ChatStreamEvent =
       output: string;
       isError?: boolean;
     }
+  | {
+      /** Tail of a still-running tool's output (Pi's bash). Throttled at the
+       *  source and never journaled: only the newest one per call matters, and
+       *  tool_result carries the full output. */
+      kind: "tool_progress";
+      toolUseId: string;
+      output: string;
+    }
   | { kind: "system_note"; message: string }
   | {
       kind: "usage";

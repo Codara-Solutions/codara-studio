@@ -112,6 +112,49 @@ async function main() {
     groups[0].models[0]?.id === "gpt-5.6-sol",
   );
 
+  // ── The default follows connected accounts ──
+  // A Claude-only user must not open on Sol and fail at launch. The curated
+  // Anthropic rows give the spend guard an affordable choice offline.
+  check(
+    "the offline Anthropic group offers Opus and Sonnet beside Fable",
+    groups[1].models.map((model) => model.id).join(",") ===
+      "claude-fable-5,claude-opus-5,claude-sonnet-5",
+  );
+  check(
+    "only Claude connected: the default is the first affordable Claude model",
+    composer.defaultChatModel(groups, new Set(["anthropic"]))?.id === "claude-opus-5",
+  );
+  check(
+    "ChatGPT connected: the configured default stays Sol",
+    composer.defaultChatModel(groups, new Set(["openai-codex", "anthropic"]))?.id === "gpt-5.6-sol",
+  );
+  check(
+    "only Grok connected: the default is the Grok row",
+    composer.defaultChatModel(groups, new Set(["xai"]))?.id === "grok-4.6",
+  );
+  check(
+    "nothing connected keeps the unfiltered default",
+    composer.defaultChatModel(groups, new Set())?.id === "gpt-5.6-sol" &&
+      composer.defaultChatModel(groups)?.id === "gpt-5.6-sol",
+  );
+  check(
+    "an explicit saved pick outranks account state",
+    composer.resolvePreferredChatModel(groups, "gpt-5.6-terra", new Set(["anthropic"]))?.id ===
+      "gpt-5.6-terra",
+  );
+  check(
+    "a saved pick the picker no longer offers falls back to a connected model",
+    composer.resolvePreferredChatModel(groups, "gpt-4-retired", new Set(["anthropic"]))?.id ===
+      "claude-opus-5",
+  );
+  check(
+    "OpenRouter rows need no subscription",
+    composer.defaultChatModel(
+      composer.buildVisibleGroups({ openRouterModels: ["anthropic/claude-sonnet-4"] }),
+      new Set(),
+    )?.id === "anthropic/claude-sonnet-4",
+  );
+
   // ── Dynamically discovered models are deliberately ordered ──
   // Rows render as a bare name, so ORDER is the only signal the list gives.
   // Models Pi reports that have no curated row used to land in whatever

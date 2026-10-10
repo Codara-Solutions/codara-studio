@@ -97,6 +97,7 @@ these has a default chord.
 | Cycle thinking effort | Mod+N | `agent.cycleEffort` |
 | Open model picker | Mod+Shift+M | `agent.openModelPicker` |
 | Open thinking effort picker | Mod+Shift+N | `agent.openEffortPicker` |
+| Stop Cora | Mod+. | `chat.stop` |
 
 The two cycle chords follow what you are looking at:
 
@@ -112,6 +113,14 @@ The two cycle chords follow what you are looking at:
   Code restores it when the picker closes.
 
 The two picker chords always open the pickers of a Cora chat.
+
+`chat.stop` does what the composer's stop button does in the visible Cora
+chat: it ends the current turn and stops its live workers, keeping the
+conversation and finished work. It does nothing when that chat is idle.
+
+Mod+F with focus in the Cora panel opens find for that conversation (Enter
+and Shift+Enter step through matches, Escape closes it). It is not a
+rebindable command; editors and terminals keep their own Mod+F.
 
 On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 `agent.cycleModel` if the window minimizes instead.

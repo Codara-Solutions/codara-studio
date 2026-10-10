@@ -152,6 +152,7 @@ import {
 } from "./autopilot-wave";
 import {
   appendBufferedEvent as appendBufferedEventRaw,
+  broadcastLiveEvent,
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
   flushBufferedEvents,
@@ -6972,6 +6973,13 @@ async function askManagerBackendUnderTurnLock(
         appendBufferedEvent(input);
         return;
       }
+      // A running tool's output tail arrives up to 4 times a second for as
+      // long as the command runs; it is display-only, so it is never written
+      // to the journal.
+      if (event.kind === "tool_progress") {
+        broadcastLiveEvent({ ...input, id: `chat-tool-progress:${callId}:${event.toolUseId}` });
+        return;
+      }
       await appendEvent(input);
     })().catch((err) => {
       console.warn("[run-store] appendEvent for chat stream event failed:", err);
@@ -8774,7 +8782,7 @@ async function rerouteUnavailableAgentRuntimes(
       rerouted.push({
         from: runtimePreference,
         to: "manual",
-        reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+        reason: "Requested provider has no connected account (Settings > Agents).",
       });
       return {
         runtimePreference: "manual" as WorkerRuntime,
@@ -8793,7 +8801,7 @@ async function rerouteUnavailableAgentRuntimes(
       to: fallback.kind,
       modelHint: nextModelHint,
       effortHint: nextEffortHint,
-      reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+      reason: "Requested provider has no connected account (Settings > Agents).",
     });
     return {
       runtimePreference: fallback.kind as WorkerRuntime,

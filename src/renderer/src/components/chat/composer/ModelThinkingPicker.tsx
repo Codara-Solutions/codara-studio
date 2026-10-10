@@ -6,10 +6,12 @@ import {
   composeModelId,
   effortsFor,
   findOptionInCatalog,
+  subscriptionForChatModel,
   type ChatBackendGroup,
   type ChatModelOption,
 } from "./types";
 import AnchoredMenu from "./AnchoredMenu";
+import { openAccountsSettings, useCoraAccountReadiness } from "../account-readiness";
 
 interface Props {
   activeBackend: ChatBackendKind;
@@ -55,6 +57,7 @@ export default function ModelThinkingPicker({
   const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
   const [openRouterModels, setOpenRouterModels] = useState<string[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const { usableProviders } = useCoraAccountReadiness();
   const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog, openRouterModels });
   const activeCompoundId = composeModelId(activeModelId, false);
   const activeOption = groups
@@ -157,7 +160,12 @@ export default function ModelThinkingPicker({
             groups={groups}
             activeBackend={activeBackend}
             activeCompoundId={activeCompoundId}
+            usableProviders={usableProviders}
             onPick={chooseModel}
+            onConnect={() => {
+              close();
+              openAccountsSettings();
+            }}
           />
         )}
       </AnchoredMenu>
@@ -169,12 +177,17 @@ function ModelPicker({
   groups,
   activeBackend,
   activeCompoundId,
+  usableProviders,
   onPick,
+  onConnect,
 }: {
   groups: ChatBackendGroup[];
   activeBackend: ChatBackendKind;
   activeCompoundId: string;
+  /** Null while account state is unknown: nothing is marked unconnected. */
+  usableProviders: ReadonlySet<string> | null;
   onPick: (model: ChatModelOption) => void;
+  onConnect: () => void;
 }) {
   const hasModels = groups.some((group) => group.models.length > 0);
   return (
@@ -186,27 +199,50 @@ function ModelPicker({
             No models available. Connect a subscription or OpenRouter in Settings.
           </div>
         ) : null}
-        {groups.map((group) => (
-          <div key={group.key} className="composer-model-group">
-            <div className="composer-model-group-label">{group.label}</div>
-            {group.models.map((model) => {
-              const active = model.id === activeCompoundId && model.backend === activeBackend;
-              return (
-                <button
-                  key={`${model.backend}:${model.id}`}
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={`composer-picker-row${active ? " is-active" : ""}`}
-                  onClick={() => onPick(model)}
-                >
-                  <span>{model.label}</span>
-                  <span className="composer-picker-row-tail" aria-hidden>{active ? "Current" : "›"}</span>
-                </button>
-              );
-            })}
-          </div>
-        ))}
+        {groups.map((group) => {
+          // Rows stay pickable: the catalog is deliberately not filtered by
+          // auth, and a stale status must never lock a model out. The group
+          // only says it needs an account and offers the way to connect one.
+          const provider = group.models[0] ? subscriptionForChatModel(group.models[0]) : null;
+          const unconnected =
+            usableProviders !== null && provider !== null && !usableProviders.has(provider);
+          return (
+            <div
+              key={group.key}
+              className={`composer-model-group${unconnected ? " is-unconnected" : ""}`}
+            >
+              <div className="composer-model-group-label">
+                <span>{group.label}</span>
+                {unconnected ? (
+                  <button
+                    type="button"
+                    className="composer-model-connect"
+                    title={`Connect a ${group.label} account in Settings > Agents`}
+                    onClick={onConnect}
+                  >
+                    Not connected · Connect
+                  </button>
+                ) : null}
+              </div>
+              {group.models.map((model) => {
+                const active = model.id === activeCompoundId && model.backend === activeBackend;
+                return (
+                  <button
+                    key={`${model.backend}:${model.id}`}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    className={`composer-picker-row${active ? " is-active" : ""}`}
+                    onClick={() => onPick(model)}
+                  >
+                    <span>{model.label}</span>
+                    <span className="composer-picker-row-tail" aria-hidden>{active ? "Current" : "›"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </>
   );

@@ -530,6 +530,14 @@ assert.doesNotMatch(
   "providers with no quota API must not render a red empty-windows error",
 );
 
+// An empty provider group starts its sign-in in one click, through the same
+// entry point as the Add picker, and never while another login runs.
+assert.match(
+  cards,
+  /No \{descriptor\.label\} account yet\.<\/span>[\s\S]*?<ActionButton[\s\S]*?disabled=\{view\.disabled \|\| view\.busy\}\s*onClick=\{\(\) => actions\.onAdd\(descriptor\.provider\)\}\s*>\s*Sign in to \{descriptor\.label\}/,
+);
+assert.match(settings, /const busy = busyProvider !== null \|\| accountMutationId !== null;/);
+
 console.log(
   "PASS one account per card for every provider with one Use, one Share, one Delete through the unified Pi channels; one sign-in in the Add picker; no pop-in, system-browser sign-in, portalled menus, and a token-blind IPC contract",
 );

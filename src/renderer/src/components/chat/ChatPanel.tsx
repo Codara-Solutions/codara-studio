@@ -17,6 +17,12 @@ import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
+import { needsCoraAccount, openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
+import DismissErrorButton from "./DismissErrorButton";
+import { filterChatHistory } from "./conversation-search";
+import { chordMatches, mod } from "../../shortcuts/chord";
+
+const FIND_CHORD = mod("f");
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
@@ -41,6 +47,7 @@ interface Props {
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
   error: string | null;
+  onDismissError?: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   collapsible?: boolean;
@@ -71,7 +78,7 @@ interface Props {
     attachments?: AddRunMessageAttachmentInput[],
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
-  onForcePauseRun: () => void;
+  onForcePauseRun: () => void | Promise<unknown>;
   // Open a past chat from the history popover. The handler is expected to
   // both select the run (so the conversation switches) and surface the
   // chat tab in the top strip; OrchestrationSidebar's handleSelectRun
@@ -91,6 +98,7 @@ export default function ChatPanel({
   composerDraftKey,
   suspendGlobalEvents,
   error,
+  onDismissError,
   collapsed,
   onToggleCollapse,
   collapsible = true,
@@ -120,6 +128,26 @@ export default function ChatPanel({
     [onChatViewChange],
   );
   const usingHoistedChatView = chatViewProp !== undefined;
+
+  // Mod+F opens find in the visible chat when focus is inside this panel (or
+  // nowhere). Editors and terminals elsewhere keep their own find.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [findRequest, setFindRequest] = useState(0);
+  const canFind = chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
+  useEffect(() => {
+    if (suspendGlobalEvents || !canFind) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !chordMatches(FIND_CHORD, event)) return;
+      const focused = document.activeElement;
+      const inPanel =
+        !focused || focused === document.body || Boolean(panelRef.current?.contains(focused));
+      if (!inPanel) return;
+      event.preventDefault();
+      setFindRequest((value) => value + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [suspendGlobalEvents, canFind]);
   // A new chat starts in the normal conversation view. Terminal-view state
   // should not leak between runs because their PTYs are run-scoped. When the
   // parent owns chatView, the parent is also responsible for the reset —
@@ -157,6 +185,7 @@ export default function ChatPanel({
 
   return (
     <div
+      ref={panelRef}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -188,7 +217,7 @@ export default function ChatPanel({
       />
       {!collapsed && (
         <>
-          {error && <ErrorBar message={error} />}
+          {error && <ErrorBar message={error} onDismiss={onDismissError} />}
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
@@ -230,6 +259,9 @@ export default function ChatPanel({
                   <ChatConversation
                     key={`conversation:${activeRun.id}`}
                     run={activeRun}
+                    cwd={workspace?.cwd ?? null}
+                    onOpenWorkerTerminal={onOpenBoardWorkerTerminal}
+                    findRequest={findRequest}
                   />
                 )}
               </div>
@@ -523,6 +555,8 @@ function ChatHistoryPopover({
   onPick: (runId: string) => void;
   onDelete?: (runId: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const matches = useMemo(() => filterChatHistory(runs, query), [runs, query]);
   return (
     <div
       ref={(node) => { popRef.current = node; }}
@@ -543,16 +577,41 @@ function ChatHistoryPopover({
       <div className="spark-eyebrow" style={{ padding: "6px 8px 5px" }}>
         Recent chats
       </div>
+      {runs.length > 0 ? (
+        <div style={{ padding: "0 4px 4px" }}>
+          <input
+            autoFocus
+            type="search"
+            className="spark-input"
+            aria-label="Search chats"
+            placeholder="Search titles and messages"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && matches.length > 0) {
+                event.preventDefault();
+                onPick(matches[0].run.id);
+              }
+            }}
+            style={{ width: "100%", boxSizing: "border-box", height: 26, fontSize: 12 }}
+          />
+        </div>
+      ) : null}
       {runs.length === 0 ? (
         <div className="spark-empty" style={{ minHeight: 0, padding: "18px 8px" }}>
           <div className="spark-eyebrow">No chats yet</div>
           <div className="spark-empty__body">Start one below to see it here.</div>
         </div>
+      ) : matches.length === 0 ? (
+        <div className="spark-empty__body" style={{ padding: "12px 8px", color: "var(--muted)" }}>
+          No chat mentions "{query.trim()}".
+        </div>
       ) : (
-        runs.map((run) => (
+        matches.map(({ run, snippet }) => (
           <ChatHistoryRow
             key={run.id}
             run={run}
+            snippet={snippet}
             active={run.id === activeRunId}
             onClick={() => onPick(run.id)}
             onDelete={onDelete}
@@ -565,11 +624,14 @@ function ChatHistoryPopover({
 
 function ChatHistoryRow({
   run,
+  snippet,
   active,
   onClick,
   onDelete,
 }: {
   run: RunState;
+  /** The message text a search matched, when the title did not. */
+  snippet?: string;
   active: boolean;
   onClick: () => void;
   onDelete?: (runId: string) => void;
@@ -716,6 +778,22 @@ function ChatHistoryRow({
         </span>
         <RunIdChip runId={run.id} />
       </div>
+      {snippet ? (
+        <div
+          style={{
+            paddingLeft: 12,
+            fontSize: 11,
+            lineHeight: 1.4,
+            color: "var(--ink-dim)",
+            overflow: "hidden",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+          }}
+        >
+          {snippet}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1070,10 +1148,16 @@ const PROJECT_STARTERS = [
 ] as const;
 
 function WelcomeState({ workspace }: { workspace: Workspace | null }) {
+  const accounts = useCoraAccountReadiness();
+  // Only a settled read that found nothing claims "no account": an unreadable
+  // status keeps the welcome as it was rather than nagging on a guess, and an
+  // OpenRouter setup already runs Cora without a subscription.
+  const needsAccount = needsCoraAccount(accounts);
   const prefill = (text: string) => {
+    // A starter frames the task; it must not wipe a half-typed description.
     window.dispatchEvent(
       new CustomEvent("spark:prefill-composer", {
-        detail: { text, replace: true },
+        detail: { text, prepend: true },
       }),
     );
   };
@@ -1117,6 +1201,21 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
           <span className="cora-welcome__project-path">{workspace.cwd}</span>
         </div>
       )}
+      {needsAccount && (
+        <div className="cora-welcome__connect" role="status">
+          <div className="cora-welcome__connect-copy">
+            <strong>Connect an account to start</strong>
+            <span>
+              {accounts.runtimeMissing
+                ? "Cora runs on Pi with your Claude, ChatGPT or Grok subscription. Install Pi and sign in once in Settings > Agents."
+                : "Cora runs on your Claude, ChatGPT or Grok subscription. Sign in once in Settings > Agents."}
+            </span>
+          </div>
+          <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
+            {accounts.runtimeMissing ? "Install Pi" : "Connect an account"}
+          </button>
+        </div>
+      )}
       <div className="cora-welcome__starters" aria-label="Suggested ways to start">
         {PROJECT_STARTERS.map((starter) => (
           <button
@@ -1138,11 +1237,15 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   );
 }
 
-function ErrorBar({ message }: { message: string }) {
+function ErrorBar({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
     <div
+      role="alert"
       style={{
         flex: "0 0 auto",
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
         padding: "7px 12px",
         background: "var(--danger-soft)",
         borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
@@ -1151,7 +1254,8 @@ function ErrorBar({ message }: { message: string }) {
         lineHeight: 1.4,
       }}
     >
-      {message}
+      <span style={{ flex: "1 1 auto", minWidth: 0 }}>{message}</span>
+      {onDismiss ? <DismissErrorButton onClick={onDismiss} /> : null}
     </div>
   );
 }

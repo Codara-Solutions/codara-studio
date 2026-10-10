@@ -52,6 +52,41 @@ async function main() {
     "session-identity.cjs",
   );
 
+  // A never-connected provider reaches the legacy auth store, which is missing
+  // (ENOENT) or lacks the provider. That must surface as a typed "connect an
+  // account" error both taxonomies read as auth, not as a launch failure.
+  const taxonomy = await bundle(
+    path.join(ROOT, "src/main/orchestration/failure-taxonomy.ts"),
+    "taxonomy.cjs",
+  );
+  const missingStore = Object.assign(new Error("ENOENT: no such file or directory, stat '/x/auth.json'"), {
+    code: "ENOENT",
+  });
+  const noAccount = execution.legacyAuthFailureAsNoAccount(missingStore, "openai-codex");
+  assert.ok(noAccount instanceof execution.NoConnectedPiAccountError);
+  assert.equal(noAccount.provider, "openai-codex");
+  assert.match(noAccount.message, /ChatGPT account/);
+  assert.match(noAccount.message, /Settings > Agents/);
+  assert.doesNotMatch(noAccount.message, /ENOENT/);
+  assert.equal(taxonomy.classifyWorkerFailure(noAccount.message), "auth");
+  assert.ok(
+    execution.legacyAuthFailureAsNoAccount(
+      new Error("Pi provider anthropic is not authenticated with OAuth"),
+      "anthropic",
+    ) instanceof execution.NoConnectedPiAccountError,
+  );
+  const unsafe = new Error("Pi subscription auth must not be readable by group or other users");
+  assert.equal(execution.legacyAuthFailureAsNoAccount(unsafe, "anthropic"), unsafe);
+  const launchSource = fs.readFileSync(
+    path.join(ROOT, "src/main/orchestration/pi-runtime-electron.ts"),
+    "utf8",
+  );
+  assert.equal(
+    (launchSource.match(/throw account\.accountProfileId\s*\?\s*error\s*:\s*legacyAuthFailureAsNoAccount\(/g) ?? []).length,
+    2,
+    "manager and worker launch plans map only the legacy route to the typed error",
+  );
+
   assert.equal(execution.normalizePiAccountProfileId(undefined), undefined);
   assert.equal(execution.normalizePiAccountProfileId(PROFILE_A), PROFILE_A);
   assert.throws(

@@ -271,7 +271,10 @@ export function planManagerTurnFailure(input: {
 /**
  * The user-facing sentence for a parked turn of `kind`. One voice everywhere
  * the parked state surfaces: the run header detail, the composer placeholder,
- * and the Retry button, including a recovery re-parked after a restart.
+ * and the Retry button, including a recovery re-parked after a restart. A
+ * recovery replay that fails and returns to parked must read the same sentence
+ * again, or an auth park would turn into a "provider unavailable" one the
+ * moment the user retried without signing in.
  */
 export function managerTurnParkReason(
   kind: ManagerTurnRecoveryFailureKind | WorkerFailureKind | undefined,
@@ -282,7 +285,7 @@ export function managerTurnParkReason(
     case "rate_limit":
       return "The selected provider account reached its usage limit. Switch accounts or retry after quota resets.";
     case "auth":
-      return "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn.";
+      return "Cora's provider account is not connected, or its sign-in expired. Connect it in Settings > Agents, then retry the saved turn.";
     case "transport":
       return "Cora lost its connection to the provider. Retry when the connection is stable.";
     case "runtime":

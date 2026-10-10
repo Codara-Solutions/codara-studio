@@ -49,6 +49,7 @@ import {
   windowsGitBashCandidates,
 } from "./pi-runtime";
 import {
+  legacyAuthFailureAsNoAccount,
   normalizePiAccountProfileId,
   normalizePiExecutionAccount,
   type PiExecutionAccount,
@@ -653,7 +654,13 @@ export async function createCodaraPiLaunchPlan(
       resolveCodaraPiRuntime(),
       isOpenRouter
         ? Promise.resolve(null)
-        : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
+        : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider).catch(
+            (error: unknown) => {
+              throw account.accountProfileId
+                ? error
+                : legacyAuthFailureAsNoAccount(error, options.provider as PiSubscriptionProvider);
+            },
+          ),
       resolveCodaraPiWebSearchExtension(),
       mcpWrite,
       loadSettings(),
@@ -811,7 +818,13 @@ export async function createCodaraPiWorkerLaunchPlan(
     resolveCodaraPiRuntime(),
     isOpenRouter
       ? Promise.resolve(null)
-      : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
+      : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider).catch(
+          (error: unknown) => {
+            throw account.accountProfileId
+              ? error
+              : legacyAuthFailureAsNoAccount(error, options.provider as PiSubscriptionProvider);
+          },
+        ),
     resolveCodaraPiWebSearchExtension(),
     untrustedPullRequest
       ? Promise.resolve(undefined)

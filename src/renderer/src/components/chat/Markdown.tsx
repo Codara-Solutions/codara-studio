@@ -1,8 +1,14 @@
-import React, { useEffect, useId, useMemo, useState } from "react";
+import React, { useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
 import rehypeHighlight from "rehype-highlight";
+import {
+  classifyChatHref,
+  codeSpanFileReference,
+  isAbsoluteChatPath,
+  resolveChatPath,
+} from "./markdown-links";
 
 // Hoisted so streaming re-renders reuse the same plugin arrays and component
 // map — a fresh object here re-runs the whole remark/rehype pipeline per render.
@@ -12,20 +18,141 @@ import rehypeHighlight from "rehype-highlight";
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 const REHYPE_PLUGINS = [rehypeHighlight];
 
-const COMPONENTS: Components = {
-  a: ({ href, children }) => (
+// The workspace that relative paths in an answer belong to. Null (the
+// default) keeps links external-only, for markdown rendered outside a run.
+export const MarkdownWorkspaceContext = React.createContext<string | null>(null);
+
+function openWorkspaceFile(cwd: string, path: string, line?: number): void {
+  const resolved = resolveChatPath(cwd, path);
+  window.dispatchEvent(
+    new CustomEvent("spark:open-file", { detail: line ? { path: resolved, line } : { path: resolved } }),
+  );
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const cwd = useContext(MarkdownWorkspaceContext);
+  const target = classifyChatHref(href);
+  return (
     <a
       href={href}
+      title={href}
       onClick={(event) => {
         event.preventDefault();
-        if (href) void window.spark.openExternal(href);
+        if (target.kind === "external") void window.spark.openExternal(target.url);
+        else if (target.kind === "path" && cwd) openWorkspaceFile(cwd, target.path, target.line);
       }}
       rel="noreferrer"
       style={{ color: "var(--accent-text)", textDecoration: "none" }}
     >
       {children}
     </a>
-  ),
+  );
+}
+
+// A code span that reads like a file path opens it on click. Existence is
+// probed only then (one IPC per click, never per streamed render); a remote
+// workspace cannot be probed locally, so it opens directly.
+function InlineCode({ text, children }: { text: string; children?: React.ReactNode }) {
+  const cwd = useContext(MarkdownWorkspaceContext);
+  const reference = useMemo(() => (cwd ? codeSpanFileReference(text) : null), [cwd, text]);
+  const [missing, setMissing] = useState(false);
+  if (!cwd || !reference || missing) {
+    return (
+      <code style={INLINE_CODE_STYLE} title={missing ? "Not found in this workspace" : undefined}>
+        {children}
+      </code>
+    );
+  }
+  const open = () => {
+    const remote = /^[a-z][a-z0-9+.-]*:\/\//i.test(cwd);
+    if (remote) {
+      openWorkspaceFile(cwd, reference.path, reference.line);
+      return;
+    }
+    const absolute = isAbsoluteChatPath(reference.path);
+    void window.spark.fs
+      .pathExists(absolute ? { target: reference.path } : { target: reference.path, baseDir: cwd })
+      .then((result) => {
+        if (result.exists && result.isFile) openWorkspaceFile(cwd, reference.path, reference.line);
+        else setMissing(true);
+      })
+      .catch(() => setMissing(true));
+  };
+  return (
+    <code
+      className="cora-md-file-ref"
+      role="link"
+      tabIndex={0}
+      title={`Open ${reference.path}`}
+      style={INLINE_CODE_STYLE}
+      onClick={open}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          open();
+        }
+      }}
+    >
+      {children}
+    </code>
+  );
+}
+
+function nodeText(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) return nodeText(node.props.children);
+  return "";
+}
+
+function codeLanguage(children: React.ReactNode): string | null {
+  const child = React.Children.toArray(children)[0];
+  if (!React.isValidElement<{ className?: string }>(child)) return null;
+  return child.props.className?.match(/\blanguage-([\w+#-]+)/)?.[1] ?? null;
+}
+
+function CodeBlock({ children }: { children?: React.ReactNode }) {
+  const language = codeLanguage(children);
+  if (language === "mermaid") return <pre style={CODE_BLOCK_STYLE}>{children}</pre>;
+  return (
+    <div className="cora-md-code">
+      <div className="cora-md-code__bar">
+        <span className="cora-md-code__lang">{language ?? ""}</span>
+        <CopyCodeButton getText={() => nodeText(children).replace(/\n$/, "")} />
+      </div>
+      <pre style={CODE_BLOCK_STYLE}>{children}</pre>
+    </div>
+  );
+}
+
+function CopyCodeButton({ getText }: { getText: () => string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      className="cora-md-code__copy"
+      aria-label="Copy code"
+      title={copied ? "Copied" : "Copy code"}
+      onClick={() => {
+        void window.spark.clipboard.writeText(getText()).then(() => {
+          setCopied(true);
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
+const COMPONENTS: Components = {
+  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
   code: ({ className, children, ...props }) => {
     const content = String(children).replace(/\n$/, "");
     if (/language-mermaid\b/.test(className ?? "")) {
@@ -35,15 +162,17 @@ const COMPONENTS: Components = {
     return block ? (
       <code className={className} {...props}>{children}</code>
     ) : (
-      <code style={INLINE_CODE_STYLE} {...props}>{children}</code>
+      <InlineCode text={content}>{children}</InlineCode>
     );
   },
-  pre: ({ children }) => <pre style={CODE_BLOCK_STYLE}>{children}</pre>,
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
   table: ({ children }) => (
     <div style={{ overflowX: "auto", maxWidth: "100%" }}>
       <table style={TABLE_STYLE}>{children}</table>
     </div>
   ),
+  th: ({ children, style }) => <th style={{ ...TABLE_HEAD_STYLE, ...style }}>{children}</th>,
+  td: ({ children, style }) => <td style={{ ...TABLE_CELL_STYLE, ...style }}>{children}</td>,
   p: ({ children }) => <p style={PARA_STYLE}>{children}</p>,
   ul: ({ children }) => <ul style={LIST_STYLE}>{children}</ul>,
   ol: ({ children }) => <ol style={LIST_STYLE}>{children}</ol>,
@@ -58,13 +187,15 @@ const COMPONENTS: Components = {
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
 function Markdown({ text }: { text: string }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={REMARK_PLUGINS}
-      rehypePlugins={REHYPE_PLUGINS}
-      components={COMPONENTS}
-    >
-      {text}
-    </ReactMarkdown>
+    <div className="cora-md">
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={COMPONENTS}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
   );
 }
 
@@ -108,4 +239,9 @@ const PARA_STYLE: React.CSSProperties = { margin: "0 0 8px", fontSize: 13.5, lin
 const LIST_STYLE: React.CSSProperties = { margin: "0 0 8px", paddingLeft: 20, fontSize: 13, lineHeight: 1.55 };
 const HEADING_STYLE: React.CSSProperties = { margin: "12px 0 6px", color: "var(--ink)", fontSize: 15, lineHeight: 1.3 };
 const QUOTE_STYLE: React.CSSProperties = { margin: "8px 0", padding: "4px 12px", borderLeft: "3px solid var(--accent-edge)", color: "var(--ink-dim)" };
-const TABLE_STYLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 12.5 };
+const TABLE_STYLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 12.5, margin: "8px 0" };
+const TABLE_CELL_STYLE: React.CSSProperties = { border: "1px solid var(--rule-soft)", padding: "4px 8px", verticalAlign: "top" };
+const TABLE_HEAD_STYLE: React.CSSProperties = {
+  ...TABLE_CELL_STYLE, textAlign: "left", fontWeight: 600, color: "var(--ink)",
+  background: "color-mix(in oklab, var(--ink) 5%, transparent)",
+};

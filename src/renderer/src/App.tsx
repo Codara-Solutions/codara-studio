@@ -142,6 +142,9 @@ import {
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
+import { isSettingsTab } from "./lib/settings-sections";
+import { isLiveOnlyEvent } from "@shared/live-events";
+import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
   buildAwayDigest,
@@ -200,6 +203,13 @@ let rendererReadySignaled = false;
 // history popover; only the workspace tab strip is forced to this constant so
 // short prompts ("hello") don't surface as truncated "He..." labels.
 const CHAT_TAB_LABEL = "Cora";
+
+// The label is the same for every chat, so hovering is how parallel chats are
+// told apart: the run's title and what it is doing.
+function chatTabTooltip(run: RunState): string {
+  const title = run.title?.trim() || CHAT_TAB_LABEL;
+  return `${title} · ${describeRunStatus(run).label}`;
+}
 const EXACT_GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -480,6 +490,7 @@ export default function App() {
   const [terminalShellResolved, setTerminalShellResolved] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>({ version: 1, step: "welcome", dismissed: false });
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
@@ -1337,7 +1348,7 @@ export default function App() {
     tabsRef.current.syncChatTabsToRuns(
       runs
         .filter((run) => run.chatMode !== "automation" || openChatTabIds.has(run.id))
-        .map((run) => ({ id: run.id, title: CHAT_TAB_LABEL })),
+        .map((run) => ({ id: run.id, title: CHAT_TAB_LABEL, tooltip: chatTabTooltip(run) })),
     );
   }, [runs]);
 
@@ -1680,7 +1691,7 @@ export default function App() {
     };
 
     return window.spark.orchestration.onEvent((event) => {
-      if (!event.workspaceId) return;
+      if (!event.workspaceId || isLiveOnlyEvent(event)) return;
       // Record the affected workspace and (re)arm the trailing timer. The
       // active workspace's runs/counts still update — just batched into one
       // refresh per burst rather than one per event.
@@ -2120,7 +2131,9 @@ export default function App() {
   // src/renderer/settings); we fold both surfaces into the polished old
   // dialog so users only see one settings UI.
   useEffect(() => {
-    const handler = () => {
+    const handler = (event: Event) => {
+      const section = (event as CustomEvent<{ section?: unknown } | undefined>).detail?.section;
+      setSettingsInitialTab(isSettingsTab(section) ? section : undefined);
       void loadSettingsDialog();
       setSettingsOpen(true);
     };
@@ -3010,6 +3023,7 @@ export default function App() {
   }, []);
 
   const handleOpenSettings = useCallback(() => {
+    setSettingsInitialTab(undefined);
     void loadSettingsDialog();
     setSettingsOpen(true);
   }, []);
@@ -5179,6 +5193,11 @@ export default function App() {
           window.dispatchEvent(new CustomEvent("spark:open-thinking-picker"));
         });
       },
+      // Only the visible chat's composer listens (suspendGlobalEvents), and it
+      // acts only while its run has something to stop.
+      "chat.stop": () => {
+        window.dispatchEvent(new CustomEvent("spark:stop-chat"));
+      },
       "markdown.togglePreview": () => {
         let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (active?.kind === "terminal") {
@@ -6211,6 +6230,10 @@ export default function App() {
         {settingsOpen && (
           <Suspense fallback={null}>
             <SettingsDialog
+              // A section request while the dialog is open (a chat's "Open
+              // accounts") must land on that tab, so the tab keys the mount.
+              key={settingsInitialTab ?? "general"}
+              initialTab={settingsInitialTab}
               settings={settings}
               shells={shells}
               defaultShell={defaultShell}

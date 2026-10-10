@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AddRunMessageAttachmentInput,
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
   CoraProfile,
-  FsEntry,
   PiCatalogModel,
   RunState,
   SparkEvent,
@@ -22,14 +21,20 @@ import {
 } from "@shared/chat-policy";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
+  backendFailureRetryText,
   deriveComposerWorkerActivity,
   findOpenQuestion,
   type ComposerWorkerActivity,
 } from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
+import { isBackendFailureQuestion } from "@shared/run-questions";
+import { loadCoraAccountReadiness } from "./account-readiness";
+import { chordToHint, mod } from "../../shortcuts/chord";
+import DismissErrorButton from "./DismissErrorButton";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import { prefillDraft } from "./composer/prefill-draft";
 import ProfilePicker from "./composer/ProfilePicker";
 import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
@@ -109,15 +114,20 @@ interface Props {
     attachments?: AddRunMessageAttachmentInput[],
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
-  onForcePauseRun: () => void;
+  /** Resolves once the stop landed, so the button can show it is pending. */
+  onForcePauseRun: () => void | Promise<unknown>;
 }
 
 const MAX_TEXTAREA_H = 168;
+// Workspace key of a composer that unmounted while focused; see the handoff
+// effects in ChatComposer.
+let composerFocusHandoff: string | null = null;
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_ATTACHMENTS = 8;
 const MAX_MENTION_RESULTS = 8;
-const MAX_FILE_SCAN_DEPTH = 6;
-const MAX_FILE_SCAN_RESULTS = 700;
+// How long a workspace file index serves new "@" mentions before a mention
+// re-reads it in the background (files created since then become mentionable).
+const FILE_INDEX_TTL_MS = 30_000;
 const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -125,17 +135,6 @@ const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/bmp",
 ]);
-const SKIPPED_MENTION_DIRS = new Set([
-  ".git",
-  ".next",
-  ".turbo",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "out",
-]);
-
 interface FileMention {
   path: string;
   name: string;
@@ -406,6 +405,22 @@ export default function ChatComposer({
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, [suspendGlobalEvents]);
 
+  // The first send of a draft remounts the composer under the new run's key.
+  // Hand focus held at unmount to the next visible instance for the same
+  // workspace; a hidden chat tab (suspendGlobalEvents) must never take it.
+  const focusHandoffKey = cwd ?? "";
+  useLayoutEffect(() => {
+    const node = textareaRef.current;
+    return () => {
+      if (node && document.activeElement === node) composerFocusHandoff = focusHandoffKey;
+    };
+  }, [focusHandoffKey]);
+  useEffect(() => {
+    if (suspendGlobalEvents || composerFocusHandoff !== focusHandoffKey) return;
+    composerFocusHandoff = null;
+    textareaRef.current?.focus({ preventScroll: true });
+  }, [suspendGlobalEvents, focusHandoffKey]);
+
   // Resolve a new draft from the saved explicit choice and the current model
   // catalog. The synchronous seed above handles another draft opened after a
   // pick in this process. This pass handles app relaunches and rejects a saved
@@ -418,8 +433,9 @@ export default function ChatComposer({
       window.spark.piSubscriptions.catalog().catch(() => [] as PiCatalogModel[]),
       window.spark.openRouter.coraModels().catch(() => [] as string[]),
       loadPreferredChatModel().catch(() => undefined),
+      loadCoraAccountReadiness(),
     ])
-      .then(([piCatalog, openRouterModels, preferredModel]) => {
+      .then(([piCatalog, openRouterModels, preferredModel, accounts]) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         piCatalogRef.current = piCatalog;
@@ -428,7 +444,11 @@ export default function ChatComposer({
         // default, including an older preference read.
         if (selectorsChosenRef.current) return;
         const groups = buildVisibleGroups({ piCatalog, openRouterModels });
-        const first = resolvePreferredChatModel(groups, preferredModel);
+        const first = resolvePreferredChatModel(
+          groups,
+          preferredModel,
+          accounts.usableProviders ?? undefined,
+        );
         if (!first) return;
         const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
@@ -453,12 +473,18 @@ export default function ChatComposer({
   // by dispatching `spark:prefill-composer`. Default behavior appends to the
   // current draft so a user typing in the composer doesn't lose their work
   // mid-thought; pass `replace: true` to overwrite the draft entirely (used
-  // by undo so the just-removed message reappears verbatim for editing).
+  // by undo so the just-removed message reappears verbatim for editing), or
+  // `prepend: true` to put the text in front of an existing draft.
   useEffect(() => {
     if (suspendGlobalEvents) return;
     const handler = (event: Event) => {
       const detail = (
-        event as CustomEvent<{ text?: unknown; replace?: unknown; attachments?: unknown }>
+        event as CustomEvent<{
+          text?: unknown;
+          replace?: unknown;
+          prepend?: unknown;
+          attachments?: unknown;
+        }>
       ).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
       // Image attachments can ride along with the text (Unqueue restores a
@@ -491,11 +517,10 @@ export default function ChatComposer({
       }
       if (!text) return;
       const replace = detail?.replace === true;
-      setDraft((current) => {
-        if (replace) return text;
-        if (!current.trim()) return text;
-        return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
-      });
+      // Welcome starters frame a task ("Investigate and fix this bug: "), so
+      // they go in front of what the user already typed instead of replacing it.
+      const prepend = detail?.prepend === true;
+      setDraft((current) => prefillDraft(current, text, { replace, prepend }));
       window.setTimeout(() => {
         const node = textareaRef.current;
         if (!node) return;
@@ -587,24 +612,61 @@ export default function ChatComposer({
     return off;
   }, [run?.id, run?.conversationEpoch]);
 
+  // One file index per composer and workspace. Loaded on the first "@" (never
+  // eagerly: a hidden composer or a user who never mentions a file must not
+  // walk the workspace), reused by later mentions and by send, and re-read in
+  // the background once it is older than FILE_INDEX_TTL_MS.
+  const fileIndexRef = useRef<{
+    cwd: string;
+    loadedAt: number;
+    ready: boolean;
+    files: Promise<FileMention[]>;
+  } | null>(null);
+  const loadFileIndex = useCallback(
+    (force: boolean): { files: Promise<FileMention[]>; ready: boolean } | null => {
+      if (!cwd) return null;
+      const current = fileIndexRef.current;
+      if (
+        !force &&
+        current &&
+        current.cwd === cwd &&
+        (!current.ready || Date.now() - current.loadedAt < FILE_INDEX_TTL_MS)
+      ) {
+        return { files: current.files, ready: current.ready };
+      }
+      const files = collectWorkspaceFiles(cwd);
+      const entry = { cwd, loadedAt: Date.now(), ready: false, files };
+      fileIndexRef.current = entry;
+      files.then(
+        () => {
+          entry.ready = true;
+          entry.loadedAt = Date.now();
+        },
+        () => {
+          if (fileIndexRef.current === entry) fileIndexRef.current = null;
+        },
+      );
+      // A background re-read keeps the previous list on screen meanwhile.
+      return { files, ready: Boolean(current?.ready && current.cwd === cwd) };
+    },
+    [cwd],
+  );
+
   useEffect(() => {
+    fileIndexRef.current = null;
     setFileReferences([]);
     setMentionQuery(null);
     setFileMentions([]);
     setFilesLoading(false);
   }, [cwd]);
 
-  // Building the @file index is intentionally lazy. Eagerly walking every
-  // directory whenever a workspace became active flooded the main process
-  // with hundreds of fs:list IPC calls—even when the composer was hidden or
-  // the user never typed "@". This is especially noticeable for parent
-  // workspaces that contain several repositories. The first mention opens the
-  // picker immediately in its loading state and populates it in the background.
   useEffect(() => {
     if (!cwd || !mentionQuery) return;
+    const index = loadFileIndex(false);
+    if (!index) return;
     let cancelled = false;
-    setFilesLoading(true);
-    void collectWorkspaceFiles(cwd)
+    if (!index.ready) setFilesLoading(true);
+    void index.files
       .then((files) => {
         if (!cancelled) setFileMentions(files);
       })
@@ -615,7 +677,7 @@ export default function ChatComposer({
     return () => {
       cancelled = true;
     };
-  }, [cwd, mentionQuery?.start]);
+  }, [cwd, mentionQuery?.start, loadFileIndex]);
 
   const mentionSuggestions = useMemo(
     () => rankMentionSuggestions(fileMentions, mentionQuery?.query ?? "").slice(0, MAX_MENTION_RESULTS),
@@ -634,6 +696,15 @@ export default function ChatComposer({
   }, [draft]);
 
   const openQuestion = useMemo(() => (run ? findOpenQuestion(run) : null), [run]);
+  // A park on a manager turn that threw is a failure notice, not an ask: the
+  // composer must not read "Answer Cora", and Retry re-answers it with the
+  // message that failed.
+  const failedTurnRetryText = useMemo(
+    () => (run ? backendFailureRetryText(run, openQuestion) : null),
+    [run, openQuestion],
+  );
+  const backendFailureQuestion =
+    openQuestion !== null && isBackendFailureQuestion(openQuestion);
   const status = run?.status;
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
@@ -681,10 +752,16 @@ export default function ChatComposer({
 
   const attachmentsForCurrentDraft = async (): Promise<AddRunMessageAttachmentInput[]> => {
     let mentionFiles = fileMentions;
-    if (cwd && draft.includes("@")) {
+    // Re-read the index only for a mention it cannot answer (a file created
+    // since, or a mention typed without the picker). An email address never
+    // parses as a mention token, so it costs nothing.
+    if (cwd && unresolvedMentionTokens(draft, mentionFiles).length > 0) {
       try {
-        mentionFiles = await collectWorkspaceFiles(cwd);
-        setFileMentions(mentionFiles);
+        const index = loadFileIndex(fileMentions.length > 0);
+        if (index) {
+          mentionFiles = await index.files;
+          if (mountedRef.current) setFileMentions(mentionFiles);
+        }
       } catch {
         // Keep the existing index; the main process also resolves textual
         // @file mentions before deciding whether a manager plan is needed.
@@ -830,6 +907,27 @@ export default function ChatComposer({
     }
   };
 
+  const retryFailedTurn = async () => {
+    if (!run_ || !openQuestion || !failedTurnRetryText || inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.spark.orchestration.answerRunQuestion({
+        runId: run_.id,
+        questionMessageId: openQuestion.id,
+        clientMessageId: makeId("client-msg"),
+        message: failedTurnRetryText,
+        attachments: [],
+      });
+    } catch (err) {
+      if (mountedRef.current) setError((err as Error).message);
+    } finally {
+      inFlight.current = false;
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+
   const updateMentionFromSelection = (text: string, cursor: number | null) => {
     if (suppressMentionUpdate.current) {
       suppressMentionUpdate.current = false;
@@ -888,6 +986,12 @@ export default function ChatComposer({
       if ((event.key === "Enter" || event.key === "Tab") && mentionSuggestions.length > 0) {
         event.preventDefault();
         insertFileMention(mentionSuggestions[Math.min(mentionIndex, mentionSuggestions.length - 1)]);
+        return;
+      }
+      // While the index loads, Enter means "pick the file", not "send the
+      // half-typed @token"; swallow it until suggestions arrive.
+      if ((event.key === "Enter" || event.key === "Tab") && filesLoading) {
+        event.preventDefault();
         return;
       }
       if (event.key === "Escape") {
@@ -1223,6 +1327,32 @@ export default function ChatComposer({
     };
   }, [suspendGlobalEvents]);
 
+  // A run that is stopping looks unchanged until the next snapshot, so the
+  // button holds a pending state instead of inviting repeated clicks.
+  const [stopping, setStopping] = useState(false);
+  const canStop = isActive || workerActivity?.state === "live";
+  const stop = async () => {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await onForcePauseRun();
+    } finally {
+      if (mountedRef.current) setStopping(false);
+    }
+  };
+  const stopRef = useRef(stop);
+  stopRef.current = stop;
+  const canStopRef = useRef(canStop);
+  canStopRef.current = canStop;
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onStop = () => {
+      if (canStopRef.current) void stopRef.current();
+    };
+    window.addEventListener("spark:stop-chat", onStop);
+    return () => window.removeEventListener("spark:stop-chat", onStop);
+  }, [suspendGlobalEvents]);
+
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
   // chat1mContext directly via applyChatBackendChange. No standalone
@@ -1237,6 +1367,8 @@ export default function ChatComposer({
     ? lockedMode === "automation"
       ? "Describe the loom you want — trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
+    : backendFailureQuestion
+      ? "Cora's last turn failed. Retry it, or send a new message."
     : openQuestion
       ? "Answer Cora, and it keeps going."
       : isTerminal
@@ -1275,6 +1407,9 @@ export default function ChatComposer({
             role="alert"
             style={{
               flex: "0 0 auto",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
               marginBottom: 8,
               padding: "6px 9px",
               borderRadius: "var(--radius-surface, 10px)",
@@ -1285,7 +1420,8 @@ export default function ChatComposer({
               lineHeight: 1.4,
             }}
           >
-            {error}
+            <span style={{ flex: "1 1 auto", minWidth: 0 }}>{error}</span>
+            <DismissErrorButton onClick={() => setError(null)} />
           </div>
         )}
         <div
@@ -1349,7 +1485,11 @@ export default function ChatComposer({
         <textarea
           ref={textareaRef}
           value={draft}
+          // Stays editable while a send is in flight: send() clears only the
+          // text it sent, so a follow-up typed meanwhile is kept, and disabling
+          // a focused element would blur it.
           disabled={disabled}
+          aria-label="Message Cora"
           spellCheck={false}
           onChange={(event) => {
             const next = event.target.value;
@@ -1429,6 +1569,8 @@ export default function ChatComposer({
                   ? "Adding pasted image..."
                 : isActive
                   ? "Enter to send · Cora reads it while she works"
+                  : backendFailureQuestion
+                    ? "Enter to send, Shift+Enter for a new line"
                   : openQuestion
                     // No Resume button here — the answer IS the resume — so the
                     // hint must not point at one.
@@ -1453,6 +1595,11 @@ export default function ChatComposer({
                 {isParkedTurn ? "Retry" : "Resume"}
               </TextButton>
             )}
+            {backendFailureQuestion && failedTurnRetryText && (
+              <TextButton onClick={retryFailedTurn} disabled={busy} tone="accent">
+                Retry
+              </TextButton>
+            )}
             <SendButton
               onClick={send}
               disabled={!canSend}
@@ -1464,9 +1611,7 @@ export default function ChatComposer({
                 state the user could see a worker "working" with nothing to
                 stop it. forcePauseRun kills every active worker pty, so it is
                 the right control for both cases. */}
-            {(isActive || workerActivity?.state === "live") && (
-              <StopButton onClick={onForcePauseRun} />
-            )}
+            {canStop && <StopButton onClick={() => void stop()} stopping={stopping} />}
           </div>
         </div>
         </div>
@@ -1627,38 +1772,32 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+// One main-process walk (fs:listFiles: a 10,000 file cap, the same skipped
+// build and dependency folders, and SSH workspace support). The renderer walk
+// it replaced made one serial fs:list IPC per folder and stopped depth-first
+// at 700 files, so in a big repo the later folders could never be mentioned.
 async function collectWorkspaceFiles(cwd: string): Promise<FileMention[]> {
-  const files: FileMention[] = [];
   const root = normalizePath(cwd);
+  const result = await window.spark.fs.listFiles(cwd);
+  return result.files
+    .filter((entry) => !entry.isDir)
+    .map((entry) => ({
+      path: entry.path,
+      name: entry.name,
+      relativePath: relativeWorkspacePath(root, entry.path),
+      ext: entry.ext,
+    }))
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
+}
 
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (depth > MAX_FILE_SCAN_DEPTH || files.length >= MAX_FILE_SCAN_RESULTS) return;
-    let entries: FsEntry[] = [];
-    try {
-      entries = await window.spark.fs.list(dir);
-    } catch {
-      return;
-    }
-
-    const dirs = entries.filter((entry) => entry.isDir && !SKIPPED_MENTION_DIRS.has(entry.name));
-    const leafFiles = entries.filter((entry) => !entry.isDir);
-    for (const entry of leafFiles) {
-      if (files.length >= MAX_FILE_SCAN_RESULTS) return;
-      files.push({
-        path: entry.path,
-        name: entry.name,
-        relativePath: relativeWorkspacePath(root, entry.path),
-        ext: entry.ext,
-      });
-    }
-    for (const entry of dirs) {
-      await walk(entry.path, depth + 1);
-      if (files.length >= MAX_FILE_SCAN_RESULTS) return;
-    }
-  }
-
-  await walk(cwd, 0);
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
+/** Mention tokens in a draft that no indexed file answers to. */
+function unresolvedMentionTokens(draft: string, files: FileMention[]): string[] {
+  return parseMentionTokens(draft).filter(
+    (token) =>
+      !files.some(
+        (file) => normalizeQuery(file.relativePath) === token || normalizeQuery(file.name) === token,
+      ),
+  );
 }
 
 function rankMentionSuggestions(files: FileMention[], rawQuery: string): FileMention[] {
@@ -2144,7 +2283,9 @@ function FileGlyph() {
   );
 }
 
-function StopButton({ onClick }: { onClick: () => void }) {
+const STOP_HINT = chordToHint(mod("."));
+
+function StopButton({ onClick, stopping }: { onClick: () => void; stopping: boolean }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [focusRing, setFocusRing] = useState(false);
@@ -2152,8 +2293,10 @@ function StopButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      title="Stop run"
-      aria-label="Stop run"
+      disabled={stopping}
+      aria-busy={stopping || undefined}
+      title={stopping ? "Stopping Cora…" : `Stop Cora (${STOP_HINT})`}
+      aria-label={stopping ? "Stopping Cora" : "Stop Cora"}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);
@@ -2185,13 +2328,21 @@ function StopButton({ onClick }: { onClick: () => void }) {
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        cursor: "default",
+        cursor: stopping ? "progress" : "default",
+        opacity: stopping ? 0.55 : 1,
         transform: pressed ? "translateY(0.5px)" : "translateY(0)",
         transition:
-          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden>
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 10 10"
+        fill="currentColor"
+        aria-hidden
+        className={stopping ? "composer-stop-glyph is-stopping" : "composer-stop-glyph"}
+      >
         <rect x="1" y="1" width="8" height="8" rx="1.5" />
       </svg>
     </button>

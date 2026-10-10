@@ -418,6 +418,44 @@ async function main() {
     );
   });
 
+  test("the auth park names the Settings tab that really holds accounts", () => {
+    const plan = P.planManagerTurnFailure({
+      error: "Pi provider openai-codex is not authenticated with OAuth",
+      runStatus: "planning",
+      mode: "chat",
+      transientRetryCount: 0,
+      backend: "pi",
+    });
+    assert.equal(plan.action, "park");
+    assert.match(plan.parkReason, /Settings > Agents/);
+    assert.doesNotMatch(plan.parkReason, /Settings \u2192 Accounts|Settings > Accounts/);
+  });
+
+  test("a manager turn that throws before streaming parks through the same policy", () => {
+    const catchStart = runStoreSource.indexOf('type: "spark_call.failed",\n      message: `Cora manager (${chatConfig.backend}) call failed');
+    assert.notEqual(catchStart, -1, "askManagerBackend's thrown-failure journal must exist");
+    const catchTail = runStoreSource.slice(catchStart, runStoreSource.indexOf("\nasync function handleManagerStartupFailure", catchStart));
+    assert.match(
+      catchTail,
+      /if \(providerTurnStarted\) return null;[\s\S]*handleManagerStartupFailure\(/,
+      "only a turn the provider never accepted may be parked or retried from the thrown path",
+    );
+    const helper = runStoreSource.slice(
+      runStoreSource.indexOf("async function handleManagerStartupFailure"),
+      runStoreSource.indexOf("const TRIVIAL_TOP_TIER_BY_RUNTIME"),
+    );
+    assert.match(
+      helper,
+      /if \(input\.managerRecoveryClaimId\) return null;/,
+      "a claimed recovery replay must keep returning null so its scheduler reparks the same token",
+    );
+    assert.match(helper, /planManagerTurnFailure\(/);
+    assert.match(helper, /plan\.action !== "park"\) return null/);
+    assert.match(helper, /type: "run\.chat_turn_parked"/);
+    assert.equal((helper.match(/draft\.managerTurnRecovery\s*=/g) ?? []).length, 1);
+    assert.doesNotMatch(helper, /humanMessages\.(?:push|splice)|addRunMessage|askHumanQuestion/);
+  });
+
   test("retry backoff is jittered and seconds-scale", () => {
     assert.equal(P.managerTurnRetryDelayMs(1, () => 0), 2000);
     assert.equal(P.managerTurnRetryDelayMs(2, () => 0), 4000);
@@ -455,6 +493,39 @@ async function main() {
       /humanMessages\.(?:push|splice)|addRunMessage/,
       "a parked provider failure must not become duplicate Cora dialogue",
     );
+  });
+
+  test("a failed recovery replay re-parks with the reason of its own kind", () => {
+    // Auth and timeout recoveries now survive normalizeRun, so a Retry that
+    // fails again (the account is still not connected) returns to parked. It
+    // must keep saying "connect it", not "the provider is unavailable".
+    for (const kind of ["auth", "timeout", "rate_limit", "transport", "provider"]) {
+      const plan = P.planManagerTurnFailure({
+        error:
+          kind === "auth"
+            ? "Cora is not authenticated with a Claude account (anthropic)."
+            : kind === "timeout"
+              ? "Pi manager turn timed out after 600s"
+              : kind === "rate_limit"
+                ? "429 rate limit exceeded"
+                : kind === "transport"
+                  ? "ECONNRESET socket hang up"
+                  : "Our servers are currently overloaded. Please try again later.",
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        backend: "pi",
+      });
+      assert.equal(plan.action, "park", kind);
+      assert.equal(plan.kind, kind);
+      assert.equal(plan.parkReason, P.managerTurnParkReason(kind), kind);
+    }
+    assert.match(P.managerTurnParkReason("auth"), /Settings > Agents/);
+    const repark = runStoreSource.slice(
+      runStoreSource.indexOf("async function returnUnfinishedManagerRecoveryToParked"),
+      runStoreSource.indexOf("function scheduleClaimedManagerTurnRecovery"),
+    );
+    assert.match(repark, /stopReason: managerTurnParkReason\(recovery\.failureKind\)/);
   });
 
   console.log(`\n${passed} manager turn policy contract tests passed`);

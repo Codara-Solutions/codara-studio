@@ -65,7 +65,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     // click would KILL the pty — forcePauseRun has no graceful ESC path — and
     // a manual-fallback run has no manager to relaunch the task afterwards, so
     // we assert its presence without clicking it).
-    await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Stop Cora" })).toBeVisible();
 
     // Play the worker: write its final report (partial). The launch driver
     // polls final-report.json every 750ms and settles the attempt once it

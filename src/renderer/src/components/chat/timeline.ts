@@ -11,7 +11,11 @@ import type {
   WorkerTask,
   WorkerTaskStatus,
 } from "@shared/types";
-import { isBackendFailurePark, resolveOpenRunQuestion } from "@shared/run-questions";
+import {
+  isBackendFailurePark,
+  isBackendFailureQuestion,
+  resolveOpenRunQuestion,
+} from "@shared/run-questions";
 import { plannedWorkerModel, type WorkerModelOptions } from "@shared/worker-model-roster";
 import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
 import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
@@ -24,6 +28,12 @@ import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
 
 export interface ChatWorker {
   id: string;
+  /**
+   * The surviving worker task (after any runtime fallback), which is what a
+   * worker pane is keyed by. `id` is the root of the chain, kept stable for
+   * React keys, and names no pane once a fallback replaced it.
+   */
+  taskId?: string;
   title: string;
   runtime: WorkerRuntime;
   status: WorkerTaskStatus;
@@ -236,6 +246,8 @@ export type ChatTimelineItem =
       questionOptions: HumanRunMessage["questionOptions"];
       /** Present on plan_approval asks: did anyone actually prove this plan? */
       planValidation?: PlanValidation;
+      /** A park on a manager turn that threw: a failure notice, not an ask. */
+      backendFailure?: true;
       answersMessageId: HumanRunMessage["answersMessageId"];
       attachments: HumanRunMessage["attachments"];
       intent: HumanRunMessage["intent"];
@@ -468,6 +480,9 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       ...(message.questionContext?.planValidation
         ? { planValidation: message.questionContext.planValidation }
         : {}),
+      ...(message.kind === "question" && isBackendFailureQuestion(message)
+        ? { backendFailure: true as const }
+        : {}),
       answersMessageId: message.answersMessageId,
       attachments: message.attachments ?? [],
       intent: message.intent,
@@ -533,6 +548,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         // Keyed on the root of the supersedes chain so a runtime fallback
         // updates the row in place instead of swapping one out for another.
         id: logicalWorkerKey(worker),
+        taskId: worker.task.id,
         title: worker.task.title,
         runtime: worker.task.runtimePreference,
         status: worker.task.status,
@@ -1234,6 +1250,28 @@ function attachmentSignature(
 // the shared compatibility policy.
 export function findOpenQuestion(run: RunState): HumanRunMessage | null {
   return resolveOpenRunQuestion(run);
+}
+
+/**
+ * The user message a backend-failure park interrupted, which the composer's
+ * Retry answers the park with. Retry cannot call resumeRun: a run blocked on
+ * an open question refuses it (resumeBlockingRunQuestion). Null for a real
+ * question, or a park that follows no user message.
+ */
+export function backendFailureRetryText(
+  run: RunState,
+  question: HumanRunMessage | null,
+): string | null {
+  if (!question || !isBackendFailureQuestion(question)) return null;
+  const index = run.humanMessages.findIndex((message) => message.id === question.id);
+  for (let i = (index < 0 ? run.humanMessages.length : index) - 1; i >= 0; i -= 1) {
+    const message = run.humanMessages[i];
+    if (message.author !== "user") continue;
+    if (message.resumeNote || message.compaction || message.boardNote) continue;
+    const text = message.message.trim();
+    if (text) return text;
+  }
+  return null;
 }
 
 export type ChatStatusTone =

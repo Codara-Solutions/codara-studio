@@ -1396,6 +1396,14 @@ async function main() {
     assert.equal(step.workers[0].model, "claude-sonnet-5");
   });
 
+  test("a step worker row keeps the root key but opens the surviving task's pane", () => {
+    const timeline = T.buildChatTimeline(pausedRunWithQueuedWorker());
+    const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-1");
+    assert.equal(step.workers.length, 1);
+    assert.equal(step.workers[0].id, "task-s1-dead");
+    assert.equal(step.workers[0].taskId, "task-s1-live");
+  });
+
   // ── Awaiting-answer manager turns (run-msafk7yu-zkudx6) ───────────────────
   // A live CLI manager holds its RPC turn open while suspended inside
   // ask_user, so the SparkCall stays "started" while the run is "blocked".
@@ -1753,6 +1761,32 @@ async function main() {
     assert.equal(T.isBackendFailurePark(run), true);
     assert.equal(T.describeRunStatus(run).tone, "failed");
     assert.equal(T.workspaceRailTone([run]), null);
+  });
+
+  test("a backend-failure park renders as a failure row and retries the failed message", () => {
+    const question = parkQuestion({ backendFailure: true });
+    const userMessage = {
+      id: "msg-user",
+      runId: "run-park",
+      author: "user",
+      kind: "note",
+      message: "Hello Cora, what can you do?",
+      createdAt: at(5),
+    };
+    const resume = { ...userMessage, id: "msg-resume", message: "resume", resumeNote: true, createdAt: at(7) };
+    const run = parkedRun({ flagged: true, question });
+    run.humanMessages = [userMessage, resume, question];
+    const row = T.buildChatTimeline(run).find((item) => item.kind === "message" && item.id === question.id);
+    assert.equal(row?.backendFailure, true);
+    assert.equal(T.backendFailureRetryText(run, question), "Hello Cora, what can you do?");
+    const genuine = parkQuestion();
+    genuine.message = "Which database should the importer write to?";
+    genuine.questionContext.reason = "Two schemas are equally valid.";
+    const genuineRun = parkedRun({ flagged: false, question: genuine });
+    genuineRun.humanMessages = [userMessage, genuine];
+    assert.equal(T.backendFailureRetryText(genuineRun, genuine), null);
+    const genuineRow = T.buildChatTimeline(genuineRun).find((item) => item.kind === "message" && item.id === genuine.id);
+    assert.equal(genuineRow?.backendFailure, undefined);
   });
 
   test("a genuine question still needs you and still lights the rail", () => {

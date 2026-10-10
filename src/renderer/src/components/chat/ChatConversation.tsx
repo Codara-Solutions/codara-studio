@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Checkpoint,
   PlanValidation,
@@ -24,8 +24,11 @@ import {
 } from "./timeline";
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
-import Markdown from "./Markdown";
+import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
 import { unwrapIpcError } from "../../lib/ipc-error";
+import { chordToHint, mod } from "../../shortcuts/chord";
+import { findMatchingRows, stepMatch } from "./conversation-search";
+import { openAccountsSettings } from "./account-readiness";
 import {
   compactPreview,
   formatToolPayload,
@@ -57,6 +60,8 @@ type ConversationItem = ChatTimelineItem | ActivityGroupItem;
 type ConversationRenderContext = {
   executionByCallId: Map<string, ExecutionTurn>;
   finalAnswerByCallId: Map<string, string>;
+  /** Row of the current find match, or -1. */
+  findCurrentIndex: number;
 };
 
 interface ConversationMinimapEntry {
@@ -78,7 +83,24 @@ const WorkerWaitContext = React.createContext<
   ((taskIds: string[]) => string | null) | null
 >(null);
 
-export default function ChatConversation({ run }: { run: RunState }) {
+// Focuses a worker's terminal pane; false when it has no open pane. A context
+// for the same reason as WorkerWaitContext: worker rows sit inside memoized
+// step cards.
+const WorkerTerminalContext = React.createContext<((workerTaskId: string) => boolean) | null>(null);
+
+export default function ChatConversation({
+  run,
+  cwd = null,
+  onOpenWorkerTerminal,
+  findRequest = 0,
+}: {
+  run: RunState;
+  /** Workspace that relative file links in Cora's answers resolve against. */
+  cwd?: string | null;
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
+  /** Bumped by the panel's find chord; each change opens and focuses find. */
+  findRequest?: number;
+}) {
   // One durable projection owns both history hydration and live frames. Build
   // it before the timeline so completed conversational turns can omit their
   // otherwise-empty manager disclosure without guessing from prose.
@@ -226,12 +248,47 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // virtualizer-supported reactive input for data that changes without adding
   // a row; changing it refreshes visible rows without remounting the list or
   // disturbing the reader's scroll position.
+  // Find in this chat. Rows are virtualized, so the browser's own find cannot
+  // see off-screen ones; this searches the row text in memory and scrolls the
+  // match into view. Row text is only built while the bar is open.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCurrent, setFindCurrent] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const seenFindRequestRef = useRef(findRequest);
+  useEffect(() => {
+    if (findRequest === seenFindRequestRef.current) return;
+    seenFindRequestRef.current = findRequest;
+    setFindOpen(true);
+    window.requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, [findRequest]);
+  const findMatches = useMemo(() => {
+    if (!findOpen) return [];
+    const texts = items.map((item) =>
+      conversationRowSearchText(item, executionByCallId, finalAnswerByCallId),
+    );
+    return findMatchingRows(texts, findQuery);
+  }, [findOpen, findQuery, items, executionByCallId, finalAnswerByCallId]);
+  const goToMatch = (position: number) => {
+    setFindCurrent(position);
+    const index = findMatches[position];
+    if (index !== undefined) virtuosoRef.current?.scrollToIndex({ index, align: "center" });
+  };
+  const closeFind = () => {
+    setFindOpen(false);
+    setFindCurrent(-1);
+  };
+  const findCurrentIndex = findOpen && findCurrent >= 0 ? findMatches[findCurrent] ?? -1 : -1;
   const renderContext = useMemo<ConversationRenderContext>(
     () => ({
       executionByCallId,
       finalAnswerByCallId,
+      findCurrentIndex,
     }),
-    [executionByCallId, finalAnswerByCallId],
+    [executionByCallId, finalAnswerByCallId, findCurrentIndex],
   );
   // The result manifest is the worker's final-report envelope, written for
   // Cora to review, not for the reader. It no longer gets a row here: the
@@ -240,6 +297,23 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
+  // "New activity" only when something arrived after the reader left the
+  // bottom; an old chat whose last answer is taller than the viewport opens
+  // scrolled up with nothing new. The event count is ignored until history
+  // hydrates, or the hydration itself would read as activity.
+  const activityMark = execution.hydrated ? `${rowCount}:${execution.events.length}` : null;
+  const leftBottomMarkRef = useRef<string | null>(null);
+  const [newActivity, setNewActivity] = useState(false);
+  useEffect(() => {
+    if (readerAtBottom) {
+      leftBottomMarkRef.current = null;
+      setNewActivity(false);
+      return;
+    }
+    if (activityMark === null) return;
+    if (leftBottomMarkRef.current === null) leftBottomMarkRef.current = activityMark;
+    else if (leftBottomMarkRef.current !== activityMark) setNewActivity(true);
+  }, [readerAtBottom, activityMark]);
   const summarizeWait = useMemo(
     () => (taskIds: string[]) => summarizeWorkerWait(run, taskIds)?.label || null,
     [run],
@@ -247,6 +321,8 @@ export default function ChatConversation({ run }: { run: RunState }) {
 
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
+      <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
+      <MarkdownWorkspaceContext.Provider value={cwd || null}>
       <div style={SCROLL_STYLE} data-testid="cora-conversation">
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
@@ -298,7 +374,9 @@ export default function ChatConversation({ run }: { run: RunState }) {
                   }}
                 >
                   <div
-                    className={`cora-timeline-row cora-timeline-row--${rowKind}`}
+                    className={`cora-timeline-row cora-timeline-row--${rowKind}${
+                      context.findCurrentIndex === index ? " is-find-current" : ""
+                    }`}
                     data-timeline-kind={rowKind}
                     style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
                   >
@@ -354,16 +432,73 @@ export default function ChatConversation({ run }: { run: RunState }) {
             virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
           }}
         />
+        {findOpen && (
+          <div className="cora-find-bar" role="search">
+            <input
+              ref={findInputRef}
+              type="text"
+              aria-label="Find in chat"
+              placeholder="Find in chat"
+              value={findQuery}
+              onChange={(event) => {
+                setFindQuery(event.currentTarget.value);
+                setFindCurrent(-1);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeFind();
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  goToMatch(stepMatch(findCurrent, event.shiftKey ? -1 : 1, findMatches.length));
+                }
+              }}
+            />
+            <span className="cora-find-bar__count" aria-live="polite">
+              {findQuery.trim()
+                ? findMatches.length === 0
+                  ? "No results"
+                  : findCurrent >= 0
+                    ? `${findCurrent + 1} of ${findMatches.length}`
+                    : `${findMatches.length} found`
+                : ""}
+            </span>
+            <button
+              type="button"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, -1, findMatches.length))}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, 1, findMatches.length))}
+            >
+              ↓
+            </button>
+            <button type="button" aria-label="Close find" title="Close (Esc)" onClick={closeFind}>
+              ×
+            </button>
+          </div>
+        )}
         {!readerAtBottom && rowCount > 0 && (
           <button
             type="button"
             onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
             style={NEW_ACTIVITY_BUTTON_STYLE}
           >
-            New activity ↓
+            {newActivity ? "New activity ↓" : "Jump to latest ↓"}
           </button>
         )}
       </div>
+      </MarkdownWorkspaceContext.Provider>
+      </WorkerTerminalContext.Provider>
     </WorkerWaitContext.Provider>
   );
 }
@@ -457,6 +592,32 @@ function ConversationMinimap({
 
 function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
+}
+
+// Everything a reader could see in a row, as one searchable string.
+function conversationRowSearchText(
+  item: ConversationItem,
+  executionByCallId: Map<string, ExecutionTurn>,
+  finalAnswerByCallId: Map<string, string>,
+): string {
+  if (item.kind === "message") return item.text;
+  if (item.kind === "step") {
+    return [item.title, item.goal, ...item.workers.map((worker) => worker.title)].join("\n");
+  }
+  const tools = item.kind === "activity-group" ? item.items : [item];
+  const parts: string[] = [];
+  for (const tool of tools) {
+    parts.push(tool.title, tool.detail ?? "");
+    if (tool.activity !== "manager") continue;
+    const callId = timelineSparkCallId(tool);
+    for (const block of executionByCallId.get(callId)?.blocks ?? []) {
+      if (block.kind === "text") parts.push(block.text);
+      else if (block.kind === "tool") parts.push(block.toolName);
+      else if (block.kind === "error") parts.push(block.message);
+    }
+    parts.push(finalAnswerByCallId.get(callId) ?? "");
+  }
+  return parts.join("\n");
 }
 
 // The SparkCall backing a manager row. Rows written since the field existed
@@ -755,6 +916,19 @@ const MessageTurn = React.memo(function MessageTurn({
               ? "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message."
               : backendFailure.hint
           }
+          action={backendFailure.action}
+        />
+      </SparkTurn>
+    );
+  }
+  // A park on a turn that threw is a failure notice, not a question: it gets
+  // no "Needs you" tag, and the composer offers Retry instead of "Answer".
+  if (item.backendFailure) {
+    return (
+      <SparkTurn tag={<IssueChip />}>
+        <BackendFailureMessage
+          detail="Cora's turn failed before it could answer."
+          hint="The failed turn above names the cause. Retry below sends your message again."
         />
       </SparkTurn>
     );
@@ -851,14 +1025,44 @@ function CheckGlyph() {
   );
 }
 
-function backendFailureDetails(
-  text: string,
-): { detail: string; hint: string; kind: "auth" | "billing" | "capacity" | "quota" | "other" } | null {
+function backendFailureDetails(text: string): ProviderFailure | null {
   const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
   const source = match?.[1]?.trim();
   const detail = match?.[2]?.trim();
   if (!source || !detail) return null;
+  return classifyProviderFailure(source, detail);
+}
+
+type ProviderFailure = {
+  detail: string;
+  hint: string;
+  kind: "auth" | "billing" | "capacity" | "quota" | "other";
+  /** Opens Settings > Agents, where accounts are connected and switched. */
+  action?: "accounts";
+};
+
+const PROVIDER_ACCOUNT_NAMES: Record<string, string> = {
+  anthropic: "Claude",
+  "openai-codex": "ChatGPT",
+  xai: "Grok",
+};
+
+// Shared by legacy "<backend> backend error:" messages and the raw error a
+// failed manager turn records, so both read the same way to the user.
+function classifyProviderFailure(source: string, detail: string): ProviderFailure {
   const normalizedDetail = detail.replace(/[_-]+/g, " ");
+  // NoConnectedPiAccountError (main): the provider never had an account, so
+  // "reconnect" would name something the user never did.
+  const neverConnected = /not authenticated with an? (\w+) account/i.exec(detail);
+  if (neverConnected) {
+    const name = neverConnected[1];
+    return {
+      detail: `No ${name} account is connected.`,
+      hint: `Connect a ${name} account in Settings > Agents, or pick a model from an account you have connected, then retry this message.`,
+      kind: "auth",
+      action: "accounts",
+    };
+  }
   const authFailure =
     /OAuth refresh failed|not authenticated|no OAuth access token|OAuth session expired|token (?:has )?expired|invalid api key|missing api key|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)/i.test(
       normalizedDetail,
@@ -878,32 +1082,30 @@ function backendFailureDetails(
   ) {
     return {
       detail: "The Claude account has no Extra Usage available for third-party harness use.",
-      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings, or use Codex-provider workers.",
+      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings > Agents, or use Codex-provider workers.",
       kind: "billing",
+      action: "accounts",
     };
   }
-  if (authFailure && /anthropic/i.test(detail)) {
-    return {
-      detail: "The selected Anthropic subscription could not be authenticated.",
-      hint: "Reconnect your Anthropic subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
-  }
-  if (authFailure && /openai-codex/i.test(detail)) {
-    return {
-      detail: "The selected Codex subscription could not be authenticated.",
-      hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
+  for (const [provider, name] of Object.entries(PROVIDER_ACCOUNT_NAMES)) {
+    if (authFailure && detail.toLowerCase().includes(provider)) {
+      return {
+        detail: `The selected ${name} account could not be authenticated.`,
+        hint: `Reconnect your ${name} account in Settings > Agents, then retry this message.`,
+        kind: "auth",
+        action: "accounts",
+      };
+    }
   }
   if (authFailure) {
     return {
       detail: "The selected provider account could not be authenticated.",
       hint:
         source === "Cora Pi"
-          ? "Reconnect the selected subscription in Settings, then retry this message."
+          ? "Reconnect the selected account in Settings > Agents, then retry this message."
           : `Reconnect the ${source} account, then retry this message.`,
       kind: "auth",
+      action: "accounts",
     };
   }
   // A quota envelope can append generic service/transport prose, so its
@@ -917,6 +1119,7 @@ function backendFailureDetails(
       detail: "The selected provider account reached a usage limit.",
       hint: "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message.",
       kind: "quota",
+      action: "accounts",
     };
   }
   if (
@@ -937,12 +1140,23 @@ function backendFailureDetails(
   };
 }
 
+/** The friendly reading of a failed manager turn's raw error, or null when
+ * the error is unclassified and the raw text says more than a generic line. */
+function failedTurnExplanation(error: string): ProviderFailure | null {
+  const trimmed = error.trim();
+  if (!trimmed) return null;
+  const failure = classifyProviderFailure("Cora Pi", trimmed);
+  return failure.kind === "other" ? null : failure;
+}
+
 function BackendFailureMessage({
   detail,
   hint,
+  action,
 }: {
   detail: string;
   hint: string;
+  action?: ProviderFailure["action"];
 }) {
   return (
     <div
@@ -954,7 +1168,16 @@ function BackendFailureMessage({
       <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t complete this turn</div>
       <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
       <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
+      {action === "accounts" ? <OpenAccountsButton /> : null}
     </div>
+  );
+}
+
+function OpenAccountsButton() {
+  return (
+    <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
+      Open accounts
+    </button>
   );
 }
 
@@ -977,8 +1200,11 @@ function LiveEllipsis() {
   );
 }
 
-function LiveToolRow({ call }: { call: LiveToolCall }) {
+// `live` marks a row in the turn that is still running. A settled turn can hold
+// a call that never reported a result (an aborted turn); it must not tick.
+function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolean }) {
   const finished = call.output !== undefined;
+  const running = live && !finished;
   const failed = finished && call.isError === true;
   // File-mutating calls (edit/write) carry enough payload to reconstruct a
   // GitHub-style change view locally; everything else yields null and the
@@ -1043,6 +1269,11 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
           {inlineDetail}
         </span>
+        {running && (
+          <span style={TOOL_STATS_STYLE}>
+            <ElapsedSince since={call.at} />
+          </span>
+        )}
         {appliedFileDiff && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span style={{ color: "var(--ok)" }}>+{appliedFileDiff.additions}</span>
@@ -1053,6 +1284,7 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <Caret open={open} />
       </DisclosureButton>
       {appliedFileDiff && <ToolFileDiffPreview change={appliedFileDiff} />}
+      {running && call.partialOutput ? <LiveToolOutput text={call.partialOutput} /> : null}
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
           {formatToolPayload(call.input).length > 0 && (
@@ -1083,16 +1315,34 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
 }
 
 
+// What a running command has printed so far, shown without expanding the row
+// so a slow test run can be told from a hung one. Pinned to the newest line.
+function LiveToolOutput({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement | null>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text]);
+  return (
+    <pre ref={ref} className="cora-live-tool-output" aria-live="off" style={LIVE_TOOL_OUTPUT_STYLE}>
+      {text}
+    </pre>
+  );
+}
+
 // GitHub-style changed-lines preview for one manager edit/write call, shown
 // directly under the tool row (the same treatment worker rows give their
-// measured file lists). The path opens the working-tree diff tab; the line
-// rows are colored exactly like a GitHub hunk. Capped so a whole-file
-// rewrite stays a preview, not a wall.
+// measured file lists). Clicking the path expands THIS call's change; the
+// working-tree diff is a separate action, because it shows whatever the file
+// holds now (later edits, staged or committed changes) rather than what this
+// call did. Collapsed, it is capped so a whole-file rewrite stays a preview.
 const TOOL_DIFF_PREVIEW_LINES = 8;
+const TOOL_DIFF_EXPANDED_LINES = 400;
 
 function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
-  const visible = change.lines.slice(0, TOOL_DIFF_PREVIEW_LINES);
+  const [expanded, setExpanded] = useState(false);
+  const visible = change.lines.slice(0, expanded ? TOOL_DIFF_EXPANDED_LINES : TOOL_DIFF_PREVIEW_LINES);
   const remaining = change.additions + change.deletions - visible.length;
+  const expandable = change.lines.length > TOOL_DIFF_PREVIEW_LINES;
   return (
     <div
       style={{
@@ -1104,17 +1354,17 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         gap: 3,
       }}
     >
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
       <button
         type="button"
         className="cora-worker-diff-file"
-        title={`Open changes for ${change.path}`}
-        aria-label={`Open changes for ${change.path}`}
+        title={expandable ? (expanded ? "Show less of this change" : "Show all of this change") : change.path}
+        aria-label={`${expanded ? "Collapse" : "Expand"} this change to ${change.path}`}
+        aria-expanded={expandable ? expanded : undefined}
         onClick={() => {
-          window.dispatchEvent(
-            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
-          );
+          if (expandable) setExpanded((value) => !value);
         }}
-        style={WORKER_DIFF_FILE_BUTTON_STYLE}
+        style={{ ...WORKER_DIFF_FILE_BUTTON_STYLE, cursor: expandable ? "pointer" : "default" }}
       >
         <span
           style={{
@@ -1133,6 +1383,19 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{change.additions}</span>
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{change.deletions}</span>
       </button>
+      <button
+        type="button"
+        className="cora-worker-terminal"
+        title={`Open the current working-tree diff of ${change.path}`}
+        onClick={() => {
+          window.dispatchEvent(
+            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
+          );
+        }}
+      >
+        Working tree
+      </button>
+      </div>
       {visible.map((line, index) => (
         <div
           key={`${index}:${line.kind}`}
@@ -1158,7 +1421,9 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
       {remaining > 0 && (
         <span style={TOOL_INLINE_DETAIL_STYLE}>
           {remaining} more changed {remaining === 1 ? "line" : "lines"}
-          {change.truncated ? " · preview capped" : " · expand the row for the full payload"}
+          {expanded
+            ? " · expand the row for the full payload"
+            : " · click the path to show them"}
         </span>
       )}
     </div>
@@ -1677,7 +1942,15 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     item.status === "planning" ||
     item.status === "reviewing" ||
     item.status === "blocked";
-  const [open, setOpen] = useState(false);
+  // A live step shows its workers; it folds itself away once it settles,
+  // unless the user opened or closed it by hand in the meantime.
+  const [open, setOpen] = useState(live);
+  const toggledRef = useRef(false);
+  const wasLiveRef = useRef(live);
+  useEffect(() => {
+    if (wasLiveRef.current && !live && !toggledRef.current) setOpen(false);
+    wasLiveRef.current = live;
+  }, [live]);
   const color = stepStatusColor(item.status);
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
@@ -1703,7 +1976,9 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     >
       <DisclosureButton
         onClick={() => {
-          if (hasBody) setOpen((value) => !value);
+          if (!hasBody) return;
+          toggledRef.current = true;
+          setOpen((value) => !value);
         }}
         baseStyle={{
           ...TOOL_ROW_BUTTON_STYLE,
@@ -1971,6 +2246,10 @@ function AssistantLiveTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const waiting = segments.length === 0;
+  // A tool still running (wait_for_workers above all) is legitimately silent
+  // for as long as the workers take, so only a turn with nothing in flight
+  // can be called stalled.
+  const toolInFlight = blocks.some((block) => block.kind === "tool" && block.output === undefined);
   return (
     <SparkTurn>
       <div
@@ -2011,7 +2290,10 @@ function AssistantLiveTurn({
             ) : null}
           </div>
         )}
-        <TurnSegments segments={segments} />
+        {!item.awaitingReply && !compaction && !toolInFlight ? (
+          <StallHint since={executionTurn?.lastEventAt || item.at} />
+        ) : null}
+        <TurnSegments segments={segments} live />
       </div>
     </SparkTurn>
   );
@@ -2042,6 +2324,7 @@ function AssistantSettledTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const actionCount = blocks.filter((block) => block.kind === "tool").length;
+  const explanation = failed && item.detail ? failedTurnExplanation(item.detail) : null;
   return (
     <SparkTurn>
       <div
@@ -2059,9 +2342,20 @@ function AssistantSettledTurn({
             </span>
           )}
           {failed && item.detail && (
-            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
+            <span
+              style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}
+              title={explanation ? item.detail : undefined}
+            >
+              {explanation?.detail ?? item.detail}
+            </span>
           )}
         </div>
+        {explanation && (
+          <div className="cora-failed-turn-hint" style={FAILED_TURN_HINT_STYLE}>
+            <span>{explanation.hint}</span>
+            {explanation.action === "accounts" ? <OpenAccountsButton /> : null}
+          </div>
+        )}
         <TurnSegments segments={segments} />
       </div>
     </SparkTurn>
@@ -2070,7 +2364,7 @@ function AssistantSettledTurn({
 
 // The one segment renderer both the live and the settled turn share, so a
 // turn finishing never changes what its prose and tool rows look like.
-function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
+function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
   return (
     <>
       {segments.map((segment) => {
@@ -2090,7 +2384,7 @@ function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
         if (segment.kind === "tool") {
           return (
             <div key={segment.id} data-execution-kind="tool">
-              <LiveToolRow call={segment.call} />
+              <LiveToolRow call={segment.call} live={live} />
             </div>
           );
         }
@@ -2127,6 +2421,28 @@ function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
     segments.push({ kind: "tool", id: block.id, call: block });
   }
   return segments;
+}
+
+const STALL_AFTER_MS = 90_000;
+const STOP_CHORD_HINT = chordToHint(mod("."));
+
+// Shown once a live turn has produced nothing for STALL_AFTER_MS. Ticks on its
+// own so the turn above it does not re-render.
+function StallHint({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const last = Date.parse(since);
+  if (!Number.isFinite(last) || now - last < STALL_AFTER_MS) return null;
+  const minutes = Math.floor((now - last) / 60_000);
+  const silence = minutes >= 1 ? `${minutes}m` : `${Math.floor((now - last) / 1000)}s`;
+  return (
+    <div className="cora-stall-hint" role="status" style={STALL_HINT_STYLE}>
+      No output for {silence}. Keep waiting, or stop Cora ({STOP_CHORD_HINT}) and retry.
+    </div>
+  );
 }
 
 // Ticks " for 12s" onto the Working header without re-rendering the turn each
@@ -2401,6 +2717,16 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
+  const openWorkerTerminal = React.useContext(WorkerTerminalContext);
+  // "Closed" holds only for the task and runtime state it was observed on: a
+  // retry or a runtime fallback opens a new pane, and a row the virtualizer
+  // keeps mounted must offer it again rather than stay disabled.
+  const terminalKey = `${worker.taskId ?? ""}:${worker.runtimeState ?? ""}`;
+  const [closedTerminalKey, setClosedTerminalKey] = useState<string | null>(null);
+  const terminalClosed = closedTerminalKey === terminalKey;
+  const hasLiveAttempt =
+    worker.runtimeState !== undefined || worker.status === "claimed" || worker.status === "running";
+  const canOpenTerminal = Boolean(openWorkerTerminal && worker.taskId && hasLiveAttempt);
   return (
     <div
       style={{
@@ -2423,6 +2749,20 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         <StatusDot color={color} pulse={pulse} size={5} />
         <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+        {canOpenTerminal && (
+          <button
+            type="button"
+            className="cora-worker-terminal"
+            disabled={terminalClosed}
+            title={terminalClosed ? "This worker's terminal is closed" : "Open this worker's terminal"}
+            onClick={() => {
+              if (!worker.taskId || !openWorkerTerminal) return;
+              if (!openWorkerTerminal(worker.taskId)) setClosedTerminalKey(terminalKey);
+            }}
+          >
+            {terminalClosed ? "Terminal closed" : "Open terminal"}
+          </button>
+        )}
         {hasDiff && diff && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
@@ -2447,7 +2787,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
               type="button"
               key={file.path}
               className="cora-worker-diff-file"
-              title={`Open changes for ${file.path}`}
+              title={`Open the current working-tree diff of ${file.path} (it can include changes made after this worker)`}
               aria-label={`Open changes for ${file.path}`}
               onClick={() => {
                 window.dispatchEvent(
@@ -3308,6 +3648,17 @@ const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
+const FAILED_TURN_HINT_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: 8,
+  paddingLeft: 12,
+  color: "var(--muted)",
+  fontSize: 11.5,
+  lineHeight: 1.45,
+};
+
 // The run-level verdict pill on its own full-width row under the final Cora
 // bubble of a completed run. flexBasis:100% breaks it onto its own line
 // within SparkTurn's flex column.
@@ -3828,6 +4179,28 @@ const TOOL_META_LINE_STYLE: React.CSSProperties = {
   fontSize: 10.5,
   lineHeight: 1.4,
   fontVariantNumeric: "tabular-nums",
+};
+
+const LIVE_TOOL_OUTPUT_STYLE: React.CSSProperties = {
+  margin: "2px 0 4px 12px",
+  padding: "6px 9px",
+  maxHeight: 168,
+  overflow: "auto",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "var(--bg)",
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+};
+
+const STALL_HINT_STYLE: React.CSSProperties = {
+  color: "var(--warn)",
+  fontSize: 11.5,
+  lineHeight: 1.4,
 };
 
 // The slim in-flight header: pulsing dots + "Working for Ns". Sits where the

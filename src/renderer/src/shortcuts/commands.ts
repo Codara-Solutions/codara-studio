@@ -53,6 +53,7 @@ export type CommandId =
   | "agent.cycleEffort"
   | "agent.openModelPicker"
   | "agent.openEffortPicker"
+  | "chat.stop"
   | "markdown.togglePreview";
 
 export type CommandGroup =
@@ -425,6 +426,16 @@ export const COMMANDS: Command[] = [
     label: "Open thinking effort picker",
     group: "Agent",
     defaultChords: [mod("n", { shift: true })],
+  },
+  {
+    // Stop is not a soft interrupt: it ends the manager turn and kills live
+    // workers. Bare Escape already closes menus, the mention picker and
+    // overlays, so a stray press must never reach this; Mod+. is the
+    // conventional "cancel" chord and nothing else in this table uses it.
+    id: "chat.stop",
+    label: "Stop Cora",
+    group: "Agent",
+    defaultChords: [mod(".")],
   },
   {
     // Mirrors VS Code's "Markdown: Open Preview" (Cmd/Ctrl+Shift+V). Only the

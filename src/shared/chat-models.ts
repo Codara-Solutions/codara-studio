@@ -1,4 +1,9 @@
-import { AGENT_FAMILIES, familyForModelId } from "./agent-families";
+import {
+  AGENT_FAMILIES,
+  familyForModelId,
+  subscriptionForModelId,
+  type PiSubscriptionProvider,
+} from "./agent-families";
 import { CODEX_MODEL_CATALOG } from "./model-catalog";
 import type {
   AgentEffortLevel,
@@ -70,6 +75,21 @@ const PI_MODELS: ChatModelOption[] = [
   {
     id: "claude-fable-5",
     label: "Claude Fable 5",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  // Curated so a Claude-only user has an affordable default before the live
+  // catalog lands (and offline): with Fable alone, the spend guard in
+  // defaultChatModel had nothing to choose but the premium tier.
+  {
+    id: "claude-opus-5",
+    label: "Claude Opus 5",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
+    id: "claude-sonnet-5",
+    label: "Claude Sonnet 5",
     backend: "pi",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
   },
@@ -493,8 +513,28 @@ function isPremiumTier(option: ChatModelOption): boolean {
  * Prefers the configured default even when a newer model leads the picker.
  * When that row is unavailable, scans groups for the first non-premium row.
  * Falls back to the first row only when every available model is premium.
+ *
+ * `usableProviders`, when given, narrows every step to models whose
+ * subscription is connected: a Claude-only user must not open on Sol and fail
+ * at launch. Rows with no subscription (OpenRouter) count as usable. When the
+ * narrowing leaves nothing (no account at all), the unfiltered rule applies,
+ * and undefined keeps it outright, so callers that do not know account state
+ * (the phone projection) are unchanged.
  */
-export function defaultChatModel(groups: ChatBackendGroup[]): ChatModelOption | null {
+export function defaultChatModel(
+  groups: ChatBackendGroup[],
+  usableProviders?: ReadonlySet<PiSubscriptionProvider>,
+): ChatModelOption | null {
+  if (usableProviders) {
+    const usable = (model: ChatModelOption): boolean => {
+      const provider = subscriptionForModelId(decomposeModelId(model.id).baseId);
+      return provider === null || usableProviders.has(provider);
+    };
+    const narrowed = groups
+      .map((group) => ({ ...group, models: group.models.filter(usable) }))
+      .filter((group) => group.models.length > 0);
+    if (narrowed.length > 0) return defaultChatModel(narrowed);
+  }
   for (const group of groups) {
     const configuredDefault = group.models.find(
       (model) => decomposeModelId(model.id).baseId === DEFAULT_CHAT_MODEL,
@@ -512,7 +552,10 @@ export function defaultChatModel(groups: ChatBackendGroup[]): ChatModelOption | 
 export function resolvePreferredChatModel(
   groups: ChatBackendGroup[],
   preferredModel: string | undefined,
+  usableProviders?: ReadonlySet<PiSubscriptionProvider>,
 ): ChatModelOption | null {
+  // An explicit saved pick wins even over account state: the user chose it,
+  // and a failed launch then explains itself with a connect action.
   if (preferredModel) {
     for (const group of groups) {
       const preferred = group.models.find(
@@ -521,7 +564,12 @@ export function resolvePreferredChatModel(
       if (preferred) return preferred;
     }
   }
-  return defaultChatModel(groups);
+  return defaultChatModel(groups, usableProviders);
+}
+
+/** The subscription a picker row needs, or null when it needs none. */
+export function subscriptionForChatModel(model: ChatModelOption): PiSubscriptionProvider | null {
+  return subscriptionForModelId(decomposeModelId(model.id).baseId);
 }
 
 // The effort cycle for a model: its pinned list when it has one, otherwise

@@ -1340,6 +1340,36 @@ a { color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.cora-welcome__connect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, 100%);
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--accent-soft);
+}
+.cora-welcome__connect-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+  text-align: left;
+}
+.cora-welcome__connect-copy strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.cora-welcome__connect .cora-failure-action {
+  align-self: center;
+  flex: 0 0 auto;
+}
 .cora-welcome__starters {
   display: grid;
   /* auto-fit rather than a fixed pair: the chat is as often half a split as it
@@ -1965,6 +1995,252 @@ a { color: inherit; }
   color: var(--ink-dim);
 }
 
+.cora-error-dismiss {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  margin: -1px -4px -1px 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: default;
+}
+.cora-error-dismiss:hover {
+  opacity: 1;
+  background: color-mix(in oklch, var(--danger) 16%, transparent);
+}
+.cora-error-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Find in a Cora chat. */
+.cora-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 22px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
+}
+.cora-find-bar input {
+  width: 180px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1 var(--font-sans);
+  outline: none;
+}
+.cora-find-bar input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+.cora-find-bar__count {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.cora-find-bar button {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 13px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-find-bar button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-find-bar button:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+.cora-find-bar button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-timeline-row.is-find-current {
+  border-radius: var(--radius-surface, 10px);
+  box-shadow: 0 0 0 2px var(--accent-edge);
+}
+
+/* Chat markdown. highlight.js token colours come from theme tokens so light
+   themes stay readable; the markdown preview keeps its own .spark-markdown
+   palette in markdown-preview/markdown.css. */
+.cora-md .hljs {
+  color: var(--ink-dim, var(--ink));
+  background: transparent;
+}
+.cora-md .hljs-comment,
+.cora-md .hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.cora-md .hljs-keyword,
+.cora-md .hljs-selector-tag,
+.cora-md .hljs-literal,
+.cora-md .hljs-section,
+.cora-md .hljs-link {
+  color: var(--danger);
+}
+.cora-md .hljs-built_in,
+.cora-md .hljs-type,
+.cora-md .hljs-class .hljs-title {
+  color: var(--warn);
+}
+.cora-md .hljs-string,
+.cora-md .hljs-attr,
+.cora-md .hljs-template-tag,
+.cora-md .hljs-template-variable {
+  color: var(--info);
+}
+.cora-md .hljs-symbol,
+.cora-md .hljs-bullet,
+.cora-md .hljs-meta {
+  color: var(--accent-text);
+}
+.cora-md .hljs-number,
+.cora-md .hljs-regexp,
+.cora-md .hljs-deletion {
+  color: var(--agent-claude);
+}
+.cora-md .hljs-name,
+.cora-md .hljs-attribute,
+.cora-md .hljs-variable,
+.cora-md .hljs-title.function_,
+.cora-md .hljs-title.class_,
+.cora-md .hljs-title {
+  color: var(--agent-pi);
+}
+.cora-md .hljs-tag,
+.cora-md .hljs-addition {
+  color: var(--ok);
+}
+.cora-md .hljs-emphasis {
+  font-style: italic;
+}
+.cora-md .hljs-strong {
+  font-weight: 700;
+}
+.cora-md-code {
+  position: relative;
+}
+.cora-md-code__bar {
+  position: absolute;
+  top: 13px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-md-code:hover .cora-md-code__bar,
+.cora-md-code:focus-within .cora-md-code__bar {
+  opacity: 1;
+}
+.cora-md-code__lang {
+  color: var(--muted);
+  font: 500 10.5px/1 var(--font-mono);
+}
+.cora-md-code__copy {
+  appearance: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink-dim);
+  font: 600 10.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-md-code__copy:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-md-code__copy:focus-visible,
+.cora-md-file-ref:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-md-file-ref {
+  cursor: pointer;
+  text-decoration: underline dotted color-mix(in oklab, var(--accent-text) 60%, transparent);
+  text-underline-offset: 2px;
+}
+.cora-md-file-ref:hover {
+  color: var(--accent-text) !important;
+}
+
+/* The one action a failure card offers (open the accounts tab). */
+.cora-failure-action {
+  appearance: none;
+  align-self: flex-start;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-control, 7px);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: 600 11px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-failure-action:hover {
+  background: color-mix(in oklch, var(--accent) 26%, transparent);
+}
+.cora-failure-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.cora-worker-terminal {
+  appearance: none;
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 10.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-worker-terminal:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-worker-terminal:disabled {
+  color: var(--muted);
+  border-color: transparent;
+}
+.cora-worker-terminal:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 .cora-worker-diff-file {
   background: transparent;
   transition:
@@ -2416,11 +2692,45 @@ a { color: inherit; }
   border-top: 1px solid var(--rule-soft);
 }
 .composer-model-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px 2px;
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
+}
+.composer-model-group.is-unconnected .composer-picker-row {
+  opacity: 0.55;
+}
+.composer-stop-glyph.is-stopping {
+  animation: runs-pulse 900ms ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-stop-glyph.is-stopping {
+    animation: none;
+  }
+}
+.composer-model-connect {
+  appearance: none;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--accent-text);
+  font: 600 9.5px/1.4 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: default;
+}
+.composer-model-connect:hover {
+  background: var(--accent-soft);
+}
+.composer-model-connect:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .composer-picker-title {
   padding: 9px 11px 7px;

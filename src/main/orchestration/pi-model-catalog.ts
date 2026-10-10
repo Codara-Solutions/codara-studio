@@ -50,7 +50,9 @@ interface ModelRuntimeLike {
 
 /** The catalog Pi itself refreshes from. We query it directly — see fetchRemoteCatalog. */
 const PI_CATALOG_BASE_URL = "https://pi.dev";
-const CATALOG_FETCH_TIMEOUT_MS = 8_000;
+// The three providers are fetched in parallel with Pi's own refresh, so this
+// bounds the added wait directly; a slow pi.dev only costs the newest rows.
+const CATALOG_FETCH_TIMEOUT_MS = 4_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -205,11 +207,17 @@ export function inspectPiModelCatalog(force = false): Promise<PiCatalogModel[]> 
   // first await, by which point the assignment below has completed.
   let work: Promise<PiCatalogModel[]> | null = null;
   work = (async (): Promise<PiCatalogModel[]> => {
+    // Started before Pi's own refresh and awaited together: run serially, the
+    // three fetches and the runtime refresh stacked to about half a minute on a
+    // slow network, and both the picker and a new draft's default waited on it.
+    // fetchRemoteCatalog never rejects, so a runtime failure leaves no dangling
+    // rejection behind.
+    const remoteCatalogs = Promise.all(PROVIDERS.map((provider) => fetchRemoteCatalog(provider)));
     try {
-      const modelRuntime = await loadModelRuntime();
+      const [modelRuntime, remotes] = await Promise.all([loadModelRuntime(), remoteCatalogs]);
       const models: PiCatalogModel[] = [];
       const seen = new Set<string>();
-      for (const provider of PROVIDERS) {
+      for (const [providerIndex, provider] of PROVIDERS.entries()) {
         // getModels, NOT getAvailable: the picker lists its curated rows whether
         // or not a subscription is connected, so the dynamic rows must behave
         // the same. Auth-filtering here meant a user who had not connected yet
@@ -225,7 +233,7 @@ export function inspectPiModelCatalog(force = false): Promise<PiCatalogModel[]> 
         })();
         // Pi's own copy first, then the live catalog on top: the remote entry
         // wins on conflict because it is the fresher description of the model.
-        const raws = [...baseline, ...(await fetchRemoteCatalog(provider))];
+        const raws = [...baseline, ...remotes[providerIndex]];
         for (const raw of raws) {
           const model = toCatalogModel(raw, provider);
           if (!model) continue;

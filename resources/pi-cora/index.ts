@@ -119,7 +119,7 @@ function workerModelContract(
   if (ids.length === 0) {
     return disconnected.length > 0
       ? `\n\nWorker model availability:\n- No enabled worker model has a connected account. Do not call codara_spawn_workers; answer directly or explain that the user must sign in to a provider in Settings > Agents.${waiting}`
-      : "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Settings.";
+      : "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Capability Center > Worker models.";
   }
   return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.${waiting}`;
 }

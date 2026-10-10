@@ -332,4 +332,61 @@ assert.equal(idless.result().finalText, "same message");
   assert.equal(legacy.result().assistantMessageCount, 1);
 }
 
-console.log("pi-turn: ok");
+
+// A running bash call's output streams as throttled tails: the first update
+// goes out at once, a burst inside the interval collapses into one trailing
+// send of the newest tail, and nothing follows the tool's end.
+(async () => {
+  const progress = [];
+  const running = new PiTurnAccumulator((event) => progress.push(event));
+  const update = (text) =>
+    running.consume({
+      type: "tool_execution_update",
+      toolCallId: "bash-1",
+      toolName: "bash",
+      partialResult: { content: [{ type: "text", text }] },
+    });
+  update("ignored: no tool_execution_start yet");
+  assert.equal(progress.length, 0);
+  running.consume({ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash", args: { command: "npm test" } });
+  progress.length = 0;
+  update("line 1");
+  update("line 1\nline 2");
+  update("line 1\nline 2\nline 3");
+  assert.deepEqual(progress, [{ kind: "tool_progress", toolUseId: "bash-1", output: "line 1" }]);
+  await new Promise((resolve) => setTimeout(resolve, piTurnModule.TOOL_PROGRESS_INTERVAL_MS + 60));
+  assert.deepEqual(progress.at(-1), {
+    kind: "tool_progress",
+    toolUseId: "bash-1",
+    output: "line 1\nline 2\nline 3",
+  });
+  assert.equal(progress.length, 2);
+
+  update("line 1\nline 2\nline 3\nline 4");
+  running.consume({
+    type: "tool_execution_end",
+    toolCallId: "bash-1",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: "done" }] },
+    isError: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, piTurnModule.TOOL_PROGRESS_INTERVAL_MS + 60));
+  assert.equal(progress.filter((event) => event.kind === "tool_progress").length, 2);
+  assert.equal(progress.at(-1).kind, "tool_result");
+  update("after the end");
+  assert.equal(progress.at(-1).kind, "tool_result");
+
+  // Only the tail travels.
+  const many = Array.from({ length: 100 }, (_, i) => `row ${i}`).join("\n");
+  const tail = piTurnModule.toolProgressTail({ content: [{ type: "text", text: `${many}\n\n` }] });
+  assert.equal(tail.split("\n").length, piTurnModule.TOOL_PROGRESS_MAX_LINES);
+  assert.ok(tail.endsWith("row 99"));
+  const wide = piTurnModule.toolProgressTail({ content: [{ type: "text", text: "x".repeat(10_000) }] });
+  assert.equal(wide.length, piTurnModule.TOOL_PROGRESS_MAX_CHARS);
+  assert.equal(piTurnModule.toolProgressTail({ content: [] }), "");
+
+  console.log("pi-turn: ok");
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

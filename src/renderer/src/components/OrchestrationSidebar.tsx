@@ -63,6 +63,13 @@ export default function OrchestrationSidebar({
 }: Props) {
   const [creatingNewRun, setCreatingNewRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dismissError = useCallback(() => setError(null), []);
+  // An error belongs to the chat it happened in; switching chats (or starting
+  // a new one) must not carry it over. A failed delete stays visible because
+  // it does not change the selection.
+  useEffect(() => {
+    setError(null);
+  }, [activeRunId, creatingNewRun]);
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.id === activeRunId) ?? null,
@@ -207,7 +214,7 @@ export default function OrchestrationSidebar({
 
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
-    void mutate(async () => {
+    return mutate(async () => {
       // Stop means stop in place: interrupt the active manager, kill live
       // workers, and preserve every chat turn and completed workspace change.
       // Conversation/code rewind belongs exclusively to the explicit Undo UI.
@@ -224,6 +231,7 @@ export default function OrchestrationSidebar({
       composerDraftKey={composerDraftKey}
       suspendGlobalEvents={suspendGlobalEvents}
       error={error}
+      onDismissError={dismissError}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}
       collapsible={collapsible}
