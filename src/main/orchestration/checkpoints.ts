@@ -241,20 +241,13 @@ export async function restoreCheckpointCode(input: {
       else restored.push(path);
     }
 
-    if (restored.length > 0) {
-      // A private index holding the checkpoint writes those files back
-      // without touching the user's index.
-      const restoreEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_INDEX_FILE: join(tempDir, "restore-index"),
-      };
-      await git(cwd, ["read-tree", sha], restoreEnv);
-      for (const chunk of chunked(restored, PATH_CHUNK)) {
-        await git(cwd, ["checkout-index", "-f", "--", ...chunk], restoreEnv);
-      }
-    }
-    const root = resolve(cwd);
+    // diff-tree paths are relative to the repository root, and the workspace
+    // may be a folder inside a larger repository.
+    const { stdout: topOut } = await git(cwd, ["rev-parse", "--show-toplevel"]);
+    const root = resolve(topOut.trim() || cwd);
+    // Removals go first: on a case-insensitive filesystem a file renamed only
+    // in case since the checkpoint is both a removed and a restored path, and
+    // removing it after the restore would delete the file just written back.
     for (const path of removed) {
       const target = resolve(root, path);
       if (!target.startsWith(`${root}${sep}`)) continue;
@@ -263,11 +256,26 @@ export async function restoreCheckpointCode(input: {
       await rm(target, { force: true }).catch(() => undefined);
       await removeEmptyParents(dirname(target), root);
     }
+    if (restored.length > 0) {
+      // A private index holding the checkpoint writes those files back
+      // without touching the user's index.
+      const restoreEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_INDEX_FILE: join(tempDir, "restore-index"),
+      };
+      await git(root, ["read-tree", sha], restoreEnv);
+      for (const chunk of pathChunks(restored)) {
+        await git(root, ["checkout-index", "-f", "--", ...chunk], restoreEnv);
+      }
+    }
 
     const touched = [...restored, ...removed];
     if (touched.length > 0 && current.headSha) {
-      for (const chunk of chunked(touched, PATH_CHUNK)) {
-        await git(cwd, ["reset", "-q", "HEAD", "--", ...chunk]);
+      for (const chunk of pathChunks(touched)) {
+        // Literal, so a file named like a glob ("[ab].txt") cannot unstage
+        // the user's other files that the pattern happens to match.
+        await git(root, ["--literal-pathspecs", "reset", "-q", "HEAD", "--", ...chunk]);
       }
     }
     return { preRestoreSha, restored, removed };
@@ -276,11 +284,25 @@ export async function restoreCheckpointCode(input: {
   }
 }
 
-const PATH_CHUNK = 200;
+// Paths per git invocation, bounded by count and by total length so one
+// command line stays well under the Windows limit of 32K characters.
+const PATH_CHUNK_COUNT = 200;
+const PATH_CHUNK_CHARS = 8_000;
 
-function chunked<T>(items: readonly T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+function pathChunks(paths: readonly string[]): string[][] {
+  const out: string[][] = [];
+  let current: string[] = [];
+  let chars = 0;
+  for (const path of paths) {
+    if (current.length > 0 && (current.length >= PATH_CHUNK_COUNT || chars + path.length > PATH_CHUNK_CHARS)) {
+      out.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(path);
+    chars += path.length + 3;
+  }
+  if (current.length > 0) out.push(current);
   return out;
 }
 

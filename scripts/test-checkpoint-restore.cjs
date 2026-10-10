@@ -115,6 +115,64 @@ async function main() {
   assert.throws(() => git("rev-parse", "--verify", "--quiet", "refs/spark/undo/run-undo"));
   console.log("PASS deleting the run drops its undo ref too");
 
+  // A workspace that is a folder inside a larger repository (a monorepo
+  // package). Snapshots cover the whole repository, and diff-tree paths are
+  // relative to its root, not to the workspace folder.
+  const MONO = path.join(TMP, "mono");
+  const mono = (...args) => execFileSync("git", ["-C", MONO, ...args], { encoding: "utf8" });
+  const monoWrite = (relative, content) => {
+    const target = path.join(MONO, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  };
+  const monoRead = (relative) => fs.readFileSync(path.join(MONO, relative), "utf8");
+  fs.mkdirSync(MONO, { recursive: true });
+  mono("init", "-q");
+  mono("config", "user.email", "test@example.com");
+  mono("config", "user.name", "Test");
+  monoWrite("app/a.txt", "original app a\n");
+  monoWrite("app/app/decoy.txt", "must survive\n");
+  monoWrite("a.txt", "root a\n");
+  monoWrite("[ab].txt", "glob-named original\n");
+  mono("add", "-A");
+  mono("-c", "commit.gpgsign=false", "commit", "-q", "-m", "base");
+  // The user stages a.txt; the restore must not unstage it through a path
+  // whose name happens to be a glob that matches it.
+  monoWrite("a.txt", "root a staged by the user\n");
+  mono("add", "a.txt");
+
+  const appCwd = path.join(MONO, "app");
+  const monoCheckpoint = await checkpoints.createCheckpoint({
+    runId: "run-mono",
+    cwd: appCwd,
+    kind: "user-message",
+    messagePointer: 1,
+    label: "before Cora",
+  });
+  assert.ok(monoCheckpoint.sha);
+
+  monoWrite("app/a.txt", "cora changed app a\n");
+  monoWrite("app/new.ts", "export const created = true;\n");
+  monoWrite("app/app/new.ts", "export const nestedCreated = true;\n");
+  monoWrite("[ab].txt", "glob-named changed by cora\n");
+
+  const monoResult = await checkpoints.restoreCheckpointCode({
+    cwd: appCwd,
+    sha: monoCheckpoint.sha,
+    runId: "run-mono",
+  });
+  assert.equal(monoRead("app/a.txt"), "original app a\n", "a file inside the workspace folder is restored");
+  assert.equal(monoRead("[ab].txt"), "glob-named original\n");
+  assert.ok(!fs.existsSync(path.join(MONO, "app", "new.ts")), "a created file inside the workspace folder is removed");
+  assert.ok(!fs.existsSync(path.join(MONO, "app", "app", "new.ts")));
+  assert.equal(monoRead("app/app/decoy.txt"), "must survive\n", "paths are never re-rooted at the workspace folder");
+  assert.deepEqual([...monoResult.removed].sort(), ["app/app/new.ts", "app/new.ts"]);
+  console.log("PASS a workspace inside a larger repository restores repository-relative paths");
+
+  assert.match(mono("diff", "--cached", "--name-only"), /^a\.txt$/m, "a glob-named restored path does not unstage a.txt");
+  assert.equal(monoRead("a.txt"), "root a staged by the user\n");
+  console.log("PASS restored paths reset the index literally, never as globs");
+
   const plain = fs.mkdtempSync(path.join(TMP, "plain-"));
   const noGit = await checkpoints.createCheckpoint({
     runId: "run-plain",
