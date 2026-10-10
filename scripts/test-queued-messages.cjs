@@ -1108,6 +1108,14 @@ async function main() {
     "the send button says Queue while a turn is active",
     composerSource.includes('label={isActive ? "Queue" : "Send"}'),
   );
+  check(
+    "the composer stays editable while a send or Resume is in flight",
+    composerSource.includes("disabled={disabled}") && !composerSource.includes("disabled={disabled || busy}"),
+  );
+  check(
+    "a reply to a question that closed is sent as a message",
+    /isQuestionInactiveError\([\s\S]{0,400}addRunMessage\(/.test(composerSource),
+  );
 
   const conversationSource = fs.readFileSync(CHAT_CONVERSATION_TSX, "utf8");
   check(
@@ -1115,6 +1123,15 @@ async function main() {
     conversationSource.includes("function UnqueueControl") &&
       conversationSource.includes("cancelQueuedMessage") &&
       /\{queued && <UnqueueControl runId=\{runId\} messageId=\{item\.id\} \/>\}/.test(conversationSource),
+  );
+  check(
+    "a turn message handed back by a failed turn shows as queued",
+    /item\.intent === "steer" \|\| \(item\.deliveryAttempts \?\? 0\) > 0/.test(conversationSource),
+  );
+  check(
+    "Send now is hidden while the run waits on an answer",
+    conversationSource.includes("{queued && !runBlocked && <SendNowControl runId={runId} />}") &&
+      conversationSource.includes("Delivered with your answer"),
   );
 
   completed = true;

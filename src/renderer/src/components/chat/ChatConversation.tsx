@@ -25,6 +25,7 @@ import {
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import {
   compactPreview,
   formatToolPayload,
@@ -309,6 +310,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
                         checkpoint={latestUndoableCheckpoint?.messageId === item.id ? latestUndoableCheckpoint : null}
                         showDoneMarker={doneMarkerSparkMessageId === item.id}
                         completionVerdict={completionVerdict}
+                        runBlocked={run.status === "blocked"}
                       />
                     ) : item?.kind === "tool" ? (
                       <ToolActivityRow
@@ -632,6 +634,7 @@ const MessageTurn = React.memo(function MessageTurn({
   checkpoint,
   showDoneMarker,
   completionVerdict,
+  runBlocked,
 }: {
   item: MessageItem;
   runId: string;
@@ -639,6 +642,7 @@ const MessageTurn = React.memo(function MessageTurn({
   checkpoint: Checkpoint | null;
   showDoneMarker: boolean;
   completionVerdict: StepVerdictKind;
+  runBlocked: boolean;
 }) {
   if (item.author === "system") {
     return (
@@ -656,9 +660,13 @@ const MessageTurn = React.memo(function MessageTurn({
     // ordinary "turn" message is also born deliveryState "queued" in the
     // store, but its own turn starts within moments, so flashing QUEUED on
     // every fresh send (most visibly the first message of a new chat) would
-    // be noise. A claimed message (backendTurnId) is being delivered now.
+    // be noise. A "turn" message that a failed or interrupted turn handed back
+    // waits just like a mid-turn one, so it shows the same chip and controls.
+    // A claimed message (backendTurnId) is being delivered now.
     const queued =
-      item.deliveryState === "queued" && !item.backendTurnId && item.intent === "steer";
+      item.deliveryState === "queued" &&
+      !item.backendTurnId &&
+      (item.intent === "steer" || (item.deliveryAttempts ?? 0) > 0);
     const hasPersistentStatus =
       queued ||
       Boolean(
@@ -702,7 +710,12 @@ const MessageTurn = React.memo(function MessageTurn({
           )}
           {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
           <CopyMessageControl text={item.text} />
-          {queued && <SendNowControl runId={runId} />}
+          {/* A blocked run is waiting for an answer, and the answer carries
+              the queue with it; Send now there would only race that answer. */}
+          {queued && !runBlocked && <SendNowControl runId={runId} />}
+          {queued && runBlocked && (
+            <span style={USER_TIME_STYLE}>Delivered with your answer</span>
+          )}
           {queued && <UnqueueControl runId={runId} messageId={item.id} />}
           {/* Undo is a conversation rewind, meaningful only once the message
               was actually delivered. While it is still queued, Unqueue is the
@@ -2525,7 +2538,7 @@ function SendNowControl({ runId }: { runId: string }) {
       const run = await window.spark.orchestration.deliverQueuedMessagesNow(runId);
       window.dispatchEvent(new CustomEvent("spark:run-snapshot", { detail: { run } }));
     } catch (err) {
-      setError((err as Error).message);
+      setError(unwrapIpcError(err));
     } finally {
       setBusy(false);
     }
@@ -2578,12 +2591,16 @@ function SendNowControl({ runId }: { runId: string }) {
 function UnqueueControl({ runId, messageId }: { runId: string; messageId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Losing the race to the turn that just took the message is not a failure:
+  // the message reached Cora, which is what Send already promised.
+  const [notice, setNotice] = useState<string | null>(null);
   const [hover, setHover] = useState(false);
 
   const unqueue = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await window.spark.orchestration.cancelQueuedMessage({ runId, messageId });
       // Same immediate-rerender channel as UndoControl: the queued row
@@ -2602,7 +2619,9 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
         );
       }
     } catch (err) {
-      setError((err as Error).message);
+      const message = unwrapIpcError(err);
+      if (/already picked this message up/.test(message)) setNotice("Already sent to Cora");
+      else setError(message);
     } finally {
       setBusy(false);
     }
@@ -2639,6 +2658,7 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
       >
         <span>Unqueue</span>
       </button>
+      {notice && <span style={{ color: "var(--muted)", fontSize: 10.5 }}>{notice}</span>}
       {error && (
         <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
           {error}

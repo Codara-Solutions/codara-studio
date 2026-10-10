@@ -242,6 +242,8 @@ export type ChatTimelineItem =
       deliveryState: HumanRunMessage["deliveryState"];
       targetTurnId: HumanRunMessage["targetTurnId"];
       backendTurnId: HumanRunMessage["backendTurnId"];
+      /** Turns that took this message and failed or were interrupted. */
+      deliveryAttempts?: number;
       conversationEpoch: number;
       /**
        * The epoch the run store files this message under when it decides
@@ -472,6 +474,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       deliveryState,
       targetTurnId: message.targetTurnId,
       backendTurnId: message.backendTurnId,
+      ...(message.deliveryAttempts ? { deliveryAttempts: message.deliveryAttempts } : {}),
       conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
       deliveryEpoch: message.conversationEpoch ?? 0,
       at: message.createdAt,

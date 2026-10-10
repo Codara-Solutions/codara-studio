@@ -12,7 +12,9 @@ import type {
   UpdateChatBackendInput,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { isQuestionInactiveError } from "@shared/run-questions";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
 import {
@@ -724,7 +726,8 @@ export default function ChatComposer({
         return;
       }
       const latestDraft = draftSnapshotRef.current;
-      const message = messageForSend(latestDraft?.draft ?? draft, attachments.length);
+      const sentDraft = latestDraft?.draft ?? draft;
+      const message = messageForSend(sentDraft, attachments.length);
       if (!message) return;
       if (!run_ || isUnstartedChatRun(run_)) {
         // No run yet, or a run the board's draft promotion minted that has
@@ -740,13 +743,36 @@ export default function ChatComposer({
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
-        await window.spark.orchestration.answerRunQuestion({
-          runId: run_.id,
-          questionMessageId: openQuestion.id,
-          clientMessageId,
-          message,
-          attachments,
-        });
+        try {
+          await window.spark.orchestration.answerRunQuestion({
+            runId: run_.id,
+            questionMessageId: openQuestion.id,
+            clientMessageId,
+            message,
+            attachments,
+          });
+        } catch (err) {
+          // The question closed (a Stop, a park) after this composer last saw
+          // it. The reply is still the user's next message; a finished run is
+          // left alone, since a message there would restart it.
+          const latestStatus = runRef.current?.status ?? run_.status;
+          if (
+            !isQuestionInactiveError((err as Error)?.message) ||
+            latestStatus === "complete" ||
+            latestStatus === "failed" ||
+            latestStatus === "cancelled"
+          ) {
+            throw err;
+          }
+          await window.spark.orchestration.addRunMessage({
+            runId: run_.id,
+            clientMessageId,
+            author: "user",
+            kind: "note",
+            message,
+            attachments,
+          });
+        }
       } else {
         await window.spark.orchestration.addRunMessage({
           runId: run_.id,
@@ -758,12 +784,16 @@ export default function ChatComposer({
         });
       }
       if (draftKey) chatComposerDrafts.delete(draftKey);
-      setDraft("");
+      // The textarea stays editable while a send is in flight; text typed in
+      // the meantime is the next message, not part of this one.
+      setDraft((current) =>
+        current.startsWith(sentDraft) ? current.slice(sentDraft.length).trimStart() : current,
+      );
       setImages([]);
       setFileReferences([]);
       setMentionQuery(null);
     } catch (err) {
-      if (mountedRef.current) setError((err as Error).message);
+      if (mountedRef.current) setError(unwrapIpcError(err));
     } finally {
       inFlight.current = false;
       if (mountedRef.current) setBusy(false);
@@ -786,7 +816,7 @@ export default function ChatComposer({
       }
       await window.spark.orchestration.resumeRun({ runId: run_.id });
     } catch (err) {
-      if (mountedRef.current) setError((err as Error).message);
+      if (mountedRef.current) setError(unwrapIpcError(err));
     } finally {
       inFlight.current = false;
       if (mountedRef.current) setBusy(false);
@@ -1208,7 +1238,7 @@ export default function ChatComposer({
           // still works on its own for an empty composer.
           ? "Send to resume — your message goes with it."
           : isActive
-            ? "Queue a message. Cora reads it after this turn."
+            ? "Message Cora. She reads it as soon as she can."
             : "Reply, steer, or add context.";
 
   return (
@@ -1307,7 +1337,7 @@ export default function ChatComposer({
         <textarea
           ref={textareaRef}
           value={draft}
-          disabled={disabled || busy}
+          disabled={disabled}
           spellCheck={false}
           onChange={(event) => {
             const next = event.target.value;
@@ -1387,7 +1417,7 @@ export default function ChatComposer({
                 : pastingImages
                   ? "Adding pasted image..."
                 : isActive
-                  ? "Enter to queue · delivered when this turn ends"
+                  ? "Enter to send · Cora reads it while she works"
                   : openQuestion
                     // No Resume button here — the answer IS the resume — so the
                     // hint must not point at one.
