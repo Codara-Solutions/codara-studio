@@ -2459,6 +2459,26 @@ export interface ManagerTurnRecovery {
   forceCanonicalReplay?: boolean;
 }
 
+export type RunManagerPlanMilestoneStatus = "pending" | "in_progress" | "done" | "deferred";
+
+export interface RunManagerPlanMilestone {
+  id: string;
+  title: string;
+  status: RunManagerPlanMilestoneStatus;
+  /** Evidence for done, the reason for deferred, or what is in the way. */
+  note?: string;
+  workerTaskIds?: string[];
+}
+
+export interface RunManagerPlan {
+  /** The user's request in their own words. */
+  goal: string;
+  milestones: RunManagerPlanMilestone[];
+  decisions?: string[];
+  nextActions?: string[];
+  updatedAt: string;
+}
+
 export interface RunState {
   id: string;
   workspaceId: string;
@@ -2615,6 +2635,13 @@ export interface RunState {
    * as 0.
    */
   verificationRounds?: number;
+  /**
+   * Cora's own working plan for multi-phase work, written only through
+   * codara_plan_update. Unlike the conversation it survives compaction and
+   * restarts, so it is shown back to the manager as part of each turn's run
+   * state, and codara_complete refuses while a milestone is still open.
+   */
+  managerPlan?: RunManagerPlan;
   /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
    * treated as "pi" by the dispatch layer. A run persisted with a retired

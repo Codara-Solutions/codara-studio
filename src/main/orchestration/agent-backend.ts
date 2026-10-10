@@ -438,7 +438,7 @@ export function buildManagerTurnPrompt(
   return appendSubscriptionHeadroom(
     appendCoraMemory(
       appendPriorRuns(
-        buildManagerTurnInput(run, inputMessages, opts),
+        appendRunState(buildManagerTurnInput(run, inputMessages, opts), opts?.runState),
         opts?.priorRuns,
       ),
       opts?.coraMemory,
@@ -485,6 +485,18 @@ export interface ManagerTurnPromptOptions {
    * byte of it in the stable prefix would kill the prompt cache for the run.
    */
   subscriptionHeadroom?: string | null;
+  /**
+   * Rendered [CORA RUN STATE] block (manager-plan.ts renderRunStateDigest):
+   * the manager's plan and the worker-task table from the run record. The
+   * caller decides when a turn carries it; it changes as work progresses, so
+   * it rides the dynamic tail only.
+   */
+  runState?: string | null;
+}
+
+function appendRunState(prompt: string, runState: string | null | undefined): string {
+  if (!runState || !runState.trim()) return prompt;
+  return [prompt, "", runState.trim()].join("\n");
 }
 
 /**

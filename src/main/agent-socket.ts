@@ -466,6 +466,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "orchestrator.request_next_iteration",
   "orchestrator.message_workers",
   "orchestrator.name_chat",
+  "orchestrator.plan_update",
   "orchestrator.whiteboard_update",
   "orchestrator.whiteboard_arrange",
   "orchestrator.whiteboard_review",
@@ -683,6 +684,8 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.plan_update":
+        return await handleOrchestratorPlanUpdate(params, id);
       case "orchestrator.whiteboard_inspect":
       case "orchestrator.whiteboard_arrange":
       case "orchestrator.whiteboard_review":
@@ -3593,6 +3596,22 @@ async function handleOrchestratorComplete(
   // a later corrective edit. One implementation (run-store), shared with the
   // orchestrator-side terminal hops that complete a run when this tool never
   // arrives, so a manager that skips codara_complete cannot skip the rule.
+  // A recorded plan is the manager's own definition of done, so a run cannot
+  // be called complete after the first green slice of a multi-area request.
+  // Runs without a plan are unaffected, and deferring with a note always
+  // clears the gate.
+  const openMilestones = (run.managerPlan?.milestones ?? []).filter(
+    (milestone) => milestone.status === "pending" || milestone.status === "in_progress",
+  );
+  if (openMilestones.length > 0) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Cannot complete: ${openMilestones.length} plan milestone(s) are still open: ` +
+        openMilestones.map((milestone) => `${milestone.id} "${milestone.title}" (${milestone.status})`).join(", ") +
+        ". Finish them, or call codara_plan_update marking each done (with evidence) or deferred (with the reason), then call codara_complete.",
+    );
+  }
   const verification = await runStore.describeVerificationFreshness(run);
   const acceptUnverified = parseAcceptUnverified(params.accept_unverified);
   if (typeof acceptUnverified === "string") {
@@ -5386,6 +5405,36 @@ async function handleOrchestratorNameChat(
     // the chat history popover.
     const updated = await runStore.renameRun({ runId: run.id, title });
     return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorPlanUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "codara_plan_update");
+  if (blocked) return blocked;
+  try {
+    const updated = await runStore.updateManagerPlan(run.id, params);
+    const plan = updated.managerPlan;
+    const open = (plan?.milestones ?? []).filter(
+      (milestone) => milestone.status === "pending" || milestone.status === "in_progress",
+    );
+    return successResponse(id, {
+      ok: true,
+      milestones: plan?.milestones.length ?? 0,
+      open_milestones: open.map((milestone) => milestone.id),
+      note: open.length > 0
+        ? "Plan saved. codara_complete stays refused until every milestone is done or deferred with a note."
+        : "Plan saved. Every milestone is done or deferred.",
+    });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

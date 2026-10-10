@@ -61,6 +61,7 @@ const EXECUTE_TOOLS = [
   "codara_ask_user",
   "codara_complete",
   "codara_name_chat",
+  "codara_plan_update",
   "codara_remember",
   "codara_request_next_iteration",
   "codara_get_worker_status",

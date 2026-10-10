@@ -239,6 +239,7 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { normalizeManagerPlanInput, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
@@ -5838,6 +5839,13 @@ async function prepareManagerTurn(
       coraMemory,
       priorRuns,
       subscriptionHeadroom,
+      // A resume or replay starts from a session that may have lost the run's
+      // progress, and a run with a plan re-reads it every turn so compaction
+      // cannot paraphrase the goal or the open milestones away.
+      runState:
+        prepared.managerPlan || includeCanonicalReplay || inputMessages.length === 0
+          ? renderRunStateDigest(prepared)
+          : null,
     }),
     inputMessages,
     conversationEpoch: epoch,
@@ -12395,6 +12403,34 @@ export async function completeRunFromOrchestrator(runId: string): Promise<RunSta
       draft.updatedAt = timestamp;
     },
   });
+}
+
+/**
+ * Replace the manager's working plan (codara_plan_update). Returns the stored
+ * plan, or throws with a message meant for the model.
+ */
+export async function updateManagerPlan(
+  runId: string,
+  raw: Record<string, unknown>,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  let failure: string | undefined;
+  const updated = await commitRunChange(run, {
+    type: "run.manager_plan_updated",
+    message: "Cora updated her plan",
+    payload: {},
+    mutate: (draft, timestamp) => {
+      const plan = normalizeManagerPlanInput(raw, timestamp);
+      if (typeof plan === "string") {
+        failure = plan;
+        return false;
+      }
+      draft.managerPlan = plan;
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (failure) throw new Error(failure);
+  return updated;
 }
 
 // Persist the composer chip's backend/model/mode/effort selection onto the

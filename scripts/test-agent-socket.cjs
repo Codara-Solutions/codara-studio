@@ -1634,6 +1634,62 @@ async function main() {
       JSON.stringify({ overruled, steps: overruledSnapshot.steps }).slice(0, 500),
     );
 
+    // codara_plan_update stores the manager's plan, and an open milestone
+    // holds codara_complete until it is done or deferred with a reason.
+    fabricateRun("run-plan", {
+      ...liveManagerTurn("run-plan", "spark-plan"),
+      chatMode: "execute",
+      workerTasks: [{ id: "wt-plan-a", title: "auth service", status: "accepted", taskClass: "feature" }],
+      workerAttempts: [],
+    });
+    const badPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [{ id: "m1", title: "auth", status: "deferred" }],
+    });
+    check(
+      "plan_update rejects a deferred milestone without a reason",
+      /deferred without a note/.test(badPlan.error?.message ?? ""),
+      JSON.stringify(badPlan).slice(0, 240),
+    );
+    const savedPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass", worker_task_ids: ["wt-plan-a"] },
+        { id: "m2", title: "billing", status: "pending" },
+      ],
+    });
+    const planSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-plan", "run.json"), "utf8"));
+    check(
+      "plan_update persists the plan and reports the open milestones",
+      savedPlan.result?.ok === true &&
+        savedPlan.result.open_milestones?.join(",") === "m2" &&
+        planSnapshot.managerPlan?.goal === "Migrate every service" &&
+        planSnapshot.managerPlan.milestones[0].workerTaskIds?.[0] === "wt-plan-a",
+      JSON.stringify({ savedPlan, plan: planSnapshot.managerPlan }).slice(0, 400),
+    );
+    const planBlocked = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "done" });
+    check(
+      "codara_complete is refused while a plan milestone is open",
+      /plan milestone\(s\) are still open: m2 "billing" \(pending\)/.test(planBlocked.error?.message ?? ""),
+      JSON.stringify(planBlocked).slice(0, 300),
+    );
+    await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass" },
+        { id: "m2", title: "billing", status: "deferred", note: "the user asked to stop after auth" },
+      ],
+    });
+    const planComplete = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "auth migrated" });
+    check(
+      "codara_complete succeeds once every milestone is done or deferred",
+      Boolean(planComplete.result?.ok) && !planComplete.error,
+      JSON.stringify(planComplete).slice(0, 300),
+    );
+
     // Deadlock-avoidance: a task stuck at "created" (prepareWorkerTask never
     // succeeded, or a user hand-added task that was never launched) must NOT
     // block completion — it can never reach a terminal state and no coordinator

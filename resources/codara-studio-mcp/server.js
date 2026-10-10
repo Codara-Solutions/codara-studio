@@ -1414,6 +1414,43 @@ const EXECUTE_TOOLS = [
     },
   },
   {
+    name: "codara_plan_update",
+    description:
+      "Record or replace your working plan for multi-phase work: the goal in the user's own words, milestones with status, decisions, and next actions. Send the whole plan each time. Codara keeps it in the run record, shows it back to you each turn (it survives compaction and restarts), and refuses codara_complete while a milestone is pending or in_progress, so mark each one done with evidence or deferred with the reason. Skip it for small single-step work.",
+    inputSchema: {
+      type: "object",
+      required: ["goal", "milestones"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        goal: { type: "string", description: "The user's request in their own words." },
+        milestones: {
+          type: "array",
+          minItems: 1,
+          maxItems: 30,
+          items: {
+            type: "object",
+            required: ["id", "title", "status"],
+            properties: {
+              id: { type: "string", description: "Short stable id such as m1." },
+              title: { type: "string" },
+              status: { type: "string", enum: ["pending", "in_progress", "done", "deferred"] },
+              note: { type: "string", description: "Evidence for done, the reason for deferred (required), or the blocker." },
+              worker_task_ids: { type: "array", items: { type: "string" } },
+            },
+            additionalProperties: false,
+          },
+        },
+        decisions: { type: "array", items: { type: "string" }, description: "Decisions made and why, one line each." },
+        next_actions: { type: "array", items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "codara_name_chat",
     description:
       "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Codara already derives a title from the first message, so call this only when that title is wrong or the topic shifts substantially, in the same step as your first inspection call rather than as its own round trip. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
@@ -1628,6 +1665,7 @@ const EXECUTE_TOOL_TO_RPC = {
   codara_ask_user: "orchestrator.ask_user",
   codara_complete: "orchestrator.complete",
   codara_name_chat: "orchestrator.name_chat",
+  codara_plan_update: "orchestrator.plan_update",
   codara_remember: "orchestrator.remember",
   codara_request_next_iteration: "orchestrator.request_next_iteration",
   codara_get_worker_status: "orchestrator.get_worker_status",
