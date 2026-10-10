@@ -85,7 +85,7 @@ function workerModelContract(value = process.env.CODARA_PI_WORKER_MODELS): strin
       .filter((model): model is string => typeof model === "string" && model.trim().length > 0)
       .map((model) => model.trim());
     if (ids.length === 0) {
-      return "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Settings.";
+      return "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Capability Center > Worker models.";
     }
     return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.`;
   } catch {

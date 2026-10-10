@@ -304,6 +304,39 @@ async function main() {
     }
   });
 
+  test("the auth park names the Settings tab that really holds accounts", () => {
+    const plan = P.planManagerTurnFailure({
+      error: "Pi provider openai-codex is not authenticated with OAuth",
+      runStatus: "planning",
+      mode: "chat",
+      transientRetryCount: 0,
+      backend: "pi",
+    });
+    assert.equal(plan.action, "park");
+    assert.match(plan.parkReason, /Settings > Agents/);
+    assert.doesNotMatch(plan.parkReason, /Settings \u2192 Accounts|Settings > Accounts/);
+  });
+
+  test("a manager turn that throws before streaming parks through the same policy", () => {
+    const catchStart = runStoreSource.indexOf('type: "spark_call.failed",\n      message: `Cora manager (${chatConfig.backend}) call failed');
+    assert.notEqual(catchStart, -1, "askManagerBackend's thrown-failure journal must exist");
+    const catchTail = runStoreSource.slice(catchStart, runStoreSource.indexOf("\nasync function parkThrownManagerTurn", catchStart));
+    assert.match(
+      catchTail,
+      /if \(!managerRecoveryClaimId\) \{[\s\S]*parkThrownManagerTurn\(/,
+      "a claimed recovery replay must keep returning null so its scheduler reparks the same token",
+    );
+    const helper = runStoreSource.slice(
+      runStoreSource.indexOf("async function parkThrownManagerTurn"),
+      runStoreSource.indexOf("const TRIVIAL_TOP_TIER_BY_RUNTIME"),
+    );
+    assert.match(helper, /planManagerTurnFailure\(/);
+    assert.match(helper, /plan\.action !== "park"\) return null/);
+    assert.match(helper, /type: "run\.chat_turn_parked"/);
+    assert.equal((helper.match(/draft\.managerTurnRecovery\s*=/g) ?? []).length, 1);
+    assert.doesNotMatch(helper, /humanMessages\.(?:push|splice)|addRunMessage|askHumanQuestion/);
+  });
+
   test("retry backoff is jittered and seconds-scale", () => {
     assert.equal(P.managerTurnRetryDelayMs(1, () => 0), 2000);
     assert.equal(P.managerTurnRetryDelayMs(2, () => 0), 4000);

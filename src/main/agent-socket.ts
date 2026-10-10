@@ -2764,7 +2764,7 @@ async function handleOrchestratorSpawnWorkers(
     return errorResponse(
       id,
       ERR_FORBIDDEN,
-      "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+      "Cora has no enabled worker model. Enable at least one in Capability Center > Worker models.",
     );
   }
   const liveFeedbackRetries = [

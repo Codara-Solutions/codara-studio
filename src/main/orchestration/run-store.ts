@@ -6658,8 +6658,100 @@ async function askManagerBackend(
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
       payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
     });
+    // A claimed recovery replay must keep returning null: its scheduler
+    // reparks the same durable token, and a second token would orphan it.
+    if (!managerRecoveryClaimId) {
+      const parked = await parkThrownManagerTurn(run.id, {
+        callId,
+        error,
+        mode,
+        backend: chatConfig.backend,
+        conversationEpoch: preparedTurn.conversationEpoch,
+        transientRetryCount,
+        failedAccountProfileId:
+          targetCall.accountProfileId ??
+          targetCall.nativeClaudeProfileId ??
+          targetCall.nativeCodexProfileId,
+      });
+      if (parked) return parked;
+    }
     return null;
   }
+}
+
+// A turn that throws before streaming (no connected account, a credential Pi
+// refused at launch) is the same provider trouble the turnFailed branch parks.
+// Without this the caller parks on a generic "check the run log" question,
+// which offers no Retry and asks the user to answer an error. Only the policy's
+// park verdict is applied here; anything else keeps the caller's fallback.
+async function parkThrownManagerTurn(
+  runId: string,
+  failure: {
+    callId: string;
+    error: string;
+    mode: SparkCall["mode"];
+    backend: ChatBackendKind;
+    conversationEpoch: number;
+    transientRetryCount: number;
+    failedAccountProfileId?: string;
+  },
+): Promise<RunState | null> {
+  const current = await getRun(runId);
+  if (!current || conversationEpoch(current) !== failure.conversationEpoch) return null;
+  const plan = planManagerTurnFailure({
+    error: failure.error,
+    runStatus: current.status,
+    mode: failure.mode,
+    transientRetryCount: failure.transientRetryCount,
+    backend: failure.backend,
+  });
+  if (plan.action !== "park") return null;
+  console.warn(
+    `[run-store] manager turn ${failure.callId} (${failure.backend}/${failure.mode}) parked after a ${plan.kind} launch failure: ${failure.error}`,
+  );
+  let parked = false;
+  const committed = await commitRunChange(current, {
+    type: "run.chat_turn_parked",
+    message: `Cora's ${failure.backend} chat turn could not start: ${failure.error}`,
+    payload: {
+      backend: failure.backend,
+      sparkCallId: failure.callId,
+      mode: failure.mode,
+      error: failure.error,
+      failureKind: plan.kind,
+      reason: plan.parkReason,
+      thrown: true,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== failure.conversationEpoch) return false;
+      if (draft.status === "paused" || draft.status === "blocked" || isTerminalRunStatus(draft.status)) {
+        return false;
+      }
+      draft.status = "paused";
+      draft.managerTurnRecovery = {
+        id: makeId("recovery"),
+        state: "parked",
+        failureKind: plan.kind as ManagerTurnRecoveryFailureKind,
+        backend: failure.backend,
+        managerMode: failure.mode,
+        conversationEpoch: failure.conversationEpoch,
+        failedSparkCallId: failure.callId,
+        failedAccountProfileId: failure.failedAccountProfileId,
+        parkedAt: timestamp,
+      };
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: plan.lastAction,
+        stopReason: plan.parkReason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+      parked = true;
+    },
+  });
+  return parked ? committed : null;
 }
 
 // Top-tier worker assignments for trivial-classified runs. The verifier
@@ -7721,7 +7813,7 @@ async function rerouteUnavailableAgentRuntimes(
       rerouted.push({
         from: runtimePreference,
         to: "manual",
-        reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+        reason: "Requested provider has no connected account (Settings > Agents).",
       });
       return {
         runtimePreference: "manual" as WorkerRuntime,
@@ -7740,7 +7832,7 @@ async function rerouteUnavailableAgentRuntimes(
       to: fallback.kind,
       modelHint: nextModelHint,
       effortHint: nextEffortHint,
-      reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+      reason: "Requested provider has no connected account (Settings > Agents).",
     });
     return {
       runtimePreference: fallback.kind as WorkerRuntime,
@@ -12969,7 +13061,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     : undefined;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
-      "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
+      "Cora has no enabled worker model. Enable at least one model in Capability Center > Worker models.",
     );
   }
   const command = isPiWorker
@@ -16390,7 +16482,9 @@ function normalizeRun(run: RunState): RunState {
       (recovery.state === "parked" || recovery.state === "resuming") &&
       (recovery.failureKind === "rate_limit" ||
         recovery.failureKind === "provider" ||
-        recovery.failureKind === "transport") &&
+        recovery.failureKind === "transport" ||
+        recovery.failureKind === "timeout" ||
+        recovery.failureKind === "auth") &&
       // A recovery parked by a retired claude/codex manager backend cannot
       // be replayed on Pi; dropping it leaves the run paused and answerable.
       recovery.backend === "pi" &&

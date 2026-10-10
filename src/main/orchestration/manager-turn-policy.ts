@@ -175,7 +175,7 @@ export function planManagerTurnFailure(input: {
           : kind === "rate_limit"
             ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
             : kind === "auth"
-              ? "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn."
+              ? "Cora's provider account is not connected, or its sign-in expired. Connect it in Settings > Agents, then retry the saved turn."
               : kind === "transport"
                 ? "Cora lost its connection to the provider. Retry when the connection is stable."
                 : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
