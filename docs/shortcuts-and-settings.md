@@ -146,7 +146,7 @@ Center, a separate dialog with five tabs:
 | MCP servers | Your MCP servers, and the built-in Codara Studio server with an on/off switch per CLI (Claude, Codex, Grok). Switching it off for a CLI removes Codara's entry from that CLI's config, and it stays off across restarts. |
 | Skills | The skills agents can load. |
 | Memory | What Cora remembers, globally and per workspace. |
-| Worker models | Which models Cora may pick for its workers. |
+| Worker models | Which models Cora may pick for its workers. Cora only uses a model whose provider has a signed-in account; the others are marked **Not signed in**. |
 | Policy | Session policy: MCP awareness, skill awareness, and **Auto-install Codara Studio MCP**, which keeps the built-in server current in each CLI on launch (setting key `playwrightMcpAutoInstall`). |
 
 The tools the built-in server provides are listed in

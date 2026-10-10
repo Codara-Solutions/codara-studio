@@ -88,7 +88,7 @@ import {
   enabledWorkerModelFor,
   rosterModelFor,
 } from "./orchestration/worker-model-hint";
-import { availableCoraWorkerModels } from "./openrouter-config";
+import { coraWorkerModelAvailability } from "./orchestration/worker-model-availability";
 import {
   constrainedRuntimesForHeadroom,
   headroomForRuntime,
@@ -2758,14 +2758,22 @@ async function handleOrchestratorSpawnWorkers(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
-  const enabledWorkerModels = untrustedPullRequest
-    ? [...ALLOWED_WORKER_MODELS]
-    : availableCoraWorkerModels(await loadSettings());
-  if (!untrustedPullRequest && enabledWorkerModels.length === 0) {
+  // Filtered by connected accounts here, not only in the manager's prompt: a
+  // session keeps the roster it was launched with, so a provider signed out
+  // since then must still never receive a worker.
+  const workerModelAvailability = untrustedPullRequest
+    ? null
+    : await coraWorkerModelAvailability(await loadSettings());
+  const enabledWorkerModels = workerModelAvailability
+    ? workerModelAvailability.connected
+    : [...ALLOWED_WORKER_MODELS];
+  if (workerModelAvailability && enabledWorkerModels.length === 0) {
     return errorResponse(
       id,
       ERR_FORBIDDEN,
-      "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+      workerModelAvailability.disconnected.length > 0
+        ? `None of Cora's enabled worker models has a connected account (${workerModelAvailability.disconnected.join(", ")}). Ask the user to sign in to one of those providers in Settings > Agents.`
+        : "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
     );
   }
   const liveFeedbackRetries = [

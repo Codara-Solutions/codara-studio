@@ -117,6 +117,38 @@ export function isOpenRouterModelId(id: string | undefined): boolean {
   return /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._/:+-]*$/i.test(base);
 }
 
+/** The subscription a native worker model runs on; null for OpenRouter ids,
+ * which need a key rather than a signed-in account, and for unknown ids. */
+export function workerModelSubscription(
+  id: string,
+): "anthropic" | "openai-codex" | "xai" | null {
+  if (isOpenRouterModelId(id)) return null;
+  const base = modelBase(id);
+  if (base.startsWith("claude-")) return "anthropic";
+  if (base.startsWith("gpt-")) return "openai-codex";
+  if (base.startsWith("grok-")) return "xai";
+  return null;
+}
+
+/**
+ * Split enabled worker models by whether Cora can actually launch them: a
+ * native model needs a usable account for its provider. Offering Cora a model
+ * it cannot run makes it plan work that is rerouted or fails at launch.
+ */
+export function partitionWorkerModelsByAccount(
+  models: readonly string[],
+  usableSubscriptions: ReadonlySet<string>,
+): { connected: string[]; disconnected: string[] } {
+  const connected: string[] = [];
+  const disconnected: string[] = [];
+  for (const id of models) {
+    const subscription = workerModelSubscription(id);
+    if (subscription === null || usableSubscriptions.has(subscription)) connected.push(id);
+    else disconnected.push(id);
+  }
+  return { connected, disconnected };
+}
+
 /**
  * Resolve a manager hint against the user's enabled worker list.
  *
