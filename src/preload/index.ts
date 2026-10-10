@@ -46,7 +46,10 @@ import type {
   AgentAssetInventory,
   AgentMcpSaveResult,
   AgentMcpServerDetail,
+  AgentMcpProbeRequest,
+  AgentMcpProbeResult,
   AgentMcpServerDraft,
+  AgentPiMcpPreview,
   AgentMcpTarget,
   AgentSyncResult,
   SparkBuiltinActionResult,
@@ -405,6 +408,16 @@ const api = {
           return { ok: false, error: "Restart Codara to enable adding MCP servers." };
         }
         throw err;
+      }),
+    piMcpPreview: (input?: { cwd?: string | null }): Promise<AgentPiMcpPreview> =>
+      ipcRenderer.invoke("agents:piMcpPreview", input ?? {}).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:piMcpPreview")) throw err;
+        return { cora: [], worker: [], maxServers: 0, errors: ["Restart Codara to see which servers reach Cora."] };
+      }),
+    probeMcp: (input: AgentMcpProbeRequest): Promise<AgentMcpProbeResult> =>
+      ipcRenderer.invoke("agents:probeMcp", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:probeMcp")) throw err;
+        return { ok: false, tools: [], durationMs: 0, error: "Restart Codara to enable testing MCP servers." };
       }),
     builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
       ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {

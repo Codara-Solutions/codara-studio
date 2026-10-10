@@ -236,7 +236,14 @@ async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
 
 let agentSyncMod: typeof import("./agent-sync") | undefined;
 async function getAgentSync(): Promise<typeof import("./agent-sync")> {
-  agentSyncMod ??= await import("./agent-sync");
+  if (!agentSyncMod) {
+    const mod = await import("./agent-sync");
+    mod.configureAgentSync({
+      trashItem: (path) => shell.trashItem(path),
+      piAgentDir: join(codaraHome(), "pi-agent"),
+    });
+    agentSyncMod = mod;
+  }
   return agentSyncMod;
 }
 
@@ -341,6 +348,7 @@ import type {
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
+  AgentMcpProbeRequest,
   AgentMcpServerDraft,
   AppState,
   CreateEntryInput,
@@ -970,6 +978,9 @@ export function registerIpc(): void {
     return inspectPiModelCatalog(input?.force === true);
   });
 
+  // Remote access imports agent-sync directly, so its trash and Pi wiring must
+  // be in place before any phone-initiated removal, not on first IPC use.
+  void getAgentSync();
   handle(
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
@@ -987,6 +998,7 @@ export function registerIpc(): void {
           const repaired = await repairSparkBuiltinEntries();
           if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
           if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
+          if (repaired.grok) (result.mcp.toGrok ??= []).push(SPARK_BUILTIN_SERVER_NAME);
         } catch (err) {
           result.mcp.errors.push(
             `Could not refresh the built-in MCP entry: ${err instanceof Error ? err.message : String(err)}`,
@@ -1049,6 +1061,32 @@ export function registerIpc(): void {
         server: input.server,
         replaceId: input.replaceId ?? null,
       });
+    },
+  );
+  handle(
+    "agents:piMcpPreview",
+    async (_e, input?: { cwd?: string | null }) => {
+      const [{ describePiMcpDelivery }, piElectron, settings] = await Promise.all([
+        getAgentSync(),
+        import("./orchestration/pi-runtime-electron"),
+        loadSettings(),
+      ]);
+      const preview = describePiMcpDelivery({
+        cwd: input?.cwd ?? null,
+        settings,
+        live: await piElectron.readLivePiMcpStatuses(),
+      });
+      const discoveryError = piElectron.piMcpDiscoveryError();
+      if (discoveryError) preview.errors.push(discoveryError);
+      return preview;
+    },
+  );
+  handle(
+    "agents:probeMcp",
+    async (_e, input: AgentMcpProbeRequest) => {
+      await getAgentSync();
+      const [{ runMcpProbe }, state] = await Promise.all([import("./mcp-probe"), loadState()]);
+      return runMcpProbe(input ?? {}, { workspaces: state.workspaces, piAgentDir: join(codaraHome(), "pi-agent") });
     },
   );
   handle("agents:builtins", async () => {

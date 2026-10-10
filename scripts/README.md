@@ -202,8 +202,9 @@ calls.
 `test-hook-installer`, `test-hook-watcher-lifecycle`, `test-codara-studio-mcp`
 (the tool list for each `SPARK_MCP_MODE`), `test-standing-terminals` (what
 `codara_spawn_terminals` opens), `test-builtin-mcp-opt-out`,
-`test-builtin-mcp-ownership`, `test-grok-mcp-copy`,
-`test-capability-center-ui`, `test-remote-capabilities`,
+`test-builtin-mcp-ownership`, `test-grok-mcp-copy`, `test-agent-sync-toml`
+(Capability Center config reads and edits, sync scope, skills, the MCP
+probe), `test-capability-center-ui`, `test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket` (needs a build).
 
 ### Preview browser
