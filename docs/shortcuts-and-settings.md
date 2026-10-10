@@ -136,6 +136,11 @@ The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
 
+One Cora setting has no switch in the window yet: `coraAlwaysVerifyEdits` in
+`~/.codarastudio/spark-settings.json`. Off by default, Cora makes small, low-risk edits (one to
+three files) herself and replies directly. Turned on, every project change
+goes through a worker and a verifier on another provider, as before.
+
 ## The Capability Center
 
 The **MCP and skills** button in the Cora composer opens the Capability

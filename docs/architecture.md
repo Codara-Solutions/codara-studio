@@ -146,6 +146,25 @@ terminals: interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 (`codara_terminal_create`, tracked by `agent-terminal-lifecycle.ts` and
 closed when the run ends).
 
+**Direct lane.** A chat's first message goes through `shouldUseDirectExecution`
+(`direct-execution.ts`). A bounded request (a question, a focused fix) runs as
+one direct worker that answers you itself, without a manager turn or a
+verifier. Broad, parallel, plan-shaped or Studio-surface requests (whiteboard,
+board, scheduling) start the manager instead, and a direct chat switches to
+the manager in place when a follow-up needs it. In Auto mode the manager also
+makes small, low-risk edits (one to three files) itself and spawns workers
+only for real work; the `coraAlwaysVerifyEdits` setting (no UI yet) restores
+the rule that every edit goes through a worker and a verifier.
+
+**Long runs.** The manager records a plan with `codara_plan_update`
+(`manager-plan.ts`); a `[CORA RUN STATE]` block with that plan and the newest
+worker tasks rides the dynamic part of resume, replay and plan-carrying turns,
+and `codara_complete` waits for open milestones. The verification-round
+ceiling scales with the number of implementation areas, the spawn brake trips
+on batches that keep failing rather than on a raw count and asks you instead
+of landing the run, and a Pi worker's continuation after compaction re-sends
+its acceptance, verification and report sections and its scratchpad.
+
 **Run store.** `run-store.ts` is the state machine for runs: steps, worker
 tasks and attempts, human messages, questions, the board, the whiteboard.
 At about 20,000 lines it is the largest file in the repository. A run lives
