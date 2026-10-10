@@ -39,7 +39,7 @@ const INDEX_TS = path.join(ROOT, "src", "main", "index.ts");
 const CACHE = path.join(ROOT, "node_modules", ".cache", "cora-wedged-run-test");
 
 const ELECTRON_STUB = `const noop = () => {};
-export const app = { getPath: () => "/tmp", getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
+export const app = { getPath: () => "/tmp", getAppPath: () => process.cwd(), getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
 export class BrowserWindow { static getAllWindows() { return []; } }
 export class Notification { static isSupported() { return false; } show() {} on() {} }
 export const ipcMain = { on: noop, handle: noop, removeHandler: noop };
@@ -282,6 +282,26 @@ async function main() {
       workerAttempts: [attempt("att-1", "succeeded", "task-1"), attempt("att-2", "succeeded", "task-2")],
     }),
     "worker_task_force_accepted",
+  );
+  // The worker cycle's honest auto review: a partial or blocked report parks
+  // the task at "blocked" and its step at completed_unverified, a failed or
+  // missing one fails both. Neither may ever settle the run on its own.
+  notSettled(
+    "a worker parked blocked by a partial report is not settled",
+    wedgedRun("run-k3", {
+      steps: [step("step-1", "completed_unverified")],
+      workerTasks: [task("task-1", "blocked")],
+      workerAttempts: [attempt("att-1", "succeeded", "task-1")],
+    }),
+    "step_unverified",
+  );
+  notSettled(
+    "a blocked task under a complete step is not settled",
+    wedgedRun("run-k4", {
+      workerTasks: [task("task-1", "accepted"), task("task-2", "blocked")],
+      workerAttempts: [attempt("att-1", "succeeded", "task-1"), attempt("att-2", "succeeded", "task-2")],
+    }),
+    "worker_task_unfinished",
   );
   check("a skipped step still counts as finished", isRunSettled(
     wedgedRun("run-l", { steps: [step("step-1", "skipped")] }),
@@ -538,6 +558,97 @@ async function main() {
   await runStore.completeSettledManagedRunsAfterRestart();
   check("boot recovery is idempotent", readRun(bootSettled).status === "complete");
 
+  // ── 3b. the unverified question resolves on a click, no manager turn ────
+  const askReport = path.join(HOME, "runs", "run-ask-unverified", "final-report.json");
+  const askId = writeRun(
+    wedgedRun("run-ask-unverified", {
+      workerTasks: [task("task-1", "accepted")],
+      workerAttempts: [
+        { ...attempt("att-1", "succeeded", "task-1"), finishedAt: NOW, finalReportPath: askReport },
+      ],
+    }),
+  );
+  fs.writeFileSync(
+    askReport,
+    JSON.stringify({
+      status: "complete",
+      summary: "wrote the script",
+      filesChanged: [{ path: "script.py", reason: "new" }],
+    }),
+  );
+  await runStore.startAutopilot({ workspaceId: WS, workspaceName: "ask", cwd: HOME, runId: askId });
+  const asked = readRun(askId);
+  const question = (asked.humanMessages || []).filter((m) => m.kind === "question").at(-1);
+  check("unverified work asks instead of completing", asked.status === "blocked" && Boolean(question), asked.status);
+  const optionIds = (question?.questionOptions || []).map((option) => option.id);
+  check(
+    "the unverified question offers check and as-is choices",
+    optionIds.includes("check_changes_now") && optionIds.includes("use_changes_as_is"),
+    JSON.stringify(optionIds),
+  );
+  check(
+    "the unverified question speaks plainly",
+    question && !/verdict/i.test(question.message),
+    question?.message,
+  );
+  const asIs = question?.questionOptions?.find((option) => option.id === "use_changes_as_is");
+  await runStore.answerRunQuestion({ runId: askId, questionMessageId: question.id, message: asIs.answer });
+  const acceptedAsIs = readRun(askId);
+  check("'Use it as is' completes the run", acceptedAsIs.status === "complete", acceptedAsIs.status);
+  check(
+    "'Use it as is' records that nothing checked the work",
+    acceptedAsIs.autopilot && acceptedAsIs.autopilot.lastAction === "user_accepted_unverified",
+    JSON.stringify(acceptedAsIs.autopilot),
+  );
+  check(
+    "'Use it as is' leaves no manager turn pending",
+    !acceptedAsIs.pendingManagerResume &&
+      (acceptedAsIs.humanMessages || []).every((m) => m.kind !== "answer" || m.deliveryState === "acknowledged"),
+  );
+
+  // "Check it now" launches one verifier over the final state on the other
+  // provider, with no manager turn, and the run goes back to work.
+  const checkReport = path.join(HOME, "runs", "run-ask-check", "final-report.json");
+  const checkId = writeRun(
+    wedgedRun("run-ask-check", {
+      settingsSnapshot: { workspaceCwd: HOME },
+      workerTasks: [{ ...task("task-1", "accepted"), runtimePreference: "claude" }],
+      workerAttempts: [
+        { ...attempt("att-1", "succeeded", "task-1"), finishedAt: NOW, finalReportPath: checkReport },
+      ],
+    }),
+  );
+  fs.writeFileSync(
+    checkReport,
+    JSON.stringify({
+      status: "complete",
+      summary: "wrote the script",
+      filesChanged: [{ path: "script.py", reason: "new" }],
+    }),
+  );
+  await runStore.startAutopilot({ workspaceId: WS, workspaceName: "ask", cwd: HOME, runId: checkId });
+  const checkQuestion = (readRun(checkId).humanMessages || []).filter((m) => m.kind === "question").at(-1);
+  const checkNow = checkQuestion?.questionOptions?.find((option) => option.id === "check_changes_now");
+  const checking = await runStore
+    .answerRunQuestion({ runId: checkId, questionMessageId: checkQuestion.id, message: checkNow.answer })
+    .catch((error) => error);
+  check("'Check it now' is applied without an error", !(checking instanceof Error), checking?.message);
+  const verifiers = checking instanceof Error
+    ? []
+    : checking.workerTasks.filter((item) => item.taskClass === "verifier");
+  check(
+    "'Check it now' adds exactly one verifier, on the provider that did not write the changes",
+    verifiers.length === 1 && verifiers[0].runtimePreference === "codex",
+    JSON.stringify(verifiers.map((item) => item.runtimePreference)),
+  );
+  check(
+    "'Check it now' puts the run back to work with no manager turn pending",
+    !(checking instanceof Error) &&
+      checking.autopilot?.lastAction === "user_requested_verification" &&
+      !checking.pendingManagerResume,
+    checking instanceof Error ? checking.message : JSON.stringify(checking.autopilot),
+  );
+
   // ── 4. wiring the fixes cannot be silently unhooked ─────────────────────
   const runStoreSrc = fs.readFileSync(RUN_STORE_TS, "utf8");
   // Fix 1: re-feeding the initial note sends the post-turn hop back into
@@ -568,6 +679,15 @@ async function main() {
     fallbackGuardAt > 0 &&
       fallbackGuardAt < fallbackSettledAt &&
       fallbackSettledAt < fallbackCompleteAt,
+  );
+  check(
+    "the worker cycle reads the report before it auto-reviews a task",
+    /autoReviewedTaskStatus\(finishedReport\?\.status\)/.test(runStoreSrc) &&
+      !/taskInDraft\.status = "accepted";/.test(runStoreSrc),
+  );
+  check(
+    "an unsettled run with an unfinished worker reaches the user",
+    runStoreSrc.indexOf("await escalateUnfinishedWorkerOutcome(settled, finishedTaskId);") > fallbackSettledAt,
   );
   check(
     "that fallback stays behind the execute-mode skip, so a live turn is never re-prompted",

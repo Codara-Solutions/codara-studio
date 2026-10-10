@@ -252,16 +252,49 @@ function workerNeedsMigration(worker: LegacyLoomWorkerConfig | undefined): boole
   );
 }
 
+// Whatever this boot cannot read is copied aside before the in-memory list
+// goes on without it: the next save rewrites scheduler.json from that list, so
+// starting empty without a copy deleted every automation on the first edit.
+async function setAsideUnreadable(raw: string, why: unknown): Promise<void> {
+  const aside = `${schedulerPath()}.corrupt-${Date.now()}`;
+  console.error(`[scheduler] scheduler.json is not fully readable; copied to ${aside}:`, why);
+  await fs.writeFile(aside, raw, "utf8").catch((err) => {
+    console.error("[scheduler] could not copy the unreadable scheduler.json aside:", err);
+  });
+}
+
 async function readFromDisk(): Promise<ScheduledJob[]> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(schedulerPath(), "utf8");
-    const parsed = JSON.parse(raw) as Partial<SchedulerFile>;
-    return Array.isArray(parsed.jobs) ? parsed.jobs.map(normalizeJob) : [];
+    raw = await fs.readFile(schedulerPath(), "utf8");
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    console.error("[scheduler] failed to read, starting empty:", err);
+    // Not cached, so a later call retries. Starting empty here would let the
+    // next save overwrite a file that exists but could not be read this time.
+    throw err;
+  }
+  let parsed: Partial<SchedulerFile>;
+  try {
+    parsed = JSON.parse(raw) as Partial<SchedulerFile>;
+    if (!parsed || typeof parsed !== "object" || (parsed.jobs !== undefined && !Array.isArray(parsed.jobs))) {
+      throw new Error("scheduler.json does not hold a jobs list");
+    }
+  } catch (err: unknown) {
+    await setAsideUnreadable(raw, err);
     return [];
   }
+  // Normalized one job at a time so a single bad entry costs only itself.
+  const jobs: ScheduledJob[] = [];
+  let firstFailure: unknown;
+  for (const job of parsed.jobs ?? []) {
+    try {
+      jobs.push(normalizeJob(job));
+    } catch (err: unknown) {
+      firstFailure = firstFailure ?? err;
+    }
+  }
+  if (firstFailure !== undefined) await setAsideUnreadable(raw, firstFailure);
+  return jobs;
 }
 
 async function loadJobs(): Promise<ScheduledJob[]> {
@@ -271,16 +304,23 @@ async function loadJobs(): Promise<ScheduledJob[]> {
 }
 
 // Persist the given list, update the cache, and serialize against any in-flight
-// write so two mutations can't interleave their atomic renames.
+// write so two mutations can't interleave their atomic renames. The chain itself
+// always settles so a failed write never blocks the next one, but the caller
+// gets this write's error: reporting success for a change that never reached
+// disk is how an automation silently reverts on the next launch.
 async function persist(jobs: ScheduledJob[]): Promise<void> {
   cache = jobs;
   const snapshot: SchedulerFile = { jobs };
-  writing = writing
-    .then(() => writeFileAtomic(schedulerPath(), JSON.stringify(snapshot, null, 2)))
-    .catch((err) => {
-      console.error("[scheduler] write failed:", err);
-    });
-  await writing;
+  const write = writing.then(() =>
+    writeFileAtomic(schedulerPath(), JSON.stringify(snapshot, null, 2)),
+  );
+  writing = write.catch(() => undefined);
+  try {
+    await write;
+  } catch (err) {
+    console.error("[scheduler] write failed:", err);
+    throw err;
+  }
 }
 
 // Broadcast a registry-changed event so the renderer's Automations panel can

@@ -133,6 +133,11 @@ async function main() {
     // timeout
     ["Pi worker timed out after 90 minutes.", "timeout"],
     ["Worker timed out after 90 minutes.", "timeout"],
+    ["Pi worker timed out: no finished tool call or message for 92 min.", "timeout"],
+    [
+      "Pi worker exceeded its 6h turn ceiling while still making progress and did not wrap up within 15 min.",
+      "timeout",
+    ],
     // tool
     ["Pi worker extension failed.", "tool"],
     ["Codara Pi bridge is incompatible: /tmp/bridge.cjs", "tool"],
@@ -142,6 +147,18 @@ async function main() {
   ];
   for (const [text, expected] of cases) {
     assert.equal(classifyWorkerFailure(text), expected, `classify(${JSON.stringify(text)})`);
+  }
+
+  // A worker that ran its turn but left no usable report did not fail to
+  // launch: its edits are likely on disk, so it must not read as a launch or
+  // auth failure that reruns the task cold elsewhere.
+  for (const text of [
+    "The worker finished its turn without a valid final report: final-report.json is not valid JSON. Its edits may already be on disk.",
+    "The claude worker finished without a valid final report: status \"in_progress\" is not one of \"complete\", \"partial\", \"blocked\", \"failed\".",
+    "Pi worker completed without a parseable final-report.json (the file is not valid JSON (Unexpected token }))",
+  ]) {
+    const kind = classifyWorkerFailure(text);
+    assert.ok(kind !== "launch" && kind !== "auth", `${JSON.stringify(text)} classified as ${kind}`);
   }
 
   // Unknown text keeps the pre-taxonomy behaviour instead of being forced into

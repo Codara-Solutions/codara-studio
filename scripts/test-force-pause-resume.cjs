@@ -62,7 +62,7 @@ const USER_INTENT_TS = path.join(ROOT, "src", "main", "orchestration", "user-int
 const CACHE = path.join(ROOT, "node_modules", ".cache", "cora-force-pause-resume-test");
 
 const ELECTRON_STUB = `const noop = () => {};
-export const app = { getPath: () => "/tmp", getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
+export const app = { getPath: () => "/tmp", getAppPath: () => process.cwd(), getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
 export class BrowserWindow { static getAllWindows() { return []; } }
 export class Notification { static isSupported() { return false; } show() {} on() {} }
 export const ipcMain = { on: noop, handle: noop, removeHandler: noop };
@@ -119,19 +119,58 @@ const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount()
 export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); } export async function resolveCodaraPiLibrary() { throw new Error("pi runtime is stubbed"); } export async function resolveUserPiRuntime() { throw new Error("pi runtime is stubbed"); }
 export function codaraPiPaths() { return { home: "/tmp/cora-stub-pi" }; }
 export async function cleanupPiMcpBridgeConfig() {}
-export async function createCodaraPiWorkerLaunchPlan() { throw new Error("pi worker launch is stubbed"); }`;
+export async function createCodaraPiWorkerLaunchPlan() {
+  // Armed only by the launching-stop case: hold the launch inside its startup
+  // window until the test has stopped the run, then hand back a usable plan.
+  if (!globalThis.__coraWorkerPlanHook) throw new Error("pi worker launch is stubbed");
+  await globalThis.__coraWorkerPlanHook();
+  return {
+    provider: "anthropic",
+    model: "claude-opus-5",
+    thinking: "high",
+    sessionId: "stub-session",
+    mcpConfigPath: null,
+    accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",
+  };
+}`;
+
+// The worker's display PTY and its Pi process, observable instead of real.
+const PTY_MANAGER_STUB = `const noop = () => {};
+export function exists() { return false; }
+export async function spawn(opts) { (globalThis.__coraPtySpawns ??= []).push(opts.id); }
+export function resize() {}
+export async function waitForResize() {}
+export async function waitForSpawn() { return false; }
+export function publishOutput() {}
+export function killImmediate(id) { (globalThis.__coraPtyKills ??= []).push(id); }
+export function dispose() {}
+export function onExit() { return noop; }
+export function readTail() { return ""; }
+export function tap() { return noop; }
+export function write() {}`;
+
+const PI_RPC_CLIENT_STUB = `export class PiRpcClient {
+  async start() { globalThis.__coraPiStarts = (globalThis.__coraPiStarts ?? 0) + 1; }
+  async prompt() { globalThis.__coraPiPrompts = (globalThis.__coraPiPrompts ?? 0) + 1; }
+  onEvent() { return () => {}; }
+  state() { return { phase: "running" }; }
+  async abort() {}
+  async stop() {}
+}`;
 
 const STUBS = {
   electron: ELECTRON_STUB,
   "node-pty": PTY_STUB,
   "./backend-registry": BACKEND_REGISTRY_STUB,
   "./pi-runtime-electron": PI_RUNTIME_STUB,
+  "../pty-manager": PTY_MANAGER_STUB,
+  "./pi-rpc-client": PI_RPC_CLIENT_STUB,
 };
 
 const stubPlugin = {
   name: "cora-force-pause-stubs",
   setup(build) {
-    build.onResolve({ filter: /^(electron|node-pty|\.\/backend-registry|\.\/pi-runtime-electron)$/ }, (args) => ({
+    build.onResolve({ filter: /^(electron|node-pty|\.\/backend-registry|\.\/pi-runtime-electron|\.\.\/pty-manager|\.\/pi-rpc-client)$/ }, (args) => ({
       path: args.path,
       namespace: "stub",
     }));
@@ -675,6 +714,84 @@ async function main() {
     messageResumePrompt.slice(0, 500),
   );
 
+  // ── 3a. interrupted workers with a session are offered as continuable ────
+  // A worker the pause cut off, one the app quit killed (boot recovery records
+  // it failed with interruptedBy "app_restart"), and one that failed on its
+  // own. The first two are listed with their session continuable through
+  // follow_up_of; the third is not interrupted work at all.
+  const continueId = "run-pause-continuable";
+  const continueTask = (id, title, status) => ({
+    id,
+    runId: continueId,
+    stepId: "step-3",
+    title,
+    status,
+    taskClass: "feature",
+    createdBy: "spark",
+    createdAt: PAUSED_AT,
+    updatedAt: PAUSED_AT,
+  });
+  const continueAttempt = (id, workerTaskId, status, extra) => ({
+    id,
+    runId: continueId,
+    workerTaskId,
+    attemptNumber: 1,
+    runtime: "claude",
+    model: "claude-sonnet-5",
+    cwd: HOME,
+    status,
+    startedAt: PAUSED_AT,
+    finishedAt: PAUSED_AT,
+    ...extra,
+  });
+  writeRun(
+    forcePausedRun(continueId, {
+      workerTasks: [
+        continueTask("task-paused", "Port the lexer", "cancelled"),
+        continueTask("task-restarted", "Port the printer", "failed"),
+        continueTask("task-broken", "Port the checker", "failed"),
+      ],
+      workerAttempts: [
+        continueAttempt("attempt-paused", "task-paused", "cancelled", {
+          interruptedBy: "pause",
+          piSessionId: "run-pause-continuable-attempt-paused",
+          contextTokens: 120_000,
+        }),
+        continueAttempt("attempt-restarted", "task-restarted", "failed", {
+          interruptedBy: "app_restart",
+          piSessionId: "run-pause-continuable-attempt-restarted",
+          error: "the app closed while this worker was running; its process is gone",
+        }),
+        continueAttempt("attempt-broken", "task-broken", "failed", {
+          piSessionId: "run-pause-continuable-attempt-broken",
+          error: "tsc failed",
+        }),
+      ],
+    }),
+  );
+  await runStore.resumeRun({ runId: continueId });
+  await runStore.settleScheduledManagerWork(continueId);
+  const continuePrompt = callsFor(continueId)[0]?.prompt ?? "";
+  check(
+    "a pause-interrupted worker with a session is listed as continuable",
+    /task task-paused, attempt attempt-paused \(attempt #1, interrupted, continuable on claude\)/.test(continuePrompt),
+    continuePrompt.slice(0, 900),
+  );
+  check(
+    "a worker the app restart killed is listed as continuable too",
+    /task task-restarted, attempt attempt-restarted \(attempt #1, interrupted, continuable on claude\)/.test(
+      continuePrompt,
+    ),
+  );
+  check(
+    "the note tells the manager how to continue them",
+    /follow_up_of set to that task id/.test(continuePrompt) && /app restart/.test(continuePrompt),
+  );
+  check(
+    "a worker that failed on its own is not presented as interrupted",
+    !continuePrompt.includes("task-broken"),
+  );
+
   // ── 3b. a run paused with its manager turn still in flight keeps that turn ──
   // The soft pauseRun path never kills the turn, so the run already has a
   // driver; a second concurrent chat turn would race the first one's decision.
@@ -1163,6 +1280,406 @@ async function main() {
     `${cancelled.workerTasks[0]?.status}/${cancelled.steps[0]?.status}`,
   );
 
+  // ── 4b1. a Stop that lands while a worker is still starting ──────────────
+  // The attempt is "launching" but has no live process yet (account, launch
+  // plan and Pi startup are still in flight). The Stop used to find nothing to
+  // kill, and the worker then ran its whole task in the paused run.
+  const launchingRun = (id) => {
+    const stepId = `step-${id}`;
+    const taskId = `task-${id}`;
+    const attemptId = `attempt-${id}`;
+    const attemptDir = path.join(HOME, "runs", id, "steps", stepId, "workers", taskId, "attempts", attemptId);
+    fs.mkdirSync(attemptDir, { recursive: true });
+    fs.writeFileSync(path.join(attemptDir, "prompt.md"), "Build the parser.\n");
+    writeRun(
+      forcePausedRun(id, {
+        status: "running",
+        autopilot: { status: "running", lastAction: "started", updatedAt: NOW },
+        sparkCalls: [],
+        steps: [
+          {
+            id: stepId,
+            runId: id,
+            index: 1,
+            title: "Build",
+            goal: "Build",
+            kind: "worker_batch",
+            status: "running",
+            plannedAgents: [],
+            acceptanceCriteria: [],
+            verificationCommands: [],
+            workerTaskIds: [taskId],
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+        workerTasks: [
+          {
+            id: taskId,
+            runId: id,
+            stepId,
+            title: "build the parser",
+            description: "Build the parser.",
+            status: "queued",
+            runtimePreference: "claude",
+            allowedPaths: [],
+            forbiddenPaths: [],
+            expectedOutputs: [],
+            verificationCommands: [],
+            canRunParallel: false,
+            conflictsWith: [],
+            taskClass: "verifier",
+            createdBy: "spark",
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+        workerAttempts: [
+          {
+            id: attemptId,
+            runId: id,
+            workerTaskId: taskId,
+            attemptNumber: 1,
+            runtime: "claude",
+            cwd: HOME,
+            status: "prompt_ready",
+            createdAt: NOW,
+          },
+        ],
+      }),
+    );
+    return { id, taskId, attemptId };
+  };
+  const stopWhileLaunching = async (fixture, stop) => {
+    let releasePlan = () => {};
+    const planReached = new Promise((resolve) => {
+      globalThis.__coraWorkerPlanHook = () => {
+        resolve(true);
+        return new Promise((release) => {
+          releasePlan = release;
+        });
+      };
+    });
+    globalThis.__coraPiStarts = 0;
+    globalThis.__coraPiPrompts = 0;
+    globalThis.__coraPtyKills = [];
+    const launch = runStore
+      .launchWorkerAttempt({ runId: fixture.id, attemptId: fixture.attemptId })
+      .catch((error) => error);
+    const reached = await Promise.race([planReached, sleep(10_000).then(() => false)]);
+    await stop(fixture.id);
+    releasePlan();
+    const launchResult = await launch;
+    globalThis.__coraWorkerPlanHook = undefined;
+    const after = readRun(fixture.id);
+    return {
+      reached,
+      launchError: launchResult instanceof Error ? launchResult.message : null,
+      run: after,
+      attempt: after.workerAttempts.find((item) => item.id === fixture.attemptId),
+      task: after.workerTasks.find((item) => item.id === fixture.taskId),
+      piStarts: globalThis.__coraPiStarts,
+      piPrompts: globalThis.__coraPiPrompts,
+      ptyKills: [...globalThis.__coraPtyKills],
+    };
+  };
+
+  const pausedLaunch = await stopWhileLaunching(launchingRun("run-pause-launching"), (id) =>
+    runStore.forcePauseRun(id),
+  );
+  check("the launch reached its startup window before the Stop", pausedLaunch.reached === true);
+  check("a launch stopped mid-startup does not throw", pausedLaunch.launchError === null, pausedLaunch.launchError);
+  check("Stop during startup keeps the run paused", pausedLaunch.run.status === "paused", pausedLaunch.run.status);
+  check(
+    "Stop during startup cancels the launching attempt",
+    pausedLaunch.attempt?.status === "cancelled",
+    pausedLaunch.attempt?.status,
+  );
+  check(
+    "Stop during startup cancels its task",
+    pausedLaunch.task?.status === "cancelled",
+    pausedLaunch.task?.status,
+  );
+  check(
+    "a pause marks the attempt it stopped as interrupted, so its session may be continued",
+    pausedLaunch.attempt?.interruptedBy === "pause",
+    pausedLaunch.attempt?.interruptedBy,
+  );
+  check(
+    "a worker stopped during startup never starts Pi or receives its prompt",
+    pausedLaunch.piStarts === 0 && pausedLaunch.piPrompts === 0,
+    JSON.stringify({ starts: pausedLaunch.piStarts, prompts: pausedLaunch.piPrompts }),
+  );
+  check(
+    "Stop during startup closes the worker's display terminal",
+    pausedLaunch.ptyKills.includes("attempt-run-pause-launching"),
+    JSON.stringify(pausedLaunch.ptyKills),
+  );
+
+  // Cancel kills before it commits and has no pause window, so a worker exit
+  // that lands first still sees a live attempt status. The aborted launch
+  // entry is what must classify that exit as the stop's, not a failure that
+  // gets reviewed.
+  let cancelExitIsStop = null;
+  const cancelledLaunch = await stopWhileLaunching(launchingRun("run-cancel-launching"), async (id) => {
+    await runStore.cancelRun({ runId: id, reason: "test cancel" });
+    cancelExitIsStop = runStore.workerExitInterruptedByForcePause({
+      runId: id,
+      attemptId: "attempt-run-cancel-launching",
+      exitCode: 1,
+      attemptStatus: "running",
+    });
+  });
+  check(
+    "a worker exit that beats Cancel's commit is still an interruption, not a failure",
+    cancelExitIsStop === true,
+    String(cancelExitIsStop),
+  );
+  check("Cancel during startup cancels the run", cancelledLaunch.run.status === "cancelled", cancelledLaunch.run.status);
+  check(
+    "Cancel during startup cancels the launching attempt and its task",
+    cancelledLaunch.attempt?.status === "cancelled" && cancelledLaunch.task?.status === "cancelled",
+    JSON.stringify({ attempt: cancelledLaunch.attempt?.status, task: cancelledLaunch.task?.status }),
+  );
+  check(
+    "a cancelled run's attempt is not marked as continuable interrupted work",
+    cancelledLaunch.attempt?.interruptedBy === undefined,
+    cancelledLaunch.attempt?.interruptedBy,
+  );
+  check(
+    "a worker cancelled during startup never receives its prompt",
+    cancelledLaunch.piPrompts === 0,
+    String(cancelledLaunch.piPrompts),
+  );
+
+  // ── 4b2. the Runs inspector's per-worker Stop, Retry, and log ───────────
+  {
+    const fixture = launchingRun("run-stop-one-worker");
+    const stoppedLaunch = await stopWhileLaunching(fixture, (id) =>
+      runStore.stopWorkerAttempt(id, fixture.attemptId),
+    );
+    check(
+      "Stop worker cancels that worker while it is still starting",
+      stoppedLaunch.attempt?.status === "cancelled" && stoppedLaunch.task?.status === "cancelled",
+      JSON.stringify({ attempt: stoppedLaunch.attempt?.status, task: stoppedLaunch.task?.status }),
+    );
+    check(
+      "Stop worker leaves the run itself running",
+      stoppedLaunch.run.status === "running",
+      stoppedLaunch.run.status,
+    );
+    check(
+      "a worker stopped while starting never starts Pi",
+      stoppedLaunch.piStarts === 0 && stoppedLaunch.piPrompts === 0,
+      JSON.stringify({ starts: stoppedLaunch.piStarts, prompts: stoppedLaunch.piPrompts }),
+    );
+    check(
+      "the stopped worker's step is not failed",
+      stoppedLaunch.run.steps[0]?.status !== "failed",
+      stoppedLaunch.run.steps[0]?.status,
+    );
+
+    // Retry runs the task again as a NEW attempt; the stopped one stays put.
+    globalThis.__coraWorkerPlanHook = () => new Promise(() => {});
+    const retried = await runStore.retryWorkerTask(fixture.id, fixture.taskId).catch((error) => error);
+    check("Retry worker accepts a stopped worker", !(retried instanceof Error), retried?.message);
+    const afterRetry = readRun(fixture.id);
+    const retryAttempts = afterRetry.workerAttempts.filter((item) => item.workerTaskId === fixture.taskId);
+    check(
+      "Retry worker adds a second attempt and keeps the first",
+      retryAttempts.length === 2 &&
+        retryAttempts.some((item) => item.id === fixture.attemptId && item.status === "cancelled"),
+      JSON.stringify(retryAttempts.map((item) => `${item.id}:${item.status}`)),
+    );
+    const newAttempt = retryAttempts.find((item) => item.id !== fixture.attemptId);
+    if (newAttempt) await runStore.stopWorkerAttempt(fixture.id, newAttempt.id).catch(() => undefined);
+    globalThis.__coraWorkerPlanHook = undefined;
+    await sleep(50);
+
+    const pausedFixture = launchingRun("run-retry-paused");
+    const pausedRun = readRun(pausedFixture.id);
+    pausedRun.status = "paused";
+    pausedRun.workerTasks[0].status = "failed";
+    pausedRun.workerAttempts[0].status = "failed";
+    writeRun(pausedRun);
+    await runStore.getRun(pausedFixture.id);
+    const refused = await runStore
+      .retryWorkerTask(pausedFixture.id, pausedFixture.taskId)
+      .catch((error) => error);
+    check(
+      "Retry worker refuses a paused run and says why",
+      refused instanceof Error && /Resume the run/.test(refused.message),
+      refused?.message,
+    );
+
+    // A partial worker parks its step at completed_unverified; retrying that
+    // blocked worker is the decision the step waits on, so it reopens.
+    const blockedFixture = launchingRun("run-retry-blocked");
+    const blockedRun = readRun(blockedFixture.id);
+    blockedRun.status = "reviewing";
+    blockedRun.steps[0].status = "completed_unverified";
+    blockedRun.workerTasks[0].status = "blocked";
+    blockedRun.workerAttempts[0].status = "succeeded";
+    writeRun(blockedRun);
+    await runStore.getRun(blockedFixture.id);
+    globalThis.__coraWorkerPlanHook = () => new Promise(() => {});
+    const blockedRetry = await runStore
+      .retryWorkerTask(blockedFixture.id, blockedFixture.taskId)
+      .catch((error) => error);
+    const afterBlockedRetry = readRun(blockedFixture.id);
+    check(
+      "Retry worker reopens the unverified step of a partially finished worker",
+      !(blockedRetry instanceof Error) &&
+        afterBlockedRetry.steps[0].status === "running" &&
+        afterBlockedRetry.workerAttempts.length === 2,
+      blockedRetry instanceof Error
+        ? blockedRetry.message
+        : JSON.stringify({ step: afterBlockedRetry.steps[0].status, attempts: afterBlockedRetry.workerAttempts.length }),
+    );
+    const blockedNew = afterBlockedRetry.workerAttempts.find((item) => item.id !== blockedFixture.attemptId);
+    if (blockedNew) await runStore.stopWorkerAttempt(blockedFixture.id, blockedNew.id).catch(() => undefined);
+    globalThis.__coraWorkerPlanHook = undefined;
+    await sleep(50);
+
+    // The log is read from the attempt's own record, confined to its run.
+    const logFixture = launchingRun("run-worker-log");
+    const logRun = readRun(logFixture.id);
+    const logDir = path.join(HOME, "runs", logFixture.id, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, "stdout.log"),
+      "\x1b[2J\x1b[H  CORA PI WORKER\r\nread the parser\nran npm test\n",
+    );
+    const outside = path.join(HOME, "outside.log");
+    fs.writeFileSync(outside, "secret");
+    logRun.workerAttempts[0].status = "failed";
+    logRun.workerAttempts[0].stdoutLogPath = path.join(logDir, "stdout.log");
+    logRun.workerAttempts.push({
+      ...logRun.workerAttempts[0],
+      id: "attempt-outside-log",
+      attemptNumber: 2,
+      stdoutLogPath: outside,
+    });
+    writeRun(logRun);
+    const log = await runStore.readWorkerAttemptLog(logFixture.id, logFixture.attemptId).catch((error) => error);
+    check(
+      "a worker's log is readable after its terminal is gone",
+      !(log instanceof Error) && log?.text.includes("ran npm test") && log.truncated === false,
+      log instanceof Error ? log.message : JSON.stringify(log),
+    );
+    check(
+      "the log reads as plain text, without the pane's terminal escapes",
+      !(log instanceof Error) && !log?.text.includes("\x1b") && log?.text.includes("CORA PI WORKER"),
+      log instanceof Error ? log.message : JSON.stringify(log?.text),
+    );
+    const escaped = await runStore
+      .readWorkerAttemptLog(logFixture.id, "attempt-outside-log")
+      .catch((error) => error);
+    check(
+      "a log path outside the run is refused",
+      escaped instanceof Error && /outside its run artifacts/.test(escaped.message),
+      escaped instanceof Error ? escaped.message : JSON.stringify(escaped),
+    );
+  }
+
+  // ── 4b3. the live-activity poll carries only live attempts' readouts ────
+  {
+    const activityRun = forcePausedRun("run-live-activity", {
+      status: "running",
+      workerAttempts: [
+        {
+          id: "attempt-live-activity",
+          runId: "run-live-activity",
+          workerTaskId: "task-parser",
+          attemptNumber: 2,
+          runtime: "claude",
+          cwd: HOME,
+          status: "running",
+          startedAt: NOW,
+          runtimeActivity: "Run command · npm test",
+          runtimeActivityAt: NOW,
+        },
+        {
+          id: "attempt-done-activity",
+          runId: "run-live-activity",
+          workerTaskId: "task-parser",
+          attemptNumber: 1,
+          runtime: "claude",
+          cwd: HOME,
+          status: "failed",
+          runtimeActivity: "stale",
+        },
+      ],
+    });
+    writeRun(activityRun);
+    writeRun({ ...activityRun, id: "run-live-activity-other", workspaceId: "ws-other" });
+    await runStore.getRun("run-live-activity");
+    await runStore.getRun("run-live-activity-other");
+    const live = runStore.liveWorkerActivity(WS).filter((item) => item.runId === "run-live-activity");
+    check(
+      "the activity poll returns the live attempt's readout and nothing else",
+      live.length === 1 &&
+        live[0].attemptId === "attempt-live-activity" &&
+        live[0].runtimeActivity === "Run command · npm test",
+      JSON.stringify(live),
+    );
+    check(
+      "the activity poll is scoped to its workspace",
+      runStore.liveWorkerActivity("ws-other").every((item) => item.runId === "run-live-activity-other"),
+    );
+  }
+
+  // ── 4c. the quit guard counts only work a quit would kill ───────────────
+  {
+    const before = runStore.liveWorkForQuit();
+    const withCall = (id, status, executionMode) =>
+      forcePausedRun(id, {
+        status,
+        executionMode,
+        workerTasks: [],
+        workerAttempts: [],
+        sparkCalls: [{ id: `call-${id}`, mode: "chat", status: "started", startedAt: NOW }],
+      });
+    for (const run of [
+      withCall("run-quit-live-chat", "running", "managed"),
+      withCall("run-quit-live-loom", "running", "direct"),
+      withCall("run-quit-paused", "paused", "managed"),
+      { ...withCall("run-quit-idle", "running", "managed"), sparkCalls: [] },
+    ]) {
+      writeRun(run);
+      await runStore.getRun(run.id);
+    }
+    const after = runStore.liveWorkForQuit();
+    check(
+      "a chat with a manager turn in flight counts as live work",
+      after.chats === before.chats + 1,
+      JSON.stringify({ before, after }),
+    );
+    check(
+      "an automation run with a turn in flight is counted as an automation",
+      after.automations === before.automations + 1,
+      JSON.stringify({ before, after }),
+    );
+    const indexSource = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+    const beforeQuit = indexSource.slice(indexSource.indexOf('app.on("before-quit"'));
+    check(
+      "before-quit asks before it starts tearing down live work",
+      beforeQuit.indexOf("confirmQuitWithLiveWork()") !== -1 &&
+        beforeQuit.indexOf("confirmQuitWithLiveWork()") < beforeQuit.indexOf("cleanupRan = true"),
+    );
+    check(
+      "declining a restart for an update drops the install request, so the next quit stays a plain quit",
+      /if \(choice !== 0\) \{\s*if \(restartingForUpdate\) updaterModCached\?\.cancelInstallRequest\(\);\s*return false;/.test(
+        indexSource,
+      ),
+    );
+    check(
+      "the e2e suite and OS shutdown never see the quit prompt",
+      /if \(quitWithLiveWorkConfirmed \|\| E2E_BACKGROUND\) return true;/.test(indexSource) &&
+        /powerMonitor\.on\("shutdown", \(\) => \{\s*quitWithLiveWorkConfirmed = true;/.test(indexSource),
+    );
+  }
+
   // ── 5. source seams ─────────────────────────────────────────────────────
   const storeSource = fs.readFileSync(RUN_STORE_TS, "utf8");
   const launchStart = storeSource.indexOf("export async function launchWorkerAttempt(");
@@ -1171,6 +1688,16 @@ async function main() {
     storeSource.indexOf("\nexport async function deleteRun(", launchStart),
   );
   check("launchWorkerAttempt exists", launchStart !== -1 && launchBody.length > 0);
+  check(
+    "boot recovery marks a worker the app quit killed as interrupted",
+    /"the app closed while this worker was running; its process is gone",\s*\{ interruptedBy: "app_restart" \}/.test(
+      storeSource,
+    ),
+  );
+  check(
+    "the Pi session id is persisted when the worker starts, before any quit can lose it",
+    /markAttemptRunning\(run\.id, task\.id, attemptId, runningTimestamp, piSessionId\)/.test(storeSource),
+  );
   check(
     "the finish path asks whether the exit belonged to a force pause",
     /const pauseInterrupted = workerExitInterruptedByForcePause\(\{/.test(launchBody),

@@ -163,10 +163,30 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
    attempt (`ensurePiWorkerDisplayPty`) and writes the worker's activity into
    it. The renderer attaches a pane to that PTY: a loop in `App.tsx` calls
    `ensureWorkerTerminalTab` once the PTY exists. `parallel-wave.ts` in
-   `src/shared/` decides which tasks can run at the same time.
+   `src/shared/` decides which tasks can run at the same time. A worker turn
+   has no fixed length: it is stopped only after 90 minutes without a
+   finished tool call or message, or, after 6 hours, if it ignores the
+   request to wrap up with a partial report (`classifyWorkerTurnCeiling` in
+   `agent-liveness.ts`). A worker cut off by a pause or an app restart is
+   marked `interruptedBy`; on Resume, Cora is told it can continue that
+   worker's Pi session with `follow_up_of` (`worker-session-reuse.ts`)
+   instead of starting the task over. Quitting, or restarting for an update,
+   while a manager turn or a worker is live asks first
+   (`confirmQuitWithLiveWork` in `index.ts`, `liveWorkForQuit` in
+   `run-store.ts`).
 8. **Reports.** A worker ends by writing `final-report.json`. `worker-report.ts`
-   reads it and decides whether to accept it. `codara_wait_for_workers`
-   returns the reports to Cora.
+   reads it and decides whether to accept it. A missing or malformed report
+   gets one follow-up turn that names the exact problem; if that fails too,
+   the worker's file is kept as `final-report.invalid.json` and the failure is
+   left to Cora instead of rerunning the task on another provider.
+   `codara_wait_for_workers`
+   returns the reports to Cora. Only a `complete` report is accepted: when no
+   Cora turn reviews it, `runAutopilotWorkerCycle` marks a failed or missing
+   report `failed` and a partial or blocked one `blocked`
+   (`autoReviewedTaskStatus` and `settledReviewedStepStatus` in
+   `step-lifecycle.ts`), so neither ever shows as a finished step or completes
+   the run. If Cora's turn already ended, the user is asked how to continue
+   (`worker-outcome-questions.ts`).
 9. **Completion.** Cora calls `codara_complete`
    (`handleOrchestratorComplete`). The run store moves the run to `complete`,
    writes `result-manifest.json` (`result-manifest.ts`) and posts the summary
@@ -175,7 +195,10 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
     and broadcast as `orchestration:event` (or `orchestration:events-batch`).
     `components/chat/ChatConversation.tsx` builds the chat timeline from
     them (`lib/useRunExecutionRecord.ts`). The Runs view is
-    `components/RunsView.tsx` and `components/runs/`.
+    `components/RunsView.tsx` and `components/runs/`. Its worker inspector
+    can stop one worker, retry a failed or stopped one as a new attempt, and
+    read a worker's log from disk after its terminal is gone
+    (`stopWorkerAttempt`, `retryWorkerTask`, `readWorkerAttemptLog`).
 
 Cora can also open real terminals. `codara_spawn_terminals` opens
 interactive Claude Code, Codex, Grok or Pi sessions for you to drive

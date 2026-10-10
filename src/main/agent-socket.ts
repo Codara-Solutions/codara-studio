@@ -132,6 +132,7 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
   UpdateCoraWhiteboardInput,
+  WorkerAttempt,
   WorkerTask,
   Workspace,
 } from "@shared/types";
@@ -3190,7 +3191,21 @@ async function handleOrchestratorSpawnWorkers(
     if (!created) continue;
     workerTaskIds.push(created.id);
     createdTaskClasses.push(typeof w.taskClass === "string" ? w.taskClass : undefined);
-    if (resumePlan) {
+    if (resumePlan?.interrupted) {
+      resumedSessionCount += 1;
+      guardrailNotes.push(
+        `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id}, whose ` +
+          `attempt ${resumePlan.sourceAttempt.attemptNumber} was cut off by ` +
+          `${
+            resumePlan.sourceAttempt.interruptedBy === "app_restart"
+              ? "an app restart"
+              : resumePlan.sourceAttempt.interruptedBy === "pause"
+                ? "a pause"
+                : "the turn time limit"
+          }. ` +
+          "The new prompt lands as the next turn of that worker's session; its edits so far are on disk.",
+      );
+    } else if (resumePlan) {
       resumedSessionCount += 1;
       guardrailNotes.push(
         `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id} ` +
@@ -3437,9 +3452,11 @@ async function handleOrchestratorAskUser(
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
-// A worker task is "done" only in these three states. Used by
-// wait_for_workers to report is_terminal.
-const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+// A worker task is "done" only in these states. Used by wait_for_workers to
+// report is_terminal. `blocked` is where the worker cycle parks a task whose
+// report came back partial or blocked: finished, but not accepted, so the
+// manager has to decide what happens next.
+const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "blocked", "failed", "cancelled"]);
 
 // Worker task statuses that represent REAL in-flight work - an attempt is
 // scheduled, running, awaiting review, or queued to retry - so completing the
@@ -3458,9 +3475,9 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 //     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
 //     `queued`, so a healthy just-spawned task is already past `created` by the
 //     time the model can call codara_complete.
-//   - `blocked`: only ever set on the loom-pass path (run-store), and
-//     loom/automation runs are rejected by rejectIfAutomationRun before this
-//     guard - so it cannot legitimately reach here.
+//   - `blocked`: a worker that reported partial or blocked work. It has
+//     finished; the manager decides whether to retry, re-plan or land without
+//     it, and completing over it is that decision.
 //   - any future/unknown status: fail-open beats a mystery deadlock.
 const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
   "queued",
@@ -3564,7 +3581,7 @@ async function handleOrchestratorComplete(
       ERR_INVALID_PARAMS,
       `Cannot complete: ${waitableTasks.length} worker task(s) still pending/running: ${detail}. ` +
       `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
-        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).` +
+        `codara_complete once every worker has reached a terminal state (accepted/blocked/failed/cancelled).` +
         (manualAwaitingUser.length > 0
           ? ` Additionally, ${manualAwaitingUser.length} manual worker report(s) await the user's accept/fail answer and will not settle via waiting: ${manualDetail}.`
           : ""),
@@ -3760,6 +3777,10 @@ async function handleOrchestratorWaitForWorkers(
     finished_at: string | null;
     final_report_path: string | null;
     final_report: unknown;
+    error: string | null;
+    failure_kind: string | null;
+    activity: string | null;
+    activity_at: string | null;
     is_terminal: boolean;
     is_requested: boolean;
   }[]> => {
@@ -3832,6 +3853,7 @@ async function handleOrchestratorWaitForWorkers(
                 : null,
             }
           : null,
+        ...workerAttemptDiagnostics(lastAttempt),
         is_requested: isRequested,
         // A MANUAL task never advances past needs_review on its own: no
         // manager session reviews it, and its resolution comes from the
@@ -4023,6 +4045,9 @@ async function handleOrchestratorGetWorkerStatus(
     const lastAttempt = [...run.workerAttempts]
       .reverse()
       .find((a) => a.workerTaskId === workerTaskId);
+    const report = lastAttempt?.finalReportPath
+      ? await runStore.readWorkerReport(lastAttempt.finalReportPath).catch(() => null)
+      : null;
     return successResponse(id, {
       worker_task_id: workerTaskId,
       task_status: task.status,
@@ -4031,10 +4056,43 @@ async function handleOrchestratorGetWorkerStatus(
       started_at: lastAttempt?.startedAt ?? null,
       finished_at: lastAttempt?.finishedAt ?? null,
       final_report_path: lastAttempt?.finalReportPath ?? null,
+      final_report_status: report?.status ?? null,
+      final_report_summary: report?.summary ?? null,
+      ...workerAttemptDiagnostics(lastAttempt),
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
+}
+
+// Provider stderr can be long; the manager needs the gist to tell the user why,
+// not the whole dump.
+const WORKER_ERROR_SNIPPET_CHARS = 500;
+
+/**
+ * Why an attempt failed and what a live one is doing, for the manager's wait
+ * and status calls. Without these a worker that died before writing a report
+ * reads as a bare "failed", and a slow one as nothing but timestamps.
+ * runtimeActivity only exists on the cached in-memory run, which is what
+ * runStore.getRun returns.
+ */
+function workerAttemptDiagnostics(attempt: WorkerAttempt | null | undefined): {
+  error: string | null;
+  failure_kind: string | null;
+  activity: string | null;
+  activity_at: string | null;
+} {
+  const error = attempt?.error?.trim();
+  return {
+    error: error
+      ? error.length > WORKER_ERROR_SNIPPET_CHARS
+        ? `${error.slice(0, WORKER_ERROR_SNIPPET_CHARS)}...`
+        : error
+      : null,
+    failure_kind: attempt?.failureKind ?? null,
+    activity: attempt?.runtimeActivity ?? null,
+    activity_at: attempt?.runtimeActivityAt ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------

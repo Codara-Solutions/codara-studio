@@ -408,6 +408,7 @@ import type {
   GitRemoteUpdatedPayload,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
+  LiveWorkerActivity,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
@@ -2226,6 +2227,51 @@ export function registerIpc(): void {
       }
       const { readWorkerAttemptPrompt } = await getRunStore();
       return readWorkerAttemptPrompt(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:readWorkerLog",
+    async (
+      _e,
+      input: { runId: string; attemptId: string },
+    ): Promise<{ text: string; truncated: boolean } | null> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker log request.");
+      }
+      const { readWorkerAttemptLog } = await getRunStore();
+      return readWorkerAttemptLog(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:stopWorkerAttempt",
+    async (_e, input: { runId: string; attemptId: string }): Promise<RunState> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker stop request.");
+      }
+      const { stopWorkerAttempt } = await getRunStore();
+      return stopWorkerAttempt(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:retryWorkerTask",
+    async (_e, input: { runId: string; workerTaskId: string }): Promise<RunState> => {
+      if (!input || typeof input.runId !== "string" || typeof input.workerTaskId !== "string") {
+        throw new Error("Invalid worker retry request.");
+      }
+      const { retryWorkerTask } = await getRunStore();
+      return retryWorkerTask(input.runId, input.workerTaskId);
+    },
+  );
+
+  handle(
+    "orchestration:getLiveActivity",
+    async (_e, workspaceId: string): Promise<LiveWorkerActivity[]> => {
+      if (typeof workspaceId !== "string") return [];
+      const { liveWorkerActivity } = await getRunStore();
+      return liveWorkerActivity(workspaceId);
     },
   );
 

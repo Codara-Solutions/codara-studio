@@ -226,6 +226,13 @@ export function isInstallRequested(): boolean {
   return installRequested;
 }
 
+// The user kept working instead of restarting for the update. A request left
+// set would turn their next plain quit into an install that relaunches the app;
+// autoInstallOnAppQuit already applies the update on that quit without one.
+export function cancelInstallRequest(): void {
+  installRequested = false;
+}
+
 // Called by index.ts at the END of quit cleanup (cleanQuit already true, so
 // the quit Squirrel issues sails through before-quit). Silent install,
 // relaunch when done: the app closes, applies the update, and reopens itself.

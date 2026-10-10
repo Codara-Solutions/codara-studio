@@ -1380,6 +1380,88 @@ async function main() {
       JSON.stringify(waitedFallback).slice(0, 280),
     );
 
+    // A worker that died before writing a report, and one parked blocked by a
+    // partial report: the manager must see why, and `blocked` must unblock the
+    // wait instead of holding it to the timeout.
+    fabricateRun("run-worker-diagnostics", {
+      chatMode: "execute",
+      workerTasks: [
+        {
+          id: "wt-crashed",
+          title: "build the parser",
+          description: "implementation",
+          status: "failed",
+          taskClass: "feature",
+          runtimePreference: "claude",
+          createdBy: "spark",
+          createdAt: "2026-07-18T10:00:00.000Z",
+          updatedAt: "2026-07-18T10:00:30.000Z",
+        },
+        {
+          id: "wt-partial",
+          title: "write the docs",
+          description: "implementation",
+          status: "blocked",
+          taskClass: "feature",
+          runtimePreference: "codex",
+          createdBy: "spark",
+          createdAt: "2026-07-18T10:00:00.000Z",
+          updatedAt: "2026-07-18T10:00:30.000Z",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-crashed",
+          workerTaskId: "wt-crashed",
+          status: "failed",
+          runtime: "claude",
+          error: `Provider stream closed: ${"x".repeat(900)}`,
+          failureKind: "transport",
+          startedAt: "2026-07-18T10:00:01.000Z",
+          finishedAt: "2026-07-18T10:00:30.000Z",
+        },
+        {
+          id: "attempt-partial",
+          workerTaskId: "wt-partial",
+          status: "succeeded",
+          runtime: "codex",
+          startedAt: "2026-07-18T10:00:01.000Z",
+          finishedAt: "2026-07-18T10:00:30.000Z",
+        },
+      ],
+    });
+    const waitedDiagnostics = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-worker-diagnostics",
+      worker_task_ids: ["wt-crashed", "wt-partial"],
+      timeout_ms: 5000,
+    });
+    const crashed = waitedDiagnostics.result?.workers?.find((w) => w.worker_task_id === "wt-crashed");
+    check(
+      "wait_for_workers treats a blocked worker as terminal",
+      waitedDiagnostics.result?.reason === "all_terminal",
+      JSON.stringify(waitedDiagnostics).slice(0, 280),
+    );
+    check(
+      "wait_for_workers says why a worker without a report failed",
+      crashed?.error?.startsWith("Provider stream closed") &&
+        crashed.error.length <= 503 &&
+        crashed.failure_kind === "transport" &&
+        "activity" in crashed &&
+        "activity_at" in crashed,
+      JSON.stringify(crashed).slice(0, 280),
+    );
+    const crashedStatus = await rpc(handshake, "orchestrator.get_worker_status", {
+      runId: "run-worker-diagnostics",
+      worker_task_id: "wt-crashed",
+    });
+    check(
+      "get_worker_status carries the failure reason",
+      crashedStatus.result?.failure_kind === "transport" &&
+        crashedStatus.result?.error?.startsWith("Provider stream closed") &&
+        crashedStatus.result?.final_report_status === null,
+      JSON.stringify(crashedStatus).slice(0, 280),
+    );
+
     fabricateRun("run-live-verifier", {
       chatMode: "execute",
       workerTasks: [{

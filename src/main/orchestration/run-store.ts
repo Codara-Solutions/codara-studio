@@ -30,6 +30,7 @@ import type {
   StartDirectWorkerRunInput,
   WorkerAttemptStatus,
   LaunchWorkerAttemptInput,
+  LiveWorkerActivity,
   MarkRunSeenInput,
   PauseRunInput,
   RenameRunInput,
@@ -165,16 +166,23 @@ import {
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import {
+  autoReviewedTaskStatus,
   countFollowUpLineageAttempts,
   reconcileAcceptedVerifierOnlySteps,
   rehomeSettledStepFeedbackRetry,
   resolveFollowUpDestinationStep,
+  settledReviewedStepStatus,
 } from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
-import { decideWorkerReport, readWorkerReport } from "./worker-report";
+import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
+import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
-import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
+import {
+  classifyWorkerSilence,
+  classifyWorkerTurnCeiling,
+  isWorkerTurnCeilingFailure,
+} from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
   managerTurnParkReason,
@@ -187,6 +195,16 @@ import {
   MANUAL_REVIEW_QUESTION_OPTIONS,
   parseManualReviewVerdict,
 } from "./manual-review";
+// The unverified-completion question is asked instead of completing when the
+// work is finished but unverified. The run stays reviewable and the user owns
+// the call, rather than a cap-broken or never-verified run being reported as a
+// clean green finish.
+import {
+  UNFINISHED_WORKER_OPTIONS,
+  UNVERIFIED_COMPLETION_OPTIONS,
+  UNVERIFIED_COMPLETION_QUESTION,
+  parseUnverifiedCompletionChoice,
+} from "./worker-outcome-questions";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
 // Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
@@ -274,6 +292,7 @@ import {
   isOpenRouterModelId,
   plannedWorkerModel,
   rosterModelFor,
+  runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { shouldResumeForUserMessage } from "./user-message-resume";
@@ -488,6 +507,17 @@ interface ActiveWorkerProcess {
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
+// Attempts between launchWorkerAttempt's start and their activeWorkerProcesses
+// entry. That window covers account resolution, the launch plan and Pi
+// startup, and a Stop landing inside it used to find nothing to kill, so the
+// worker went on to run its whole task in a paused run. Stop marks the entry
+// aborted and the launch backs out at its next checkpoint.
+interface LaunchingWorkerAttempt {
+  runId: string;
+  workerTaskId: string;
+  aborted: boolean;
+}
+const launchingWorkerAttempts = new Map<string, LaunchingWorkerAttempt>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
@@ -559,6 +589,68 @@ const drainRunRuntimeResources = createRunRuntimeShutdown({
  */
 export function shutdownRunRuntimeResources(maxWaitMs?: number): Promise<void> {
   return drainRunRuntimeResources(maxWaitMs);
+}
+
+/**
+ * Activity readouts of the workspace's live worker attempts, straight from the
+ * run cache that reportActivity writes. The renderer polls this instead of
+ * listRuns while workers run, so a tool call costs a few bytes, not a clone of
+ * every run in the workspace.
+ */
+export function liveWorkerActivity(workspaceId: string): LiveWorkerActivity[] {
+  const live: LiveWorkerActivity[] = [];
+  for (const run of runCache.values()) {
+    if (run.workspaceId !== workspaceId) continue;
+    for (const attempt of run.workerAttempts) {
+      if (attempt.status !== "launching" && attempt.status !== "running" && attempt.status !== "finishing") {
+        continue;
+      }
+      live.push({
+        runId: run.id,
+        attemptId: attempt.id,
+        runtimeActivity: attempt.runtimeActivity,
+        runtimeActivityAt: attempt.runtimeActivityAt,
+      });
+    }
+  }
+  return live;
+}
+
+/**
+ * The work a quit would kill right now: runs with a manager turn in flight or
+ * a worker process alive or starting. Synchronous and memory-only, because the
+ * quit guard has to decide inside before-quit. Run status alone is not enough:
+ * an idle chat can sit at "running" long after its last turn ended.
+ */
+export function liveWorkForQuit(): { chats: number; automations: number; workers: number } {
+  const runIds = new Set<string>();
+  // A launch entry lives until its attempt finishes, so a running worker sits
+  // in both maps: count attempts, not entries.
+  const attemptIds = new Set<string>();
+  for (const worker of activeWorkerProcesses.values()) {
+    runIds.add(worker.runId);
+    attemptIds.add(worker.attemptId);
+  }
+  for (const [attemptId, launching] of launchingWorkerAttempts) {
+    if (launching.aborted) continue;
+    runIds.add(launching.runId);
+    attemptIds.add(attemptId);
+  }
+  for (const run of runCache.values()) {
+    if (isTerminalRunStatus(run.status) || run.status === "paused") continue;
+    if (run.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) runIds.add(run.id);
+  }
+  let chats = 0;
+  let automations = 0;
+  for (const runId of runIds) {
+    if (runCache.get(runId)?.executionMode === "direct") automations += 1;
+    else chats += 1;
+  }
+  return {
+    chats,
+    automations,
+    workers: attemptIds.size,
+  };
 }
 
 interface ManagerDecisionMutationContext {
@@ -952,6 +1044,166 @@ export async function readWorkerAttemptPrompt(
     throw new Error("Worker prompt path is outside its run artifacts.");
   }
   return fs.readFile(promptPath, "utf8");
+}
+
+const WORKER_LOG_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The tail of a worker attempt's transcript (stdout.log, what its pane
+ * showed), so the user can read a worker whose terminal is gone. Confined the
+ * same way as readWorkerAttemptPrompt: the path comes from the attempt record
+ * and must resolve inside the run's own directory.
+ */
+export async function readWorkerAttemptLog(
+  runId: string,
+  attemptId: string,
+): Promise<{ text: string; truncated: boolean } | null> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt?.stdoutLogPath) return null;
+  let logPath: string;
+  try {
+    logPath = await fs.realpath(resolvePath(attempt.stdoutLogPath));
+  } catch {
+    return null;
+  }
+  const artifactRoot = await fs.realpath(runDir(run.id));
+  const relativeLog = relative(artifactRoot, logPath);
+  if (
+    relativeLog === "" ||
+    relativeLog.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    relativeLog === ".." ||
+    isAbsolute(relativeLog)
+  ) {
+    throw new Error("Worker log path is outside its run artifacts.");
+  }
+  const size = (await fs.stat(logPath)).size;
+  const text = await readFileTailUtf8(logPath, WORKER_LOG_TAIL_BYTES);
+  // The log mirrors the pane, so it carries cursor and screen escapes the
+  // inspector would print as literal junk.
+  return { text: stripAnsiAndControls(text ?? ""), truncated: size > WORKER_LOG_TAIL_BYTES };
+}
+
+/**
+ * Stop one worker without pausing its run. The attempt is marked cancelled
+ * BEFORE the kill: the finish path reads a cancelled attempt as an
+ * interruption, so the stopped worker is never reviewed, failed over to the
+ * other provider, or allowed to fail its step. A launch still starting backs
+ * out at its next checkpoint instead of starting Pi.
+ */
+export async function stopWorkerAttempt(runId: string, attemptId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((item) => item.id === attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+  if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return run;
+  const launching = launchingWorkerAttempts.get(attemptId);
+  if (launching) launching.aborted = true;
+  const stopped = await commitRunChange(run, {
+    type: "worker_attempt.stopped_by_user",
+    message: "Worker stopped by the user",
+    workerTaskId: attempt.workerTaskId,
+    payload: { attemptId },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerAttempts.find((item) => item.id === attemptId);
+      if (!target || ATTEMPT_TERMINAL_STATUSES.has(target.status)) return false;
+      target.status = "cancelled";
+      target.error = target.error ?? "Stopped by the user.";
+      target.finishedAt = target.finishedAt ?? timestamp;
+      const task = draft.workerTasks.find((item) => item.id === target.workerTaskId);
+      if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
+        task.status = "cancelled";
+        task.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  const active = activeWorkerProcesses.get(attemptId);
+  if (active) {
+    try {
+      active.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    pty.killImmediate(attemptId);
+  } catch {
+    /* no display PTY */
+  }
+  return stopped;
+}
+
+/**
+ * Run a failed, stopped, or blocked worker task again as a new attempt, so the
+ * old attempt's log and report stay as they were. Only while the run is
+ * working: a paused or blocked run must be resumed (or its question answered)
+ * first, and an ended run belongs to Cora's follow-up flow.
+ */
+export async function retryWorkerTask(runId: string, workerTaskId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const task = run.workerTasks.find((item) => item.id === workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${workerTaskId}`);
+  if (!["failed", "cancelled", "blocked"].includes(task.status)) {
+    throw new Error("Only a failed, stopped, or blocked worker can be retried.");
+  }
+  if (run.status === "paused") {
+    throw new Error("Resume the run before retrying a worker.");
+  }
+  if (run.status === "blocked") {
+    throw new Error("Answer the open question in the chat before retrying a worker.");
+  }
+  if (run.status !== "running" && run.status !== "reviewing") {
+    throw new Error("This run has ended. Ask Cora to continue the work instead.");
+  }
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  // The worker cycle settles a step with a partial or blocked worker at
+  // completed_unverified, and that step is waiting on exactly this decision, so
+  // retrying the blocked worker reopens it. Any other settled step is history.
+  const reopensUnverifiedStep = step?.status === "completed_unverified" && task.status === "blocked";
+  if (step && isImmutableStepStatus(step.status) && !reopensUnverifiedStep) {
+    throw new Error("That worker's step is already settled. Ask Cora for a follow-up instead.");
+  }
+  const lastAttempt = run.workerAttempts
+    .filter((attempt) => attempt.workerTaskId === task.id)
+    .reduce<WorkerAttempt | undefined>(
+      (latest, attempt) => (!latest || attempt.attemptNumber > latest.attemptNumber ? attempt : latest),
+      undefined,
+    );
+  if (lastAttempt && !ATTEMPT_TERMINAL_STATUSES.has(lastAttempt.status)) {
+    throw new Error("That worker is still running.");
+  }
+  await commitRunChange(run, {
+    type: "worker_task.retry_requested",
+    message: `Worker retried by the user: ${task.title}`,
+    workerTaskId: task.id,
+    payload: { previousAttemptId: lastAttempt?.id ?? null },
+    mutate: (draft, timestamp) => {
+      const draftStep = task.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
+      if (
+        draftStep &&
+        (draftStep.status === "failed" ||
+          draftStep.status === "blocked" ||
+          (reopensUnverifiedStep && draftStep.status === "completed_unverified"))
+      ) {
+        draftStep.status = "running";
+        draftStep.updatedAt = timestamp;
+        draft.currentStepId = draftStep.id;
+      }
+      draft.status = "running";
+      draft.updatedAt = timestamp;
+    },
+  });
+  // A sandboxed attempt's cwd is its throwaway worktree; the retry forks a new
+  // one from the real workspace.
+  const cwd = lastAttempt?.sandboxBaseRepo ?? lastAttempt?.cwd ?? autopilotInputFromRun(run).cwd;
+  const envelope = await prepareWorkerTask({
+    runId,
+    workerTaskId,
+    cwd,
+    unattended: Boolean(lastAttempt?.sandboxWorktreePath),
+  });
+  scheduleAutopilotCycles(runId, [envelope.attemptId]);
+  return requireRun(runId);
 }
 
 async function purgeTerminalRunForRetention(runId: string): Promise<void> {
@@ -1400,7 +1652,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       if (verification.ok) {
         return completeRunFromOrchestrator(run.id);
       }
-      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
         reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
         managerMode: "worker_result_review",
       });
@@ -2530,6 +2782,7 @@ export async function failWorkerAttempt(
   runId: string,
   attemptId: string,
   error: string,
+  options?: { interruptedBy?: WorkerAttempt["interruptedBy"] },
 ): Promise<RunState> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((a) => a.id === attemptId);
@@ -2546,6 +2799,7 @@ export async function failWorkerAttempt(
         a.error = error;
         a.failureKind = classifyWorkerFailure(error);
         a.finishedAt = a.finishedAt ?? timestamp;
+        if (options?.interruptedBy) a.interruptedBy = options.interruptedBy;
         const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
         if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
           t.status = "failed";
@@ -4628,6 +4882,7 @@ export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
         run.id,
         attempt.id,
         "the app closed while this worker was running; its process is gone",
+        { interruptedBy: "app_restart" },
       ).catch(() => undefined);
       // requireRun is awaited as an ARGUMENT, so its rejection would escape the
       // trailing .catch and abort recovery for every remaining run. A run
@@ -4790,11 +5045,6 @@ export async function describeMissingHandoffArtifacts(
   return { ok: missing.length === 0, missing };
 }
 
-/** Asked instead of completing when the work is finished but unverified. The
- * run stays reviewable and the user owns the call, rather than a cap-broken or
- * never-verified run being reported as a clean green finish. */
-const UNVERIFIED_COMPLETION_QUESTION =
-  "Every worker finished, but the latest code changes never earned a passing verifier verdict, so I won't mark this done on my own. Tell me whether to run a verifier over the final state or accept the work as it stands.";
 
 /**
  * Finish managed runs that a restart found already done.
@@ -5172,19 +5422,22 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // For execute/auto-mode CC/Codex chat backends, the CC/Codex manager session
   // is doing review itself (reading the worker's final_report_path returned by
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
-  // We need the worker_task to reach a TERMINAL status (accepted/failed/
-  // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
+  // We need the worker_task to reach a TERMINAL status (accepted/blocked/
+  // failed/cancelled) so codara_wait_for_workers actually unblocks: `needs_review`
   // is non-terminal in the WorkerTaskStatus enum, and the manager-review
   // path that normally transitions needs_review → accepted via
-  // decideWorkerReport is explicitly skipped below. So auto-accept on
-  // success here; the CC manager will inspect the report and judge quality.
+  // decideWorkerReport is explicitly skipped below. The terminal status must
+  // still say what the report said: only a `complete` report is accepted, a
+  // failed or missing one fails the task, and a partial or blocked one parks it
+  // at `blocked`. Accepting every report here showed failed workers as green
+  // steps and let the settled-run hop below complete a run nobody reviewed.
   const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const finishedTask = latest.workerTasks.find((t) => t.id === finishedTaskId);
-  const shouldAutoAccept =
+  const autoReviews =
     isExecuteModeCliManager &&
-    finishedTask?.status === "needs_review" &&
+    finishedTask !== undefined &&
     // ...but never for a manual-runtime task. Those exist precisely because
     // the manager yielded no decision (createFallbackAutopilotTask after a
     // failed manager startup): no CLI manager session spawned the task and
@@ -5194,6 +5447,12 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // below then marks green; the classic needs_review escalation keeps the
     // verdict with the human.
     finishedTask.runtimePreference !== "manual";
+  const shouldAutoAccept = autoReviews && finishedTask?.status === "needs_review";
+  const finishedReport =
+    shouldAutoAccept && finishedAttempt?.finalReportPath
+      ? await readWorkerReport(finishedAttempt.finalReportPath).catch(() => null)
+      : null;
+  const autoReviewedStatus = shouldAutoAccept ? autoReviewedTaskStatus(finishedReport?.status) : undefined;
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -5202,7 +5461,10 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       workerTasks: latest.workerTasks.length,
       workerAttempts: latest.workerAttempts.length,
       waitingForOtherWorkers: hasOtherActiveCycles || hasOtherActiveWorkers,
-      autoAcceptedForExecuteModeCli: shouldAutoAccept,
+      autoAcceptedForExecuteModeCli: autoReviewedStatus === "accepted",
+      ...(autoReviewedStatus
+        ? { autoReviewedTaskStatus: autoReviewedStatus, reportStatus: finishedReport?.status ?? null }
+        : {}),
     },
     mutate: (draft, timestamp) => {
       draft.status = hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "reviewing";
@@ -5215,21 +5477,27 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
             : "worker_cycle_completed_needs_manager_review",
         updatedAt: timestamp,
       };
-      if (shouldAutoAccept && finishedTaskId) {
-        const taskInDraft = draft.workerTasks.find((t) => t.id === finishedTaskId);
-        if (taskInDraft && taskInDraft.status === "needs_review") {
-          taskInDraft.status = "accepted";
-          taskInDraft.updatedAt = timestamp;
-          // Also roll up the parent step's review status so it doesn't sit
-          // at "reviewing" forever — the manager (CC) consumes the report
-          // directly via final_report_path.
-          if (taskInDraft.stepId) {
-            const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
-            if (stepInDraft && stepInDraft.status === "reviewing") {
-              stepInDraft.status = "complete";
-              stepInDraft.updatedAt = timestamp;
-            }
-          }
+      const taskInDraft = autoReviews && finishedTaskId
+        ? draft.workerTasks.find((t) => t.id === finishedTaskId)
+        : undefined;
+      if (taskInDraft && autoReviewedStatus && taskInDraft.status === "needs_review") {
+        taskInDraft.status = autoReviewedStatus;
+        taskInDraft.updatedAt = timestamp;
+      }
+      // Also roll up the parent step's review status so it doesn't sit at
+      // "reviewing" forever; the manager consumes the report directly via
+      // final_report_path. The step settles on the worst outcome among its
+      // tasks, and only once none of them is still live, so a sibling's success
+      // never paints over this worker's failure (or the reverse).
+      if (taskInDraft?.stepId) {
+        const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
+        const rolledUp = stepInDraft?.status === "reviewing"
+          ? settledReviewedStepStatus(draft, stepInDraft.id)
+          : undefined;
+        if (stepInDraft && rolledUp && (autoReviewedStatus || rolledUp !== "complete")) {
+          stepInDraft.status = rolledUp;
+          stepInDraft.updatedAt = timestamp;
+          if (draft.currentStepId === stepInDraft.id) draft.currentStepId = undefined;
         }
       }
       draft.updatedAt = timestamp;
@@ -5319,11 +5587,54 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
         await completeRunFromOrchestrator(runId);
         return;
       }
-      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
         reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
         managerMode: "worker_result_review",
       });
+      return;
     }
+    // A worker that failed or did not finish is a decision someone still owes,
+    // and with no manager turn live nobody else will take it: without this the
+    // run sits at "reviewing" with nothing driving it.
+    await escalateUnfinishedWorkerOutcome(settled, finishedTaskId);
+  }
+}
+
+async function escalateUnfinishedWorkerOutcome(
+  run: RunState,
+  taskId: string | undefined,
+): Promise<void> {
+  const finished = taskId ? run.workerTasks.find((item) => item.id === taskId) : undefined;
+  const unfinished = (item: WorkerTask) => item.status === "failed" || item.status === "blocked";
+  // The last worker of a step to land may have succeeded after a sibling did
+  // not; the step's failure is still the open decision.
+  const task = finished && unfinished(finished)
+    ? finished
+    : finished?.stepId
+      ? run.workerTasks.find((item) => item.stepId === finished.stepId && unfinished(item))
+      : undefined;
+  if (!task) return;
+  if (resolveOpenRunQuestionPure(run)) return;
+  if (run.steps.some((step) => step.status === "running" || step.status === "reviewing")) return;
+  const attempt = [...run.workerAttempts].reverse().find((item) => item.workerTaskId === task.id);
+  const report = attempt?.finalReportPath
+    ? await readWorkerReport(attempt.finalReportPath).catch(() => null)
+    : null;
+  const outcome =
+    report?.status === "partial"
+      ? "only finished part of its task"
+      : report?.status === "blocked"
+        ? "got stuck and needs a decision"
+        : "failed";
+  const summary = (report?.summary ?? attempt?.error ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+  const question = `The worker "${task.title}" ${outcome}${summary ? `: ${summary}` : "."} How should I continue?`;
+  try {
+    await askHumanQuestion(run.id, question, UNFINISHED_WORKER_OPTIONS, {
+      reason: `Worker report status: ${report?.status ?? "missing"}.`,
+      managerMode: "worker_result_review",
+    });
+  } catch (err) {
+    console.warn(`[run-store] unfinished-worker question for ${run.id} not posted:`, err);
   }
 }
 
@@ -5693,6 +6004,69 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
   const run = await getRun(runId);
   if (!run) return;
   const error = err instanceof Error ? err.message : String(err);
+  // One worker's launch or review error is that worker's failure. While other
+  // workers or cycles of the run are still going, failing the whole run used
+  // to mark those siblings failed while their processes kept running and
+  // later overwrote the verdict. Only the attempt that threw is terminalized
+  // then, and the manager sees it (with its error) through wait_for_workers.
+  const othersInFlight =
+    hasOtherAutopilotCycles(runId, attemptId) ||
+    activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId) ||
+    [...launchingWorkerAttempts].some(
+      ([launchingId, entry]) => entry.runId === runId && launchingId !== attemptId,
+    );
+  if (othersInFlight || run.status === "paused") {
+    await commitRunChange(run, {
+      type: "autopilot.cycle_failed",
+      message: `Worker attempt failed: ${error}`,
+      payload: { attemptId, error, scope: "attempt" },
+      mutate: (draft, timestamp) => {
+        const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
+        if (!attempt) return false;
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "failed";
+          attempt.error = attempt.error ?? error;
+          attempt.failureKind = attempt.failureKind ?? classifyWorkerFailure(error);
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+        const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
+        if (
+          task &&
+          ["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(task.status)
+        ) {
+          task.status = "failed";
+          task.updatedAt = timestamp;
+        }
+        const step = task?.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
+        const rolledUp = step && !isTerminalStepStatus(step.status)
+          ? settledReviewedStepStatus(draft, step.id)
+          : undefined;
+        if (step && rolledUp) {
+          step.status = rolledUp;
+          step.updatedAt = timestamp;
+          if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+        }
+        draft.updatedAt = timestamp;
+      },
+    });
+    return;
+  }
+  // Nothing else is in flight, so the run itself has failed. A worker that is
+  // somehow still alive is stopped first, so the recorded state and the
+  // processes agree.
+  for (const worker of activeWorkersForRun(runId)) {
+    try {
+      worker.kill();
+    } catch {
+      /* best-effort */
+    }
+  }
   await commitRunChange(run, {
     type: "autopilot.cycle_failed",
     message: `Autopilot worker cycle failed: ${error}`,
@@ -5701,7 +6075,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
       error,
     },
     mutate: (draft, timestamp) => {
-      if (draft.status === "cancelled" || draft.status === "complete") return false;
+      if (draft.status === "cancelled" || draft.status === "complete" || draft.status === "paused") return false;
       draft.status = "failed";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -5722,6 +6096,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
           attempt.status === "finishing"
         ) {
           attempt.status = "failed";
+          if (attempt.id === attemptId) attempt.error = attempt.error ?? error;
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
         }
       }
@@ -10425,9 +10800,149 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     schedulePendingManagerResume(manualReview);
     return manualReview;
   }
+  const unverifiedChoice = await maybeApplyUnverifiedCompletionAnswer(
+    updated,
+    questionMessageId,
+    messageId,
+    message,
+  );
+  if (unverifiedChoice) return unverifiedChoice;
 
   schedulePendingManagerResume(updated);
   return updated;
+}
+
+/**
+ * Apply a canned answer to the unverified-completion question without a manager
+ * turn. Returns null for any other question or for free text, which then goes
+ * to Cora as usual.
+ *
+ * "Use it as is" finishes the run but records that nothing checked it, so the
+ * completion never reads as verified. "Check it now" appends one verifier step
+ * over the final state and launches it; the worker cycle's settled-run hop then
+ * completes the run when the verdict passes, or asks again when it does not.
+ * Either way the answer is consumed here, so the pending manager resume the
+ * answer stamped is dropped: a manager turn would only re-decide (and could
+ * spawn a second verifier for) a choice the user already made.
+ */
+async function maybeApplyUnverifiedCompletionAnswer(
+  run: RunState,
+  questionMessageId: string,
+  answerMessageId: string,
+  answerText: string,
+): Promise<RunState | null> {
+  const question = run.humanMessages.find(
+    (entry) => entry.id === questionMessageId && entry.kind === "question",
+  );
+  const options = question?.questionOptions ?? [];
+  if (!options.some((option) => option.id === UNVERIFIED_COMPLETION_OPTIONS[0].id)) return null;
+  const choice = parseUnverifiedCompletionChoice(answerText, options);
+  if (!choice) return null;
+
+  const consumeAnswer = (draft: RunState): void => {
+    abandonRunQuestionOwnership(draft);
+    const answer = draft.humanMessages.find((entry) => entry.id === answerMessageId);
+    if (answer) answer.deliveryState = "acknowledged";
+  };
+
+  if (choice === "accept") {
+    const accepted = await commitRunChange(run, {
+      type: "run.accepted_unverified",
+      message: "The user accepted the changes without a check",
+      payload: { questionMessageId, source: "user_accepted_unverified" },
+      mutate: (draft, timestamp) => {
+        if (isTerminalRunStatus(draft.status)) return false;
+        consumeAnswer(draft);
+        draft.status = "complete";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "complete",
+          lastAction: "user_accepted_unverified",
+          stopReason: "Finished at the user's request without a verifier check.",
+          updatedAt: timestamp,
+        };
+        draft.completedAt = timestamp;
+        draft.updatedAt = timestamp;
+      },
+    });
+    await addRunMessage({
+      runId: run.id,
+      author: "system",
+      kind: "note",
+      message: "Finished without a check, as you asked. These changes have not been verified.",
+    }).catch(() => undefined);
+    return requireRun(accepted.id);
+  }
+
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) return null;
+  let implementerRuntime: WorkerRuntime | undefined;
+  for (const attempt of [...run.workerAttempts].reverse()) {
+    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+    if (!task || task.taskClass === "verifier" || !attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (report && report.filesChanged.length > 0) {
+      implementerRuntime = task.runtimePreference;
+      break;
+    }
+  }
+  const verifierRuntime: WorkerRuntime = implementerRuntime === "claude" ? "codex" : "claude";
+  const stepId = makeId("step");
+  const taskId = makeId("task");
+  const resumed = await commitRunChange(run, {
+    type: "run.verification_requested",
+    message: "The user asked for a check of the final changes",
+    payload: { questionMessageId, stepId, taskId, verifierRuntime },
+    mutate: (draft, timestamp) => {
+      if (isTerminalRunStatus(draft.status)) return false;
+      consumeAnswer(draft);
+      const { step } = resolveFollowUpDestinationStep(draft, {
+        newStepId: stepId,
+        title: "Check the final changes",
+        goal: "Independently verify the run's final changes.",
+        acceptanceCriteria: ["An independent verifier signs off on the final state."],
+        timestamp,
+      });
+      draft.workerTasks.push({
+        id: taskId,
+        runId: draft.id,
+        stepId: step.id,
+        title: "Verify the final changes",
+        description: [
+          "Independently verify the changes this run made, as they stand now.",
+          "Re-derive ground truth from the filesystem; do NOT trust earlier workers' self-reports.",
+          "Return a verifier verdict covering what the user asked for in this chat.",
+        ].join("\n"),
+        runtimePreference: verifierRuntime,
+        effortHint: "low",
+        status: "created",
+        allowedPaths: [],
+        forbiddenPaths: [],
+        expectedOutputs: [],
+        verificationCommands: [],
+        canRunParallel: false,
+        conflictsWith: [],
+        taskClass: "verifier",
+        createdBy: "spark",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      if (!step.workerTaskIds.includes(taskId)) step.workerTaskIds.push(taskId);
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "user_requested_verification",
+        stopReason: undefined,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!resumed.workerTasks.some((task) => task.id === taskId)) return resumed;
+  const envelope = await prepareWorkerTask({ runId: run.id, workerTaskId: taskId, cwd });
+  scheduleAutopilotCycles(run.id, [envelope.attemptId]);
+  return requireRun(run.id);
 }
 
 /**
@@ -10551,7 +11066,7 @@ async function maybeApplyManualReviewAnswer(
     if (verification.ok) {
       return completeRunFromOrchestrator(applied.id);
     }
-    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
       reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
       managerMode: "worker_result_review",
     });
@@ -10924,13 +11439,17 @@ export async function resumeManagerTurnRecovery(
   return { outcome: decision.outcome, run };
 }
 
-/** One worker attempt a pause killed before it could finish. */
+/** One worker attempt a pause or app restart killed before it could finish. */
 interface ResumeInterruptedAttempt {
   attemptId: string;
   attemptNumber: number;
   taskId: string;
   taskTitle: string;
   stepLabel: string;
+  /** Its session can be continued warm with follow_up_of on `runtime`. */
+  continuable: boolean;
+  runtime: WorkerRuntime;
+  cause: "pause" | "app_restart";
 }
 
 // forcePauseRun kills the PTYs first and commits the pause after, so an attempt
@@ -10951,7 +11470,9 @@ const RESUME_INTERRUPTED_NOTE_LIMIT = 12;
 /**
  * The attempts a pause interrupted and nobody has picked back up: their task is
  * still `cancelled` (so no follow-up task superseded it) and their newest
- * attempt is `cancelled` (killed, not failed and not retried). This is the list
+ * attempt is `cancelled` (killed, not failed and not retried). Attempts the app
+ * quit killed are recorded failed with interruptedBy "app_restart" by boot
+ * recovery and are listed the same way. This is the list
  * the manager needs on resume — it owns retry bookkeeping, so Resume's job is
  * to tell it exactly what stopped mid-flight, not to relaunch behind its back.
  */
@@ -10963,15 +11484,23 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       .filter((id): id is string => Boolean(id)),
   );
   const rows: ResumeInterruptedAttempt[] = [];
+  const resumedSessionIds = new Set(
+    run.workerTasks
+      .map((task) => task.resumeSessionId)
+      .filter((id): id is string => Boolean(id)),
+  );
   for (const task of run.workerTasks) {
-    if (task.status !== "cancelled") continue;
+    if (task.status !== "cancelled" && task.status !== "failed") continue;
     if (supersededTaskIds.has(task.id)) continue;
     const attempts = run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id);
     if (attempts.length === 0) continue;
     const latest = attempts.reduce((best, attempt) =>
       (attempt.attemptNumber ?? 0) >= (best.attemptNumber ?? 0) ? attempt : best,
     );
-    if (latest.status !== "cancelled") continue;
+    const restartKilled = latest.status === "failed" && latest.interruptedBy === "app_restart";
+    if (task.status === "failed" ? !restartKilled : latest.status !== "cancelled") continue;
+    // Already continued by a follow-up: that worker owns the work now.
+    if (latest.piSessionId && resumedSessionIds.has(latest.piSessionId)) continue;
     if (Number.isFinite(pausedAtMs)) {
       const finishedMs = Date.parse(latest.finishedAt ?? "");
       if (Number.isFinite(finishedMs) && finishedMs < pausedAtMs - PAUSE_KILL_LEAD_MS) continue;
@@ -10983,6 +11512,14 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       taskId: task.id,
       taskTitle: task.title,
       stepLabel: step ? `Step ${step.index} "${step.title}"` : "No step",
+      continuable:
+        evaluateWorkerSessionReuse({
+          run,
+          followUpOfTaskId: task.id,
+          requestedRuntime: latest.runtime,
+        }).kind === "resume",
+      runtime: latest.runtime,
+      cause: restartKilled ? "app_restart" : "pause",
     });
   }
   return rows;
@@ -10998,15 +11535,26 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
 function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string {
   const listed = rows.slice(0, RESUME_INTERRUPTED_NOTE_LIMIT);
   const remaining = rows.length - listed.length;
+  const anyContinuable = listed.some((row) => row.continuable);
+  const byRestart = rows.some((row) => row.cause === "app_restart");
   return [
     RESUME_INTERRUPTED_NOTE_HEADER,
-    "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+    `Resume this run. ${byRestart ? "The app restart or the pause" : "The pause"} stopped the attempts below before they finished, and nothing is running now:`,
     ...listed.map(
       (row) =>
-        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted)`,
+        `- ${row.stepLabel} · ${row.taskTitle}, task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted${
+          row.continuable ? `, continuable on ${row.runtime}` : ""
+        })`,
     ),
     ...(remaining > 0 ? [`- …and ${remaining} more interrupted attempt(s).`] : []),
-    "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
+    ...(anyContinuable
+      ? [
+          "A continuable task keeps its worker's session: spawn one worker with follow_up_of set to that task id, " +
+            "the same runtime, and a brief that says to check its edits so far and finish the remaining work. " +
+            "It continues where it stopped instead of starting over.",
+        ]
+      : []),
+    "Re-issue the work that is still needed (continue or relaunch those tasks, or replace them if the plan changed), then carry on.",
   ].join("\n");
 }
 
@@ -11385,6 +11933,9 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
   // every exit the cancel causes read as interrupted.
   openForcePauseWindow(run.id);
   try {
+    // A worker still starting has no process to kill yet; its launch checks
+    // this flag and stands down instead of running in the cancelled run.
+    abortLaunchingWorkers(run.id);
     await disposeManagerSessions(run.id);
     const activeWorkers = activeWorkersForRun(run.id);
     for (const worker of activeWorkers) {
@@ -11425,6 +11976,10 @@ function commitCancelledRun(run: RunState, reason: string): Promise<RunState> {
         call.completedAt = timestamp;
       }
       for (const attempt of draft.workerAttempts) {
+        // Cancel opens the force-pause window, so an exit that landed before
+        // this commit was tagged as pause-interrupted. A cancelled run has
+        // nothing to continue.
+        delete attempt.interruptedBy;
         if (
           attempt.status === "preparing" ||
           attempt.status === "prompt_ready" ||
@@ -13693,9 +14248,27 @@ function isWorkerEffort(value: string): value is NonNullable<WorkerTask["effortH
 }
 
 export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
+  if (!attempt || launchingWorkerAttempts.has(attempt.id)) return launchWorkerAttemptInner(input);
+  launchingWorkerAttempts.set(attempt.id, {
+    runId: run.id,
+    workerTaskId: attempt.workerTaskId,
+    aborted: false,
+  });
+  try {
+    return await launchWorkerAttemptInner(input);
+  } finally {
+    launchingWorkerAttempts.delete(attempt.id);
+  }
+}
+
+async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promise<RunState> {
   let run = await requireRun(input.runId);
   const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
   if (!attempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
+  // Stopped before its cycle reached it: a cancelled attempt never launches.
+  if (attempt.status === "cancelled") return run;
   if (attempt.status !== "prompt_ready" && attempt.status !== "failed") {
     throw new Error(`Worker attempt is not ready to launch: ${attempt.status}`);
   }
@@ -13726,21 +14299,33 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     task.runtimePreference === "codex" ||
     task.runtimePreference === "grok";
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
+  const usableWorkerRuntimes = workerSettings
+    ? await detectConfiguredAgentRuntimes()
+        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
+        .catch(() => undefined)
+    : undefined;
   const piWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
         workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
         run.executionMode === "direct" && !isAutomationRun,
+        usableWorkerRuntimes,
       )
     : undefined;
+  // Keep the attempt's runtime in step with the provider the model launches
+  // on, so labels and session reuse never contradict the session.
+  const launchRuntime: WorkerRuntime = isPiWorker
+    ? runtimeForWorkerModelId(piWorkerModel) ?? task.runtimePreference
+    : task.runtimePreference;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
       "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
     );
   }
+  if (workerLaunchAborted(attempt.id)) return run;
   const command = isPiWorker
-    ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+    ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
     : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
@@ -13750,6 +14335,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.error = undefined;
   attempt.failureKind = undefined;
   attempt.command = command;
+  attempt.runtime = launchRuntime;
   attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
   attempt.stdoutLogPath = paths.stdoutLog;
@@ -13881,6 +14467,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           promptText,
           command,
           model: piWorkerModel!,
+          launchAborted: () => workerLaunchAborted(attempt.id),
         })
       : await runWorkerSession({
           run,
@@ -13908,11 +14495,26 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // user stopped on purpose.
   const pauseInterrupted = workerExitInterruptedByForcePause({
     runId: run.id,
+    attemptId: finishedAttempt.id,
     exitCode: result.exitCode,
     attemptStatus: finishedAttempt.status,
   });
-  finishedAttempt.status =
-    result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
+  // A run that already ended (failed or cancelled while this worker ran) owns
+  // the verdicts it wrote. A late exit records its details but must not flip a
+  // terminal attempt or task back to succeeded/needs_review, and nothing may be
+  // reviewed or relaunched from it.
+  const runAlreadyEnded = run.status === "failed" || run.status === "cancelled";
+  const keepAttemptVerdict =
+    runAlreadyEnded && ["failed", "timed_out", "cancelled"].includes(finishedAttempt.status);
+  const keepTaskVerdict =
+    runAlreadyEnded && ["failed", "cancelled", "blocked", "accepted"].includes(finishedTask.status);
+  if (!keepAttemptVerdict) {
+    finishedAttempt.status =
+      result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
+  }
+  if (pauseInterrupted && (forcePausingRuns.get(run.id) ?? 0) > 0) {
+    finishedAttempt.interruptedBy = "pause";
+  }
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
@@ -13950,8 +14552,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // later worker can move the shared tree. Best-effort: non-Git workspaces and
   // legacy attempts without a pre-worker baseline simply omit the counters.
   await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
-  finishedTask.status =
-    result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
+  if (!keepTaskVerdict) {
+    finishedTask.status =
+      result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
+  }
   finishedTask.updatedAt = finishedAt;
   const finishedStep = finishedTask.stepId ? run.steps.find((item) => item.id === finishedTask.stepId) : undefined;
   // A pause-interrupted worker says nothing about its step: the force pause owns
@@ -13960,6 +14564,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (
     finishedStep &&
     !pauseInterrupted &&
+    !runAlreadyEnded &&
     !["complete", "completed_unverified", "skipped"].includes(finishedStep.status)
   ) {
     if (result.exitCode !== 0) {
@@ -14076,6 +14681,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
       }
     }
   }
+
+  if (runAlreadyEnded) return run;
 
   run = await reviewWorkerReportArtifact({
     run,
@@ -15131,17 +15738,24 @@ function forcePauseWindowClosed(runId: string): Promise<void> | null {
  * flight, so Resume and the report surfaces showed a step that "failed" when in
  * truth it was interrupted. `forcePausingRuns` covers the exit landing first,
  * the persisted `cancelled` status covers the pause commit landing first.
- * Everything outside that window is a genuine failure and stays `failed`.
+ * Cancel and the per-worker Stop have no pause window; they mark the attempt's
+ * launch entry aborted before they kill, which covers their exit landing ahead
+ * of their commit. Everything else is a genuine failure and stays `failed`.
  *
  * Exported for scripts/test-force-pause-resume.cjs.
  */
 export function workerExitInterruptedByForcePause(input: {
   runId: string;
+  attemptId?: string;
   exitCode: number;
   attemptStatus: WorkerAttempt["status"];
 }): boolean {
   if (input.exitCode === 0) return false;
-  return (forcePausingRuns.get(input.runId) ?? 0) > 0 || input.attemptStatus === "cancelled";
+  return (
+    (forcePausingRuns.get(input.runId) ?? 0) > 0 ||
+    input.attemptStatus === "cancelled" ||
+    (input.attemptId !== undefined && workerLaunchAborted(input.attemptId))
+  );
 }
 
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
@@ -15201,6 +15815,7 @@ function carryQueuedInputAcrossEpoch(
 
 async function forcePauseRunInner(run: RunState): Promise<RunState> {
   const reason = "Force-paused by user";
+  const launchingWorkers = abortLaunchingWorkers(run.id);
   const activeWorkers = activeWorkersForRun(run.id);
   const oldEpoch = conversationEpoch(run);
 
@@ -15232,10 +15847,13 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
   activeAutopilotReviews.delete(run.id);
 
   // 3. Commit the paused status and transition in-flight attempts/tasks to
-  //    cancelled (so the next resume doesn't think they're still alive).
-  const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
+  //    cancelled (so the next resume doesn't think they're still alive). A
+  //    launch can start while the teardown above awaits, so collect launching
+  //    attempts again right before the commit.
+  const stoppedWorkers = [...activeWorkers, ...launchingWorkers, ...abortLaunchingWorkers(run.id)];
+  const cancelledAttemptIds = new Set(stoppedWorkers.map((w) => w.attemptId));
   const cancelledTaskIds = new Set(
-    activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
+    stoppedWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
   );
   return commitRunChange(run, {
     type: "run.force_paused",
@@ -15300,6 +15918,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
           attempt.status = "cancelled";
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
         }
+        if (attempt.status === "cancelled") attempt.interruptedBy = attempt.interruptedBy ?? "pause";
       }
       for (const task of draft.workerTasks) {
         if (!cancelledTaskIds.has(task.id)) continue;
@@ -15647,7 +16266,11 @@ async function maybeSpawnDeclaredVerifier({
       : task.runtimePreference === "codex"
         ? "claude"
         : task.runtimePreference;
-  const changed = report.filesChanged.slice(0, 20).join(", ");
+  const changed = report.filesChanged
+    .slice(0, 20)
+    .map((file) => file.path)
+    .filter(Boolean)
+    .join(", ");
   const rerun = priorAutoVerifiers.length > 0;
   const description = [
     brief,
@@ -18074,6 +18697,30 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
 }
 
+function workerLaunchAborted(attemptId: string): boolean {
+  return launchingWorkerAttempts.get(attemptId)?.aborted === true;
+}
+
+/**
+ * Abort every launch of this run that has not registered a live process yet
+ * and close the display PTYs they may already own. Returns them so the caller
+ * can cancel their attempts in the same commit that stops the run.
+ */
+function abortLaunchingWorkers(runId: string): Array<{ attemptId: string; workerTaskId: string }> {
+  const aborted: Array<{ attemptId: string; workerTaskId: string }> = [];
+  for (const [attemptId, entry] of launchingWorkerAttempts) {
+    if (entry.runId !== runId) continue;
+    entry.aborted = true;
+    aborted.push({ attemptId, workerTaskId: entry.workerTaskId });
+    try {
+      pty.killImmediate(attemptId);
+    } catch {
+      /* no display PTY yet */
+    }
+  }
+  return aborted;
+}
+
 /** How many earlier attempts' handoffs one worker prompt may inherit. */
 const MAX_INHERITED_HANDOFF_ARTIFACTS = 8;
 
@@ -19411,10 +20058,14 @@ async function readWorkerReportWithWorkspaceShadowRecovery(
   return { report: shadowReport, relocatedFrom: shadowPath };
 }
 
+// The provider follows the model, not runtimePreference: a fallback from the
+// enabled list, or a plan pairing "claude" with a gpt hint, would otherwise
+// launch the model on the wrong provider and fail validation.
 function piProviderForWorker(task: WorkerTask, model: string | undefined): PiProvider {
   if (model?.includes("/")) return "openrouter";
-  if (task.runtimePreference === "grok") return "xai";
-  return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
+  const runtime = runtimeForWorkerModelId(model) ?? task.runtimePreference;
+  if (runtime === "grok") return "xai";
+  return runtime === "claude" ? "anthropic" : "openai-codex";
 }
 
 function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
@@ -19431,10 +20082,11 @@ function piModelForWorker(
   isAutomationRun = false,
   enabledModels?: readonly string[],
   isDirectRun = false,
+  usableRuntimes?: ReadonlySet<string>,
 ): string | undefined {
   // Share selection with queued worker labels so the advertised model and
   // the launch target agree before an attempt has started.
-  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels });
+  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels, usableRuntimes });
 }
 
 function piWorkerToolLabel(value: unknown): string {
@@ -19656,6 +20308,10 @@ function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
   );
 }
 
+// Finishing something, not merely streaming, is what re-arms a worker turn's
+// no-progress ceiling.
+const PI_WORKER_PROGRESS_EVENTS = new Set<string>(["tool_execution_end", "message_end", "compaction_end"]);
+
 /**
  * Drive one Pi worker turn to completion.
  *
@@ -19672,8 +20328,8 @@ async function waitForPiWorkerTurn(
   interrupted: () => boolean = () => false,
   onCompaction?: (phase: "compacting" | "resuming") => void,
   taskContract?: () => string,
+  onWrapUp?: () => void,
 ): Promise<void> {
-  let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
   let compaction: PiWorkerCompaction | undefined;
@@ -19684,9 +20340,13 @@ async function waitForPiWorkerTurn(
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
       let stallReported = false;
+      const startedAt = Date.now();
+      let lastProgressAt = startedAt;
+      let wrapUpRequestedAt: number | null = null;
       unsubscribe = client.onEvent((event) => {
         lastEventAt = Date.now();
         lastEventType = event.type;
+        if (PI_WORKER_PROGRESS_EVENTS.has(event.type)) lastProgressAt = lastEventAt;
         // Any traffic at all means the worker is reachable again. Clear the
         // stall mark so the pane returns to its real state rather than wearing
         // an amber badge for the rest of a turn that recovered.
@@ -19730,13 +20390,23 @@ async function waitForPiWorkerTurn(
           stallReported = true;
           onStallChange?.({ stalled: true, detail: verdict.detail });
         }
+        const ceiling = classifyWorkerTurnCeiling({
+          now: Date.now(),
+          startedAt,
+          lastProgressAt,
+          wrapUpRequestedAt,
+        });
+        if (ceiling.action === "fail") {
+          reject(new Error(ceiling.detail));
+          return;
+        }
+        if (ceiling.action === "wrap_up") {
+          wrapUpRequestedAt = Date.now();
+          onWrapUp?.();
+          void client.prompt(ceiling.detail, "steer").catch(() => undefined);
+        }
       }, 500);
       poll.unref();
-      timer = setTimeout(
-        () => reject(new Error("Pi worker timed out after 90 minutes.")),
-        PI_WORKER_TURN_CEILING_MS,
-      );
-      timer.unref();
     });
     await client.prompt(prompt);
     await settled;
@@ -19744,7 +20414,6 @@ async function waitForPiWorkerTurn(
     compaction?.dispose();
     unsubscribe();
     if (poll) clearInterval(poll);
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -19796,6 +20465,7 @@ async function runPiWorkerSession({
   promptText,
   command,
   model,
+  launchAborted = () => false,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -19805,6 +20475,7 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
   model: string;
+  launchAborted?: () => boolean;
 }): Promise<{
   exitCode: number;
   error?: string;
@@ -19818,22 +20489,14 @@ async function runPiWorkerSession({
   contextWindowTokens?: number;
 }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  await ensurePiWorkerDisplayPty(attemptId, cwd);
-  await pty.waitForResize(attemptId, 5_000);
-
   const provider = piProviderForWorker(task, model);
   const thinking = piThinkingForWorker(task);
   const modelLabel = model;
-  pty.publishOutput(
-    attemptId,
-    `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
-      `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
-      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the Pi harness…\r\n`,
-  );
 
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  let reportInvalid = false;
   const taskSteering: string[] = [];
   const taskContract = () => [
     task.description.trim(),
@@ -19935,7 +20598,27 @@ async function runPiWorkerSession({
     target.run.updatedAt = at;
   };
 
+  // A Stop that lands before the worker has a live process aborts its launch.
+  // Throwing an interruption sends it down the normal failure path, where the
+  // pause's cancelled verdict on the attempt keeps it out of review.
+  const backOutIfStopped = () => {
+    if (!launchAborted()) return;
+    interrupted = true;
+    throw new Error("Pi worker was interrupted before it started: the run was stopped.");
+  };
+
   try {
+    // Inside the try so a display failure (no default shell, PTY spawn error)
+    // ends this attempt with a failure report instead of escaping to the cycle,
+    // which would fail the whole run and its sibling workers with it.
+    await ensurePiWorkerDisplayPty(attemptId, cwd);
+    await pty.waitForResize(attemptId, 5_000);
+    pty.publishOutput(
+      attemptId,
+      `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
+        `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
+        `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the Pi harness…\r\n`,
+    );
     const step = run.steps.find((item) => item.id === task.stepId);
     // Mailbox provisioning, not group membership: an unflagged batch worker
     // still gets the peer_* tools so Cora can reach it. Which recipients those
@@ -20050,14 +20733,19 @@ async function runPiWorkerSession({
     ) {
       throw new Error("Pi worker plan changed its frozen account identity");
     }
+    backOutIfStopped();
     client = new PiRpcClient(plan, {
       requestTimeoutMs: 120_000,
       shutdownGraceMs: 2_000,
     });
     await client.start();
+    backOutIfStopped();
 
     const runningTimestamp = new Date().toISOString();
-    await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+    if (!(await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp, piSessionId))) {
+      interrupted = true;
+      throw new Error("Pi worker was interrupted before it started: the attempt was cancelled.");
+    }
     await appendEvent({
       timestamp: runningTimestamp,
       workspaceId: run.workspaceId,
@@ -20227,29 +20915,54 @@ async function runPiWorkerSession({
     };
 
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
+    backOutIfStopped();
     const compactionProgress = (phase: "compacting" | "resuming") => {
       const detail = phase === "compacting" ? "Compacting context…" : "Resuming after context compaction…";
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
     };
-    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
+    const wrapUpRequested = () => {
+      reportActivity("Time limit reached: writing a partial report…");
+      paint("\r\n  \x1b[33m⏱ Turn time limit reached: asking the worker to hand in a partial report\x1b[0m\r\n");
+    };
+    await waitForPiWorkerTurn(
+      client,
+      promptText,
+      reportStall,
+      () => interrupted,
+      compactionProgress,
+      taskContract,
+      wrapUpRequested,
+    );
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
     if (!report) {
+      // Tell the worker exactly what is wrong. A bare "not parseable" made it
+      // rewrite the same shape, and the second miss threw its work away.
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
       paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
       await waitForPiWorkerTurn(
         client,
-        `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
+        `Your task turn ended without a valid final report at ${paths.finalReportJson}` +
+          `${problem ? `: ${problem}` : ""}. ` +
+          'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
           "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
         reportStall,
         () => interrupted,
         compactionProgress,
         taskContract,
+        wrapUpRequested,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }
-    if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
+    if (!report) {
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
+      reportInvalid = true;
+      throw new Error(
+        `Pi worker completed without a parseable final-report.json${problem ? ` (${problem})` : ""}.`,
+      );
+    }
 
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
@@ -20263,7 +20976,14 @@ async function runPiWorkerSession({
     // provider "servers overloaded" arriving during shutdown, long after the
     // validated report), writeAutoFailureReport preserves it and this session
     // settles as succeeded so the report's verdict decides the node.
-    const failureWrite = await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
+    const failureWrite = await writeAutoFailureReport(paths, task, message, {
+      interrupted,
+      cause: reportInvalid
+        ? "no_valid_report"
+        : isWorkerTurnCeilingFailure(message)
+          ? "turn_ceiling"
+          : undefined,
+    }).catch(() => null);
     if (failureWrite?.preservedExisting) {
       const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
       if (report && (report.status === "complete" || report.status === "partial")) {
@@ -20331,20 +21051,28 @@ async function stampAttemptAccountProfile(
   });
 }
 
+// Returns false when the attempt was cancelled while it started (a Stop raced
+// the launch): a cancelled attempt never comes back to life as running.
+// The Pi session id is stamped here, not only at finish, because an app quit
+// never reaches the finish path and the session is what lets the interrupted
+// work be continued after the restart.
 async function markAttemptRunning(
   runId: string,
   workerTaskId: string,
   attemptId: string,
   timestamp: string,
-): Promise<void> {
+  piSessionId?: string,
+): Promise<boolean> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((item) => item.id === attemptId);
   const task = run.workerTasks.find((item) => item.id === workerTaskId);
-  if (!attempt || !task) return;
+  if (!attempt || !task) return true;
+  if (attempt.status === "cancelled") return false;
   const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
   attempt.status = "running";
   task.status = "running";
   attempt.startedAt = attempt.startedAt ?? timestamp;
+  if (piSessionId) attempt.piSessionId = piSessionId;
   task.updatedAt = timestamp;
   if (step && !["complete", "completed_unverified", "failed", "skipped"].includes(step.status)) {
     step.status = "running";
@@ -20353,6 +21081,7 @@ async function markAttemptRunning(
   }
   run.updatedAt = timestamp;
   await saveRun(run);
+  return true;
 }
 
 // Returns the full command line we type into pwsh — the same string a user

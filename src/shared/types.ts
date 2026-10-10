@@ -3681,13 +3681,20 @@ export interface WorkerAttempt {
    */
   preWorkerCheckpointSha?: string | null;
   /**
-   * Pi session id this attempt ran under, recorded at session finish. This is
-   * what makes warm follow-up spawns possible: launching a new Pi process with
-   * the same `--session-id` against the canonical session dir continues the
-   * finished worker's transcript. Absent for non-Pi transports (legacy CLI,
-   * structured e2e workers) and for attempts recorded before this field.
+   * Pi session id this attempt ran under, recorded when the session starts and
+   * again at finish. This is what makes warm follow-up spawns possible:
+   * launching a new Pi process with the same `--session-id` against the
+   * canonical session dir continues the worker's transcript. Absent for non-Pi
+   * transports (legacy CLI, structured e2e workers) and for attempts recorded
+   * before this field.
    */
   piSessionId?: string;
+  /**
+   * Set when the attempt ended because the run was paused or the app closed,
+   * not because of anything the worker did. Such an attempt's session may be
+   * continued with follow_up_of even though its task never finished.
+   */
+  interruptedBy?: "pause" | "app_restart";
   /**
    * Context occupancy at session finish: the newest message's input +
    * cacheRead + cacheWrite, a gauge over the last provider request (same
@@ -3699,6 +3706,17 @@ export interface WorkerAttempt {
    * so the reuse gate falls back to contextWindowForModel(attempt.model).
    */
   contextWindowTokens?: number;
+}
+
+/**
+ * A live worker attempt's activity readout, polled by the renderer on its own
+ * so a running worker does not cost a full listRuns every second.
+ */
+export interface LiveWorkerActivity {
+  runId: string;
+  attemptId: string;
+  runtimeActivity?: string;
+  runtimeActivityAt?: string;
 }
 
 export interface WorkerTaskEnvelope {

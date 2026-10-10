@@ -645,12 +645,19 @@ function ensureTray(): void {
   }
 }
 
+// Kept so the quit guard can tell, synchronously, that a quit is the update
+// restart. The install path always runs after this module has loaded.
+let updaterModCached: typeof import("./auto-updater") | undefined;
+
 function registerUpdaterAfterFirstPaint(windowForEvents: BrowserWindow): void {
   // Dev builds load the module too: registerAutoUpdater itself skips update
   // CHECKS when unpackaged but still opens the SSE stream, whose git-push
   // webhook events drive instant fetches for git triggers.
   void import("./auto-updater")
-    .then(({ registerAutoUpdater }) => registerAutoUpdater(windowForEvents))
+    .then((updater) => {
+      updaterModCached = updater;
+      return updater.registerAutoUpdater(windowForEvents);
+    })
     .catch((err) => console.warn("[main] auto-updater failed to load:", err));
 }
 
@@ -751,6 +758,11 @@ function createWindow(): void {
   // window, but a tray is the reliable always-visible re-entry point, so we
   // require it before going headless. On Windows we also drop the taskbar
   // button so the hidden window doesn't linger there.
+  // Windows logoff and shutdown: the same no-prompt rule as powerMonitor's
+  // "shutdown" on macOS and Linux.
+  mainWindow.on("session-end", () => {
+    quitWithLiveWorkConfirmed = true;
+  });
   mainWindow.on("close", (e) => {
     if (isQuitting) return; // real quit in flight — let the window close
     // Close-to-tray: the window hides and the app keeps running. On macOS the
@@ -1201,6 +1213,10 @@ app.whenReady().then(async () => {
   // window too: macOS can lock before the actual suspend event while remote
   // PTYs are still producing final bytes.
   powerMonitor.on("lock-screen", () => pauseTerminalDelivery("lock-screen"));
+  // A logout or shutdown must not stall behind the live-work quit prompt.
+  powerMonitor.on("shutdown", () => {
+    quitWithLiveWorkConfirmed = true;
+  });
   powerMonitor.on("suspend", () => {
     logMain("power", "system suspend");
     pauseTerminalDelivery("suspend");
@@ -1506,8 +1522,58 @@ const piSessionTracker = createPiSessionTracker({
 // cleanup, then quit again (cleanQuit short-circuits the second pass).
 let cleanQuit = false;
 let cleanupRan = false;
+// Set once a quit is allowed to kill live Cora work, so the second before-quit
+// pass (and a quit the OS forces at shutdown) never asks twice.
+let quitWithLiveWorkConfirmed = false;
+
+function describeLiveWork(live: { chats: number; automations: number }): string {
+  const parts: string[] = [];
+  if (live.chats > 0) parts.push(`${live.chats} chat${live.chats === 1 ? "" : "s"}`);
+  if (live.automations > 0) {
+    parts.push(`${live.automations} automation${live.automations === 1 ? "" : "s"}`);
+  }
+  return parts.join(" and ");
+}
+
+// Quitting stops every manager turn and worker in seconds, and the run comes
+// back paused with half-applied edits. Ask first. The check is synchronous and
+// memory-only, so it can decide inside before-quit.
+function confirmQuitWithLiveWork(): boolean {
+  if (quitWithLiveWorkConfirmed || E2E_BACKGROUND) return true;
+  const live = runStoreMod?.liveWorkForQuit();
+  if (!live || live.chats + live.automations === 0) return true;
+  const restartingForUpdate = updaterModCached?.isInstallRequested() === true;
+  const options: Electron.MessageBoxSyncOptions = {
+    type: "warning",
+    buttons: [restartingForUpdate ? "Restart anyway" : "Quit anyway", "Keep working"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    message: `Cora is still working in ${describeLiveWork(live)}.`,
+    detail:
+      (restartingForUpdate ? "Restarting to update" : "Quitting") +
+      " stops it now. The work pauses and can be resumed after the app reopens, " +
+      "but anything a worker was in the middle of is left half done.",
+  };
+  const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
+  const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
+  if (choice !== 0) {
+    if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
+    return false;
+  }
+  quitWithLiveWorkConfirmed = true;
+  return true;
+}
+
 app.on("before-quit", (event) => {
   if (cleanQuit) return;
+  if (!cleanupRan && !confirmQuitWithLiveWork()) {
+    event.preventDefault();
+    // The tray's Quit flags isQuitting before calling app.quit(); undo it so
+    // a later window close hides or quits as it normally would.
+    isQuitting = false;
+    return;
+  }
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false

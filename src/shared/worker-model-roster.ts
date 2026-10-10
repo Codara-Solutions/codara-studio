@@ -118,19 +118,48 @@ export function isOpenRouterModelId(id: string | undefined): boolean {
 }
 
 /**
+ * The native worker runtime a model id belongs to, or undefined for OpenRouter
+ * and unknown ids. A Pi worker's provider follows its model, so this is what
+ * decides which subscription a launch needs.
+ */
+export function runtimeForWorkerModelId(
+  id: string | undefined,
+): "claude" | "codex" | "grok" | undefined {
+  const base = modelBase(id ?? "");
+  if (!base || isOpenRouterModelId(base)) return undefined;
+  if (base.startsWith("claude-")) return "claude";
+  if (base.startsWith("gpt-")) return "codex";
+  if (base.startsWith("grok-")) return "grok";
+  return undefined;
+}
+
+/**
  * Resolve a manager hint against the user's enabled worker list.
  *
  * Exact enabled hints win. Otherwise stay on the requested native family when
  * possible, then fall back to the first enabled model. This makes the setting
  * a real launch boundary rather than a prompt-only preference.
+ *
+ * `usableRuntimes`, when given, narrows every choice to models whose provider
+ * has a connected account (OpenRouter and unknown ids are never excluded): a
+ * model nobody can sign in to only fails at launch. If no enabled model
+ * qualifies, the whole list is used so the launch error names the real gap.
  */
 export function enabledWorkerModelFor(
   runtime: string,
   hint: string | undefined,
   enabledModels: readonly string[],
+  usableRuntimes?: ReadonlySet<string>,
 ): string | undefined {
-  const enabled = [...new Set(enabledModels.map((id) => id.trim()).filter(Boolean))];
-  if (enabled.length === 0) return undefined;
+  const all = [...new Set(enabledModels.map((id) => id.trim()).filter(Boolean))];
+  if (all.length === 0) return undefined;
+  const usable = usableRuntimes
+    ? all.filter((id) => {
+        const family = runtimeForWorkerModelId(id);
+        return family === undefined || usableRuntimes.has(family);
+      })
+    : all;
+  const enabled = usable.length > 0 ? usable : all;
 
   const raw = sanitizeWorkerModelHint(hint?.trim() || undefined);
   const requestedBase = modelBase(raw ?? "");
@@ -210,6 +239,8 @@ export interface WorkerModelOptions {
   isAutomationRun?: boolean;
   isDirectRun?: boolean;
   enabledModels?: readonly string[];
+  /** Runtimes with a connected account; see enabledWorkerModelFor. */
+  usableRuntimes?: ReadonlySet<string>;
 }
 
 export function plannedWorkerModel(
@@ -227,6 +258,7 @@ export function plannedWorkerModel(
       task.runtimePreference,
       task.modelHint,
       options.enabledModels,
+      options.usableRuntimes,
     );
   }
   // For Cora-spawned workers the roster is enforced at the spawn chokepoint,
