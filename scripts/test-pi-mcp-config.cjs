@@ -131,11 +131,11 @@ async function main() {
   // but not there would render a row with Cora/Workers switches that silently
   // do nothing.
   const dialogSource = fs.readFileSync(
-    path.join(__dirname, "..", "src", "renderer", "src", "components", "AgentCapabilitiesDialog.tsx"),
+    path.join(__dirname, "..", "src", "renderer", "src", "components", "capabilities", "model.ts"),
     "utf8",
   );
   const dialogList = dialogSource.match(/const RESERVED_MCP_NAMES = new Set\(\[([\s\S]*?)\]\)/);
-  assert.ok(dialogList, "AgentCapabilitiesDialog.tsx declares RESERVED_MCP_NAMES");
+  assert.ok(dialogList, "capabilities/model.ts declares RESERVED_MCP_NAMES");
   const dialogNames = [...dialogList[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(
     dialogNames.slice().sort(),

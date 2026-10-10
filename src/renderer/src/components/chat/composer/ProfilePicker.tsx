@@ -7,28 +7,54 @@ interface Props {
   activeProfileId: string;
   onPick: (profileId: string) => void;
   onManage: () => void;
+  /** A started chat froze its profile when it was created: show which one,
+   *  but offer no switch that could not affect the conversation. */
+  locked?: boolean;
 }
 
-// Draft-only identity selector. A run freezes its profile when it is created,
-// so this intentionally disappears after the first message rather than
-// offering a switch that cannot affect the active conversation.
+// The Cora profile of this chat. A new chat picks it from the menu, which is
+// shown even while only the built-in profile exists so "New profile" is
+// discoverable. A started chat shows its profile as a read-only chip.
 export default function ProfilePicker({
   profiles,
   activeProfileId,
   onPick,
   onManage,
+  locked = false,
 }: Props) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const active = profiles.find((profile) => profile.id === activeProfileId) ?? profiles[0];
+  const active = profiles.find((profile) => profile.id === activeProfileId) ?? (locked ? undefined : profiles[0]);
 
   useEffect(() => {
+    // Repairing a stale id only applies to a draft; a started chat's profile is
+    // whatever the run recorded, even if that profile was deleted since.
+    if (locked) return;
     if (profiles.some((profile) => profile.id === activeProfileId)) return;
     const fallback = profiles.find((profile) => profile.isDefault) ?? profiles[0];
     if (fallback) onPick(fallback.id);
-  }, [activeProfileId, onPick, profiles]);
+  }, [activeProfileId, locked, onPick, profiles]);
 
-  if (!active || profiles.length < 2) return null;
+  if (locked) {
+    // A deleted profile's chats were moved to the built-in one, which is
+    // named Cora; an id the list no longer has reads the same way.
+    const name = active?.name ?? "Cora";
+    return (
+      <div className="composer-profile">
+        <span
+          className="composer-pill composer-profile-trigger is-locked"
+          title={`Cora profile: ${name}. Profile is fixed for this chat.`}
+          aria-label={`Cora profile: ${name}. Profile is fixed for this chat.`}
+          role="img"
+        >
+          <span className="composer-profile-glyph" aria-hidden>✦</span>
+          <span className="composer-profile-label">{name}</span>
+        </span>
+      </div>
+    );
+  }
+
+  if (!active) return null;
 
   return (
     <div className="composer-profile">
@@ -37,6 +63,7 @@ export default function ProfilePicker({
         type="button"
         className={`composer-pill composer-profile-trigger${open ? " is-active" : ""}`}
         title={`Cora profile: ${active.name}`}
+        aria-label={`Cora profile: ${active.name}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
@@ -84,7 +111,7 @@ export default function ProfilePicker({
             onManage();
           }}
         >
-          Manage profiles…
+          {profiles.length < 2 ? "New profile…" : "New or edit profiles…"}
         </button>
       </AnchoredMenu>
     </div>

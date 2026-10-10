@@ -1,41 +1,64 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAssetInventory,
-  AgentAssetInventoryItem,
-  AgentMcpServerDetail,
+  AgentMcpProbeResult,
+  AgentMcpServerDraft,
   AgentMcpTarget,
+  AgentPiMcpPreview,
   AppSettings,
   CoraMemoryScope,
   CoraMemoryStatus,
   CoraProfile,
-  MemoryTierStatus,
-  SparkBuiltinInstallState,
   SparkBuiltinMcpId,
   SparkBuiltinMcpStatus,
   SparkBuiltinRuntime,
 } from "@shared/types";
-import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
-import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
+import { CORA_WORKER_MODEL_CHOICES } from "@shared/worker-model-roster";
 import {
-  CORA_WORKER_MODEL_CHOICES,
-  WORKER_MODEL_ROSTER,
-} from "@shared/worker-model-roster";
-
-// codara-studio ships inside Codara itself. It stays at the top of the MCP list
-// with its own install controls and is hidden from the discovered inventory so
-// it never reads as a third-party connector. The retired names are earlier
-// copies of the same server: a workspace config can still hold one, and Pi
-// drops all five by name, so a row with live-looking switches would be a lie.
-// Mirrors RESERVED_MCP_SERVER_NAMES in src/main/orchestration/pi-mcp-config.ts,
-// which the renderer cannot import (main-process module); scripts/test-pi-mcp-
-// config.cjs asserts the two lists stay identical.
-const RESERVED_MCP_NAMES = new Set([
-  "codara-studio",
-  "spark-preview",
-  "cora-preview",
-  "spark-orchestrator",
-  "cora-orchestrator",
-]);
+  CAPABILITY_TABS,
+  CLI_LABEL,
+  PAGE_SIZE,
+  RESERVED_MCP_NAMES,
+  RUNTIME_COLUMNS,
+  RUNTIME_LABEL,
+  blankEditor,
+  describeUnlistedTarget,
+  editorDestinations,
+  editorDraft,
+  editorFromDetail,
+  errorText,
+  failure,
+  filterGroups,
+  groupByName,
+  groupItems,
+  isCapabilityTab,
+  mcpSessionKey,
+  ok,
+  openRouterKeyVerified,
+  toggleKey,
+  usableWorkerModels,
+  validateEditor,
+  withPiAssignment,
+  type CapabilityTab,
+  type CliRuntime,
+  type EditorCopy,
+  type EditorState,
+  type NameGroup,
+  type StatusMessage,
+} from "./capabilities/model";
+import {
+  AccentDot,
+  CloseButton,
+  useInteractive,
+  withFocusRing,
+} from "./capabilities/controls";
+import McpSection, { type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
+import McpServerForm from "./capabilities/McpServerForm";
+import SkillsSection from "./capabilities/SkillsSection";
+import ProfilesSection, { type ProfileDocumentDraft, type ProfileDraft } from "./capabilities/ProfilesSection";
+import MemorySection from "./capabilities/MemorySection";
+import WorkerModelsSection from "./capabilities/WorkerModelsSection";
+import BehaviorSection from "./capabilities/BehaviorSection";
 
 interface Props {
   settings: AppSettings;
@@ -44,70 +67,15 @@ interface Props {
    *  which leaves that tier reported as unavailable rather than guessed. */
   workspaceId: string | null;
   initialTab?: CapabilityTab;
+  /** The profile whose memory the Memory section opens on, for example the
+   *  profile of the chat the dialog was opened from. */
+  initialProfileId?: string | null;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
 }
 
-type CapabilityKind = "mcp" | "skill";
-type RuntimeColumn = "claude" | "codex" | "grok" | "shared";
-type CapabilityTab = "mcp" | "skills" | "memory" | "workers" | "policy";
-
-const TABS: { id: CapabilityTab; label: string }[] = [
-  { id: "mcp", label: "MCP servers" },
-  { id: "skills", label: "Skills" },
-  { id: "memory", label: "Memory" },
-  { id: "workers", label: "Worker models" },
-  { id: "policy", label: "Policy" },
-];
-
-interface NameGroup {
-  kind: CapabilityKind;
-  name: string;
-  sessionKey: string;
-  installs: Record<RuntimeColumn, AgentAssetInventoryItem[]>;
-  any: AgentAssetInventoryItem;
-}
-
-interface Pair {
-  key: string;
-  value: string;
-}
-
-// The add/edit form. `replaceId` is the asset id being edited, which the save
-// removes when the name or the destination file changed, so an edit moves an
-// entry instead of forking it.
-interface EditorState {
-  mode: "add" | "edit";
-  replaceId: string | null;
-  targetId: string;
-  name: string;
-  transport: "stdio" | "http";
-  command: string;
-  argsText: string;
-  env: Pair[];
-  url: string;
-  headers: Pair[];
-}
-
-// Which config files a remove touches: one runtime column, or all of them.
-type RemoveScope = RuntimeColumn | "all";
-
-const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "grok", "shared"];
-const PAGE_SIZE = 40;
-const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
-  claude: "Claude",
-  codex: "Codex",
-  grok: "Grok",
-  shared: "Shared",
-};
-// What the user calls the external tools. RUNTIME_LABEL names the config
-// column (and reads right in "Removed X from Claude"); this names the app.
-const CLI_LABEL: Record<"claude" | "codex" | "grok", string> = {
-  claude: "Claude CLI",
-  codex: "Codex CLI",
-  grok: "Grok Build",
-};
-const MCP_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// What leaving would throw away, so the dialog can ask first.
+type LeaveAction = { kind: "close" } | { kind: "back" } | { kind: "tab"; tab: CapabilityTab };
 
 // React StrictMode intentionally mounts effects twice in development. Asset
 // discovery walks the local Claude/Codex skill trees, so issuing the same IPC
@@ -153,114 +121,155 @@ function requestTargets(cwd: string | null): Promise<AgentMcpTarget[]> {
   return promise;
 }
 
-// ── Shared interaction state ─────────────────────────────────────────────────
-// Hand-rolled buttons in this dialog set an inline box-shadow, which silently
-// wins over the global :focus-visible ring (the ring rule isn't !important).
-// Each custom control tracks hover / focus-visible / press locally and composes
-// the accent --focus-ring back into its inline box-shadow so keyboard focus
-// actually renders. Native elements that DON'T set an inline box-shadow (the
-// .spark-* utilities) inherit the global ring for free. Mirrors SettingsDialog.
-function useInteractive() {
-  const [hover, setHover] = useState(false);
-  const [focus, setFocus] = useState(false);
-  const [pressed, setPressed] = useState(false);
-  const handlers = {
-    onMouseEnter: () => setHover(true),
-    onMouseLeave: () => {
-      setHover(false);
-      setPressed(false);
-    },
-    onMouseDown: () => setPressed(true),
-    onMouseUp: () => setPressed(false),
-    onFocus: (event: React.FocusEvent) => {
-      if (event.target.matches(":focus-visible")) setFocus(true);
-    },
-    onBlur: () => {
-      setFocus(false);
-      setPressed(false);
-    },
-  };
-  return { hover, focus, pressed, handlers };
-}
+const EMPTY_PROFILE_DRAFT: ProfileDraft = { name: "", description: "", instructions: "" };
 
-function withFocusRing(base: string | undefined, focus: boolean): string | undefined {
-  if (!focus) return base;
-  if (!base || base === "none") return "var(--focus-ring)";
-  return `${base}, var(--focus-ring)`;
-}
+// What the footer says while no action has reported: there is no Save step,
+// and when each kind of change takes effect.
+const STANDING_NOTE: Record<CapabilityTab, string> = {
+  mcp: "Changes apply as you make them. Cora picks up MCP changes on your next message; running workers keep what they started with.",
+  skills: "Changes apply as you make them. New Cora chats and workers load the skills switched on.",
+  profiles: "Changes apply as you make them. A started chat keeps the profile it began with.",
+  memory: "Memory changes apply immediately.",
+  workers: "Changes apply as you make them, from the next worker Cora starts.",
+  policy: "Changes apply as you make them, for every workspace.",
+};
 
 export default function AgentCapabilitiesDialog({
   settings,
   workspaceCwd,
   workspaceId,
   initialTab = "mcp",
+  initialProfileId = null,
   onClose,
   onSave,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<CapabilityTab>(initialTab);
+  const [activeTab, setActiveTab] = useState<CapabilityTab>(isCapabilityTab(initialTab) ? initialTab : "mcp");
   // Selecting a section should acknowledge the click before the inventory it
   // holds builds its DOM. The nav follows activeTab immediately while React
   // renders the section body at deferred priority. Mirrors SettingsDialog.
   const renderedTab = useDeferredValue(activeTab);
-  const [draft, setDraft] = useState(settings);
   const [assets, setAssets] = useState<AgentAssetInventory | null>(null);
+  const [assetsError, setAssetsError] = useState<string | null>(null);
   const [builtins, setBuiltins] = useState<SparkBuiltinMcpStatus[] | null>(null);
+  const [builtinsError, setBuiltinsError] = useState<string | null>(null);
   const [targets, setTargets] = useState<AgentMcpTarget[]>([]);
-  const [syncing, setSyncing] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [preview, setPreview] = useState<AgentPiMcpPreview | null>(null);
   // One key per in-flight file action: `${sessionKey}` while a row is being
   // removed, `${sessionKey}:${runtime}` while it is copied to a runtime, and
-  // `${builtinId}:${runtime}` for the built-in install controls.
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
+  // `${builtinId}:${runtime}` for the built-in install controls. A set, so two
+  // actions on different rows each keep their own busy state.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
+  const [status, setStatus] = useState<StatusMessage | null>(null);
   const [mcpSearch, setMcpSearch] = useState("");
   const [skillSearch, setSkillSearch] = useState("");
+  const [mcpLimit, setMcpLimit] = useState(PAGE_SIZE);
+  const [skillLimit, setSkillLimit] = useState(PAGE_SIZE);
+  const [probes, setProbes] = useState<Record<string, ProbeState>>({});
+  const [sync, setSync] = useState<SyncState>({ phase: "idle" });
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [editorBusy, setEditorBusy] = useState(false);
-  const [mcpLimit, setMcpLimit] = useState(PAGE_SIZE);
-  const [skillLimit, setSkillLimit] = useState(PAGE_SIZE);
-  // Both memory tiers, or null while the first read is in flight. Every memory
-  // IPC resolves to the fresh pair, so a toggle or a clear replaces this whole
-  // object and no follow-up read is needed.
+  const [editorProbe, setEditorProbe] = useState<ProbeState | null>(null);
+  const editorBaseline = useRef("");
+  const [confirmLeave, setConfirmLeave] = useState<LeaveAction | null>(null);
+  // Both memory tiers of the profile being viewed, or null while the first
+  // read is in flight. Every memory IPC resolves to the fresh pair.
   const [memory, setMemory] = useState<CoraMemoryStatus | null>(null);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [memoryBusy, setMemoryBusy] = useState<CoraMemoryScope | null>(null);
+  const [memoryReload, setMemoryReload] = useState(0);
+  // Whose memory the Memory section shows. Local to the dialog: looking at a
+  // profile must never change which profile new chats default to.
+  const [viewedProfileId, setViewedProfileId] = useState<string | null>(initialProfileId);
   const [profiles, setProfiles] = useState<CoraProfile[]>([]);
-  const [profileName, setProfileName] = useState("");
-  const [profileDescription, setProfileDescription] = useState("");
-  const [profileOperation, setProfileOperation] = useState<
-    "switching" | "creating" | "deleting" | null
-  >(null);
-  const profileBusy = profileOperation !== null;
+  const [profilesLoading, setProfilesLoading] = useState(true);
+  const [profileDraft, setProfileDraft] = useState<ProfileDraft>(EMPTY_PROFILE_DRAFT);
+  const [profileOperation, setProfileOperation] = useState<"switching" | "creating" | "deleting" | null>(null);
+  const [documentDraft, setDocumentDraft] = useState<ProfileDocumentDraft | null>(null);
+  const [documentBusy, setDocumentBusy] = useState(false);
+  const [documentError, setDocumentError] = useState<string | null>(null);
+  const [openRouterVerified, setOpenRouterVerified] = useState<boolean | null>(null);
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
-  // Whether the form is still mounted when an async save settles. A save that
-  // fails after the form was dismissed has nowhere to put setEditorError, so
-  // the message has to fall back to the footer instead of vanishing.
-  const editorRef = useRef<EditorState | null>(null);
+  const navRef = useRef<HTMLElement | null>(null);
+
+  // ── Settings apply as they change ──────────────────────────────────────────
+  // Every switch here persists on its own, so there is no draft to lose on
+  // close and no Save to forget. Each change is a function of the settings it
+  // applies to: it runs against the latest saved record (never a stale copy
+  // that would write back an unrelated field a phone or the composer just
+  // changed), the view shows it optimistically, and a failed save drops it
+  // from the view again. Saves run one at a time so quick toggles compose.
+  const latestSettings = useRef(settings);
+  const pendingChanges = useRef<Array<(current: AppSettings) => AppSettings>>([]);
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const replayPending = (base: AppSettings) =>
+    pendingChanges.current.reduce((current, change) => change(current), base);
+  const [view, setView] = useState<AppSettings>(settings);
   useEffect(() => {
-    editorRef.current = editor;
-  }, [editor]);
+    latestSettings.current = settings;
+    setView(replayPending(settings));
+  }, [settings]);
+
+  const markBusy = useCallback((key: string, on: boolean) => {
+    setBusy((current) => {
+      const next = new Set(current);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, []);
 
   const refreshAssets = useCallback(() => {
+    setAssetsError(null);
     void requestAssets(workspaceCwd)
       .then(setAssets)
-      .catch((err) => setStatus((err as Error).message));
+      .catch((err) => setAssetsError(errorText(err)));
   }, [workspaceCwd]);
 
   const refreshBuiltins = useCallback(() => {
+    setBuiltinsError(null);
     void requestBuiltins()
       .then(setBuiltins)
-      .catch((err) => setStatus((err as Error).message));
+      .catch((err) => setBuiltinsError(errorText(err)));
   }, []);
 
-  useEffect(() => {
-    setDraft(settings);
-  }, [settings]);
+  const refreshPreview = useCallback(() => {
+    void window.spark.agents
+      .piMcpPreview({ cwd: workspaceCwd })
+      .then(setPreview)
+      .catch(() => setPreview(null));
+  }, [workspaceCwd]);
+
+  const applySettings = useCallback(
+    (change: (current: AppSettings) => AppSettings, success: string | null): Promise<boolean> => {
+      pendingChanges.current.push(change);
+      setView((current) => change(current));
+      const run = saveChain.current.then(async () => {
+        try {
+          const next = change(latestSettings.current);
+          await onSave(next);
+          latestSettings.current = next;
+          if (success) setStatus(ok(success));
+          return true;
+        } catch (err) {
+          setStatus(failure(`Could not save that change: ${errorText(err)}`));
+          return false;
+        } finally {
+          pendingChanges.current = pendingChanges.current.filter((entry) => entry !== change);
+          setView(replayPending(latestSettings.current));
+        }
+      });
+      saveChain.current = run;
+      return run;
+    },
+    [onSave],
+  );
 
   useEffect(() => {
     refreshAssets();
-  }, [refreshAssets]);
+    refreshPreview();
+  }, [refreshAssets, refreshPreview]);
 
   useEffect(() => {
     refreshBuiltins();
@@ -273,19 +282,56 @@ export default function AgentCapabilitiesDialog({
   }, [workspaceCwd]);
 
   useEffect(() => {
+    if (isCapabilityTab(initialTab)) setActiveTab(initialTab);
+  }, [initialTab]);
+  useEffect(() => {
+    if (initialProfileId) setViewedProfileId(initialProfileId);
+  }, [initialProfileId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void openRouterKeyVerified(view)
+      .then((verified) => {
+        if (!cancelled) setOpenRouterVerified(verified);
+      })
+      .catch(() => {
+        if (!cancelled) setOpenRouterVerified(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Only the three inputs of the verification hash matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.openRouterApiKey, view.openRouterVerifiedKeyHash, view.openRouterCoraModels]);
+
+  useEffect(() => {
     let cancelled = false;
     let generation = 0;
     const refresh = () => {
       const request = ++generation;
-      void Promise.all([window.spark.memory.get(workspaceId), window.spark.coraProfiles.list()])
-        .then(([nextMemory, nextProfiles]) => {
-          if (!cancelled && request === generation) {
-            setMemory(nextMemory);
-            setProfiles(nextProfiles);
+      setMemoryError(null);
+      void window.spark.coraProfiles
+        .list()
+        .then(async (nextProfiles) => {
+          if (cancelled || request !== generation) return;
+          setProfiles(nextProfiles);
+          setProfilesLoading(false);
+          // A profile deleted elsewhere (the phone, the CLI) falls back to the
+          // default instead of failing every read.
+          const viewed = viewedProfileId && nextProfiles.some((profile) => profile.id === viewedProfileId)
+            ? viewedProfileId
+            : undefined;
+          if (viewedProfileId && !viewed) {
+            setViewedProfileId(null);
+            return;
           }
+          const nextMemory = await window.spark.memory.get(workspaceId, viewed);
+          if (!cancelled && request === generation) setMemory(nextMemory);
         })
         .catch((err) => {
-          if (!cancelled && request === generation) setStatus((err as Error).message);
+          if (cancelled || request !== generation) return;
+          setProfilesLoading(false);
+          setMemoryError(errorText(err));
         });
     };
     refresh();
@@ -297,70 +343,105 @@ export default function AgentCapabilitiesDialog({
       cancelled = true;
       unsubscribe?.();
     };
-  }, [workspaceId]);
+  }, [workspaceId, viewedProfileId, memoryReload]);
 
+  // ── Leaving with unsaved drafts ────────────────────────────────────────────
+  const editorDirty = editor !== null && JSON.stringify(editor) !== editorBaseline.current;
+  const profileDraftDirty =
+    profileDraft.name.trim() !== "" || profileDraft.description.trim() !== "" || profileDraft.instructions.trim() !== "";
+  const documentDirty = documentDraft !== null && documentDraft.content !== documentDraft.original;
+  const anyDirty = editorDirty || profileDraftDirty || documentDirty;
+
+  const openEditor = (state: EditorState) => {
+    editorBaseline.current = JSON.stringify(state);
+    setEditorError(null);
+    setEditorProbe(null);
+    setEditor(state);
+  };
+
+  const performLeave = (action: LeaveAction) => {
+    setConfirmLeave(null);
+    if (action.kind === "close") {
+      onClose();
+      return;
+    }
+    setEditor(null);
+    setEditorProbe(null);
+    if (action.kind === "tab") {
+      // A per-row result ("Removed X from Claude") is about the section it
+      // came from, so it does not follow the user out.
+      setStatus(null);
+      setActiveTab(action.tab);
+    }
+  };
+
+  // The form is a view inside the dialog, so Escape, the scrim and the nav
+  // back out of it first. Anything typed and not saved is confirmed before it
+  // is thrown away, and closing asks the same about the profile drafts.
+  const requestLeave = (action: LeaveAction) => {
+    if (editorBusy && action.kind !== "close") return;
+    const discards =
+      action.kind === "close" ? anyDirty : editorDirty;
+    if (discards) setConfirmLeave(action);
+    else performLeave(action);
+  };
+
+  const selectTab = (tab: CapabilityTab) => {
+    // A save in flight keeps the form up: dropping it would unmount the only
+    // place its result can be reported.
+    if (editorBusy) return;
+    if (editor) {
+      requestLeave({ kind: "tab", tab });
+      return;
+    }
+    setStatus(null);
+    setEditor(null);
+    setActiveTab(tab);
+  };
+
+  const latestLeave = useRef({ requestLeave, confirmLeave, editor });
+  latestLeave.current = { requestLeave, confirmLeave, editor };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      // The form is a view inside the dialog, so Escape backs out of it first
-      // instead of discarding the whole draft.
-      if (editor) setEditor(null);
-      else onClose();
+      const current = latestLeave.current;
+      if (current.confirmLeave) {
+        setConfirmLeave(null);
+        return;
+      }
+      current.requestLeave(current.editor ? { kind: "back" } : { kind: "close" });
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [editor, onClose]);
+  }, []);
 
+  // ── Inventory ──────────────────────────────────────────────────────────────
   const mcp = useMemo(
     () => (assets?.mcp ?? []).filter((item) => !RESERVED_MCP_NAMES.has(item.name.toLowerCase())),
     [assets?.mcp],
   );
   const skills = assets?.skills ?? [];
-  const disabledSkills = useMemo(
-    () => new Set(draft.agentDisabledSkillIds),
-    [draft.agentDisabledSkillIds],
-  );
-  // Which MCP servers this workspace hands to Cora's Pi manager session and to
-  // Pi implementation workers. Assignment is per scope and off by default.
-  const coraAssigned = useMemo(
-    () => new Set(draft.agentMcpCoraManagerIds),
-    [draft.agentMcpCoraManagerIds],
-  );
-  const workerAssigned = useMemo(
-    () => new Set(draft.agentMcpPiWorkerIds),
-    [draft.agentMcpPiWorkerIds],
-  );
+  const disabledSkills = useMemo(() => new Set(view.agentDisabledSkillIds), [view.agentDisabledSkillIds]);
+  const coraAssigned = useMemo(() => new Set(view.agentMcpCoraManagerIds), [view.agentMcpCoraManagerIds]);
+  const workerAssigned = useMemo(() => new Set(view.agentMcpPiWorkerIds), [view.agentMcpPiWorkerIds]);
   const workerChoices = useMemo(
     () => [
       ...new Set([
         ...CORA_WORKER_MODEL_CHOICES,
-        ...draft.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
-        ...draft.coraWorkerModels.map((id) => id.trim()).filter(Boolean),
+        ...view.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
+        ...view.coraWorkerModels.map((id) => id.trim()).filter(Boolean),
       ]),
     ],
-    [draft.coraWorkerModels, draft.openRouterCoraModels],
+    [view.coraWorkerModels, view.openRouterCoraModels],
   );
-  // The roster mixes three native families with OpenRouter favorites, so the
-  // tab divides it by source instead of interleaving them in one flat list.
-  const workerModelGroups = useMemo(() => {
-    const buckets = new Map<string, string[]>();
-    for (const modelId of workerChoices) {
-      const group = workerModelGroupFor(modelId);
-      const bucket = buckets.get(group);
-      if (bucket) bucket.push(modelId);
-      else buckets.set(group, [modelId]);
-    }
-    return WORKER_MODEL_GROUP_ORDER.filter((label) => buckets.has(label)).map(
-      (label) => ({ label, models: buckets.get(label)! }),
-    );
-  }, [workerChoices]);
+  const usableWorkers = useMemo(
+    () => usableWorkerModels(view, openRouterVerified ?? true),
+    [view, openRouterVerified],
+  );
 
   const mcpGroups = useMemo(() => groupByName(mcp, "mcp"), [mcp]);
   const skillGroups = useMemo(() => groupByName(skills, "skill"), [skills]);
-  const filteredMcp = useMemo(
-    () => filterGroups(mcpGroups, deferredMcpSearch),
-    [mcpGroups, deferredMcpSearch],
-  );
+  const filteredMcp = useMemo(() => filterGroups(mcpGroups, deferredMcpSearch), [mcpGroups, deferredMcpSearch]);
   const filteredSkills = useMemo(
     () => filterGroups(skillGroups, deferredSkillSearch),
     [skillGroups, deferredSkillSearch],
@@ -374,283 +455,261 @@ export default function AgentCapabilitiesDialog({
     setSkillLimit(PAGE_SIZE);
   }, [deferredSkillSearch, skillGroups]);
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      await onSave(draft);
-      onClose();
-    } catch (err) {
-      setStatus((err as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const syncAssets = () => {
-    setSyncing(true);
-    setStatus(null);
-    void window.spark.agents
-      .sync({ cwd: workspaceCwd })
-      .then((result) => {
-        setStatus(formatSyncSummary(result));
-        refreshAssets();
-        refreshBuiltins();
-      })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setSyncing(false));
-  };
-
-  // Memory mutations land on disk immediately (they are not part of the Save
-  // draft), so each one adopts the status pair the main process returns.
-  const runMemoryAction = (
-    scope: CoraMemoryScope,
-    action: () => Promise<CoraMemoryStatus>,
-  ) => {
-    setMemoryBusy(scope);
-    setStatus(null);
-    void action()
-      .then(setMemory)
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setMemoryBusy(null));
-  };
-
-  const toggleMemory = (scope: CoraMemoryScope, enabled: boolean) => {
-    runMemoryAction(scope, () => window.spark.memory.setEnabled(scope, workspaceId, enabled));
-  };
-
-  const clearMemory = (scope: CoraMemoryScope, includeUserLines: boolean) => {
-    runMemoryAction(scope, () => window.spark.memory.clear(scope, workspaceId, includeUserLines));
-  };
-
-  const toggleWorkerModel = (modelId: string) => {
-    setDraft((current) => {
-      const enabled = current.coraWorkerModels.includes(modelId);
-      return {
-        ...current,
-        coraWorkerModels: enabled
-          ? current.coraWorkerModels.filter((id) => id !== modelId)
-          : [...current.coraWorkerModels, modelId],
-      };
-    });
-  };
-
-  const useProfile = (reference: string) => {
-    setProfileOperation("switching");
-    setStatus(null);
-    void window.spark.coraProfiles
-      .use(reference)
-      .then(async (nextProfiles) => {
-        setProfiles(nextProfiles);
-        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
-        setMemory(await window.spark.memory.get(workspaceId));
-      })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setProfileOperation(null));
-  };
-
-  const createProfile = (event: React.FormEvent) => {
-    event.preventDefault();
-    const name = profileName.trim();
-    if (!name) return;
-    setProfileOperation("creating");
-    setStatus(null);
-    void window.spark.coraProfiles
-      .create({ name, description: profileDescription.trim() || undefined })
-      .then(async () => {
-        const nextProfiles = await window.spark.coraProfiles.use(name);
-        setProfiles(nextProfiles);
-        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
-        setMemory(await window.spark.memory.get(workspaceId));
-        setProfileName("");
-        setProfileDescription("");
-        setStatus(`${name} is now the default profile for new Cora chats.`);
-      })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setProfileOperation(null));
-  };
-
-  const deleteProfile = (profile: Pick<CoraProfile, "id" | "name">) => {
-    if (profile.id === "default") return;
-    setProfileOperation("deleting");
-    setStatus(null);
-    void window.spark.coraProfiles
-      .delete(profile.id)
-      .then(async (result) => {
-        setProfiles(result.profiles);
-        window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
-        setMemory(await window.spark.memory.get(workspaceId));
-        const movedChats = result.reassignedRunCount > 0
-          ? ` ${result.reassignedRunCount} existing chat${result.reassignedRunCount === 1 ? " was" : "s were"} moved to built-in Cora.`
-          : "";
-        setStatus(`${result.deletedProfile.name} was deleted.${movedChats}`);
-      })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setProfileOperation(null));
-  };
-
-  // The listener lives in App.tsx and owns the editor tabs, so opening a file
-  // from a modal is a window event rather than a threaded-through callback.
-  // The dialog deliberately stays up: closing it here would discard whatever
-  // unsaved MCP and skill changes the draft is holding.
-  const openMemoryFile = (path: string) => {
-    window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }));
-    setStatus(`Opened ${path} in the editor. Close this dialog to see it.`);
-  };
-
+  // ── Settings-backed switches ───────────────────────────────────────────────
   const togglePiScope = (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => {
-    setDraft((current) => {
-      const field = scope === "cora" ? "agentMcpCoraManagerIds" : "agentMcpPiWorkerIds";
-      const next: AppSettings = {
-        ...current,
-        [field]: toggleAssignment(current[field], group.sessionKey, assigned),
-      };
-      // Pi delivery also honours the per-server disable list this dialog used to
-      // expose. A server switched on here must never stay silently blocked by a
-      // leftover entry in it.
-      if (assigned) {
-        next.agentDisabledMcpIds = current.agentDisabledMcpIds.filter((key) => key !== group.sessionKey);
-      }
-      return next;
-    });
+    const who = scope === "cora" ? "Cora" : "Pi workers";
+    const message = assigned
+      ? scope === "cora"
+        ? `Cora can use ${group.name}. An open chat connects it on your next message.`
+        : `Pi workers can use ${group.name} from their next launch.`
+      : `${who} no longer use ${group.name}.`;
+    void applySettings(
+      (current) => withPiAssignment(current, group.sessionKey, scope === "cora" ? { cora: assigned } : { workers: assigned }),
+      message,
+    ).then(refreshPreview);
   };
 
   const toggleSkill = (group: NameGroup, enabled: boolean) => {
-    setDraft((current) => ({
-      ...current,
-      agentDisabledSkillIds: toggleKey(current.agentDisabledSkillIds, group.sessionKey, enabled),
-    }));
+    void applySettings(
+      (current) => ({
+        ...current,
+        agentDisabledSkillIds: toggleKey(current.agentDisabledSkillIds, group.sessionKey, enabled),
+      }),
+      enabled
+        ? `${group.name} is on. New Cora chats and workers can load it.`
+        : `${group.name} is off. New Cora chats and workers will not load it.`,
+    );
+  };
+
+  const toggleWorkerModel = (modelId: string) => {
+    const on = view.coraWorkerModels.includes(modelId);
+    if (on) {
+      const remaining = usableWorkerModels(
+        { ...view, coraWorkerModels: view.coraWorkerModels.filter((id) => id !== modelId) },
+        openRouterVerified ?? true,
+      );
+      if (remaining.length === 0 && usableWorkers.length > 0) {
+        setStatus(failure("Keep at least one usable worker model on. Without one, Cora cannot start workers."));
+        return;
+      }
+    }
+    void applySettings(
+      (current) => ({
+        ...current,
+        coraWorkerModels: on
+          ? current.coraWorkerModels.filter((id) => id !== modelId)
+          : [...new Set([...current.coraWorkerModels, modelId])],
+      }),
+      on ? `${modelId} is off for new workers.` : `Cora may now hand work to ${modelId}.`,
+    );
+  };
+
+  const changeBehavior = (patch: Partial<AppSettings>, message: string) => {
+    void applySettings((current) => ({ ...current, ...patch }), message);
+  };
+
+  // ── Config file actions ────────────────────────────────────────────────────
+  const afterAssetChange = () => {
+    refreshAssets();
+    refreshPreview();
   };
 
   // `scope` is one runtime column or every column at once. A server registered
-  // in both runtimes can be dropped from one and kept in the other, which the
-  // old all-or-nothing remove forced the user into a text editor for.
+  // in several runtimes can be dropped from one and kept in the others.
   const removeGroup = (group: NameGroup, scope: RemoveScope) => {
     const columns = scope === "all" ? RUNTIME_COLUMNS : [scope];
     const items = columns.flatMap((rt) => group.installs[rt]).filter((item) => item.canDelete);
     if (items.length === 0) return;
-    setBusyKey(group.sessionKey);
+    markBusy(group.sessionKey, true);
     setStatus(null);
     void (async () => {
+      const removed = new Set<string>();
       const failures: string[] = [];
       for (const item of items) {
         try {
           const result = await window.spark.agents.deleteAsset(item.id);
-          if (!result.ok) failures.push(result.error ?? `Could not remove ${item.name}.`);
+          if (result.ok) removed.add(RUNTIME_LABEL[item.runtime]);
+          else failures.push(`${RUNTIME_LABEL[item.runtime]}: ${result.error ?? "unknown error"}`);
         } catch (err) {
-          failures.push((err as Error).message);
+          failures.push(`${RUNTIME_LABEL[item.runtime]}: ${errorText(err)}`);
         }
       }
+      const done = removed.size > 0 ? `Removed ${group.name} from ${[...removed].join(" and ")}.` : "";
       setStatus(
-        failures[0] ??
-        (scope === "all"
-          ? `Removed ${group.name} from every config file.`
-          : `Removed ${group.name} from ${RUNTIME_LABEL[scope]}.`),
+        failures.length > 0
+          ? failure(`${done}${done ? " " : ""}Could not remove ${group.name} from ${failures.join("; ")}`)
+          : ok(done),
       );
-      refreshAssets();
-      setBusyKey(null);
+      afterAssetChange();
+      markBusy(group.sessionKey, false);
     })();
   };
 
-  const installToRuntime = (group: NameGroup, target: "claude" | "codex" | "grok") => {
-    // Prefer a shared source, then whichever other CLI config already carries
-    // the entry, then any discovered copy of it.
+  const installToRuntime = (group: NameGroup, target: CliRuntime) => {
+    // Prefer the copy Cora uses, then any other CLI's copy.
     const source =
-      group.installs.shared[0] ??
-      RUNTIME_COLUMNS.filter((rt) => rt !== target && rt !== "shared")
-        .map((rt) => group.installs[rt][0])
-        .find(Boolean) ??
+      (group.any.runtime !== target ? group.any : undefined) ??
+      groupItems(group).find((item) => item.runtime !== target) ??
       group.any;
-    setBusyKey(`${group.sessionKey}:${target}`);
+    const key = `${group.sessionKey}:${target}`;
+    markBusy(key, true);
     void window.spark.agents
       .installAsset(source.id, target)
       .then((result) => {
         setStatus(
           result.ok
-            ? `Copied ${group.name} into the ${RUNTIME_LABEL[target]} config.`
-            : result.error ?? `Could not copy ${group.name} into the ${RUNTIME_LABEL[target]} config.`,
+            ? ok(`Added ${group.name} to the ${CLI_LABEL[target]} config.`)
+            : failure(result.error ?? `Could not add ${group.name} to the ${CLI_LABEL[target]} config.`),
         );
-        refreshAssets();
+        afterAssetChange();
       })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setBusyKey(null));
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => markBusy(key, false));
   };
 
   // The reread runs inside the busy window so the switch lands on the new
   // state instead of flicking back to the old one first.
-  const installBuiltin = (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => {
-    setBusyKey(`${id}:${runtime}`);
-    void window.spark.agents
-      .installBuiltin(id, runtime)
+  const setBuiltin = (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime, installed: boolean) => {
+    const key = `${id}:${runtime}`;
+    markBusy(key, true);
+    const action = installed
+      ? window.spark.agents.installBuiltin(id, runtime)
+      : window.spark.agents.uninstallBuiltin(id, runtime);
+    void action
       .then((result) => {
-        setStatus(
-          result.ok
-            ? `Added Codara Studio tools to the ${CLI_LABEL[runtime]}.`
-            : result.error ?? `Could not add Codara Studio tools to the ${CLI_LABEL[runtime]}.`,
-        );
+        if (installed) {
+          setStatus(
+            result.ok
+              ? ok(`Added Codara Studio tools to the ${CLI_LABEL[runtime]}.`)
+              : failure(result.error ?? `Could not add Codara Studio tools to the ${CLI_LABEL[runtime]}.`),
+          );
+        } else {
+          setStatus(
+            result.ok
+              ? ok(`Removed Codara Studio tools from the ${CLI_LABEL[runtime]}. They stay off until you turn them back on.`)
+              : failure(result.error ?? `Could not remove Codara Studio tools from the ${CLI_LABEL[runtime]}.`),
+          );
+        }
         return requestBuiltins().then(setBuiltins);
       })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setBusyKey(null));
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => markBusy(key, false));
   };
 
-  const uninstallBuiltin = (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => {
-    setBusyKey(`${id}:${runtime}`);
+  const testGroup = (group: NameGroup) => {
+    const key = group.sessionKey;
+    setProbes((current) => ({ ...current, [key]: { busy: true, result: null } }));
     void window.spark.agents
-      .uninstallBuiltin(id, runtime)
-      .then((result) => {
-        setStatus(
-          result.ok
-            ? `Removed Codara Studio tools from the ${CLI_LABEL[runtime]}. They stay off until you turn them back on.`
-            : result.error ?? `Could not remove Codara Studio tools from the ${CLI_LABEL[runtime]}.`,
-        );
-        return requestBuiltins().then(setBuiltins);
-      })
-      .catch((err) => setStatus((err as Error).message))
-      .finally(() => setBusyKey(null));
+      .probeMcp({ cwd: workspaceCwd, id: group.any.id })
+      .catch((err): AgentMcpProbeResult => ({ ok: false, tools: [], durationMs: 0, error: errorText(err) }))
+      .then((result) => setProbes((current) => ({ ...current, [key]: { busy: false, result } })));
   };
 
-  const openAdd = () => {
-    setEditorError(null);
-    setActiveTab("mcp");
-    setEditor({
-      mode: "add",
-      replaceId: null,
-      targetId: targets[0]?.id ?? "",
-      name: "",
-      transport: "stdio",
-      command: "",
-      argsText: "",
-      env: [],
-      url: "",
-      headers: [],
+  const dismissProbe = (key: string) => {
+    setProbes((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
     });
   };
 
-  const openEdit = (group: NameGroup) => {
-    const item =
-      group.installs.shared[0] ?? group.installs.claude[0] ?? group.installs.codex[0] ?? group.any;
-    setEditorBusy(true);
-    setEditorError(null);
-    setActiveTab("mcp");
+  const previewSync = () => {
+    setSync({ phase: "previewing" });
     void window.spark.agents
-      .mcpDetail(item.id)
-      .then((detail) => {
+      .sync({ cwd: workspaceCwd, dryRun: true })
+      .then((result) => setSync({ phase: "preview", result }))
+      .catch((err) => {
+        setSync({ phase: "idle" });
+        setStatus(failure(`Could not check what to sync: ${errorText(err)}`));
+      });
+  };
+
+  const runSync = () => {
+    if (sync.phase !== "preview") return;
+    setSync({ phase: "running", result: sync.result });
+    void window.spark.agents
+      .sync({ cwd: workspaceCwd })
+      .then((result) => {
+        setSync({ phase: "done", result });
+        afterAssetChange();
+        refreshBuiltins();
+      })
+      .catch((err) => {
+        setSync({ phase: "idle" });
+        setStatus(failure(`Sync failed: ${errorText(err)}`));
+      });
+  };
+
+  // ── Add and edit ───────────────────────────────────────────────────────────
+  const openAdd = () => {
+    setActiveTab("mcp");
+    openEditor(blankEditor(targets));
+  };
+
+  const openEdit = (group: NameGroup) => {
+    const primary = group.any;
+    const others = groupItems(group).filter((item) => item.id !== primary.id && item.canDelete);
+    setEditorBusy(true);
+    setStatus(null);
+    void Promise.all([
+      window.spark.agents.mcpDetail(primary.id),
+      ...others.map((item) => window.spark.agents.mcpDetail(item.id).catch(() => null)),
+    ])
+      .then(([detail, ...otherDetails]) => {
         if (!detail) {
-          setStatus(`Could not read the definition for ${group.name}.`);
+          setStatus(failure(`Could not read the definition of ${group.name}.`));
           return;
         }
-        setEditor(editorFromDetail(detail));
+        const comparable = (value: typeof detail) =>
+          value ? JSON.stringify({ ...value, id: "", targetId: "" }) : "";
+        const copies: EditorCopy[] = [];
+        otherDetails.forEach((other, index) => {
+          if (!other) return;
+          const matched = comparable(other) === comparable(detail);
+          copies.push({
+            id: others[index].id,
+            targetId: other.targetId,
+            runtime: others[index].runtime,
+            path: others[index].path,
+            selected: matched,
+            matched,
+          });
+        });
+        openEditor(
+          editorFromDetail(
+            detail,
+            { cora: coraAssigned.has(group.sessionKey), workers: workerAssigned.has(group.sessionKey) },
+            copies,
+          ),
+        );
       })
-      .catch((err) => setStatus((err as Error).message))
+      .catch((err) => setStatus(failure(errorText(err))))
       .finally(() => setEditorBusy(false));
   };
 
+  const editorRef = useRef<EditorState | null>(null);
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
   // A save reports next to the fields while the form is up, and in the footer
   // once it isn't: the form's own error slot is unmounted by then, so routing
   // there would drop the message on the floor.
   const reportEditorProblem = (message: string) => {
     if (editorRef.current) setEditorError(message);
-    else setStatus(message);
+    else setStatus(failure(message));
+  };
+
+  const saveTo = async (
+    targetId: string,
+    replaceId: string | null,
+    server: AgentMcpServerDraft,
+  ): Promise<string | null> => {
+    try {
+      const result = await window.spark.agents.saveMcpServer({ cwd: workspaceCwd, targetId, replaceId, server });
+      return result.ok ? null : result.error ?? "Could not save this server.";
+    } catch (err) {
+      return errorText(err);
+    }
   };
 
   const submitEditor = () => {
@@ -660,34 +719,128 @@ export default function AgentCapabilitiesDialog({
       setEditorError(problem);
       return;
     }
-    setEditorBusy(true);
-    setEditorError(null);
-    void window.spark.agents
-      .saveMcpServer({
-        cwd: workspaceCwd,
-        targetId: editor.targetId,
-        replaceId: editor.replaceId,
-        server: {
-          name: editor.name.trim(),
-          transport: editor.transport,
-          command: editor.transport === "stdio" ? editor.command.trim() : undefined,
-          args: editor.transport === "stdio" ? splitArgs(editor.argsText) : undefined,
-          env: editor.transport === "stdio" ? pairsToRecord(editor.env) : undefined,
-          url: editor.transport === "http" ? editor.url.trim() : undefined,
-          headers: editor.transport === "http" ? pairsToRecord(editor.headers) : undefined,
-        },
-      })
-      .then((result) => {
-        if (!result.ok) {
-          reportEditorProblem(result.error ?? "Could not save this server.");
+    const server = editorDraft(editor);
+    const current = editor;
+    if (current.mode === "add") {
+      const destinations = editorDestinations(current, targets);
+      if (destinations.problem) {
+        setEditorError(destinations.problem);
+        return;
+      }
+      setEditorBusy(true);
+      setEditorError(null);
+      void (async () => {
+        const saved: string[] = [];
+        const failed: string[] = [];
+        for (const target of destinations.targets) {
+          const error = await saveTo(target.id, null, server);
+          if (error) failed.push(`${target.label}: ${error}`);
+          else saved.push(target.label);
+        }
+        if (saved.length === 0) {
+          reportEditorProblem(failed.join(" "));
+          setEditorBusy(false);
           return;
         }
-        setStatus(`Saved ${result.name} to ${result.path}.`);
+        const key = mcpSessionKey(server.name);
+        if (current.cora || current.workers) {
+          await applySettings(
+            (settingsNow) =>
+              withPiAssignment(settingsNow, key, {
+                ...(current.cora ? { cora: true } : {}),
+                ...(current.workers ? { workers: true } : {}),
+              }),
+            null,
+          );
+        }
+        const who = [current.cora ? "Cora (from your next message)" : null, current.workers ? "Pi workers" : null]
+          .filter(Boolean)
+          .join(" and ");
+        const text =
+          `Added ${server.name} to ${saved.join(" and ")}.` +
+          (who ? ` ${who} can use it.` : " Cora and Pi workers do not use it until you switch them on.") +
+          (failed.length > 0 ? ` Could not save to ${failed.join("; ")}` : "");
+        setStatus(failed.length > 0 ? failure(text) : ok(text));
         setEditor(null);
-        refreshAssets();
-      })
-      .catch((err) => reportEditorProblem((err as Error).message))
-      .finally(() => setEditorBusy(false));
+        setEditorBusy(false);
+        afterAssetChange();
+      })();
+      return;
+    }
+
+    setEditorBusy(true);
+    setEditorError(null);
+    void (async () => {
+      const primaryError = await saveTo(current.targetId, current.replaceId, server);
+      if (primaryError) {
+        reportEditorProblem(primaryError);
+        setEditorBusy(false);
+        return;
+      }
+      const updated: string[] = [];
+      const failed: string[] = [];
+      for (const copy of current.copies.filter((item) => item.selected)) {
+        if (copy.runtime === "grok" && server.headers) {
+          failed.push(`Grok: Grok Build's config cannot carry request headers, so that copy was left as it was`);
+          continue;
+        }
+        const error = await saveTo(copy.targetId, copy.id, server);
+        if (error) failed.push(`${RUNTIME_LABEL[copy.runtime]}: ${error}`);
+        else updated.push(RUNTIME_LABEL[copy.runtime]);
+      }
+      // Access is keyed by lowercase name in every workspace, so a rename moves
+      // it to the new name. The old name keeps its access while another copy
+      // still carries it.
+      const newKey = mcpSessionKey(server.name);
+      const oldKey = mcpSessionKey(current.originalName);
+      const leftBehind = current.copies.some((copy) => !copy.selected);
+      const reassign = (settingsNow: AppSettings) => {
+        let next = withPiAssignment(settingsNow, newKey, { cora: current.cora, workers: current.workers });
+        if (newKey !== oldKey && !leftBehind) next = withPiAssignment(next, oldKey, { cora: false, workers: false });
+        return next;
+      };
+      const before = latestSettings.current;
+      const after = reassign(before);
+      if (
+        after.agentMcpCoraManagerIds.join("\n") !== before.agentMcpCoraManagerIds.join("\n") ||
+        after.agentMcpPiWorkerIds.join("\n") !== before.agentMcpPiWorkerIds.join("\n") ||
+        after.agentDisabledMcpIds.join("\n") !== before.agentDisabledMcpIds.join("\n")
+      ) {
+        await applySettings(reassign, null);
+      }
+      const text =
+        `Saved ${server.name}.` +
+        (updated.length > 0 ? ` Also updated the copy in ${updated.join(" and ")}.` : "") +
+        (current.cora ? " Cora picks up the change on your next message." : "") +
+        (failed.length > 0 ? ` Not updated: ${failed.join("; ")}.` : "");
+      setStatus(failed.length > 0 ? failure(text) : ok(text));
+      setEditor(null);
+      setEditorBusy(false);
+      afterAssetChange();
+    })();
+  };
+
+  const testEditor = () => {
+    if (!editor) return;
+    const server = editorDraft(editor);
+    const problem = server.transport === "stdio"
+      ? server.command ? null : "Fill in the command first."
+      : server.url ? null : "Fill in the URL first.";
+    if (problem) {
+      setEditorError(problem);
+      return;
+    }
+    setEditorError(null);
+    setEditorProbe({ busy: true, result: null });
+    void window.spark.agents
+      .probeMcp({ cwd: workspaceCwd, draft: { ...server, name: server.name || "draft" } })
+      .catch((err): AgentMcpProbeResult => ({ ok: false, tools: [], durationMs: 0, error: errorText(err) }))
+      .then((result) => setEditorProbe({ busy: false, result }));
+  };
+
+  const parseSnippet = async (text: string) => {
+    const result = await window.spark.agents.parseMcpSnippet(text);
+    return result.ok ? { servers: result.servers, notes: result.notes } : { error: result.error };
   };
 
   const editorTargets = useMemo(() => {
@@ -696,36 +849,187 @@ export default function AgentCapabilitiesDialog({
     return [...targets, describeUnlistedTarget(editor.targetId)];
   }, [editor?.targetId, targets]);
 
+  // ── Profiles and memory ────────────────────────────────────────────────────
+  const viewedProfile = viewedProfileId ?? memory?.profile.id;
+
+  const announceProfilesChanged = () => {
+    window.dispatchEvent(new CustomEvent("spark:cora-profiles-changed"));
+  };
+
+  const makeDefaultProfile = (profile: CoraProfile) => {
+    setProfileOperation("switching");
+    setStatus(null);
+    void window.spark.coraProfiles
+      .use(profile.id)
+      .then((nextProfiles) => {
+        setProfiles(nextProfiles);
+        announceProfilesChanged();
+        setStatus(ok(`${profile.name} is now the default for new chats and automations.`));
+      })
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => setProfileOperation(null));
+  };
+
+  const createProfile = () => {
+    const name = profileDraft.name.trim();
+    if (!name) return;
+    setProfileOperation("creating");
+    setStatus(null);
+    void window.spark.coraProfiles
+      .create({
+        name,
+        description: profileDraft.description.trim() || undefined,
+        instructions: profileDraft.instructions.trim() || undefined,
+      })
+      .then((nextProfiles) => {
+        setProfiles(nextProfiles);
+        announceProfilesChanged();
+        setProfileDraft(EMPTY_PROFILE_DRAFT);
+        setStatus(ok(`Created ${name}. Pick it from the profile menu when you start a chat, or make it the default.`));
+      })
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => setProfileOperation(null));
+  };
+
+  const deleteProfile = (profile: Pick<CoraProfile, "id" | "name">) => {
+    if (profile.id === "default") return;
+    setProfileOperation("deleting");
+    setStatus(null);
+    void window.spark.coraProfiles
+      .delete(profile.id)
+      .then((result) => {
+        setProfiles(result.profiles);
+        announceProfilesChanged();
+        if (viewedProfileId === profile.id) setViewedProfileId(null);
+        if (documentDraft?.profileId === profile.id) setDocumentDraft(null);
+        const movedChats = result.reassignedRunCount > 0
+          ? ` ${result.reassignedRunCount} existing chat${result.reassignedRunCount === 1 ? " was" : "s were"} moved to built-in Cora.`
+          : "";
+        setStatus(ok(`${result.deletedProfile.name} was deleted.${movedChats}`));
+      })
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => setProfileOperation(null));
+  };
+
+  const editProfileDocument = (profile: CoraProfile) => {
+    setDocumentBusy(true);
+    setDocumentError(null);
+    void window.spark.coraProfiles
+      .readDocument(profile.id)
+      .then((document) =>
+        setDocumentDraft({
+          profileId: profile.id,
+          content: document.content,
+          original: document.content,
+          revision: document.revision,
+        }),
+      )
+      .catch((err) => setStatus(failure(`Could not read ${profile.name}'s instructions: ${errorText(err)}`)))
+      .finally(() => setDocumentBusy(false));
+  };
+
+  const saveProfileDocument = () => {
+    if (!documentDraft) return;
+    const draft = documentDraft;
+    const name = profiles.find((profile) => profile.id === draft.profileId)?.name ?? "this profile";
+    setDocumentBusy(true);
+    setDocumentError(null);
+    void window.spark.coraProfiles
+      .saveDocument(draft.profileId, draft.revision, draft.content)
+      .then(() => {
+        setDocumentDraft(null);
+        setStatus(ok(`Saved the instructions for ${name}. Its next turn uses them.`));
+      })
+      .catch((err) => setDocumentError(errorText(err)))
+      .finally(() => setDocumentBusy(false));
+  };
+
+  const showProfileMemory = (profile: CoraProfile) => {
+    setViewedProfileId(profile.id);
+    setMemory(null);
+    selectTab("memory");
+  };
+
+  const viewMemoryOf = (profileId: string) => {
+    if (profileId === viewedProfile) return;
+    setMemory(null);
+    setViewedProfileId(profileId);
+  };
+
+  // Memory mutations land on disk immediately, so each one adopts the status
+  // pair the main process returns.
+  const runMemoryAction = (scope: CoraMemoryScope, action: () => Promise<CoraMemoryStatus>) => {
+    setMemoryBusy(scope);
+    setStatus(null);
+    void action()
+      .then(setMemory)
+      .catch((err) => setStatus(failure(errorText(err))))
+      .finally(() => setMemoryBusy(null));
+  };
+
+  const toggleMemory = (scope: CoraMemoryScope, enabled: boolean) => {
+    runMemoryAction(scope, () => window.spark.memory.setEnabled(scope, workspaceId, enabled, viewedProfile));
+  };
+
+  const clearMemory = (scope: CoraMemoryScope, includeUserLines: boolean) => {
+    runMemoryAction(scope, () => window.spark.memory.clear(scope, workspaceId, includeUserLines, viewedProfile));
+  };
+
+  // The file may not exist yet (nothing remembered), and the editor cannot
+  // open a missing file, so it is created from its template first. The
+  // listener lives in App.tsx and owns the editor tabs. The dialog closes so
+  // the tab is visible, unless that would throw away an unsaved draft here.
+  const openMemoryFile = (scope: CoraMemoryScope) => {
+    setStatus(null);
+    void window.spark.memory
+      .ensureFile(scope, workspaceId, viewedProfile)
+      .then((path) => {
+        window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }));
+        if (anyDirty) {
+          setStatus(ok(`Opened ${path} in the editor. Close this dialog to see it.`));
+        } else {
+          onClose();
+        }
+      })
+      .catch((err) => setStatus(failure(`Could not open the memory file: ${errorText(err)}`)));
+  };
+
+  // ── Nav ────────────────────────────────────────────────────────────────────
   const visibleMcp = filteredMcp.slice(0, mcpLimit);
   const visibleSkills = filteredSkills.slice(0, skillLimit);
   // Right-aligned nav counts, omitted until the inventory read lands so the nav
   // never reports an empty workspace while it is still being walked. The MCP
-  // count has to include the pinned built-ins: they are rows in the same list,
-  // and counting only the discovered groups reports one fewer than is on screen.
-  const enabledWorkerCount = workerChoices.filter((model) =>
-    draft.coraWorkerModels.includes(model),
-  ).length;
+  // count includes the pinned built-ins: they are rows in the same list.
+  const enabledWorkerCount = workerChoices.filter((model) => view.coraWorkerModels.includes(model)).length;
   const tabCount = (tab: CapabilityTab): string | null => {
-    if (tab === "workers") {
-      return `${enabledWorkerCount}/${workerChoices.length}`;
-    }
+    if (tab === "workers") return `${enabledWorkerCount}/${workerChoices.length}`;
+    if (tab === "profiles") return profiles.length > 0 ? String(profiles.length) : null;
     if (assets === null) return null;
     if (tab === "mcp") return String(mcpGroups.length + (builtins?.length ?? 0));
     if (tab === "skills") return `${activeSkillCount}/${skillGroups.length}`;
     return null;
   };
 
-  // The built-in is pinned above the discovered list, so the filter has to
-  // reach it too or a search looks like it left a stray row behind.
-  const visibleBuiltins = (builtins ?? []).filter((builtin) => {
-    const query = deferredMcpSearch.trim().toLowerCase();
-    return !query || `${builtin.name} ${builtin.summary}`.toLowerCase().includes(query);
-  });
+  // Arrow keys move through the sections like any vertical tab list.
+  const onNavKeyDown = (event: React.KeyboardEvent) => {
+    const index = CAPABILITY_TABS.findIndex((tab) => tab.id === activeTab);
+    let next = -1;
+    if (event.key === "ArrowDown") next = (index + 1) % CAPABILITY_TABS.length;
+    else if (event.key === "ArrowUp") next = (index - 1 + CAPABILITY_TABS.length) % CAPABILITY_TABS.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = CAPABILITY_TABS.length - 1;
+    if (next === -1) return;
+    event.preventDefault();
+    const tab = CAPABILITY_TABS[next].id;
+    selectTab(tab);
+    navRef.current?.querySelector<HTMLButtonElement>(`#capability-tab-${tab}`)?.focus();
+  };
 
+  const statusText = status?.text ?? null;
   return (
-    // Clicking out of the form backs out one level, matching Escape, so a
-    // half-filled server is never discarded together with the whole dialog.
-    <div style={overlayStyle} onMouseDown={() => (editor ? setEditor(null) : onClose())}>
+    // Clicking outside backs out one level, matching Escape, so a half-filled
+    // server is never discarded together with the whole dialog.
+    <div style={overlayStyle} onMouseDown={() => requestLeave(editor ? { kind: "back" } : { kind: "close" })}>
       {/* Scrim + dialog face come from the shared glass classes (frosted in
           glass mode, opaque panel look otherwise). */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
@@ -740,8 +1044,6 @@ export default function AgentCapabilitiesDialog({
       >
         <header className="agent-capabilities-header" style={headerStyle}>
           <AccentDot />
-          {/* One quiet title line, like Settings: the accent dot is the brand
-              mark and the tab nav says what the dialog holds. */}
           <div
             data-capability-tab={renderedTab}
             aria-busy={renderedTab !== activeTab}
@@ -749,425 +1051,226 @@ export default function AgentCapabilitiesDialog({
           >
             Capability Center
           </div>
+          <div style={subtitleStyle}>Tools, skills, profiles and memory for Cora and your CLIs</div>
           <div style={{ flex: 1 }} />
-          <CloseButton onClick={onClose} />
+          <CloseButton onClick={() => requestLeave({ kind: "close" })} />
         </header>
 
         <div style={bodyStyle}>
-          <nav className="agent-capabilities-nav" style={navStyle}>
-            {TABS.map((tab) => (
+          <nav
+            ref={navRef}
+            className="agent-capabilities-nav"
+            style={navStyle}
+            role="tablist"
+            aria-orientation="vertical"
+            aria-label="Capability Center sections"
+            onKeyDown={onNavKeyDown}
+          >
+            {CAPABILITY_TABS.map((tab) => (
               <TabButton
                 key={tab.id}
                 tab={tab.id}
                 label={tab.label}
                 count={tabCount(tab.id)}
                 active={activeTab === tab.id}
-                // The form is a view over the content pane, so picking a
-                // section backs out of it the same way Escape does — except
-                // while a save is in flight, where dropping the form would
-                // unmount the only place its result can be reported.
-                onClick={() => {
-                  if (editorBusy) return;
-                  // A per-row result ("Removed X from Claude") is about the
-                  // section it came from, so it does not follow the user out.
-                  setStatus(null);
-                  setEditor(null);
-                  setActiveTab(tab.id);
-                }}
+                onClick={() => selectTab(tab.id)}
               />
             ))}
           </nav>
 
-          {editor ? (
-            <main className="agent-capabilities-scroll" style={mainStyle}>
+          <main
+            className="agent-capabilities-scroll"
+            style={mainStyle}
+            role="tabpanel"
+            id="capability-panel"
+            aria-labelledby={`capability-tab-${activeTab}`}
+          >
+            {editor ? (
               <McpServerForm
                 editor={editor}
                 targets={editorTargets}
+                hasWorkspace={Boolean(workspaceCwd)}
                 busy={editorBusy}
                 error={editorError}
+                probe={editorProbe}
                 onChange={setEditor}
+                onTest={testEditor}
+                onParse={parseSnippet}
               />
-            </main>
-          ) : (
-            <main className="agent-capabilities-scroll" style={mainStyle}>
-              {renderedTab === "mcp" ? (
-                <section style={sectionStyle}>
-                  <div style={sectionHeadStyle}>
-                    <div style={{ minWidth: 0 }}>
-                      <h2 style={sectionTitleStyle}>MCP servers</h2>
-                      <p style={sectionDetailStyle}>
-                        Cora and Workers control what agents inside Codara can use. The Claude, Codex, and Grok
-                        columns show which external CLI configs on this machine carry the server.
-                      </p>
-                    </div>
-                    <div style={sectionActionsStyle}>
-                      <SearchField
-                        value={mcpSearch}
-                        onChange={setMcpSearch}
-                        placeholder="Filter servers"
-                      />
-                      <button
-                        type="button"
-                        className="spark-btn is-primary"
-                        onClick={openAdd}
-                        disabled={targets.length === 0}
-                        title={targets.length === 0 ? "No writable MCP config location was found" : undefined}
-                      >
-                        Add MCP server
-                      </button>
-                    </div>
-                  </div>
+            ) : (
+              <>
+                {renderedTab === "mcp" ? (
+                  <McpSection
+                    hasWorkspace={Boolean(workspaceCwd)}
+                    loading={assets === null && assetsError === null}
+                    loadError={assets === null ? assetsError : null}
+                    onRetry={refreshAssets}
+                    groups={visibleMcp}
+                    totalGroups={mcpGroups.length}
+                    filteredTotal={filteredMcp.length}
+                    search={mcpSearch}
+                    onSearch={setMcpSearch}
+                    onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
+                    builtins={builtins}
+                    builtinsError={builtinsError}
+                    onRetryBuiltins={refreshBuiltins}
+                    coraAssigned={coraAssigned}
+                    workerAssigned={workerAssigned}
+                    preview={preview}
+                    busy={busy}
+                    probes={probes}
+                    canAdd={targets.length > 0}
+                    sync={sync}
+                    onAdd={openAdd}
+                    onTogglePiScope={togglePiScope}
+                    onEdit={openEdit}
+                    onRemove={removeGroup}
+                    onInstall={installToRuntime}
+                    onTest={testGroup}
+                    onDismissProbe={dismissProbe}
+                    onInstallBuiltin={(id, runtime) => setBuiltin(id, runtime, true)}
+                    onUninstallBuiltin={(id, runtime) => setBuiltin(id, runtime, false)}
+                    onSyncPreview={previewSync}
+                    onSyncRun={runSync}
+                    onSyncDismiss={() => setSync({ phase: "idle" })}
+                  />
+                ) : null}
 
-                  <div className="agent-capability-list" style={listStyle}>
-                    {visibleBuiltins.length > 0 || visibleMcp.length > 0 ? (
-                      <TableHeader
-                        template={MCP_GRID}
-                        labels={["Server", "Cora", "Workers", "Claude", "Codex", "Grok", ""]}
-                      />
-                    ) : null}
-                    {visibleBuiltins.map((builtin) => (
-                      <BuiltinRow
-                        key={builtin.id}
-                        builtin={builtin}
-                        busyKey={busyKey}
-                        onInstall={installBuiltin}
-                        onUninstall={uninstallBuiltin}
-                      />
-                    ))}
-                    {visibleMcp.map((group) => (
-                      <McpRow
-                        key={group.sessionKey}
-                        group={group}
-                        busyKey={busyKey}
-                        coraAssigned={coraAssigned.has(group.sessionKey)}
-                        workerAssigned={workerAssigned.has(group.sessionKey)}
-                        onTogglePiScope={togglePiScope}
-                        onEdit={openEdit}
-                        onRemove={removeGroup}
-                        onInstall={installToRuntime}
-                      />
-                    ))}
-                    {filteredMcp.length === 0 && visibleBuiltins.length === 0 ? (
-                      <EmptyRow
-                        text={
-                          mcpGroups.length === 0
-                            ? "No MCP servers are configured for this workspace yet."
-                            : "No servers match this filter."
-                        }
-                      />
-                    ) : null}
-                    <Pager
-                      shown={visibleMcp.length}
-                      total={filteredMcp.length}
-                      onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
-                    />
-                  </div>
-                </section>
-              ) : null}
+                {renderedTab === "skills" ? (
+                  <SkillsSection
+                    loading={assets === null && assetsError === null}
+                    loadError={assets === null ? assetsError : null}
+                    onRetry={refreshAssets}
+                    groups={visibleSkills}
+                    totalGroups={skillGroups.length}
+                    filteredTotal={filteredSkills.length}
+                    activeCount={activeSkillCount}
+                    truncated={Boolean(assets?.skillsTruncated)}
+                    search={skillSearch}
+                    onSearch={setSkillSearch}
+                    onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
+                    disabled={disabledSkills}
+                    busy={busy}
+                    onToggle={toggleSkill}
+                    onRemove={removeGroup}
+                    onInstall={installToRuntime}
+                  />
+                ) : null}
 
-              {renderedTab === "skills" ? (
-                <section style={sectionStyle}>
-                  <div style={sectionHeadStyle}>
-                    <div style={{ minWidth: 0 }}>
-                      <h2 style={sectionTitleStyle}>Skills</h2>
-                      <p style={sectionDetailStyle}>
-                        Reusable workflows workers load on demand. {activeSkillCount} of {skillGroups.length} enabled.
-                      </p>
-                    </div>
-                    <div style={sectionActionsStyle}>
-                      <SearchField
-                        value={skillSearch}
-                        onChange={setSkillSearch}
-                        placeholder="Filter skills"
-                      />
-                    </div>
-                  </div>
+                {renderedTab === "profiles" ? (
+                  <ProfilesSection
+                    profiles={profiles}
+                    loading={profilesLoading}
+                    operation={profileOperation}
+                    draft={profileDraft}
+                    onDraftChange={setProfileDraft}
+                    onCreate={createProfile}
+                    onMakeDefault={makeDefaultProfile}
+                    onDelete={deleteProfile}
+                    onShowMemory={showProfileMemory}
+                    documentDraft={documentDraft}
+                    documentBusy={documentBusy}
+                    documentError={documentError}
+                    onEditDocument={editProfileDocument}
+                    onDocumentChange={(content) =>
+                      setDocumentDraft((current) => (current ? { ...current, content } : current))
+                    }
+                    onSaveDocument={saveProfileDocument}
+                    onCancelDocument={() => {
+                      setDocumentDraft(null);
+                      setDocumentError(null);
+                    }}
+                    focusProfileId={initialProfileId}
+                  />
+                ) : null}
 
-                  <div className="agent-capability-list" style={listStyle}>
-                    {visibleSkills.length > 0 ? (
-                      <TableHeader
-                        template={SKILL_GRID}
-                        labels={["Skill", "Enabled", "Claude", "Codex", ""]}
-                      />
-                    ) : null}
-                    {visibleSkills.map((group) => (
-                      <SkillRow
-                        key={group.sessionKey}
-                        group={group}
-                        busyKey={busyKey}
-                        enabled={!disabledSkills.has(group.sessionKey)}
-                        onToggle={toggleSkill}
-                        onRemove={removeGroup}
-                        onInstall={installToRuntime}
-                      />
-                    ))}
-                    {filteredSkills.length === 0 ? (
-                      <EmptyRow
-                        text={
-                          skillGroups.length === 0
-                            ? "No skills were found for this workspace."
-                            : "No skills match this filter."
-                        }
-                      />
-                    ) : null}
-                    <Pager
-                      shown={visibleSkills.length}
-                      total={filteredSkills.length}
-                      onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
-                    />
-                  </div>
-                </section>
-              ) : null}
+                {renderedTab === "memory" ? (
+                  <MemorySection
+                    profiles={profiles}
+                    viewedProfileId={viewedProfile ?? null}
+                    onViewProfile={viewMemoryOf}
+                    memory={memory}
+                    memoryError={memoryError}
+                    onRetry={() => setMemoryReload((current) => current + 1)}
+                    busy={memoryBusy}
+                    workspaceAvailable={workspaceId !== null}
+                    onToggle={toggleMemory}
+                    onOpen={openMemoryFile}
+                    onClear={clearMemory}
+                  />
+                ) : null}
 
-              {renderedTab === "memory" ? (
-                <section style={sectionStyle}>
-                  <div style={sectionHeadStyle}>
-                    <div style={{ minWidth: 0 }}>
-                      <h2 style={sectionTitleStyle}>Cora memory</h2>
-                      <p style={sectionDetailStyle}>
-                        Profile {memory?.profile.name ?? "Cora"} has isolated global and workspace
-                        memory. Cora reads these plain markdown files at session start and appends
-                        durable lessons; edit them like any other file.
-                      </p>
-                    </div>
-                  </div>
+                {renderedTab === "workers" ? (
+                  <WorkerModelsSection
+                    choices={workerChoices}
+                    enabled={view.coraWorkerModels}
+                    usable={usableWorkers}
+                    openRouterVerified={openRouterVerified}
+                    busy={false}
+                    onToggle={toggleWorkerModel}
+                  />
+                ) : null}
 
-                  <div style={profilePickerStyle}>
-                    <label style={{ ...profileFieldStyle, flexBasis: "100%" }}>
-                      <span style={fieldLabelStyle}>Cora used by default</span>
-                      <select
-                        className="spark-input"
-                        value={memory?.profile.id ?? "default"}
-                        disabled={profileBusy || profiles.length === 0}
-                        onChange={(event) => useProfile(event.target.value)}
-                      >
-                        {profiles.map((profile) => (
-                          <option key={profile.id} value={profile.id}>
-                            {profile.name}
-                          </option>
-                        ))}
-                      </select>
-                      <span style={profileHintStyle}>
-                        Every new chat also has a profile picker, so this is only the starting choice.
-                      </span>
-                    </label>
-                    {memory && memory.profile.id !== "default" ? (
-                      <div style={profileActionsStyle}>
-                        <button
-                          type="button"
-                          className="spark-btn"
-                          style={smallBtnStyle}
-                          disabled={profileBusy}
-                          onClick={() => openMemoryFile(memory.profile.identityPath)}
-                        >
-                          Edit {memory.profile.name}
-                        </button>
-                        <ConfirmRemoveButton
-                          busy={profileBusy}
-                          disabled={false}
-                          label={`Delete ${memory.profile.name}`}
-                          title={`Delete ${memory.profile.name} and move its identity and memories to Trash`}
-                          onConfirm={() => deleteProfile(memory.profile)}
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <form style={profileCreatorStyle} onSubmit={createProfile}>
-                    <div style={profileCreatorHeadingStyle}>
-                      <strong>Make another Cora</strong>
-                      <span>Its identity and memories stay isolated from every other profile.</span>
-                    </div>
-                    <label style={profileFieldStyle}>
-                      <span style={fieldLabelStyle}>Name</span>
-                      <input
-                        className="spark-input"
-                        value={profileName}
-                        maxLength={80}
-                        placeholder="Reviewer, Designer, Release Cora…"
-                        disabled={profileBusy}
-                        onChange={(event) => setProfileName(event.target.value)}
-                      />
-                    </label>
-                    <label style={{ ...profileFieldStyle, flex: "2 1 260px" }}>
-                      <span style={fieldLabelStyle}>Purpose <span style={profileOptionalStyle}>optional</span></span>
-                      <input
-                        className="spark-input"
-                        value={profileDescription}
-                        maxLength={300}
-                        placeholder="What should this Cora focus on?"
-                        disabled={profileBusy}
-                        onChange={(event) => setProfileDescription(event.target.value)}
-                      />
-                    </label>
-                    <button
-                      type="submit"
-                      className="spark-btn"
-                      style={smallBtnStyle}
-                      disabled={profileBusy || profileName.trim().length === 0}
-                    >
-                      {profileOperation === "creating" ? "Creating…" : "Create & use"}
-                    </button>
-                  </form>
-
-                  <div className="agent-capability-list" style={listStyle}>
-                    <MemoryRow
-                      scope="workspace"
-                      title="Workspace memory"
-                      detail="Facts about this repository: the command that really runs the tests, a build step with a gotcha, a convention the code does not state."
-                      status={memory?.workspace ?? null}
-                      busy={memoryBusy === "workspace"}
-                      unavailable={workspaceId === null ? "No workspace is open." : null}
-                      onToggle={toggleMemory}
-                      onOpen={openMemoryFile}
-                      onClear={clearMemory}
-                    />
-                    <MemoryRow
-                      scope="global"
-                      title="Global memory"
-                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
-                      status={memory?.global ?? null}
-                      busy={memoryBusy === "global"}
-                      unavailable={null}
-                      onToggle={toggleMemory}
-                      onOpen={openMemoryFile}
-                      onClear={clearMemory}
-                    />
-                  </div>
-                </section>
-              ) : null}
-
-              {renderedTab === "workers" ? (
-                <section style={sectionStyle}>
-                  <div style={sectionHeadStyle}>
-                    <div style={{ minWidth: 0 }}>
-                      <h2 style={sectionTitleStyle}>Cora worker models</h2>
-                      <p style={sectionDetailStyle}>
-                        Choose the models Cora may delegate implementation and verification to.
-                        Changes are enforced when the next worker launches.
-                      </p>
-                    </div>
-                  </div>
-                  <div role="group" aria-label="Cora worker models" style={policyListStyle}>
-                    {workerModelGroups.map((group) => (
-                      <div
-                        key={group.label}
-                        role="group"
-                        aria-label={`${group.label} worker models`}
-                      >
-                        <div style={workerModelGroupLabelStyle}>{group.label}</div>
-                        {group.models.map((modelId) => (
-                          <WorkerModelRow
-                            key={modelId}
-                            modelId={modelId}
-                            checked={draft.coraWorkerModels.includes(modelId)}
-                            onToggle={() => toggleWorkerModel(modelId)}
-                          />
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              ) : null}
-
-              {renderedTab === "policy" ? (
-                <section style={sectionStyle}>
-                  <div style={sectionHeadStyle}>
-                    <div style={{ minWidth: 0 }}>
-                      <h2 style={sectionTitleStyle}>Session policy</h2>
-                      <p style={sectionDetailStyle}>Applies to every agent session in this workspace.</p>
-                    </div>
-                    <button type="button" className="spark-btn" disabled={syncing} onClick={syncAssets}>
-                      {syncing ? "Syncing" : "Sync Claude and Codex"}
-                    </button>
-                  </div>
-                  <div style={policyListStyle}>
-                    <PolicyToggle
-                      title="MCP awareness"
-                      detail="List available MCP server names in agent planning prompts."
-                      checked={draft.agentMcpSyncEnabled}
-                      onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
-                    />
-                    <PolicyToggle
-                      title="Skill awareness"
-                      detail="Let workers discover named workflows and load their docs on demand."
-                      checked={draft.agentSkillSyncEnabled}
-                      onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
-                    />
-                    <PolicyToggle
-                      title="Auto-install Codara Studio MCP"
-                      detail="Keep the built-in server current in each CLI on launch. A CLI you switch it off for stays off."
-                      checked={draft.playwrightMcpAutoInstall}
-                      onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
-                    />
-                  </div>
-                </section>
-              ) : null}
-            </main>
-          )}
+                {renderedTab === "policy" ? (
+                  <BehaviorSection view={view} busy={busy} onChange={changeBehavior} />
+                ) : null}
+              </>
+            )}
+          </main>
         </div>
 
         <footer className="agent-capabilities-footer" style={footerStyle}>
-          {/* Errors from the form render next to the fields; the footer keeps
-              the standing note about which actions are deferred. */}
-          <div
-            style={{
-              ...statusStyle,
-              color:
-                !editor && status && /issue|error|could not|failed/i.test(status)
-                  ? "var(--danger)"
-                  : "var(--muted)",
-            }}
-          >
-            {editor
-              ? "Adding or editing a server writes to the config file right away."
-              : status ??
-                // Memory writes to disk as you click; everything else is held
-                // in the draft until Save, so the standing note follows the tab.
-                (activeTab === "memory"
-                  ? "Memory changes apply immediately."
-                  : "Changes apply after Save. Running workers keep their current prompt.")}
-          </div>
-          {editor ? (
+          {confirmLeave ? (
             <>
-              <button type="button" className="spark-btn" onClick={() => setEditor(null)} disabled={editorBusy}>
-                Back
+              <div role="alert" style={{ ...statusStyle, color: "var(--ink)" }}>
+                {confirmLeave.kind === "close" && !editorDirty
+                  ? "You have an unsaved profile draft. Discard it?"
+                  : "This server has unsaved changes. Discard them?"}
+              </div>
+              <button type="button" className="spark-btn" onClick={() => setConfirmLeave(null)} autoFocus>
+                Keep editing
               </button>
-              <button type="button" className="spark-btn is-primary" onClick={submitEditor} disabled={editorBusy}>
-                {editorBusy ? "Saving" : editor.mode === "add" ? "Add server" : "Save server"}
+              <button type="button" className="spark-btn is-danger" onClick={() => performLeave(confirmLeave)}>
+                Discard
               </button>
             </>
           ) : (
             <>
-              <button type="button" className="spark-btn" onClick={onClose}>
-                Cancel
-              </button>
-              <button type="button" className="spark-btn is-primary" onClick={save} disabled={saving}>
-                {saving ? "Saving" : "Save"}
-              </button>
+              {/* Errors from the form render next to the fields; the footer keeps
+                  the result of the last action, or the standing note. */}
+              <div
+                role={status?.tone === "error" ? "alert" : "status"}
+                aria-live="polite"
+                style={{
+                  ...statusStyle,
+                  color: status?.tone === "error" ? "var(--danger)" : status?.tone === "ok" ? "var(--ink-dim)" : "var(--muted)",
+                }}
+              >
+                {editor
+                  ? editor.mode === "add"
+                    ? "Adding a server writes it into the config files you picked."
+                    : "Saving writes the change into the config file straight away."
+                  : statusText ?? STANDING_NOTE[activeTab]}
+              </div>
+              {editor ? (
+                <>
+                  <button type="button" className="spark-btn" onClick={() => requestLeave({ kind: "back" })} disabled={editorBusy}>
+                    Back
+                  </button>
+                  <button type="button" className="spark-btn is-primary" onClick={submitEditor} disabled={editorBusy}>
+                    {editorBusy ? "Saving" : editor.mode === "add" ? "Add server" : "Save changes"}
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="spark-btn is-primary" onClick={() => requestLeave({ kind: "close" })}>
+                  Done
+                </button>
+              )}
             </>
           )}
         </footer>
       </section>
     </div>
-  );
-}
-
-// The header's brand mark. SettingsDialog keeps its own private copy of this;
-// duplicating the 7px dot is cheaper than exporting it across two dialogs.
-function AccentDot() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        flex: "0 0 7px",
-        width: 7,
-        height: 7,
-        borderRadius: "50%",
-        background: "var(--accent)",
-        boxShadow: "0 0 8px var(--accent-glow)",
-      }}
-    />
   );
 }
 
@@ -1192,8 +1295,12 @@ function TabButton({
   return (
     <button
       type="button"
+      role="tab"
+      id={`capability-tab-${tab}`}
+      aria-selected={active}
+      aria-controls="capability-panel"
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
-      aria-current={active ? "page" : undefined}
       {...handlers}
       style={{
         appearance: "none",
@@ -1270,6 +1377,13 @@ function NavIcon({ tab }: { tab: CapabilityTab }) {
           <path d="M9 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2" />
         </svg>
       );
+    case "profiles": // person
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="8" r="3.5" />
+          <path d="M5 20a7 7 0 0 1 14 0" />
+        </svg>
+      );
     case "memory": // book
       return (
         <svg {...common}>
@@ -1299,1477 +1413,6 @@ function NavIcon({ tab }: { tab: CapabilityTab }) {
   }
 }
 
-// A quiet glyph button for the dialog corner: a 1.5px SVG on the shared
-// .spark-icon-btn idiom (transparent at rest, ink-tint on hover, global ring).
-function CloseButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button type="button" className="spark-icon-btn" aria-label="Close" title="Close" onClick={onClick}>
-      <CloseGlyph />
-    </button>
-  );
-}
-
-function SearchField({
-  value,
-  onChange,
-  placeholder,
-}: {
-  value: string;
-  onChange: (next: string) => void;
-  placeholder: string;
-}) {
-  return (
-    <div style={searchWrapStyle}>
-      <SearchGlyph />
-      <input
-        type="search"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={placeholder}
-        className="spark-input"
-        style={searchInputStyle}
-        spellCheck={false}
-      />
-    </div>
-  );
-}
-
-function McpRow({
-  group,
-  busyKey,
-  coraAssigned,
-  workerAssigned,
-  onTogglePiScope,
-  onEdit,
-  onRemove,
-  onInstall,
-}: {
-  group: NameGroup;
-  busyKey: string | null;
-  coraAssigned: boolean;
-  workerAssigned: boolean;
-  onTogglePiScope: (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => void;
-  onEdit: (group: NameGroup) => void;
-  onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
-}) {
-  const transport = group.any.mcpTransport ?? "stdio";
-  const summary = group.any.mcpSummary ?? group.any.path;
-  return (
-    <div className="agent-capability-row" style={mcpRowStyle}>
-      <div style={{ minWidth: 0 }}>
-        <div style={rowNameStyle} title={group.name}>
-          {group.name}
-          <EntryFlags group={group} />
-        </div>
-        {/* The transport rides with the summary, not the name: the Server
-            column is narrow and rowNameStyle clips, which would eat a badge. */}
-        <div style={rowMetaStyle}>
-          <span className="spark-badge" style={transportBadgeStyle}>
-            {transport === "stdio" ? "stdio" : transport === "sse" ? "sse" : "http"}
-          </span>
-          <span style={rowSummaryStyle} title={`${summary}\n${group.any.path}`}>
-            {summary}
-          </span>
-        </div>
-        <div style={rowMetaStyle}>
-          <span style={rowScopeStyle}>{group.any.scope}</span>
-        </div>
-      </div>
-      <Cell label="Cora" title={`Connect ${group.name} to Cora`}>
-        <Switch
-          checked={coraAssigned}
-          onChange={(next) => onTogglePiScope(group, "cora", next)}
-          ariaLabel={`Connect ${group.name} to Cora`}
-        />
-      </Cell>
-      <Cell label="Workers" title={`Connect ${group.name} to workers`}>
-        <Switch
-          checked={workerAssigned}
-          onChange={(next) => onTogglePiScope(group, "worker", next)}
-          ariaLabel={`Connect ${group.name} to workers`}
-        />
-      </Cell>
-      <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
-      <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
-      <CliCell group={group} runtime="grok" busyKey={busyKey} onInstall={onInstall} />
-      <div style={rowActionsStyle}>
-        <button type="button" className="spark-btn" style={smallBtnStyle} onClick={() => onEdit(group)}>
-          Edit
-        </button>
-        <RemoveControl
-          group={group}
-          busy={busyKey === group.sessionKey}
-          protectedTitle="Protected entry"
-          onRemove={onRemove}
-        />
-      </div>
-    </div>
-  );
-}
-
-// One table cell. The caption repeats the column header, hidden while the grid
-// is wide enough to carry its own header row and revealed by the narrow-width
-// rule in styles.css, where rows stack and the header is gone.
-function Cell({
-  label,
-  title,
-  children,
-}: {
-  label: string;
-  title?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={cellStyle} title={title}>
-      <span className="agent-capability-cell-label" style={cellLabelStyle}>
-        {label}
-      </span>
-      {children}
-    </div>
-  );
-}
-
-// Whether one external CLI carries this entry, in the column named after it.
-// A shared config file is read by both CLIs, so it satisfies either column —
-// the tooltip says so, because "set up in Claude" reads differently when the
-// file is one both tools happen to read.
-function CliCell({
-  group,
-  runtime,
-  busyKey,
-  onInstall,
-}: {
-  group: NameGroup;
-  runtime: "claude" | "codex" | "grok";
-  busyKey: string | null;
-  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
-}) {
-  const noun = group.kind === "mcp" ? "server" : "skill";
-  const direct = group.installs[runtime];
-  const shared = group.installs.shared;
-  if (direct.length > 0 || shared.length > 0) {
-    const paths = [...direct, ...shared].map((item) => item.path);
-    const via = direct.length === 0 ? " via a shared config file" : "";
-    return (
-      <Cell
-        label={CLI_LABEL[runtime]}
-        title={`This ${noun} is set up for the ${CLI_LABEL[runtime]}${via}.\n${paths.join("\n")}`}
-      >
-        <CheckGlyph />
-      </Cell>
-    );
-  }
-  // shareState's "covered" cases are an install in this CLI's own config or in
-  // a shared one — both handled above — and a group with no install at all,
-  // which groupByName cannot build. Anything still here is blocked.
-  const state = shareState(group, runtime);
-  if (state.kind === "blocked") {
-    return (
-      <Cell label={CLI_LABEL[runtime]} title={state.reason}>
-        <span style={cellDashStyle}>—</span>
-      </Cell>
-    );
-  }
-  const busy = busyKey === `${group.sessionKey}:${runtime}`;
-  return (
-    <Cell label={CLI_LABEL[runtime]}>
-      <button
-        type="button"
-        className="spark-btn"
-        style={microBtnStyle}
-        disabled={busy}
-        onClick={() => onInstall(group, runtime)}
-        title={`Copy this ${noun} into the ${CLI_LABEL[runtime]} config so that tool can use it too`}
-      >
-        {busy ? "…" : "Copy"}
-      </button>
-    </Cell>
-  );
-}
-
-// The two standing warnings about an entry, next to its name where they qualify
-// it: an entry only one runtime understands, and one Codara is not allowed to
-// delete.
-function EntryFlags({ group }: { group: NameGroup }) {
-  const isProtected = RUNTIME_COLUMNS.some((rt) => group.installs[rt].some((item) => !item.canDelete));
-  return (
-    <>
-      {!group.any.syncable ? (
-        <span className="spark-badge is-warn" style={flagBadgeStyle} title={group.any.compatibilityReason}>
-          native
-        </span>
-      ) : null}
-      {isProtected ? (
-        <span className="spark-badge is-warn" style={flagBadgeStyle} title="Codara cannot delete this entry.">
-          protected
-        </span>
-      ) : null}
-    </>
-  );
-}
-
-// The column labels. One flat row: a second tier of grouped captions over
-// Cora/Workers and Claude/Codex was more chrome than four short words need.
-function TableHeader({ template, labels }: { template: string; labels: string[] }) {
-  return (
-    <div
-      className="agent-capability-head"
-      style={{ ...tableHeadStyle, gridTemplateColumns: template }}
-    >
-      {labels.map((label, index) => (
-        <span key={label || `col-${index}`} style={index === 0 ? tableHeadLeadStyle : tableHeadCellStyle}>
-          {label}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function SkillRow({
-  group,
-  busyKey,
-  enabled,
-  onToggle,
-  onRemove,
-  onInstall,
-}: {
-  group: NameGroup;
-  busyKey: string | null;
-  enabled: boolean;
-  onToggle: (group: NameGroup, enabled: boolean) => void;
-  onRemove: (group: NameGroup, scope: RemoveScope) => void;
-  // Skills only ever render the Claude and Codex columns; Grok Build has no
-  // skill root, so the wide union here is the shared handler's, not an offer.
-  onInstall: (group: NameGroup, target: "claude" | "codex" | "grok") => void;
-}) {
-  return (
-    <div
-      className="agent-capability-row"
-      style={{ ...skillRowStyle, opacity: enabled ? 1 : 0.55 }}
-    >
-      <div style={{ minWidth: 0 }}>
-        <div style={rowNameStyle} title={group.name}>
-          {group.name}
-          <EntryFlags group={group} />
-        </div>
-        <div style={rowMetaStyle}>
-          <span style={rowSummaryStyle} title={group.any.path}>
-            {group.any.path}
-          </span>
-          <span style={rowScopeStyle}>{group.any.scope}</span>
-        </div>
-      </div>
-      <Cell label="Enabled" title={`Let workers load ${group.name}`}>
-        <Switch
-          checked={enabled}
-          onChange={(next) => onToggle(group, next)}
-          ariaLabel={`Let workers load ${group.name}`}
-        />
-      </Cell>
-      <CliCell group={group} runtime="claude" busyKey={busyKey} onInstall={onInstall} />
-      <CliCell group={group} runtime="codex" busyKey={busyKey} onInstall={onInstall} />
-      <div style={rowActionsStyle}>
-        <RemoveControl
-          group={group}
-          busy={busyKey === group.sessionKey}
-          protectedTitle="Protected skill"
-          onRemove={onRemove}
-        />
-      </div>
-    </div>
-  );
-}
-
-// One memory tier: what it holds, how full its file is, and the three actions
-// on it. There is deliberately no content editing here; the file is markdown
-// and the editor is the editor, so the row hands the path to a tab instead of
-// growing a second, worse text box.
-function MemoryRow({
-  scope,
-  title,
-  detail,
-  status,
-  busy,
-  unavailable,
-  onToggle,
-  onOpen,
-  onClear,
-}: {
-  scope: CoraMemoryScope;
-  title: string;
-  detail: string;
-  status: MemoryTierStatus | null;
-  busy: boolean;
-  /** Why this tier cannot be used right now, or null when it can. */
-  unavailable: string | null;
-  onToggle: (scope: CoraMemoryScope, enabled: boolean) => void;
-  onOpen: (path: string) => void;
-  onClear: (scope: CoraMemoryScope, includeUserLines: boolean) => void;
-}) {
-  const enabled = status?.enabled ?? false;
-  const blocked = unavailable !== null || status === null;
-  const lines = status ? status.counts.user + status.counts.cora + status.counts.auto : 0;
-  return (
-    <div
-      className="agent-capability-row"
-      style={{ ...rowStyle, opacity: blocked || !enabled ? 0.55 : 1 }}
-    >
-      <div style={{ minWidth: 0 }}>
-        <div style={rowNameStyle} title={title}>
-          {title}
-        </div>
-        <div style={memoryDetailStyle}>{detail}</div>
-        {status && status.path ? (
-          <div style={rowMetaStyle}>
-            <span style={rowSummaryStyle} title={status.path}>
-              {status.path}
-            </span>
-          </div>
-        ) : null}
-        <div style={rowMetaStyle}>
-          {unavailable ? (
-            <span style={memoryNoteStyle}>{unavailable}</span>
-          ) : status === null ? (
-            <span style={memoryNoteStyle}>Reading the file</span>
-          ) : status.bytesUsed === 0 ? (
-            <span style={memoryNoteStyle}>Nothing remembered yet.</span>
-          ) : (
-            <MemoryMeter status={status} lines={lines} />
-          )}
-        </div>
-      </div>
-      <div style={rowControlsStyle}>
-        <SwitchCell
-          label="Enabled"
-          checked={enabled}
-          disabled={blocked || busy}
-          onChange={(next) => onToggle(scope, next)}
-          title={
-            unavailable ??
-            `Load ${title.toLowerCase()} into Cora's sessions and let it write there`
-          }
-        />
-        <button
-          type="button"
-          className="spark-btn"
-          style={smallBtnStyle}
-          disabled={blocked || !status?.path}
-          onClick={() => status?.path && onOpen(status.path)}
-          title={status?.path ?? "This file has no resolved location yet"}
-        >
-          Open in editor
-        </button>
-        <MemoryClearControl
-          busy={busy}
-          disabled={blocked || (status?.bytesUsed ?? 0) === 0}
-          userLineCount={status?.counts.user ?? 0}
-          onClear={(includeUserLines) => onClear(scope, includeUserLines)}
-        />
-      </div>
-    </div>
-  );
-}
-
-// How full the file is, in the two units that matter: a bar against the hard
-// cap, and the line provenance underneath. The warning tint arrives at the same
-// 80% soft cap the writer uses to start asking Cora to consolidate, so the UI
-// turns amber on exactly the runs where the tool starts pushing back.
-function MemoryMeter({ status, lines }: { status: MemoryTierStatus; lines: number }) {
-  const tone = memoryTone(status);
-  const color = tone === "over" ? "var(--danger)" : tone === "warn" ? "var(--warn)" : "var(--accent)";
-  const filled = status.bytesCap > 0 ? Math.min(1, status.bytesUsed / status.bytesCap) : 0;
-  return (
-    <div style={memoryMeterStyle}>
-      <div style={memoryTrackStyle}>
-        <div style={{ ...memoryFillStyle, width: `${Math.round(filled * 100)}%`, background: color }} />
-      </div>
-      <span style={{ ...memoryNoteStyle, color: tone === "ok" ? "var(--muted)" : color }}>
-        {formatMemoryBytes(status.bytesUsed)} of {formatMemoryBytes(status.bytesCap)}
-        {tone === "over" ? " · full, Cora must consolidate before it can add more" : ""}
-        {tone === "warn" ? " · nearly full" : ""}
-      </span>
-      <span style={memoryNoteStyle}>
-        {lines} {lines === 1 ? "line" : "lines"}
-        {status.counts.user > 0 ? ` · ${status.counts.user} yours` : ""}
-      </span>
-    </div>
-  );
-}
-
-// Clearing is two steps because it deletes a file the user may have written in
-// by hand. The default drops only the agent-written lines; taking the user's
-// own notes too is a separate, explicit tick.
-function MemoryClearControl({
-  busy,
-  disabled,
-  userLineCount,
-  onClear,
-}: {
-  busy: boolean;
-  disabled: boolean;
-  userLineCount: number;
-  onClear: (includeUserLines: boolean) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [includeUserLines, setIncludeUserLines] = useState(false);
-
-  const close = () => {
-    setOpen(false);
-    setIncludeUserLines(false);
-  };
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="spark-btn"
-        style={smallBtnStyle}
-        disabled={busy || disabled}
-        onClick={() => setOpen(true)}
-        title="Delete what Cora remembered here"
-      >
-        {busy ? "Working" : "Clear"}
-      </button>
-    );
-  }
-
-  return (
-    <div style={removeChoiceStyle}>
-      <span style={cellLabelStyle}>Clear memory</span>
-      {userLineCount > 0 ? (
-        <label style={{ ...memoryCheckStyle, color: includeUserLines ? "var(--danger)" : "var(--muted)" }}>
-          <input
-            type="checkbox"
-            checked={includeUserLines}
-            onChange={(event) => setIncludeUserLines(event.currentTarget.checked)}
-          />
-          <span>
-            Also delete my own notes ({userLineCount} {userLineCount === 1 ? "line" : "lines"})
-          </span>
-        </label>
-      ) : null}
-      <div style={removeChoiceRowStyle}>
-        <button
-          type="button"
-          className="spark-btn is-danger"
-          style={microBtnStyle}
-          onClick={() => {
-            close();
-            onClear(includeUserLines);
-          }}
-          title={
-            includeUserLines
-              ? "Delete every line in this file"
-              : "Delete the lines Cora wrote and keep yours"
-          }
-        >
-          {includeUserLines ? "Delete all" : "Clear Cora's lines"}
-        </button>
-        <button type="button" className="spark-btn" style={microBtnStyle} onClick={close}>
-          Keep
-        </button>
-      </div>
-    </div>
-  );
-}
-
-type ShareState = { kind: "covered" } | { kind: "ready" } | { kind: "blocked"; reason: string };
-
-function shareState(group: NameGroup, target: "claude" | "codex" | "grok"): ShareState {
-  if (group.installs.shared.length > 0 || group.installs[target].length > 0) return { kind: "covered" };
-  const source = RUNTIME_COLUMNS.some((rt) => group.installs[rt].length > 0);
-  if (!source) return { kind: "covered" };
-  if (!group.any.syncable) {
-    return {
-      kind: "blocked",
-      reason: group.any.compatibilityReason ?? `This entry cannot be copied to ${RUNTIME_LABEL[target]}.`,
-    };
-  }
-  // An entry pinned to one runtime cannot be copied into another. A remote
-  // server carrying request headers is "claude", which blocks both TOML
-  // configs (Codex and Grok Build) rather than only Codex.
-  const only = group.any.compatibility;
-  if (only !== "both" && only !== "unknown" && only !== target) {
-    return {
-      kind: "blocked",
-      reason: group.any.compatibilityReason ?? `This entry does not work under ${RUNTIME_LABEL[target]}.`,
-    };
-  }
-  return { kind: "ready" };
-}
-
-// Remove, scoped. One runtime column present keeps the plain two-step confirm.
-// Several columns turn the second step into the choice itself: which config
-// files this removal is allowed to touch.
-function RemoveControl({
-  group,
-  busy,
-  protectedTitle,
-  onRemove,
-}: {
-  group: NameGroup;
-  busy: boolean;
-  protectedTitle: string;
-  onRemove: (group: NameGroup, scope: RemoveScope) => void;
-}) {
-  const columns = RUNTIME_COLUMNS.filter((rt) => group.installs[rt].some((item) => item.canDelete));
-  if (columns.length === 0) {
-    return <ConfirmRemoveButton busy={busy} disabled title={protectedTitle} onConfirm={() => {}} />;
-  }
-  if (columns.length === 1) {
-    const only = columns[0];
-    return (
-      <ConfirmRemoveButton
-        busy={busy}
-        disabled={false}
-        title={`Remove ${group.name} from ${RUNTIME_LABEL[only]}:\n${group.installs[only].map((item) => item.path).join("\n")}`}
-        onConfirm={() => onRemove(group, only)}
-      />
-    );
-  }
-  return <ScopedRemoveButton group={group} busy={busy} columns={columns} onRemove={onRemove} />;
-}
-
-function ScopedRemoveButton({
-  group,
-  busy,
-  columns,
-  onRemove,
-}: {
-  group: NameGroup;
-  busy: boolean;
-  columns: RuntimeColumn[];
-  onRemove: (group: NameGroup, scope: RemoveScope) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const close = () => {
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = null;
-    setOpen(false);
-  };
-
-  const arm = () => {
-    if (busy) return;
-    setOpen(true);
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => setOpen(false), 6000);
-  };
-
-  const choose = (scope: RemoveScope) => {
-    close();
-    onRemove(group, scope);
-  };
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        className="spark-btn"
-        style={smallBtnStyle}
-        disabled={busy}
-        onClick={arm}
-        title={`${group.name} lives in ${columns.length} config locations. Pick which one to remove it from.`}
-      >
-        {busy ? "Working" : "Remove"}
-      </button>
-    );
-  }
-
-  return (
-    <div style={removeChoiceStyle}>
-      <span style={cellLabelStyle}>Remove from</span>
-      <div style={removeChoiceRowStyle}>
-        {columns.map((rt) => (
-          <button
-            key={rt}
-            type="button"
-            className="spark-btn is-danger"
-            style={microBtnStyle}
-            onClick={() => choose(rt)}
-            title={group.installs[rt].map((item) => item.path).join("\n")}
-          >
-            {RUNTIME_LABEL[rt]}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="spark-btn is-danger"
-          style={microBtnStyle}
-          onClick={() => choose("all")}
-          title={`Remove ${group.name} from every config file`}
-        >
-          All
-        </button>
-        <button type="button" className="spark-btn" style={microBtnStyle} onClick={close}>
-          Keep
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function BuiltinRow({
-  builtin,
-  busyKey,
-  onInstall,
-  onUninstall,
-}: {
-  builtin: SparkBuiltinMcpStatus;
-  busyKey: string | null;
-  onInstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
-  onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
-}) {
-  const runtimes: SparkBuiltinRuntime[] = ["claude", "codex", "grok"];
-  return (
-    <div className="agent-capability-row" style={mcpRowStyle}>
-      <div style={{ minWidth: 0 }}>
-        {/* Same trap McpRow documents: rowNameStyle is nowrap + ellipsis inside
-            the narrow Server column, so a badge parked on the name line gets
-            sliced. The badges ride the wrapping meta row instead. */}
-        <div style={rowNameStyle} title="Codara Studio tools">
-          Codara Studio tools
-        </div>
-        <div style={rowMetaStyle}>
-          <span style={rowSummaryStyle} title={builtin.detail}>
-            {builtin.summary}
-          </span>
-        </div>
-        <div style={rowMetaStyle}>
-          <span style={rowScopeStyle}>{builtin.name}</span>
-          <span className="spark-badge is-accent" style={flagBadgeStyle}>
-            built in
-          </span>
-          <span className="spark-badge" style={flagBadgeStyle} title={builtin.tools.join(", ")}>
-            {builtin.tools.length} tools
-          </span>
-        </div>
-      </div>
-      {/* No switch: Cora and workers reach these tools without any config, so a
-          toggle sitting on would be a control that does nothing. */}
-      <Cell label="Cora" title="Always on — loaded directly from Codara">
-        <CheckGlyph />
-      </Cell>
-      <Cell label="Workers" title="Always on — loaded directly from Codara">
-        <CheckGlyph />
-      </Cell>
-      {runtimes.map((runtime) => (
-        <BuiltinCliCell
-          key={runtime}
-          runtime={runtime}
-          status={builtin[runtime]}
-          autoManaged={builtin.autoManaged}
-          busy={busyKey === `${builtin.id}:${runtime}`}
-          onInstall={() => onInstall(builtin.id, runtime)}
-          onUninstall={() => onUninstall(builtin.id, runtime)}
-        />
-      ))}
-      <div style={rowActionsStyle} />
-    </div>
-  );
-}
-
-// The built-in server in one CLI's config, as a switch: off removes Codara's
-// entry and keeps it out across launches, on writes it back. An entry the user
-// wrote is theirs to change, and a CLI that is not installed has no config.
-function BuiltinCliCell({
-  runtime,
-  status,
-  autoManaged,
-  busy,
-  onInstall,
-  onUninstall,
-}: {
-  runtime: SparkBuiltinRuntime;
-  status: SparkBuiltinMcpStatus["claude"];
-  autoManaged: boolean;
-  busy: boolean;
-  onInstall: () => void;
-  onUninstall: () => void;
-}) {
-  const label = CLI_LABEL[runtime];
-  // Holds the flipped position while the config write and the status reread
-  // run, so the switch does not snap back before the new state arrives.
-  const [target, setTarget] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!busy) setTarget(null);
-  }, [busy]);
-  if (status.state !== "installed" && status.state !== "available") {
-    return (
-      <Cell label={label} title={status.configPath}>
-        <span style={cellNoteStyle}>{builtinStateLabel(status.state)}</span>
-      </Cell>
-    );
-  }
-  const installed = status.state === "installed";
-  const title = installed
-    ? `The ${label} can use Codara Studio tools${autoManaged ? " (kept current on launch)" : ""}. Turn off to remove them.\n${status.configPath}`
-    : `Turn on to give the ${label} Codara Studio tools.\n${status.configPath}`;
-  return (
-    <Cell label={label} title={title}>
-      <Switch
-        checked={target ?? installed}
-        disabled={busy}
-        ariaLabel={`Codara Studio tools for the ${label}`}
-        onChange={(next) => {
-          setTarget(next);
-          if (next) onInstall();
-          else onUninstall();
-        }}
-      />
-    </Cell>
-  );
-}
-
-function builtinStateLabel(state: SparkBuiltinInstallState): string {
-  if (state === "user-managed") return "Set up by you";
-  if (state === "unavailable") return "Not detected";
-  return state === "installed" ? "Added" : "Not added";
-}
-
-// Destructive actions stay neutral until armed, then reveal the danger tint for
-// the confirm step. The arm expires so a stray first click cannot linger.
-function ConfirmRemoveButton({
-  busy,
-  disabled,
-  label = "Remove",
-  title,
-  onConfirm,
-}: {
-  busy: boolean;
-  disabled: boolean;
-  label?: string;
-  title?: string;
-  onConfirm: () => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    };
-  }, []);
-
-  const handleClick = () => {
-    if (busy || disabled) return;
-    if (!confirming) {
-      setConfirming(true);
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => setConfirming(false), 4000);
-      return;
-    }
-    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-    setConfirming(false);
-    onConfirm();
-  };
-
-  return (
-    <button
-      type="button"
-      className={confirming ? "spark-btn is-danger" : "spark-btn"}
-      style={smallBtnStyle}
-      disabled={busy || disabled}
-      onClick={handleClick}
-      title={confirming ? "Click again to confirm" : title}
-    >
-      {busy ? "Working" : confirming ? "Confirm" : label}
-    </button>
-  );
-}
-
-function McpServerForm({
-  editor,
-  targets,
-  busy,
-  error,
-  onChange,
-}: {
-  editor: EditorState;
-  targets: AgentMcpTarget[];
-  busy: boolean;
-  error: string | null;
-  onChange: (next: EditorState) => void;
-}) {
-  const set = <K extends keyof EditorState>(key: K, value: EditorState[K]) =>
-    onChange({ ...editor, [key]: value });
-  const target = targets.find((item) => item.id === editor.targetId) ?? null;
-  return (
-    <section style={sectionStyle} aria-busy={busy}>
-      <div style={sectionHeadStyle}>
-        <div style={{ minWidth: 0 }}>
-          <h2 style={sectionTitleStyle}>{editor.mode === "add" ? "Add MCP server" : "Edit MCP server"}</h2>
-          <p style={sectionDetailStyle}>
-            Codara writes the entry into the config file you pick. Claude, Codex and Pi all read it back.
-          </p>
-        </div>
-      </div>
-
-      <div style={formGridStyle}>
-        <Field label="Name" hint="Letters, digits, dot, underscore and hyphen.">
-          <input
-            className="spark-input"
-            value={editor.name}
-            onChange={(event) => set("name", event.target.value)}
-            placeholder="my-server"
-            spellCheck={false}
-            autoFocus
-          />
-        </Field>
-
-        <div style={fieldStyle}>
-          <span style={fieldLabelStyle}>Transport</span>
-          <div className="spark-segmented" role="group" aria-label="Transport">
-            <button
-              type="button"
-              className={editor.transport === "stdio" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-              aria-pressed={editor.transport === "stdio"}
-              onClick={() => set("transport", "stdio")}
-            >
-              stdio
-            </button>
-            <button
-              type="button"
-              className={editor.transport === "http" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-              aria-pressed={editor.transport === "http"}
-              onClick={() => set("transport", "http")}
-            >
-              HTTP
-            </button>
-          </div>
-        </div>
-
-        {editor.transport === "stdio" ? (
-          <>
-            <Field label="Command">
-              <input
-                className="spark-input"
-                value={editor.command}
-                onChange={(event) => set("command", event.target.value)}
-                placeholder="npx"
-                spellCheck={false}
-              />
-            </Field>
-            <Field label="Arguments" hint="One per line.">
-              <textarea
-                className="spark-input"
-                value={editor.argsText}
-                onChange={(event) => set("argsText", event.target.value)}
-                placeholder={"-y\n@scope/package"}
-                spellCheck={false}
-                rows={4}
-                style={textareaStyle}
-              />
-            </Field>
-            <PairEditor
-              label="Environment"
-              pairs={editor.env}
-              keyPlaceholder="API_KEY"
-              valuePlaceholder="value"
-              onChange={(env) => set("env", env)}
-            />
-          </>
-        ) : (
-          <>
-            <Field label="URL" hint="Streamable HTTP endpoint.">
-              <input
-                className="spark-input"
-                value={editor.url}
-                onChange={(event) => set("url", event.target.value)}
-                placeholder="https://example.com/mcp"
-                spellCheck={false}
-              />
-            </Field>
-            <PairEditor
-              label="Headers"
-              pairs={editor.headers}
-              keyPlaceholder="Authorization"
-              valuePlaceholder="Bearer ..."
-              onChange={(headers) => set("headers", headers)}
-            />
-          </>
-        )}
-
-        <Field label="Location" hint={target ? target.path : undefined}>
-          <select
-            className="spark-input"
-            value={editor.targetId}
-            onChange={(event) => set("targetId", event.target.value)}
-          >
-            {targets.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-        </Field>
-
-        {target?.format === "toml" && editor.transport === "http" && editor.headers.length > 0 ? (
-          <div style={formNoteStyle}>
-            Codex config.toml cannot carry request headers. Pick a JSON location for this server.
-          </div>
-        ) : null}
-        {error ? <div style={formErrorStyle}>{error}</div> : null}
-      </div>
-    </section>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label style={fieldStyle}>
-      <span style={fieldLabelStyle}>{label}</span>
-      {children}
-      {hint ? <span style={fieldHintStyle}>{hint}</span> : null}
-    </label>
-  );
-}
-
-function PairEditor({
-  label,
-  pairs,
-  keyPlaceholder,
-  valuePlaceholder,
-  onChange,
-}: {
-  label: string;
-  pairs: Pair[];
-  keyPlaceholder: string;
-  valuePlaceholder: string;
-  onChange: (next: Pair[]) => void;
-}) {
-  const update = (index: number, patch: Partial<Pair>) =>
-    onChange(pairs.map((pair, i) => (i === index ? { ...pair, ...patch } : pair)));
-  return (
-    <div style={fieldStyle}>
-      <span style={fieldLabelStyle}>{label}</span>
-      {pairs.map((pair, index) => (
-        // Rows are positional and every input is controlled, so the index is a
-        // stable enough key here.
-        <div key={index} style={pairRowStyle}>
-          <input
-            className="spark-input"
-            value={pair.key}
-            onChange={(event) => update(index, { key: event.target.value })}
-            placeholder={keyPlaceholder}
-            spellCheck={false}
-            aria-label={`${label} name`}
-          />
-          <input
-            className="spark-input"
-            value={pair.value}
-            onChange={(event) => update(index, { value: event.target.value })}
-            placeholder={valuePlaceholder}
-            spellCheck={false}
-            aria-label={`${label} value`}
-          />
-          <button
-            type="button"
-            className="spark-icon-btn"
-            aria-label={`Remove ${pair.key || label.toLowerCase()}`}
-            onClick={() => onChange(pairs.filter((_, i) => i !== index))}
-          >
-            <TrashGlyph />
-          </button>
-        </div>
-      ))}
-      <button
-        type="button"
-        className="spark-btn"
-        style={smallBtnStyle}
-        onClick={() => onChange([...pairs, { key: "", value: "" }])}
-      >
-        Add {label.toLowerCase()} row
-      </button>
-    </div>
-  );
-}
-
-function EmptyRow({ text }: { text: string }) {
-  return (
-    <div className="spark-empty" style={{ minHeight: 84 }}>
-      <span className="spark-empty__body">{text}</span>
-    </div>
-  );
-}
-
-function Pager({ shown, total, onMore }: { shown: number; total: number; onMore: () => void }) {
-  if (shown >= total) return null;
-  return (
-    <div style={pagerStyle}>
-      <span>
-        {shown} of {total} shown
-      </span>
-      <button type="button" className="spark-btn" style={smallBtnStyle} onClick={onMore}>
-        Show {Math.min(PAGE_SIZE, total - shown)} more
-      </button>
-    </div>
-  );
-}
-
-function SwitchCell({
-  label,
-  checked,
-  onChange,
-  title,
-  disabled,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  title: string;
-  disabled?: boolean;
-}) {
-  return (
-    <div style={switchCellStyle} title={title}>
-      <span style={cellLabelStyle}>{label}</span>
-      <Switch checked={checked} onChange={onChange} ariaLabel={title} disabled={disabled} />
-    </div>
-  );
-}
-
-// The list divides by model source, not one flat roster: the three native
-// families under the names the rest of the app uses (Claude, Codex, Grok),
-// then the user's OpenRouter favorites. "Other" only exists so an id with an
-// unrecognized shape stays visible and toggleable instead of vanishing.
-const WORKER_MODEL_GROUP_ORDER = ["Claude", "Codex", "Grok", "OpenRouter", "Other"] as const;
-
-function workerModelGroupFor(modelId: string): string {
-  // OpenRouter ids are vendor/model paths; native Pi ids never contain "/".
-  if (modelId.includes("/")) return "OpenRouter";
-  const family = familyForModelId(modelId);
-  return family ? AGENT_FAMILIES[family].displayName : "Other";
-}
-
-// Presentation is derived from the id alone: a friendly label for scanning
-// and a premium flag for the one roster entry that is materially more
-// expensive. Attribution comes from the group heading the row renders under.
-// The EXACT id always renders beside the label in mono — the id, not the
-// label, is what the spawn path enforces.
-function workerModelPresentation(modelId: string): {
-  label: string;
-  premium: boolean;
-} {
-  const isOpenRouter = modelId.includes("/");
-  const codexEntry = CODEX_MODEL_CATALOG.find((entry) => entry.id === modelId);
-  const slug = (isOpenRouter ? modelId.split("/").at(-1) : modelId) ?? modelId;
-  const label =
-    codexEntry?.label ??
-    slug
-      .split(/[-_]/)
-      .filter(Boolean)
-      .map((part) =>
-        part.toLowerCase() === "gpt" ? "GPT" : `${part.charAt(0).toUpperCase()}${part.slice(1)}`,
-      )
-      .join(" ");
-  return { label, premium: modelId === WORKER_MODEL_ROSTER.claude.premium };
-}
-
-// One compact de-boxed row per model, same shell as PolicyToggle so the tab
-// reads like the rest of the dialog: the whole row is the switch, and the
-// group heading above carries the provider attribution.
-function WorkerModelRow({
-  modelId,
-  checked,
-  onToggle,
-}: {
-  modelId: string;
-  checked: boolean;
-  onToggle: () => void;
-}) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  const model = workerModelPresentation(modelId);
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={`${model.label} (${modelId})`}
-      title={modelId}
-      onClick={onToggle}
-      {...handlers}
-      style={{
-        ...workerModelRowStyle,
-        background: pressed ? "var(--press)" : hover ? "var(--hover)" : "transparent",
-        boxShadow: withFocusRing(undefined, focus),
-      }}
-    >
-      <span style={workerModelNameCellStyle}>
-        <span
-          style={{
-            ...workerModelLabelStyle,
-            // Off rows dim their label so the enabled set pops at a glance;
-            // the switch remains the authoritative state indicator.
-            color: checked ? "var(--ink)" : "var(--muted)",
-          }}
-        >
-          {model.label}
-        </span>
-        {model.premium ? (
-          <span className="spark-badge" style={workerModelTierStyle}>
-            Premium
-          </span>
-        ) : null}
-        <span style={workerModelIdStyle}>{modelId}</span>
-      </span>
-      <SwitchTrack checked={checked} />
-    </button>
-  );
-}
-
-function PolicyToggle({
-  title,
-  detail,
-  checked,
-  onChange,
-}: {
-  title: string;
-  detail: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-}) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={title}
-      onClick={() => onChange(!checked)}
-      {...handlers}
-      style={{
-        ...policyRowStyle,
-        // De-boxed full-width row: the whole strip is the hit target, revealed
-        // by an ink tint only, so there is no reflow and no panel-in-panel.
-        background: pressed ? "var(--press)" : hover ? "var(--hover)" : "transparent",
-        boxShadow: withFocusRing(undefined, focus),
-      }}
-    >
-      <span style={{ minWidth: 0 }}>
-        <span style={policyTitleStyle}>{title}</span>
-        <span style={policyDetailStyle}>{detail}</span>
-      </span>
-      <SwitchTrack checked={checked} />
-    </button>
-  );
-}
-
-// ── Switch: one switch metric, app-wide. 34x20 track, 16px knob, 2px inset,
-// accent fill + glow when on. SwitchTrack is the pure-visual part so the same
-// geometry can be (a) an interactive role=switch button, or (b) a decorative
-// indicator nested inside a larger clickable row (PolicyToggle), where a
-// nested <button> would be invalid HTML. Matches SettingsDialog exactly.
-const SWITCH_W = 34;
-const SWITCH_H = 20;
-const SWITCH_KNOB = 16;
-
-function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boolean }) {
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-block",
-        position: "relative",
-        flex: `0 0 ${SWITCH_W}px`,
-        width: SWITCH_W,
-        height: SWITCH_H,
-        borderRadius: 999,
-        boxSizing: "border-box",
-        border: checked ? "1px solid var(--accent-edge)" : "1px solid var(--rule-strong)",
-        background: checked
-          ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-          : "color-mix(in oklab, var(--ink) 5%, transparent)",
-        opacity: disabled ? 0.55 : 1,
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: 1,
-          left: checked ? SWITCH_W - SWITCH_KNOB - 2 : 1,
-          width: SWITCH_KNOB,
-          height: SWITCH_KNOB,
-          borderRadius: "50%",
-          background: checked ? "var(--accent)" : "var(--ink-dim)",
-          boxShadow: checked ? "0 0 8px var(--accent-glow)" : "none",
-          transition:
-            "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-        }}
-      />
-    </span>
-  );
-}
-
-function Switch({
-  checked,
-  onChange,
-  ariaLabel,
-  disabled,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-  ariaLabel?: string;
-  disabled?: boolean;
-}) {
-  const { focus, pressed, handlers } = useInteractive();
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={ariaLabel}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      {...handlers}
-      style={{
-        appearance: "none",
-        display: "inline-flex",
-        flex: `0 0 ${SWITCH_W}px`,
-        padding: 0,
-        border: "none",
-        borderRadius: 999,
-        background: "transparent",
-        cursor: "default",
-        transform: pressed && !disabled ? "translateY(0.5px)" : "none",
-        boxShadow: withFocusRing(undefined, focus),
-        transition: "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <SwitchTrack checked={checked} disabled={disabled} />
-    </button>
-  );
-}
-
-// Shared 1.5px-stroke SVG icon family at currentColor (no unicode glyphs).
-function CloseGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
-      <path d="M6 6l12 12M18 6L6 18" />
-    </svg>
-  );
-}
-
-function SearchGlyph() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      aria-hidden
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      style={searchGlyphStyle}
-    >
-      <circle cx="11" cy="11" r="7" />
-      <path d="M21 21l-4.3-4.3" />
-    </svg>
-  );
-}
-
-// "Yes, this one is set up here." Tinted --ok rather than inheriting, because
-// in a column of dashes and buttons the tick is the signal.
-function CheckGlyph() {
-  return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      aria-hidden
-      fill="none"
-      stroke="var(--ok)"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M5 12.5l4.5 4.5L19 7.5" />
-    </svg>
-  );
-}
-
-function TrashGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12" />
-    </svg>
-  );
-}
-
-function groupByName(items: AgentAssetInventoryItem[], kind: CapabilityKind): NameGroup[] {
-  const map = new Map<string, NameGroup>();
-  for (const item of items) {
-    const key = `${kind}:${item.name.toLowerCase()}`;
-    let group = map.get(key);
-    if (!group) {
-      group = {
-        kind,
-        name: item.name,
-        sessionKey: item.sessionKey,
-        installs: { claude: [], codex: [], grok: [], shared: [] },
-        any: item,
-      };
-      map.set(key, group);
-    }
-    group.installs[item.runtime].push(item);
-  }
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function filterGroups(groups: NameGroup[], search: string): NameGroup[] {
-  const query = search.trim().toLowerCase();
-  if (!query) return groups;
-  return groups.filter((group) => {
-    const haystack = [
-      group.name,
-      group.any.mcpSummary ?? "",
-      ...RUNTIME_COLUMNS.flatMap((rt) => group.installs[rt].map((item) => item.path)),
-    ]
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(query);
-  });
-}
-
-function toggleKey(list: string[], key: string, enabled: boolean): string[] {
-  const next = new Set(list);
-  if (enabled) next.delete(key);
-  else next.add(key);
-  return [...next].sort();
-}
-
-// The Pi scope lists are opt-IN (a listed key is assigned), the mirror image of
-// the disabled-awareness lists.
-function toggleAssignment(list: string[], key: string, assigned: boolean): string[] {
-  const next = new Set(list);
-  if (assigned) next.add(key);
-  else next.delete(key);
-  return [...next].sort();
-}
-
-function editorFromDetail(detail: AgentMcpServerDetail): EditorState {
-  return {
-    mode: "edit",
-    replaceId: detail.id,
-    targetId: detail.targetId,
-    name: detail.name,
-    transport: detail.transport,
-    command: detail.command ?? "",
-    argsText: (detail.args ?? []).join("\n"),
-    env: pairsFrom(detail.env),
-    url: detail.url ?? "",
-    headers: pairsFrom(detail.headers),
-  };
-}
-
-// A target id is `${runtime}:${scope}:${path}`; the path itself may hold colons
-// on Windows, so split on the first two only.
-function describeUnlistedTarget(id: string): AgentMcpTarget {
-  const first = id.indexOf(":");
-  const second = id.indexOf(":", first + 1);
-  const path = second === -1 ? id : id.slice(second + 1);
-  return {
-    id,
-    runtime: "shared",
-    scope: "user",
-    path,
-    label: "Current location",
-    format: path.toLowerCase().endsWith(".json") ? "json" : "toml",
-  };
-}
-
-function pairsFrom(record?: Record<string, string>): Pair[] {
-  if (!record) return [];
-  return Object.entries(record).map(([key, value]) => ({ key, value }));
-}
-
-function pairsToRecord(pairs: Pair[]): Record<string, string> | undefined {
-  const out: Record<string, string> = {};
-  for (const pair of pairs) {
-    const key = pair.key.trim();
-    if (!key) continue;
-    out[key] = pair.value;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
-function splitArgs(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-// Mirrors the main-process rules so the user sees the problem before a write is
-// attempted. The main process stays the authority.
-function validateEditor(editor: EditorState): string | null {
-  const name = editor.name.trim();
-  if (!name) return "Name is required.";
-  if (!MCP_NAME_PATTERN.test(name)) {
-    return "Name may use letters, digits, dot, underscore and hyphen, and must start with a letter or digit.";
-  }
-  if (!editor.targetId) return "Choose where to save this server.";
-  if (editor.transport === "stdio") {
-    if (!editor.command.trim()) return "Command is required for a stdio server.";
-    return null;
-  }
-  const url = editor.url.trim();
-  if (!url) return "URL is required for an HTTP server.";
-  if (!/^https?:\/\//i.test(url)) return "URL must start with http:// or https://.";
-  return null;
-}
-
-function formatSyncSummary(result: {
-  mcp: { toClaude: string[]; toCodex: string[]; skipped: string[]; errors: string[] };
-  skills: { toClaude: string[]; toCodex: string[]; skipped: string[]; errors: string[] };
-}): string {
-  const mcpCount = result.mcp.toClaude.length + result.mcp.toCodex.length;
-  const skillCount = result.skills.toClaude.length + result.skills.toCodex.length;
-  const errors = [...result.mcp.errors, ...result.skills.errors];
-  if (errors.length > 0) {
-    return `Synced ${mcpCount} MCP and ${skillCount} skill item(s). Issues: ${errors.slice(0, 2).join(" | ")}`;
-  }
-  if (mcpCount === 0 && skillCount === 0) return "Nothing copied. Compatible entries are already available.";
-  return `Synced ${mcpCount} MCP and ${skillCount} skill item(s).`;
-}
-
-// The fraction of the hard cap at which the writer starts asking Cora to
-// consolidate instead of append (MEMORY_FILE_SOFT_BYTES / MEMORY_FILE_MAX_BYTES
-// in src/main/orchestration/cora-memory.ts). Derived from the reported cap
-// rather than hard-coded, so the renderer cannot drift from a cap change.
-const MEMORY_SOFT_RATIO = 0.8;
-
-function memoryTone(status: MemoryTierStatus): "ok" | "warn" | "over" {
-  if (status.overCap || status.bytesUsed > status.bytesCap) return "over";
-  return status.bytesUsed >= Math.ceil(status.bytesCap * MEMORY_SOFT_RATIO) ? "warn" : "ok";
-}
-
-// Bytes at the scale these files live at: a few KB, where "3.2 KB" is the
-// readable unit and a decimal past 10 KB is noise.
-function formatMemoryBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  return `${kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10} KB`;
-}
-
 const overlayStyle: React.CSSProperties = {
   position: "absolute",
   inset: 0,
@@ -2783,7 +1426,7 @@ const overlayStyle: React.CSSProperties = {
 const dialogStyle: React.CSSProperties = {
   // Fixed footprint: the body scrolls internally, the dialog stays put.
   zIndex: 1,
-  width: "min(880px, calc(100vw - 44px))",
+  width: "min(1120px, calc(100vw - 44px))",
   height: "min(760px, calc(100vh - 44px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
@@ -2808,6 +1451,15 @@ const titleStyle: React.CSSProperties = {
   letterSpacing: "-0.005em",
 };
 
+const subtitleStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 12,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  minWidth: 0,
+};
+
 const bodyStyle: React.CSSProperties = {
   display: "flex",
   minHeight: 0,
@@ -2815,7 +1467,7 @@ const bodyStyle: React.CSSProperties = {
 };
 
 const navStyle: React.CSSProperties = {
-  flex: "0 0 190px",
+  flex: "0 0 200px",
   borderRight: "1px solid var(--rule-soft)",
   // Translucent so the dialog's glass face shows through; over the opaque
   // fallback face it reads like the old --bg/--panel mix.
@@ -2852,504 +1504,6 @@ const mainStyle: React.CSSProperties = {
   gap: 22,
 };
 
-const sectionStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 10,
-  alignContent: "start",
-};
-
-const sectionHeadStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  alignItems: "end",
-  justifyContent: "space-between",
-  gap: 10,
-};
-
-const sectionTitleStyle: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 14,
-  fontWeight: 600,
-  margin: 0,
-};
-
-const sectionDetailStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11.5,
-  lineHeight: 1.45,
-  margin: "3px 0 0",
-};
-
-const sectionActionsStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-};
-
-const listStyle: React.CSSProperties = {
-  border: "1px solid var(--rule-soft)",
-  borderRadius: "var(--radius-surface, 10px)",
-  overflow: "hidden",
-  background: "color-mix(in oklab, var(--bg) 22%, transparent)",
-  boxShadow: "var(--well)",
-};
-
-// One grid template shared by a list's header row and every row in it. Every
-// column but the first is a fixed width so the two grids resolve identically —
-// an `auto` actions column would size to each row's own buttons and the
-// "table" would stop lining up the moment one row armed its remove confirm.
-// Widths are as tight as the content allows (a 34px switch, a 10px header word,
-// a "Copy" micro button) because every pixel here comes out of the Server
-// column: at the 860px breakpoint the pane is ~575px and the fixed columns plus
-// gaps and padding take ~442px of it.
-const MCP_GRID = "minmax(0, 1fr) 52px 60px 56px 56px 56px 116px";
-const SKILL_GRID = "minmax(0, 1fr) 60px 64px 64px 124px";
-
-const tableHeadStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 10,
-  alignItems: "center",
-  padding: "8px 14px",
-  borderBottom: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklab, var(--ink) 4%, transparent)",
-};
-
-const tableHeadCellStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10,
-  lineHeight: 1.3,
-  textAlign: "center",
-};
-
-const tableHeadLeadStyle: React.CSSProperties = {
-  ...tableHeadCellStyle,
-  textAlign: "left",
-};
-
-const cellStyle: React.CSSProperties = {
-  display: "grid",
-  justifyItems: "center",
-  alignContent: "center",
-  gap: 4,
-  minWidth: 0,
-};
-
-const cellDashStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontSize: 12,
-};
-
-const cellNoteStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontSize: 10,
-  lineHeight: 1.3,
-  textAlign: "center",
-};
-
-const rowStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 14,
-  alignItems: "center",
-  padding: "12px 14px",
-  borderBottom: "1px solid var(--rule-soft)",
-};
-
-const mcpRowStyle: React.CSSProperties = {
-  ...rowStyle,
-  gridTemplateColumns: MCP_GRID,
-  gap: 10,
-};
-
-const skillRowStyle: React.CSSProperties = {
-  ...rowStyle,
-  gridTemplateColumns: SKILL_GRID,
-  gap: 10,
-};
-
-const rowNameStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 7,
-  color: "var(--ink)",
-  fontSize: 13,
-  fontWeight: 600,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const rowMetaStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  flexWrap: "wrap",
-  marginTop: 4,
-  minWidth: 0,
-};
-
-const rowSummaryStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  maxWidth: "100%",
-};
-
-const rowScopeStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-};
-
-const rowControlsStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "flex-end",
-  gap: 10,
-};
-
-const rowActionsStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  alignSelf: "center",
-  gap: 6,
-};
-
-const switchCellStyle: React.CSSProperties = {
-  display: "grid",
-  justifyItems: "center",
-  gap: 4,
-};
-
-const removeChoiceStyle: React.CSSProperties = {
-  display: "grid",
-  justifyItems: "end",
-  gap: 4,
-};
-
-// Wraps: armed, this is up to five nowrap buttons inside a fixed 124px actions
-// track, and the row's `contain: paint` would clip the overflow into buttons
-// that are invisible but still keyboard-reachable. Only column WIDTH has to
-// match across rows, so growing taller costs the table nothing.
-const removeChoiceRowStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "flex-end",
-  flexWrap: "wrap",
-  gap: 4,
-};
-
-const memoryDetailStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.45,
-  marginTop: 3,
-};
-
-const profilePickerStyle: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 10,
-  alignItems: "end",
-  padding: 12,
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 10,
-  background: "color-mix(in oklab, var(--panel) 72%, transparent)",
-};
-
-const profileCreatorStyle: React.CSSProperties = {
-  ...profilePickerStyle,
-  marginTop: 10,
-};
-
-const profileActionsStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  flexWrap: "wrap",
-  gap: 8,
-};
-
-const profileCreatorHeadingStyle: React.CSSProperties = {
-  display: "grid",
-  flex: "1 0 100%",
-  gap: 3,
-  color: "var(--ink)",
-  fontSize: 12,
-};
-
-const profileHintStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10,
-  lineHeight: 1.35,
-};
-
-const profileOptionalStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontWeight: 400,
-  textTransform: "none",
-  letterSpacing: 0,
-};
-
-const profileFieldStyle: React.CSSProperties = {
-  display: "grid",
-  flex: "1 1 190px",
-  gap: 5,
-  minWidth: 0,
-};
-
-const memoryMeterStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  flexWrap: "wrap",
-  minWidth: 0,
-  width: "100%",
-};
-
-const memoryTrackStyle: React.CSSProperties = {
-  flex: "0 0 120px",
-  height: 4,
-  borderRadius: 999,
-  overflow: "hidden",
-  background: "color-mix(in oklab, var(--ink) 8%, transparent)",
-};
-
-const memoryFillStyle: React.CSSProperties = {
-  height: "100%",
-  borderRadius: 999,
-  transition: "width var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-};
-
-const memoryNoteStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10.5,
-  lineHeight: 1.45,
-};
-
-const memoryCheckStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "flex-start",
-  gap: 6,
-  fontSize: 10,
-  lineHeight: 1.4,
-  maxWidth: 220,
-  textAlign: "left",
-};
-
-const cellLabelStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10,
-  lineHeight: 1.3,
-};
-
-const smallBtnStyle: React.CSSProperties = {
-  height: "auto",
-  padding: "5px 10px",
-  fontSize: 11,
-};
-
-const microBtnStyle: React.CSSProperties = {
-  height: "auto",
-  padding: "2px 7px",
-  fontSize: 10,
-};
-
-const transportBadgeStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  textTransform: "none",
-  letterSpacing: "0.02em",
-};
-
-const flagBadgeStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  textTransform: "none",
-  letterSpacing: "0.02em",
-};
-
-const pagerStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  padding: "8px 12px",
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-};
-
-const searchWrapStyle: React.CSSProperties = {
-  position: "relative",
-  display: "flex",
-  alignItems: "center",
-};
-
-const searchGlyphStyle: React.CSSProperties = {
-  position: "absolute",
-  left: 9,
-  color: "var(--muted)",
-  pointerEvents: "none",
-};
-
-const searchInputStyle: React.CSSProperties = {
-  height: "auto",
-  width: 190,
-  padding: "7px 10px 7px 30px",
-};
-
-const formGridStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 14,
-  maxWidth: 560,
-};
-
-const fieldStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 5,
-  minWidth: 0,
-};
-
-const fieldLabelStyle: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 12,
-  fontWeight: 600,
-};
-
-const fieldHintStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.4,
-  overflowWrap: "anywhere",
-};
-
-const textareaStyle: React.CSSProperties = {
-  height: "auto",
-  padding: "8px 10px",
-  fontFamily: "var(--font-mono)",
-  fontSize: 12,
-  // .spark-input sets line-height 1 for its 26px single-line shell, which packs
-  // wrapped argument lines together.
-  lineHeight: 1.5,
-  resize: "vertical",
-};
-
-const pairRowStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1.4fr) auto",
-  gap: 6,
-  alignItems: "center",
-};
-
-const formNoteStyle: React.CSSProperties = {
-  color: "var(--warn)",
-  fontSize: 11,
-  lineHeight: 1.45,
-};
-
-const formErrorStyle: React.CSSProperties = {
-  color: "var(--danger)",
-  fontSize: 11.5,
-  lineHeight: 1.45,
-};
-
-const policyListStyle: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  // Negative gutters so the row hover tint bleeds past the text alignment.
-  marginInline: -8,
-};
-
-const policyRowStyle: React.CSSProperties = {
-  appearance: "none",
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 14,
-  alignItems: "center",
-  textAlign: "left",
-  width: "100%",
-  padding: "9px 8px",
-  border: "none",
-  borderRadius: "var(--radius-surface, 10px)",
-  color: "inherit",
-  font: "inherit",
-  cursor: "default",
-  transition:
-    "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-};
-
-const policyTitleStyle: React.CSSProperties = {
-  display: "block",
-  color: "var(--ink)",
-  fontSize: 13,
-  fontWeight: 600,
-};
-
-const policyDetailStyle: React.CSSProperties = {
-  display: "block",
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.45,
-  marginTop: 2,
-};
-
-// Worker-model rows reuse the de-boxed policy-row shell. Single-line rows
-// keep the tab compact; the source heading above each cluster carries the
-// provider, so the row itself is just name, id, and switch.
-const workerModelRowStyle: React.CSSProperties = {
-  ...policyRowStyle,
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 12,
-  padding: "8px 8px",
-};
-
-// The source heading over each cluster: Claude, Codex, Grok, OpenRouter.
-const workerModelGroupLabelStyle: React.CSSProperties = {
-  padding: "12px 8px 3px",
-  fontSize: 10,
-  fontWeight: 650,
-  letterSpacing: "0.07em",
-  textTransform: "uppercase",
-  color: "var(--muted-2)",
-};
-
-const workerModelNameCellStyle: React.CSSProperties = {
-  minWidth: 0,
-  display: "flex",
-  alignItems: "baseline",
-  flexWrap: "wrap",
-  columnGap: 8,
-  rowGap: 2,
-};
-
-const workerModelLabelStyle: React.CSSProperties = {
-  fontSize: 13,
-  fontWeight: 600,
-  transition: "color var(--motion-fast) var(--ease-out)",
-};
-
-// The exact model id, always visible: it is the value that persists and that
-// run-store enforces at spawn, so it must be copy-checkable at a glance.
-const workerModelIdStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10.5,
-  color: "var(--muted-2)",
-};
-
-const workerModelTierStyle: React.CSSProperties = {
-  alignSelf: "center",
-  flex: "0 0 auto",
-  padding: "1px 5px",
-  fontSize: 8.5,
-  fontWeight: 650,
-  letterSpacing: "0.04em",
-};
-
 const footerStyle: React.CSSProperties = {
   borderTop: "1px solid var(--rule-soft)",
   padding: "12px 18px",
@@ -3360,7 +1514,7 @@ const footerStyle: React.CSSProperties = {
 
 const statusStyle: React.CSSProperties = {
   flex: 1,
-  fontSize: 11,
+  fontSize: 11.5,
   fontWeight: 500,
   lineHeight: 1.45,
   overflowWrap: "anywhere",

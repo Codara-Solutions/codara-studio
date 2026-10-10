@@ -484,8 +484,9 @@ export default function App() {
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [capabilitiesInitialTab, setCapabilitiesInitialTab] = useState<
-    "mcp" | "skills" | "memory" | "workers" | "policy"
+    "mcp" | "skills" | "profiles" | "memory" | "workers" | "policy"
   >("mcp");
+  const [capabilitiesProfileId, setCapabilitiesProfileId] = useState<string | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [workerSessionPicker, setWorkerSessionPicker] =
     useState<WorkerSessionPickerRequest | null>(null);
@@ -2995,12 +2996,18 @@ export default function App() {
   }, []);
 
   const handleOpenCapabilities = useCallback((event?: Event) => {
-    const requested = (event as CustomEvent<{ tab?: unknown }> | undefined)?.detail?.tab;
+    const detail = (event as CustomEvent<{ tab?: unknown; profileId?: unknown }> | undefined)?.detail;
+    const requested = detail?.tab;
     setCapabilitiesInitialTab(
-      requested === "skills" || requested === "memory" || requested === "workers" || requested === "policy"
+      requested === "skills" ||
+        requested === "profiles" ||
+        requested === "memory" ||
+        requested === "workers" ||
+        requested === "policy"
         ? requested
         : "mcp",
     );
+    setCapabilitiesProfileId(typeof detail?.profileId === "string" ? detail.profileId : null);
     void loadAgentCapabilitiesDialog();
     setCapabilitiesOpen(true);
   }, []);
@@ -4914,6 +4921,7 @@ export default function App() {
         setSettingsOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
       },
+      "capabilities.open": () => window.dispatchEvent(new CustomEvent("spark:open-capabilities")),
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "automations.open": () => tabs.openAutomationsTab(),
       "usage.open": () => tabs.openUsageTab(),
@@ -6197,6 +6205,7 @@ export default function App() {
               workspaceCwd={activeWorkspace?.cwd ?? null}
               workspaceId={activeWorkspace?.id ?? null}
               initialTab={capabilitiesInitialTab}
+              initialProfileId={capabilitiesProfileId}
               onClose={closeCapabilities}
               onSave={handleSaveSettings}
             />
