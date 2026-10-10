@@ -210,19 +210,25 @@ async function main() {
     const EXTRA_USAGE_DECLINE =
       '400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."},"request_id":"req_011Cdavbsxnm5vP5ZkjLrM3t"}';
     for (const backend of [undefined, "pi"]) {
-      const plan = P.planManagerTurnFailure({
-        error: EXTRA_USAGE_DECLINE,
-        runStatus: "running",
-        mode: "chat",
-        transientRetryCount: 0,
-        ...(backend ? { backend } : {}),
-      });
-      // fail_turn, not fail: the run keeps its status and its live workers.
-      assert.equal(plan.action, "fail_turn", `expected fail_turn for backend=${backend}`);
-      assert.equal(plan.kind, "subscription");
-      // Nothing that could pause the run or drive the composer placeholder.
-      assert.equal(plan.parkReason, undefined);
-      assert.equal(plan.lastAction, undefined);
+      for (const activeWorkerCount of [0, 2]) {
+        const plan = P.planManagerTurnFailure({
+          error: EXTRA_USAGE_DECLINE,
+          runStatus: "running",
+          mode: "chat",
+          transientRetryCount: 0,
+          activeWorkerCount,
+          ...(backend ? { backend } : {}),
+        });
+        // With live workers, fail_turn: the run keeps its status and the
+        // workers keep driving it. With none, fail: a "running" run with no
+        // driver would show Working forever.
+        const expected = activeWorkerCount > 0 ? "fail_turn" : "fail";
+        assert.equal(plan.action, expected, `expected ${expected} for backend=${backend}, workers=${activeWorkerCount}`);
+        assert.equal(plan.kind, "subscription");
+        // Nothing that could pause the run or drive the composer placeholder.
+        assert.equal(plan.parkReason, undefined);
+        assert.equal(plan.lastAction, undefined);
+      }
     }
     // Still never a quiet same-account retry: a doomed account must not burn
     // automatic attempts, on any mode.

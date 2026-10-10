@@ -172,6 +172,7 @@ import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonom
 import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
+  managerTurnParkReason,
   managerTurnRetryDelayMs,
   MAX_MANAGER_TRANSIENT_RETRIES,
   planManagerTurnFailure,
@@ -10139,12 +10140,7 @@ async function returnUnfinishedManagerRecoveryToParked(
           recovery.managerMode === "chat"
             ? "chat_turn_parked"
             : "manager_turn_parked",
-        stopReason:
-          recovery.failureKind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : recovery.failureKind === "transport"
-              ? "Cora lost its provider connection. Retry when the connection is stable."
-              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        stopReason: managerTurnParkReason(recovery.failureKind),
         pausedAt: timestamp,
         updatedAt: timestamp,
       };
@@ -16409,9 +16405,15 @@ function normalizeRun(run: RunState): RunState {
       typeof recovery.id === "string" &&
       recovery.id.startsWith("recovery-") &&
       (recovery.state === "parked" || recovery.state === "resuming") &&
+      // Every kind manager-turn-policy parks with. A kind missing here is
+      // deleted by the first saveRun after the park, which strands the run
+      // paused without the exact-replay token its Retry needs.
       (recovery.failureKind === "rate_limit" ||
         recovery.failureKind === "provider" ||
-        recovery.failureKind === "transport") &&
+        recovery.failureKind === "transport" ||
+        recovery.failureKind === "timeout" ||
+        recovery.failureKind === "auth" ||
+        recovery.failureKind === "runtime") &&
       // A recovery parked by a retired claude/codex manager backend cannot
       // be replayed on Pi; dropping it leaves the run paused and answerable.
       recovery.backend === "pi" &&

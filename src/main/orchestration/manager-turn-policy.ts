@@ -28,11 +28,13 @@
 //     backend names those causes structurally), and any failure the
 //     taxonomy cannot name while workers are still running: a manager-only
 //     problem must never kill healthy workers.
-//   fail_turn  -> subscription (billing) declines. The SparkCall fails
-//     visibly and the run keeps its status and its workers: a billing
-//     decline is a plain turn failure the user retries themselves. Parking
-//     it paused the run and took over the composer for something the user
-//     had not asked to be handled.
+//   fail_turn  -> subscription (billing) declines while workers still run.
+//     The SparkCall fails visibly and the run keeps its status and its
+//     workers, which go on driving it: a billing decline is a plain turn
+//     failure the user retries themselves. Parking it paused the run and
+//     took over the composer for something the user had not asked to be
+//     handled. With no live worker it fails the run instead, since a
+//     "running" run with nothing driving it would show Working forever.
 //   fail       -> everything else, with no live workers, keeps the
 //     pre-policy behaviour.
 //
@@ -113,8 +115,8 @@ const KEEP_STATE_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
  * out — rather than the work failing, and therefore park the run instead of
  * branding it failed once retries are exhausted. Rate limits park without
  * retrying first. `subscription` is intentionally absent: a billing decline
- * fails the turn visibly and leaves the run running, so the composer stays a
- * normal input.
+ * fails the turn visibly (and the run only when no worker is left to drive
+ * it), so the composer stays a normal input.
  *
  * `timeout` is here because a manager turn that ran out of time says nothing
  * about the work. Observed live: a manager that had been correctly driving a
@@ -227,21 +229,16 @@ export function planManagerTurnFailure(input: {
       // One voice everywhere the parked state surfaces: the run header detail,
       // the composer placeholder, and the Retry button all speak this exact
       // sentence pair, naming the control that actually exists.
-      parkReason:
-        kind === "timeout"
-          ? "Cora's turn ran out of time. Its saved request is ready to retry."
-          : kind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : kind === "auth"
-              ? "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn."
-              : kind === "transport"
-                ? "Cora lost its connection to the provider. Retry when the connection is stable."
-                : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+      parkReason: managerTurnParkReason(kind),
       lastAction,
     };
   }
 
-  if (kind === "subscription") {
+  const workersRunning = (input.activeWorkerCount ?? 0) > 0;
+  // Only live workers keep driving a run whose turn failed. With none, a run
+  // left "running" has no driver and shows Working forever, so a billing
+  // decline then fails the run like any other unrecoverable turn.
+  if (kind === "subscription" && workersRunning) {
     return {
       action: "fail_turn",
       kind,
@@ -250,7 +247,7 @@ export function planManagerTurnFailure(input: {
     };
   }
 
-  if ((input.activeWorkerCount ?? 0) > 0) {
+  if (workersRunning) {
     return {
       action: "park",
       kind: "runtime",
@@ -269,6 +266,28 @@ export function planManagerTurnFailure(input: {
       ? `${kind} failure, the turn itself is broken and the run reports it honestly`
       : "unclassified turn failure, keeping the pre-policy verdict",
   };
+}
+
+/**
+ * The user-facing sentence for a parked turn of `kind`. One voice everywhere
+ * the parked state surfaces: the run header detail, the composer placeholder,
+ * and the Retry button, including a recovery re-parked after a restart.
+ */
+export function managerTurnParkReason(kind: ManagerTurnRecoveryFailureKind): string {
+  switch (kind) {
+    case "timeout":
+      return "Cora's turn ran out of time. Its saved request is ready to retry.";
+    case "rate_limit":
+      return "The selected provider account reached its usage limit. Switch accounts or retry after quota resets.";
+    case "auth":
+      return "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn.";
+    case "transport":
+      return "Cora lost its connection to the provider. Retry when the connection is stable.";
+    case "runtime":
+      return "Cora's turn did not finish. Retry the saved turn.";
+    default:
+      return "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.";
+  }
 }
 
 /** True when the autopilot projection says a run was parked by this policy.
