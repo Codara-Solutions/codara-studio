@@ -24,7 +24,7 @@ import {
 } from "./timeline";
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
-import Markdown from "./Markdown";
+import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
 import { openAccountsSettings } from "./account-readiness";
 import {
   compactPreview,
@@ -78,7 +78,14 @@ const WorkerWaitContext = React.createContext<
   ((taskIds: string[]) => string | null) | null
 >(null);
 
-export default function ChatConversation({ run }: { run: RunState }) {
+export default function ChatConversation({
+  run,
+  cwd = null,
+}: {
+  run: RunState;
+  /** Workspace that relative file links in Cora's answers resolve against. */
+  cwd?: string | null;
+}) {
   // One durable projection owns both history hydration and live frames. Build
   // it before the timeline so completed conversational turns can omit their
   // otherwise-empty manager disclosure without guessing from prose.
@@ -247,6 +254,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
 
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
+      <MarkdownWorkspaceContext.Provider value={cwd || null}>
       <div style={SCROLL_STYLE} data-testid="cora-conversation">
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
@@ -363,6 +371,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
           </button>
         )}
       </div>
+      </MarkdownWorkspaceContext.Provider>
     </WorkerWaitContext.Provider>
   );
 }

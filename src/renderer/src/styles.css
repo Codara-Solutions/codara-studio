@@ -2020,6 +2020,114 @@ a { color: inherit; }
   box-shadow: var(--focus-ring);
 }
 
+/* Chat markdown. highlight.js token colours come from theme tokens so light
+   themes stay readable; the markdown preview keeps its own .spark-markdown
+   palette in markdown-preview/markdown.css. */
+.cora-md .hljs {
+  color: var(--ink-dim, var(--ink));
+  background: transparent;
+}
+.cora-md .hljs-comment,
+.cora-md .hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.cora-md .hljs-keyword,
+.cora-md .hljs-selector-tag,
+.cora-md .hljs-literal,
+.cora-md .hljs-section,
+.cora-md .hljs-link {
+  color: var(--danger);
+}
+.cora-md .hljs-built_in,
+.cora-md .hljs-type,
+.cora-md .hljs-class .hljs-title {
+  color: var(--warn);
+}
+.cora-md .hljs-string,
+.cora-md .hljs-attr,
+.cora-md .hljs-template-tag,
+.cora-md .hljs-template-variable {
+  color: var(--info);
+}
+.cora-md .hljs-symbol,
+.cora-md .hljs-bullet,
+.cora-md .hljs-meta {
+  color: var(--accent-text);
+}
+.cora-md .hljs-number,
+.cora-md .hljs-regexp,
+.cora-md .hljs-deletion {
+  color: var(--agent-claude);
+}
+.cora-md .hljs-name,
+.cora-md .hljs-attribute,
+.cora-md .hljs-variable,
+.cora-md .hljs-title.function_,
+.cora-md .hljs-title.class_,
+.cora-md .hljs-title {
+  color: var(--agent-pi);
+}
+.cora-md .hljs-tag,
+.cora-md .hljs-addition {
+  color: var(--ok);
+}
+.cora-md .hljs-emphasis {
+  font-style: italic;
+}
+.cora-md .hljs-strong {
+  font-weight: 700;
+}
+.cora-md-code {
+  position: relative;
+}
+.cora-md-code__bar {
+  position: absolute;
+  top: 13px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-md-code:hover .cora-md-code__bar,
+.cora-md-code:focus-within .cora-md-code__bar {
+  opacity: 1;
+}
+.cora-md-code__lang {
+  color: var(--muted);
+  font: 500 10.5px/1 var(--font-mono);
+}
+.cora-md-code__copy {
+  appearance: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink-dim);
+  font: 600 10.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-md-code__copy:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-md-code__copy:focus-visible,
+.cora-md-file-ref:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-md-file-ref {
+  cursor: pointer;
+  text-decoration: underline dotted color-mix(in oklab, var(--accent-text) 60%, transparent);
+  text-underline-offset: 2px;
+}
+.cora-md-file-ref:hover {
+  color: var(--accent-text) !important;
+}
+
 /* The one action a failure card offers (open the accounts tab). */
 .cora-failure-action {
   appearance: none;

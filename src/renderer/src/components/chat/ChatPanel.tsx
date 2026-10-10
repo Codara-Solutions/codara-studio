@@ -234,6 +234,7 @@ export default function ChatPanel({
                   <ChatConversation
                     key={`conversation:${activeRun.id}`}
                     run={activeRun}
+                    cwd={workspace?.cwd ?? null}
                   />
                 )}
               </div>
