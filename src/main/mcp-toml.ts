@@ -52,8 +52,11 @@ function stringTable(value: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-const ENV_PLACEHOLDER = /^\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$/;
-const BEARER_PLACEHOLDER = /^Bearer \$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}$/;
+// Only the exact ${VAR} form folds into env_vars, env_http_headers and
+// bearer_token_env_var, because those read back as ${VAR}. Any other spelling,
+// such as ${env:VAR}, is written literally so the post-write check matches.
+const ENV_PLACEHOLDER = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
+const BEARER_PLACEHOLDER = /^Bearer \$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 /**
  * One parsed [mcp_servers.<name>] table in the runtime-agnostic shape. Codex's
@@ -365,7 +368,7 @@ function dropLines(lines: string[], ranges: Array<[number, number]>): string[] {
 // Rendering
 // ---------------------------------------------------------------------------
 
-export function tomlString(value: string): string {
+function tomlString(value: string): string {
   return `"${value
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"')
@@ -375,7 +378,7 @@ export function tomlString(value: string): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)}"`;
 }
 
-export function tomlKey(value: string): string {
+function tomlKey(value: string): string {
   return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
 }
 
@@ -400,6 +403,7 @@ function renderModeledServer(server: McpServerConfig, options: { includeEnabled:
     }
     if (forwarded.length > 0) keys.push(`env_vars = [${forwarded.map(tomlString).join(", ")}]`);
     if (literal.length > 0) tables.push({ suffix: "env", entries: literal });
+    if (server.cwd) keys.push(`cwd = ${tomlString(server.cwd)}`);
   }
   if (server.url) {
     keys.push(`url = ${tomlString(server.url)}`);
@@ -460,6 +464,8 @@ const MODELED_KEYS = new Set([
   "bearer_token_env_var",
 ]);
 // Keys that only make sense for one transport, dropped when an edit switches.
+// The edit form carries no cwd, so an edit keeps the file's own cwd line; a
+// definition that carries one (a copy from another config) replaces it.
 const STDIO_ONLY_KEYS = new Set(["cwd"]);
 
 function comparable(server: McpServerConfig | null): string {
@@ -515,6 +521,7 @@ export function upsertTomlMcpServer(text: string, server: McpServerConfig, label
     const dropKey = (key: string) =>
       MODELED_KEYS.has(key) ||
       (Boolean(server.url) && STDIO_ONLY_KEYS.has(key)) ||
+      (key === "cwd" && Boolean(server.command && server.cwd)) ||
       (key === "enabled" && server.enabled !== undefined);
     const ranges: Array<[number, number]> = [];
     for (const statement of main.body) {

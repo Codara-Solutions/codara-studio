@@ -495,12 +495,26 @@ export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail
   };
 }
 
-/** The raw definition behind an asset id, for a connection test. */
-export function readMcpServerForAsset(id: string): { server: McpServerConfig; scope: SyncScope; path: string } | null {
+/**
+ * The raw definition behind an asset id, for a connection test. The id comes
+ * from the renderer and the result is started as a process, so only a config
+ * file the inventory itself lists for `cwd` is read: an id naming another
+ * folder's .mcp.json, or another project's map in ~/.claude.json, is refused.
+ */
+export function readMcpServerForAsset(
+  id: string,
+  cwd: string,
+): { server: McpServerConfig; scope: SyncScope; path: string } | null {
   const parsed = parseAssetId(id);
   if (!parsed || parsed.kind !== "mcp") return null;
-  const server = readMcpServerByName(parsed.path, parsed.name, parsed.project);
-  return server ? { server, scope: parsed.scope, path: parsed.path } : null;
+  const source = discoverMcpSources(cwd.trim() || homedir()).find((candidate) =>
+    candidate.runtime === parsed.runtime &&
+    candidate.scope === parsed.scope &&
+    normalizePathForMatch(resolve(candidate.path)) === normalizePathForMatch(resolve(parsed.path)) &&
+    (candidate.project ?? null) === (parsed.project ?? null));
+  if (!source || !source.names.includes(parsed.name)) return null;
+  const server = source.configs?.get(parsed.name) ?? null;
+  return server ? { server, scope: parsed.scope, path: source.path } : null;
 }
 
 /** Validate an unsaved form draft into the runtime-agnostic shape. */
@@ -1256,7 +1270,17 @@ async function syncMcpConfigs(cwd: string | null, result: AgentSyncResult): Prom
   try {
     // The built-in server is switched per CLI in the Capability Center, and its
     // entry holds this machine's absolute paths, so it never rides a sync.
-    const userCodex = readCodexMcpServers(tomlRuntimeConfigPath("codex")).filter((server) => !isReservedMcpName(server.name));
+    // Only the user's own tables count: an older sync filled the managed block
+    // of the user Codex config with servers from project .mcp.json files, and
+    // copying those into ~/.claude.json would activate them everywhere. Claude
+    // has no `enabled` switch, so a server off in Codex would arrive on.
+    const userCodex = readCodexMcpServers(tomlRuntimeConfigPath("codex"), { excludeManagedBlock: true })
+      .filter((server) => !isReservedMcpName(server.name))
+      .filter((server) => {
+        if (server.enabled !== false) return true;
+        result.mcp.skipped.push(`Codex MCP server '${server.name}' is turned off (enabled = false) and was not copied to Claude.`);
+        return false;
+      });
     const toClaude = await writeClaudeMcpServers(claudeUserConfigFile(), userCodex, result, { keepHeaders: true });
     result.mcp.toClaude.push(...toClaude);
 
@@ -1318,8 +1342,14 @@ function readClaudeMcpServers(path: string): McpServerConfig[] {
     .filter((server): server is McpServerConfig => Boolean(server));
 }
 
-function readCodexMcpServers(path: string): McpServerConfig[] {
-  return loadConfig(path)?.tomlServers ?? [];
+function readCodexMcpServers(path: string, options?: { excludeManagedBlock?: boolean }): McpServerConfig[] {
+  const loaded = loadConfig(path);
+  if (!loaded) return [];
+  if (!options?.excludeManagedBlock) return loaded.tomlServers;
+  const stripped = stripManagedMcpBlock(loaded.text);
+  if (!stripped.removed) return loaded.tomlServers;
+  const parsed = parseTomlText(stripped.text);
+  return parsed.ok ? tomlMcpServersFromDocument(parsed.value) : [];
 }
 
 function normalizeMcpServer(name: string, value: unknown): McpServerConfig | null {
@@ -1356,18 +1386,14 @@ function normalizeMcpServer(name: string, value: unknown): McpServerConfig | nul
   return server;
 }
 
-// Writes the Codex-shaped managed block. `options.runtime` only changes which
-// CLI the skip messages name and how carefully the file is replaced; the TOML
-// itself is identical, because Grok Build parses the same tables.
+// Writes the Codex managed block of a project's .codex/config.toml.
 async function writeCodexManagedMcpServers(
   path: string,
   sourceServers: McpServerConfig[],
   result: AgentSyncResult,
-  options?: { runtime?: TomlCopyRuntime },
 ): Promise<string[]> {
   if (sourceServers.length === 0) return [];
-  const runtime = options?.runtime ?? "codex";
-  const label = TOML_RUNTIME_LABEL[runtime];
+  const label = TOML_RUNTIME_LABEL.codex;
   return withConfigFileLock(path, async () => {
     const existing = await readTextIfExists(path);
     const whole = parseTomlText(existing);
@@ -1387,12 +1413,6 @@ async function writeCodexManagedMcpServers(
         result.mcp.skipped.push(`${label} already has MCP server '${server.name}'.`);
         return false;
       }
-      if (runtime === "grok" && server.url && server.headers) {
-        result.mcp.skipped.push(
-          `MCP server '${server.name}' sends request headers, which ${label} config.toml cannot carry.`,
-        );
-        return false;
-      }
       if (!server.command && !server.url) {
         result.mcp.skipped.push(`MCP server '${server.name}' is missing command/url and was skipped for ${label}.`);
         return false;
@@ -1401,7 +1421,7 @@ async function writeCodexManagedMcpServers(
     });
     if (syncable.length === 0 && !stripped.removed) return [];
 
-    await fs.mkdir(dirname(path), { recursive: true, mode: runtime === "grok" ? 0o700 : undefined });
+    await fs.mkdir(dirname(path), { recursive: true });
     // Source definitions win over the copy already in the block, so a re-sync
     // still refreshes a changed command or env.
     const merged = new Map(managed.map((server) => [server.name, server]));

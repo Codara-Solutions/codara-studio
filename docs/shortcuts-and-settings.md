@@ -175,9 +175,11 @@ and the rest of the file is untouched. Codex headers are read from
 `config.toml` cannot carry request headers, so a server that needs them stays
 in a Claude or Codex config.
 
-**Sync** keeps scope: servers from your user configs are copied to the other
-CLIs' user configs, and project servers to the other CLIs' project files. A
-secret copied into a project file becomes a `${VAR}` placeholder and the sync
+**Sync** keeps scope: the servers in your user `~/.codex/config.toml` are
+copied to your user `~/.claude.json`, and the project's `.mcp.json` servers
+to the project's `.codex/config.toml`. A Codex server turned off with
+`enabled = false` is not copied, because Claude has no such switch. A secret
+copied into a project file becomes a `${VAR}` placeholder and the sync
 summary names the variable to set. **Copy to Codex or Grok** adds the server
 to your user config there; a name that already exists is left alone.
 

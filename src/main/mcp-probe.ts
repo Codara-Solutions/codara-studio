@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { isRemotePath } from "@shared/remote";
 import type { AgentMcpProbeRequest, AgentMcpProbeResult, Workspace } from "@shared/types";
 import { mcpServerFromDraft, readMcpServerForAsset, type McpServerConfig } from "./agent-sync";
 import { normalizePiMcpServersDetailed, type PiMcpServerConfig } from "./orchestration/pi-mcp-config";
@@ -159,9 +160,10 @@ export async function probeMcpServer(server: PiMcpServerConfig, options: McpProb
     }
     client = new Client({ name: "codara-probe", version: "1" }) as unknown as ProbeClient;
     const connecting = client.connect(transport, { timeout: timeoutMs });
-    if (transport.pid) void descendantPids(transport.pid).then((pids) => { descendants = pids; });
+    const remember = (pids: number[]) => { descendants = [...new Set([...descendants, ...pids])]; };
+    if (transport.pid) void descendantPids(transport.pid).then(remember);
     await withTimeout(connecting, timeoutMs, "Connecting");
-    if (transport.pid) descendants = await descendantPids(transport.pid);
+    if (transport.pid) remember(await descendantPids(transport.pid));
     const remaining = Math.max(1_000, timeoutMs - (Date.now() - started));
     const listed = await withTimeout(client.listTools(undefined, { timeout: remaining }), remaining, "Listing tools");
     const info = client.getServerVersion?.();
@@ -183,11 +185,27 @@ export async function probeMcpServer(server: PiMcpServerConfig, options: McpProb
   } catch (error) {
     return finish({ ok: false, tools: [], error: redact(errorText(error), server) });
   } finally {
+    // A launcher such as npx spawns the real server only after its download,
+    // so a probe that timed out may hold grandchildren the early snapshot
+    // missed. Re-read the tree while the direct child still holds it.
+    if (transport?.pid) {
+      const late = await descendantPids(transport.pid);
+      descendants = [...new Set([...descendants, ...late])];
+    }
     await killWindowsTree(transport?.pid);
     await client?.close().catch(() => undefined);
     await transport?.close?.().catch(() => undefined);
     killOrphans(descendants);
   }
+}
+
+function insideOpenWorkspace(cwd: string, workspaces: readonly Workspace[]): boolean {
+  const target = resolve(cwd);
+  return workspaces.some((workspace) => {
+    if (!workspace.cwd?.trim() || isRemotePath(workspace.cwd)) return false;
+    const rel = relative(resolve(workspace.cwd), target);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  });
 }
 
 /**
@@ -203,21 +221,23 @@ export async function runMcpProbe(
   context: { workspaces: readonly Workspace[]; piAgentDir: string; timeoutMs?: number },
 ): Promise<AgentMcpProbeResult> {
   const cwd = typeof input.cwd === "string" ? input.cwd.trim() : "";
+  // Pi never connects MCP servers inside an imported pull request, and a
+  // server started there would resolve binaries (npx, local node_modules)
+  // from the repository, so nothing is probed with that folder as its cwd.
+  if (cwd && (await workspaceProjectPolicyModeForTerminalCwd(cwd, context.workspaces)) === "untrusted-pull-request") {
+    return {
+      ok: false,
+      tools: [],
+      durationMs: 0,
+      error: "This workspace is an imported pull request, so Codara will not start MCP servers in it.",
+    };
+  }
   let raw: McpServerConfig;
   if (typeof input.id === "string" && input.id) {
-    const found = readMcpServerForAsset(input.id);
+    const found = readMcpServerForAsset(input.id, cwd);
     if (!found) return { ok: false, tools: [], durationMs: 0, error: "This server's definition could not be read. Refresh the list." };
-    if (found.scope === "workspace" && !cwd) {
+    if (found.scope === "workspace" && (!cwd || !insideOpenWorkspace(cwd, context.workspaces))) {
       return { ok: false, tools: [], durationMs: 0, error: "Open the workspace this server belongs to, then test it again." };
-    }
-    if (found.scope === "workspace" &&
-      (await workspaceProjectPolicyModeForTerminalCwd(cwd, context.workspaces)) === "untrusted-pull-request") {
-      return {
-        ok: false,
-        tools: [],
-        durationMs: 0,
-        error: "This server comes from an imported pull request's configuration, so Codara will not start it.",
-      };
     }
     raw = found.server;
   } else if (input.draft && typeof input.draft === "object") {

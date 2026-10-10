@@ -233,6 +233,25 @@ async function main() {
     const detail = sync.readMcpServerDetail({ id: mcpItem("multi", "codex").id });
     assert.deepEqual(detail.args, ["server.js", "--flag", "--new"]);
     assert.equal(detail.env.MODE, "y");
+
+    // ${env:VAR} is not Codex's env_vars spelling, so it stays a literal value
+    // instead of failing the post-write check.
+    const spelled = await sync.saveMcpServer({
+      cwd: FAKE_CWD,
+      targetId: target("Every workspace, Codex").id,
+      replaceId: mcpItem("multi", "codex").id,
+      server: { name: "multi", transport: "stdio", command: "node", args: ["server.js"], env: { API_KEY: "${API_KEY}", OTHER: "${env:OTHER}" } },
+    });
+    assert.equal(spelled.ok, true, spelled.error);
+    assert.equal(sync.readMcpServerDetail({ id: mcpItem("multi", "codex").id }).env.OTHER, "${env:OTHER}");
+    assert.ok(fs.readFileSync(CODEX_TOML, "utf8").split("\n").includes('cwd = "/srv"'), "an edit without a cwd keeps the file's own");
+
+    // A copy carries the stdio cwd along with the command.
+    const copied = await sync.installAgentAssetToRuntime({ id: mcpItem("multi", "codex").id, target: "grok" });
+    assert.deepEqual(copied, { ok: true, installed: ["multi"] });
+    const grokText = fs.readFileSync(path.join(FAKE_HOME, ".grok", "config.toml"), "utf8");
+    assert.ok(grokText.split("\n").includes('cwd = "/srv"'), `the copy dropped cwd:\n${grokText}`);
+    fs.rmSync(path.join(FAKE_HOME, ".grok"), { recursive: true, force: true });
   });
 
   await check("removing the last managed server keeps the block markers", async () => {
@@ -308,11 +327,27 @@ async function main() {
 
   await check("sync keeps scope and placeholders project secrets", async () => {
     writeJson(CLAUDE_JSON, { mcpServers: {} });
-    fs.writeFileSync(CODEX_TOML, '[mcp_servers.usr]\ncommand = "usr-cmd"\n');
+    // The managed block is what older syncs copied out of some project's
+    // .mcp.json; it must not become a user server in Claude.
+    fs.writeFileSync(CODEX_TOML, [
+      "[mcp_servers.usr]",
+      'command = "usr-cmd"',
+      "",
+      "[mcp_servers.off]",
+      'command = "off-cmd"',
+      "enabled = false",
+      "",
+      "# >>> SPARK_AGENT_MCP_SYNC",
+      "[mcp_servers.legacy]",
+      'command = "legacy-cmd"',
+      "# <<< SPARK_AGENT_MCP_SYNC",
+      "",
+    ].join("\n"));
     fs.rmSync(PROJECT_CODEX_TOML, { force: true });
     writeJson(PROJECT_MCP_JSON, { mcpServers: { proj: { command: "proj-cmd", env: { API_TOKEN: "literal-secret-value" } } } });
     const result = await sync.syncAgentAssets({ cwd: FAKE_CWD });
-    assert.deepEqual(Object.keys(readJson(CLAUDE_JSON).mcpServers), ["usr"], "the user Codex server reached the user Claude config");
+    assert.deepEqual(Object.keys(readJson(CLAUDE_JSON).mcpServers), ["usr"], "only the user's own enabled Codex server reaches Claude");
+    assert.ok(result.mcp.skipped.some((note) => /'off' is turned off/.test(note)), "the disabled server is reported");
     assert.deepEqual(Object.keys(readJson(PROJECT_MCP_JSON).mcpServers), ["proj"], "a user server leaked into the project");
     assert.doesNotMatch(fs.readFileSync(CODEX_TOML, "utf8"), /proj/, "a project server leaked into the user Codex config");
     const projectToml = fs.readFileSync(PROJECT_CODEX_TOML, "utf8");
@@ -450,6 +485,39 @@ async function main() {
     const noWorkspace = await probe.runMcpProbe({ id: hostile.id }, { workspaces: [], piAgentDir: PI_AGENT_DIR });
     assert.equal(noWorkspace.ok, false);
     assert.equal(fs.existsSync(marker), false);
+    const notOpen = await probe.runMcpProbe({ cwd: FAKE_CWD, id: hostile.id }, { workspaces: [], piAgentDir: PI_AGENT_DIR });
+    assert.equal(notOpen.ok, false);
+    assert.match(notOpen.error, /Open the workspace/);
+    assert.equal(fs.existsSync(marker), false, "the probe started a project server for a workspace that is not open");
+
+    // The id comes from the renderer: one naming another folder's .mcp.json
+    // (here an imported pull request) is not a server of the open workspace.
+    writeJson(path.join(OTHER_PROJECT, ".mcp.json"), {
+      mcpServers: { hostile: { command: process.execPath, args: ["-e", `require("fs").writeFileSync(${JSON.stringify(marker)}, "x")`] } },
+    });
+    const forged = JSON.stringify({ ...JSON.parse(hostile.id), path: path.join(OTHER_PROJECT, ".mcp.json") });
+    const crossed = await probe.runMcpProbe(
+      { cwd: FAKE_CWD, id: forged },
+      {
+        workspaces: [{ cwd: FAKE_CWD }, { cwd: OTHER_PROJECT, copyBranch: { origin: { kind: "github-pull-request" } } }],
+        piAgentDir: PI_AGENT_DIR,
+      },
+    );
+    assert.equal(crossed.ok, false);
+    assert.equal(fs.existsSync(marker), false, "the probe started another folder's project server");
+
+    // Pi connects no MCP server inside an imported pull request, and a draft
+    // started there would resolve its binaries from the repository.
+    const prDraft = await probe.runMcpProbe(
+      {
+        cwd: OTHER_PROJECT,
+        draft: { name: "draft", transport: "stdio", command: process.execPath, args: ["-e", `require("fs").writeFileSync(${JSON.stringify(marker)}, "x")`] },
+      },
+      { workspaces: [{ cwd: OTHER_PROJECT, copyBranch: { origin: { kind: "github-pull-request" } } }], piAgentDir: PI_AGENT_DIR },
+    );
+    assert.equal(prDraft.ok, false);
+    assert.match(prDraft.error, /imported pull request/);
+    assert.equal(fs.existsSync(marker), false, "the probe started a draft inside an imported pull request");
   });
 
   console.log(results.map((name) => `  ok  ${name}`).join("\n"));
