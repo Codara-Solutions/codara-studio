@@ -8,6 +8,12 @@
 // (index.ts for the Cora manager, worker.ts for implementation workers) call
 // registerMcpBridge with it.
 //
+// A live roster (Cora's own sessions) can change while the session runs: the
+// launcher rewrites the file when the user assigns or removes a server in the
+// Capability Center, and the bridge re-reads it on each prompt, connecting new
+// servers and dropping removed ones. The bridge reports each server's state to
+// a status file next to the roster, which the Capability Center shows.
+//
 // Two hard constraints shape everything below.
 // 1. A throw from the extension factory kills the whole extension, and a throw
 //    from a handler fails the Codara turn (src/main/orchestration/pi-turn.ts
@@ -48,6 +54,8 @@ export interface McpBridgeConfig {
   maxToolsPerServer: number;
   servers: McpBridgeServerConfig[];
   sdkDir: string;
+  live: boolean;
+  configPath: string;
 }
 
 export interface McpBridgeHandle {
@@ -58,6 +66,9 @@ export interface McpBridgeHandle {
 
 interface ServerState {
   config: McpBridgeServerConfig;
+  // Dropped from a live roster. Its tools stay registered (Pi cannot
+  // unregister) but are deactivated and refuse calls.
+  removed: boolean;
   status: "pending" | "connected" | "failed" | "disconnected";
   error: string | null;
   toolNames: string[];
@@ -109,17 +120,22 @@ export const EXTERNAL_SERVER_STATUS_NAME = "codara_server_status";
 
 const requireFromExtension = createRequire(import.meta.url);
 
+function rosterServers(parsed: Partial<McpBridgeConfig>): McpBridgeServerConfig[] {
+  return Array.isArray(parsed.servers)
+    ? parsed.servers.filter((server): server is McpBridgeServerConfig =>
+      Boolean(server && typeof server.name === "string" && (server.command || server.url)))
+    : [];
+}
+
 export function activeMcpBridgeConfig(env: NodeJS.ProcessEnv = process.env): McpBridgeConfig | null {
   const configPath = env.CODARA_PI_MCP_CONFIG?.trim();
   const sdkDir = env.CODARA_PI_MCP_SDK_DIR?.trim();
   if (!configPath || !sdkDir) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as Partial<McpBridgeConfig>;
-    const servers = Array.isArray(parsed.servers)
-      ? parsed.servers.filter((server): server is McpBridgeServerConfig =>
-        Boolean(server && typeof server.name === "string" && (server.command || server.url)))
-      : [];
-    if (servers.length === 0) return null;
+    const servers = rosterServers(parsed);
+    const live = parsed.live === true;
+    if (servers.length === 0 && !live) return null;
     return {
       version: typeof parsed.version === "number" ? parsed.version : 1,
       audience: typeof parsed.audience === "string" ? parsed.audience : "cora",
@@ -129,10 +145,17 @@ export function activeMcpBridgeConfig(env: NodeJS.ProcessEnv = process.env): Mcp
       maxToolsPerServer: positiveNumber(parsed.maxToolsPerServer, 64),
       servers,
       sdkDir,
+      live,
+      configPath,
     };
   } catch {
     return null;
   }
+}
+
+/** Mirrors piMcpStatusPath in src/main/orchestration/pi-mcp-config.ts. */
+export function mcpStatusPath(configPath: string): string {
+  return configPath.replace(/\.json$/, "") + ".status.json";
 }
 
 function positiveNumber(value: unknown, fallback: number): number {
@@ -225,24 +248,79 @@ function resultErrorMessage(result: McpCallResult, fallback: string): string {
   return texts.join("\n").slice(0, 2_000) || fallback;
 }
 
+function newServerState(config: McpBridgeServerConfig): ServerState {
+  return {
+    config,
+    removed: false,
+    status: "pending",
+    error: null,
+    toolNames: [],
+    skipped: [],
+    stderr: [],
+    client: null,
+    registered: new Set(),
+  };
+}
+
+// Status lines leave the Pi process, so a server's own env and header values
+// (tokens), and any query string on its URL, never appear in them.
+function redactServerSecrets(text: string, server: McpBridgeServerConfig): string {
+  let out = text;
+  const values = [...Object.values(server.env ?? {}), ...Object.values(server.headers ?? {})]
+    .map((value) => value.replace(/^Bearer\s+/i, ""))
+    .filter((value) => value.length >= 4)
+    .sort((a, b) => b.length - a.length);
+  for (const value of values) out = out.split(value).join("***");
+  if (server.url) {
+    const query = server.url.indexOf("?");
+    if (query !== -1) out = out.split(server.url.slice(query)).join("?***");
+  }
+  return out;
+}
+
 export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): McpBridgeHandle {
   const states = new Map<string, ServerState>();
   const remoteTools = new Map<string, RegisteredRemoteTool>();
   const activatedRemoteTools = new Set<string>();
   for (const server of config.servers) {
-    states.set(server.name, {
-      config: server,
-      status: "pending",
-      error: null,
-      toolNames: [],
-      skipped: [],
-      stderr: [],
-      client: null,
-      registered: new Set(),
-    });
+    states.set(server.name, newServerState(server));
   }
   let sdk: ReturnType<typeof loadMcpSdk> | null = null;
   let shutDown = false;
+  let coreToolsRegistered = false;
+  let lastRosterText: string | null = null;
+  try {
+    lastRosterText = config.live ? fs.readFileSync(config.configPath, "utf8") : null;
+  } catch {
+    lastRosterText = null;
+  }
+
+  function activeStates(): ServerState[] {
+    return [...states.values()].filter((state) => !state.removed);
+  }
+
+  function writeStatus(): void {
+    if (!config.live || shutDown) return;
+    try {
+      const target = mcpStatusPath(config.configPath);
+      const body = JSON.stringify({
+        version: 1,
+        updatedAt: new Date().toISOString(),
+        servers: activeStates().map((state) => ({
+          name: state.config.name,
+          status: state.status,
+          tools: state.toolNames.length,
+          updatedAt: new Date().toISOString(),
+          ...(state.error ? { error: redactServerSecrets(state.error, state.config) } : {}),
+        })),
+      });
+      const temp = `${target}.${process.pid}.tmp`;
+      fs.writeFileSync(temp, body, { mode: 0o600 });
+      fs.renameSync(temp, target);
+    } catch {
+      // Diagnostics only: a status write never affects the session.
+    }
+  }
 
   function deactivateUnselectedRemoteTools(): void {
     const active = pi.getActiveTools();
@@ -359,12 +437,16 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
     const target = transport as { onerror?: (error: Error) => void; onclose?: () => void };
     target.onerror = (error: Error) => {
       state.error = errorText(error);
-      if (state.status === "connected") state.status = "disconnected";
+      if (state.status === "connected") {
+        state.status = "disconnected";
+        writeStatus();
+      }
     };
     target.onclose = () => {
       if (state.status === "connected" && !shutDown) {
         state.status = "disconnected";
         state.error = state.error ?? "the server closed the connection";
+        writeStatus();
       }
     };
   }
@@ -457,6 +539,11 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       prepareArguments: ((args: unknown) =>
         (args && typeof args === "object" && !Array.isArray(args) ? args : {})) as never,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+        if (state.removed) {
+          throw new Error(
+            `MCP server ${state.config.name} was removed from this session in the Capability Center. Continue without this tool.`,
+          );
+        }
         const client = state.client;
         if (!client || state.status !== "connected") {
           throw new Error(
@@ -487,89 +574,203 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
     } as never);
   }
 
-  pi.registerTool({
-    name: EXTERNAL_TOOL_LOADER_NAME,
-    label: "External tools · discover",
-    description:
-      "Search the tools on external MCP servers assigned to this Cora session and activate only the relevant definitions. Use query for capability search, or activate with exact names returned by an earlier search. Activated tools become directly callable on the next step.",
-    promptSnippet: "Discover and activate relevant tools from assigned external MCP servers",
-    parameters: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "Capability or tool name to search for, such as 'deploy Runpod endpoint'. Matching tools are activated.",
+  function registerCoreTools(): void {
+    if (coreToolsRegistered) return;
+    coreToolsRegistered = true;
+    pi.registerTool({
+      name: EXTERNAL_TOOL_LOADER_NAME,
+      label: "External tools · discover",
+      description:
+        "Search the tools on external MCP servers assigned to this Cora session and activate only the relevant definitions. Use query for capability search, or activate with exact names returned by an earlier search. Activated tools become directly callable on the next step.",
+      promptSnippet: "Discover and activate relevant tools from assigned external MCP servers",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "Capability or tool name to search for, such as 'deploy Runpod endpoint'. Matching tools are activated.",
+          },
+          activate: {
+            type: "array",
+            items: { type: "string" },
+            maxItems: MAX_TOOL_SEARCH_LIMIT,
+            description: "Exact mcp__<server>__<tool> names to activate.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_TOOL_SEARCH_LIMIT,
+            description: `Maximum query matches to activate (default ${DEFAULT_TOOL_SEARCH_LIMIT}).`,
+          },
         },
-        activate: {
-          type: "array",
-          items: { type: "string" },
-          maxItems: MAX_TOOL_SEARCH_LIMIT,
-          description: "Exact mcp__<server>__<tool> names to activate.",
-        },
-        limit: {
-          type: "integer",
-          minimum: 1,
-          maximum: MAX_TOOL_SEARCH_LIMIT,
-          description: `Maximum query matches to activate (default ${DEFAULT_TOOL_SEARCH_LIMIT}).`,
-        },
-      },
-      additionalProperties: false,
-    } as never,
-    async execute(
-      _toolCallId: string,
-      params: { query?: string; activate?: string[]; limit?: number },
-    ) {
-      const explicit = Array.isArray(params?.activate) ? params.activate : [];
-      const query = typeof params?.query === "string" ? params.query.trim() : "";
-      const limit = Number.isInteger(params?.limit)
-        ? Math.min(MAX_TOOL_SEARCH_LIMIT, Math.max(1, Number(params.limit)))
-        : DEFAULT_TOOL_SEARCH_LIMIT;
-      const matches = explicit.length > 0 ? [] : searchRemoteTools(query, limit);
-      const selectedNames = explicit.length > 0 ? explicit : matches.map((tool) => tool.name);
+        additionalProperties: false,
+      } as never,
+      async execute(
+        _toolCallId: string,
+        params: { query?: string; activate?: string[]; limit?: number },
+      ) {
+        const explicit = Array.isArray(params?.activate) ? params.activate : [];
+        const query = typeof params?.query === "string" ? params.query.trim() : "";
+        const limit = Number.isInteger(params?.limit)
+          ? Math.min(MAX_TOOL_SEARCH_LIMIT, Math.max(1, Number(params.limit)))
+          : DEFAULT_TOOL_SEARCH_LIMIT;
+        const matches = explicit.length > 0 ? [] : searchRemoteTools(query, limit);
+        const selectedNames = explicit.length > 0 ? explicit : matches.map((tool) => tool.name);
 
-      if (selectedNames.length === 0) {
-        const connected = [...states.values()].filter((state) => state.status === "connected");
-        const summary = connected.length > 0
-          ? connected.map((state) => `${state.config.name} (${state.toolNames.length} tools)`).join(", ")
-          : "none";
+        if (selectedNames.length === 0) {
+          const connected = activeStates().filter((state) => state.status === "connected");
+          const summary = connected.length > 0
+            ? connected.map((state) => `${state.config.name} (${state.toolNames.length} tools)`).join(", ")
+            : "none";
+          return {
+            content: [{
+              type: "text",
+              text: query
+                ? `No assigned external tools matched ${JSON.stringify(query)}. Connected servers: ${summary}. Try a narrower tool or capability name.`
+                : `Connected external MCP servers: ${summary}. Pass query to search and activate relevant tools.`,
+            }] as never,
+            details: { query, activated: [], connectedServers: connected.map((state) => state.config.name) },
+          };
+        }
+
+        const result = activateRemoteTools(selectedNames);
+        const selected = [...result.activated, ...result.alreadyActive];
+        const lines = selected.map(
+          (tool) => `- ${tool.name}: ${compactDescription(tool.description)}`,
+        );
+        if (result.unknown.length > 0) {
+          lines.push(`Unknown tool names: ${result.unknown.join(", ")}`);
+        }
         return {
           content: [{
             type: "text",
-            text: query
-              ? `No assigned external tools matched ${JSON.stringify(query)}. Connected servers: ${summary}. Try a narrower tool or capability name.`
-              : `Connected external MCP servers: ${summary}. Pass query to search and activate relevant tools.`,
+            text: [
+              selected.length > 0
+                ? `Activated ${result.activated.length} external tool(s); ${result.alreadyActive.length} already active. Call the tools directly on the next step:`
+                : "No external tools were activated.",
+              ...lines,
+            ].join("\n"),
           }] as never,
-          details: { query, activated: [], connectedServers: connected.map((state) => state.config.name) },
+          details: {
+            query,
+            activated: result.activated.map((tool) => tool.name),
+            alreadyActive: result.alreadyActive.map((tool) => tool.name),
+            unknown: result.unknown,
+          },
         };
-      }
+      },
+    } as never);
 
-      const result = activateRemoteTools(selectedNames);
-      const selected = [...result.activated, ...result.alreadyActive];
-      const lines = selected.map(
-        (tool) => `- ${tool.name}: ${compactDescription(tool.description)}`,
-      );
-      if (result.unknown.length > 0) {
-        lines.push(`Unknown tool names: ${result.unknown.join(", ")}`);
-      }
-      return {
-        content: [{
-          type: "text",
-          text: [
-            selected.length > 0
-              ? `Activated ${result.activated.length} external tool(s); ${result.alreadyActive.length} already active. Call the tools directly on the next step:`
-              : "No external tools were activated.",
-            ...lines,
-          ].join("\n"),
-        }] as never,
-        details: {
-          query,
-          activated: result.activated.map((tool) => tool.name),
-          alreadyActive: result.alreadyActive.map((tool) => tool.name),
-          unknown: result.unknown,
+    pi.registerTool({
+      name: EXTERNAL_SERVER_STATUS_NAME,
+      label: "External servers · status",
+      description:
+        "Inspect the user-configured MCP servers attached to this session: transport, connection state, registered mcp__<server>__<tool> names, skipped tools, and the last error. Use action=reconnect with a server name to retry one that failed.",
+      promptSnippet: "Inspect or reconnect the configured MCP servers",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["list", "reconnect"], description: "Defaults to list." },
+          server: { type: "string", description: "Server name, required for reconnect." },
         },
-      };
-    },
-  } as never);
+        additionalProperties: false,
+      } as never,
+      async execute(_toolCallId: string, params: { action?: string; server?: string }) {
+        const action = params?.action === "reconnect" ? "reconnect" : "list";
+        if (action === "reconnect") {
+          const state = states.get(String(params?.server ?? "").trim());
+          if (!state || state.removed) {
+            throw new Error(`Unknown MCP server. Configured: ${activeStates().map((entry) => entry.config.name).join(", ") || "none"}.`);
+          }
+          try {
+            await connectServer(state);
+            deactivateUnselectedRemoteTools();
+          } catch (error) {
+            state.status = "failed";
+            state.error = errorText(error);
+            state.client = null;
+          }
+          writeStatus();
+          return { content: [{ type: "text", text: statusLine(state) }] as never };
+        }
+        const lines = activeStates().map(statusLine);
+        return {
+          content: [{ type: "text", text: lines.join("\n\n") || "No MCP servers configured." }] as never,
+          details: activeStates().map((state) => ({
+            name: state.config.name,
+            transport: state.config.transport,
+            status: state.status,
+            tools: state.toolNames,
+            error: state.error,
+          })),
+        };
+      },
+    } as never);
+  }
+
+  async function connectStates(targets: ServerState[]): Promise<void> {
+    await Promise.allSettled(targets.map(async (state) => {
+      try {
+        await connectServer(state);
+      } catch (error) {
+        state.status = "failed";
+        state.error = errorText(error);
+        state.client = null;
+      }
+    }));
+  }
+
+  // Re-read a live roster: connect added servers, reconnect changed ones, and
+  // retire removed ones. A missing or unreadable file keeps the current set.
+  async function reloadRoster(): Promise<void> {
+    if (!config.live || shutDown) return;
+    let text: string;
+    let next: McpBridgeServerConfig[];
+    try {
+      text = fs.readFileSync(config.configPath, "utf8");
+      if (text === lastRosterText) return;
+      next = rosterServers(JSON.parse(text) as Partial<McpBridgeConfig>);
+    } catch {
+      return;
+    }
+    lastRosterText = text;
+    const wanted = new Map(next.map((server) => [server.name, server]));
+    const toConnect: ServerState[] = [];
+    for (const state of states.values()) {
+      if (state.removed || wanted.has(state.config.name)) continue;
+      state.removed = true;
+      state.status = "disconnected";
+      const client = state.client;
+      state.client = null;
+      if (client) await client.close().catch(() => undefined);
+      for (const name of state.registered) {
+        remoteTools.delete(name);
+        activatedRemoteTools.delete(name);
+      }
+      const active = pi.getActiveTools();
+      const kept = active.filter((name) => !state.registered.has(name));
+      if (kept.length !== active.length) pi.setActiveTools(kept);
+    }
+    for (const server of next) {
+      const existing = states.get(server.name);
+      if (!existing) {
+        const state = newServerState(server);
+        states.set(server.name, state);
+        toConnect.push(state);
+        continue;
+      }
+      if (!existing.removed && JSON.stringify(existing.config) === JSON.stringify(server)) continue;
+      existing.removed = false;
+      existing.config = server;
+      existing.status = "pending";
+      existing.error = null;
+      toConnect.push(existing);
+    }
+    if (activeStates().length > 0) registerCoreTools();
+    await connectStates(toConnect);
+    deactivateUnselectedRemoteTools();
+    writeStatus();
+  }
 
   function statusLine(state: ServerState): string {
     const target = state.config.transport === "stdio"
@@ -586,64 +787,15 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
     return parts.join("\n");
   }
 
-  pi.registerTool({
-    name: EXTERNAL_SERVER_STATUS_NAME,
-    label: "External servers · status",
-    description:
-      "Inspect the user-configured MCP servers attached to this session: transport, connection state, registered mcp__<server>__<tool> names, skipped tools, and the last error. Use action=reconnect with a server name to retry one that failed.",
-    promptSnippet: "Inspect or reconnect the configured MCP servers",
-    parameters: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: ["list", "reconnect"], description: "Defaults to list." },
-        server: { type: "string", description: "Server name, required for reconnect." },
-      },
-      additionalProperties: false,
-    } as never,
-    async execute(_toolCallId: string, params: { action?: string; server?: string }) {
-      const action = params?.action === "reconnect" ? "reconnect" : "list";
-      if (action === "reconnect") {
-        const state = states.get(String(params?.server ?? "").trim());
-        if (!state) {
-          throw new Error(`Unknown MCP server. Configured: ${[...states.keys()].join(", ") || "none"}.`);
-        }
-        try {
-          await connectServer(state);
-          deactivateUnselectedRemoteTools();
-        } catch (error) {
-          state.status = "failed";
-          state.error = errorText(error);
-          state.client = null;
-        }
-        return { content: [{ type: "text", text: statusLine(state) }] as never };
-      }
-      const lines = [...states.values()].map(statusLine);
-      return {
-        content: [{ type: "text", text: lines.join("\n\n") || "No MCP servers configured." }] as never,
-        details: [...states.values()].map((state) => ({
-          name: state.config.name,
-          transport: state.config.transport,
-          status: state.status,
-          tools: state.toolNames,
-          error: state.error,
-        })),
-      };
-    },
-  } as never);
+  // An empty live roster registers nothing: the discovery and status tools
+  // appear only once a server is assigned.
+  if (activeStates().length > 0) registerCoreTools();
 
   // Pi awaits session_start before the session accepts a prompt, so connecting
   // here cannot race the first turn. Every failure is recorded, never thrown.
   pi.on("session_start", async () => {
     try {
-      await Promise.allSettled([...states.values()].map(async (state) => {
-        try {
-          await connectServer(state);
-        } catch (error) {
-          state.status = "failed";
-          state.error = errorText(error);
-          state.client = null;
-        }
-      }));
+      await connectStates(activeStates());
       // Remote definitions remain registered so the loader can activate them,
       // but only Codara's small discovery/status surface is sent initially.
       deactivateUnselectedRemoteTools();
@@ -655,7 +807,20 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
         }
       }
     }
+    writeStatus();
   });
+
+  // Input runs before the system prompt is built for the turn, so servers
+  // assigned since the last prompt are connected and named in it.
+  if (config.live) {
+    pi.on("input", async () => {
+      try {
+        await reloadRoster();
+      } catch {
+        // A failed reload keeps the previous roster.
+      }
+    });
+  }
 
   pi.on("session_shutdown", async () => {
     if (shutDown) return;
@@ -669,8 +834,8 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
 
   return {
     promptSuffix(): string {
-      const healthy = [...states.values()].filter((state) => state.status === "connected");
-      const broken = [...states.values()].filter((state) => state.status !== "connected");
+      const healthy = activeStates().filter((state) => state.status === "connected");
+      const broken = activeStates().filter((state) => state.status !== "connected");
       const lines: string[] = [];
       if (healthy.length > 0) {
         lines.push(
