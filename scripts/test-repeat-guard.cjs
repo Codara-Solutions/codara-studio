@@ -32,6 +32,7 @@ function loadTypeScriptModule(sourcePath) {
 const {
   createRepeatedCallGuard,
   callSignature,
+  isWorkspaceMutationCall,
   resultFingerprint,
   POLLING_TOOLS,
 } = loadTypeScriptModule(path.join(__dirname, "..", "resources", "pi-cora", "repeat-guard.ts"));
@@ -196,7 +197,59 @@ function call(guard, toolName, input, result = "same output", isError = false) {
   assert.deepEqual(actions, ["allow", "allow", "note", "note", "block"]);
 }
 
-// 10. Wiring: the real worker extension must hang the guard off Pi's tool_call
+// 10. A workspace mutation between identical checks makes them fresh calls:
+//     edit, typecheck, edit, typecheck... with a byte-identical failure is a
+//     fix loop and must never be refused. Read-only work in between does not
+//     count as a mutation, and an identical check with no edit still blocks.
+{
+  const guard = createRepeatedCallGuard();
+  const check = { command: "npx tsc --noEmit -p ." };
+  for (let i = 0; i < 6; i += 1) {
+    const { decision } = call(guard, "bash", check, "src/a.ts(3,1): error TS2322");
+    assert.equal(decision.action, "allow", `typecheck after edit ${i} stays allowed`);
+    call(guard, "edit", { path: "src/a.ts", oldText: `v${i}`, newText: `v${i + 1}` }, "Edited src/a.ts");
+  }
+  const sedGuard = createRepeatedCallGuard();
+  for (let i = 0; i < 6; i += 1) {
+    assert.equal(call(sedGuard, "bash", check, "same error").decision.action, "allow");
+    call(sedGuard, "bash", { command: `sed -i 's/a${i}/b/' src/a.ts` }, "");
+  }
+
+  const readOnly = createRepeatedCallGuard();
+  const actions = [];
+  for (let i = 0; i < 5; i += 1) {
+    actions.push(call(readOnly, "bash", check, "same error").decision.action);
+    call(readOnly, "bash", { command: `cat src/a.ts | head -n ${i + 1}` }, `line ${i}`);
+  }
+  assert.deepEqual(actions, ["allow", "allow", "note", "note", "block"], "read-only bash in between still counts");
+
+  const failedEdit = createRepeatedCallGuard();
+  const failedActions = [];
+  for (let i = 0; i < 5; i += 1) {
+    failedActions.push(call(failedEdit, "bash", check, "same error").decision.action);
+    call(failedEdit, "edit", { path: "src/a.ts", oldText: `missing ${i}` }, "oldText not found", true);
+  }
+  assert.deepEqual(failedActions, ["allow", "allow", "note", "note", "block"], "a failed edit changed nothing");
+
+  assert.equal(isWorkspaceMutationCall("bash", { command: "npm test" }), false);
+  assert.equal(isWorkspaceMutationCall("bash", { command: "npm run typecheck 2>&1 | tail -20" }), false);
+  assert.equal(isWorkspaceMutationCall("bash", { command: "node build.js > /dev/null" }), false);
+  assert.equal(isWorkspaceMutationCall("bash", { command: "printf 'x' > src/out.txt" }), true);
+  assert.equal(isWorkspaceMutationCall("bash", { command: "npx prettier --write src" }), true);
+  assert.equal(isWorkspaceMutationCall("bash", { command: "git checkout -- src/a.ts" }), true);
+  assert.equal(isWorkspaceMutationCall("write", { path: "a" }, true), false);
+  assert.equal(isWorkspaceMutationCall("write", { path: "a" }, false), true);
+}
+
+// 11. The guidance points polling at the tools built for it.
+{
+  const guard = createRepeatedCallGuard();
+  let note;
+  for (let i = 0; i < 3; i += 1) note = call(guard, "bash", { command: "curl -s localhost:3000" }, "refused").outcome?.note;
+  assert.match(note, /codara_terminal_read/);
+}
+
+// 12. Wiring: the real worker extension must hang the guard off Pi's tool_call
 //     and tool_result hooks, veto the fifth identical call, and deliver the
 //     change-approach note on the third call's own result.
 async function checkWorkerExtensionWiring() {
