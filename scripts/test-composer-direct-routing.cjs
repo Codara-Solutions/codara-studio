@@ -50,14 +50,18 @@ assert.match(
 );
 
 // 2. startAutopilot routes only runs it creates, and the direct worker runs
-// a model from the user's enabled roster instead of a hard-coded default.
+// a connected model from the user's enabled roster instead of a hard-coded
+// default, while the chip stays the chat's model.
 const runStore = read("src/main/orchestration/run-store.ts");
 const startAutopilot = functionBody(runStore, "export async function startAutopilot(");
 assert.match(startAutopilot, /!input\.runId &&\s*\(await shouldUseDirectExecution\(/);
 assert.match(startAutopilot, /chatMode: input\.chatMode/, "chat mode reaches the routing decision");
-assert.match(startAutopilot, /availableCoraWorkerModels\(/);
-assert.match(startAutopilot, /directWorkerModels\.includes\(chipModel\)/);
+assert.match(startAutopilot, /await resolveDirectWorkerModel\(chipModel\)/);
+assert.match(startAutopilot, /chatModel: chipModel,/, "the chip is kept as the chat's model");
 assert.doesNotMatch(startAutopilot, /"gpt-5\.6-sol"/, "no hard-coded direct model");
+const resolveDirect = functionBody(runStore, "async function resolveDirectWorkerModel(");
+assert.match(resolveDirect, /coraWorkerModelAvailability\(/, "only connected models are candidates");
+assert.match(resolveDirect, /pickDirectWorkerModel\(chipModel, connected\)/);
 
 // 3. A finished direct chat escalates to the manager for a follow-up the
 // direct worker cannot serve, and that first manager turn replays the dialogue.

@@ -296,11 +296,13 @@ import { codaraHome } from "../codara-home";
 import { defaultShell } from "../shells";
 import {
   isOpenRouterModelId,
+  pickDirectWorkerModel,
   plannedWorkerModel,
   rosterModelFor,
   runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
+import { coraWorkerModelAvailability } from "./worker-model-availability";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -1429,6 +1431,18 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   return `Autopilot - ${input.workspaceName}`;
 }
 
+async function resolveDirectWorkerModel(chipModel: string | undefined): Promise<string | undefined> {
+  const { connected } = await coraWorkerModelAvailability(await loadSettings());
+  return pickDirectWorkerModel(chipModel, connected);
+}
+
+/** The worker model for the next pass of a direct chat (not a Loom run). */
+async function directChatPassModel(run: RunState): Promise<string> {
+  const chipModel = run.chatModel?.trim() || undefined;
+  if (run.automationId) return chipModel || "gpt-5.6-sol";
+  return (await resolveDirectWorkerModel(chipModel)) ?? chipModel ?? "gpt-5.6-sol";
+}
+
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
   const directExecutionRequested =
     !input.runId &&
@@ -1442,23 +1456,16 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
     }));
-  // A direct Cora turn is implemented as one worker. If the user disabled the
-  // entire worker roster, keep the request on the manager path: the manager's
-  // injected contract tells it to answer directly or ask the user to enable a
-  // worker, instead of creating a run that can never launch.
-  const directWorkerModels = directExecutionRequested
-    ? availableCoraWorkerModels(await loadSettings())
-    : [];
-  if (
-    !input.runId &&
-    directWorkerModels.length > 0
-  ) {
-    // The composer's chip names the manager model; the direct worker may only
-    // run a model the user left enabled in the worker roster.
-    const chipModel = input.chatModel?.trim();
-    const directModel = chipModel && directWorkerModels.includes(chipModel)
-      ? chipModel
-      : directWorkerModels[0];
+  // A direct Cora turn is implemented as one worker, which may only run a model
+  // the user left enabled in the worker roster and has an account for. With
+  // none, keep the request on the manager path: its injected contract tells
+  // it to answer directly or ask the user to sign in or enable a worker,
+  // instead of creating a run that can never launch.
+  const chipModel = input.chatModel?.trim() || undefined;
+  const directModel = directExecutionRequested
+    ? await resolveDirectWorkerModel(chipModel)
+    : undefined;
+  if (!input.runId && directModel) {
     return startDirectWorkerRun({
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
@@ -1470,6 +1477,9 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       prompt: input.initialUserNote!.trim(),
       clientMessageId: input.initialUserNoteClientMessageId,
       model: directModel,
+      // The chip stays the chat's model, so later passes and an escalation to
+      // the manager keep what the user picked.
+      chatModel: chipModel,
       effort: input.chatEffort ?? "medium",
       access: "full",
     });
@@ -1930,7 +1940,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     automationId: input.automationId,
     executionMode: "direct",
     chatBackend: "pi",
-    chatModel: input.model,
+    chatModel: input.chatModel ?? input.model,
     chatMode: "auto",
     chatEffort: input.effort,
   });
@@ -11751,7 +11761,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return addDirectIteration({
       runId: run.id,
       prompt: renderBundledManagerInput(queuedDirectMessages),
-      model: run.chatModel?.trim() || "gpt-5.6-sol",
+      model: await directChatPassModel(run),
       effort: run.chatEffort ?? "medium",
       queuedMessageIds: queuedDirectMessages.map((message) => message.id),
       access: "full",
@@ -12277,7 +12287,7 @@ export async function addRunMessage(
     return addDirectIteration({
       runId: run.id,
       prompt,
-      model: run.chatModel?.trim() || "gpt-5.6-sol",
+      model: await directChatPassModel(run),
       effort: run.chatEffort ?? "medium",
       clientMessageId: input.clientMessageId,
       attachments: input.attachments,

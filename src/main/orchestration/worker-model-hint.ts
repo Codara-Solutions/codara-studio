@@ -11,6 +11,7 @@ export {
   coerceWorkerModelToRoster,
   enabledWorkerModelFor,
   isOpenRouterModelId,
+  pickDirectWorkerModel,
   plannedWorkerModel,
   rosterModelFor,
   runtimeForWorkerModelId,

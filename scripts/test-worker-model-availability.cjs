@@ -69,6 +69,16 @@ async function main() {
   assert.equal(roster.workerModelSubscription("anthropic/claude-sonnet-4"), null, "OpenRouter ids need a key, not an account");
   console.log("PASS worker models map to the subscription they run on");
 
+  // The direct lane runs the chat's chip model only when it can launch; an
+  // OpenAI-only user whose chip is a GPT model the roster does not enable
+  // must stay on OpenAI rather than land on a Claude model with no sign-in.
+  assert.equal(roster.pickDirectWorkerModel("gpt-5.6-sol", ["claude-opus-5", "gpt-5.6-sol"]), "gpt-5.6-sol");
+  assert.equal(roster.pickDirectWorkerModel("gpt-5.6-terra", ["gpt-5.6-sol", "grok-4.6"]), "gpt-5.6-sol");
+  assert.equal(roster.pickDirectWorkerModel("gpt-5.6-terra", ["claude-opus-5", "grok-4.6"]), "claude-opus-5");
+  assert.equal(roster.pickDirectWorkerModel(undefined, ["grok-4.6"]), "grok-4.6");
+  assert.equal(roster.pickDirectWorkerModel("claude-opus-5", []), undefined, "nothing connected keeps the manager path");
+  console.log("PASS the direct lane picks a connected model, preferring the chip and its provider");
+
   const split = roster.partitionWorkerModelsByAccount(
     ["claude-opus-5", "gpt-5.6-sol", "grok-4.6", "qwen/qwen3-coder"],
     new Set(["anthropic"]),

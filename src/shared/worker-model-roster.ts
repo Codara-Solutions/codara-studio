@@ -150,6 +150,25 @@ export function partitionWorkerModelsByAccount(
 }
 
 /**
+ * The model a direct Cora turn runs on: the chat's chip model when it is a
+ * connected worker model, otherwise a connected one from the chip's provider,
+ * otherwise any connected one. Undefined when nothing is connected, which
+ * keeps the request on the manager path that explains how to sign in.
+ */
+export function pickDirectWorkerModel(
+  chipModel: string | undefined,
+  connected: readonly string[],
+): string | undefined {
+  const chip = chipModel?.trim();
+  if (chip && connected.includes(chip)) return chip;
+  const subscription = chip ? workerModelSubscription(chip) : null;
+  return (
+    (subscription ? connected.find((id) => workerModelSubscription(id) === subscription) : undefined) ??
+    connected[0]
+  );
+}
+
+/**
  * The native worker runtime a model id belongs to, or undefined for OpenRouter
  * and unknown ids. A Pi worker's provider follows its model, so this is what
  * decides which subscription a launch needs.

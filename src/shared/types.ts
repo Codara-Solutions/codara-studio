@@ -5085,6 +5085,9 @@ export interface StartDirectWorkerRunInput {
   prompt: string; // fully rendered loop prompt
   clientMessageId?: string;
   model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
+  /** The chat's chip model, kept as run.chatModel when it differs from the
+   *  worker model. Defaults to `model`. */
+  chatModel?: string;
   effort?: AgentEffortLevel;
   /** Looms v2.5: the graph node this pass's single worker executes (its prompt
    *  IS the rendered `prompt` above). Defaults to "w0" when omitted, so a
