@@ -555,6 +555,52 @@ export function upsertTomlMcpServer(text: string, server: McpServerConfig, label
 }
 
 /**
+ * Rename one server where it sits: its table header, its
+ * `[mcp_servers.<from>.*]` sub-table headers and any inline `from = {...}` or
+ * `mcp_servers.from.*` keys. Every key under it (enabled, cwd, timeouts,
+ * tools.* approvals) is untouched, which a remove-and-recreate would lose.
+ */
+export function renameTomlMcpServer(text: string, from: string, to: string, label = "config.toml"): string {
+  const doc = requireParsed(text, label);
+  if (from === to) return text;
+  const servers = doc.mcp_servers as Record<string, unknown> | undefined;
+  if (!isRecord(servers?.[from])) return text;
+  if (servers && to in servers) throw new Error(`'${to}' already exists in ${label}.`);
+  const eol = detectEol(text);
+  const lines = text.split(/\r?\n/);
+  const layout = serverLayout(groupSections(scanStatements(lines)), from);
+  const renamePath = (path: string[], at: number) =>
+    path.map((segment, index) => tomlKey(index === at ? to : segment)).join(".");
+  for (const section of [...(layout.main ? [layout.main] : []), ...layout.subSections]) {
+    const header = section.header!;
+    const line = lines[header.start];
+    const open = line.indexOf("[");
+    const key = parseKeyPath(line, open + 1);
+    if (!key) throw new Error(`Could not rename '${from}' in ${label}. Edit the file by hand.`);
+    const close = line.indexOf("]", key.next);
+    lines[header.start] = `${line.slice(0, open)}[${renamePath(section.path, 1)}${line.slice(close)}`;
+  }
+  for (const statement of layout.inline) {
+    const line = lines[statement.start];
+    const offset = line.length - line.trimStart().length;
+    const key = parseKeyPath(line, offset);
+    if (!key) throw new Error(`Could not rename '${from}' in ${label}. Edit the file by hand.`);
+    const at = statement.path[0] === "mcp_servers" ? 1 : 0;
+    lines[statement.start] = `${line.slice(0, offset)}${renamePath(statement.path, at)} ${line.slice(key.next)}`;
+  }
+  const next = lines.join(eol);
+  const check = requireParsed(next, label);
+  const renamed = check.mcp_servers as Record<string, unknown> | undefined;
+  if (
+    isRecord(renamed?.[from]) ||
+    JSON.stringify(renamed?.[to]) !== JSON.stringify(servers?.[from])
+  ) {
+    throw new Error(`Could not rename '${from}' to '${to}' in ${label}. Edit the file by hand.`);
+  }
+  return next;
+}
+
+/**
  * Remove every table, sub-table and inline key that defines `name`. Comment
  * lines after the server's last key stay, so a managed block's end marker that
  * follows the last server in the block survives.

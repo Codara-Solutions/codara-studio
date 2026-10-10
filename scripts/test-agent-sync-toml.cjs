@@ -254,6 +254,47 @@ async function main() {
     fs.rmSync(path.join(FAKE_HOME, ".grok"), { recursive: true, force: true });
   });
 
+  await check("renaming a server keeps it disabled with its cwd, timeouts and tool approvals", async () => {
+    const before = fs.readFileSync(CODEX_TOML, "utf8");
+    fs.writeFileSync(CODEX_TOML, [
+      before.trimEnd(),
+      "",
+      "[mcp_servers.old]",
+      'command = "npx"',
+      'args = ["-y", "deploy-mcp"]',
+      'cwd = "/srv/tools"',
+      "enabled = false",
+      "startup_timeout_sec = 60",
+      "tool_timeout_sec = 120",
+      "",
+      "[mcp_servers.old.tools.deploy]",
+      'approval_mode = "approve"',
+      "",
+    ].join("\n"));
+    const saved = await sync.saveMcpServer({
+      cwd: FAKE_CWD,
+      targetId: target("Every workspace, Codex").id,
+      replaceId: mcpItem("old", "codex").id,
+      server: { name: "new", transport: "stdio", command: "npx", args: ["-y", "deploy-mcp"] },
+    });
+    assert.equal(saved.ok, true, saved.error);
+    const lines = fs.readFileSync(CODEX_TOML, "utf8").split("\n");
+    for (const line of [
+      "[mcp_servers.new]",
+      'cwd = "/srv/tools"',
+      "enabled = false",
+      "startup_timeout_sec = 60",
+      "tool_timeout_sec = 120",
+      "[mcp_servers.new.tools.deploy]",
+      'approval_mode = "approve"',
+    ]) {
+      assert.ok(lines.includes(line), `the rename dropped: ${line}`);
+    }
+    assert.ok(!lines.some((line) => line.startsWith("[mcp_servers.old")), "the old tables are gone");
+    assert.ok(!lines.includes("enabled = true"), "the rename turned the server back on");
+    fs.writeFileSync(CODEX_TOML, before);
+  });
+
   await check("removing the last managed server keeps the block markers", async () => {
     fs.mkdirSync(path.dirname(PROJECT_CODEX_TOML), { recursive: true });
     fs.writeFileSync(PROJECT_CODEX_TOML, [

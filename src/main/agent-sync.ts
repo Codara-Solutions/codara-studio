@@ -30,6 +30,7 @@ import { withConfigFileLock, writeConfigFileAtomic } from "./config-file-io";
 import {
   parseTomlText,
   removeTomlMcpServer,
+  renameTomlMcpServer,
   renderTomlMcpServer,
   scanTomlMcpServerNames,
   tomlMcpServerNamesFromDocument,
@@ -1709,7 +1710,7 @@ function ensureProjectJsonMcpMap(parsed: Record<string, unknown>, project: strin
 async function upsertCodexMcpServer(path: string, server: McpServerConfig, replaceName: string | null): Promise<void> {
   await withConfigFileLock(path, async () => {
     let existing = await readTextIfExists(path);
-    if (replaceName && replaceName !== server.name) existing = removeTomlMcpServer(existing, replaceName, path);
+    if (replaceName && replaceName !== server.name) existing = renameTomlMcpServer(existing, replaceName, server.name, path);
     const next = ensureTrailingNewline(upsertTomlMcpServer(existing, server, path));
     await fs.mkdir(dirname(path), { recursive: true });
     await writeConfigFileAtomic(path, next);
