@@ -13,6 +13,7 @@ export {
   isOpenRouterModelId,
   plannedWorkerModel,
   rosterModelFor,
+  runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
   WORKER_DEFAULT_CLAUDE_MODEL,
   WORKER_MODEL_ROSTER,

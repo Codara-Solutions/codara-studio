@@ -285,6 +285,7 @@ import {
   isOpenRouterModelId,
   plannedWorkerModel,
   rosterModelFor,
+  runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
 import { shouldResumeForUserMessage } from "./user-message-resume";
@@ -13327,14 +13328,25 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     task.runtimePreference === "codex" ||
     task.runtimePreference === "grok";
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
+  const usableWorkerRuntimes = workerSettings
+    ? await detectConfiguredAgentRuntimes()
+        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
+        .catch(() => undefined)
+    : undefined;
   const piWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
         workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
         run.executionMode === "direct" && !isAutomationRun,
+        usableWorkerRuntimes,
       )
     : undefined;
+  // Keep the attempt's runtime in step with the provider the model launches
+  // on, so labels and session reuse never contradict the session.
+  const launchRuntime: WorkerRuntime = isPiWorker
+    ? runtimeForWorkerModelId(piWorkerModel) ?? task.runtimePreference
+    : task.runtimePreference;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
       "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
@@ -13342,7 +13354,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   }
   if (workerLaunchAborted(attempt.id)) return run;
   const command = isPiWorker
-    ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+    ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
     : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
@@ -13352,6 +13364,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   attempt.error = undefined;
   attempt.failureKind = undefined;
   attempt.command = command;
+  attempt.runtime = launchRuntime;
   attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
   attempt.stdoutLogPath = paths.stdoutLog;
@@ -18999,10 +19012,14 @@ async function readWorkerReportWithWorkspaceShadowRecovery(
   return { report: shadowReport, relocatedFrom: shadowPath };
 }
 
+// The provider follows the model, not runtimePreference: a fallback from the
+// enabled list, or a plan pairing "claude" with a gpt hint, would otherwise
+// launch the model on the wrong provider and fail validation.
 function piProviderForWorker(task: WorkerTask, model: string | undefined): PiProvider {
   if (model?.includes("/")) return "openrouter";
-  if (task.runtimePreference === "grok") return "xai";
-  return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
+  const runtime = runtimeForWorkerModelId(model) ?? task.runtimePreference;
+  if (runtime === "grok") return "xai";
+  return runtime === "claude" ? "anthropic" : "openai-codex";
 }
 
 function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
@@ -19019,10 +19036,11 @@ function piModelForWorker(
   isAutomationRun = false,
   enabledModels?: readonly string[],
   isDirectRun = false,
+  usableRuntimes?: ReadonlySet<string>,
 ): string | undefined {
   // Share selection with queued worker labels so the advertised model and
   // the launch target agree before an attempt has started.
-  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels });
+  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels, usableRuntimes });
 }
 
 function piWorkerToolLabel(value: unknown): string {
