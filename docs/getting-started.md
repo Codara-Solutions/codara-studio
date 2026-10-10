@@ -103,9 +103,10 @@ Once the guide is done, try these in your workspace:
 
 ### In the Cora chat
 
-- **No account yet.** The welcome screen says when no Claude or ChatGPT
-  account is connected and opens Settings, Agents for you. New chats default
-  to a model from an account you have connected.
+- **No account yet.** The welcome screen says when no Claude, ChatGPT or Grok
+  account is connected (and OpenRouter is not set up) and opens Settings,
+  Agents for you. New chats default to a model from an account you have
+  connected.
 - **A turn that fails** shows as a failure, with **Retry** in the composer
   and, when the cause is a missing or signed-out account, **Open accounts**.
 - **Stop.** The stop button, or Cmd+. (Ctrl+. on Windows and Linux), ends the

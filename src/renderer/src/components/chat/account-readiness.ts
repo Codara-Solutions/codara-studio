@@ -11,6 +11,9 @@ export interface CoraAccountReadiness {
   usableProviders: ReadonlySet<PiSubscriptionProvider> | null;
   /** Pi itself is unavailable, so connecting an account is not enough. */
   runtimeMissing: boolean;
+  /** OpenRouter is configured with at least one Cora model, which runs Cora
+   *  without any subscription. */
+  openRouterReady: boolean;
   /** A status read has finished (successfully or not). */
   settled: boolean;
 }
@@ -29,15 +32,50 @@ export function usableProvidersFromOverview(
   return usable;
 }
 
-export function readinessFromOverview(overview: PiSubscriptionOverview): CoraAccountReadiness {
+export function readinessFromOverview(
+  overview: PiSubscriptionOverview,
+  openRouterModels: readonly string[] = [],
+): CoraAccountReadiness {
   return {
     usableProviders: usableProvidersFromOverview(overview),
     runtimeMissing: !overview.runtimeInstalled,
+    openRouterReady: openRouterModels.length > 0,
     settled: true,
   };
 }
 
-let snapshot: CoraAccountReadiness = { usableProviders: null, runtimeMissing: false, settled: false };
+/** A settled read found nothing at all that can run a Cora turn. */
+export function needsCoraAccount(readiness: CoraAccountReadiness): boolean {
+  return (
+    readiness.settled &&
+    readiness.usableProviders !== null &&
+    readiness.usableProviders.size === 0 &&
+    !readiness.openRouterReady
+  );
+}
+
+// An unreadable status says nothing about accounts; callers keep their
+// unfiltered defaults rather than claiming nothing is connected.
+const UNKNOWN_READINESS: CoraAccountReadiness = {
+  usableProviders: null,
+  runtimeMissing: false,
+  openRouterReady: false,
+  settled: true,
+};
+
+function readReadiness(): Promise<CoraAccountReadiness> {
+  return Promise.all([
+    window.spark.piSubscriptions.status(),
+    window.spark.openRouter.coraModels().catch(() => [] as string[]),
+  ]).then(([overview, openRouterModels]) => readinessFromOverview(overview, openRouterModels));
+}
+
+let snapshot: CoraAccountReadiness = {
+  usableProviders: null,
+  runtimeMissing: false,
+  openRouterReady: false,
+  settled: false,
+};
 const listeners = new Set<() => void>();
 let stopEvents: (() => void) | null = null;
 let readSeq = 0;
@@ -49,15 +87,12 @@ function publish(next: CoraAccountReadiness): void {
 
 function refresh(): void {
   const seq = ++readSeq;
-  void window.spark.piSubscriptions
-    .status()
-    .then((overview) => {
-      if (seq === readSeq) publish(readinessFromOverview(overview));
+  void readReadiness()
+    .then((readiness) => {
+      if (seq === readSeq) publish(readiness);
     })
     .catch(() => {
-      // An unreadable status says nothing about accounts; keep the composer's
-      // unfiltered defaults rather than claiming nothing is connected.
-      if (seq === readSeq) publish({ usableProviders: null, runtimeMissing: false, settled: true });
+      if (seq === readSeq) publish(UNKNOWN_READINESS);
     });
 }
 
@@ -91,10 +126,7 @@ export function useCoraAccountReadiness(): CoraAccountReadiness {
 /** One-shot read for code that resolves a default outside render. */
 export function loadCoraAccountReadiness(): Promise<CoraAccountReadiness> {
   if (snapshot.settled) return Promise.resolve(snapshot);
-  return window.spark.piSubscriptions
-    .status()
-    .then(readinessFromOverview)
-    .catch(() => ({ usableProviders: null, runtimeMissing: false, settled: true }));
+  return readReadiness().catch(() => UNKNOWN_READINESS);
 }
 
 export function openAccountsSettings(): void {

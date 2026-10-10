@@ -17,7 +17,7 @@ import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
-import { openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
+import { needsCoraAccount, openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
 import DismissErrorButton from "./DismissErrorButton";
 import { filterChatHistory } from "./conversation-search";
 import { chordMatches, mod } from "../../shortcuts/chord";
@@ -1150,9 +1150,9 @@ const PROJECT_STARTERS = [
 function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   const accounts = useCoraAccountReadiness();
   // Only a settled read that found nothing claims "no account": an unreadable
-  // status keeps the welcome as it was rather than nagging on a guess.
-  const needsAccount =
-    accounts.settled && accounts.usableProviders !== null && accounts.usableProviders.size === 0;
+  // status keeps the welcome as it was rather than nagging on a guess, and an
+  // OpenRouter setup already runs Cora without a subscription.
+  const needsAccount = needsCoraAccount(accounts);
   const prefill = (text: string) => {
     // A starter frames the task; it must not wipe a half-typed description.
     window.dispatchEvent(

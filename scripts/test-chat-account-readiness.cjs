@@ -79,12 +79,30 @@ async function main() {
     assert.match(app, /initialTab=\{settingsInitialTab\}/);
   });
 
+  test("only a settled read with no subscription and no OpenRouter needs an account", () => {
+    const overview = { runtimeInstalled: true, runtimeVersion: "1", runtimeExpectedVersion: "1", connections: [] };
+    assert.equal(R.needsCoraAccount(R.readinessFromOverview(overview)), true);
+    // OpenRouter runs Cora with no subscription: telling that user to connect
+    // an account would be wrong.
+    assert.equal(R.needsCoraAccount(R.readinessFromOverview(overview, ["anthropic/claude-sonnet-4.5"])), false);
+    assert.equal(
+      R.needsCoraAccount(R.readinessFromOverview({ ...overview, connections: [connection("xai")] })),
+      false,
+    );
+    // Unknown (failed read) and unsettled states never nag.
+    assert.equal(
+      R.needsCoraAccount({ usableProviders: null, runtimeMissing: false, openRouterReady: false, settled: true }),
+      false,
+    );
+    assert.equal(
+      R.needsCoraAccount({ usableProviders: new Set(), runtimeMissing: false, openRouterReady: false, settled: false }),
+      false,
+    );
+  });
+
   test("the welcome card only claims no account after a settled, successful read", () => {
     const panel = fs.readFileSync(path.join(CHAT, "ChatPanel.tsx"), "utf8");
-    assert.match(
-      panel,
-      /accounts\.settled && accounts\.usableProviders !== null && accounts\.usableProviders\.size === 0/,
-    );
+    assert.match(panel, /const needsAccount = needsCoraAccount\(accounts\);/);
     assert.match(panel, /Connect an account to start/);
     // Starters no longer replace a half-typed draft.
     assert.match(panel, /detail: \{ text, prepend: true \}/);
