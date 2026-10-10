@@ -949,6 +949,11 @@ export function registerIpc(): void {
     const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
   });
+  handle("pi-subscriptions:resume-login", async (event) => {
+    await unifiedAccountsReady();
+    const { resumePiSubscriptionLogin } = await getPiSubscriptionAuth();
+    return resumePiSubscriptionLogin(event.sender);
+  });
   handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
     return installPiRuntimeForWindow(event.sender);

@@ -41,7 +41,10 @@ assert.match(
   subscriptionAuth,
   /type: "completed",[\s\S]{0,400}?owner\.focus\?\.\(\);/,
 );
-assert.match(subscriptionAuth, /if \(!cancelled\) owner\.focus\?\.\(\);/);
+assert.match(
+  subscriptionAuth,
+  /if \(!alreadyClosed && !flow\.userCancelled && !flow\.superseded\) owner\.focus\?\.\(\);/,
+);
 assert.doesNotMatch(
   subscriptionAuth,
   /type: "cancelled"[^\n]*\n\s*focusStudioWindow/,

@@ -12,6 +12,7 @@ import type {
   EditorThemeId,
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
+  PiSubscriptionProfileLoginRequest,
   PiSubscriptionPrompt,
   PiSubscriptionProvider,
   PtyResourceSnapshot,
@@ -2167,6 +2168,10 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         return { ...base, status: "running", message: event.message };
       });
     });
+    // A sign-in started before this panel mounted (another tab, a closed
+    // dialog) keeps running in main; ask for it again so it can be finished
+    // or cancelled here instead of blocking every other sign-in.
+    void window.spark.piSubscriptions.resumeLogin().catch(() => undefined);
     return remove;
   }, []);
 
@@ -2210,7 +2215,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   const beginProfileLogin = (
     provider: PiSubscriptionProvider,
     message: string,
-    start: () => Promise<unknown>,
+    start: () => Promise<PiSubscriptionProfileLoginRequest>,
   ) => {
     setError(null);
     setAddingProvider(null);
@@ -2221,7 +2226,13 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       status: "running",
       message,
     });
-    void start().catch((err) => {
+    void start().then((request) => {
+      // An already open sign-in for this account answers with its own id and
+      // replays its events; either way the panel now cancels the real flow.
+      setLogin((current) => current?.requestId === "starting"
+        ? { ...current, requestId: request.requestId }
+        : current);
+    }).catch((err) => {
       setLogin({
         requestId: "failed-to-start",
         provider,
@@ -2644,7 +2655,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       </div>
       {login && <div ref={guidedLoginRef}><PiLoginPanel login={login} promptValue={promptValue} onPromptValue={setPromptValue} onSubmitPrompt={submitPrompt} onCancel={() => {
         if (login.status === "running") {
-          if (login.requestId !== "starting") void window.spark.piSubscriptions.cancel(login.requestId);
+          void window.spark.piSubscriptions.cancel(login.requestId === "starting" ? undefined : login.requestId);
           return;
         }
         setLogin(null);
@@ -2733,8 +2744,8 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           onPromptValue={setPromptValue}
           onSubmitPrompt={submitPrompt}
           onCancel={() => {
-            if (login.status === "running" && login.requestId !== "starting") {
-              void window.spark.piSubscriptions.cancel(login.requestId);
+            if (login.status === "running") {
+              void window.spark.piSubscriptions.cancel(login.requestId === "starting" ? undefined : login.requestId);
             } else {
               setLogin(null);
             }
@@ -2896,7 +2907,8 @@ function PiLoginPanel({
 }) {
   const done = login.status === "completed";
   const failed = login.status === "failed";
-  const tone = done ? "var(--ok)" : failed ? "var(--danger)" : "var(--accent)";
+  const cancelled = login.status === "cancelled";
+  const tone = done ? "var(--ok)" : failed ? "var(--danger)" : cancelled ? "var(--muted)" : "var(--accent)";
   const select = login.prompt?.type === "select" ? login.prompt : null;
   const textPrompt = login.prompt && login.prompt.type !== "select" ? login.prompt : null;
   return (
@@ -2926,7 +2938,7 @@ function PiLoginPanel({
         />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
-            {done ? "Account connected" : failed ? "Could not sign in" : "Signing in to this account"}
+            {done ? "Account connected" : failed ? "Could not sign in" : cancelled ? "Sign-in cancelled" : "Signing in to this account"}
           </div>
           <div style={{ marginTop: 2, color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11, lineHeight: 1.45 }}>
             {login.message}

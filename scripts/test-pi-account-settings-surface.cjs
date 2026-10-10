@@ -32,6 +32,7 @@ const channels = [
   "pi-subscriptions:share-login",
   "pi-subscriptions:respond",
   "pi-subscriptions:cancel",
+  "pi-subscriptions:resume-login",
   "pi-subscriptions:usage",
 ];
 for (const channel of channels) {
