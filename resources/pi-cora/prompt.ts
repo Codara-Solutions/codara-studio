@@ -123,12 +123,14 @@ const ORCHESTRATION = `How you orchestrate:
 
 // ── effort calibration ──────────────────────────────────────────────────────
 
-function effortContract(options: CoraPiPromptOptions): string {
-  const trivial = options.alwaysVerifyEdits
+// Only Auto mode has the small-edit path; Execute mode always delegates, so it
+// keeps the worker shape even with the setting off.
+function effortContract(mode: CoraPiMode, options: CoraPiPromptOptions): string {
+  const trivial = options.alwaysVerifyEdits || mode !== "auto"
     ? `- Trivial work is two moves: spawn one fast implementer with its oracle and
   declared verifier, then wait and complete. No plan, board, or speculation.`
-    : `- Trivial work is one move: in Auto mode make the small change yourself, run
-  its check, and answer. No worker, plan, board, or speculation.`;
+    : `- Trivial work is one move: make the small change yourself, run its check,
+  and answer. No worker, plan, board, or speculation.`;
   return `Effort calibration:
 - Match spend to problem size. Wall-clock and tokens are budgets the user
   feels: a small fix delivered in two minutes beats the same fix wrapped in
@@ -447,7 +449,7 @@ This is Automation mode:
   const orchestrating = [
     shared,
     ORCHESTRATION,
-    effortContract(options),
+    effortContract(mode, options),
     WORKER_TASK_CLASS_CONTRACT,
     TASK_COMPLEXITY_CONTRACT,
     RUN_PLAYBOOKS_CONTRACT,

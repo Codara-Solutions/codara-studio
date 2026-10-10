@@ -219,33 +219,38 @@ ${mcp?.promptSuffix() ?? ""}`,
   const deferredFamilies = STUDIO_TOOL_FAMILIES.filter(
     (family) => familyTools.has(family) && !alwaysActiveFamilies.has(family),
   );
-  const loadedFamilies = new Set<StudioToolFamily>();
-  const activateFamilies = (families: readonly StudioToolFamily[]): StudioToolFamily[] => {
+  // Judged against the live active set, not a record of earlier loads: a
+  // session switch hides families again, and a stale "already loaded" record
+  // would let codara_tools report tools that the next request does not carry.
+  const activateFamilies = (families: readonly StudioToolFamily[]): void => {
     const active = new Set(pi.getActiveTools());
-    const added: StudioToolFamily[] = [];
+    const initialSize = active.size;
     for (const family of families) {
       if (!deferredFamilies.includes(family)) continue;
-      if (!loadedFamilies.has(family)) added.push(family);
-      loadedFamilies.add(family);
       for (const tool of familyTools.get(family) ?? []) active.add(tool.name);
     }
-    if (added.length > 0) pi.setActiveTools([...active]);
-    return added;
+    if (active.size !== initialSize) pi.setActiveTools([...active]);
   };
 
   if (deferredFamilies.length > 0) {
     pi.on("session_start", (_event, ctx) => {
       const used = familiesUsedInBranch(ctx.sessionManager.getBranch());
       const keep = new Set(deferredFamilies.filter((family) => used.has(family)));
-      for (const family of keep) loadedFamilies.add(family);
       const hidden = new Set(
         deferredFamilies
           .filter((family) => !keep.has(family))
           .flatMap((family) => (familyTools.get(family) ?? []).map((tool) => tool.name)),
       );
+      // A kept family is re-activated too: an earlier session in this process
+      // may have hidden it, and the transcript calls its tools.
       const active = pi.getActiveTools();
-      const next = active.filter((name) => !hidden.has(name));
-      if (next.length !== active.length) pi.setActiveTools(next);
+      const next = new Set(active.filter((name) => !hidden.has(name)));
+      for (const family of keep) {
+        for (const tool of familyTools.get(family) ?? []) next.add(tool.name);
+      }
+      if (next.size !== active.length || active.some((name) => !next.has(name))) {
+        pi.setActiveTools([...next]);
+      }
     });
     // Before a session's first model request nothing is cached yet, so the
     // families the request plainly needs can be loaded for free. Later turns

@@ -71,6 +71,19 @@ assert.match(auto, /Do not spawn a\s+worker and do not call codara_complete/);
 assert.match(auto, /explicitly says not to use agents or workers, honor that request/);
 assert.match(auto, /Do not\s+call codara_spawn_workers or codara_complete on this direct path/);
 assert.match(auto, /If no worker models are enabled, use the same direct path/);
+// Small edits: Auto mode makes them herself unless the user asked for every
+// edit to go through a worker; Execute mode always delegates, so its effort
+// calibration must never tell it to edit directly.
+assert.match(auto, /Small, low-risk changes are yours to make/);
+assert.match(auto, /Trivial work is one move: make the small change yourself/);
+const autoAlwaysVerify = extension.buildCoraPiSystemPrompt("auto", "fast", { alwaysVerifyEdits: true });
+assert.match(autoAlwaysVerify, /"Always verify edits with a worker"/);
+assert.doesNotMatch(autoAlwaysVerify, /Small, low-risk changes are yours to make/);
+assert.match(autoAlwaysVerify, /Trivial work is two moves/);
+assert.match(execute, /Trivial work is two moves/);
+assert.doesNotMatch(execute, /make the small change yourself/);
+assert.doesNotMatch(automation, /you have codara_remember/, "the automation roster has no codara_remember");
+assert.match(auto, /you have codara_remember/);
 assert.match(auto, /direct-work exception remains binding here/);
 assert.match(auto, /do not spawn a plan verifier/);
 assert.match(auto, /at least one\s+bounded worker/);
@@ -178,6 +191,12 @@ for (const command of [
   "npx playwright codegen https://example.com",
   "npx playwright test --headed",
   "echo ready; open https://example.com",
+  // A shell's -c script and an eval string are command lines of their own;
+  // quote-aware splitting must not hide a launch inside them.
+  'bash -c "cd app && open http://localhost:3000"',
+  "sh -lc 'npm run build; xdg-open http://localhost:3000'",
+  "eval 'open https://example.com'",
+  "BROWSER=1 open https://example.com",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
   assert.equal(
@@ -196,6 +215,8 @@ for (const command of [
   "pnpm exec playwright test",
   "git commit -m 'docs: explain; open the panel first'",
   'echo "step one; open the settings"',
+  'bash -c "npx playwright test && echo done"',
+  "CI=1 npx playwright test",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
 }

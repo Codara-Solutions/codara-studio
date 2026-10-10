@@ -82,13 +82,19 @@ export function launchesExternalBrowser(command: string): boolean {
       .trim()
       .replace(/^[({]+\s*/, "")
       .replace(/^(?:(?:sudo|nohup|command|builtin)\s+)+/i, "");
-    // `env FOO=bar open …` is a common wrapper. Peel only leading
-    // assignments; the command itself remains available to the checks below.
-    segment = segment.replace(
-      /^env(?:\s+[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+))*\s+/i,
-      "",
-    );
+    // `env FOO=bar open …` and `FOO=bar open …` are common wrappers. Peel only
+    // leading assignments; the command itself remains available to the checks
+    // below.
+    segment = segment
+      .replace(/^env(?:\s+[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+))*\s+/i, "")
+      .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/, "");
     if (!segment) continue;
+    // Quotes keep a commit message's "; open" out of the segment checks, but a
+    // shell's -c script or an eval string is a command line of its own.
+    const nested =
+      /^(?:\S*\/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+(["'])([\s\S]*)\1\s*$/.exec(segment) ??
+      /^eval\s+(["'])([\s\S]*)\1\s*$/.exec(segment);
+    if (nested && launchesExternalBrowser(nested[2])) return true;
     if (/^(?:\S*\/)?open(?:\s|$)/i.test(segment)) return true;
     if (/^(?:\S*\/)?(?:xdg-open|sensible-browser|gnome-open|kde-open)(?:\s|$)/i.test(segment)) {
       return true;
