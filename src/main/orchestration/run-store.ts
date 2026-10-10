@@ -5278,7 +5278,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // is doing review itself (reading the worker's final_report_path returned by
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
   // We need the worker_task to reach a TERMINAL status (accepted/blocked/
-  // failed/cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
+  // failed/cancelled) so codara_wait_for_workers actually unblocks: `needs_review`
   // is non-terminal in the WorkerTaskStatus enum, and the manager-review
   // path that normally transitions needs_review → accepted via
   // decideWorkerReport is explicitly skipped below. The terminal status must
@@ -5340,7 +5340,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
         taskInDraft.updatedAt = timestamp;
       }
       // Also roll up the parent step's review status so it doesn't sit at
-      // "reviewing" forever — the manager consumes the report directly via
+      // "reviewing" forever; the manager consumes the report directly via
       // final_report_path. The step settles on the worst outcome among its
       // tasks, and only once none of them is still live, so a sibling's success
       // never paints over this worker's failure (or the reverse).
@@ -10894,7 +10894,7 @@ function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string 
     `Resume this run. ${byRestart ? "The app restart or the pause" : "The pause"} stopped the attempts below before they finished, and nothing is running now:`,
     ...listed.map(
       (row) =>
-        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted${
+        `- ${row.stepLabel} · ${row.taskTitle}, task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted${
           row.continuable ? `, continuable on ${row.runtime}` : ""
         })`,
     ),
@@ -19465,6 +19465,10 @@ function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
   );
 }
 
+// Finishing something, not merely streaming, is what re-arms a worker turn's
+// no-progress ceiling.
+const PI_WORKER_PROGRESS_EVENTS = new Set<string>(["tool_execution_end", "message_end", "compaction_end"]);
+
 /**
  * Drive one Pi worker turn to completion.
  *
@@ -19499,13 +19503,7 @@ async function waitForPiWorkerTurn(
       unsubscribe = client.onEvent((event) => {
         lastEventAt = Date.now();
         lastEventType = event.type;
-        if (
-          event.type === "tool_execution_end" ||
-          event.type === "message_end" ||
-          event.type === "compaction_end"
-        ) {
-          lastProgressAt = lastEventAt;
-        }
+        if (PI_WORKER_PROGRESS_EVENTS.has(event.type)) lastProgressAt = lastEventAt;
         // Any traffic at all means the worker is reachable again. Clear the
         // stall mark so the pane returns to its real state rather than wearing
         // an amber badge for the rest of a turn that recovered.
