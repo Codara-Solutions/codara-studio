@@ -145,6 +145,12 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
       await scrollConversation(page, "bottom");
       await expect(page.getByRole("textbox", { name: "Message Cora" }).last()).toBeVisible();
       await shoot(page, "long", size.name);
+      // Hover-only meta (time, copy) must float in the turn gap, not shove
+      // the next turn down or sit on its text.
+      await page.locator('[data-message-author="user"]').locator("visible=true").last().hover();
+      await shoot(page, "long-hover-user", size.name);
+      await page.locator('[data-message-author="cora"]').locator("visible=true").nth(-2).hover();
+      await shoot(page, "long-hover-cora", size.name);
     }
 
     // The complaint's window was short as well as narrow: the composer must
@@ -157,10 +163,12 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
     expect((composer?.y ?? 0) + (composer?.height ?? 0)).toBeLessThanOrEqual((viewport?.height ?? 0) - 8);
     await shoot(page, "paused-auth", "short");
 
-    await page.evaluate(() => {
-      document.documentElement.dataset.theme = "codara-daylight";
-      document.documentElement.dataset.themeMode = "light";
+    // Through the real preference, so the theme provider and the workspace
+    // accent's contrast pass both run, exactly as for a user switching themes.
+    await page.evaluate(async () => {
+      await (window as unknown as { spark: any }).spark.preferences.set("theme", "codara-daylight");
     });
+    await expect.poll(() => page.evaluate(() => document.documentElement.dataset.themeMode)).toBe("light");
     await applySize(page, SIZES[1]);
     await shoot(page, "paused-auth", "wide-light");
     await openChat(page, "Manager loop design");
