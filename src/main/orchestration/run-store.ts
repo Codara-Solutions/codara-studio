@@ -11336,13 +11336,63 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
     return run;
   }
   const reason = input.reason?.trim() || "Run cancelled";
-  await sendPauseSignals(run, reason);
+  // Tear down like Stop does. An ESC alone left the manager turn running and
+  // each worker exiting on its own, and those exits landed as failures that
+  // overwrote the cancelled tasks and revived skipped steps. The window makes
+  // every exit the cancel causes read as interrupted.
+  openForcePauseWindow(run.id);
+  try {
+    await disposeManagerSessions(run.id);
+    const activeWorkers = activeWorkersForRun(run.id);
+    for (const worker of activeWorkers) {
+      try {
+        worker.kill();
+      } catch {
+        /* best-effort; the hard pty kill follows */
+      }
+      try {
+        pty.killImmediate(worker.attemptId);
+      } catch {
+        /* the session may already have exited */
+      }
+      activeWorkerProcesses.delete(worker.attemptId);
+    }
+    for (const key of [...activeAutopilotCycles.keys()]) {
+      if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+    }
+    activeAutopilotPlans.delete(run.id);
+    activeAutopilotReviews.delete(run.id);
+    return await commitCancelledRun(run, reason);
+  } finally {
+    closeForcePauseWindow(run.id);
+  }
+}
+
+function commitCancelledRun(run: RunState, reason: string): Promise<RunState> {
   return commitRunChange(run, {
     type: "run.cancelled",
     message: reason,
     payload: { reason },
     mutate: (draft, timestamp) => {
       abandonRunQuestionOwnership(draft);
+      for (const call of draft.sparkCalls) {
+        if (call.status !== "started" || call.completedAt) continue;
+        call.status = "failed";
+        call.error = "Manager turn interrupted because the run was cancelled.";
+        call.completedAt = timestamp;
+      }
+      for (const attempt of draft.workerAttempts) {
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
       draft.status = "cancelled";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -15324,6 +15374,16 @@ async function reviewWorkerReportArtifact({
   attempt: WorkerAttempt;
   paths: WorkerArtifactPaths;
 }): Promise<RunState> {
+  // A report that lands after the run was cancelled, or after its step was
+  // skipped, has nothing left to drive: reviewing it set a cancelled run's
+  // task back to needs_review and its skipped step back to reviewing. A
+  // complete step is still reviewed, since its declared verifier reports
+  // after the implementation settled it.
+  const current = (await getRun(run.id)) ?? run;
+  const step = task.stepId ? current.steps.find((entry) => entry.id === task.stepId) : undefined;
+  if (current.status === "cancelled" || step?.status === "skipped") {
+    return current;
+  }
   const report = await readWorkerReport(paths.finalReportJson);
   if (!report) {
     await appendEvent({

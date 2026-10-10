@@ -1069,6 +1069,100 @@ async function main() {
     }) === false,
   );
 
+  // ── 4b. cancel tears down like Stop ─────────────────────────────────────
+  // `cora chat cancel` used to send only ESC: the manager turn kept going and
+  // each worker exit landed as a failure that overwrote the cancelled task and
+  // revived the skipped step.
+  const cancelId = writeRun(
+    forcePausedRun("run-cancel-teardown", {
+      status: "running",
+      autopilot: { status: "running", lastAction: "resumed_by_user", updatedAt: NOW },
+      steps: [
+        {
+          id: "step-3",
+          runId: "run-cancel-teardown",
+          title: "Wire the parser",
+          status: "running",
+          createdAt: PAUSED_AT,
+          updatedAt: PAUSED_AT,
+        },
+      ],
+      workerTasks: [
+        {
+          id: "task-parser",
+          runId: "run-cancel-teardown",
+          stepId: "step-3",
+          title: "Implement the tokenizer",
+          status: "running",
+          taskClass: "feature",
+          createdBy: "spark",
+          createdAt: PAUSED_AT,
+          updatedAt: PAUSED_AT,
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-cancel",
+          runId: "run-cancel-teardown",
+          workerTaskId: "task-parser",
+          attemptNumber: 1,
+          runtime: "claude",
+          cwd: HOME,
+          status: "running",
+          startedAt: PAUSED_AT,
+        },
+      ],
+      sparkCalls: [
+        {
+          id: "spark-live-at-cancel",
+          runId: "run-cancel-teardown",
+          mode: "chat",
+          model: "stub-model",
+          status: "started",
+          conversationEpoch: 1,
+          createdAt: PAUSED_AT,
+        },
+      ],
+    }),
+  );
+  const cancelWindow = [];
+  globalThis.__coraDisposeHook = (disposingRunId) => {
+    cancelWindow.push(
+      runStore.workerExitInterruptedByForcePause({
+        runId: disposingRunId,
+        exitCode: 1,
+        attemptStatus: "running",
+      }),
+    );
+  };
+  await runStore.cancelRun({ runId: cancelId, reason: "cancelled from the CLI" });
+  globalThis.__coraDisposeHook = undefined;
+  const cancelled = readRun(cancelId);
+  check(
+    "cancel disposes the manager session inside the interrupt window",
+    cancelWindow.length === 1 && cancelWindow[0] === true,
+    JSON.stringify(cancelWindow),
+  );
+  check(
+    "cancel records the live attempt cancelled, so its exit reads as interrupted",
+    cancelled.workerAttempts[0]?.status === "cancelled" &&
+      runStore.workerExitInterruptedByForcePause({
+        runId: cancelId,
+        exitCode: 1,
+        attemptStatus: cancelled.workerAttempts[0]?.status,
+      }),
+    cancelled.workerAttempts[0]?.status,
+  );
+  check(
+    "cancel fails the live manager call",
+    cancelled.sparkCalls.find((call) => call.id === "spark-live-at-cancel")?.status === "failed",
+  );
+  check(
+    "cancel leaves the task cancelled and the step skipped",
+    cancelled.workerTasks[0]?.status === "cancelled" && cancelled.steps[0]?.status === "skipped",
+    `${cancelled.workerTasks[0]?.status}/${cancelled.steps[0]?.status}`,
+  );
+
   // ── 5. source seams ─────────────────────────────────────────────────────
   const storeSource = fs.readFileSync(RUN_STORE_TS, "utf8");
   const launchStart = storeSource.indexOf("export async function launchWorkerAttempt(");
