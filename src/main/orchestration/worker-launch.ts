@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import type { WorkerArtifactPaths, WorkerReport, WorkerTask } from "@shared/types";
 import { stripAnsiWorkerTap, workerSubmitTurnStarted } from "@shared/agent-patterns";
 import * as pty from "../pty-manager";
+import { workerReportStatusOf } from "./worker-report";
 
 // Local copy of run-store's delay — replicated here rather than imported to
 // avoid a circular import (run-store imports this module's launch helpers).
@@ -138,7 +139,7 @@ export async function writeAutoFailureReport(
     priorRaw = raw;
     const existing = JSON.parse(raw) as Record<string, unknown>;
     if (typeof existing?.summary === "string") priorSummary = existing.summary.trim();
-    const status = existing?.status;
+    const status = workerReportStatusOf(existing?.status);
     if (status === "complete" || status === "partial" || status === "blocked") {
       const risks = Array.isArray(existing.risks)
         ? existing.risks.filter((item): item is string => typeof item === "string")

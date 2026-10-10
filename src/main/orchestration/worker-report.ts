@@ -47,11 +47,21 @@ const WORKER_REPORT_STATUS_ALIASES: Readonly<Record<string, WorkerReport["status
   completed: "complete",
 };
 
-function normalizeReportStatus(value: unknown): WorkerReport["status"] {
+/**
+ * The status a report's raw `status` value reads as, aliases included, or null
+ * when it is not one. Every reader that decides whether a report on disk is a
+ * worker's own verdict must use this, or a report readWorkerReport accepts
+ * could be treated as missing and overwritten.
+ */
+export function workerReportStatusOf(value: unknown): WorkerReport["status"] | null {
   const text = typeof value === "string" ? value.trim().toLowerCase() : "";
   if ((WORKER_REPORT_STATUSES as readonly string[]).includes(text)) return text as WorkerReport["status"];
-  const alias = WORKER_REPORT_STATUS_ALIASES[text];
-  if (alias) return alias;
+  return Object.hasOwn(WORKER_REPORT_STATUS_ALIASES, text) ? WORKER_REPORT_STATUS_ALIASES[text] : null;
+}
+
+function normalizeReportStatus(value: unknown): WorkerReport["status"] {
+  const status = workerReportStatusOf(value);
+  if (status) return status;
   throw new Error(
     `status ${JSON.stringify(value ?? null)} is not one of ${WORKER_REPORT_STATUSES.map((item) => `"${item}"`).join(", ")}`,
   );

@@ -261,6 +261,16 @@ async function main() {
     resInterrupted.preservedExisting === true && readReport(pInterrupted).status === "complete",
   );
 
+  // readWorkerReport reads "done" as complete, so a late error must keep such a
+  // report exactly as it keeps a literal "complete" one.
+  const pAlias = reportFile("alias.json", { ...completeReport("Done in other words."), status: "done" });
+  const resAlias = await workerLaunch.writeAutoFailureReport({ finalReportJson: pAlias }, wtask, "late boom");
+  check(
+    "a report whose status is an accepted synonym of complete is preserved",
+    resAlias.preservedExisting === true && readReport(pAlias).summary === "Done in other words.",
+    JSON.stringify(readReport(pAlias)),
+  );
+
   const pMissing = reportFile("missing.json");
   const resMissing = await workerLaunch.writeAutoFailureReport({ finalReportJson: pMissing }, wtask, "no TUI banner observed");
   const afterMissing = readReport(pMissing);
@@ -296,7 +306,7 @@ async function main() {
   const LAUNCH_FAILURE_RISK = /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i;
   const pInvalid = reportFile(
     path.join("invalid-shape", "final-report.json"),
-    { status: "success", summary: "Added the parser and its tests." },
+    { status: "in_progress", summary: "Added the parser and its tests." },
   );
   await workerLaunch.writeAutoFailureReport(
     { finalReportJson: pInvalid },

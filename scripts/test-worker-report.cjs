@@ -59,7 +59,7 @@ async function main() {
   });
 
   await test("anything that could mean unfinished work stays invalid", async () => {
-    for (const status of ["ok", "in_progress", "error", "", 1, null]) {
+    for (const status of ["ok", "in_progress", "error", "", 1, null, "constructor", "toString"]) {
       const report = await R.readWorkerReport(file(`bad-${String(status)}.json`, { status }));
       assert.equal(report, null, String(status));
     }
