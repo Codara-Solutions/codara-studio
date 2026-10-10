@@ -18,6 +18,8 @@ export class PiWorkerCompaction {
     private readonly options: {
       interrupted: () => boolean;
       taskContract?: () => string;
+      /** The worker's persisted scratchpad note, read at resume time. */
+      scratchpad?: () => Promise<string>;
       onError: (error: Error) => void;
       onProgress?: (phase: "compacting" | "resuming") => void;
     },
@@ -61,8 +63,15 @@ export class PiWorkerCompaction {
     // can settle before the prompt acknowledgement reaches the host.
     this.inFlight = false;
     const contract = this.options.taskContract?.().trim();
-    await this.client.prompt(contract
-      ? `${CONTINUE}\n\nOriginal task contract and subsequent steering (later steering supersedes earlier instructions; completed work stays completed):\n${contract}`
-      : CONTINUE);
+    // The scratchpad is the worker's own continuity note, written precisely
+    // so it survives compaction; a read failure only loses the hint.
+    const notes = (await this.options.scratchpad?.().catch(() => "") ?? "").trim();
+    await this.client.prompt([
+      CONTINUE,
+      ...(contract
+        ? [`Original task contract and subsequent steering (later steering supersedes earlier instructions; completed work stays completed):\n${contract}`]
+        : []),
+      ...(notes ? [`Your scratchpad note from before compaction:\n${notes}`] : []),
+    ].join("\n\n"));
   }
 }

@@ -317,6 +317,7 @@ import {
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { workerContractSections, workerReportSection } from "./worker-contract-sections";
 import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
@@ -18924,6 +18925,7 @@ async function waitForPiWorkerTurn(
   interrupted: () => boolean = () => false,
   onCompaction?: (phase: "compacting" | "resuming") => void,
   taskContract?: () => string,
+  scratchpad?: () => Promise<string>,
 ): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
@@ -18931,7 +18933,13 @@ async function waitForPiWorkerTurn(
   let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
-      compaction = new PiWorkerCompaction(client, { interrupted, taskContract, onError: reject, onProgress: onCompaction });
+      compaction = new PiWorkerCompaction(client, {
+        interrupted,
+        taskContract,
+        scratchpad,
+        onError: reject,
+        onProgress: onCompaction,
+      });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
@@ -19087,12 +19095,23 @@ async function runPiWorkerSession({
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
   const taskSteering: string[] = [];
+  // The acceptance, verification and final-report sections live only in
+  // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
+  // them would otherwise leave the worker unable to write a valid report.
+  const contractSections = workerContractSections(promptText);
   const taskContract = () => [
     task.description.trim(),
     ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
     ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+    ...(contractSections ? [contractSections] : []),
     ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
   ].join("\n\n");
+  // Outside the workspace, beside the report. Imported pull-request workers
+  // have no scratchpad tool.
+  const scratchpadPath =
+    runProjectPolicyMode(run) === "untrusted-pull-request" ? "" : join(paths.attemptDir, "scratchpad.md");
+  const readScratchpad = async () =>
+    scratchpadPath ? (await fs.readFile(scratchpadPath, "utf8").catch(() => "")).slice(0, 4_000) : "";
   // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
@@ -19290,6 +19309,7 @@ async function runPiWorkerSession({
           }
         : undefined,
     });
+    if (scratchpadPath) plan.env.CODARA_PI_SCRATCHPAD_PATH = scratchpadPath;
     // The plan creator may write a per-session MCP bridge file. Capture it
     // before the durable profile stamp so any stamp failure still reaches the
     // finally cleanup path.
@@ -19484,7 +19504,15 @@ async function runPiWorkerSession({
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
     };
-    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
+    await waitForPiWorkerTurn(
+      client,
+      promptText,
+      reportStall,
+      () => interrupted,
+      compactionProgress,
+      taskContract,
+      readScratchpad,
+    );
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
@@ -19493,11 +19521,15 @@ async function runPiWorkerSession({
       await waitForPiWorkerTurn(
         client,
         `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
-          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON." +
+          (workerReportSection(promptText)
+            ? `\n\nThe report contract from the original task prompt, verbatim:\n${workerReportSection(promptText)}`
+            : ""),
         reportStall,
         () => interrupted,
         compactionProgress,
         taskContract,
+        readScratchpad,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }
