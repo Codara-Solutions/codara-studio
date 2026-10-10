@@ -3,7 +3,24 @@ import type { ChatMode, CoraExecutionStrategy } from "@shared/types";
 const MANAGED_REQUEST =
   /\b(?:all (?:failures|lint errors|tests|type errors|typecheck errors)|architecture|architectural|audit (?:the )?(?:entire|whole)|background task|deep research|everything|investigate (?:the )?(?:entire|whole)|long[- ]running|migration|multi[- ]agent|parallel(?:ize|ise| work| agents?)|plan mode|refactor (?:the )?(?:app|application|codebase|project|repository)|repository[- ]wide|research the web|search the web|whole (?:app|application|codebase|project|repository)|work across (?:the )?(?:app|codebase|project|repository))\b/i;
 
+// The direct lane's worker cannot write the whiteboard or board, author
+// automations, or ask a blocking question (worker-policy.ts keeps those
+// surfaces read-only for every worker), so requests for them go to the
+// manager, which has those tools.
+const STUDIO_SURFACE_REQUEST =
+  /\b(?:whiteboard|kanban|board|automations?|loom|schedul(?:e|ed|ing)|cron(?:tab|job)?|recurring|nightly|hourly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i;
+
 const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:morning|afternoon|evening)|how are you)(?:\s+(?:cora|there))?[!?.\s]*|(?:thanks|thank you|sounds good|okay|ok|cool|nice|great)[!?.\s]*|what(?:'s| is) your (?:favorite|favourite)\b[^\n]{0,120}|who are you[!?.\s]*|tell me (?:a|another) joke[!?.\s]*)$/i;
+
+/**
+ * A follow-up in a finished direct chat that the direct worker cannot serve:
+ * broad or parallel work, or a Studio surface it has no write tools for. The
+ * chat then continues with the manager instead of another direct pass.
+ */
+export function followUpNeedsManager(prompt: string): boolean {
+  const text = prompt.trim();
+  return text.length > 4_000 || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
+}
 
 export function isConversationalRequest(prompt: string): boolean {
   return SOCIAL_REQUEST.test(prompt.trim());
@@ -36,6 +53,8 @@ export async function shouldUseDirectExecution(
   if (
     !input.prompt?.trim() ||
     input.chatMode === "talk" ||
+    input.chatMode === "plan" ||
+    input.chatMode === "automation" ||
     input.hasPlan ||
     input.hasAttachments ||
     input.hasFanOut ||
@@ -48,5 +67,6 @@ export async function shouldUseDirectExecution(
   const prompt = input.prompt.trim();
   if (isConversationalRequest(prompt)) return false;
   if (prompt.length > 4_000 || MANAGED_REQUEST.test(prompt)) return false;
+  if (STUDIO_SURFACE_REQUEST.test(prompt)) return false;
   return true;
 }

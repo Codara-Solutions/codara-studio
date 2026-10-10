@@ -71,6 +71,19 @@ assert.match(auto, /Do not spawn a\s+worker and do not call codara_complete/);
 assert.match(auto, /explicitly says not to use agents or workers, honor that request/);
 assert.match(auto, /Do not\s+call codara_spawn_workers or codara_complete on this direct path/);
 assert.match(auto, /If no worker models are enabled, use the same direct path/);
+// Small edits: Auto mode makes them herself unless the user asked for every
+// edit to go through a worker; Execute mode always delegates, so its effort
+// calibration must never tell it to edit directly.
+assert.match(auto, /Small, low-risk changes are yours to make/);
+assert.match(auto, /Trivial work is one move: make the small change yourself/);
+const autoAlwaysVerify = extension.buildCoraPiSystemPrompt("auto", "fast", { alwaysVerifyEdits: true });
+assert.match(autoAlwaysVerify, /"Always verify edits with a worker"/);
+assert.doesNotMatch(autoAlwaysVerify, /Small, low-risk changes are yours to make/);
+assert.match(autoAlwaysVerify, /Trivial work is two moves/);
+assert.match(execute, /Trivial work is two moves/);
+assert.doesNotMatch(execute, /make the small change yourself/);
+assert.doesNotMatch(automation, /you have codara_remember/, "the automation roster has no codara_remember");
+assert.match(auto, /you have codara_remember/);
 assert.match(auto, /direct-work exception remains binding here/);
 assert.match(auto, /do not spawn a plan verifier/);
 assert.match(auto, /at least one\s+bounded worker/);
@@ -175,6 +188,15 @@ for (const command of [
   "python3 -m webbrowser https://example.com",
   "python3 -c 'import webbrowser; webbrowser.open(\"https://example.com\")'",
   "npx playwright open https://example.com",
+  "npx playwright codegen https://example.com",
+  "npx playwright test --headed",
+  "echo ready; open https://example.com",
+  // A shell's -c script and an eval string are command lines of their own;
+  // quote-aware splitting must not hide a launch inside them.
+  'bash -c "cd app && open http://localhost:3000"',
+  "sh -lc 'npm run build; xdg-open http://localhost:3000'",
+  "eval 'open https://example.com'",
+  "BROWSER=1 open https://example.com",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
   assert.equal(
@@ -188,6 +210,13 @@ for (const command of [
   "git grep 'open https'",
   "printf 'open https://example.com'",
   "npm run build",
+  "npx playwright test tests/e2e/chat.spec.ts",
+  "npx playwright install chromium",
+  "pnpm exec playwright test",
+  "git commit -m 'docs: explain; open the panel first'",
+  'echo "step one; open the settings"',
+  'bash -c "npx playwright test && echo done"',
+  "CI=1 npx playwright test",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
 }
@@ -209,10 +238,16 @@ const workerExtensionSource = fs.readFileSync(
 assert.match(workerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 assert.match(workerExtensionSource, /const SCRATCHPAD_MAX_CHARS = 4_000/);
 assert.match(workerExtensionSource, /name: "scratchpad"/);
-assert.match(workerExtensionSource, /if \(!untrustedPullRequest\) registerScratchpadTool\(pi\)/);
+assert.match(
+  workerExtensionSource,
+  /if \(!untrustedPullRequest\) \{\s*registerScratchpadTool\(pi, process\.env\.CODARA_PI_SCRATCHPAD_PATH/,
+);
 assert.match(workerExtensionSource, /never hidden reasoning/);
 assert.match(workerExtensionSource, /For greetings, opinions, and questions/);
 assert.match(workerExtensionSource, /The result summary\s+is shown to the user verbatim/);
+assert.doesNotMatch(workerExtensionSource, /One concise outcome sentence/);
+assert.doesNotMatch(workerExtensionSource, /promptSnippet: tool\.description/);
+assert.doesNotMatch(managerExtensionSource, /promptSnippet: tool\.description/);
 assert.match(workerExtensionSource, /Do not inspect the repository or say "acknowledged"/);
 
 // Automation detection is the SPARK_AUTOMATION_ID stamp.
@@ -322,6 +357,7 @@ const noInput = {};
   assert.equal(blocked("web_search")?.block, true, "readonly blocks web_search");
   assert.equal(blocked("deep_search")?.block, true, "readonly blocks deep_search");
   assert.equal(blocked("url_context")?.block, true, "readonly blocks url_context");
+  assert.equal(blocked("fetch_url")?.block, true, "readonly blocks fetch_url");
   assert.equal(blocked("grep")?.block, true, "blockedTools Grep maps to grep");
   assert.equal(blocked("read"), undefined, "read stays available");
   assert.equal(blocked("write"), undefined, "write (no path arg) stays available for the final report");
@@ -351,6 +387,12 @@ const noInput = {};
   assert.equal(blocked("edit", { path: process.cwd() + "/x.txt" }), undefined, "edits keeps the edit tool inside the workspace");
   assert.equal(blocked("bash")?.block, true, "edits blocks bash");
   assert.equal(blocked("url_context")?.block, true, "WebFetch maps to url_context");
+  assert.equal(blocked("fetch_url")?.block, true, "edits blocks fetch_url (no network)");
+  assert.equal(
+    policy.fenceDecision("fetch_url", noInput, policy.fencedToolNames({ CODARA_PI_WORKER_BLOCKED_TOOLS: "WebFetch" }), {})?.block,
+    true,
+    "a bare WebFetch block also covers fetch_url",
+  );
   assert.equal(blocked("codara_terminal_create")?.block, true, "edits blocks terminal create");
   assert.equal(blocked("codara_terminal_close")?.block, true, "edits blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "edits blocks preview evaluate");
@@ -899,6 +941,68 @@ const noInput = {};
     assert.match(source, /registerCodaraAnthropicRenewal\(pi,/, `${file} must route the Claude refresh to Studio`);
   }
   assert.equal(typeof studioBridge.requestCodara, "function", "the bridge exposes the socket call");
+}
+
+{
+  const families = loadTypeScriptModule(
+    path.join(__dirname, "..", "resources", "pi-cora", "tool-families.ts"),
+  );
+  process.env.SPARK_MCP_MODE = "execute";
+  delete require.cache[require.resolve(studioBridgePath)];
+  const managerTools = require(studioBridgePath).listTools();
+  const byFamily = {};
+  for (const tool of managerTools) {
+    const family = families.studioToolFamily(tool.name);
+    if (family) byFamily[family] = (byFamily[family] ?? 0) + 1;
+    const snippet = families.toolPromptSnippet(tool.description);
+    assert.ok(snippet.length > 0 && snippet.length <= 100, `${tool.name} snippet stays one short line`);
+    assert.doesNotMatch(snippet, /\n/, `${tool.name} snippet is a single line`);
+  }
+  for (const family of families.STUDIO_TOOL_FAMILIES) {
+    assert.ok(byFamily[family] > 0, `the manager roster has ${family} tools`);
+    assert.ok(families.STUDIO_FAMILY_GUIDANCE[family].length > 0);
+  }
+  for (const core of ["codara_spawn_workers", "codara_complete", "codara_ask_user", "codara_remember", "codara_wait_for_workers"]) {
+    assert.equal(families.studioToolFamily(core), null, `${core} is never deferred`);
+  }
+  assert.equal(families.studioToolFamily("codara_list_automations"), "automations");
+  assert.equal(families.studioToolFamily("codara_set_automation_enabled"), "automations");
+  assert.equal(
+    families.toolPromptSnippet("Spawn workers now. They run in parallel and report back."),
+    "Spawn workers now.",
+  );
+  assert.match(families.toolPromptSnippet("x ".repeat(200)), /\.\.\.$/);
+
+  assert.deepEqual(families.familiesForRequest("hi, what does run-store.ts do?"), []);
+  assert.deepEqual(families.familiesForRequest("draw me a diagram of the auth flow"), ["whiteboard"]);
+  assert.deepEqual(families.familiesForRequest("start the dev server and check localhost:5173"), ["browser", "terminal"]);
+  assert.deepEqual(families.familiesForRequest("every monday summarize open PRs"), ["automations"]);
+  assert.deepEqual(families.familiesForRequest("move the card to done on the board"), ["board"]);
+
+  const branch = [
+    { type: "message", message: { role: "user", content: "hello" } },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "toolCall", name: "codara_tools", arguments: {} }] },
+    },
+    {
+      type: "message",
+      message: { role: "toolResult", toolName: "codara_tools", addedToolNames: ["codara_whiteboard_get"] },
+    },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "toolCall", name: "codara_preview_navigate" }] },
+    },
+    { type: "custom", message: { role: "assistant", content: [{ type: "toolCall", name: "codara_board_get" }] } },
+  ];
+  assert.deepEqual([...families.familiesUsedInBranch(branch)].sort(), ["browser", "whiteboard"]);
+  assert.equal(families.branchHasAssistantTurn(branch), true);
+  assert.equal(families.branchHasAssistantTurn(branch.slice(0, 1)), false);
+
+  assert.match(managerExtensionSource, /name: STUDIO_TOOL_LOADER_NAME/);
+  assert.match(managerExtensionSource, /familiesUsedInBranch\(ctx\.sessionManager\.getBranch\(\)\)/);
+  assert.match(managerExtensionSource, /CODARA_PI_ALWAYS_VERIFY_EDITS/);
+  console.log("pi manager Studio tool families (lazy loading): ok");
 }
 
 console.log("pi Cora mode + execution-policy prompts: ok");

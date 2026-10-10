@@ -21,6 +21,7 @@ export interface PiMcpBridgeConfig {
   version: 1;
   audience: PiMcpAudience;
   connectTimeoutMs: number;
+  stdioConnectTimeoutMs: number;
   callTimeoutMs: number;
   maxTotalCallMs: number;
   maxToolsPerServer: number;
@@ -56,10 +57,14 @@ export const RESERVED_MCP_SERVER_NAMES = [
 
 export const PI_MCP_DEFAULTS = {
   connectTimeoutMs: 10_000,
+  // A first `npx -y` run installs the package before the handshake.
+  stdioConnectTimeoutMs: 30_000,
   callTimeoutMs: 60_000,
   maxTotalCallMs: 600_000,
   maxServers: 8,
-  maxToolsPerServer: 64,
+  // Remote tools stay inactive until codara_external_tools loads them, so the
+  // cap only bounds a runaway server, not the prompt.
+  maxToolsPerServer: 256,
 } as const;
 
 const RESERVED = new Set<string>(RESERVED_MCP_SERVER_NAMES.map((name) => name.toLowerCase()));
@@ -173,6 +178,7 @@ export function buildPiMcpBridgeConfig(
     version: 1,
     audience: options.audience,
     connectTimeoutMs: options.connectTimeoutMs ?? PI_MCP_DEFAULTS.connectTimeoutMs,
+    stdioConnectTimeoutMs: options.stdioConnectTimeoutMs ?? PI_MCP_DEFAULTS.stdioConnectTimeoutMs,
     callTimeoutMs: options.callTimeoutMs ?? PI_MCP_DEFAULTS.callTimeoutMs,
     maxTotalCallMs: options.maxTotalCallMs ?? PI_MCP_DEFAULTS.maxTotalCallMs,
     maxToolsPerServer: options.maxToolsPerServer ?? PI_MCP_DEFAULTS.maxToolsPerServer,

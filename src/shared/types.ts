@@ -629,6 +629,11 @@ export interface AppSettings {
   // hands it to the live turn (Pi steer), so she reads it at her next step;
   // "queue" holds it until the turn ends and then starts a fresh turn.
   coraMidTurnDelivery: CoraMidTurnDelivery;
+  // "Always verify edits with a worker". Off by default: Cora makes small,
+  // low-risk edits herself. On restores the old rule that every project
+  // change goes through a worker and its cross-provider verifier. Optional
+  // only so renderer fallbacks need not list it; storage always normalizes it.
+  coraAlwaysVerifyEdits?: boolean;
 }
 
 export type CoraMidTurnDelivery = "steer" | "queue";
@@ -2469,6 +2474,26 @@ export interface ManagerTurnRecovery {
   forceCanonicalReplay?: boolean;
 }
 
+export type RunManagerPlanMilestoneStatus = "pending" | "in_progress" | "done" | "deferred";
+
+export interface RunManagerPlanMilestone {
+  id: string;
+  title: string;
+  status: RunManagerPlanMilestoneStatus;
+  /** Evidence for done, the reason for deferred, or what is in the way. */
+  note?: string;
+  workerTaskIds?: string[];
+}
+
+export interface RunManagerPlan {
+  /** The user's request in their own words. */
+  goal: string;
+  milestones: RunManagerPlanMilestone[];
+  decisions?: string[];
+  nextActions?: string[];
+  updatedAt: string;
+}
+
 export interface RunState {
   id: string;
   workspaceId: string;
@@ -2625,6 +2650,21 @@ export interface RunState {
    * as 0.
    */
   verificationRounds?: number;
+  /**
+   * The same corrective rounds keyed by implementation lineage (the first task
+   * of a retry / follow-up chain). A multi-area run legitimately draws one
+   * corrective verdict per area, so the run-level ceiling scales with the
+   * number of lineages and a single lineage is judged on its own count.
+   * Reset together with verificationRounds.
+   */
+  verificationRoundsByLineage?: Record<string, number>;
+  /**
+   * Cora's own working plan for multi-phase work, written only through
+   * codara_plan_update. Unlike the conversation it survives compaction and
+   * restarts, so it is shown back to the manager as part of each turn's run
+   * state, and codara_complete refuses while a milestone is still open.
+   */
+  managerPlan?: RunManagerPlan;
   /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
    * treated as "pi" by the dispatch layer. A run persisted with a retired

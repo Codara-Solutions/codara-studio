@@ -57,5 +57,68 @@ function harness() {
   }
   const h2 = harness(); h2.interrupt(); h2.coordinator.consume(pause); h2.coordinator.consume(settled); await tick();
   assert.deepEqual(h2.calls, [], "a cancelled task cannot start compaction");
+
+  // The worker's persisted scratchpad rides the continuation prompt.
+  {
+    const prompts = [];
+    let finish;
+    const withNotes = new PiWorkerCompaction({
+      request() { return new Promise((resolve) => { finish = resolve; }); },
+      async prompt(message) { prompts.push(message); },
+    }, {
+      taskContract: () => "contract",
+      scratchpad: async () => "objective: ship\nnext: run npm test",
+      interrupted: () => false,
+      onError: () => {},
+    });
+    withNotes.consume(pause); withNotes.consume(settled); finish({}); await tick(); await tick();
+    assert.match(prompts[0], /Your scratchpad note from before compaction:\nobjective: ship\nnext: run npm test/);
+    const failing = new PiWorkerCompaction({
+      request() { return new Promise((resolve) => { finish = resolve; }); },
+      async prompt(message) { prompts.push(message); },
+    }, {
+      scratchpad: async () => { throw new Error("gone"); },
+      interrupted: () => false,
+      onError: (error) => { throw error; },
+    });
+    failing.consume(pause); failing.consume(settled); finish({}); await tick(); await tick();
+    assert.doesNotMatch(prompts[1], /scratchpad/, "an unreadable scratchpad only drops the hint");
+  }
+
+  // The contract sections the continuation re-sends come verbatim from the
+  // original prompt, report first.
+  {
+    const sectionsExports = {};
+    vm.runInNewContext(
+      ts.transpileModule(
+        fs.readFileSync(require.resolve("../src/main/orchestration/worker-contract-sections.ts"), "utf8"),
+        { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+      ).outputText,
+      { exports: sectionsExports },
+    );
+    const prompt = [
+      "# Worker task",
+      "## TASK",
+      "Fix the parser.",
+      "## ACCEPTANCE",
+      "- parse(\"1+2\") returns 3",
+      "## WEB RESEARCH",
+      "Use web_search.",
+      "## VERIFICATION COMMANDS",
+      "- npm test",
+      "## FINAL REPORT (mandatory)",
+      "Write /runs/a/final-report.json with keys status, summary, filesChanged, proof.",
+    ].join("\n");
+    const contract = sectionsExports.workerContractSections(prompt);
+    assert.ok(contract.startsWith("## FINAL REPORT (mandatory)\nWrite /runs/a/final-report.json"), contract);
+    assert.match(contract, /## ACCEPTANCE\n- parse\("1\+2"\) returns 3/);
+    assert.match(contract, /## VERIFICATION COMMANDS\n- npm test/);
+    assert.doesNotMatch(contract, /WEB RESEARCH|## TASK/);
+    assert.match(sectionsExports.workerReportSection(prompt), /^## FINAL REPORT \(mandatory\)\nWrite \/runs\/a\/final-report\.json/);
+    const capped = sectionsExports.workerContractSections(prompt, 120);
+    assert.ok(capped.length <= 120 && capped.includes("FINAL REPORT"), "the cap keeps the report section first");
+    assert.match(runStore, /workerContractSections\(promptText\)/);
+    assert.match(runStore, /plan\.env\.CODARA_PI_SCRATCHPAD_PATH = scratchpadPath/);
+  }
   console.log("Pi worker pause/compact/resume lifecycle passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

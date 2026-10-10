@@ -59,6 +59,7 @@ const EMPTY_SETTINGS: AppSettings = {
   autopilotSandbox: false,
   openAiFastMode: false,
   coraMidTurnDelivery: "steer",
+  coraAlwaysVerifyEdits: false,
 };
 
 // The OpenRouter key is stored encrypted by the operating system (Electron
@@ -380,6 +381,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     autopilotSandbox: settings.autopilotSandbox === true,
     openAiFastMode: settings.openAiFastMode === true,
     coraMidTurnDelivery: settings.coraMidTurnDelivery === "queue" ? "queue" : "steer",
+    coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
   };
 }
 

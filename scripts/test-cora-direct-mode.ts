@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  followUpNeedsManager,
   isConversationalRequest,
   shouldUseDirectExecution,
 } from "../src/main/orchestration/direct-execution.ts";
@@ -80,6 +81,43 @@ try {
     false,
     "repository-wide work stays managed regardless of workspace size",
   );
+  for (const prompt of [
+    "Draw the auth flow on the whiteboard.",
+    "Move the login card to done on the board.",
+    "Run my tests every night at 2am.",
+    "Schedule a weekly dependency check.",
+    "Create an automation that posts the build status.",
+    "Add a cron job for the backup script.",
+  ]) {
+    assert.equal(
+      await shouldUseDirectExecution({ cwd: root, prompt }),
+      false,
+      `a request for a surface the direct worker cannot write stays managed: ${prompt}`,
+    );
+  }
+  assert.equal(
+    await shouldUseDirectExecution({ cwd: root, prompt: "Fix the dashboard keyboard shortcut." }),
+    true,
+    "board inside another word is not a board request",
+  );
+  for (const chatMode of ["plan", "automation", "talk"] as const) {
+    assert.equal(
+      await shouldUseDirectExecution({ strategy: "direct", cwd: root, prompt: "Fix one bug.", chatMode }),
+      false,
+      `${chatMode} mode never takes the direct lane`,
+    );
+  }
+  assert.equal(
+    await shouldUseDirectExecution({ cwd: root, prompt: "Fix one bug.", chatMode: "auto" }),
+    true,
+  );
+  // A finished direct chat hands a follow-up to the manager only when the
+  // direct worker cannot serve it; greetings and bounded fixes stay direct.
+  assert.equal(followUpNeedsManager("now draw this on the whiteboard"), true);
+  assert.equal(followUpNeedsManager("refactor the whole codebase in parallel"), true);
+  assert.equal(followUpNeedsManager("run this every night"), true);
+  assert.equal(followUpNeedsManager("thanks!"), false);
+  assert.equal(followUpNeedsManager("also fix the typo in utils.ts"), false);
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

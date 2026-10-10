@@ -57,6 +57,7 @@ import {
   setDefaultCoraProfile,
 } from "./orchestration/cora-profiles";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { openPlanMilestones } from "./orchestration/manager-plan";
 import {
   blindApprovalAskProblem,
   parsePlanValidation,
@@ -467,6 +468,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "orchestrator.request_next_iteration",
   "orchestrator.message_workers",
   "orchestrator.name_chat",
+  "orchestrator.plan_update",
   "orchestrator.whiteboard_update",
   "orchestrator.whiteboard_arrange",
   "orchestrator.whiteboard_review",
@@ -684,6 +686,8 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.plan_update":
+        return await handleOrchestratorPlanUpdate(params, id);
       case "orchestrator.whiteboard_inspect":
       case "orchestrator.whiteboard_arrange":
       case "orchestrator.whiteboard_review":
@@ -2601,10 +2605,12 @@ function verifierRoundCapForRun(run: RunState): number {
 // worker_batch step, and a runaway manager can chain them without limit -
 // chat autopilot has no automation-loop hardCap. Generous on purpose: it
 // bounds pathological loops, not normal runs. Scoped to the current user
-// turn (batches minted since the latest user-authored message) because chat
-// runs are long-lived - legitimate batches spread across many turns must
-// never accumulate into a force-land.
-const SYNTHETIC_STEP_CEILING = 20;
+// turn (batches minted since the latest user-authored message or Resume)
+// because chat runs are long-lived - legitimate batches spread across many
+// turns must never accumulate into a stop. Tripping it asks the user instead
+// of landing the run.
+const SYNTHETIC_STEP_CEILING = 60;
+const NO_PROGRESS_BATCH_LIMIT = 8;
 const UNTRUSTED_PR_MAX_WORKERS_PER_BATCH = 4;
 
 function untrustedPullRequestWorkerPathError(
@@ -2843,7 +2849,8 @@ async function handleOrchestratorSpawnWorkers(
       const capNote =
         `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
         `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
-        "the implementation now (it lands as completed_unverified carrying the existing verifier caveats) " +
+        "the implementation now with codara_complete accept_unverified (a reason plus the task ids of the " +
+        "verifiers you overrule; it lands as completed_unverified with the reason in the summary) " +
         "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
         "treat that as an environmental caveat, not a code failure.";
       if (requestedVerifiers.length === workerEntries.length) {
@@ -3027,32 +3034,49 @@ async function handleOrchestratorSpawnWorkers(
   // ceiling: a fresh user message resets the budget, so the brake catches a
   // runaway single-turn spawn loop without ever tripping on a multi-turn
   // chat run's accumulated history.
-  const latestUserTurnAt = run.humanMessages.reduce((max, message) => {
-    if (message.author !== "user") return max;
-    const at = Date.parse(message.createdAt);
-    return Number.isFinite(at) && at > max ? at : max;
-  }, Number.NEGATIVE_INFINITY);
-  const syntheticStepCount = run.steps.filter(
-    (step) =>
-      (step.kind ?? "worker_batch") === "worker_batch" &&
-      Date.parse(step.createdAt) >= latestUserTurnAt,
-  ).length;
-  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING) {
-    await runStore
-      .forceLandRunUnverified(runId, {
-        trigger: "synthetic_step_ceiling",
-        note:
-          `This run reached the ceiling of ${SYNTHETIC_STEP_CEILING} manager-spawned worker batches in one turn. ` +
-          "Codara accepted the remaining reviewed work and landed the run as unverified rather than keep spawning.",
-      })
-      .catch(() => undefined);
+  // An explicit Resume grants a fresh budget too.
+  const latestUserTurnAt = Math.max(
+    run.humanMessages.reduce((max, message) => {
+      if (message.author !== "user") return max;
+      const at = Date.parse(message.createdAt);
+      return Number.isFinite(at) && at > max ? at : max;
+    }, Number.NEGATIVE_INFINITY),
+    Date.parse(run.autopilot?.resumedAt ?? "") || Number.NEGATIVE_INFINITY,
+  );
+  const turnBatches = run.steps
+    .filter(
+      (step) =>
+        (step.kind ?? "worker_batch") === "worker_batch" &&
+        Date.parse(step.createdAt) >= latestUserTurnAt,
+    )
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const syntheticStepCount = turnBatches.length;
+  // A long single request legitimately spawns dozens of batches, so the brake
+  // is lack of progress: the newest batches all ended with every task failed
+  // or cancelled. The raw count stays as a runaway backstop only.
+  let failedBatchStreak = 0;
+  for (let index = turnBatches.length - 1; index >= 0; index -= 1) {
+    const batchTasks = run.workerTasks.filter((task) => task.stepId === turnBatches[index].id);
+    const noProgress =
+      batchTasks.length > 0 &&
+      batchTasks.every((task) => task.status === "failed" || task.status === "cancelled");
+    if (!noProgress) break;
+    failedBatchStreak += 1;
+  }
+  const noProgressBrake = failedBatchStreak >= NO_PROGRESS_BATCH_LIMIT;
+  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING || noProgressBrake) {
+    // Never force-land here: the work may be half done and only the user can
+    // say whether more batches are worth it. Their reply opens a fresh budget.
     return successResponse(id, {
       worker_task_ids: [],
       step_ceiling_reached: true,
-      note:
-        `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
-        `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
-        "Summarize the outcome for the user and end the turn. Do not spawn more workers.",
+      note: noProgressBrake
+        ? `Step brake: the last ${failedBatchStreak} worker batches all failed or were cancelled. ` +
+          "Do not spawn more workers on the same approach. Tell the user what keeps failing and ask with " +
+          "codara_ask_user whether to continue (and with what change) or stop here."
+        : `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
+          `(cap ${SYNTHETIC_STEP_CEILING}). Do not spawn more workers now. Summarize progress (update ` +
+          "codara_plan_update if you keep a plan) and ask with codara_ask_user whether to continue for more batches.",
     });
   }
   const workerTitles = workersToCreate
@@ -3506,6 +3530,24 @@ function summaryDisclosesPath(summary: string, path: string): boolean {
   return base.length > 2 && haystack.includes(base);
 }
 
+/** Parsed accept_unverified, null when absent, or an error message. */
+function parseAcceptUnverified(
+  value: unknown,
+): { reason: string; overruledVerifierTaskIds: string[] } | null | string {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return "accept_unverified must be an object with reason and overruled_verifier_task_ids.";
+  }
+  const raw = value as Record<string, unknown>;
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const ids = Array.isArray(raw.overruled_verifier_task_ids)
+    ? raw.overruled_verifier_task_ids.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (!reason) return "accept_unverified.reason must say why the verifier verdicts are overruled.";
+  if (ids.length === 0) return "accept_unverified.overruled_verifier_task_ids must list the verifier task ids you overrule.";
+  return { reason: reason.slice(0, 2_000), overruledVerifierTaskIds: ids.map((item) => item.trim()) };
+}
+
 async function handleOrchestratorComplete(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -3587,12 +3629,54 @@ async function handleOrchestratorComplete(
           : ""),
     );
   }
+  // A recorded plan is the manager's own definition of done, so a run cannot
+  // be called complete after the first green slice of a multi-area request.
+  // Runs without a plan are unaffected, and deferring with a note always
+  // clears the gate.
+  const openMilestones = openPlanMilestones(run.managerPlan);
+  if (openMilestones.length > 0) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Cannot complete: ${openMilestones.length} plan milestone(s) are still open: ` +
+        openMilestones.map((milestone) => `${milestone.id} "${milestone.title}" (${milestone.status})`).join(", ") +
+        ". Finish them, or call codara_plan_update marking each done (with evidence) or deferred (with the reason), then call codara_complete.",
+    );
+  }
   // Verification freshness invariant: an earlier green verifier does not cover
   // a later corrective edit. One implementation (run-store), shared with the
   // orchestrator-side terminal hops that complete a run when this tool never
   // arrives, so a manager that skips codara_complete cannot skip the rule.
   const verification = await runStore.describeVerificationFreshness(run);
-  if (!verification.ok) {
+  const acceptUnverified = parseAcceptUnverified(params.accept_unverified);
+  if (typeof acceptUnverified === "string") {
+    return errorResponse(id, ERR_INVALID_PARAMS, acceptUnverified);
+  }
+  // The overrule exit exists so a verdict the manager adjudicated as out of
+  // contract cannot wedge the run. It must name every blocking verifier, so a
+  // second failing shard is never waved through by overruling the first.
+  if (!verification.ok && acceptUnverified) {
+    const listed = new Set(acceptUnverified.overruledVerifierTaskIds);
+    const missing = verification.blockingVerifiers.filter((verifier) => !listed.has(verifier.taskId));
+    if (verification.blockingVerifiers.length === 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: no verifier returned a non-passing verdict over the current workspace; " +
+          "the work simply has not been verified yet. Spawn a read-only verifier, or ask the user.",
+      );
+    }
+    if (missing.length > 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: overruled_verifier_task_ids must list every blocking verifier. Missing: " +
+          missing.map((verifier) => `"${verifier.title}" (${verifier.taskId}, ${verifier.confidence})`).join(", ") +
+          ".",
+      );
+    }
+  }
+  if (!verification.ok && !acceptUnverified) {
     // A failing verifier over the current tree is named explicitly, because
     // with a scope-split round the manager may be looking at one or more GREEN
     // sibling reports and reasonably believe the round passed.
@@ -3603,7 +3687,9 @@ async function handleOrchestratorComplete(
         ? `Cannot complete: "${verification.blockingVerifier.title}" returned ` +
             `${verification.blockingVerifier.confidence} over the current workspace. A passing verdict from ` +
             "another verifier in the same round does not cover its scope. Address its FEEDBACK/FAILED claims, " +
-            "then re-verify the corrected workspace before calling codara_complete."
+            "then re-verify the corrected workspace before calling codara_complete. If you adjudicated its claims as " +
+            "out of contract, call codara_complete with accept_unverified naming " +
+            `${verification.blockingVerifiers.map((verifier) => verifier.taskId).join(", ")}.`
         : "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
             `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
             "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
@@ -3636,6 +3722,7 @@ async function handleOrchestratorComplete(
     const applied = await runStore.applyCodaraCompleteFromManagerCall({
       runId,
       summary,
+      ...(!verification.ok && acceptUnverified ? { acceptUnverified } : {}),
     });
     return successResponse(id, applied.result);
   } catch (err) {
@@ -5400,6 +5487,34 @@ async function handleOrchestratorNameChat(
     // the chat history popover.
     const updated = await runStore.renameRun({ runId: run.id, title });
     return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorPlanUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "codara_plan_update");
+  if (blocked) return blocked;
+  try {
+    const updated = await runStore.updateManagerPlan(run.id, params);
+    const plan = updated.managerPlan;
+    const open = openPlanMilestones(plan);
+    return successResponse(id, {
+      ok: true,
+      milestones: plan?.milestones.length ?? 0,
+      open_milestones: open.map((milestone) => milestone.id),
+      note: open.length > 0
+        ? "Plan saved. codara_complete stays refused until every milestone is done or deferred with a note."
+        : "Plan saved. Every milestone is done or deferred.",
+    });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

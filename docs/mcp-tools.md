@@ -36,10 +36,20 @@ environment variable that Codara sets for the agent:
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember`. When Cora works on an imported pull request from an
+`codara_remember`, with the whiteboard and board read-only. Requests to draw
+on the whiteboard, change the board or schedule work therefore go to the
+orchestrating chat, and a direct chat hands over to it when a follow-up needs
+those tools. When Cora works on an imported pull request from an
 untrusted source, it only gets the orchestration tools that spawn, wait for,
 and message workers, ask you, name the chat and complete the run: no browser,
 terminal, memory or automation tools.
+
+Inside Cora's own runtime (Pi), the browser, terminal, whiteboard, board and
+automation tools start inactive in the orchestrating chat and are loaded on
+demand with `codara_tools`, which also returns how to use them. A request that
+plainly needs a family loads it on the first turn. This keeps every request
+smaller. Cora and her workers also have `fetch_url`, which reads one web page
+as text, next to `web_search` and the free `deep_search`.
 
 ## Browser
 
@@ -116,9 +126,10 @@ Only in `execute`, except where noted.
 | `codara_message_workers` | Sends a message to one worker or all of them. |
 | `codara_check_messages` | Reads messages workers sent to Cora. |
 | `codara_ask_user` | Asks you a question, with options, when Cora cannot decide safely. Also in `worker` and `automation`. |
-| `codara_complete` | Marks the run complete once workers finished and their work was verified. |
-| `codara_name_chat` | Gives the chat a short title. Also in `automation`. |
-| `codara_remember` | Saves a lasting fact to Cora's memory, for you or for this workspace. |
+| `codara_complete` | Marks the run complete once workers finished and their work was verified. With `accept_unverified` (a reason and the task ids of every blocking verifier), Cora can overrule a verdict she judged out of contract; the run lands as completed but unverified and the reason is added to the summary you see. |
+| `codara_plan_update` | Records Cora's plan for multi-phase work: your request, milestones with status, decisions and next steps. The plan survives compaction and restarts, and `codara_complete` is refused while a milestone is still open. |
+| `codara_name_chat` | Gives the chat a better title when the one derived from your first message is wrong or the topic shifts. Also in `automation`. |
+| `codara_remember` | Saves a lasting fact to Cora's memory, for you or for this workspace. Workers in chat runs get a read-only copy of the memory; automation workers do not. |
 | `codara_request_next_iteration` | In an automation loop, decides whether another pass runs. Also in `worker`. |
 
 ## Automations

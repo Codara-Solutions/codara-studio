@@ -115,7 +115,7 @@ import {
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { shouldUseDirectExecution } from "./direct-execution";
+import { followUpNeedsManager, shouldUseDirectExecution } from "./direct-execution";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -263,6 +263,7 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { normalizeManagerPlanInput, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
@@ -274,6 +275,7 @@ import {
   createCheckpoint,
   deleteRunCheckpoints,
   restoreCheckpointCode,
+  restoreCheckpointPaths,
   rewindShadowRef,
   runCheckpointStartPoint,
 } from "./checkpoints";
@@ -343,6 +345,7 @@ import {
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { workerContractSections, workerReportSection } from "./worker-contract-sections";
 import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
@@ -1406,13 +1409,19 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // entire worker roster, keep the request on the manager path: the manager's
   // injected contract tells it to answer directly or ask the user to enable a
   // worker, instead of creating a run that can never launch.
-  const canLaunchDirectWorker = directExecutionRequested
-    ? availableCoraWorkerModels(await loadSettings()).length > 0
-    : false;
+  const directWorkerModels = directExecutionRequested
+    ? availableCoraWorkerModels(await loadSettings())
+    : [];
   if (
     !input.runId &&
-    canLaunchDirectWorker
+    directWorkerModels.length > 0
   ) {
+    // The composer's chip names the manager model; the direct worker may only
+    // run a model the user left enabled in the worker roster.
+    const chipModel = input.chatModel?.trim();
+    const directModel = chipModel && directWorkerModels.includes(chipModel)
+      ? chipModel
+      : directWorkerModels[0];
     return startDirectWorkerRun({
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
@@ -1423,7 +1432,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       title: chatTitleFromInput(input),
       prompt: input.initialUserNote!.trim(),
       clientMessageId: input.initialUserNoteClientMessageId,
-      model: input.chatModel?.trim() || "gpt-5.6-sol",
+      model: directModel,
       effort: input.chatEffort ?? "medium",
       access: "full",
     });
@@ -4922,6 +4931,8 @@ export interface RunVerificationFreshness {
    * the verdict for the round.
    */
   blockingVerifier: { confidence: string; title: string } | null;
+  /** Every non-passing verifier over the current tree, for a manager overrule. */
+  blockingVerifiers: Array<{ taskId: string; confidence: string; title: string }>;
 }
 
 /**
@@ -4941,17 +4952,23 @@ export async function describeVerificationFreshness(
 ): Promise<RunVerificationFreshness> {
   let latestChangedImplementationAt = 0;
   let latestVerifierConfidence: string | null = null;
-  const verdicts: Array<{ at: number; confidence: string; title: string }> = [];
+  const verdicts: Array<{ at: number; confidence: string; title: string; taskId: string }> = [];
   for (const attempt of run.workerAttempts ?? []) {
     if (!attempt.finalReportPath) continue;
     const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
     if (!task) continue;
+    // A chat that escalated from the direct lane keeps the direct worker's
+    // passes (the only tasks a chat run stamps with a loom node). Those edits
+    // were answered as the direct lane's own reply, so they must not leave the
+    // manager's first codara_complete, or a settled turn, waiting on a
+    // verifier for work it never orchestrated.
+    if (task.loomNodeId && run.executionMode !== "direct" && !run.automationId) continue;
     const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
     if (!report) continue;
     const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
     if (task.taskClass === "verifier" && report.verifier) {
       latestVerifierConfidence = report.verifier.confidence;
-      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title });
+      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title, taskId: task.id });
     } else if (report.filesChanged.length > 0) {
       latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
     }
@@ -4971,7 +4988,8 @@ export async function describeVerificationFreshness(
   // That was mostly latent while every verifier covered the whole surface;
   // splitting a round into disjoint scopes makes "one shard fails" the
   // expected case, so the gate has to see the whole round, not its best member.
-  const blocking = current.find((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence)) ?? null;
+  const blockingVerdicts = current.filter((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence));
+  const blocking = blockingVerdicts[0] ?? null;
   return {
     ok:
       latestChangedImplementationAt === 0 ||
@@ -4980,6 +4998,11 @@ export async function describeVerificationFreshness(
     latestChangedImplementationAt,
     latestPassingVerifierAt,
     blockingVerifier: blocking ? { confidence: blocking.confidence, title: blocking.title } : null,
+    blockingVerifiers: [
+      ...new Map(
+        blockingVerdicts.map((v) => [v.taskId, { taskId: v.taskId, confidence: v.confidence, title: v.title }]),
+      ).values(),
+    ],
   };
 }
 
@@ -6254,8 +6277,16 @@ async function prepareManagerTurn(
         recovery?.state === "resuming" &&
         recovery.resumeClaimId === call.managerRecoveryClaimId &&
         recovery.conversationEpoch === epoch;
+      // A chat escalated from the direct lane has worker history and Cora
+      // replies but no manager session yet, so its first manager turn replays
+      // the dialogue the way a rebuilt session does. Its direct passes are the
+      // only chat tasks stamped with a loom node; a fan-out or council batch
+      // forced before the first turn has tasks too but no dialogue to replay.
+      const escalatedFromDirect =
+        draft.sparkCalls.length === 0 && draft.workerTasks.some((task) => Boolean(task.loomNodeId));
       includeCanonicalReplay =
         shouldIncludeCanonicalReplay(draft, epoch) ||
+        escalatedFromDirect ||
         (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
@@ -6331,6 +6362,13 @@ async function prepareManagerTurn(
       coraMemory,
       priorRuns,
       subscriptionHeadroom,
+      // A resume or replay starts from a session that may have lost the run's
+      // progress, and a run with a plan re-reads it every turn so compaction
+      // cannot paraphrase the goal or the open milestones away.
+      runState:
+        prepared.managerPlan || includeCanonicalReplay || inputMessages.length === 0
+          ? renderRunStateDigest(prepared)
+          : null,
     }),
     inputMessages,
     conversationEpoch: epoch,
@@ -11420,6 +11458,7 @@ export async function resumeManagerTurnRecovery(
       current.resumeRequestedAt = timestamp;
       draft.status = "running";
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -11728,6 +11767,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         }
         draft.status = "running";
         draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
           status: "running",
@@ -11868,6 +11908,7 @@ async function finishResumeAfterChatRoute(
       // budget so the run doesn't re-trip a saturated round ceiling on its
       // first corrective verdict (mirrors the user-turn reset in addRunMessage).
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -12097,7 +12138,30 @@ export async function addRunMessage(
   // Internal: set on the single retry after Stop moved the epoch mid-send.
   retriedAfterEpochMove = false,
 ): Promise<RunState> {
-  const run = await requireRun(input.runId);
+  let run = await requireRun(input.runId);
+  // A desktop chat may start on the direct lane; a follow-up that needs
+  // parallel workers or a Studio surface the direct worker cannot write
+  // continues with the manager in the same chat instead.
+  if (
+    !input.skipDirectDispatch &&
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    input.author === "user" &&
+    input.kind === "note" &&
+    isTerminalRunStatus(run.status) &&
+    followUpNeedsManager(input.message)
+  ) {
+    run = await commitRunChange(run, {
+      type: "run.escalated_to_manager",
+      message: "Cora's manager takes over this chat for a request the direct lane cannot serve",
+      payload: {},
+      mutate: (draft, timestamp) => {
+        if (draft.executionMode !== "direct") return false;
+        draft.executionMode = "managed";
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
   if (
     !input.skipDirectDispatch &&
     run.executionMode === "direct" &&
@@ -12299,7 +12363,13 @@ export async function addRunMessage(
       // guards a single runaway corrective loop, not the whole conversation —
       // without this reset a follow-up inherits a saturated counter and the
       // first corrective verdict of the new turn instantly force-lands the run.
-      if (input.author === "user") draft.verificationRounds = 0;
+      if (input.author === "user") {
+        draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
+        // A claim verified in an earlier turn says nothing about behavior the
+        // user has since asked to change.
+        delete draft.greenClaims;
+      }
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
@@ -13514,9 +13584,25 @@ export interface CodaraCompleteApplicationOutcome {
 export async function applyCodaraCompleteFromManagerCall(input: {
   runId: string;
   summary: string;
+  /** The manager overruled non-passing verifiers (validated by the caller). */
+  acceptUnverified?: { reason: string; overruledVerifierTaskIds: string[] };
 }): Promise<CodaraCompleteApplicationOutcome> {
   const run = await requireRun(input.runId);
-  const summary = canonicalCodaraCompleteSummary(input.summary);
+  const overruled = input.acceptUnverified
+    ? run.workerTasks.filter(
+        (task) =>
+          task.taskClass === "verifier" && input.acceptUnverified!.overruledVerifierTaskIds.includes(task.id),
+      )
+    : [];
+  // The overrule is disclosed in the user-visible summary, so a run that
+  // landed against a verifier never reads as a verified success.
+  const overruleNote = input.acceptUnverified
+    ? `Landed unverified: Cora overruled ${overruled.map((task) => `"${task.title}"`).join(", ")}. ` +
+      `Reason: ${input.acceptUnverified.reason.trim()}`
+    : "";
+  const summary = canonicalCodaraCompleteSummary(
+    overruleNote ? `${input.summary.trim()}\n\n${overruleNote}`.trim() : input.summary,
+  );
   const payloadSha256 = hashCodaraCompletePayload(summary);
   let outcome: Omit<CodaraCompleteApplicationOutcome, "run"> | undefined;
   const eventPayload: Record<string, unknown> = {
@@ -13612,6 +13698,29 @@ export async function applyCodaraCompleteFromManagerCall(input: {
       };
       call.applicationReceipts = [receipt];
 
+      if (overruled.length > 0) {
+        // An auto-spawned verifier may sit on its own step; the work it judged
+        // is on the implementation task's step, which must carry the label.
+        const overruledStepIds = new Set(
+          overruled
+            .flatMap((task) => [
+              task.stepId,
+              draft.workerTasks.find((candidate) => candidate.id === task.autoVerifierForTaskId)?.stepId,
+            ])
+            .filter((stepId): stepId is string => Boolean(stepId)),
+        );
+        for (const step of draft.steps) {
+          if (!overruledStepIds.has(step.id)) continue;
+          if (step.status === "failed" || step.status === "skipped") continue;
+          step.status = "completed_unverified";
+          step.updatedAt = timestamp;
+        }
+        eventPayload.acceptUnverified = {
+          reason: input.acceptUnverified!.reason.trim(),
+          overruledVerifierTaskIds: overruled.map((task) => task.id),
+        };
+      }
+
       delete draft.blockedOn;
       abandonRunQuestionOwnership(draft);
       draft.status = "complete";
@@ -13667,6 +13776,34 @@ export async function completeRunFromOrchestrator(runId: string): Promise<RunSta
       draft.updatedAt = timestamp;
     },
   });
+}
+
+/**
+ * Replace the manager's working plan (codara_plan_update). Returns the stored
+ * plan, or throws with a message meant for the model.
+ */
+export async function updateManagerPlan(
+  runId: string,
+  raw: Record<string, unknown>,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  let failure: string | undefined;
+  const updated = await commitRunChange(run, {
+    type: "run.manager_plan_updated",
+    message: "Cora updated her plan",
+    payload: {},
+    mutate: (draft, timestamp) => {
+      const plan = normalizeManagerPlanInput(raw, timestamp);
+      if (typeof plan === "string") {
+        failure = plan;
+        return false;
+      }
+      draft.managerPlan = plan;
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (failure) throw new Error(failure);
+  return updated;
 }
 
 // Persist the composer chip's backend/model/mode/effort selection onto the
@@ -14387,6 +14524,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   ) {
     try {
       const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+      let checkpointError: string | undefined;
       const checkpoint = await withCheckpointLock(run.id, () =>
         createCheckpoint({
           runId: run.id,
@@ -14394,6 +14532,9 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
           kind: "pre-worker",
           messagePointer: run.humanMessages.length,
           label: `pre-worker ${task.title}`,
+          onError: (message) => {
+            checkpointError = message;
+          },
         }),
       );
       attempt.preWorkerCheckpointSha = checkpoint.sha;
@@ -14407,9 +14548,16 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
         stepId: task.stepId,
         workerTaskId: task.id,
         attemptId: attempt.id,
-        type: "run.checkpoint_created",
-        message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
-        payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
+        type: checkpointError ? "run.checkpoint_failed" : "run.checkpoint_created",
+        message: checkpointError
+          ? `Checkpoint ${checkpoint.kind} failed; undo and regression restore are unavailable for this worker`
+          : `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
+        payload: {
+          checkpointId: checkpoint.id,
+          sha: checkpoint.sha,
+          kind: checkpoint.kind,
+          ...(checkpointError ? { error: checkpointError } : {}),
+        },
       });
     } catch {
       // Checkpoint capture is best-effort; never let it abort the launch.
@@ -16141,15 +16289,20 @@ async function reviewWorkerReportArtifact({
     const oracleAccept = await maybeAcceptOracleBlockedVerifierVerdict({ run, task, attempt, report });
     if (oracleAccept) return oracleAccept;
     if (correctiveVerdict) {
-      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run);
+      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run, task);
       if (ceilingLanded) return ceilingLanded;
     }
-    const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
-      run,
-      task,
-      attempt,
-      report,
-    });
+    // A lineage at its base budget stops looping on its own: the verdict goes
+    // to the manager, who can correct once more, overrule it through
+    // codara_complete accept_unverified, or ask the user.
+    const feedbackRetry = correctiveVerdict && verificationLineageSaturated(run, task)
+      ? null
+      : await maybeQueueVerifierFeedbackRetry({
+          run,
+          task,
+          attempt,
+          report,
+        });
     if (feedbackRetry) return feedbackRetry;
   }
 
@@ -16266,11 +16419,7 @@ async function maybeSpawnDeclaredVerifier({
       : task.runtimePreference === "codex"
         ? "claude"
         : task.runtimePreference;
-  const changed = report.filesChanged
-    .slice(0, 20)
-    .map((file) => file.path)
-    .filter(Boolean)
-    .join(", ");
+  const changed = report.filesChanged.slice(0, 20).map((file) => file.path).filter(Boolean).join(", ");
   const rerun = priorAutoVerifiers.length > 0;
   const description = [
     brief,
@@ -16830,17 +16979,73 @@ async function recordVerificationRound({
   attempt: WorkerAttempt;
 }): Promise<RunState> {
   const nextRounds = (run.verificationRounds ?? 0) + 1;
+  const lineage = verifierLineageRoot(run, task);
   return commitRunChange(run, {
     type: "autopilot.verification_round_recorded",
     stepId: task.stepId,
     workerTaskId: task.id,
     message: `Verification round ${nextRounds} reviewed`,
-    payload: { attemptId: attempt.id, verificationRounds: nextRounds },
+    payload: {
+      attemptId: attempt.id,
+      verificationRounds: nextRounds,
+      lineage,
+      lineageRounds: (run.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+    },
     mutate: (draft, timestamp) => {
       draft.verificationRounds = (draft.verificationRounds ?? 0) + 1;
+      draft.verificationRoundsByLineage = {
+        ...(draft.verificationRoundsByLineage ?? {}),
+        [lineage]: (draft.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+      };
       draft.updatedAt = timestamp;
     },
   });
+}
+
+// The first task of an implementation's retry / follow-up chain.
+function implementationLineageRoot(run: RunState, taskId: string): string {
+  const byId = new Map(run.workerTasks.map((candidate) => [candidate.id, candidate]));
+  let current = byId.get(taskId);
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parentId = current.supersedesTaskId ?? current.followUpOfTaskId;
+    const parent = parentId ? byId.get(parentId) : undefined;
+    if (!parent) break;
+    current = parent;
+  }
+  return current?.id ?? taskId;
+}
+
+// The lineage a verifier judges: its declared implementation, else the newest
+// implementation task on its step, else the verifier alone.
+function verifierLineageRoot(run: RunState, verifier: WorkerTask): string {
+  const implementationId =
+    verifier.autoVerifierForTaskId ??
+    [...run.workerTasks]
+      .reverse()
+      .find(
+        (candidate) =>
+          Boolean(verifier.stepId) &&
+          candidate.stepId === verifier.stepId &&
+          candidate.taskClass !== "verifier",
+      )?.id;
+  return implementationId ? implementationLineageRoot(run, implementationId) : `verifier:${verifier.id}`;
+}
+
+function implementationLineageCount(run: RunState): number {
+  const roots = new Set(
+    run.workerTasks
+      .filter((candidate) => candidate.taskClass !== "verifier" && candidate.status !== "cancelled")
+      .map((candidate) => implementationLineageRoot(run, candidate.id)),
+  );
+  return Math.max(1, roots.size);
+}
+
+function verificationLineageSaturated(run: RunState, verifier: WorkerTask): boolean {
+  if (!runHasMcpManager(run)) return false;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  return (run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0) >= base;
 }
 
 // Run-level verification-round ceiling for execute-mode CLI/Pi managers. The
@@ -16850,16 +17055,31 @@ async function recordVerificationRound({
 // runaway loops, not to police normal runs.
 const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6 } as const;
 
-async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
+// One corrective verdict per area is the normal shape of a multi-area run,
+// so the run-level ceiling scales with the number of implementation lineages.
+// A single lineage still trips it on its own at twice the base, which catches
+// a manager-minted follow-up chain ping-ponging past the attempt cap.
+async function maybeForceLandAtVerificationCeiling(
+  run: RunState,
+  verifier: WorkerTask,
+): Promise<RunState | null> {
   if (!runHasMcpManager(run)) return null;
   const rounds = run.verificationRounds ?? 0;
-  const ceiling = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
-  if (rounds < ceiling) return null;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  const lineages = implementationLineageCount(run);
+  const ceiling = base * lineages;
+  const lineageRounds = run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0;
+  if (rounds < ceiling && lineageRounds < base * 2) return null;
   return forceLandRunUnverified(run.id, {
     trigger: "verification_rounds_capped",
     note:
-      `Verification hit its hard ceiling: ${rounds} rounds against a limit of ${ceiling} for this policy. ` +
-      "Codara accepted the remaining reviewed work and landed it as unverified — further rounds were repeating the same evidence.",
+      rounds >= ceiling
+        ? `Verification hit its hard ceiling: ${rounds} corrective rounds against a limit of ${ceiling} ` +
+          `(${base} per implementation area, ${lineages} area(s)). ` +
+          "Codara accepted the remaining reviewed work and landed it as unverified; further rounds were repeating the same evidence."
+        : `Verification hit its hard ceiling: one implementation area drew ${lineageRounds} corrective rounds ` +
+          `against a limit of ${base * 2}. Codara accepted the remaining reviewed work and landed it as unverified; ` +
+          "further rounds were repeating the same evidence.",
   });
 }
 
@@ -17409,6 +17629,24 @@ async function maybeQueueVerifierFeedbackRetry({
   return commitRunChange(run, change);
 }
 
+// Claims are scoped to the implementation lineage a verifier judged, so a
+// generic "tests pass" verified for one area cannot trigger a revert when
+// another area's verifier fails the same words mid-migration.
+function greenClaimKey(lineage: string, claim: string): string {
+  return `${lineage}::${normalizeClaimKey(claim)}`;
+}
+
+// A verifier the manager spawned on a step of its own names no
+// implementation, so its claims share one run-wide scope. Per-verifier keys
+// would never match a later re-verifier's and would silently disable the
+// regression guard for that whole shape of run.
+const UNSCOPED_CLAIM_LINEAGE = "unscoped";
+
+function greenClaimLineage(run: RunState, verifier: WorkerTask): string {
+  const lineage = verifierLineageRoot(run, verifier);
+  return lineage.startsWith("verifier:") ? UNSCOPED_CLAIM_LINEAGE : lineage;
+}
+
 // Marks the report's newly-verified atomic claims green on the run (claim key ->
 // the attempt that verified it). Records green even when the same report also
 // triggers a FEEDBACK re-enqueue, so a partial pass isn't lost on the retry.
@@ -17432,8 +17670,10 @@ async function recordGreenClaims({
     payload: { attemptId: attempt.id, count: verified.length },
     mutate: (draft, timestamp) => {
       const greenClaims = (draft.greenClaims ??= {});
+      const verifier = draft.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
+      const lineage = verifier ? greenClaimLineage(draft, verifier) : UNSCOPED_CLAIM_LINEAGE;
       for (const claim of verified) {
-        greenClaims[normalizeClaimKey(claim.claim)] = attempt.id;
+        greenClaims[greenClaimKey(lineage, claim.claim)] = attempt.id;
       }
       draft.updatedAt = timestamp;
     },
@@ -17441,11 +17681,11 @@ async function recordGreenClaims({
 }
 
 // Detects regressions on previously-green claims: a verdict that marks an
-// already-green claim as `failed`. When found, restores the workspace to the
-// most recent impl pre-worker checkpoint (the latest non-null
-// preWorkerCheckpointSha) and emits a loud revert notice, then drops the now-
-// stale green entries so the next attempt re-establishes green. Returns the
-// updated run (regression restored) or null when no regression applies.
+// already-green claim of the same lineage as `failed`. When found, restores
+// the files the lineage's newest implementation attempt changed to that
+// attempt's pre-worker checkpoint and emits a loud revert notice, then drops
+// the now-stale green entries so the next attempt re-establishes green.
+// Returns the updated run, or null when no regression applies.
 async function maybeRestoreGreenClaimRegression({
   run,
   task,
@@ -17459,11 +17699,12 @@ async function maybeRestoreGreenClaimRegression({
 }): Promise<{ run: RunState; restoreFailed: boolean } | null> {
   const green = run.greenClaims;
   if (!green) return null;
+  const lineage = greenClaimLineage(run, task);
   const regressedKeys: string[] = [];
   const regressedClaims: string[] = [];
   for (const claim of report.verifier?.atomicClaims ?? []) {
     if (claim.verdict !== "failed") continue;
-    const key = normalizeClaimKey(claim.claim);
+    const key = greenClaimKey(lineage, claim.claim);
     if (green[key]) {
       regressedKeys.push(key);
       regressedClaims.push(claim.claim.trim());
@@ -17471,25 +17712,50 @@ async function maybeRestoreGreenClaimRegression({
   }
   if (regressedKeys.length === 0) return null;
 
-  // Latest impl pre-worker snapshot that predates the regressing change.
+  // The snapshot taken before this lineage's newest implementation attempt,
+  // and only the files that attempt reported changing. A whole-tree reset to
+  // the newest snapshot in the run would also wipe other areas' finished work.
+  // An unscoped verifier judged the run as a whole, so its regression is
+  // attributed to the newest implementation attempt of any lineage.
   let restoredSha: string | null = null;
+  let restorePaths: string[] = [];
   for (let i = run.workerAttempts.length - 1; i >= 0; i--) {
-    const sha = run.workerAttempts[i].preWorkerCheckpointSha;
-    if (sha) {
-      restoredSha = sha;
-      break;
+    const candidate = run.workerAttempts[i];
+    const candidateTask = run.workerTasks.find((item) => item.id === candidate.workerTaskId);
+    if (!candidateTask || candidateTask.taskClass === "verifier") continue;
+    if (
+      lineage !== UNSCOPED_CLAIM_LINEAGE &&
+      implementationLineageRoot(run, candidateTask.id) !== lineage
+    ) {
+      continue;
     }
+    if (!candidate.preWorkerCheckpointSha) continue;
+    const candidateReport = candidate.finalReportPath
+      ? await readWorkerReport(candidate.finalReportPath).catch(() => null)
+      : null;
+    restoredSha = candidate.preWorkerCheckpointSha;
+    restorePaths = (candidateReport?.filesChanged ?? []).map((file) => file.path).filter(Boolean);
+    break;
   }
+  // Restoring under a live writer would race its edits; the manager decides.
+  const otherLiveWriters =
+    activeWorkersForRun(run.id).some((worker) => worker.workerTaskId !== task.id) ||
+    run.workerTasks.some(
+      (item) =>
+        item.id !== task.id &&
+        (item.status === "running" || item.status === "claimed") &&
+        taskWritesWorkspace(item),
+    );
   const cwd = workspaceCwdFromRun(run);
-  if (!restoredSha || !cwd) {
-    // Nothing to restore to (non-git workspace or no prior snapshot). Still drop
-    // the stale green entries below so the regression isn't silently retained.
+  // Nothing safe to restore still drops the stale green entries, so the
+  // regression isn't silently retained.
+  const nothingRestored = async (reason: string) => {
     const unavailable = await commitRunChange(run, {
       type: "autopilot.green_claim_regression_detected",
       stepId: task.stepId,
       workerTaskId: task.id,
-      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); no pre-worker snapshot available to restore`,
-      payload: { claims: regressedClaims, attemptId: attempt.id },
+      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); ${reason}`,
+      payload: { claims: regressedClaims, attemptId: attempt.id, lineage, otherLiveWriters },
       mutate: (draft, timestamp) => {
         if (draft.greenClaims) {
           for (const key of regressedKeys) delete draft.greenClaims[key];
@@ -17498,10 +17764,16 @@ async function maybeRestoreGreenClaimRegression({
       },
     });
     return { run: unavailable, restoreFailed: false };
+  };
+  if (otherLiveWriters) return nothingRestored("another worker is still writing, so nothing was restored");
+  if (!restoredSha || !cwd || restorePaths.length === 0) {
+    return nothingRestored("no pre-worker snapshot of this area is available to restore");
   }
 
+  let restoredCount = 0;
   try {
-    await restoreCheckpointCode({ cwd, sha: restoredSha });
+    const result = await restoreCheckpointPaths({ cwd, sha: restoredSha, paths: restorePaths });
+    restoredCount = result.restored.length + result.removed.length;
   } catch (error) {
     const restoreError = error instanceof Error ? error.message : String(error);
     const failed = await commitRunChange(run, {
@@ -17533,6 +17805,9 @@ async function maybeRestoreGreenClaimRegression({
     });
     return { run: failed, restoreFailed: true };
   }
+  if (restoredCount === 0) {
+    return nothingRestored("none of the files the regressing worker reported could be restored from the snapshot");
+  }
   for (const claim of regressedClaims) {
     await appendRegressionRevertEvent({
       workspaceId: run.workspaceId,
@@ -17550,8 +17825,8 @@ async function maybeRestoreGreenClaimRegression({
     type: "autopilot.green_claim_regression_reverted",
     stepId: task.stepId,
     workerTaskId: task.id,
-    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s) to pre-worker snapshot`,
-    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id },
+    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s): restored ${restoredCount} file(s) to the pre-worker snapshot`,
+    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id, paths: restorePaths },
     mutate: (draft, timestamp) => {
       if (draft.greenClaims) {
         for (const key of regressedKeys) delete draft.greenClaims[key];
@@ -20329,13 +20604,20 @@ async function waitForPiWorkerTurn(
   onCompaction?: (phase: "compacting" | "resuming") => void,
   taskContract?: () => string,
   onWrapUp?: () => void,
+  scratchpad?: () => Promise<string>,
 ): Promise<void> {
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
   let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
-      compaction = new PiWorkerCompaction(client, { interrupted, taskContract, onError: reject, onProgress: onCompaction });
+      compaction = new PiWorkerCompaction(client, {
+        interrupted,
+        taskContract,
+        scratchpad,
+        onError: reject,
+        onProgress: onCompaction,
+      });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
@@ -20498,12 +20780,23 @@ async function runPiWorkerSession({
   let interrupted = false;
   let reportInvalid = false;
   const taskSteering: string[] = [];
+  // The acceptance, verification and final-report sections live only in
+  // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
+  // them would otherwise leave the worker unable to write a valid report.
+  const contractSections = workerContractSections(promptText);
   const taskContract = () => [
     task.description.trim(),
     ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
     ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+    ...(contractSections ? [contractSections] : []),
     ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
   ].join("\n\n");
+  // Outside the workspace, beside the report. Imported pull-request workers
+  // have no scratchpad tool.
+  const scratchpadPath =
+    runProjectPolicyMode(run) === "untrusted-pull-request" ? "" : join(paths.attemptDir, "scratchpad.md");
+  const readScratchpad = async () =>
+    scratchpadPath ? (await fs.readFile(scratchpadPath, "utf8").catch(() => "")).slice(0, 4_000) : "";
   // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
@@ -20721,6 +21014,7 @@ async function runPiWorkerSession({
           }
         : undefined,
     });
+    if (scratchpadPath) plan.env.CODARA_PI_SCRATCHPAD_PATH = scratchpadPath;
     // The plan creator may write a per-session MCP bridge file. Capture it
     // before the durable profile stamp so any stamp failure still reaches the
     // finally cleanup path.
@@ -20933,6 +21227,7 @@ async function runPiWorkerSession({
       compactionProgress,
       taskContract,
       wrapUpRequested,
+      readScratchpad,
     );
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
@@ -20947,12 +21242,16 @@ async function runPiWorkerSession({
         `Your task turn ended without a valid final report at ${paths.finalReportJson}` +
           `${problem ? `: ${problem}` : ""}. ` +
           'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
-          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON." +
+          (workerReportSection(promptText)
+            ? `\n\nThe report contract from the original task prompt, verbatim:\n${workerReportSection(promptText)}`
+            : ""),
         reportStall,
         () => interrupted,
         compactionProgress,
         taskContract,
         wrapUpRequested,
+        readScratchpad,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }

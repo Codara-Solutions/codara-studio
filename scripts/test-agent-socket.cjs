@@ -1717,6 +1717,197 @@ async function main() {
         /verify async contract/.test(failedVerifierComplete.error?.message ?? ""),
       JSON.stringify(failedVerifierComplete).slice(0, 240),
     );
+    check(
+      "the refusal names the accept_unverified exit and the blocking verifier id",
+      /accept_unverified/.test(failedVerifierComplete.error?.message ?? "") &&
+        /wt-verifier/.test(failedVerifierComplete.error?.message ?? ""),
+      JSON.stringify(failedVerifierComplete).slice(0, 400),
+    );
+
+    // An adjudicated out-of-contract verdict must not wedge the run: the
+    // manager overrules it explicitly, naming every blocking verifier, and the
+    // run lands with the implementation step labelled completed_unverified.
+    fabricateRun("run-overrule", {
+      ...liveManagerTurn("run-overrule", "spark-overrule"),
+      chatMode: "execute",
+      steps: [
+        { id: "step-impl", title: "implement", status: "complete", createdAt: "2026-07-18T09:59:00.000Z", updatedAt: "2026-07-18T10:00:00.000Z" },
+        { id: "step-verify", title: "verify", status: "complete", createdAt: "2026-07-18T10:00:00.000Z", updatedAt: "2026-07-18T10:01:00.000Z" },
+      ],
+      workerTasks: [
+        { id: "wt-ov-impl", stepId: "step-impl", title: "implement async contract", status: "accepted", taskClass: "feature" },
+        {
+          id: "wt-ov-verifier",
+          stepId: "step-verify",
+          title: "verify async contract",
+          status: "accepted",
+          taskClass: "verifier",
+          autoVerifierForTaskId: "wt-ov-impl",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-ov-impl",
+          workerTaskId: "wt-ov-impl",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: implementationReportPath,
+        },
+        {
+          id: "attempt-ov-verifier",
+          workerTaskId: "wt-ov-verifier",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:01:00.000Z",
+          finalReportPath: verifierReportPath,
+        },
+      ],
+    });
+    const overruleNoReason = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: " ", overruled_verifier_task_ids: ["wt-ov-verifier"] },
+    });
+    check(
+      "accept_unverified requires a reason",
+      /reason must say why/.test(overruleNoReason.error?.message ?? ""),
+      JSON.stringify(overruleNoReason).slice(0, 240),
+    );
+    const overruleWrongId = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: "out of contract", overruled_verifier_task_ids: ["wt-ov-impl"] },
+    });
+    check(
+      "accept_unverified must list every blocking verifier",
+      /must list every blocking verifier/.test(overruleWrongId.error?.message ?? "") &&
+        /wt-ov-verifier/.test(overruleWrongId.error?.message ?? ""),
+      JSON.stringify(overruleWrongId).slice(0, 300),
+    );
+    const overruled = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "Implemented the async contract.",
+      accept_unverified: {
+        reason: "The verifier demanded unicode handling the brief never asked for.",
+        overruled_verifier_task_ids: ["wt-ov-verifier"],
+      },
+    });
+    const overruledSnapshot = JSON.parse(
+      fs.readFileSync(path.join(HOME, "runs", "run-overrule", "run.json"), "utf8"),
+    );
+    check(
+      "accept_unverified lands the run as completed_unverified with the reason disclosed",
+      Boolean(overruled.result?.ok) &&
+        overruledSnapshot.status === "complete" &&
+        overruledSnapshot.steps.find((step) => step.id === "step-impl")?.status === "completed_unverified" &&
+        overruledSnapshot.humanMessages.some((message) =>
+          /Landed unverified: Cora overruled "verify async contract"\. Reason: The verifier demanded unicode/.test(message.message)),
+      JSON.stringify({ overruled, steps: overruledSnapshot.steps }).slice(0, 500),
+    );
+
+    // The step brake is lack of progress, not a raw batch count, and it asks
+    // the user instead of force-landing the run.
+    const brakeSteps = Array.from({ length: 8 }, (_, index) => ({
+      id: `step-brake-${index}`,
+      title: `batch ${index}`,
+      kind: "worker_batch",
+      status: "failed",
+      createdAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+    }));
+    fabricateRun("run-step-brake", {
+      chatMode: "execute",
+      status: "running",
+      humanMessages: [{
+        id: "msg-brake",
+        runId: "run-step-brake",
+        author: "user",
+        kind: "note",
+        message: "migrate everything",
+        attachments: [],
+        createdAt: "2026-07-18T10:00:00.000Z",
+      }],
+      steps: brakeSteps,
+      workerTasks: brakeSteps.map((step, index) => ({
+        id: `wt-brake-${index}`,
+        stepId: step.id,
+        title: `attempt ${index}`,
+        status: index % 2 === 0 ? "failed" : "cancelled",
+        taskClass: "feature",
+      })),
+      workerAttempts: [],
+    });
+    const braked = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-step-brake",
+      workers: [{ title: "try again", description: "same approach", taskClass: "feature", runtimePreference: "claude" }],
+    });
+    const brakedSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-step-brake", "run.json"), "utf8"));
+    check(
+      "eight failed batches in a row trip the no-progress brake without landing the run",
+      braked.result?.step_ceiling_reached === true &&
+        /last 8 worker batches all failed/.test(braked.result?.note ?? "") &&
+        /codara_ask_user/.test(braked.result?.note ?? "") &&
+        brakedSnapshot.status === "running" &&
+        brakedSnapshot.steps.length === 8,
+      JSON.stringify({ braked, status: brakedSnapshot.status }).slice(0, 400),
+    );
+
+    // codara_plan_update stores the manager's plan, and an open milestone
+    // holds codara_complete until it is done or deferred with a reason.
+    fabricateRun("run-plan", {
+      ...liveManagerTurn("run-plan", "spark-plan"),
+      chatMode: "execute",
+      workerTasks: [{ id: "wt-plan-a", title: "auth service", status: "accepted", taskClass: "feature" }],
+      workerAttempts: [],
+    });
+    const badPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [{ id: "m1", title: "auth", status: "deferred" }],
+    });
+    check(
+      "plan_update rejects a deferred milestone without a reason",
+      /deferred without a note/.test(badPlan.error?.message ?? ""),
+      JSON.stringify(badPlan).slice(0, 240),
+    );
+    const savedPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass", worker_task_ids: ["wt-plan-a"] },
+        { id: "m2", title: "billing", status: "pending" },
+      ],
+    });
+    const planSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-plan", "run.json"), "utf8"));
+    check(
+      "plan_update persists the plan and reports the open milestones",
+      savedPlan.result?.ok === true &&
+        savedPlan.result.open_milestones?.join(",") === "m2" &&
+        planSnapshot.managerPlan?.goal === "Migrate every service" &&
+        planSnapshot.managerPlan.milestones[0].workerTaskIds?.[0] === "wt-plan-a",
+      JSON.stringify({ savedPlan, plan: planSnapshot.managerPlan }).slice(0, 400),
+    );
+    const planBlocked = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "done" });
+    check(
+      "codara_complete is refused while a plan milestone is open",
+      /plan milestone\(s\) are still open: m2 "billing" \(pending\)/.test(planBlocked.error?.message ?? ""),
+      JSON.stringify(planBlocked).slice(0, 300),
+    );
+    await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass" },
+        { id: "m2", title: "billing", status: "deferred", note: "the user asked to stop after auth" },
+      ],
+    });
+    const planComplete = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "auth migrated" });
+    check(
+      "codara_complete succeeds once every milestone is done or deferred",
+      Boolean(planComplete.result?.ok) && !planComplete.error,
+      JSON.stringify(planComplete).slice(0, 300),
+    );
 
     // Deadlock-avoidance: a task stuck at "created" (prepareWorkerTask never
     // succeeded, or a user hand-added task that was never launched) must NOT

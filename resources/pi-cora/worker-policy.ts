@@ -62,20 +62,20 @@ export function isWorkerSafeBridgeTool(
 //
 // Pi 0.84.4's native tools are exactly: bash, edit, find, grep, ls, read,
 // write. The session also carries extension tools: web_search + url_context
-// (pi-web-search), deep_search (bundled fallback), and the codara_* bridge
-// roster. The fence names below are asserted against that inventory in
+// (pi-web-search), deep_search and fetch_url (bundled), and the codara_*
+// bridge roster. The fence names below are asserted against that inventory in
 // scripts/test-pi-cora-extension.cjs.
 //
 // blockedTools entries use the familiar bare vocabulary (Bash, WebSearch,
 // Edit, Write, ...). They are mapped onto the real tool names; a handful need
 // explicit aliases.
 const FENCE_ALIASES: Record<string, string[]> = {
-  websearch: ["web_search", "deep_search", "url_context"],
-  webfetch: ["url_context", "deep_search"],
+  websearch: ["web_search", "deep_search", "url_context", "fetch_url"],
+  webfetch: ["url_context", "deep_search", "fetch_url"],
   glob: ["find"],
   multiedit: ["edit"],
 };
-const FENCE_WEB_AND_SHELL = ["bash", "web_search", "deep_search", "url_context"];
+const FENCE_WEB_AND_SHELL = ["bash", "web_search", "deep_search", "url_context", "fetch_url"];
 const FENCE_READONLY_EXTRA = ["edit"];
 // Bridge tools that ARE a shell or arbitrary code execution: any fenced preset
 // blocks them ("no shell/web" must include the terminal tab that takes a

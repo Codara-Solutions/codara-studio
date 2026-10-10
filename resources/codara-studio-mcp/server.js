@@ -909,7 +909,7 @@ const STEP_ACTION_SCHEMA = {
 const GRAPH_SCHEMA = {
   type: "object",
   description:
-    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify); its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
+    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify); its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges), {{lastOutput}} (the previous pass's summary).",
   required: ["version", "nodes", "edges", "entryNodeIds"],
   properties: {
     version: { type: "number", enum: [1] },
@@ -1003,7 +1003,7 @@ const AUTOMATION_TOOLS = [
         loop: LOOP_SCHEMA,
         prompt_template: {
           type: "string",
-          description: "The instruction a single-worker loom runs each iteration (required when no graph is given). With a graph, each worker node carries its own prompt and this is ignored; omit it for a steps-only graph. Supports {{var}}/{{node:id}}/{{incoming}} tokens.",
+          description: "The instruction a single-worker loom runs each iteration (required when no graph is given). With a graph, each worker node carries its own prompt and this is ignored; omit it for a steps-only graph. Supports {{var}}/{{node:id}}/{{incoming}} tokens, and {{lastOutput}} (the previous pass's summary) so a looping worker continues instead of starting over. Without that token, passes after the first get the previous summary appended.",
         },
         worker: WORKER_SCHEMA,
         graph: GRAPH_SCHEMA,
@@ -1026,7 +1026,7 @@ const AUTOMATION_TOOLS = [
         name: { type: "string" },
         trigger: TRIGGER_SCHEMA,
         loop: LOOP_SCHEMA,
-        prompt_template: { type: "string" },
+        prompt_template: { type: "string", description: "Replacement prompt for a single-worker loom. Supports the same tokens as codara_create_automation, including {{lastOutput}}." },
         worker: WORKER_SCHEMA,
         graph: GRAPH_SCHEMA,
       },
@@ -1118,7 +1118,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY, right after you understand what the user wants automated, and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
+      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Codara already derives a title from the first message, so call this only when that title is wrong or the topic shifts substantially, in the same step as another tool call rather than as its own round trip. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1390,6 +1390,62 @@ const EXECUTE_TOOLS = [
           type: "string",
           description: "Optional human-readable summary to attach as a system note.",
         },
+        accept_unverified: {
+          type: "object",
+          description:
+            "Only after you adjudicated a FEEDBACK/FAILED verifier verdict as out of contract, or after verification_cap_reached: land the work anyway as completed_unverified. List every blocking verifier you overrule; the reason is appended to the summary the user sees. Never use it to skip verification of work no verifier has judged.",
+          required: ["reason", "overruled_verifier_task_ids"],
+          properties: {
+            reason: {
+              type: "string",
+              description: "Why each overruled verdict does not apply (for example: claims outside the brief's acceptance criteria).",
+            },
+            overruled_verifier_task_ids: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string" },
+              description: "Task ids of every non-passing verifier over the current workspace.",
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_plan_update",
+    description:
+      "Record or replace your working plan for multi-phase work: the goal in the user's own words, milestones with status, decisions, and next actions. Send the whole plan each time. Codara keeps it in the run record, shows it back to you each turn (it survives compaction and restarts), and refuses codara_complete while a milestone is pending or in_progress, so mark each one done with evidence or deferred with the reason. Skip it for small single-step work.",
+    inputSchema: {
+      type: "object",
+      required: ["goal", "milestones"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        goal: { type: "string", description: "The user's request in their own words." },
+        milestones: {
+          type: "array",
+          minItems: 1,
+          maxItems: 30,
+          items: {
+            type: "object",
+            required: ["id", "title", "status"],
+            properties: {
+              id: { type: "string", description: "Short stable id such as m1." },
+              title: { type: "string" },
+              status: { type: "string", enum: ["pending", "in_progress", "done", "deferred"] },
+              note: { type: "string", description: "Evidence for done, the reason for deferred (required), or the blocker." },
+              worker_task_ids: { type: "array", items: { type: "string" } },
+            },
+            additionalProperties: false,
+          },
+        },
+        decisions: { type: "array", items: { type: "string" }, description: "Decisions made and why, one line each." },
+        next_actions: { type: "array", items: { type: "string" } },
       },
       additionalProperties: false,
     },
@@ -1397,7 +1453,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY, once the goal for the session is clear, and again if the topic shifts substantially. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
+      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Codara already derives a title from the first message, so call this only when that title is wrong or the topic shifts substantially, in the same step as your first inspection call rather than as its own round trip. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1421,7 +1477,7 @@ const EXECUTE_TOOLS = [
       "Write a durable fact to Cora's memory so a LATER session starts already knowing it. Two tiers, each a plain markdown file the user can open and edit: `global` for facts about the user and this machine (preferences, how they want you to work, installed tooling), `workspace` for facts about this repository (a verified command, an environment gotcha, a convention the repo does not state). " +
       "Remember only when one of three things happened: the user corrected you or stated a durable preference, an environmental fact cost a worker an attempt or a retry, or a repo-specific command or gotcha was verified to work. Never remember task status, one-off details, or anything a later session could read out of the repo itself. One plain sentence per memory, no provenance tags, at most a couple of memories per run. " +
       "Each file is capped at 4096 bytes and starts warning near 3277. When the result reports the file is full, do NOT skip the write: re-read the file, merge and shorten the existing lines, and call this tool again with action `replace` and the complete new body. `replace` rewrites the whole file, so it must carry forward every line still worth keeping; lines the user wrote by hand are preserved unless you pass confirm_drop_user_lines. " +
-      "Workers do NOT see memory. When a remembered fact matters for a task you are delegating, copy that line into the worker's description.",
+      "Workers in chat runs receive a read-only copy of this memory and the active profile; do not copy memory lines into worker briefs. Automation workers do not see memory.",
     inputSchema: {
       type: "object",
       required: ["scope", "action"],
@@ -1609,6 +1665,7 @@ const EXECUTE_TOOL_TO_RPC = {
   codara_ask_user: "orchestrator.ask_user",
   codara_complete: "orchestrator.complete",
   codara_name_chat: "orchestrator.name_chat",
+  codara_plan_update: "orchestrator.plan_update",
   codara_remember: "orchestrator.remember",
   codara_request_next_iteration: "orchestrator.request_next_iteration",
   codara_get_worker_status: "orchestrator.get_worker_status",

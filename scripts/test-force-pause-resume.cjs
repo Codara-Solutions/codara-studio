@@ -789,7 +789,9 @@ async function main() {
   );
   check(
     "a worker that failed on its own is not presented as interrupted",
-    !continuePrompt.includes("task-broken"),
+    // The run-state block lists every task; only the interrupted list matters.
+    !/task task-broken, attempt attempt-broken/.test(continuePrompt) &&
+      !/task-broken[^\n]*(?:interrupted|continuable)/.test(continuePrompt),
   );
 
   // ── 3b. a run paused with its manager turn still in flight keeps that turn ──
