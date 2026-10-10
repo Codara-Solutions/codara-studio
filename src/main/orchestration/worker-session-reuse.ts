@@ -21,7 +21,7 @@ const SAFE_SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 
 /** Mirrors TERMINAL_WORKER_TASK_STATUSES in agent-socket.ts: any other status
  *  may still have (or get) a live Pi process writing the session file. */
-const TERMINAL_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+const TERMINAL_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled", "blocked"]);
 
 /** Order attempts by when they finished (fallback: started). NaN sorts first
  *  so an attempt with no usable timestamp never outranks a dated one. */
@@ -38,8 +38,11 @@ export type WorkerSessionReuseDecision =
       sourceTask: WorkerTask;
       sourceAttempt: WorkerAttempt;
       sessionId: string;
+      /** 0 when the interrupted attempt never recorded a gauge. */
       contextTokens: number;
       contextWindowTokens: number;
+      /** The source was cut off by a pause or app restart, not finished. */
+      interrupted: boolean;
     }
   /** Gate failed; spawn cold and tell the manager why in the result note. */
   | { kind: "cold"; reason: string }
@@ -74,14 +77,6 @@ export function evaluateWorkerSessionReuse(input: {
         "never continued. Spawned cold instead.",
     };
   }
-  if (sourceTask.status !== "accepted") {
-    return {
-      kind: "cold",
-      reason:
-        `Task ${sourceTask.id} is not terminal-successful (status ${sourceTask.status}); only an accepted ` +
-        "worker's session can be continued. Spawned cold instead.",
-    };
-  }
   const sourceAttempt = input.run.workerAttempts
     .filter((attempt) => attempt.workerTaskId === sourceTask.id)
     .reduce<WorkerAttempt | null>(
@@ -89,7 +84,24 @@ export function evaluateWorkerSessionReuse(input: {
         !latest || attempt.attemptNumber > latest.attemptNumber ? attempt : latest,
       null,
     );
-  if (!sourceAttempt || sourceAttempt.status !== "succeeded") {
+  // A pause or an app quit kills a worker mid-slice through no fault of its
+  // own. Its session holds the plan and everything it read, so continuing it
+  // beats a cold relaunch. A worker that failed or was cancelled for any
+  // other reason is never continued: its session is what went wrong.
+  const interrupted =
+    sourceAttempt !== null &&
+    sourceAttempt.interruptedBy !== undefined &&
+    (sourceAttempt.status === "cancelled" || sourceAttempt.status === "failed") &&
+    (sourceTask.status === "cancelled" || sourceTask.status === "failed");
+  if (sourceTask.status !== "accepted" && !interrupted) {
+    return {
+      kind: "cold",
+      reason:
+        `Task ${sourceTask.id} is not terminal-successful (status ${sourceTask.status}); only an accepted ` +
+        "worker's session, or one interrupted by a pause or app restart, can be continued. Spawned cold instead.",
+    };
+  }
+  if (!sourceAttempt || (!interrupted && sourceAttempt.status !== "succeeded")) {
     return {
       kind: "cold",
       reason:
@@ -139,15 +151,9 @@ export function evaluateWorkerSessionReuse(input: {
       (newest, attempt) => (attemptFinishRank(attempt) >= attemptFinishRank(newest) ? attempt : newest),
       sourceAttempt,
     );
-  const contextTokens = gaugeAttempt.contextTokens;
-  if (typeof contextTokens !== "number" || !Number.isFinite(contextTokens) || contextTokens <= 0) {
-    return {
-      kind: "cold",
-      reason:
-        `The newest attempt on that session (task ${gaugeAttempt.workerTaskId}) captured no context ` +
-        "usage, so the reuse gate cannot verify headroom. Spawned cold instead.",
-    };
-  }
+  const gauge = gaugeAttempt.contextTokens;
+  const contextTokens =
+    typeof gauge === "number" && Number.isFinite(gauge) && gauge > 0 ? gauge : 0;
   // The ceiling that matters for a Pi worker is its compaction trigger, not
   // the raw model window: Codara compacts Pi sessions at min(contextWindow
   // minus Pi's headroom, DEFAULT_PI_COMPACT_AT_TOKENS), so on the 1M-window
@@ -159,6 +165,29 @@ export function evaluateWorkerSessionReuse(input: {
       ? gaugeAttempt.contextWindowTokens
       : contextWindowForModel(gaugeAttempt.model ?? sourceAttempt.model).tokens;
   const contextWindowTokens = Math.min(rawWindow, effectiveCompactionCapTokens(rawWindow));
+  if (interrupted) {
+    // No headroom cap: the cap trades a long context for a fresh worker with a
+    // good brief, but an interrupted worker IS the context for its unfinished
+    // work, and Pi compacts the session if it fills. An app quit never records
+    // a gauge at all.
+    return {
+      kind: "resume",
+      sourceTask,
+      sourceAttempt,
+      sessionId,
+      contextTokens,
+      contextWindowTokens,
+      interrupted: true,
+    };
+  }
+  if (contextTokens === 0) {
+    return {
+      kind: "cold",
+      reason:
+        `The newest attempt on that session (task ${gaugeAttempt.workerTaskId}) captured no context ` +
+        "usage, so the reuse gate cannot verify headroom. Spawned cold instead.",
+    };
+  }
   const fraction = contextTokens / contextWindowTokens;
   if (fraction >= WORKER_SESSION_REUSE_MAX_CONTEXT_FRACTION) {
     return {
@@ -176,5 +205,6 @@ export function evaluateWorkerSessionReuse(input: {
     sessionId,
     contextTokens,
     contextWindowTokens,
+    interrupted: false,
   };
 }

@@ -170,6 +170,7 @@ import {
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
+import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
 import {
   classifyWorkerSilence,
@@ -2545,6 +2546,7 @@ export async function failWorkerAttempt(
   runId: string,
   attemptId: string,
   error: string,
+  options?: { interruptedBy?: WorkerAttempt["interruptedBy"] },
 ): Promise<RunState> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((a) => a.id === attemptId);
@@ -2561,6 +2563,7 @@ export async function failWorkerAttempt(
         a.error = error;
         a.failureKind = classifyWorkerFailure(error);
         a.finishedAt = a.finishedAt ?? timestamp;
+        if (options?.interruptedBy) a.interruptedBy = options.interruptedBy;
         const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
         if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
           t.status = "failed";
@@ -4532,6 +4535,7 @@ export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
         run.id,
         attempt.id,
         "the app closed while this worker was running; its process is gone",
+        { interruptedBy: "app_restart" },
       ).catch(() => undefined);
       // requireRun is awaited as an ARGUMENT, so its rejection would escape the
       // trailing .catch and abort recovery for every remaining run. A run
@@ -10585,13 +10589,17 @@ export async function resumeManagerTurnRecovery(
   return { outcome: decision.outcome, run };
 }
 
-/** One worker attempt a pause killed before it could finish. */
+/** One worker attempt a pause or app restart killed before it could finish. */
 interface ResumeInterruptedAttempt {
   attemptId: string;
   attemptNumber: number;
   taskId: string;
   taskTitle: string;
   stepLabel: string;
+  /** Its session can be continued warm with follow_up_of on `runtime`. */
+  continuable: boolean;
+  runtime: WorkerRuntime;
+  cause: "pause" | "app_restart";
 }
 
 // forcePauseRun kills the PTYs first and commits the pause after, so an attempt
@@ -10612,7 +10620,9 @@ const RESUME_INTERRUPTED_NOTE_LIMIT = 12;
 /**
  * The attempts a pause interrupted and nobody has picked back up: their task is
  * still `cancelled` (so no follow-up task superseded it) and their newest
- * attempt is `cancelled` (killed, not failed and not retried). This is the list
+ * attempt is `cancelled` (killed, not failed and not retried). Attempts the app
+ * quit killed are recorded failed with interruptedBy "app_restart" by boot
+ * recovery and are listed the same way. This is the list
  * the manager needs on resume — it owns retry bookkeeping, so Resume's job is
  * to tell it exactly what stopped mid-flight, not to relaunch behind its back.
  */
@@ -10624,15 +10634,23 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       .filter((id): id is string => Boolean(id)),
   );
   const rows: ResumeInterruptedAttempt[] = [];
+  const resumedSessionIds = new Set(
+    run.workerTasks
+      .map((task) => task.resumeSessionId)
+      .filter((id): id is string => Boolean(id)),
+  );
   for (const task of run.workerTasks) {
-    if (task.status !== "cancelled") continue;
+    if (task.status !== "cancelled" && task.status !== "failed") continue;
     if (supersededTaskIds.has(task.id)) continue;
     const attempts = run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id);
     if (attempts.length === 0) continue;
     const latest = attempts.reduce((best, attempt) =>
       (attempt.attemptNumber ?? 0) >= (best.attemptNumber ?? 0) ? attempt : best,
     );
-    if (latest.status !== "cancelled") continue;
+    const restartKilled = latest.status === "failed" && latest.interruptedBy === "app_restart";
+    if (task.status === "failed" ? !restartKilled : latest.status !== "cancelled") continue;
+    // Already continued by a follow-up: that worker owns the work now.
+    if (latest.piSessionId && resumedSessionIds.has(latest.piSessionId)) continue;
     if (Number.isFinite(pausedAtMs)) {
       const finishedMs = Date.parse(latest.finishedAt ?? "");
       if (Number.isFinite(finishedMs) && finishedMs < pausedAtMs - PAUSE_KILL_LEAD_MS) continue;
@@ -10644,6 +10662,14 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       taskId: task.id,
       taskTitle: task.title,
       stepLabel: step ? `Step ${step.index} "${step.title}"` : "No step",
+      continuable:
+        evaluateWorkerSessionReuse({
+          run,
+          followUpOfTaskId: task.id,
+          requestedRuntime: latest.runtime,
+        }).kind === "resume",
+      runtime: latest.runtime,
+      cause: restartKilled ? "app_restart" : "pause",
     });
   }
   return rows;
@@ -10659,15 +10685,26 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
 function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string {
   const listed = rows.slice(0, RESUME_INTERRUPTED_NOTE_LIMIT);
   const remaining = rows.length - listed.length;
+  const anyContinuable = listed.some((row) => row.continuable);
+  const byRestart = rows.some((row) => row.cause === "app_restart");
   return [
     RESUME_INTERRUPTED_NOTE_HEADER,
-    "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+    `Resume this run. ${byRestart ? "The app restart or the pause" : "The pause"} stopped the attempts below before they finished, and nothing is running now:`,
     ...listed.map(
       (row) =>
-        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted)`,
+        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted${
+          row.continuable ? `, continuable on ${row.runtime}` : ""
+        })`,
     ),
     ...(remaining > 0 ? [`- …and ${remaining} more interrupted attempt(s).`] : []),
-    "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
+    ...(anyContinuable
+      ? [
+          "A continuable task keeps its worker's session: spawn one worker with follow_up_of set to that task id, " +
+            "the same runtime, and a brief that says to check its edits so far and finish the remaining work. " +
+            "It continues where it stopped instead of starting over.",
+        ]
+      : []),
+    "Re-issue the work that is still needed (continue or relaunch those tasks, or replace them if the plan changed), then carry on.",
   ].join("\n");
 }
 
@@ -13490,6 +13527,9 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     finishedAttempt.status =
       result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
   }
+  if (pauseInterrupted && (forcePausingRuns.get(run.id) ?? 0) > 0) {
+    finishedAttempt.interruptedBy = "pause";
+  }
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
@@ -14829,6 +14869,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
           attempt.status = "cancelled";
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
         }
+        if (attempt.status === "cancelled") attempt.interruptedBy = attempt.interruptedBy ?? "pause";
       }
       for (const task of draft.workerTasks) {
         if (!cancelledTaskIds.has(task.id)) continue;
@@ -19639,7 +19680,7 @@ async function runPiWorkerSession({
     backOutIfStopped();
 
     const runningTimestamp = new Date().toISOString();
-    if (!(await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp))) {
+    if (!(await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp, piSessionId))) {
       interrupted = true;
       throw new Error("Pi worker was interrupted before it started: the attempt was cancelled.");
     }
@@ -19950,11 +19991,15 @@ async function stampAttemptAccountProfile(
 
 // Returns false when the attempt was cancelled while it started (a Stop raced
 // the launch): a cancelled attempt never comes back to life as running.
+// The Pi session id is stamped here, not only at finish, because an app quit
+// never reaches the finish path and the session is what lets the interrupted
+// work be continued after the restart.
 async function markAttemptRunning(
   runId: string,
   workerTaskId: string,
   attemptId: string,
   timestamp: string,
+  piSessionId?: string,
 ): Promise<boolean> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((item) => item.id === attemptId);
@@ -19965,6 +20010,7 @@ async function markAttemptRunning(
   attempt.status = "running";
   task.status = "running";
   attempt.startedAt = attempt.startedAt ?? timestamp;
+  if (piSessionId) attempt.piSessionId = piSessionId;
   task.updatedAt = timestamp;
   if (step && !["complete", "completed_unverified", "failed", "skipped"].includes(step.status)) {
     step.status = "running";

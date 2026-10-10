@@ -161,7 +161,10 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
    has no fixed length: it is stopped only after 90 minutes without a
    finished tool call or message, or, after 6 hours, if it ignores the
    request to wrap up with a partial report (`classifyWorkerTurnCeiling` in
-   `agent-liveness.ts`).
+   `agent-liveness.ts`). A worker cut off by a pause or an app restart is
+   marked `interruptedBy`; on Resume, Cora is told it can continue that
+   worker's Pi session with `follow_up_of` (`worker-session-reuse.ts`)
+   instead of starting the task over.
 8. **Reports.** A worker ends by writing `final-report.json`. `worker-report.ts`
    reads it and decides whether to accept it. A missing or malformed report
    gets one follow-up turn that names the exact problem; if that fails too,

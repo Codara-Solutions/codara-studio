@@ -1263,7 +1263,7 @@ const EXECUTE_TOOLS = [
               follow_up_of: {
                 type: "string",
                 description:
-                  "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. Never allowed on taskClass verifier; verification must start fresh.",
+                  "Optional worker_task_id of an ACCEPTED worker from this run. Use it for follow-up or corrective work on files that finished worker just covered: Codara resumes that worker's runtime session (same runtime and model, prior context intact) so the new prompt lands as its next turn instead of paying a cold start. Only honored while the finished attempt's context usage is low; otherwise Codara spawns cold and the result note says why. A worker a pause or app restart cut off may also be continued this way (the resume note marks it continuable): give it a brief to check its edits so far and finish the rest. Never allowed on taskClass verifier; verification must start fresh.",
               },
               verifier: {
                 type: "string",

@@ -3191,7 +3191,15 @@ async function handleOrchestratorSpawnWorkers(
     if (!created) continue;
     workerTaskIds.push(created.id);
     createdTaskClasses.push(typeof w.taskClass === "string" ? w.taskClass : undefined);
-    if (resumePlan) {
+    if (resumePlan?.interrupted) {
+      resumedSessionCount += 1;
+      guardrailNotes.push(
+        `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id}, whose ` +
+          `attempt ${resumePlan.sourceAttempt.attemptNumber} was cut off by a ` +
+          `${resumePlan.sourceAttempt.interruptedBy === "app_restart" ? "app restart" : "pause"}. ` +
+          "The new prompt lands as the next turn of that worker's session; its edits so far are on disk.",
+      );
+    } else if (resumePlan) {
       resumedSessionCount += 1;
       guardrailNotes.push(
         `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id} ` +

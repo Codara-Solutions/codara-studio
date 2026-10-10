@@ -702,6 +702,83 @@ async function main() {
     messageResumePrompt.slice(0, 500),
   );
 
+  // ── 3a. interrupted workers with a session are offered as continuable ────
+  // A worker the pause cut off, one the app quit killed (boot recovery records
+  // it failed with interruptedBy "app_restart"), and one that failed on its
+  // own. The first two are listed with their session continuable through
+  // follow_up_of; the third is not interrupted work at all.
+  const continueId = "run-pause-continuable";
+  const continueTask = (id, title, status) => ({
+    id,
+    runId: continueId,
+    stepId: "step-3",
+    title,
+    status,
+    taskClass: "feature",
+    createdBy: "spark",
+    createdAt: PAUSED_AT,
+    updatedAt: PAUSED_AT,
+  });
+  const continueAttempt = (id, workerTaskId, status, extra) => ({
+    id,
+    runId: continueId,
+    workerTaskId,
+    attemptNumber: 1,
+    runtime: "claude",
+    model: "claude-sonnet-5",
+    cwd: HOME,
+    status,
+    startedAt: PAUSED_AT,
+    finishedAt: PAUSED_AT,
+    ...extra,
+  });
+  writeRun(
+    forcePausedRun(continueId, {
+      workerTasks: [
+        continueTask("task-paused", "Port the lexer", "cancelled"),
+        continueTask("task-restarted", "Port the printer", "failed"),
+        continueTask("task-broken", "Port the checker", "failed"),
+      ],
+      workerAttempts: [
+        continueAttempt("attempt-paused", "task-paused", "cancelled", {
+          interruptedBy: "pause",
+          piSessionId: "run-pause-continuable-attempt-paused",
+          contextTokens: 120_000,
+        }),
+        continueAttempt("attempt-restarted", "task-restarted", "failed", {
+          interruptedBy: "app_restart",
+          piSessionId: "run-pause-continuable-attempt-restarted",
+          error: "the app closed while this worker was running; its process is gone",
+        }),
+        continueAttempt("attempt-broken", "task-broken", "failed", {
+          piSessionId: "run-pause-continuable-attempt-broken",
+          error: "tsc failed",
+        }),
+      ],
+    }),
+  );
+  await runStore.resumeRun({ runId: continueId });
+  const continuePrompt = callsFor(continueId)[0]?.prompt ?? "";
+  check(
+    "a pause-interrupted worker with a session is listed as continuable",
+    /task task-paused, attempt attempt-paused \(attempt #1, interrupted, continuable on claude\)/.test(continuePrompt),
+    continuePrompt.slice(0, 900),
+  );
+  check(
+    "a worker the app restart killed is listed as continuable too",
+    /task task-restarted, attempt attempt-restarted \(attempt #1, interrupted, continuable on claude\)/.test(
+      continuePrompt,
+    ),
+  );
+  check(
+    "the note tells the manager how to continue them",
+    /follow_up_of set to that task id/.test(continuePrompt) && /app restart/.test(continuePrompt),
+  );
+  check(
+    "a worker that failed on its own is not presented as interrupted",
+    !continuePrompt.includes("task-broken"),
+  );
+
   // ── 3b. a run paused with its manager turn still in flight keeps that turn ──
   // The soft pauseRun path never kills the turn, so the run already has a
   // driver; a second concurrent chat turn would race the first one's decision.
@@ -1210,6 +1287,11 @@ async function main() {
     pausedLaunch.task?.status,
   );
   check(
+    "a pause marks the attempt it stopped as interrupted, so its session may be continued",
+    pausedLaunch.attempt?.interruptedBy === "pause",
+    pausedLaunch.attempt?.interruptedBy,
+  );
+  check(
     "a worker stopped during startup never starts Pi or receives its prompt",
     pausedLaunch.piStarts === 0 && pausedLaunch.piPrompts === 0,
     JSON.stringify({ starts: pausedLaunch.piStarts, prompts: pausedLaunch.piPrompts }),
@@ -1230,6 +1312,11 @@ async function main() {
     JSON.stringify({ attempt: cancelledLaunch.attempt?.status, task: cancelledLaunch.task?.status }),
   );
   check(
+    "a cancelled run's attempt is not marked as continuable interrupted work",
+    cancelledLaunch.attempt?.interruptedBy === undefined,
+    cancelledLaunch.attempt?.interruptedBy,
+  );
+  check(
     "a worker cancelled during startup never receives its prompt",
     cancelledLaunch.piPrompts === 0,
     String(cancelledLaunch.piPrompts),
@@ -1243,6 +1330,16 @@ async function main() {
     storeSource.indexOf("\nexport async function deleteRun(", launchStart),
   );
   check("launchWorkerAttempt exists", launchStart !== -1 && launchBody.length > 0);
+  check(
+    "boot recovery marks a worker the app quit killed as interrupted",
+    /"the app closed while this worker was running; its process is gone",\s*\{ interruptedBy: "app_restart" \}/.test(
+      storeSource,
+    ),
+  );
+  check(
+    "the Pi session id is persisted when the worker starts, before any quit can lose it",
+    /markAttemptRunning\(run\.id, task\.id, attemptId, runningTimestamp, piSessionId\)/.test(storeSource),
+  );
   check(
     "the finish path asks whether the exit belonged to a force pause",
     /const pauseInterrupted = workerExitInterruptedByForcePause\(\{/.test(launchBody),

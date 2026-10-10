@@ -253,6 +253,61 @@ async function main() {
     assert.match(decision.reason, /no successful attempt/);
   }
 
+  // A worker a pause cut off is continued even though its task never
+  // finished, with no headroom cap: its session is the context for its own
+  // unfinished work.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "cancelled";
+    attempt.status = "cancelled";
+    attempt.interruptedBy = "pause";
+    attempt.contextTokens = 150_000; // far above the 20% follow-up cap
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume");
+    assert.equal(decision.interrupted, true);
+    assert.equal(decision.sessionId, attempt.piSessionId);
+  }
+
+  // An app quit records the attempt failed with no gauge; it still resumes.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "failed";
+    attempt.status = "failed";
+    attempt.interruptedBy = "app_restart";
+    delete attempt.contextTokens;
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume");
+    assert.equal(decision.contextTokens, 0);
+  }
+
+  // A worker that failed or was cancelled for its own reasons is never
+  // continued, and an interrupted one still needs its runtime, its session,
+  // no live writer, and a non-verifier class.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "failed";
+    attempt.status = "failed";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "failed for cause");
+    task.status = "cancelled";
+    attempt.status = "cancelled";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "cancelled by a Stop");
+    attempt.interruptedBy = "pause";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "resume");
+    assert.equal(
+      evaluate({ workerTasks, workerAttempts }, { requestedRuntime: "codex" }).kind,
+      "cold",
+      "interrupted sessions do not cross runtimes",
+    );
+    workerTasks.push({ id: "task-cont", status: "running", resumeSessionId: attempt.piSessionId });
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /one live writer/);
+    workerTasks.pop();
+    delete attempt.piSessionId;
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /no resumable runtime session/);
+    attempt.piSessionId = "run-1-attempt-src";
+    task.taskClass = "verifier";
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /verifier/);
+  }
+
   // A verifier source is never continued.
   {
     const { workerTasks, workerAttempts, task } = baseRun();
