@@ -89,7 +89,7 @@ async function main() {
         backend: "pi",
       });
       assert.equal(plan.action, "park");
-      assert.match(plan.reason, /Pi exhausted its own automatic provider retries/);
+      assert.match(plan.reason, /Pi already retried the provider or a tool already ran/);
       assert.equal(
         plan.parkReason,
         error === OVERLOADED
@@ -200,7 +200,7 @@ async function main() {
     );
   });
 
-  test("a subscription/billing decline fails the turn and never parks the run", () => {
+  test("a subscription/billing decline fails only the turn and never parks the run", () => {
     // The exact 400 recorded on run-ms9ikoef-mnucvq: Anthropic bills
     // third-party harness use against Extra Usage and this account had none.
     // It is classified so the failure card can explain the billing cause, but a
@@ -217,7 +217,8 @@ async function main() {
         transientRetryCount: 0,
         ...(backend ? { backend } : {}),
       });
-      assert.equal(plan.action, "fail", `expected fail for backend=${backend}`);
+      // fail_turn, not fail: the run keeps its status and its live workers.
+      assert.equal(plan.action, "fail_turn", `expected fail_turn for backend=${backend}`);
       assert.equal(plan.kind, "subscription");
       // Nothing that could pause the run or drive the composer placeholder.
       assert.equal(plan.parkReason, undefined);
@@ -274,7 +275,7 @@ async function main() {
     assert.equal(P.isParkedManagerTurnAction(undefined), false);
   });
 
-  test("auth parks for user recovery; crashes and unclassified errors fail", () => {
+  test("auth parks for user recovery; unclassified errors fail only without live workers", () => {
     for (const error of [
       "Pi provider openai-codex is not authenticated with OAuth",
       "OAuth session expired, please /login",
@@ -299,9 +300,116 @@ async function main() {
         runStatus: "running",
         mode: "chat",
         transientRetryCount: 0,
+        activeWorkerCount: 0,
       });
       assert.equal(plan.action, "fail", `expected fail for ${JSON.stringify(error)}`);
+      // A manager-only problem must never kill workers that are still busy.
+      const withWorkers = P.planManagerTurnFailure({
+        error,
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        activeWorkerCount: 2,
+      });
+      assert.equal(withWorkers.action, "park", `expected park with live workers for ${JSON.stringify(error)}`);
+      assert.equal(withWorkers.kind, "runtime");
+      assert.equal(
+        withWorkers.parkReason,
+        "Cora's turn failed, but its workers are still running. Retry the saved turn.",
+      );
     }
+  });
+
+  test("a crashed runtime or an empty reply parks with its own reason and never replays", () => {
+    for (const [failureCause, parkReason] of [
+      ["runtime", "Cora's runtime stopped unexpectedly. Retry the saved turn."],
+      ["empty_reply", "Cora finished without a reply. Retry the saved turn."],
+    ]) {
+      const plan = P.planManagerTurnFailure({
+        error: failureCause === "runtime"
+          ? "Pi RPC process exited (SIGKILL)"
+          : "Cora finished its tool work without a final response after one retry.",
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        backend: "pi",
+        failureCause,
+        replaySafe: true,
+      });
+      assert.equal(plan.action, "park", failureCause);
+      assert.equal(plan.kind, "runtime");
+      assert.equal(plan.parkReason, parkReason);
+    }
+    // A terminal or user-held run still keeps its state.
+    assert.equal(
+      P.planManagerTurnFailure({
+        error: "Pi RPC process exited (1)",
+        runStatus: "complete",
+        mode: "chat",
+        transientRetryCount: 0,
+        failureCause: "runtime",
+      }).action,
+      "keep_state",
+    );
+  });
+
+  test("Pi runtime and SDK failure strings classify instead of failing the run", () => {
+    for (const [error, kind] of [
+      ["Pi RPC process exited (1)", "transport"],
+      ["Pi RPC process exited (SIGKILL)", "transport"],
+      ["Pi RPC output exceeded the line limit", "transport"],
+      ["Pi RPC client stopped", "transport"],
+      ["Connection error.", "transport"],
+      ["Cora Pi backend error: terminated", "transport"],
+      ["Codex error: stream disconnected before completion", "transport"],
+      ["Request was aborted.", "transport"],
+      ["Pi exhausted automatic retries.", "provider"],
+      ["This model is currently experiencing high load", "provider"],
+      ["The server had an error processing your request", "provider"],
+      ["Codex token refresh was refused (400)", "auth"],
+    ]) {
+      const plan = P.planManagerTurnFailure({
+        error,
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        backend: "pi",
+      });
+      assert.equal(plan.kind, kind, error);
+      assert.equal(plan.action, "park", error);
+    }
+  });
+
+  test("Pi turns earn a replay only when Pi never retried and no tool started", () => {
+    const base = {
+      error: "read ECONNRESET",
+      runStatus: "running",
+      mode: "chat",
+      transientRetryCount: 0,
+      backend: "pi",
+    };
+    const replay = P.planManagerTurnFailure({ ...base, replaySafe: true });
+    assert.equal(replay.action, "retry");
+    assert.equal(replay.kind, "transport");
+    assert.equal(P.planManagerTurnFailure({ ...base, replaySafe: true, providerRetried: true }).action, "park");
+    assert.equal(P.planManagerTurnFailure({ ...base, replaySafe: false }).action, "park");
+    assert.equal(P.planManagerTurnFailure(base).action, "park", "unknown replay safety is unsafe");
+    assert.equal(
+      P.planManagerTurnFailure({ ...base, replaySafe: true, transientRetryCount: 2 }).action,
+      "park",
+      "the shared budget still bounds Pi replays",
+    );
+  });
+
+  test("a turn-only failure never reaches the worker-killing branch", () => {
+    const failTurn = runStoreSource.indexOf('if (failurePlan.action === "fail_turn")');
+    const killWorkers = runStoreSource.indexOf("const orphanedWorkers = activeWorkersForRun(failedRun.id)");
+    assert.ok(failTurn > 0 && killWorkers > failTurn, "fail_turn must return before workers are stopped");
+    assert.match(
+      runStoreSource,
+      /activeWorkerCount: activeWorkersForRun\(settledRun\.id\)\.length/,
+      "the policy must see the run's live workers",
+    );
   });
 
   test("retry backoff is jittered and seconds-scale", () => {

@@ -6315,6 +6315,10 @@ async function askManagerBackend(
         mode,
         transientRetryCount,
         backend: chatConfig.backend,
+        failureCause: result.failureCause,
+        providerRetried: result.providerRetried,
+        replaySafe: result.replaySafe,
+        activeWorkerCount: activeWorkersForRun(settledRun.id).length,
       });
 
       // The run already carries a state this dead turn must not rewrite: a
@@ -6418,6 +6422,7 @@ async function askManagerBackend(
           model: result.model,
           backend: chatConfig.backend,
           error: failureMessage,
+          ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
           providerResponseIds: result.providerResponseIds,
         },
       });
@@ -6426,6 +6431,13 @@ async function askManagerBackend(
       // so would make an overload string a future manager prompt. The failed
       // SparkCall and typed events above are the sole durable error surface.
       const failedRun = settledRun;
+
+      // A billing decline fails this turn and nothing else: the run keeps
+      // its status and its workers, and the failed SparkCall above is the
+      // visible error.
+      if (failurePlan.action === "fail_turn") {
+        return failedRun;
+      }
 
       // Provider trouble that outlived the retries (or a rate limit, which a
       // fast retry can never clear): park instead of failing. The work did
@@ -6634,6 +6646,10 @@ async function askManagerBackend(
     }
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
+    const diagnostics =
+      err && typeof (err as { diagnostics?: unknown }).diagnostics === "string"
+        ? (err as { diagnostics: string }).diagnostics
+        : undefined;
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;
@@ -6656,7 +6672,13 @@ async function askManagerBackend(
       sparkCallId: callId,
       type: "spark_call.failed",
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
-      payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
+      payload: {
+        mode,
+        model: chatConfig.model,
+        backend: chatConfig.backend,
+        error,
+        ...(diagnostics ? { diagnostics } : {}),
+      },
     });
     return null;
   }

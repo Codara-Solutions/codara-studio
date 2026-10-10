@@ -84,6 +84,25 @@ async function main() {
     ["runtime network fetch failure before final report", "transport"],
     ["fetch failed", "transport"],
     ["read ECONNRESET", "transport"],
+    // Pi's own process going away and the SDK wordings Pi retries before it
+    // gives up: unclassified, these failed the run and killed its workers.
+    ["Pi RPC process exited (1)", "transport"],
+    ["Pi RPC process exited (SIGKILL)", "transport"],
+    ["Pi RPC output exceeded the line limit", "transport"],
+    ["Pi RPC emitted invalid UTF-8 or JSON", "transport"],
+    ["Pi RPC stdin failed: write EPIPE", "transport"],
+    ["Pi RPC client stopped", "transport"],
+    ["Pi RPC client is not running", "transport"],
+    ["Connection error.", "transport"],
+    ["terminated", "transport"],
+    ["Cora Pi backend error: terminated", "transport"],
+    ["Codex error: stream disconnected before completion", "transport"],
+    ["Request was aborted.", "transport"],
+    ["WebSocket stream closed before response.completed", "transport"],
+    // provider: Pi's own fallback after its retries, and capacity wordings
+    ["Pi exhausted automatic retries.", "provider"],
+    ["This model is currently experiencing high load", "provider"],
+    ["The server had an error processing your request. Sorry about that!", "provider"],
     // auth
     ["Pi provider anthropic is not authenticated with OAuth", "auth"],
     ["Pi provider openai has no OAuth access token", "auth"],
@@ -91,6 +110,8 @@ async function main() {
     ["401 Unauthorized", "auth"],
     ["HTTP 401 Unauthorized; service unavailable", "auth"],
     ["invalid api key provided", "auth"],
+    ["Codex token refresh was refused (400)", "auth"],
+    ["Cora's Claude sign-in expired and cannot be renewed (OAuth session expired). Sign in again in Settings > Accounts.", "auth"],
     // launch
     ["runtime binary did not start (saw 'command not found')", "launch"],
     ["no TUI banner observed", "launch"],
@@ -126,6 +147,10 @@ async function main() {
   // Unknown text keeps the pre-taxonomy behaviour instead of being forced into
   // a bucket, and empty input is never a failure kind.
   assert.equal(classifyWorkerFailure("the migration script left the schema half applied"), undefined);
+  // "terminated" counts only as undici's bare stream message, not prose.
+  assert.equal(classifyWorkerFailure("a loop-back never terminated. Pass failed."), undefined);
+  // A context overflow is deterministic; replaying it would loop.
+  assert.equal(classifyWorkerFailure("prompt is too long: 210000 tokens > 200000 maximum"), undefined);
   assert.equal(classifyWorkerFailure(""), undefined);
   assert.equal(classifyWorkerFailure("   "), undefined);
   assert.equal(classifyWorkerFailure(undefined), undefined);
