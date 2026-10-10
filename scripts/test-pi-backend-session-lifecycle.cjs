@@ -279,6 +279,20 @@ async function loadBackend() {
   return require(outfile).piBackend;
 }
 
+async function loadTurnPolicy() {
+  const outfile = path.join(TMP, "manager-turn-policy.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src/main/orchestration/manager-turn-policy.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  return require(outfile);
+}
+
 function requestInput(runId, model = "gpt-5.6-sol") {
   return {
     run: {
@@ -724,6 +738,17 @@ async function testDeadProcessFailsTheTurnPromptly(backend, harness) {
   assert.equal(result.turnFailed, true, "a runtime that died mid-turn fails the turn");
   assert.ok(Date.now() - startedAt < 5000, "the turn fails within seconds, not at the idle timeout");
   assert.match(result.notice, /in the middle of the turn/);
+  // A crashed manager runtime says nothing about the work: the run parks for
+  // Retry with its workers alive instead of failing and killing them.
+  const policy = await loadTurnPolicy();
+  const plan = policy.planManagerTurnFailure({
+    error: result.notice,
+    runStatus: "running",
+    mode: "chat",
+    transientRetryCount: 0,
+    backend: "pi",
+  });
+  assert.equal(plan.action, "park", `a runtime that died mid-turn parks the run (got ${JSON.stringify(plan)})`);
   await backend.disposeChat("run-dead-mid-turn");
 }
 

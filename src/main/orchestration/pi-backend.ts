@@ -364,12 +364,21 @@ interface PiTurnLiveness {
   inFlightTools: Map<string, { name: string; startedAt: number; longPoll: boolean }>;
 }
 
+function runtimeDiedMidTurnError(phase: "failed" | "stopped"): Error {
+  return new Error(
+    `Cora's Pi runtime ${phase === "failed" ? "failed" : "exited"} in the middle of the turn (transport closed).`,
+  );
+}
+
 /**
  * Resolve when the turn settles; reject when it goes QUIET (see
  * PI_TURN_IDLE_TIMEOUT_MS) or blows the absolute ceiling. A turn parked inside
  * a long-poll orchestration tool is never idle, however long it waits. A Pi
  * process that died mid-turn never emits agent_settled, so a stopped or failed
  * client rejects at the next check instead of waiting out the idle timeout.
+ * Its error must classify as "transport" (see runtimeDiedMidTurnError) so the
+ * turn policy parks the run: a crashed manager runtime says nothing about the
+ * work, and an unclassified error would fail the run and kill its workers.
  */
 async function waitForSettled(
   settled: Promise<void>,
@@ -387,7 +396,7 @@ async function waitForSettled(
           if (session.interrupted) return;
           const phase = session.client.state().phase;
           if (phase === "failed" || phase === "stopped") {
-            reject(new Error(`Cora's Pi runtime ${phase === "failed" ? "failed" : "exited"} in the middle of the turn.`));
+            reject(runtimeDiedMidTurnError(phase));
           }
         }, PI_PROCESS_CHECK_MS);
         processPoll.unref();
