@@ -86,6 +86,14 @@ async function main() {
     assert.equal(good.report?.summary, "half");
   });
 
+  await test("the report follow-up turn names the exact problem and the allowed statuses", async () => {
+    const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");
+    assert.match(
+      runStore,
+      /const \{ problem \} = await readWorkerReportWithProblem\(paths\.finalReportJson\);\s*paint\([^)]*\);\s*await waitForPiWorkerTurn\(\s*client,\s*`Your task turn ended without a valid final report at \$\{paths\.finalReportJson\}` \+\s*`\$\{problem \? `: \$\{problem\}` : ""\}\. ` \+\s*'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed"\. '/,
+    );
+  });
+
   console.log(`\n${passed} worker report checks passed.`);
 }
 

@@ -128,6 +128,18 @@ async function main() {
     assert.equal(classifyWorkerFailure(text), expected, `classify(${JSON.stringify(text)})`);
   }
 
+  // A worker that ran its turn but left no usable report did not fail to
+  // launch: its edits are likely on disk, so it must not read as a launch or
+  // auth failure that reruns the task cold elsewhere.
+  for (const text of [
+    "The worker finished its turn without a valid final report: final-report.json is not valid JSON. Its edits may already be on disk.",
+    "The claude worker finished without a valid final report: status \"in_progress\" is not one of \"complete\", \"partial\", \"blocked\", \"failed\".",
+    "Pi worker completed without a parseable final-report.json (the file is not valid JSON (Unexpected token }))",
+  ]) {
+    const kind = classifyWorkerFailure(text);
+    assert.ok(kind !== "launch" && kind !== "auth", `${JSON.stringify(text)} classified as ${kind}`);
+  }
+
   // Unknown text keeps the pre-taxonomy behaviour instead of being forced into
   // a bucket, and empty input is never a failure kind.
   assert.equal(classifyWorkerFailure("the migration script left the schema half applied"), undefined);
