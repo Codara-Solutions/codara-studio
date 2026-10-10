@@ -328,6 +328,22 @@ async function main() {
     usage.inspectCachedPiSubscriptionUsageProfiles().length === 1 &&
       usage.inspectCachedPiSubscriptionUsageProfiles()[0].provider === "anthropic",
   );
+  // The manager-prompt reader outlives the provider TTL but not its own bound.
+  const lastKnown = usage.inspectLastKnownPiSubscriptionUsageProfiles(30 * 60_000);
+  check(
+    "the last-known reader keeps usage past the provider TTL",
+    lastKnown.length === 3 && lastKnown.some((entry) => entry.provider === "openai-codex"),
+    JSON.stringify(lastKnown.map((entry) => entry.provider)),
+  );
+  lastKnown[0].windows[0].usedPercent = 999;
+  check(
+    "the last-known reader is mutation-safe",
+    usage.inspectLastKnownPiSubscriptionUsageProfiles(30 * 60_000)[0].windows[0].usedPercent !== 999,
+  );
+  check(
+    "the last-known reader drops reads older than its bound",
+    usage.inspectLastKnownPiSubscriptionUsageProfiles(30_000).length === 0,
+  );
   await usage.inspectPiSubscriptionUsage(true);
   check("forced refresh bypasses every profile cache", fetches === 6, `fetches=${fetches}`);
 

@@ -184,7 +184,7 @@ async function main() {
     descendantPid = descendant.pid;
     assert.equal(alive(descendantPid), true, "fixture descendant should be running before stop");
   }
-await client.stop();
+  await client.stop();
   if (process.platform !== "win32") {
     await waitFor(() => !alive(descendantPid), 3_000, "detached Pi tool descendant teardown");
     assert.equal(alive(unrelated.pid), true, "stopping Pi must not touch an unrelated process");
@@ -193,7 +193,7 @@ await client.stop();
   assert.equal(client.state().phase, "stopped");
   assert.equal(client.state().pendingCount, 0);
 
-const malformed = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const malformed = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
   await malformed.start();
   await assert.rejects(
     malformed.request({ type: "malformed" }),
@@ -202,7 +202,7 @@ const malformed = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGrace
   assert.equal(malformed.state().phase, "failed");
   await malformed.stop();
 
-const startupTimeout = new PiRpcClient(
+  const startupTimeout = new PiRpcClient(
     plan({ FIXTURE_IGNORE_STATE: "1" }),
     { requestTimeoutMs: 20, shutdownGraceMs: 30 },
   );
@@ -222,7 +222,7 @@ const startupTimeout = new PiRpcClient(
   await stderr.stop();
   // A crash after the last response leaves nothing pending to reject; the
   // failure subscription is the only way a waiting turn hears about it.
-const crashing = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const crashing = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
   await crashing.start();
   const failures = [];
   crashing.onFailure((failure) => failures.push(failure));
@@ -236,7 +236,7 @@ const crashing = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceM
   assert.equal(crashing.state().phase, "failed");
   await crashing.stop();
 
-const stopped = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  const stopped = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
   await stopped.start();
   let stopFailures = 0;
   stopped.onFailure(() => { stopFailures += 1; });
@@ -247,7 +247,7 @@ const stopped = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs
   // agent_end repeats the whole run and is the one record that may outgrow
   // the line limit; it is skipped, whole or split across chunks, and the
   // session carries on. Any other oversized record is still fatal.
-for (const split of [false, true]) {
+  for (const split of [false, true]) {
     const oversized = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
     await oversized.start();
     const seen = [];
@@ -258,7 +258,7 @@ for (const split of [false, true]) {
     assert.equal(oversized.diagnostics().droppedOversizedEvents, 1);
     await oversized.stop();
   }
-const fatal = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
+  const fatal = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
   await fatal.start();
   await assert.rejects(fatal.request({ type: "big_message_end" }), (error) => error.code === "PROTOCOL_ERROR");
   assert.equal(fatal.state().failure.message, "Pi RPC output exceeded the line limit");
