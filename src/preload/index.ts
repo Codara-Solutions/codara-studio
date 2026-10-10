@@ -137,6 +137,7 @@ import type {
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
+  LiveWorkerActivity,
   RunState,
   RuntimeState,
   ScheduledJob,
@@ -848,6 +849,8 @@ const api = {
       ipcRenderer.invoke("orchestration:retryWorkerTask", { runId, workerTaskId }),
     listRuns: (workspaceId?: string): Promise<RunState[]> =>
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
+    getLiveActivity: (workspaceId: string): Promise<LiveWorkerActivity[]> =>
+      ipcRenderer.invoke("orchestration:getLiveActivity", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>
       ipcRenderer.invoke("orchestration:listEvents", runId),
     startAutopilot: (input: StartAutopilotInput): Promise<RunState> =>

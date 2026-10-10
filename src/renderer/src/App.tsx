@@ -1777,24 +1777,57 @@ export default function App() {
 
   // The event channel above only refreshes when orchestration APPENDS an
   // event. A live worker's activity readout (WorkerAttempt.runtimeActivity)
-  // is deliberately event-less and in-memory — one journal append per tool
-  // call would be spam — so a long worker turn can mutate the run cache for
-  // minutes without a single event. While any attempt is live, poll the
-  // snapshot at 1Hz to carry those silent mutations to the Runs card.
-  // Cheap in every idle dimension: the tick is one array scan when nothing
-  // is running, skips entirely while the window is hidden, and a no-change
-  // poll is absorbed by refreshRunsFor's sameRunsList reference-keep.
+  // is deliberately event-less and in-memory (one journal append per tool
+  // call would be spam), so a long worker turn can change it for minutes
+  // without a single event. While any attempt is live, poll just those
+  // readouts at 1Hz and patch them in. Polling listRuns here cloned every run
+  // in the workspace each second, and the activity's updatedAt bump defeated
+  // sameRunsList, so the whole app re-rendered every tick. Only runs whose
+  // readout moved get a new object; every other run keeps its reference.
   useEffect(() => {
     if (!booted) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
+      const workspaceId = activeIdRef.current;
+      if (!workspaceId) return;
       const hasLiveAttempt = runsRef.current.some((run) =>
         run.workerAttempts.some((attempt) =>
           ["launching", "running", "finishing"].includes(attempt.status),
         ),
       );
       if (!hasLiveAttempt) return;
-      void refreshRunsForRef.current(activeIdRef.current);
+      void window.spark.orchestration
+        .getLiveActivity(workspaceId)
+        .then((live) => {
+          if (activeIdRef.current !== workspaceId || live.length === 0) return;
+          const byAttempt = new Map(live.map((item) => [item.attemptId, item]));
+          setRuns((current) => {
+            let changed = false;
+            const next = current.map((run) => {
+              const moved = run.workerAttempts.some((attempt) => {
+                const item = byAttempt.get(attempt.id);
+                return (
+                  item !== undefined &&
+                  (item.runtimeActivity !== attempt.runtimeActivity ||
+                    item.runtimeActivityAt !== attempt.runtimeActivityAt)
+                );
+              });
+              if (!moved) return run;
+              changed = true;
+              return {
+                ...run,
+                workerAttempts: run.workerAttempts.map((attempt) => {
+                  const item = byAttempt.get(attempt.id);
+                  return item
+                    ? { ...attempt, runtimeActivity: item.runtimeActivity, runtimeActivityAt: item.runtimeActivityAt }
+                    : attempt;
+                }),
+              };
+            });
+            return changed ? next : current;
+          });
+        })
+        .catch(() => undefined);
     }, 1_000);
     return () => window.clearInterval(interval);
   }, [booted]);

@@ -408,6 +408,7 @@ import type {
   GitRemoteUpdatedPayload,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
+  LiveWorkerActivity,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
@@ -2262,6 +2263,15 @@ export function registerIpc(): void {
       }
       const { retryWorkerTask } = await getRunStore();
       return retryWorkerTask(input.runId, input.workerTaskId);
+    },
+  );
+
+  handle(
+    "orchestration:getLiveActivity",
+    async (_e, workspaceId: string): Promise<LiveWorkerActivity[]> => {
+      if (typeof workspaceId !== "string") return [];
+      const { liveWorkerActivity } = await getRunStore();
+      return liveWorkerActivity(workspaceId);
     },
   );
 

@@ -1415,6 +1415,53 @@ async function main() {
     );
   }
 
+  // ── 4b3. the live-activity poll carries only live attempts' readouts ────
+  {
+    const activityRun = forcePausedRun("run-live-activity", {
+      status: "running",
+      workerAttempts: [
+        {
+          id: "attempt-live-activity",
+          runId: "run-live-activity",
+          workerTaskId: "task-parser",
+          attemptNumber: 2,
+          runtime: "claude",
+          cwd: HOME,
+          status: "running",
+          startedAt: NOW,
+          runtimeActivity: "Run command · npm test",
+          runtimeActivityAt: NOW,
+        },
+        {
+          id: "attempt-done-activity",
+          runId: "run-live-activity",
+          workerTaskId: "task-parser",
+          attemptNumber: 1,
+          runtime: "claude",
+          cwd: HOME,
+          status: "failed",
+          runtimeActivity: "stale",
+        },
+      ],
+    });
+    writeRun(activityRun);
+    writeRun({ ...activityRun, id: "run-live-activity-other", workspaceId: "ws-other" });
+    await runStore.getRun("run-live-activity");
+    await runStore.getRun("run-live-activity-other");
+    const live = runStore.liveWorkerActivity(WS).filter((item) => item.runId === "run-live-activity");
+    check(
+      "the activity poll returns the live attempt's readout and nothing else",
+      live.length === 1 &&
+        live[0].attemptId === "attempt-live-activity" &&
+        live[0].runtimeActivity === "Run command · npm test",
+      JSON.stringify(live),
+    );
+    check(
+      "the activity poll is scoped to its workspace",
+      runStore.liveWorkerActivity("ws-other").every((item) => item.runId === "run-live-activity-other"),
+    );
+  }
+
   // ── 4c. the quit guard counts only work a quit would kill ───────────────
   {
     const before = runStore.liveWorkForQuit();

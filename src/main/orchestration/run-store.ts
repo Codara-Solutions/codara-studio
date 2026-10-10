@@ -30,6 +30,7 @@ import type {
   StartDirectWorkerRunInput,
   WorkerAttemptStatus,
   LaunchWorkerAttemptInput,
+  LiveWorkerActivity,
   MarkRunSeenInput,
   PauseRunInput,
   RenameRunInput,
@@ -580,6 +581,31 @@ const drainRunRuntimeResources = createRunRuntimeShutdown({
  */
 export function shutdownRunRuntimeResources(maxWaitMs?: number): Promise<void> {
   return drainRunRuntimeResources(maxWaitMs);
+}
+
+/**
+ * Activity readouts of the workspace's live worker attempts, straight from the
+ * run cache that reportActivity writes. The renderer polls this instead of
+ * listRuns while workers run, so a tool call costs a few bytes, not a clone of
+ * every run in the workspace.
+ */
+export function liveWorkerActivity(workspaceId: string): LiveWorkerActivity[] {
+  const live: LiveWorkerActivity[] = [];
+  for (const run of runCache.values()) {
+    if (run.workspaceId !== workspaceId) continue;
+    for (const attempt of run.workerAttempts) {
+      if (attempt.status !== "launching" && attempt.status !== "running" && attempt.status !== "finishing") {
+        continue;
+      }
+      live.push({
+        runId: run.id,
+        attemptId: attempt.id,
+        runtimeActivity: attempt.runtimeActivity,
+        runtimeActivityAt: attempt.runtimeActivityAt,
+      });
+    }
+  }
+  return live;
 }
 
 /**

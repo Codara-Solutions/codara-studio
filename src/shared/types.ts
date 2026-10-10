@@ -3679,6 +3679,17 @@ export interface WorkerAttempt {
   contextWindowTokens?: number;
 }
 
+/**
+ * A live worker attempt's activity readout, polled by the renderer on its own
+ * so a running worker does not cost a full listRuns every second.
+ */
+export interface LiveWorkerActivity {
+  runId: string;
+  attemptId: string;
+  runtimeActivity?: string;
+  runtimeActivityAt?: string;
+}
+
 export interface WorkerTaskEnvelope {
   runId: string;
   workerTaskId: string;
