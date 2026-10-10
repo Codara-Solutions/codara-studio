@@ -69,7 +69,7 @@ const runtime = loadTypeScriptModule(
  * three edges stubbed so the assembled --extension roster can be asserted for
  * real instead of being re-implemented here.
  */
-async function loadElectronLaunchPlans(outDirectory) {
+async function loadElectronLaunchPlans(outDirectory, bundleDirectory = outDirectory) {
   const stub = (contents) => ({ contents, loader: "js" });
   const stubs = {
     electron: `module.exports = { app: {
@@ -78,7 +78,7 @@ async function loadElectronLaunchPlans(outDirectory) {
       getPath: () => ${JSON.stringify(outDirectory)},
     } };`,
     storage: "module.exports = { loadSettings: async () => ({}) };",
-    "agent-sync": "module.exports = { listPiMcpServers: () => [] };",
+    "agent-sync": "module.exports = { listPiMcpServers: () => globalThis.__codaraTestMcpServers ?? [] };",
     "path-reconstruction": "module.exports = { getEnrichedEnv: async () => process.env };",
     // The user's installed Pi: a fake global package outside the app tree.
     "binary-resolver": `module.exports = {
@@ -98,7 +98,7 @@ async function loadElectronLaunchPlans(outDirectory) {
       revokeAgentSocketCapability: () => undefined,
     };`,
   };
-  const outfile = path.join(outDirectory, "pi-runtime-electron.cjs");
+  const outfile = path.join(bundleDirectory, "pi-runtime-electron.cjs");
   await esbuild.build({
     entryPoints: [path.join(ROOT, "src", "main", "orchestration", "pi-runtime-electron.ts")],
     outfile,
@@ -156,6 +156,7 @@ async function main() {
     path.join(__dirname, "..", "node_modules"),
   ]);
   assert.equal(installedRuntime.version, "0.85.1");
+  assert.equal(installedRuntime.source, "bundled");
   assert.equal(path.basename(installedRuntime.entrypoint), "cli.js");
 
   await withTempDirectory(async (directory) => {
@@ -190,7 +191,15 @@ async function main() {
   // Cora runs the Pi the user installed: any version from the minimum up,
   // found through the package its `pi` links into or npm's global layout.
   assert.equal(runtime.CODARA_PI_MIN_VERSION, "0.85.1");
-  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent");
+  // The Install button pins the tested minor line; npm's latest may be a
+  // major version Codara never ran.
+  assert.equal(runtime.CODARA_PI_INSTALL_SPEC, "@earendil-works/pi-coding-agent@~0.85.1");
+  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent@~0.85.1");
+  const installSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "pi-runtime-install.ts"),
+    "utf8",
+  );
+  assert.match(installSource, /"--global",\s*CODARA_PI_INSTALL_SPEC,/, "npm installs the pinned spec");
   assert.equal(runtime.comparePiVersions("0.87.1", "0.85.1"), 1);
   assert.equal(runtime.comparePiVersions("0.85.1", "0.85.1"), 0);
   assert.equal(runtime.comparePiVersions("0.85.0", "0.85.1"), -1);
@@ -215,6 +224,7 @@ async function main() {
     assert.equal(roots[0], fs.realpathSync(packageRoot), "the link resolves into its package first");
     const located = await runtime.resolveInstalledPiRuntime(roots);
     assert.equal(located.version, "0.87.1", "a newer Pi than the tested one runs Cora");
+    assert.equal(located.source, "user");
     assert.equal(located.entrypoint, path.join(fs.realpathSync(packageRoot), "dist", "bundle", "cli.js"));
 
     // A shim that is not a link (Windows' pi.cmd, some managers) finds npm's layout.
@@ -675,6 +685,62 @@ async function main() {
   });
   assert.equal(partialMcpPlan.env.CODARA_PI_MCP_CONFIG, undefined);
   assert.equal(partialMcpPlan.mcpConfigPath, null);
+  assert.equal(mcpPlan.runtimeVersion, fakeRuntime.version, "a plan names the Pi build it runs");
+
+  // An ssh:// workspace path would resolve to a nonsense local directory and
+  // fail as a misleading ENOENT; say what is actually unsupported.
+  assert.throws(() => runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "anthropic",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-remote",
+    runId: "run-remote",
+    mode: "execute",
+    cwd: "ssh://devbox/home/u/project",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+  }), /Cora runs on local folders only for now/);
+
+  // Pi's retry budget is merged into the isolated settings.json without
+  // disturbing anything else, and a hand-set shellPath survives.
+  assert.deepEqual(runtime.mergeCodaraPiAgentSettings(undefined), {
+    retry: { enabled: true, maxRetries: 6, baseDelayMs: 2000 },
+  });
+  assert.deepEqual(
+    runtime.mergeCodaraPiAgentSettings(
+      { theme: "dark", shellPath: "D:\\tools\\bash.exe", retry: { enabled: false, provider: { maxRetryDelayMs: 1000 } } },
+    ),
+    {
+      theme: "dark",
+      shellPath: "D:\\tools\\bash.exe",
+      retry: { enabled: true, maxRetries: 6, baseDelayMs: 2000, provider: { maxRetryDelayMs: 1000 } },
+    },
+  );
+  assert.equal(
+    runtime.mergeCodaraPiAgentSettings({}, { shellPath: "C:\\Git\\bin\\bash.exe" }).shellPath,
+    "C:\\Git\\bin\\bash.exe",
+  );
+  // The longest single backoff sleep stays inside the worker's
+  // provider-failure grace, so a retrying worker is never failed mid-sleep.
+  assert.ok(
+    runtime.CODARA_PI_RETRY_SETTINGS.baseDelayMs * 2 ** (runtime.CODARA_PI_RETRY_SETTINGS.maxRetries - 1) < 6 * 60 * 1000,
+  );
+
+  // Git for Windows' bash is found in user-scope installs too, never the WSL
+  // launcher that a PATH search can land on.
+  const bashCandidates = runtime.windowsGitBashCandidates(
+    {
+      ProgramFiles: "C:\\Program Files",
+      LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      USERPROFILE: "C:\\Users\\u",
+    },
+    "C:\\Users\\u\\AppData\\Local\\Programs\\Git\\cmd\\git.exe",
+  );
+  assert.equal(bashCandidates[0], "C:\\Program Files\\Git\\bin\\bash.exe");
+  assert.ok(bashCandidates.includes("C:\\Users\\u\\AppData\\Local\\Programs\\Git\\bin\\bash.exe"));
+  assert.ok(bashCandidates.includes("C:\\Users\\u\\scoop\\apps\\git\\current\\bin\\bash.exe"));
+  assert.equal(bashCandidates.some((candidate) => /System32/i.test(candidate)), false);
 
   assert.throws(() => runtime.buildPiManagerLaunchPlan({
     ...codexPlan,
@@ -737,6 +803,27 @@ async function main() {
       managerPlan.env.PI_CODING_AGENT_SESSION_DIR,
       path.join(configDir, "sessions"),
     );
+    assert.equal(managerPlan.runtimeSource, "user");
+    const agentSettingsPath = path.join(managerPlan.env.PI_CODING_AGENT_DIR, "settings.json");
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(agentSettingsPath, "utf8")).retry,
+      { enabled: true, maxRetries: 6, baseDelayMs: 2000 },
+      "every launch carries Codara's Pi retry budget",
+    );
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(agentSettingsPath).mode & 0o077, 0, "settings.json stays owner-only");
+    }
+    // A settings file the user broke by hand is left alone, not replaced.
+    fs.writeFileSync(agentSettingsPath, "{ not json");
+    await plans.createCodaraPiLaunchPlan({
+      provider: "anthropic",
+      runId: "run-settings-broken",
+      mode: "execute",
+      sessionId: "session-settings-broken",
+      cwd: directory,
+    });
+    assert.equal(fs.readFileSync(agentSettingsPath, "utf8"), "{ not json");
+    fs.rmSync(agentSettingsPath);
 
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
@@ -853,6 +940,48 @@ async function main() {
       untrustedWorkerPlan.agentSocketCapabilityExpiresAt,
       4_102_444_800_000,
     );
+  });
+
+  // The manager's MCP roster holds credentials: a launch that throws after
+  // writing it must remove it. The bundle lives under the repo so the MCP SDK
+  // resolves and a real roster is written.
+  await withTempDirectory(async (directory) => {
+    process.env.CODARA_HOME_DIR = directory;
+    const bundleDirectory = fs.mkdtempSync(path.join(ROOT, "node_modules", ".codara-pi-runtime-test-"));
+    try {
+      const plans = await loadElectronLaunchPlans(directory, bundleDirectory);
+      const configDir = path.join(directory, "pi-agent");
+      fs.mkdirSync(configDir, { recursive: true });
+      const authPath = path.join(configDir, "auth.json");
+      fs.writeFileSync(authPath, JSON.stringify({
+        anthropic: { type: "oauth", access: "synthetic-access", expires: 1 },
+      }));
+      fs.chmodSync(authPath, 0o600);
+      globalThis.__codaraTestMcpServers = [{ name: "files", command: "npx", args: ["-y", "files-mcp"] }];
+      await assert.rejects(
+        plans.createCodaraPiLaunchPlan({
+          provider: "anthropic",
+          runId: "run-expired-auth",
+          mode: "execute",
+          sessionId: "session-expired-auth",
+          cwd: directory,
+        }),
+        /Cora's Claude sign-in expired and cannot be renewed \(OAuth session expired\)\. Sign in again in Settings > Accounts\./,
+      );
+      // The account's private dir is created by the auth store; its mcp/
+      // folder exists only because the roster was written there.
+      const entries = fs.readdirSync(directory, { recursive: true }).map(String);
+      const mcpDirs = entries.filter((entry) => path.basename(entry) === "mcp");
+      assert.equal(mcpDirs.length, 1, "the roster was written before the launch failed");
+      assert.deepEqual(
+        fs.readdirSync(path.join(directory, mcpDirs[0])).filter((name) => name.endsWith(".json")),
+        [],
+        "a failed launch must not leave its credential roster behind",
+      );
+    } finally {
+      delete globalThis.__codaraTestMcpServers;
+      fs.rmSync(bundleDirectory, { recursive: true, force: true });
+    }
   });
 
   console.log("pi runtime policy: ok");
