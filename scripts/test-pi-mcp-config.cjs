@@ -174,6 +174,10 @@ async function main() {
   assert.equal(built.audience, "worker");
   assert.equal(built.servers.length, servers.length);
   assert.equal(built.connectTimeoutMs, config.PI_MCP_DEFAULTS.connectTimeoutMs);
+  // A first `npx -y` install needs longer than an HTTP handshake, and remote
+  // tools load on demand, so a 95-tool server keeps every tool.
+  assert.equal(built.stdioConnectTimeoutMs, 30_000);
+  assert.equal(built.maxToolsPerServer, 256);
 
   // activeMcpBridgeConfig is env-gated and never throws.
   assert.equal(bridge.activeMcpBridgeConfig({}), null);
@@ -259,6 +263,16 @@ async function main() {
     assert.equal(livePi.activeTools.has(bridge.EXTERNAL_SERVER_STATUS_NAME), true);
     assert.equal(livePi.activeTools.has("mcp_status"), false);
     assert.equal(echo.parameters.properties.text.type, "string");
+
+    // Short and stop words never activate a tool on their own: "a" is a
+    // substring of nearly every tool name.
+    const noise = await livePi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+      "call-noise",
+      { query: "list a pod", limit: 5 },
+    );
+    assert.deepEqual(noise.details.activated, [], "an unrelated query activates nothing");
+    assert.equal(livePi.activeTools.has(echo.name), false);
+    assert.equal(livePi.activeTools.has("mcp__fixture__fail"), false);
 
     const discovery = await livePi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
       "call-discover",

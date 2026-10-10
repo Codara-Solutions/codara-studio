@@ -43,6 +43,7 @@ export interface McpBridgeConfig {
   version: number;
   audience: string;
   connectTimeoutMs: number;
+  stdioConnectTimeoutMs: number;
   callTimeoutMs: number;
   maxTotalCallMs: number;
   maxToolsPerServer: number;
@@ -107,6 +108,11 @@ const MAX_TOOL_SEARCH_LIMIT = 8;
 export const EXTERNAL_TOOL_LOADER_NAME = "codara_external_tools";
 export const EXTERNAL_SERVER_STATUS_NAME = "codara_server_status";
 
+const SEARCH_STOP_WORDS = new Set([
+  "the", "and", "for", "with", "from", "into", "that", "this", "tool", "tools",
+  "use", "using", "some", "any", "all", "can", "how", "what", "which", "please",
+]);
+
 const requireFromExtension = createRequire(import.meta.url);
 
 export function activeMcpBridgeConfig(env: NodeJS.ProcessEnv = process.env): McpBridgeConfig | null {
@@ -124,9 +130,10 @@ export function activeMcpBridgeConfig(env: NodeJS.ProcessEnv = process.env): Mcp
       version: typeof parsed.version === "number" ? parsed.version : 1,
       audience: typeof parsed.audience === "string" ? parsed.audience : "cora",
       connectTimeoutMs: positiveNumber(parsed.connectTimeoutMs, 10_000),
+      stdioConnectTimeoutMs: positiveNumber(parsed.stdioConnectTimeoutMs, 30_000),
       callTimeoutMs: positiveNumber(parsed.callTimeoutMs, 60_000),
       maxTotalCallMs: positiveNumber(parsed.maxTotalCallMs, 600_000),
-      maxToolsPerServer: positiveNumber(parsed.maxToolsPerServer, 64),
+      maxToolsPerServer: positiveNumber(parsed.maxToolsPerServer, 256),
       servers,
       sdkDir,
     };
@@ -290,25 +297,44 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
   function searchRemoteTools(query: string, limit: number): RegisteredRemoteTool[] {
     const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     if (!normalizedQuery) return [];
-    const terms = normalizedQuery.split(/\s+/).filter(Boolean);
-    return [...remoteTools.values()]
-      .map((tool) => {
-        const name = tool.name.toLowerCase().replace(/[^a-z0-9]+/g, " ");
-        const remoteName = tool.remoteName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
-        const serverName = tool.serverName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
-        const description = tool.description.toLowerCase();
-        let score = 0;
-        if (name === normalizedQuery || remoteName === normalizedQuery) score += 40;
-        if (name.includes(normalizedQuery) || remoteName.includes(normalizedQuery)) score += 16;
-        for (const term of terms) {
-          if (name.includes(term)) score += 8;
-          if (remoteName.includes(term)) score += 8;
-          if (serverName.includes(term)) score += 3;
-          if (description.includes(term)) score += 1;
+    // Short words and stop words are substrings of nearly every tool name
+    // ("a" in "list_pods"), so they would activate unrelated tools.
+    const terms = normalizedQuery
+      .split(/\s+/)
+      .filter((term) => term.length >= 3 && !SEARCH_STOP_WORDS.has(term));
+    const scored = [...remoteTools.values()].map((tool) => {
+      const name = tool.name.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const remoteName = tool.remoteName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const serverName = tool.serverName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      const description = tool.description.toLowerCase();
+      let score = 0;
+      let nameHit = false;
+      let descriptionHits = 0;
+      if (name === normalizedQuery || remoteName === normalizedQuery) score += 40;
+      if (name.includes(normalizedQuery) || remoteName.includes(normalizedQuery)) {
+        score += 16;
+        nameHit = true;
+      }
+      for (const term of terms) {
+        if (name.includes(term)) score += 8;
+        if (remoteName.includes(term)) score += 8;
+        if (name.includes(term) || remoteName.includes(term)) nameHit = true;
+        if (serverName.includes(term)) score += 3;
+        if (description.includes(term)) {
+          score += 1;
+          descriptionHits += 1;
         }
-        return { tool, score };
-      })
-      .filter((candidate) => candidate.score > 0)
+      }
+      return { tool, score, nameHit, descriptionHits };
+    });
+    // A name hit is the strong signal. Only when no tool name matches does a
+    // description that covers most of the query qualify on its own.
+    const named = scored.filter((candidate) => candidate.nameHit);
+    const candidates = named.length > 0
+      ? named
+      : scored.filter((candidate) =>
+        terms.length > 0 && candidate.descriptionHits >= Math.ceil(terms.length / 2));
+    return candidates
       .sort((left, right) => right.score - left.score || left.tool.name.localeCompare(right.tool.name))
       .slice(0, limit)
       .map((candidate) => candidate.tool);
@@ -379,7 +405,10 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
     attachTransportWatchers(state, transport);
     let listed: { tools?: McpToolDescriptor[] };
     try {
-      await client.connect(transport, { timeout: config.connectTimeoutMs });
+      const connectTimeout = state.config.command
+        ? Math.max(config.connectTimeoutMs, config.stdioConnectTimeoutMs)
+        : config.connectTimeoutMs;
+      await client.connect(transport, { timeout: connectTimeout });
       listed = await client.listTools(undefined, { timeout: config.connectTimeoutMs });
     } catch (error) {
       // A timed-out handshake leaves the child process running otherwise.
