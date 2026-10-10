@@ -742,6 +742,19 @@ const MessageTurn = React.memo(function MessageTurn({
               ? "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message."
               : backendFailure.hint
           }
+          action={backendFailure.action}
+        />
+      </SparkTurn>
+    );
+  }
+  // A park on a turn that threw is a failure notice, not a question: it gets
+  // no "Needs you" tag, and the composer offers Retry instead of "Answer".
+  if (item.backendFailure) {
+    return (
+      <SparkTurn tag={<IssueChip />}>
+        <BackendFailureMessage
+          detail="Cora's turn failed before it could answer."
+          hint="The failed turn above names the cause. Retry below sends your message again."
         />
       </SparkTurn>
     );
@@ -838,14 +851,44 @@ function CheckGlyph() {
   );
 }
 
-function backendFailureDetails(
-  text: string,
-): { detail: string; hint: string; kind: "auth" | "billing" | "capacity" | "quota" | "other" } | null {
+function backendFailureDetails(text: string): ProviderFailure | null {
   const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
   const source = match?.[1]?.trim();
   const detail = match?.[2]?.trim();
   if (!source || !detail) return null;
+  return classifyProviderFailure(source, detail);
+}
+
+type ProviderFailure = {
+  detail: string;
+  hint: string;
+  kind: "auth" | "billing" | "capacity" | "quota" | "other";
+  /** Opens Settings > Agents, where accounts are connected and switched. */
+  action?: "accounts";
+};
+
+const PROVIDER_ACCOUNT_NAMES: Record<string, string> = {
+  anthropic: "Claude",
+  "openai-codex": "ChatGPT",
+  xai: "Grok",
+};
+
+// Shared by legacy "<backend> backend error:" messages and the raw error a
+// failed manager turn records, so both read the same way to the user.
+function classifyProviderFailure(source: string, detail: string): ProviderFailure {
   const normalizedDetail = detail.replace(/[_-]+/g, " ");
+  // NoConnectedPiAccountError (main): the provider never had an account, so
+  // "reconnect" would name something the user never did.
+  const neverConnected = /not authenticated with an? (\w+) account/i.exec(detail);
+  if (neverConnected) {
+    const name = neverConnected[1];
+    return {
+      detail: `No ${name} account is connected.`,
+      hint: `Connect a ${name} account in Settings > Agents, or pick a model from an account you have connected, then retry this message.`,
+      kind: "auth",
+      action: "accounts",
+    };
+  }
   const authFailure =
     /OAuth refresh failed|not authenticated|no OAuth access token|OAuth session expired|token (?:has )?expired|invalid api key|missing api key|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)/i.test(
       normalizedDetail,
@@ -865,32 +908,30 @@ function backendFailureDetails(
   ) {
     return {
       detail: "The Claude account has no Extra Usage available for third-party harness use.",
-      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings, or use Codex-provider workers.",
+      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings > Agents, or use Codex-provider workers.",
       kind: "billing",
+      action: "accounts",
     };
   }
-  if (authFailure && /anthropic/i.test(detail)) {
-    return {
-      detail: "The selected Anthropic subscription could not be authenticated.",
-      hint: "Reconnect your Anthropic subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
-  }
-  if (authFailure && /openai-codex/i.test(detail)) {
-    return {
-      detail: "The selected Codex subscription could not be authenticated.",
-      hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
+  for (const [provider, name] of Object.entries(PROVIDER_ACCOUNT_NAMES)) {
+    if (authFailure && detail.toLowerCase().includes(provider)) {
+      return {
+        detail: `The selected ${name} account could not be authenticated.`,
+        hint: `Reconnect your ${name} account in Settings > Agents, then retry this message.`,
+        kind: "auth",
+        action: "accounts",
+      };
+    }
   }
   if (authFailure) {
     return {
       detail: "The selected provider account could not be authenticated.",
       hint:
         source === "Cora Pi"
-          ? "Reconnect the selected subscription in Settings, then retry this message."
+          ? "Reconnect the selected account in Settings > Agents, then retry this message."
           : `Reconnect the ${source} account, then retry this message.`,
       kind: "auth",
+      action: "accounts",
     };
   }
   // A quota envelope can append generic service/transport prose, so its
@@ -904,6 +945,7 @@ function backendFailureDetails(
       detail: "The selected provider account reached a usage limit.",
       hint: "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message.",
       kind: "quota",
+      action: "accounts",
     };
   }
   if (
@@ -924,12 +966,27 @@ function backendFailureDetails(
   };
 }
 
+/** The friendly reading of a failed manager turn's raw error, or null when
+ * the error is unclassified and the raw text says more than a generic line. */
+function failedTurnExplanation(error: string): ProviderFailure | null {
+  const trimmed = error.trim();
+  if (!trimmed) return null;
+  const failure = classifyProviderFailure("Cora Pi", trimmed);
+  return failure.kind === "other" ? null : failure;
+}
+
+function openAccountsSettings(): void {
+  window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents" } }));
+}
+
 function BackendFailureMessage({
   detail,
   hint,
+  action,
 }: {
   detail: string;
   hint: string;
+  action?: ProviderFailure["action"];
 }) {
   return (
     <div
@@ -941,7 +998,16 @@ function BackendFailureMessage({
       <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t complete this turn</div>
       <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
       <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
+      {action === "accounts" ? <OpenAccountsButton /> : null}
     </div>
+  );
+}
+
+function OpenAccountsButton() {
+  return (
+    <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
+      Open accounts
+    </button>
   );
 }
 
@@ -2029,6 +2095,7 @@ function AssistantSettledTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const actionCount = blocks.filter((block) => block.kind === "tool").length;
+  const explanation = failed && item.detail ? failedTurnExplanation(item.detail) : null;
   return (
     <SparkTurn>
       <div
@@ -2046,9 +2113,20 @@ function AssistantSettledTurn({
             </span>
           )}
           {failed && item.detail && (
-            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
+            <span
+              style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}
+              title={explanation ? item.detail : undefined}
+            >
+              {explanation?.detail ?? item.detail}
+            </span>
           )}
         </div>
+        {explanation && (
+          <div className="cora-failed-turn-hint" style={FAILED_TURN_HINT_STYLE}>
+            <span>{explanation.hint}</span>
+            {explanation.action === "accounts" ? <OpenAccountsButton /> : null}
+          </div>
+        )}
         <TurnSegments segments={segments} />
       </div>
     </SparkTurn>
@@ -3269,6 +3347,17 @@ const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
   color: "var(--muted)",
   fontSize: 11,
   lineHeight: 1.4,
+};
+
+const FAILED_TURN_HINT_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  alignItems: "center",
+  gap: 8,
+  paddingLeft: 12,
+  color: "var(--muted)",
+  fontSize: 11.5,
+  lineHeight: 1.45,
 };
 
 // The run-level verdict pill on its own full-width row under the final Cora

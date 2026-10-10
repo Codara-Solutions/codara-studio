@@ -20,11 +20,13 @@ import {
 } from "@shared/chat-policy";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
+  backendFailureRetryText,
   deriveComposerWorkerActivity,
   findOpenQuestion,
   type ComposerWorkerActivity,
 } from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
+import { isBackendFailureQuestion } from "@shared/run-questions";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
@@ -631,6 +633,15 @@ export default function ChatComposer({
   }, [draft]);
 
   const openQuestion = useMemo(() => (run ? findOpenQuestion(run) : null), [run]);
+  // A park on a manager turn that threw is a failure notice, not an ask: the
+  // composer must not read "Answer Cora", and Retry re-answers it with the
+  // message that failed.
+  const failedTurnRetryText = useMemo(
+    () => (run ? backendFailureRetryText(run, openQuestion) : null),
+    [run, openQuestion],
+  );
+  const backendFailureQuestion =
+    openQuestion !== null && isBackendFailureQuestion(openQuestion);
   const status = run?.status;
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
@@ -785,6 +796,27 @@ export default function ChatComposer({
         return;
       }
       await window.spark.orchestration.resumeRun({ runId: run_.id });
+    } catch (err) {
+      if (mountedRef.current) setError((err as Error).message);
+    } finally {
+      inFlight.current = false;
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+
+  const retryFailedTurn = async () => {
+    if (!run_ || !openQuestion || !failedTurnRetryText || inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.spark.orchestration.answerRunQuestion({
+        runId: run_.id,
+        questionMessageId: openQuestion.id,
+        clientMessageId: makeId("client-msg"),
+        message: failedTurnRetryText,
+        attachments: [],
+      });
     } catch (err) {
       if (mountedRef.current) setError((err as Error).message);
     } finally {
@@ -1195,6 +1227,8 @@ export default function ChatComposer({
     ? lockedMode === "automation"
       ? "Describe the loom you want — trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
+    : backendFailureQuestion
+      ? "Cora's last turn failed. Retry it, or send a new message."
     : openQuestion
       ? "Answer Cora, and it keeps going."
       : isTerminal
@@ -1388,6 +1422,8 @@ export default function ChatComposer({
                   ? "Adding pasted image..."
                 : isActive
                   ? "Enter to queue · delivered when this turn ends"
+                  : backendFailureQuestion
+                    ? "Enter to send, Shift+Enter for a new line"
                   : openQuestion
                     // No Resume button here — the answer IS the resume — so the
                     // hint must not point at one.
@@ -1416,6 +1452,11 @@ export default function ChatComposer({
             {isPaused && (
               <TextButton onClick={resume} disabled={busy} tone="accent">
                 {isParkedTurn ? "Retry" : "Resume"}
+              </TextButton>
+            )}
+            {backendFailureQuestion && failedTurnRetryText && (
+              <TextButton onClick={retryFailedTurn} disabled={busy} tone="accent">
+                Retry
               </TextButton>
             )}
             <SendButton

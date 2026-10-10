@@ -1965,6 +1965,27 @@ a { color: inherit; }
   color: var(--ink-dim);
 }
 
+/* The one action a failure card offers (open the accounts tab). */
+.cora-failure-action {
+  appearance: none;
+  align-self: flex-start;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-control, 7px);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: 600 11px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-failure-action:hover {
+  background: color-mix(in oklch, var(--accent) 26%, transparent);
+}
+.cora-failure-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .cora-worker-diff-file {
   background: transparent;
   transition:

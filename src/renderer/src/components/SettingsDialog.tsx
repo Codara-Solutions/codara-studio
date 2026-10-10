@@ -118,7 +118,7 @@ const COMMIT_MESSAGE_NATIVE_MODELS: { id: string; label: string; group: string }
       .map((id) => ({ id, label: friendlyModelLabel(id), group: vendor }));
   });
 
-type SettingsTab =
+export type SettingsTab =
   | "general"
   | "editor"
   | "terminal"

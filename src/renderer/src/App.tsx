@@ -142,6 +142,8 @@ import {
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
+import { isSettingsTab } from "./lib/settings-sections";
+import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
   buildAwayDigest,
@@ -479,6 +481,7 @@ export default function App() {
   const [terminalShellResolved, setTerminalShellResolved] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState<OnboardingProgress>({ version: 1, step: "welcome", dismissed: false });
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
@@ -2085,7 +2088,9 @@ export default function App() {
   // src/renderer/settings); we fold both surfaces into the polished old
   // dialog so users only see one settings UI.
   useEffect(() => {
-    const handler = () => {
+    const handler = (event: Event) => {
+      const section = (event as CustomEvent<{ section?: unknown } | undefined>).detail?.section;
+      setSettingsInitialTab(isSettingsTab(section) ? section : undefined);
       void loadSettingsDialog();
       setSettingsOpen(true);
     };
@@ -2975,6 +2980,7 @@ export default function App() {
   }, []);
 
   const handleOpenSettings = useCallback(() => {
+    setSettingsInitialTab(undefined);
     void loadSettingsDialog();
     setSettingsOpen(true);
   }, []);
@@ -6169,6 +6175,10 @@ export default function App() {
         {settingsOpen && (
           <Suspense fallback={null}>
             <SettingsDialog
+              // A section request while the dialog is open (a chat's "Open
+              // accounts") must land on that tab, so the tab keys the mount.
+              key={settingsInitialTab ?? "general"}
+              initialTab={settingsInitialTab}
               settings={settings}
               shells={shells}
               defaultShell={defaultShell}
