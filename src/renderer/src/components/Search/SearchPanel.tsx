@@ -250,8 +250,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
         ext: ext && ext.length > 0 && ext !== hit.path ? ext : undefined,
       };
       onOpenFile(entry, { line: hit.line, column: hit.column });
-      // Also broadcast for any future listener that wants to seek inside
-      // an editor we have not wired up yet (wave 3 integration point).
+      // The App listener opens the same tab and reveals the hit's line.
       window.dispatchEvent(
         new CustomEvent("spark:open-file", {
           detail: { path: hit.path, line: hit.line, column: hit.column },

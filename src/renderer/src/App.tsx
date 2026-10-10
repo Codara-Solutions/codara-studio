@@ -146,6 +146,7 @@ import { isSettingsTab } from "./lib/settings-sections";
 import { isLiveOnlyEvent } from "@shared/live-events";
 import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
+import { requestEditorReveal } from "./components/editor-cm/reveal";
 import {
   buildAwayDigest,
   captureAwayDigestBaseline,
@@ -3983,8 +3984,16 @@ export default function App() {
   // reusable and does not need the entire tabs API threaded through it.
   useEffect(() => {
     const openFile = (event: Event) => {
-      const path = (event as CustomEvent<{ path?: string }>).detail?.path;
-      if (path) openFileByPath(path);
+      const detail = (event as CustomEvent<{ path?: string; line?: unknown; column?: unknown }>).detail;
+      const path = detail?.path;
+      if (!path) return;
+      openFileByPath(path);
+      if (typeof detail.line === "number" && detail.line > 0) {
+        requestEditorReveal(path, {
+          line: detail.line,
+          column: typeof detail.column === "number" ? detail.column : undefined,
+        });
+      }
     };
     const openDiff = (event: Event) => {
       const path = (event as CustomEvent<{ path?: string }>).detail?.path;

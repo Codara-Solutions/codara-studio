@@ -11,7 +11,7 @@ import {
 } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { Prec } from "@codemirror/state";
-import { keymap } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 import {
   findNext,
@@ -32,6 +32,7 @@ import { EDITOR_THEME_EXT } from "./editor-cm/themes";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
+import { EDITOR_REVEAL_EVENT, revealOffset, takeEditorReveal } from "./editor-cm/reveal";
 import {
   inlineCompletion,
   type InlineAutocompleteStatus,
@@ -294,6 +295,43 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       cancelled = true;
     };
   }, [path, doc.status]);
+
+  // A link to path:line opens the file and asks for that line. The view
+  // mounts a frame or two after the document is ready, so the reveal waits
+  // for it instead of being dropped.
+  const [revealRequest, setRevealRequest] = useState(0);
+  useEffect(() => {
+    const onReveal = (event: Event) => {
+      if ((event as CustomEvent<{ path?: string }>).detail?.path === path) {
+        setRevealRequest((count) => count + 1);
+      }
+    };
+    window.addEventListener(EDITOR_REVEAL_EVENT, onReveal);
+    return () => window.removeEventListener(EDITOR_REVEAL_EVENT, onReveal);
+  }, [path]);
+  const codeVisible = doc.status === "ready" && (!hasViewToggle || viewMode === "edit");
+  useEffect(() => {
+    if (!codeVisible) return;
+    let frame = 0;
+    let attempts = 0;
+    const reveal = () => {
+      const view = cmRef.current?.view;
+      if (!view) {
+        if (attempts++ < 30) frame = requestAnimationFrame(reveal);
+        return;
+      }
+      const target = takeEditorReveal(path);
+      if (!target) return;
+      const offset = revealOffset(view.state.doc, target);
+      view.dispatch({
+        selection: { anchor: offset },
+        effects: EditorView.scrollIntoView(offset, { y: "center" }),
+      });
+      view.focus();
+    };
+    reveal();
+    return () => cancelAnimationFrame(frame);
+  }, [path, codeVisible, revealRequest]);
 
   // Autosave flush points: a pending debounce fires immediately when the
   // window loses focus or this pane goes inactive (tab switch), so edits
