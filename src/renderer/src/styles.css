@@ -1340,6 +1340,36 @@ a { color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.cora-welcome__connect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, 100%);
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--accent-soft);
+}
+.cora-welcome__connect-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+  text-align: left;
+}
+.cora-welcome__connect-copy strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.cora-welcome__connect .cora-failure-action {
+  align-self: center;
+  flex: 0 0 auto;
+}
 .cora-welcome__starters {
   display: grid;
   /* auto-fit rather than a fixed pair: the chat is as often half a split as it
@@ -2425,11 +2455,37 @@ a { color: inherit; }
   border-top: 1px solid var(--rule-soft);
 }
 .composer-model-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px 2px;
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
+}
+.composer-model-group.is-unconnected .composer-picker-row {
+  opacity: 0.55;
+}
+.composer-model-connect {
+  appearance: none;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--accent-text);
+  font: 600 9.5px/1.4 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: default;
+}
+.composer-model-connect:hover {
+  background: var(--accent-soft);
+}
+.composer-model-connect:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .composer-picker-title {
   padding: 9px 11px 7px;

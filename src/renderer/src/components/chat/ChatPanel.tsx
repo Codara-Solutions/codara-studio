@@ -17,6 +17,7 @@ import { describeRunStatus, statusToneColor } from "./timeline";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
+import { openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
@@ -1070,10 +1071,16 @@ const PROJECT_STARTERS = [
 ] as const;
 
 function WelcomeState({ workspace }: { workspace: Workspace | null }) {
+  const accounts = useCoraAccountReadiness();
+  // Only a settled read that found nothing claims "no account": an unreadable
+  // status keeps the welcome as it was rather than nagging on a guess.
+  const needsAccount =
+    accounts.settled && accounts.usableProviders !== null && accounts.usableProviders.size === 0;
   const prefill = (text: string) => {
+    // A starter frames the task; it must not wipe a half-typed description.
     window.dispatchEvent(
       new CustomEvent("spark:prefill-composer", {
-        detail: { text, replace: true },
+        detail: { text, prepend: true },
       }),
     );
   };
@@ -1115,6 +1122,21 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
           />
           <span className="cora-welcome__project-name">{workspace.name}</span>
           <span className="cora-welcome__project-path">{workspace.cwd}</span>
+        </div>
+      )}
+      {needsAccount && (
+        <div className="cora-welcome__connect" role="status">
+          <div className="cora-welcome__connect-copy">
+            <strong>Connect an account to start</strong>
+            <span>
+              {accounts.runtimeMissing
+                ? "Cora runs on Pi with your Claude, ChatGPT or Grok subscription. Install Pi and sign in once in Settings > Agents."
+                : "Cora runs on your Claude, ChatGPT or Grok subscription. Sign in once in Settings > Agents."}
+            </span>
+          </div>
+          <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
+            {accounts.runtimeMissing ? "Install Pi" : "Connect an account"}
+          </button>
         </div>
       )}
       <div className="cora-welcome__starters" aria-label="Suggested ways to start">

@@ -25,6 +25,7 @@ import {
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
+import { openAccountsSettings } from "./account-readiness";
 import {
   compactPreview,
   formatToolPayload,
@@ -973,10 +974,6 @@ function failedTurnExplanation(error: string): ProviderFailure | null {
   if (!trimmed) return null;
   const failure = classifyProviderFailure("Cora Pi", trimmed);
   return failure.kind === "other" ? null : failure;
-}
-
-function openAccountsSettings(): void {
-  window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents" } }));
 }
 
 function BackendFailureMessage({

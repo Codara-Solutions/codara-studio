@@ -27,6 +27,7 @@ import {
 } from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
 import { isBackendFailureQuestion } from "@shared/run-questions";
+import { loadCoraAccountReadiness } from "./account-readiness";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
@@ -417,8 +418,9 @@ export default function ChatComposer({
       window.spark.piSubscriptions.catalog().catch(() => [] as PiCatalogModel[]),
       window.spark.openRouter.coraModels().catch(() => [] as string[]),
       loadPreferredChatModel().catch(() => undefined),
+      loadCoraAccountReadiness(),
     ])
-      .then(([piCatalog, openRouterModels, preferredModel]) => {
+      .then(([piCatalog, openRouterModels, preferredModel, accounts]) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         piCatalogRef.current = piCatalog;
@@ -427,7 +429,11 @@ export default function ChatComposer({
         // default, including an older preference read.
         if (selectorsChosenRef.current) return;
         const groups = buildVisibleGroups({ piCatalog, openRouterModels });
-        const first = resolvePreferredChatModel(groups, preferredModel);
+        const first = resolvePreferredChatModel(
+          groups,
+          preferredModel,
+          accounts.usableProviders ?? undefined,
+        );
         if (!first) return;
         const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
@@ -452,12 +458,18 @@ export default function ChatComposer({
   // by dispatching `spark:prefill-composer`. Default behavior appends to the
   // current draft so a user typing in the composer doesn't lose their work
   // mid-thought; pass `replace: true` to overwrite the draft entirely (used
-  // by undo so the just-removed message reappears verbatim for editing).
+  // by undo so the just-removed message reappears verbatim for editing), or
+  // `prepend: true` to put the text in front of an existing draft.
   useEffect(() => {
     if (suspendGlobalEvents) return;
     const handler = (event: Event) => {
       const detail = (
-        event as CustomEvent<{ text?: unknown; replace?: unknown; attachments?: unknown }>
+        event as CustomEvent<{
+          text?: unknown;
+          replace?: unknown;
+          prepend?: unknown;
+          attachments?: unknown;
+        }>
       ).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
       // Image attachments can ride along with the text (Unqueue restores a
@@ -490,9 +502,13 @@ export default function ChatComposer({
       }
       if (!text) return;
       const replace = detail?.replace === true;
+      // Welcome starters frame a task ("Investigate and fix this bug: "), so
+      // they go in front of what the user already typed instead of replacing it.
+      const prepend = detail?.prepend === true;
       setDraft((current) => {
         if (replace) return text;
         if (!current.trim()) return text;
+        if (prepend) return `${text}${current.trimStart()}`;
         return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
       });
       window.setTimeout(() => {
