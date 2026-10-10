@@ -15166,7 +15166,11 @@ async function maybeSpawnDeclaredVerifier({
       : task.runtimePreference === "codex"
         ? "claude"
         : task.runtimePreference;
-  const changed = report.filesChanged.slice(0, 20).join(", ");
+  const changed = report.filesChanged
+    .slice(0, 20)
+    .map((file) => file.path)
+    .filter(Boolean)
+    .join(", ");
   const rerun = priorAutoVerifiers.length > 0;
   const description = [
     brief,
