@@ -15,10 +15,7 @@ test("a live worker pane returns after the renderer misses its launch event", as
 
   try {
     app = await electron.launch({
-      // --ozone-platform=x11 keeps Linux launches deterministic: Chromium's
-      // Wayland auto-detection can hang the whole app when the compositor
-      // is unavailable to new clients (headless CI, stale sessions).
-      args: [".", "--ozone-platform=x11"],
+      args: ["."],
       env: {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app

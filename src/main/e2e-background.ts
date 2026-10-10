@@ -33,7 +33,12 @@ export const E2E_BACKGROUND = process.env.SPARK_E2E_BACKGROUND === "1";
 export function isolateE2eFromDesktop(): void {
   if (!E2E_BACKGROUND) return;
   app.commandLine.appendSwitch("mute-audio");
-  if (process.platform === "linux") app.commandLine.appendSwitch("ozone-platform", "headless");
+  if (process.platform === "linux") {
+    // A spec launching with --ozone-platform=x11 (or wayland) would otherwise
+    // keep its own backend and put a real window on the desktop again.
+    app.commandLine.removeSwitch("ozone-platform");
+    app.commandLine.appendSwitch("ozone-platform", "headless");
+  }
 }
 
 /**

@@ -53,7 +53,7 @@ test("the kanban renders cards with images, opens the card panel, and the lightb
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", "--ozone-platform=x11"],
+      args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
