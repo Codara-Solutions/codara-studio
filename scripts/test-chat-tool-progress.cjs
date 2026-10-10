@@ -4,7 +4,8 @@
 //
 // Pinned:
 //   - The run store broadcasts chat.tool_progress without journaling it, under
-//     one stable id per call, so each tail replaces the last.
+//     one stable id per call, so each tail replaces the last. It reaches
+//     windows only, and listeners that refetch runs on any event skip it.
 //   - The projection attaches the newest tail to a call that has no result
 //     yet and drops it once the result lands (the unsequenced progress event
 //     sorts after the result).
@@ -94,9 +95,45 @@ async function main() {
       /if \(event\.kind === "tool_progress"\) \{\s*broadcastLiveEvent\(\{ \.\.\.input, id: `chat-tool-progress:\$\{callId\}:\$\{event\.toolUseId\}` \}\);\s*return;\s*\}/,
     );
     const eventLog = read("src/main/orchestration/event-log.ts");
-    assert.match(eventLog, /export function broadcastLiveEvent\(input: AppendEventInput\): void \{\s*broadcast\(\[createEvent\(input\)\]\);\s*\}/);
+    // Windows only: main subscribers (phone invalidation, board pushes) track
+    // journaled state, and a tail several times a second would make every
+    // paired phone refetch an unchanged run.
+    assert.match(eventLog, /export function broadcastLiveEvent\(input: AppendEventInput\): void \{\s*sendToWindows\(\[createEvent\(input\)\]\);\s*\}/);
     const backend = read("src/main/orchestration/agent-backend.ts");
     assert.match(backend, /kind: "tool_progress";\s*toolUseId: string;\s*output: string;/);
+  });
+
+  await (async () => {
+    const out = await esbuild.build({
+      entryPoints: [path.join(ROOT, "src/shared/live-events.ts")],
+      bundle: true,
+      format: "cjs",
+      platform: "node",
+      write: false,
+      logLevel: "silent",
+      tsconfig: path.join(ROOT, "tsconfig.node.json"),
+    });
+    const mod = { exports: {} };
+    // eslint-disable-next-line no-new-func
+    new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+    const { isLiveOnlyEvent } = mod.exports;
+    test("tool progress is live-only; journaled chat events are not", () => {
+      assert.equal(isLiveOnlyEvent({ type: "chat.tool_progress" }), true);
+      assert.equal(isLiveOnlyEvent({ type: "chat.tool_result" }), false);
+      assert.equal(isLiveOnlyEvent({ type: "chat.assistant_block" }), false);
+    });
+  })();
+
+  test("run-list refreshers ignore live-only events", () => {
+    // Each of these refetches runs (or a run's detail) on any event; a long
+    // command would otherwise re-list every run, and re-render the app, once
+    // a second for as long as it prints.
+    const globalRuns = read("src/renderer/src/lib/useGlobalRuns.ts");
+    assert.match(globalRuns, /onEvent\(\(event\) => \{\s*if \(isLiveOnlyEvent\(event\)\) return;/);
+    const app = read("src/renderer/src/App.tsx");
+    assert.match(app, /if \(!event\.workspaceId \|\| isLiveOnlyEvent\(event\)\) return;/);
+    const automations = read("src/renderer/src/components/automations/AutomationsPage.tsx");
+    assert.match(automations, /event\.runId === liveRun\?\.id && !isLiveOnlyEvent\(event\)/);
   });
 
   test("only the live turn's running rows show output and elapsed time", () => {

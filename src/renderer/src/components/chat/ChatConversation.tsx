@@ -592,8 +592,6 @@ function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
 }
 
-// The SparkCall backing a manager row. Rows written since the field existed
-// carry it directly; older persisted timelines still derive it from the id.
 // Everything a reader could see in a row, as one searchable string.
 function conversationRowSearchText(
   item: ConversationItem,
@@ -620,6 +618,8 @@ function conversationRowSearchText(
   return parts.join("\n");
 }
 
+// The SparkCall backing a manager row. Rows written since the field existed
+// carry it directly; older persisted timelines still derive it from the id.
 function timelineSparkCallId(item: ToolItem): string {
   if (item.sparkCallId) return item.sparkCallId;
   return item.id.startsWith("spark-call:")
@@ -4139,9 +4139,6 @@ const TOOL_META_LINE_STYLE: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
 };
 
-// The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
-// completed turn's "Worked for Ns" disclosure line will land, so the
-// live → done transition swaps copy without moving anything.
 const LIVE_TOOL_OUTPUT_STYLE: React.CSSProperties = {
   margin: "2px 0 4px 12px",
   padding: "6px 9px",
@@ -4164,6 +4161,9 @@ const STALL_HINT_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
+// The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
+// completed turn's "Worked for Ns" disclosure line will land, so the
+// live → done transition swaps copy without moving anything.
 const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",

@@ -11,6 +11,7 @@ import type {
   UpdateScheduledJobInput,
 } from "@shared/types";
 import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-questions";
+import { isLiveOnlyEvent } from "@shared/live-events";
 import { runStatusColor } from "../../lib/run-status";
 import {
   STOP_REASON_LABEL,
@@ -182,7 +183,7 @@ export default function AutomationsPage({
       if (event.type === "automation.updated" || event.type === "automation.iteration") {
         void refresh();
         void refreshDetail();
-      } else if (event.runId && event.runId === liveRun?.id) {
+      } else if (event.runId && event.runId === liveRun?.id && !isLiveOnlyEvent(event)) {
         void refreshDetail();
       }
     });

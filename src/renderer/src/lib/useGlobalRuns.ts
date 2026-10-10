@@ -18,6 +18,7 @@
  * digest — can read the latest runs without taking `runs` as a dependency.
  */
 import React, { useEffect, useRef, useState } from "react";
+import { isLiveOnlyEvent } from "@shared/live-events";
 import type { RunState } from "@shared/types";
 
 export function useGlobalRuns(booted: boolean): {
@@ -65,7 +66,8 @@ export function useGlobalRuns(booted: boolean): {
     let refreshTimer: number | null = null;
     let pendingSince = 0;
 
-    const off = window.spark.orchestration.onEvent(() => {
+    const off = window.spark.orchestration.onEvent((event) => {
+      if (isLiveOnlyEvent(event)) return;
       const now = Date.now();
       if (refreshTimer === null) {
         pendingSince = now;

@@ -245,12 +245,15 @@ export function appendBufferedEvent(input: AppendEventInput): void {
 }
 
 /**
- * Send a live-only event to subscribers without journaling it. It has no
+ * Send a live-only event to renderer windows without journaling it. It has no
  * sequence, so it sorts after every durable event; callers give it a stable id
- * so each new one replaces the last instead of accumulating.
+ * so each new one replaces the last instead of accumulating. Main-process
+ * subscribers never see it: they track journaled state (worker panes, board
+ * pushes, phone invalidations), and a display-only frame several times a
+ * second would make the phone refetch a run that did not change.
  */
 export function broadcastLiveEvent(input: AppendEventInput): void {
-  broadcast([createEvent(input)]);
+  sendToWindows([createEvent(input)]);
 }
 
 /**
@@ -448,6 +451,10 @@ function broadcast(events: SparkEvent[]): void {
       }
     }
   }
+  sendToWindows(events);
+}
+
+function sendToWindows(events: SparkEvent[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.webContents.isDestroyed()) continue;
     if (events.length === 1) {
