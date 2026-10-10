@@ -63,7 +63,10 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", "--ozone-platform=x11"],
+      // No --ozone-platform here: under SPARK_E2E_BACKGROUND (playwright.config.ts)
+      // the app runs headless and muted, and forcing x11 would put the window
+      // on the desktop of whoever is using the machine.
+      args: ["."],
       env: {
         ...env,
         TZ: "UTC",
