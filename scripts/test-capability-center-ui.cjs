@@ -67,6 +67,11 @@ check("sections carry plain-language names, including Profiles", () => {
   assert.match(app, /requested === "profiles"/);
   assert.match(app, /initialProfileId=\{capabilitiesProfileId\}/);
   assert.match(composer, /tab: "profiles", profileId: frozenProfileId \?\? draftCoraProfileId/);
+  // The Tools button opens on the chat's profile too, so Memory shows and
+  // edits that profile's memory instead of the default one.
+  const openCapabilities = composer.slice(composer.indexOf("const openCapabilities = () => {"));
+  assert.match(openCapabilities.slice(0, 300), /detail: \{ profileId: frozenProfileId \?\? draftCoraProfileId \}/);
+  assert.ok(composer.indexOf("const frozenProfileId") < composer.indexOf("const openCapabilities = () => {"));
 });
 
 check("one save model: settings apply as they change, never through a draft", () => {

@@ -1122,12 +1122,18 @@ export default function ChatComposer({
     window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
   };
 
-  const openCapabilities = () => {
-    window.dispatchEvent(new CustomEvent("spark:open-capabilities"));
-  };
   // A chat freezes its profile on the first send; before that (no run, or a
   // run the board minted and never started) the draft's pick still applies.
   const frozenProfileId = run_ && !isUnstartedChatRun(run_) ? run_.coraProfileId ?? "default" : null;
+  // Memory in the Capability Center belongs to a profile, so it opens on this
+  // chat's profile rather than the registry default.
+  const openCapabilities = () => {
+    window.dispatchEvent(
+      new CustomEvent("spark:open-capabilities", {
+        detail: { profileId: frozenProfileId ?? draftCoraProfileId },
+      }),
+    );
+  };
   const openProfileManager = () => {
     window.dispatchEvent(
       new CustomEvent("spark:open-capabilities", {
