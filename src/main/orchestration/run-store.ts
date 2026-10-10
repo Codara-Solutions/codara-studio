@@ -160,10 +160,12 @@ import {
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import {
+  autoReviewedTaskStatus,
   countFollowUpLineageAttempts,
   reconcileAcceptedVerifierOnlySteps,
   rehomeSettledStepFeedbackRetry,
   resolveFollowUpDestinationStep,
+  settledReviewedStepStatus,
 } from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
@@ -181,6 +183,16 @@ import {
   MANUAL_REVIEW_QUESTION_OPTIONS,
   parseManualReviewVerdict,
 } from "./manual-review";
+// The unverified-completion question is asked instead of completing when the
+// work is finished but unverified. The run stays reviewable and the user owns
+// the call, rather than a cap-broken or never-verified run being reported as a
+// clean green finish.
+import {
+  UNFINISHED_WORKER_OPTIONS,
+  UNVERIFIED_COMPLETION_OPTIONS,
+  UNVERIFIED_COMPLETION_QUESTION,
+  parseUnverifiedCompletionChoice,
+} from "./worker-outcome-questions";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
 // Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
@@ -1388,7 +1400,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       if (verification.ok) {
         return completeRunFromOrchestrator(run.id);
       }
-      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
         reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
         managerMode: "worker_result_review",
       });
@@ -4667,11 +4679,6 @@ export async function describeMissingHandoffArtifacts(
   return { ok: missing.length === 0, missing };
 }
 
-/** Asked instead of completing when the work is finished but unverified. The
- * run stays reviewable and the user owns the call, rather than a cap-broken or
- * never-verified run being reported as a clean green finish. */
-const UNVERIFIED_COMPLETION_QUESTION =
-  "Every worker finished, but the latest code changes never earned a passing verifier verdict, so I won't mark this done on my own. Tell me whether to run a verifier over the final state or accept the work as it stands.";
 
 /**
  * Finish managed runs that a restart found already done.
@@ -5049,19 +5056,22 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // For execute/auto-mode CC/Codex chat backends, the CC/Codex manager session
   // is doing review itself (reading the worker's final_report_path returned by
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
-  // We need the worker_task to reach a TERMINAL status (accepted/failed/
-  // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
+  // We need the worker_task to reach a TERMINAL status (accepted/blocked/
+  // failed/cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
   // is non-terminal in the WorkerTaskStatus enum, and the manager-review
   // path that normally transitions needs_review → accepted via
-  // decideWorkerReport is explicitly skipped below. So auto-accept on
-  // success here; the CC manager will inspect the report and judge quality.
+  // decideWorkerReport is explicitly skipped below. The terminal status must
+  // still say what the report said: only a `complete` report is accepted, a
+  // failed or missing one fails the task, and a partial or blocked one parks it
+  // at `blocked`. Accepting every report here showed failed workers as green
+  // steps and let the settled-run hop below complete a run nobody reviewed.
   const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const finishedTask = latest.workerTasks.find((t) => t.id === finishedTaskId);
-  const shouldAutoAccept =
+  const autoReviews =
     isExecuteModeCliManager &&
-    finishedTask?.status === "needs_review" &&
+    finishedTask !== undefined &&
     // ...but never for a manual-runtime task. Those exist precisely because
     // the manager yielded no decision (createFallbackAutopilotTask after a
     // failed manager startup): no CLI manager session spawned the task and
@@ -5071,6 +5081,12 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // below then marks green; the classic needs_review escalation keeps the
     // verdict with the human.
     finishedTask.runtimePreference !== "manual";
+  const shouldAutoAccept = autoReviews && finishedTask?.status === "needs_review";
+  const finishedReport =
+    shouldAutoAccept && finishedAttempt?.finalReportPath
+      ? await readWorkerReport(finishedAttempt.finalReportPath).catch(() => null)
+      : null;
+  const autoReviewedStatus = shouldAutoAccept ? autoReviewedTaskStatus(finishedReport?.status) : undefined;
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -5079,7 +5095,10 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       workerTasks: latest.workerTasks.length,
       workerAttempts: latest.workerAttempts.length,
       waitingForOtherWorkers: hasOtherActiveCycles || hasOtherActiveWorkers,
-      autoAcceptedForExecuteModeCli: shouldAutoAccept,
+      autoAcceptedForExecuteModeCli: autoReviewedStatus === "accepted",
+      ...(autoReviewedStatus
+        ? { autoReviewedTaskStatus: autoReviewedStatus, reportStatus: finishedReport?.status ?? null }
+        : {}),
     },
     mutate: (draft, timestamp) => {
       draft.status = hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "reviewing";
@@ -5092,21 +5111,27 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
             : "worker_cycle_completed_needs_manager_review",
         updatedAt: timestamp,
       };
-      if (shouldAutoAccept && finishedTaskId) {
-        const taskInDraft = draft.workerTasks.find((t) => t.id === finishedTaskId);
-        if (taskInDraft && taskInDraft.status === "needs_review") {
-          taskInDraft.status = "accepted";
-          taskInDraft.updatedAt = timestamp;
-          // Also roll up the parent step's review status so it doesn't sit
-          // at "reviewing" forever — the manager (CC) consumes the report
-          // directly via final_report_path.
-          if (taskInDraft.stepId) {
-            const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
-            if (stepInDraft && stepInDraft.status === "reviewing") {
-              stepInDraft.status = "complete";
-              stepInDraft.updatedAt = timestamp;
-            }
-          }
+      const taskInDraft = autoReviews && finishedTaskId
+        ? draft.workerTasks.find((t) => t.id === finishedTaskId)
+        : undefined;
+      if (taskInDraft && autoReviewedStatus && taskInDraft.status === "needs_review") {
+        taskInDraft.status = autoReviewedStatus;
+        taskInDraft.updatedAt = timestamp;
+      }
+      // Also roll up the parent step's review status so it doesn't sit at
+      // "reviewing" forever — the manager consumes the report directly via
+      // final_report_path. The step settles on the worst outcome among its
+      // tasks, and only once none of them is still live, so a sibling's success
+      // never paints over this worker's failure (or the reverse).
+      if (taskInDraft?.stepId) {
+        const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
+        const rolledUp = stepInDraft?.status === "reviewing"
+          ? settledReviewedStepStatus(draft, stepInDraft.id)
+          : undefined;
+        if (stepInDraft && rolledUp && (autoReviewedStatus || rolledUp !== "complete")) {
+          stepInDraft.status = rolledUp;
+          stepInDraft.updatedAt = timestamp;
+          if (draft.currentStepId === stepInDraft.id) draft.currentStepId = undefined;
         }
       }
       draft.updatedAt = timestamp;
@@ -5190,11 +5215,46 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
         await completeRunFromOrchestrator(runId);
         return;
       }
-      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
         reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
         managerMode: "worker_result_review",
       });
+      return;
     }
+    // A worker that failed or did not finish is a decision someone still owes,
+    // and with no manager turn live nobody else will take it: without this the
+    // run sits at "reviewing" with nothing driving it.
+    await escalateUnfinishedWorkerOutcome(settled, finishedTaskId);
+  }
+}
+
+async function escalateUnfinishedWorkerOutcome(
+  run: RunState,
+  taskId: string | undefined,
+): Promise<void> {
+  const task = taskId ? run.workerTasks.find((item) => item.id === taskId) : undefined;
+  if (!task || (task.status !== "failed" && task.status !== "blocked")) return;
+  if (resolveOpenRunQuestionPure(run)) return;
+  if (run.steps.some((step) => step.status === "running" || step.status === "reviewing")) return;
+  const attempt = [...run.workerAttempts].reverse().find((item) => item.workerTaskId === task.id);
+  const report = attempt?.finalReportPath
+    ? await readWorkerReport(attempt.finalReportPath).catch(() => null)
+    : null;
+  const outcome =
+    report?.status === "partial"
+      ? "only finished part of its task"
+      : report?.status === "blocked"
+        ? "got stuck and needs a decision"
+        : "failed";
+  const summary = (report?.summary ?? attempt?.error ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+  const question = `The worker "${task.title}" ${outcome}${summary ? `: ${summary}` : "."} How should I continue?`;
+  try {
+    await askHumanQuestion(run.id, question, UNFINISHED_WORKER_OPTIONS, {
+      reason: `Worker report status: ${report?.status ?? "missing"}.`,
+      managerMode: "worker_result_review",
+    });
+  } catch (err) {
+    console.warn(`[run-store] unfinished-worker question for ${run.id} not posted:`, err);
   }
 }
 
@@ -9794,9 +9854,149 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     schedulePendingManagerResume(manualReview);
     return manualReview;
   }
+  const unverifiedChoice = await maybeApplyUnverifiedCompletionAnswer(
+    updated,
+    questionMessageId,
+    messageId,
+    message,
+  );
+  if (unverifiedChoice) return unverifiedChoice;
 
   schedulePendingManagerResume(updated);
   return updated;
+}
+
+/**
+ * Apply a canned answer to the unverified-completion question without a manager
+ * turn. Returns null for any other question or for free text, which then goes
+ * to Cora as usual.
+ *
+ * "Use it as is" finishes the run but records that nothing checked it, so the
+ * completion never reads as verified. "Check it now" appends one verifier step
+ * over the final state and launches it; the worker cycle's settled-run hop then
+ * completes the run when the verdict passes, or asks again when it does not.
+ * Either way the answer is consumed here, so the pending manager resume the
+ * answer stamped is dropped: a manager turn would only re-decide (and could
+ * spawn a second verifier for) a choice the user already made.
+ */
+async function maybeApplyUnverifiedCompletionAnswer(
+  run: RunState,
+  questionMessageId: string,
+  answerMessageId: string,
+  answerText: string,
+): Promise<RunState | null> {
+  const question = run.humanMessages.find(
+    (entry) => entry.id === questionMessageId && entry.kind === "question",
+  );
+  const options = question?.questionOptions ?? [];
+  if (!options.some((option) => option.id === UNVERIFIED_COMPLETION_OPTIONS[0].id)) return null;
+  const choice = parseUnverifiedCompletionChoice(answerText, options);
+  if (!choice) return null;
+
+  const consumeAnswer = (draft: RunState): void => {
+    abandonRunQuestionOwnership(draft);
+    const answer = draft.humanMessages.find((entry) => entry.id === answerMessageId);
+    if (answer) answer.deliveryState = "acknowledged";
+  };
+
+  if (choice === "accept") {
+    const accepted = await commitRunChange(run, {
+      type: "run.accepted_unverified",
+      message: "The user accepted the changes without a check",
+      payload: { questionMessageId, source: "user_accepted_unverified" },
+      mutate: (draft, timestamp) => {
+        if (isTerminalRunStatus(draft.status)) return false;
+        consumeAnswer(draft);
+        draft.status = "complete";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "complete",
+          lastAction: "user_accepted_unverified",
+          stopReason: "Finished at the user's request without a verifier check.",
+          updatedAt: timestamp,
+        };
+        draft.completedAt = timestamp;
+        draft.updatedAt = timestamp;
+      },
+    });
+    await addRunMessage({
+      runId: run.id,
+      author: "system",
+      kind: "note",
+      message: "Finished without a check, as you asked. These changes have not been verified.",
+    }).catch(() => undefined);
+    return requireRun(accepted.id);
+  }
+
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) return null;
+  let implementerRuntime: WorkerRuntime | undefined;
+  for (const attempt of [...run.workerAttempts].reverse()) {
+    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+    if (!task || task.taskClass === "verifier" || !attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (report && report.filesChanged.length > 0) {
+      implementerRuntime = task.runtimePreference;
+      break;
+    }
+  }
+  const verifierRuntime: WorkerRuntime = implementerRuntime === "claude" ? "codex" : "claude";
+  const stepId = makeId("step");
+  const taskId = makeId("task");
+  const resumed = await commitRunChange(run, {
+    type: "run.verification_requested",
+    message: "The user asked for a check of the final changes",
+    payload: { questionMessageId, stepId, taskId, verifierRuntime },
+    mutate: (draft, timestamp) => {
+      if (isTerminalRunStatus(draft.status)) return false;
+      consumeAnswer(draft);
+      const { step } = resolveFollowUpDestinationStep(draft, {
+        newStepId: stepId,
+        title: "Check the final changes",
+        goal: "Independently verify the run's final changes.",
+        acceptanceCriteria: ["An independent verifier signs off on the final state."],
+        timestamp,
+      });
+      draft.workerTasks.push({
+        id: taskId,
+        runId: draft.id,
+        stepId: step.id,
+        title: "Verify the final changes",
+        description: [
+          "Independently verify the changes this run made, as they stand now.",
+          "Re-derive ground truth from the filesystem; do NOT trust earlier workers' self-reports.",
+          "Return a verifier verdict covering what the user asked for in this chat.",
+        ].join("\n"),
+        runtimePreference: verifierRuntime,
+        effortHint: "low",
+        status: "created",
+        allowedPaths: [],
+        forbiddenPaths: [],
+        expectedOutputs: [],
+        verificationCommands: [],
+        canRunParallel: false,
+        conflictsWith: [],
+        taskClass: "verifier",
+        createdBy: "spark",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      if (!step.workerTaskIds.includes(taskId)) step.workerTaskIds.push(taskId);
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "user_requested_verification",
+        stopReason: undefined,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!resumed.workerTasks.some((task) => task.id === taskId)) return resumed;
+  const envelope = await prepareWorkerTask({ runId: run.id, workerTaskId: taskId, cwd });
+  scheduleAutopilotCycles(run.id, [envelope.attemptId]);
+  return requireRun(run.id);
 }
 
 /**
@@ -9920,7 +10120,7 @@ async function maybeApplyManualReviewAnswer(
     if (verification.ok) {
       return completeRunFromOrchestrator(applied.id);
     }
-    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
+    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
       reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
       managerMode: "worker_result_review",
     });

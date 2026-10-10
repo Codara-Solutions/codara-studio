@@ -160,7 +160,13 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
    `src/shared/` decides which tasks can run at the same time.
 8. **Reports.** A worker ends by writing `final-report.json`. `worker-report.ts`
    reads it and decides whether to accept it. `codara_wait_for_workers`
-   returns the reports to Cora.
+   returns the reports to Cora. Only a `complete` report is accepted: when no
+   Cora turn reviews it, `runAutopilotWorkerCycle` marks a failed or missing
+   report `failed` and a partial or blocked one `blocked`
+   (`autoReviewedTaskStatus` and `settledReviewedStepStatus` in
+   `step-lifecycle.ts`), so neither ever shows as a finished step or completes
+   the run. If Cora's turn already ended, the user is asked how to continue
+   (`worker-outcome-questions.ts`).
 9. **Completion.** Cora calls `codara_complete`
    (`handleOrchestratorComplete`). The run store moves the run to `complete`,
    writes `result-manifest.json` (`result-manifest.ts`) and posts the summary

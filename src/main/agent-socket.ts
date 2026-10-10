@@ -3437,9 +3437,11 @@ async function handleOrchestratorAskUser(
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
-// A worker task is "done" only in these three states. Used by
-// wait_for_workers to report is_terminal.
-const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+// A worker task is "done" only in these states. Used by wait_for_workers to
+// report is_terminal. `blocked` is where the worker cycle parks a task whose
+// report came back partial or blocked: finished, but not accepted, so the
+// manager has to decide what happens next.
+const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "blocked", "failed", "cancelled"]);
 
 // Worker task statuses that represent REAL in-flight work - an attempt is
 // scheduled, running, awaiting review, or queued to retry - so completing the
@@ -3458,9 +3460,9 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 //     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
 //     `queued`, so a healthy just-spawned task is already past `created` by the
 //     time the model can call codara_complete.
-//   - `blocked`: only ever set on the loom-pass path (run-store), and
-//     loom/automation runs are rejected by rejectIfAutomationRun before this
-//     guard - so it cannot legitimately reach here.
+//   - `blocked`: a worker that reported partial or blocked work. It has
+//     finished; the manager decides whether to retry, re-plan or land without
+//     it, and completing over it is that decision.
 //   - any future/unknown status: fail-open beats a mystery deadlock.
 const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
   "queued",
@@ -3564,7 +3566,7 @@ async function handleOrchestratorComplete(
       ERR_INVALID_PARAMS,
       `Cannot complete: ${waitableTasks.length} worker task(s) still pending/running: ${detail}. ` +
       `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
-        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).` +
+        `codara_complete once every worker has reached a terminal state (accepted/blocked/failed/cancelled).` +
         (manualAwaitingUser.length > 0
           ? ` Additionally, ${manualAwaitingUser.length} manual worker report(s) await the user's accept/fail answer and will not settle via waiting: ${manualDetail}.`
           : ""),
