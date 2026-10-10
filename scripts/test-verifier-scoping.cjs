@@ -307,6 +307,62 @@ async function main() {
     results.push("every blocking verifier is listed for an explicit overrule");
   }
 
+  {
+    // The verification-round ceiling scales with implementation lineages: five
+    // areas with one corrective verdict each is a normal run, not a loop. A
+    // single lineage still trips it alone at twice the base.
+    const shim =
+      "type RunState = any; type WorkerTask = any;\n" +
+      "const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6 } as const;\n" +
+      extract(RUN_STORE, "function implementationLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function verifierLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function implementationLineageCount(") + "\n" +
+      extract(RUN_STORE, "function verificationLineageSaturated(") + "\n" +
+      extract(RUN_STORE, "async function maybeForceLandAtVerificationCeiling(");
+    const landed = [];
+    const build = compile(
+      shim,
+      ["runHasMcpManager", "effectiveRunExecutionPolicy", "forceLandRunUnverified"],
+      "{ maybeForceLandAtVerificationCeiling, verificationLineageSaturated, verifierLineageRoot }",
+    );
+    const api = build(() => true, () => "fast", async (runId, input) => {
+      landed.push(input);
+      return { id: runId, landed: true };
+    });
+    const tasks = [];
+    const byLineage = {};
+    for (let area = 0; area < 5; area += 1) {
+      tasks.push({ id: `impl-${area}`, taskClass: "feature", status: "accepted", stepId: `s${area}` });
+      tasks.push({ id: `ver-${area}`, taskClass: "verifier", status: "accepted", stepId: `s${area}`, autoVerifierForTaskId: `impl-${area}` });
+      byLineage[`impl-${area}`] = 1;
+    }
+    const multiArea = { id: "r", workerTasks: tasks, verificationRounds: 5, verificationRoundsByLineage: byLineage };
+    assert.equal(await api.maybeForceLandAtVerificationCeiling(multiArea, tasks[9]), null);
+    assert.equal(landed.length, 0, "five areas with one FEEDBACK each must not force-land the run");
+
+    // A retry chain is one lineage: impl-0 <- impl-0b (supersedes) <- impl-0c (follow-up).
+    const chain = [
+      { id: "impl-0", taskClass: "feature", status: "failed", stepId: "s0" },
+      { id: "impl-0b", taskClass: "feature", status: "accepted", stepId: "s1", supersedesTaskId: "impl-0" },
+      { id: "impl-0c", taskClass: "feature", status: "accepted", stepId: "s2", followUpOfTaskId: "impl-0b" },
+      { id: "ver-c", taskClass: "verifier", status: "accepted", stepId: "s2" },
+      { id: "other-1", taskClass: "feature", status: "accepted", stepId: "s3" },
+      { id: "other-2", taskClass: "feature", status: "accepted", stepId: "s4" },
+    ];
+    assert.equal(api.verifierLineageRoot({ workerTasks: chain }, chain[3]), "impl-0");
+    const saturated = { id: "r2", workerTasks: chain, verificationRounds: 4, verificationRoundsByLineage: { "impl-0": 4 } };
+    assert.equal(api.verificationLineageSaturated(saturated, chain[3]), true, "a lineage at its base stops auto-retrying");
+    assert.equal(await api.maybeForceLandAtVerificationCeiling(saturated, chain[3]), null, "one lineage at 4 of 8 does not land");
+    const single = { id: "r3", workerTasks: chain.slice(0, 4), verificationRounds: 4, verificationRoundsByLineage: { "impl-0": 4 } };
+    assert.equal((await api.maybeForceLandAtVerificationCeiling(single, chain[3]))?.landed, true, "a run with one lineage keeps the old base ceiling");
+    landed.length = 0;
+    const runaway = { ...saturated, verificationRounds: 8, verificationRoundsByLineage: { "impl-0": 8 } };
+    const result = await api.maybeForceLandAtVerificationCeiling(runaway, chain[3]);
+    assert.equal(result?.landed, true, "a single ping-ponging lineage still trips the ceiling");
+    assert.match(landed[0].note, /one implementation area drew 8 corrective rounds/);
+    results.push("the verification ceiling scales per lineage and still stops a runaway lineage");
+  }
+
   check("codara_complete exposes the accept_unverified overrule and the socket enforces it", () => {
     const server = read("resources/codara-studio-mcp/server.js");
     assert.match(server, /accept_unverified: \{[\s\S]*?overruled_verifier_task_ids/);

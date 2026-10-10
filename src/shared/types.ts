@@ -2636,6 +2636,14 @@ export interface RunState {
    */
   verificationRounds?: number;
   /**
+   * The same corrective rounds keyed by implementation lineage (the first task
+   * of a retry / follow-up chain). A multi-area run legitimately draws one
+   * corrective verdict per area, so the run-level ceiling scales with the
+   * number of lineages and a single lineage is judged on its own count.
+   * Reset together with verificationRounds.
+   */
+  verificationRoundsByLineage?: Record<string, number>;
+  /**
    * Cora's own working plan for multi-phase work, written only through
    * codara_plan_update. Unlike the conversation it survives compaction and
    * restarts, so it is shown back to the manager as part of each turn's run

@@ -10302,6 +10302,7 @@ export async function resumeManagerTurnRecovery(
       current.resumeRequestedAt = timestamp;
       draft.status = "running";
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -10582,6 +10583,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         }
         draft.status = "running";
         draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
           status: "running",
@@ -10674,6 +10676,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       // budget so the run doesn't re-trip a saturated round ceiling on its
       // first corrective verdict (mirrors the user-turn reset in addRunMessage).
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -11026,7 +11029,10 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       // guards a single runaway corrective loop, not the whole conversation —
       // without this reset a follow-up inherits a saturated counter and the
       // first corrective verdict of the new turn instantly force-lands the run.
-      if (input.author === "user") draft.verificationRounds = 0;
+      if (input.author === "user") {
+        draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
+      }
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
@@ -14775,15 +14781,20 @@ async function reviewWorkerReportArtifact({
     const oracleAccept = await maybeAcceptOracleBlockedVerifierVerdict({ run, task, attempt, report });
     if (oracleAccept) return oracleAccept;
     if (correctiveVerdict) {
-      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run);
+      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run, task);
       if (ceilingLanded) return ceilingLanded;
     }
-    const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
-      run,
-      task,
-      attempt,
-      report,
-    });
+    // A lineage at its base budget stops looping on its own: the verdict goes
+    // to the manager, who can correct once more, overrule it through
+    // codara_complete accept_unverified, or ask the user.
+    const feedbackRetry = correctiveVerdict && verificationLineageSaturated(run, task)
+      ? null
+      : await maybeQueueVerifierFeedbackRetry({
+          run,
+          task,
+          attempt,
+          report,
+        });
     if (feedbackRetry) return feedbackRetry;
   }
 
@@ -15461,17 +15472,73 @@ async function recordVerificationRound({
   attempt: WorkerAttempt;
 }): Promise<RunState> {
   const nextRounds = (run.verificationRounds ?? 0) + 1;
+  const lineage = verifierLineageRoot(run, task);
   return commitRunChange(run, {
     type: "autopilot.verification_round_recorded",
     stepId: task.stepId,
     workerTaskId: task.id,
     message: `Verification round ${nextRounds} reviewed`,
-    payload: { attemptId: attempt.id, verificationRounds: nextRounds },
+    payload: {
+      attemptId: attempt.id,
+      verificationRounds: nextRounds,
+      lineage,
+      lineageRounds: (run.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+    },
     mutate: (draft, timestamp) => {
       draft.verificationRounds = (draft.verificationRounds ?? 0) + 1;
+      draft.verificationRoundsByLineage = {
+        ...(draft.verificationRoundsByLineage ?? {}),
+        [lineage]: (draft.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+      };
       draft.updatedAt = timestamp;
     },
   });
+}
+
+// The first task of an implementation's retry / follow-up chain.
+function implementationLineageRoot(run: RunState, taskId: string): string {
+  const byId = new Map(run.workerTasks.map((candidate) => [candidate.id, candidate]));
+  let current = byId.get(taskId);
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parentId = current.supersedesTaskId ?? current.followUpOfTaskId;
+    const parent = parentId ? byId.get(parentId) : undefined;
+    if (!parent) break;
+    current = parent;
+  }
+  return current?.id ?? taskId;
+}
+
+// The lineage a verifier judges: its declared implementation, else the newest
+// implementation task on its step, else the verifier alone.
+function verifierLineageRoot(run: RunState, verifier: WorkerTask): string {
+  const implementationId =
+    verifier.autoVerifierForTaskId ??
+    [...run.workerTasks]
+      .reverse()
+      .find(
+        (candidate) =>
+          Boolean(verifier.stepId) &&
+          candidate.stepId === verifier.stepId &&
+          candidate.taskClass !== "verifier",
+      )?.id;
+  return implementationId ? implementationLineageRoot(run, implementationId) : `verifier:${verifier.id}`;
+}
+
+function implementationLineageCount(run: RunState): number {
+  const roots = new Set(
+    run.workerTasks
+      .filter((candidate) => candidate.taskClass !== "verifier" && candidate.status !== "cancelled")
+      .map((candidate) => implementationLineageRoot(run, candidate.id)),
+  );
+  return Math.max(1, roots.size);
+}
+
+function verificationLineageSaturated(run: RunState, verifier: WorkerTask): boolean {
+  if (!runHasMcpManager(run)) return false;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  return (run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0) >= base;
 }
 
 // Run-level verification-round ceiling for execute-mode CLI/Pi managers. The
@@ -15481,16 +15548,31 @@ async function recordVerificationRound({
 // runaway loops, not to police normal runs.
 const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6 } as const;
 
-async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
+// One corrective verdict per area is the normal shape of a multi-area run,
+// so the run-level ceiling scales with the number of implementation lineages.
+// A single lineage still trips it on its own at twice the base, which catches
+// a manager-minted follow-up chain ping-ponging past the attempt cap.
+async function maybeForceLandAtVerificationCeiling(
+  run: RunState,
+  verifier: WorkerTask,
+): Promise<RunState | null> {
   if (!runHasMcpManager(run)) return null;
   const rounds = run.verificationRounds ?? 0;
-  const ceiling = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
-  if (rounds < ceiling) return null;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  const lineages = implementationLineageCount(run);
+  const ceiling = base * lineages;
+  const lineageRounds = run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0;
+  if (rounds < ceiling && lineageRounds < base * 2) return null;
   return forceLandRunUnverified(run.id, {
     trigger: "verification_rounds_capped",
     note:
-      `Verification hit its hard ceiling: ${rounds} rounds against a limit of ${ceiling} for this policy. ` +
-      "Codara accepted the remaining reviewed work and landed it as unverified — further rounds were repeating the same evidence.",
+      rounds >= ceiling
+        ? `Verification hit its hard ceiling: ${rounds} corrective rounds against a limit of ${ceiling} ` +
+          `(${base} per implementation area, ${lineages} area(s)). ` +
+          "Codara accepted the remaining reviewed work and landed it as unverified; further rounds were repeating the same evidence."
+        : `Verification hit its hard ceiling: one implementation area drew ${lineageRounds} corrective rounds ` +
+          `against a limit of ${base * 2}. Codara accepted the remaining reviewed work and landed it as unverified; ` +
+          "further rounds were repeating the same evidence.",
   });
 }
 
