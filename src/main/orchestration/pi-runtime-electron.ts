@@ -212,6 +212,7 @@ interface LivePiMcpRoster {
 const livePiMcpRosters = new Map<string, LivePiMcpRoster>();
 let livePiMcpRefreshHooked = false;
 let livePiMcpRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let livePiMcpRefreshTail: Promise<void> = Promise.resolve();
 let lastPiMcpDiscoveryError: string | null = null;
 
 /** The last MCP discovery failure behind a Pi launch, for the Capability Center. */
@@ -310,7 +311,15 @@ function scheduleLivePiMcpRefresh(): void {
  * servers changed. A failed discovery keeps the current roster rather than
  * disconnecting servers that are working.
  */
-export async function refreshLivePiMcpRosters(): Promise<void> {
+export function refreshLivePiMcpRosters(): Promise<void> {
+  // One pass at a time: a pass that resolved before a later settings change
+  // must not land its older roster after the newer pass already wrote.
+  const pass = livePiMcpRefreshTail.then(refreshLivePiMcpRostersOnce);
+  livePiMcpRefreshTail = pass.catch(() => undefined);
+  return pass;
+}
+
+async function refreshLivePiMcpRostersOnce(): Promise<void> {
   for (const [path, roster] of [...livePiMcpRosters]) {
     const servers = await discoverPiMcpServers(roster.audience, roster.cwd);
     if (!servers) continue;
@@ -319,6 +328,9 @@ export async function refreshLivePiMcpRosters(): Promise<void> {
     try {
       await writeRosterFile(path, content);
       roster.content = content;
+      // The session ended while this write was in flight; its cleanup already
+      // ran, so the credentials file this write recreated is removed here.
+      if (!livePiMcpRosters.has(path)) await rm(path, { force: true }).catch(() => undefined);
     } catch (error) {
       console.warn("[pi-mcp] could not refresh a live MCP roster:", error);
     }
