@@ -1957,6 +1957,7 @@ function friendlyWorkerLine(
   report?: WorkerReport,
 ): string {
   if (status === "running") {
+    if (task.status === "needs_review") return "Finished. Waiting for Cora to review the report.";
     // The live activity readout (what tool the worker is on right now) beats
     // the generic sentence whenever a writer has reported one.
     return (
@@ -1964,7 +1965,13 @@ function friendlyWorkerLine(
       "Currently running. The final report will appear when it finishes."
     );
   }
-  if (status === "blocked") return attempt?.error || "This worker hit a problem and may need a retry or review.";
+  if (status === "blocked") {
+    return (
+      attempt?.error ||
+      report?.summary ||
+      "This worker hit a problem and may need a retry or review."
+    );
+  }
   if (status === "done") {
     if (report?.summary) return report.summary;
     return "Finished. Review the report and proof below for details.";

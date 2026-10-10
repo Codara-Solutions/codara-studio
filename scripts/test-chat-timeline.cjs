@@ -1360,6 +1360,33 @@ async function main() {
     assert.equal(T.attemptStatusColor("finishing"), "var(--accent)");
   });
 
+  test("the graph never paints an unfinished or failed worker as done", () => {
+    const task = (status) => ({ id: "t", status });
+    const attempt = (status) => ({ id: "a", status });
+    // A failed attempt whose synthetic report left the task awaiting review.
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("failed"), "reviewing"), "blocked");
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("timed_out"), "reviewing"), "blocked");
+    // A clean exit whose report said failed or partial.
+    assert.equal(T.deriveAgentStatus(task("failed"), attempt("succeeded"), "failed"), "blocked");
+    assert.equal(T.deriveAgentStatus(task("blocked"), attempt("succeeded"), "blocked"), "blocked");
+    // Finished but not yet reviewed is still in progress.
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("succeeded"), "reviewing"), "running");
+    // Only an accepted task, or a settled success with no task verdict, is done.
+    assert.equal(T.deriveAgentStatus(task("accepted"), attempt("succeeded"), "complete"), "done");
+    assert.equal(T.deriveAgentStatus(undefined, attempt("succeeded"), "running"), "done");
+  });
+
+  test("a relaunched attempt never shows the previous run's report", () => {
+    // A relaunch reuses the attempt id and the report path, so the cache must
+    // be keyed by when and how the attempt settled, and a live attempt shows
+    // no report at all.
+    const source = fs.readFileSync(RUN_FORMAT, "utf8");
+    const hook = source.slice(source.indexOf("export function useRunReports("));
+    assert.match(hook, /key: `\$\{attempt\.finalReportPath\}\|\$\{attempt\.finishedAt \?\? ""\}\|\$\{attempt\.status\}`/);
+    assert.match(hook, /LIVE_REPORT_ATTEMPT_STATUSES\.has\(attempt\.status\)\) continue;/);
+    assert.match(hook, /cacheRef\.current\.get\(key\)/);
+  });
+
   test("a queued worker row names its allowed roster model", () => {
     const state = pausedRunWithQueuedWorker();
     const timeline = T.buildChatTimeline(state);

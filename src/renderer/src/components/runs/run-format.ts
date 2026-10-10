@@ -411,9 +411,10 @@ export function deriveAgentStatus(
   // node falls through to "queued" — matching the composer chip and the chat
   // row, so the graph never shows a worker running that never started.
   if (task?.status === "running" || task?.status === "claimed") return "running";
-  if (task?.status === "accepted" || task?.status === "needs_review" || attempt?.status === "succeeded") {
-    return "done";
-  }
+  if (task?.status === "accepted") return "done";
+  // The verdict outranks the process exit: an attempt that exited cleanly can
+  // still carry a failed or partial report, and its task is then failed or
+  // blocked. A failed attempt is never shown as done either.
   if (
     task?.status === "blocked" ||
     task?.status === "failed" ||
@@ -424,6 +425,9 @@ export function deriveAgentStatus(
   ) {
     return "blocked";
   }
+  // Finished but not yet reviewed: still in progress, not done.
+  if (task?.status === "needs_review") return "running";
+  if (attempt?.status === "succeeded") return "done";
   if (stepStatus === "complete") return "done";
   if (stepStatus === "blocked" || stepStatus === "failed") return "blocked";
   return "queued";
@@ -581,34 +585,54 @@ export function isRunStillTicking(run: RunState): boolean {
   );
 }
 
-// Lazily loads every worker's structured final report from disk and caches it
-// by path, so a report file is read exactly once across the whole canvas
-// lifetime. Returns an attempt-id keyed map; both the step nodes (file-count
-// rollup) and the inspector (full report) read from it without re-fetching.
+const LIVE_REPORT_ATTEMPT_STATUSES = new Set<WorkerAttempt["status"]>([
+  "preparing",
+  "prompt_ready",
+  "launching",
+  "running",
+  "finishing",
+]);
+
+// Lazily loads every worker's structured final report from disk and caches it,
+// so a settled report is read exactly once across the whole canvas lifetime.
+// Returns an attempt-id keyed map; both the step nodes (file-count rollup) and
+// the inspector (full report) read from it without re-fetching.
+//
+// The cache key carries the attempt's finishedAt and status, not just the path:
+// a relaunch reuses the attempt id and therefore the report path, and a late
+// failure can rewrite a report in place, so a path alone would keep showing the
+// first run's report. A live attempt has no report of its own yet; whatever
+// file sits at its path belongs to the previous run, so it is not shown.
 export function useRunReports(run: RunState): ReadonlyMap<string, WorkerReport> {
   const cacheRef = useRef<Map<string, WorkerReport>>(new Map());
   const [, bump] = useState(0);
 
-  const pathByAttempt = useMemo(() => {
-    const map = new Map<string, string>();
+  const sourceByAttempt = useMemo(() => {
+    const map = new Map<string, { path: string; key: string }>();
     for (const attempt of run.workerAttempts) {
-      if (attempt.finalReportPath) map.set(attempt.id, attempt.finalReportPath);
+      if (!attempt.finalReportPath || LIVE_REPORT_ATTEMPT_STATUSES.has(attempt.status)) continue;
+      map.set(attempt.id, {
+        path: attempt.finalReportPath,
+        key: `${attempt.finalReportPath}|${attempt.finishedAt ?? ""}|${attempt.status}`,
+      });
     }
     return map;
   }, [run.workerAttempts]);
 
   useEffect(() => {
     let cancelled = false;
-    const wanted = [...new Set(pathByAttempt.values())];
-    const missing = wanted.filter((path) => !cacheRef.current.has(path));
-    if (missing.length === 0) return undefined;
+    const missing = new Map<string, string>();
+    for (const { path, key } of sourceByAttempt.values()) {
+      if (!cacheRef.current.has(key)) missing.set(key, path);
+    }
+    if (missing.size === 0) return undefined;
     void Promise.all(
-      missing.map((path) =>
+      [...missing].map(([key, path]) =>
         window.spark.orchestration
           .readWorkerReport(path)
           // readWorkerReport resolves to null when the file is missing or
           // unparseable; drop those so the cache only holds real reports.
-          .then((report) => (report ? ([path, report] as const) : null))
+          .then((report) => (report ? ([key, report] as const) : null))
           .catch(() => null),
       ),
     ).then((loaded) => {
@@ -625,16 +649,16 @@ export function useRunReports(run: RunState): ReadonlyMap<string, WorkerReport> 
     return () => {
       cancelled = true;
     };
-  }, [pathByAttempt]);
+  }, [sourceByAttempt]);
 
   return useMemo(() => {
     const next = new Map<string, WorkerReport>();
-    for (const [attemptId, path] of pathByAttempt) {
-      const report = cacheRef.current.get(path);
+    for (const [attemptId, { key }] of sourceByAttempt) {
+      const report = cacheRef.current.get(key);
       if (report) next.set(attemptId, report);
     }
     return next;
     // cacheRef.current.size advances when a freshly loaded report lands via
     // the bump() re-render, which is exactly when this map must be rebuilt.
-  }, [pathByAttempt, cacheRef.current.size]);
+  }, [sourceByAttempt, cacheRef.current.size]);
 }
