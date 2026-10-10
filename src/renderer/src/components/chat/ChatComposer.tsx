@@ -19,7 +19,7 @@ import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
 import {
   chatModelIsOpenAi,
 } from "@shared/chat-policy";
-import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
+import { useCoraMidTurnDelivery, useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
   backendFailureRetryText,
   deriveComposerWorkerActivity,
@@ -1166,6 +1166,7 @@ export default function ChatComposer({
   // state. It shows only for an OpenAI model — Anthropic has no priority tier
   // and must never be offered one.
   const fastMode = useOpenAiFastMode();
+  const midTurnDelivery = useCoraMidTurnDelivery();
   const fastModeAvailable = chatModelIsOpenAi(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
@@ -1568,7 +1569,9 @@ export default function ChatComposer({
                 : pastingImages
                   ? "Adding pasted image..."
                 : isActive
-                  ? "Enter to send · Cora reads it while she works"
+                  ? midTurnDelivery === "queue"
+                    ? "Enter to queue · delivered when this turn ends"
+                    : "Enter to send · Cora reads it while she works"
                   : backendFailureQuestion
                     ? "Enter to send, Shift+Enter for a new line"
                   : openQuestion

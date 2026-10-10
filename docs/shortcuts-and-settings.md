@@ -146,11 +146,6 @@ The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
 
-One Cora setting has no switch in the window yet: `coraAlwaysVerifyEdits` in
-`~/.codarastudio/spark-settings.json`. Off by default, Cora makes small, low-risk edits (one to
-three files) herself and replies directly. Turned on, every project change
-goes through a worker and a verifier on another provider, as before.
-
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your
@@ -166,7 +161,7 @@ by default; bind it in Keybindings). It has six sections:
 | Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat (including a board chat with no messages yet) picks its profile from the composer's profile menu; a started chat shows its profile as a chip that opens it here, and keeps it. |
 | Memory | What Cora remembers for the profile you pick, globally and for this workspace. Global memory is the master switch: while it is off, workspace memory is off too and says so. **Open in editor** creates the file if nothing was remembered yet. |
 | Worker models | Which models Cora may pick for its workers. Cora only uses a model whose provider has a signed-in account; the others are marked **Not signed in**. The last usable model cannot be switched off; an OpenRouter model only counts once its key is verified. |
-| Behavior | Three switches that apply to all workspaces: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
+| Behavior | Settings that apply to all workspaces. **Always verify edits with a worker** (`coraAlwaysVerifyEdits`, off by default): off, Cora makes small, low-risk edits (one to three files) herself and replies directly; on, every project change goes through a worker and a verifier on another provider. It applies the next time Cora starts in a chat. **Messages you send while Cora works** (`coraMidTurnDelivery`): **Cora reads new messages right away** (the default) hands a message to the live turn, so she sees it at her next step; **Wait until Cora finishes** queues it for a new turn. Then three worker and CLI switches: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
 
 Every switch applies as soon as you flip it; there is no Save step and
 nothing to lose by closing. Forms you type into (a server you are adding or

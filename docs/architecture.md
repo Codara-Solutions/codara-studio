@@ -170,7 +170,7 @@ verifier. Broad, parallel, plan-shaped or Studio-surface requests (whiteboard,
 board, scheduling) start the manager instead, and a direct chat switches to
 the manager in place when a follow-up needs it. In Auto mode the manager also
 makes small, low-risk edits (one to three files) itself and spawns workers
-only for real work; the `coraAlwaysVerifyEdits` setting (no UI yet) restores
+only for real work; the `coraAlwaysVerifyEdits` setting (Capability Center > Behavior) restores
 the rule that every edit goes through a worker and a verifier.
 
 **Long runs.** The manager records a plan with `codara_plan_update`
@@ -202,7 +202,8 @@ turn is steered into it: run-store claims the message for the live call and
 tool calls (`codara_wait_for_workers` returns early with reason
 `user_message` so a long wait does not hold it). A steer the turn never read
 is withdrawn from Pi (`clear_queue`) and goes back to the queue when the turn
-ends. `AppSettings.coraMidTurnDelivery` set to `"queue"` turns steering off.
+ends. `AppSettings.coraMidTurnDelivery` set to `"queue"` (Capability Center >
+Behavior, **Wait until Cora finishes**) turns steering off.
 
 **Automations and looms.** `scheduler.ts` arms triggers (cron, interval,
 folder, git, manual, and others). `automation-loop.ts` starts iterations.

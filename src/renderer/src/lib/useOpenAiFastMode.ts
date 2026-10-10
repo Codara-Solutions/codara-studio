@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AppSettings } from "@shared/types";
+import type { AppSettings, CoraMidTurnDelivery } from "@shared/types";
 
 // Fast mode is one global setting (AppSettings.openAiFastMode) whose only
 // control now sits in the chat composer, far from the Settings dialog that
@@ -105,4 +105,27 @@ export function useOpenAiFastMode(): OpenAiFastModeControl {
   }, []);
 
   return { enabled, toggle };
+}
+
+/**
+ * How a message sent during a live turn reaches Cora (AppSettings
+ * .coraMidTurnDelivery), so the composer hint describes what will happen.
+ */
+export function useCoraMidTurnDelivery(): CoraMidTurnDelivery {
+  const [delivery, setDelivery] = useState<CoraMidTurnDelivery>(
+    cached?.coraMidTurnDelivery === "queue" ? "queue" : "steer",
+  );
+  useEffect(() => {
+    let cancelled = false;
+    const apply = (settings: AppSettings) => {
+      if (!cancelled) setDelivery(settings.coraMidTurnDelivery === "queue" ? "queue" : "steer");
+    };
+    void loadSettingsOnce().then(apply).catch(() => undefined);
+    const unsubscribe = onSettingsChanged(apply);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+  return delivery;
 }
