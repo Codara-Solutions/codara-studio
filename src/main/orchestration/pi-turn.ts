@@ -136,6 +136,21 @@ function toolOutput(resultValue: unknown): string {
   catch { return String(resultValue); }
 }
 
+// Live output of a running tool (Pi's bash streams tool_execution_update with
+// everything so far). Only a tail is forwarded, at most this often, because the
+// final tool_result carries the whole output.
+export const TOOL_PROGRESS_INTERVAL_MS = 250;
+export const TOOL_PROGRESS_MAX_LINES = 40;
+export const TOOL_PROGRESS_MAX_CHARS = 4000;
+
+export function toolProgressTail(partialResult: unknown): string {
+  const text = textBlocks(partialResult);
+  if (!text) return "";
+  const lines = text.replace(/\s+$/, "").split(/\r?\n/);
+  const tail = lines.slice(-TOOL_PROGRESS_MAX_LINES).join("\n");
+  return tail.length > TOOL_PROGRESS_MAX_CHARS ? tail.slice(-TOOL_PROGRESS_MAX_CHARS) : tail;
+}
+
 /**
  * Deterministically converts one Pi RPC turn into Codara's existing stream and
  * manager-decision inputs. It deliberately consumes only documented RPC
@@ -166,6 +181,13 @@ export class PiTurnAccumulator {
   private fatalFailure: string | null = null;
   private readonly providerResponseIds = new Set<string>();
   private settled = false;
+  // Per running tool: when its last tail went out, and the newest tail held
+  // back by the throttle (sent by a trailing timer so the final lines before a
+  // quiet stretch are never lost).
+  private readonly toolProgress = new Map<
+    string,
+    { sentAt: number; pending: string | null; timer: ReturnType<typeof setTimeout> | null }
+  >();
 
   constructor(
     onStream?: ChatStreamHandler,
@@ -250,8 +272,17 @@ export class PiTurnAccumulator {
       return;
     }
 
+    if (event.type === "tool_execution_update") {
+      if (typeof event.toolCallId !== "string" || !event.toolCallId || !this.onStream) return;
+      if (!this.toolIds.has(event.toolCallId) || this.completedToolIds.has(event.toolCallId)) return;
+      const tail = toolProgressTail(event.partialResult);
+      if (tail) this.queueToolProgress(event.toolCallId, tail);
+      return;
+    }
+
     if (event.type === "tool_execution_end") {
       if (typeof event.toolCallId !== "string" || !event.toolCallId) return;
+      this.clearToolProgress(event.toolCallId);
       this.completedToolIds.add(event.toolCallId);
       if (event.isError === true) this.failedToolIds.add(event.toolCallId);
       this.onStream?.({
@@ -288,6 +319,32 @@ export class PiTurnAccumulator {
     }
 
     if (event.type === "agent_settled") this.settled = true;
+  }
+
+  private queueToolProgress(toolUseId: string, output: string): void {
+    const state = this.toolProgress.get(toolUseId) ?? { sentAt: 0, pending: null, timer: null };
+    this.toolProgress.set(toolUseId, state);
+    const wait = TOOL_PROGRESS_INTERVAL_MS - (Date.now() - state.sentAt);
+    if (wait <= 0 && !state.timer) {
+      state.sentAt = Date.now();
+      this.onStream?.({ kind: "tool_progress", toolUseId, output });
+      return;
+    }
+    state.pending = output;
+    state.timer ??= setTimeout(() => {
+      state.timer = null;
+      if (state.pending === null || this.completedToolIds.has(toolUseId)) return;
+      const pending = state.pending;
+      state.pending = null;
+      state.sentAt = Date.now();
+      this.onStream?.({ kind: "tool_progress", toolUseId, output: pending });
+    }, Math.max(0, wait));
+  }
+
+  private clearToolProgress(toolUseId: string): void {
+    const state = this.toolProgress.get(toolUseId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.toolProgress.delete(toolUseId);
   }
 
   result(): PiTurnResult {

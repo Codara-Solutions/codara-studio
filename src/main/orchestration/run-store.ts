@@ -146,6 +146,7 @@ import {
 } from "./autopilot-wave";
 import {
   appendBufferedEvent as appendBufferedEventRaw,
+  broadcastLiveEvent,
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
   flushBufferedEvents,
@@ -6112,6 +6113,13 @@ async function askManagerBackend(
       // flushes whatever is buffered ahead of it, preserving emission order.
       if (event.kind === "assistant_block") {
         appendBufferedEvent(input);
+        return;
+      }
+      // A running tool's output tail arrives up to 4 times a second for as
+      // long as the command runs; it is display-only, so it is never written
+      // to the journal.
+      if (event.kind === "tool_progress") {
+        broadcastLiveEvent({ ...input, id: `chat-tool-progress:${callId}:${event.toolUseId}` });
         return;
       }
       await appendEvent(input);

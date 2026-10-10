@@ -245,6 +245,15 @@ export function appendBufferedEvent(input: AppendEventInput): void {
 }
 
 /**
+ * Send a live-only event to subscribers without journaling it. It has no
+ * sequence, so it sorts after every durable event; callers give it a stable id
+ * so each new one replaces the last instead of accumulating.
+ */
+export function broadcastLiveEvent(input: AppendEventInput): void {
+  broadcast([createEvent(input)]);
+}
+
+/**
  * Force buffered stream events to disk now. Called for one run when its manager
  * turn ends, and for every run on shutdown, so a quit inside the flush window
  * cannot drop the tail of a stream.

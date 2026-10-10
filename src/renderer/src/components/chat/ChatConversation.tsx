@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Checkpoint,
   PlanValidation,
@@ -1187,8 +1187,11 @@ function LiveEllipsis() {
   );
 }
 
-function LiveToolRow({ call }: { call: LiveToolCall }) {
+// `live` marks a row in the turn that is still running. A settled turn can hold
+// a call that never reported a result (an aborted turn); it must not tick.
+function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolean }) {
   const finished = call.output !== undefined;
+  const running = live && !finished;
   const failed = finished && call.isError === true;
   // File-mutating calls (edit/write) carry enough payload to reconstruct a
   // GitHub-style change view locally; everything else yields null and the
@@ -1253,6 +1256,11 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
           {inlineDetail}
         </span>
+        {running && (
+          <span style={TOOL_STATS_STYLE}>
+            <ElapsedSince since={call.at} />
+          </span>
+        )}
         {appliedFileDiff && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span style={{ color: "var(--ok)" }}>+{appliedFileDiff.additions}</span>
@@ -1263,6 +1271,7 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <Caret open={open} />
       </DisclosureButton>
       {appliedFileDiff && <ToolFileDiffPreview change={appliedFileDiff} />}
+      {running && call.partialOutput ? <LiveToolOutput text={call.partialOutput} /> : null}
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
           {formatToolPayload(call.input).length > 0 && (
@@ -1292,6 +1301,20 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   );
 }
 
+
+// What a running command has printed so far, shown without expanding the row
+// so a slow test run can be told from a hung one. Pinned to the newest line.
+function LiveToolOutput({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement | null>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text]);
+  return (
+    <pre ref={ref} className="cora-live-tool-output" aria-live="off" style={LIVE_TOOL_OUTPUT_STYLE}>
+      {text}
+    </pre>
+  );
+}
 
 // GitHub-style changed-lines preview for one manager edit/write call, shown
 // directly under the tool row (the same treatment worker rows give their
@@ -2238,7 +2261,7 @@ function AssistantLiveTurn({
         {!item.awaitingReply && !compaction && !toolInFlight ? (
           <StallHint since={executionTurn?.lastEventAt || item.at} />
         ) : null}
-        <TurnSegments segments={segments} />
+        <TurnSegments segments={segments} live />
       </div>
     </SparkTurn>
   );
@@ -2309,7 +2332,7 @@ function AssistantSettledTurn({
 
 // The one segment renderer both the live and the settled turn share, so a
 // turn finishing never changes what its prose and tool rows look like.
-function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
+function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
   return (
     <>
       {segments.map((segment) => {
@@ -2329,7 +2352,7 @@ function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
         if (segment.kind === "tool") {
           return (
             <div key={segment.id} data-execution-kind="tool">
-              <LiveToolRow call={segment.call} />
+              <LiveToolRow call={segment.call} live={live} />
             </div>
           );
         }
@@ -4100,6 +4123,22 @@ const TOOL_META_LINE_STYLE: React.CSSProperties = {
 // The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
 // completed turn's "Worked for Ns" disclosure line will land, so the
 // live → done transition swaps copy without moving anything.
+const LIVE_TOOL_OUTPUT_STYLE: React.CSSProperties = {
+  margin: "2px 0 4px 12px",
+  padding: "6px 9px",
+  maxHeight: 168,
+  overflow: "auto",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "var(--bg)",
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+};
+
 const STALL_HINT_STYLE: React.CSSProperties = {
   color: "var(--warn)",
   fontSize: 11.5,
