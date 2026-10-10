@@ -19,6 +19,10 @@ import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
 import { openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
 import DismissErrorButton from "./DismissErrorButton";
+import { filterChatHistory } from "./conversation-search";
+import { chordMatches, mod } from "../../shortcuts/chord";
+
+const FIND_CHORD = mod("f");
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
@@ -124,6 +128,26 @@ export default function ChatPanel({
     [onChatViewChange],
   );
   const usingHoistedChatView = chatViewProp !== undefined;
+
+  // Mod+F opens find in the visible chat when focus is inside this panel (or
+  // nowhere). Editors and terminals elsewhere keep their own find.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [findRequest, setFindRequest] = useState(0);
+  const canFind = chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
+  useEffect(() => {
+    if (suspendGlobalEvents || !canFind) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !chordMatches(FIND_CHORD, event)) return;
+      const focused = document.activeElement;
+      const inPanel =
+        !focused || focused === document.body || Boolean(panelRef.current?.contains(focused));
+      if (!inPanel) return;
+      event.preventDefault();
+      setFindRequest((value) => value + 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [suspendGlobalEvents, canFind]);
   // A new chat starts in the normal conversation view. Terminal-view state
   // should not leak between runs because their PTYs are run-scoped. When the
   // parent owns chatView, the parent is also responsible for the reset —
@@ -161,6 +185,7 @@ export default function ChatPanel({
 
   return (
     <div
+      ref={panelRef}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -236,6 +261,7 @@ export default function ChatPanel({
                     run={activeRun}
                     cwd={workspace?.cwd ?? null}
                     onOpenWorkerTerminal={onOpenBoardWorkerTerminal}
+                    findRequest={findRequest}
                   />
                 )}
               </div>
@@ -529,6 +555,8 @@ function ChatHistoryPopover({
   onPick: (runId: string) => void;
   onDelete?: (runId: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const matches = useMemo(() => filterChatHistory(runs, query), [runs, query]);
   return (
     <div
       ref={(node) => { popRef.current = node; }}
@@ -549,16 +577,41 @@ function ChatHistoryPopover({
       <div className="spark-eyebrow" style={{ padding: "6px 8px 5px" }}>
         Recent chats
       </div>
+      {runs.length > 0 ? (
+        <div style={{ padding: "0 4px 4px" }}>
+          <input
+            autoFocus
+            type="search"
+            className="spark-input"
+            aria-label="Search chats"
+            placeholder="Search titles and messages"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && matches.length > 0) {
+                event.preventDefault();
+                onPick(matches[0].run.id);
+              }
+            }}
+            style={{ width: "100%", boxSizing: "border-box", height: 26, fontSize: 12 }}
+          />
+        </div>
+      ) : null}
       {runs.length === 0 ? (
         <div className="spark-empty" style={{ minHeight: 0, padding: "18px 8px" }}>
           <div className="spark-eyebrow">No chats yet</div>
           <div className="spark-empty__body">Start one below to see it here.</div>
         </div>
+      ) : matches.length === 0 ? (
+        <div className="spark-empty__body" style={{ padding: "12px 8px", color: "var(--muted)" }}>
+          No chat mentions "{query.trim()}".
+        </div>
       ) : (
-        runs.map((run) => (
+        matches.map(({ run, snippet }) => (
           <ChatHistoryRow
             key={run.id}
             run={run}
+            snippet={snippet}
             active={run.id === activeRunId}
             onClick={() => onPick(run.id)}
             onDelete={onDelete}
@@ -571,11 +624,14 @@ function ChatHistoryPopover({
 
 function ChatHistoryRow({
   run,
+  snippet,
   active,
   onClick,
   onDelete,
 }: {
   run: RunState;
+  /** The message text a search matched, when the title did not. */
+  snippet?: string;
   active: boolean;
   onClick: () => void;
   onDelete?: (runId: string) => void;
@@ -722,6 +778,22 @@ function ChatHistoryRow({
         </span>
         <RunIdChip runId={run.id} />
       </div>
+      {snippet ? (
+        <div
+          style={{
+            paddingLeft: 12,
+            fontSize: 11,
+            lineHeight: 1.4,
+            color: "var(--ink-dim)",
+            overflow: "hidden",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+          }}
+        >
+          {snippet}
+        </div>
+      ) : null}
     </div>
   );
 }

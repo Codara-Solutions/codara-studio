@@ -2020,6 +2020,74 @@ a { color: inherit; }
   box-shadow: var(--focus-ring);
 }
 
+/* Find in a Cora chat. */
+.cora-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 22px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
+}
+.cora-find-bar input {
+  width: 180px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1 var(--font-sans);
+  outline: none;
+}
+.cora-find-bar input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+.cora-find-bar__count {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.cora-find-bar button {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 13px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-find-bar button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-find-bar button:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+.cora-find-bar button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-timeline-row.is-find-current {
+  border-radius: var(--radius-surface, 10px);
+  box-shadow: 0 0 0 2px var(--accent-edge);
+}
+
 /* Chat markdown. highlight.js token colours come from theme tokens so light
    themes stay readable; the markdown preview keeps its own .spark-markdown
    palette in markdown-preview/markdown.css. */

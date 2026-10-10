@@ -26,6 +26,7 @@ import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../ru
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
 import { chordToHint, mod } from "../../shortcuts/chord";
+import { findMatchingRows, stepMatch } from "./conversation-search";
 import { openAccountsSettings } from "./account-readiness";
 import {
   compactPreview,
@@ -58,6 +59,8 @@ type ConversationItem = ChatTimelineItem | ActivityGroupItem;
 type ConversationRenderContext = {
   executionByCallId: Map<string, ExecutionTurn>;
   finalAnswerByCallId: Map<string, string>;
+  /** Row of the current find match, or -1. */
+  findCurrentIndex: number;
 };
 
 interface ConversationMinimapEntry {
@@ -88,11 +91,14 @@ export default function ChatConversation({
   run,
   cwd = null,
   onOpenWorkerTerminal,
+  findRequest = 0,
 }: {
   run: RunState;
   /** Workspace that relative file links in Cora's answers resolve against. */
   cwd?: string | null;
   onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
+  /** Bumped by the panel's find chord; each change opens and focuses find. */
+  findRequest?: number;
 }) {
   // One durable projection owns both history hydration and live frames. Build
   // it before the timeline so completed conversational turns can omit their
@@ -241,12 +247,47 @@ export default function ChatConversation({
   // virtualizer-supported reactive input for data that changes without adding
   // a row; changing it refreshes visible rows without remounting the list or
   // disturbing the reader's scroll position.
+  // Find in this chat. Rows are virtualized, so the browser's own find cannot
+  // see off-screen ones; this searches the row text in memory and scrolls the
+  // match into view. Row text is only built while the bar is open.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCurrent, setFindCurrent] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const seenFindRequestRef = useRef(findRequest);
+  useEffect(() => {
+    if (findRequest === seenFindRequestRef.current) return;
+    seenFindRequestRef.current = findRequest;
+    setFindOpen(true);
+    window.requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, [findRequest]);
+  const findMatches = useMemo(() => {
+    if (!findOpen) return [];
+    const texts = items.map((item) =>
+      conversationRowSearchText(item, executionByCallId, finalAnswerByCallId),
+    );
+    return findMatchingRows(texts, findQuery);
+  }, [findOpen, findQuery, items, executionByCallId, finalAnswerByCallId]);
+  const goToMatch = (position: number) => {
+    setFindCurrent(position);
+    const index = findMatches[position];
+    if (index !== undefined) virtuosoRef.current?.scrollToIndex({ index, align: "center" });
+  };
+  const closeFind = () => {
+    setFindOpen(false);
+    setFindCurrent(-1);
+  };
+  const findCurrentIndex = findOpen && findCurrent >= 0 ? findMatches[findCurrent] ?? -1 : -1;
   const renderContext = useMemo<ConversationRenderContext>(
     () => ({
       executionByCallId,
       finalAnswerByCallId,
+      findCurrentIndex,
     }),
-    [executionByCallId, finalAnswerByCallId],
+    [executionByCallId, finalAnswerByCallId, findCurrentIndex],
   );
   // The result manifest is the worker's final-report envelope, written for
   // Cora to review, not for the reader. It no longer gets a row here: the
@@ -332,7 +373,9 @@ export default function ChatConversation({
                   }}
                 >
                   <div
-                    className={`cora-timeline-row cora-timeline-row--${rowKind}`}
+                    className={`cora-timeline-row cora-timeline-row--${rowKind}${
+                      context.findCurrentIndex === index ? " is-find-current" : ""
+                    }`}
                     data-timeline-kind={rowKind}
                     style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
                   >
@@ -387,6 +430,61 @@ export default function ChatConversation({
             virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
           }}
         />
+        {findOpen && (
+          <div className="cora-find-bar" role="search">
+            <input
+              ref={findInputRef}
+              type="text"
+              aria-label="Find in chat"
+              placeholder="Find in chat"
+              value={findQuery}
+              onChange={(event) => {
+                setFindQuery(event.currentTarget.value);
+                setFindCurrent(-1);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeFind();
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  goToMatch(stepMatch(findCurrent, event.shiftKey ? -1 : 1, findMatches.length));
+                }
+              }}
+            />
+            <span className="cora-find-bar__count" aria-live="polite">
+              {findQuery.trim()
+                ? findMatches.length === 0
+                  ? "No results"
+                  : findCurrent >= 0
+                    ? `${findCurrent + 1} of ${findMatches.length}`
+                    : `${findMatches.length} found`
+                : ""}
+            </span>
+            <button
+              type="button"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, -1, findMatches.length))}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, 1, findMatches.length))}
+            >
+              ↓
+            </button>
+            <button type="button" aria-label="Close find" title="Close (Esc)" onClick={closeFind}>
+              ×
+            </button>
+          </div>
+        )}
         {!readerAtBottom && rowCount > 0 && (
           <button
             type="button"
@@ -496,6 +594,32 @@ function timelineItemKey(item: ConversationItem): string {
 
 // The SparkCall backing a manager row. Rows written since the field existed
 // carry it directly; older persisted timelines still derive it from the id.
+// Everything a reader could see in a row, as one searchable string.
+function conversationRowSearchText(
+  item: ConversationItem,
+  executionByCallId: Map<string, ExecutionTurn>,
+  finalAnswerByCallId: Map<string, string>,
+): string {
+  if (item.kind === "message") return item.text;
+  if (item.kind === "step") {
+    return [item.title, item.goal, ...item.workers.map((worker) => worker.title)].join("\n");
+  }
+  const tools = item.kind === "activity-group" ? item.items : [item];
+  const parts: string[] = [];
+  for (const tool of tools) {
+    parts.push(tool.title, tool.detail ?? "");
+    if (tool.activity !== "manager") continue;
+    const callId = timelineSparkCallId(tool);
+    for (const block of executionByCallId.get(callId)?.blocks ?? []) {
+      if (block.kind === "text") parts.push(block.text);
+      else if (block.kind === "tool") parts.push(block.toolName);
+      else if (block.kind === "error") parts.push(block.message);
+    }
+    parts.push(finalAnswerByCallId.get(callId) ?? "");
+  }
+  return parts.join("\n");
+}
+
 function timelineSparkCallId(item: ToolItem): string {
   if (item.sparkCallId) return item.sparkCallId;
   return item.id.startsWith("spark-call:")
