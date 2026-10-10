@@ -96,7 +96,7 @@ function refresh(): void {
     });
 }
 
-function subscribe(listener: () => void): () => void {
+export function subscribeCoraAccountReadiness(listener: () => void): () => void {
   listeners.add(listener);
   if (!stopEvents) {
     refresh();
@@ -111,6 +111,9 @@ function subscribe(listener: () => void): () => void {
     if (listeners.size === 0 && stopEvents) {
       stopEvents();
       stopEvents = null;
+      // Account changes that land while nothing listens never reach the
+      // snapshot, so it no longer counts as a settled answer.
+      snapshot = { ...snapshot, settled: false };
     }
   };
 }
@@ -120,7 +123,7 @@ function getSnapshot(): CoraAccountReadiness {
 }
 
 export function useCoraAccountReadiness(): CoraAccountReadiness {
-  return useSyncExternalStore(subscribe, getSnapshot);
+  return useSyncExternalStore(subscribeCoraAccountReadiness, getSnapshot);
 }
 
 /** One-shot read for code that resolves a default outside render. */

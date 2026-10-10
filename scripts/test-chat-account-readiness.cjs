@@ -146,6 +146,32 @@ async function main() {
     assert.match(composer, /resolvePreferredChatModel\(\s*groups,\s*preferredModel,\s*accounts\.usableProviders \?\? undefined,\s*\)/);
   });
 
+  // An account connected while no chat was mounted must reach the next new
+  // chat's default model: the cached answer went stale when nothing listened.
+  let connections = [];
+  globalThis.window = {
+    spark: {
+      piSubscriptions: {
+        status: async () => ({ runtimeInstalled: true, connections }),
+        onEvent: () => () => {},
+      },
+      openRouter: { coraModels: async () => [] },
+    },
+  };
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const stop = R.subscribeCoraAccountReadiness(() => {});
+  await tick();
+  assert.equal((await R.loadCoraAccountReadiness()).usableProviders.size, 0);
+  stop();
+  connections = [connection("anthropic")];
+  const stopAgain = R.subscribeCoraAccountReadiness(() => {});
+  const fresh = await R.loadCoraAccountReadiness();
+  stopAgain();
+  assert.deepEqual([...fresh.usableProviders], ["anthropic"]);
+  passed += 1;
+  console.log("  PASS a readiness read after every chat closed does not reuse the stale answer");
+  delete globalThis.window;
+
   console.log(`\n${passed} chat account readiness checks passed`);
 }
 
