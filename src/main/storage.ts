@@ -58,6 +58,7 @@ const EMPTY_SETTINGS: AppSettings = {
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
   openAiFastMode: false,
+  coraAlwaysVerifyEdits: false,
 };
 
 // The OpenRouter key is stored encrypted by the operating system (Electron
@@ -378,6 +379,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
     autopilotSandbox: settings.autopilotSandbox === true,
     openAiFastMode: settings.openAiFastMode === true,
+    coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
   };
 }
 

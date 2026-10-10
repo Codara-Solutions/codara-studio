@@ -625,6 +625,11 @@ export interface AppSettings {
   // Anthropic sessions are unaffected and can never run a fast/priority tier;
   // resources/pi-cora/service-tier.ts strips one structurally.
   openAiFastMode: boolean;
+  // "Always verify edits with a worker". Off by default: Cora makes small,
+  // low-risk edits herself. On restores the old rule that every project
+  // change goes through a worker and its cross-provider verifier. Optional
+  // only so renderer fallbacks need not list it; storage always normalizes it.
+  coraAlwaysVerifyEdits?: boolean;
 }
 
 export interface OpenRouterValidationInput {

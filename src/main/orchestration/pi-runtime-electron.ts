@@ -484,6 +484,7 @@ export async function createCodaraPiLaunchPlan(
     processExecutable: electronAsNodeInterpreter(),
   });
   plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(availableCoraWorkerModels(settings));
+  if (settings.coraAlwaysVerifyEdits) plan.env.CODARA_PI_ALWAYS_VERIFY_EDITS = "1";
   return untrustedPullRequest
     ? attachUntrustedSocketCapability(plan, {
         audience: "untrusted-pi-manager",

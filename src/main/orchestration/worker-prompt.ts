@@ -875,7 +875,7 @@ function renderDirectTaskPrompt({
   lines.push(
     "",
     "## FINISH",
-    "Call `submit_result` exactly once after the work and checks are finished. Keep its summary and evidence concise. Do not write the report file by hand.",
+    "Call `submit_result` exactly once after the work and checks are finished. Its summary is your reply to the user, shown verbatim: the complete answer for a question, or what changed and how it was checked for a change. Keep the evidence fields concise. Do not write the report file by hand.",
     `Workspace: ${cwd}`,
     `Report destination (handled by submit_result): ${paths.finalReportJson}`,
   );
