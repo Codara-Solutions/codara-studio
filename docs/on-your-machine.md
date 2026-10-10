@@ -45,6 +45,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | Your global npm packages | **Install Pi** in Settings runs `npm install -g @earendil-works/pi-coding-agent` once, when you click it. Codara never updates or removes it. | Install Pi yourself, or not at all: until Pi is installed, Cora runs on a Pi build bundled with the app. |
 | `~/.cache/spark/shell-integration/` | Staged copies of the shell integration files that Studio terminals source. Your `~/.zshrc`, `~/.bashrc` and PowerShell profile are never modified. | No setting yet; worker and agent panes already run without it (`SPARK_NO_SHELL_INTEGRATION=1`). |
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
+| Git refs in your workspace repository: `refs/spark/runs/<run>` and `refs/spark/undo/<run>` | Cora snapshots the workspace before each message so **Undo message and code** can restore it. That undo asks for a second click, puts back every file changed since the message (and removes files created since), and first saves the files as they were on `refs/spark/undo/<run>`, so an undo can be reversed with `git checkout refs/spark/undo/<run> -- <path>`. Neither ref moves a branch or HEAD. | Deleting the chat removes both refs. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |
 
 For Pi, Codara reads without editing: while a Pi pane runs, it lists the

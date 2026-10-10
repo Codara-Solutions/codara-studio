@@ -9774,7 +9774,9 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
   const cwd = workspaceCwdFromRun(updated);
   if (cwd && runProjectPolicyMode(updated) === "trusted") {
     const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
-    void recordCheckpointInBackground({
+    // Awaited like addRunMessage's: the resume scheduled below lets Cora
+    // edit files, and the "answer" snapshot must predate those edits.
+    await recordCheckpointInBackground({
       runId: updated.id,
       cwd,
       kind: "user-message",
@@ -14088,7 +14090,7 @@ async function performConversationRewind(
       }
       const cwd = workspaceCwdFromRun(barrier);
       if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
-      await restoreCheckpointCode({ cwd, sha: target.checkpoint.sha });
+      await restoreCheckpointCode({ cwd, sha: target.checkpoint.sha, runId: barrier.id });
     }
 
     const rewindCwd = workspaceCwdFromRun(barrier);
@@ -16045,7 +16047,7 @@ async function maybeRestoreGreenClaimRegression({
   }
 
   try {
-    await restoreCheckpointCode({ cwd, sha: restoredSha });
+    await restoreCheckpointCode({ cwd, sha: restoredSha, runId: run.id });
   } catch (error) {
     const restoreError = error instanceof Error ? error.message : String(error);
     const failed = await commitRunChange(run, {

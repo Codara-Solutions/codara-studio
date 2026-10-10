@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Checkpoint } from "@shared/types";
 import { makeId } from "@shared/ids";
@@ -13,10 +13,12 @@ import { makeId } from "@shared/ids";
 // new checkpoint is parented to the previous one on the same ref, which keeps
 // `git log refs/spark/runs/{runId}` browsable for debugging.
 //
-// Restoring "chat + code" runs `read-tree -u --reset <sha>` to make the
-// worktree match the snapshot, then `reset HEAD` so the index falls back to
-// HEAD — the user sees the restoration as a clean set of pending changes
-// against their real branch.
+// Restoring "chat + code" first snapshots the CURRENT worktree onto
+// refs/spark/undo/{runId}, so the undo itself can be undone, then rewrites
+// only the paths that differ between the checkpoint and now: changed and
+// deleted files come back from the checkpoint, files created since are
+// removed. Only those paths fall back to HEAD in the index; whatever else the
+// user staged stays staged.
 
 const execFileAsync = promisify(execFile);
 const TIMEOUT_MS = 20_000;
@@ -74,6 +76,30 @@ export async function runCheckpointStartPoint(
   return refSha(cwd, shadowRef(runId));
 }
 
+// Write the whole worktree (respecting .gitignore) as a tree object through a
+// private index, so neither HEAD nor the index the user sees is touched.
+async function snapshotWorktreeTree(
+  cwd: string,
+  indexFile: string,
+): Promise<{ tree: string; headSha: string | null }> {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_INDEX_FILE: indexFile,
+  };
+  const headSha = await refSha(cwd, "HEAD");
+  if (headSha) {
+    // Seed the temp index with HEAD so files we don't touch keep their mode
+    // bits, and binary blobs stay deduped against the existing pack.
+    await git(cwd, ["read-tree", "HEAD"], env);
+  }
+  // -A picks up modifications, additions, and deletions, all relative to
+  // gitignore. This is the same surface area as a normal stage-all commit.
+  await git(cwd, ["add", "-A"], env);
+  const { stdout: treeOut } = await git(cwd, ["write-tree"], env);
+  return { tree: treeOut.trim(), headSha };
+}
+
 export interface CreateCheckpointInput {
   runId: string;
   cwd: string;
@@ -103,27 +129,8 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
   let tempDir: string | null = null;
   try {
     tempDir = await mkdtemp(join(tmpdir(), "spark-ckpt-"));
-    const tempIndex = join(tempDir, "index");
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      GIT_TERMINAL_PROMPT: "0",
-      GIT_INDEX_FILE: tempIndex,
-    };
-
-    const headSha = await refSha(cwd, "HEAD");
-    if (headSha) {
-      // Seed the temp index with HEAD so files we don't touch keep their mode
-      // bits, and binary blobs stay deduped against the existing pack.
-      await git(cwd, ["read-tree", "HEAD"], env);
-    }
-
-    // -A picks up modifications, additions, and deletions, all relative to
-    // gitignore. This is the same surface area as a normal stage-all commit.
-    await git(cwd, ["add", "-A"], env);
-
-    const { stdout: treeOut } = await git(cwd, ["write-tree"], env);
-    const tree = treeOut.trim();
-    if (!tree) return baseCheckpoint;
+    const { tree, headSha } = await snapshotWorktreeTree(cwd, join(tempDir, "index"));
+    if (!tree) return { ...baseCheckpoint, snapshotError: "Git wrote no snapshot of the workspace." };
 
     const parents: string[] = [];
     const parentRef = await refSha(cwd, shadowRef(runId));
@@ -149,10 +156,11 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
     await git(cwd, ["update-ref", shadowRef(runId), commit]);
 
     return { ...baseCheckpoint, sha: commit };
-  } catch {
+  } catch (error) {
     // Checkpoint creation is best-effort. A failed snapshot returns the
-    // sha-less entry so the undo-chat-only path still works.
-    return baseCheckpoint;
+    // sha-less entry so the undo-chat-only path still works, with the reason
+    // the code undo is unavailable.
+    return { ...baseCheckpoint, snapshotError: gitErrorText(error) || "Git could not snapshot the workspace." };
   } finally {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -160,14 +168,25 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
   }
 }
 
-// Restore the workspace to a checkpoint's snapshot. The worktree is updated to
-// match the snapshot exactly (including removing files that didn't exist at
-// the checkpoint), then the index is reset back to HEAD so the restoration
-// shows up as a normal set of pending changes the user can review and commit.
+export interface CheckpointRestoreResult {
+  /** The workspace as it was just before the restore (also the tip of
+   * refs/spark/undo/{runId} when a run id was given). */
+  preRestoreSha: string;
+  /** Paths written back from the checkpoint. */
+  restored: string[];
+  /** Paths created after the checkpoint and removed. */
+  removed: string[];
+}
+
+// Restore the workspace to a checkpoint's snapshot: every file the snapshot
+// covers ends up as it was at the checkpoint, including files created since
+// (removed) and files deleted since (restored). The restored paths show up as
+// pending changes against HEAD the user can review and commit.
 export async function restoreCheckpointCode(input: {
   cwd: string;
   sha: string;
-}): Promise<void> {
+  runId?: string;
+}): Promise<CheckpointRestoreResult> {
   const { cwd, sha } = input;
   if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
   if (!(await isGitRepo(cwd))) throw new Error("Workspace is not a git repository.");
@@ -175,13 +194,119 @@ export async function restoreCheckpointCode(input: {
   const exists = await refSha(cwd, sha);
   if (!exists) throw new Error("Checkpoint commit is missing from the shadow ref.");
 
-  // -u updates the worktree to match; --reset blows away conflicting changes
-  // (the user explicitly asked for an undo). After this the worktree matches
-  // the snapshot and the index does too.
-  await git(cwd, ["read-tree", "-u", "--reset", sha]);
-  // Pull the index back to HEAD so the user keeps their branch pointer and
-  // sees the restored files as pending changes against HEAD.
-  await git(cwd, ["reset", "HEAD"]);
+  const tempDir = await mkdtemp(join(tmpdir(), "spark-restore-"));
+  try {
+    // Nothing is touched unless the current state is saved first: an undo
+    // also reverts edits the user or another chat made since the checkpoint,
+    // and this snapshot is the only way back from that.
+    let current: { tree: string; headSha: string | null };
+    try {
+      current = await snapshotWorktreeTree(cwd, join(tempDir, "current-index"));
+    } catch (error) {
+      throw new Error(
+        `Codara could not save the current workspace before undoing, so no file was changed. ${gitErrorText(error)}`,
+      );
+    }
+    const undoRef = input.runId ? undoRefFor(input.runId) : null;
+    const previousUndo = undoRef ? await refSha(cwd, undoRef) : null;
+    const { stdout: preOut } = await git(cwd, [
+      "commit-tree",
+      current.tree,
+      "-p",
+      previousUndo ?? sha,
+      "-m",
+      `spark-pre-undo ${sha}\n\nWorkspace just before restoring checkpoint ${sha}`,
+    ]);
+    const preRestoreSha = preOut.trim();
+    if (!preRestoreSha) throw new Error("Codara could not save the current workspace before undoing, so no file was changed.");
+    if (undoRef) await git(cwd, ["update-ref", undoRef, preRestoreSha]);
+
+    const { stdout: diffOut } = await git(cwd, [
+      "diff-tree",
+      "-r",
+      "-z",
+      "--no-renames",
+      "--name-status",
+      sha,
+      preRestoreSha,
+    ]);
+    const restored: string[] = [];
+    const removed: string[] = [];
+    const fields = diffOut.split("\0");
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      const status = fields[i];
+      const path = fields[i + 1];
+      if (!status || !path) continue;
+      if (status === "A") removed.push(path);
+      else restored.push(path);
+    }
+
+    if (restored.length > 0) {
+      // A private index holding the checkpoint writes those files back
+      // without touching the user's index.
+      const restoreEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_INDEX_FILE: join(tempDir, "restore-index"),
+      };
+      await git(cwd, ["read-tree", sha], restoreEnv);
+      for (const chunk of chunked(restored, PATH_CHUNK)) {
+        await git(cwd, ["checkout-index", "-f", "--", ...chunk], restoreEnv);
+      }
+    }
+    const root = resolve(cwd);
+    for (const path of removed) {
+      const target = resolve(root, path);
+      if (!target.startsWith(`${root}${sep}`)) continue;
+      // Non-recursive on purpose: a path that is a directory now (a nested
+      // repository, a submodule) is left alone rather than deleted wholesale.
+      await rm(target, { force: true }).catch(() => undefined);
+      await removeEmptyParents(dirname(target), root);
+    }
+
+    const touched = [...restored, ...removed];
+    if (touched.length > 0 && current.headSha) {
+      for (const chunk of chunked(touched, PATH_CHUNK)) {
+        await git(cwd, ["reset", "-q", "HEAD", "--", ...chunk]);
+      }
+    }
+    return { preRestoreSha, restored, removed };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+const PATH_CHUNK = 200;
+
+function chunked<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+async function removeEmptyParents(dir: string, root: string): Promise<void> {
+  let current = dir;
+  while (current !== root && current.startsWith(root)) {
+    try {
+      await rmdir(current);
+    } catch {
+      return;
+    }
+    current = dirname(current);
+  }
+}
+
+function undoRefFor(runId: string): string {
+  return `refs/spark/undo/${runId}`;
+}
+
+function gitErrorText(error: unknown): string {
+  const err = error as { killed?: boolean; signal?: string; message?: string };
+  if (err?.killed || err?.signal === "SIGTERM") {
+    return `Git did not finish within ${TIMEOUT_MS / 1000} seconds.`;
+  }
+  const message = err?.message ?? String(error);
+  return message.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
 }
 
 // Drop the run's shadow ref when the run is deleted. Best-effort — a missing
@@ -189,6 +314,7 @@ export async function restoreCheckpointCode(input: {
 export async function deleteRunCheckpoints(cwd: string, runId: string): Promise<void> {
   if (!cwd || !(await isGitRepo(cwd))) return;
   await git(cwd, ["update-ref", "-d", shadowRef(runId)]).catch(() => undefined);
+  await git(cwd, ["update-ref", "-d", undoRefFor(runId)]).catch(() => undefined);
 }
 
 // Rewind the run's shadow ref so its tip points to `sha` (or delete the ref
