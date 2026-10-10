@@ -126,6 +126,46 @@ async function main() {
   assert.equal(fs.readFileSync(path.join(repo, "new/c.txt"), "utf8"), "c1\n");
   assert.equal(git(repo, "diff", "--cached", "--name-only"), "b.txt", "the index is left as the user had it");
 
+  // 3b. Worker reports list paths however they like: an absolute path inside
+  // the workspace is restored, and a gitignored file the worker reported is
+  // never deleted just because no snapshot can contain it.
+  write(repo, "a.txt", "a4 broken again\n");
+  write(repo, "ignored.log", "user data\n");
+  const absolute = await checkpoints.restoreCheckpointPaths({
+    cwd: repo,
+    sha: checkpoint.sha,
+    paths: [path.join(repo, "a.txt"), "ignored.log", path.join(TMP, "elsewhere.txt")],
+  });
+  assert.deepEqual(absolute.restored, ["a.txt"]);
+  assert.deepEqual(absolute.removed, []);
+  assert.equal(fs.readFileSync(path.join(repo, "a.txt"), "utf8"), "a2\n");
+  assert.equal(fs.readFileSync(path.join(repo, "ignored.log"), "utf8"), "user data\n", "ignored files survive");
+
+  // 3c. A workspace that is a subdirectory of the repository: snapshot trees
+  // are rooted at the repository, so a root-relative lookup would miss every
+  // file and delete it instead of restoring it.
+  write(repo, "pkg/src/x.ts", "x1\n");
+  const sub = path.join(repo, "pkg");
+  const subCheckpoint = await checkpoints.createCheckpoint({
+    runId: "run-sub",
+    cwd: sub,
+    kind: "pre-worker",
+    messagePointer: 0,
+    label: "subdirectory workspace",
+  });
+  assert.ok(subCheckpoint.sha);
+  write(repo, "pkg/src/x.ts", "x2 broken\n");
+  write(repo, "pkg/src/y.ts", "y new\n");
+  const subResult = await checkpoints.restoreCheckpointPaths({
+    cwd: sub,
+    sha: subCheckpoint.sha,
+    paths: ["src/x.ts", "./src/y.ts"],
+  });
+  assert.deepEqual(subResult.restored, ["src/x.ts"]);
+  assert.deepEqual(subResult.removed, ["src/y.ts"]);
+  assert.equal(fs.readFileSync(path.join(sub, "src/x.ts"), "utf8"), "x1\n", "restored, not deleted");
+  assert.equal(fs.existsSync(path.join(sub, "src/y.ts")), false);
+
   // 4. The regression guard uses the scoped restore, refuses under a live
   // writer, and scopes claims to a lineage and the current user turn.
   const runStore = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "run-store.ts"), "utf8");

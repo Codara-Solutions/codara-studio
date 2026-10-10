@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Checkpoint } from "@shared/types";
 import { makeId } from "@shared/ids";
@@ -215,11 +215,19 @@ export async function restoreCheckpointCode(input: {
   await git(cwd, ["reset", "HEAD"]);
 }
 
-// Restore only `paths` (workspace-relative) to their content in a checkpoint,
-// leaving every other file and the index alone. A path the snapshot does not
-// contain was created after it and is removed. Used by the automatic
-// green-claim regression restore, which must not touch work outside the
-// regressing worker's own files.
+// Restore only `paths` to their content in a checkpoint, leaving every other
+// file and the index alone. A path the snapshot does not contain was created
+// after it and is removed. Used by the automatic green-claim regression
+// restore, which must not touch work outside the regressing worker's own
+// files.
+//
+// Paths come from a worker report, so they may be workspace-relative or
+// absolute; anything outside the workspace is skipped. The workspace may be a
+// subdirectory of the repository while snapshot trees are rooted at the
+// repository, so tree lookups use git's cwd-relative `<rev>:./<path>` form;
+// a root-relative lookup would miss every file and delete it. A gitignored
+// path is never in a snapshot (add -A skips it), so its absence proves
+// nothing and it is left alone rather than deleted.
 export async function restoreCheckpointPaths(input: {
   cwd: string;
   sha: string;
@@ -232,18 +240,27 @@ export async function restoreCheckpointPaths(input: {
   const root = resolve(cwd);
   const restored: string[] = [];
   const removed: string[] = [];
+  const seen = new Set<string>();
   for (const raw of input.paths) {
-    const path = raw.replace(/\\/g, "/").replace(/^\.\//, "");
-    const absolute = resolve(root, path);
-    if (!path || isAbsolute(path) || (absolute !== root && !absolute.startsWith(`${root}${sep}`))) continue;
-    const inSnapshot = await git(cwd, ["cat-file", "-e", `${sha}:${path}`]).then(() => true, () => false);
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const absolute = isAbsolute(trimmed) ? resolve(trimmed) : resolve(root, trimmed);
+    if (!absolute.startsWith(`${root}${sep}`)) continue;
+    const path = relative(root, absolute).split(sep).join("/");
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    const inSnapshot = await git(cwd, ["cat-file", "-e", `${sha}:./${path}`]).then(() => true, () => false);
     if (inSnapshot) {
-      await git(cwd, ["restore", `--source=${sha}`, "--worktree", "--", path]);
+      await git(cwd, ["--literal-pathspecs", "restore", `--source=${sha}`, "--worktree", "--", path]);
       restored.push(path);
-    } else {
-      await rm(absolute, { force: true, recursive: false }).catch(() => undefined);
-      removed.push(path);
+      continue;
     }
+    const ignored = await git(cwd, ["check-ignore", "-q", "--", path]).then(() => true, () => false);
+    if (ignored) continue;
+    const entry = await lstat(absolute).catch(() => null);
+    if (!entry || entry.isDirectory()) continue;
+    await rm(absolute, { force: true });
+    removed.push(path);
   }
   return { restored, removed };
 }
