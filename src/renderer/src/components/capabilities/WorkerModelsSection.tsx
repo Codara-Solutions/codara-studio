@@ -19,14 +19,12 @@ export default function WorkerModelsSection({
   enabled,
   usable,
   openRouterVerified,
-  busy,
   onToggle,
 }: {
   choices: string[];
   enabled: string[];
   usable: string[];
   openRouterVerified: boolean | null;
-  busy: boolean;
   onToggle: (modelId: string) => void;
 }) {
   const groups = groupWorkerModels(choices);
@@ -67,7 +65,6 @@ export default function WorkerModelsSection({
                   key={modelId}
                   modelId={modelId}
                   checked={on}
-                  disabled={busy}
                   unusable={unusable}
                   onToggle={() => onToggle(modelId)}
                 />
@@ -133,13 +130,11 @@ function workerModelPresentation(modelId: string): { label: string; premium: boo
 function WorkerModelRow({
   modelId,
   checked,
-  disabled,
   unusable,
   onToggle,
 }: {
   modelId: string;
   checked: boolean;
-  disabled: boolean;
   unusable: string | null;
   onToggle: () => void;
 }) {
@@ -153,7 +148,6 @@ function WorkerModelRow({
       aria-label={`${model.label} (${modelId})`}
       aria-description={unusable ?? undefined}
       title={unusable ?? modelId}
-      disabled={disabled}
       onClick={onToggle}
       {...handlers}
       style={{

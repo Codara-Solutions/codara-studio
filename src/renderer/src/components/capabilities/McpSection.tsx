@@ -21,7 +21,6 @@ import {
   type CliRuntime,
   type NameGroup,
   type RuntimeColumn,
-  type StatusMessage,
 } from "./model";
 import type { AgentSyncResult } from "@shared/types";
 import {
@@ -344,7 +343,6 @@ function McpRow({
   const summary = group.any.mcpSummary;
   const copies = groupItems(group);
   const definable = Boolean(summary);
-  const settingsBusy = busy.has(`${group.sessionKey}:access`);
   return (
     <div className="agent-capability-row agent-capability-row--mcp" style={mcpRowStyle}>
       <div style={{ minWidth: 0 }}>
@@ -382,7 +380,6 @@ function McpRow({
       <Cell label="Cora">
         <Switch
           checked={coraAssigned}
-          disabled={settingsBusy}
           onChange={(next) => onTogglePiScope(group, "cora", next)}
           ariaLabel={`Let Cora use ${group.name}`}
           title={`Let Cora use ${group.name} in every workspace where it is defined`}
@@ -391,7 +388,6 @@ function McpRow({
       <Cell label="Workers">
         <Switch
           checked={workerAssigned}
-          disabled={settingsBusy}
           onChange={(next) => onTogglePiScope(group, "worker", next)}
           ariaLabel={`Let Pi workers use ${group.name}`}
           title={`Let Cora's Pi workers use ${group.name}`}
@@ -951,12 +947,6 @@ function builtinStateLabel(state: SparkBuiltinInstallState): string {
   if (state === "user-managed") return "Set up by you";
   if (state === "unavailable") return "Not detected";
   return state === "installed" ? "Added" : "Not added";
-}
-
-export function statusFromProbe(name: string, result: AgentMcpProbeResult): StatusMessage {
-  return result.ok
-    ? { tone: "ok", text: `${name} answered with ${result.tools.length} ${result.tools.length === 1 ? "tool" : "tools"}.` }
-    : { tone: "error", text: `${name} did not connect: ${result.error ?? "unknown error"}` };
 }
 
 const mcpRowStyle: React.CSSProperties = {

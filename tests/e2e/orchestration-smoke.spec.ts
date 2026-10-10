@@ -426,7 +426,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
       })
       .toBe("google/gemini-3.5-flash:1500:true");
 
-    // The Capability Center shares Settings' footprint. Its shell must also
+    // The Capability Center has Settings' height and a wider fixed width, which
+    // its MCP table needs. Its shell must also
     // paint without the SVG lens/full-screen blur combination that made
     // opening and typing visibly trail the pointer.
     const capabilityOpenLatencyMs = await page.getByRole("button", { name: "Tools, skills and memory" }).evaluate((button) => new Promise<number>((resolve) => {

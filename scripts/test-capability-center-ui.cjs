@@ -265,10 +265,30 @@ check("profiles are created, edited and chosen where chats start", () => {
   assert.match(composer, /locked=\{frozenProfileId !== null\}/);
   assert.doesNotMatch(composer, /\{!run_ \? \(\s*\n\s*<ProfilePicker/);
   assert.match(profilePicker, /Profile is fixed for this chat\./);
+  // The chip of a started chat opens that chat's profile (its memory view
+  // included), not the default one.
+  assert.match(profilePicker, /className="composer-pill composer-profile-trigger is-locked"[\s\S]{0,300}?onClick=\{onManage\}/);
   assert.match(profilePicker, /"New profile…"/);
   assert.doesNotMatch(profilePicker, /profiles\.length < 2\) return null/);
   assert.match(composer, /profileId: latestDraft\?\.profileId \?\? draftCoraProfileId/);
   assert.match(sidebar, /coraProfileId: chatConfig\?\.profileId/);
+  // A board-minted chat still shows the menu, so its first send must carry
+  // the pick onto the reused run (scripts/test-unstarted-run-profile.cjs
+  // drives the behavior).
+  assert.match(runStore, /if \(run\) run = await adoptCoraProfileForUnstartedRun\(run, input\.coraProfileId\);/);
+});
+
+check("results never claim a write that failed", () => {
+  // Adding or editing a server also writes who may use it. That settings save
+  // can fail on its own, and the message must say so instead of "Cora can
+  // use it".
+  assert.match(dialog, /const accessSaved =\s*\n\s*current\.cora \|\| current\.workers\s*\n\s*\? await applySettings\(/);
+  assert.match(dialog, /const accessSaved = accessChanged \? await applySettings\(reassign, null\) : true;/);
+  assert.match(dialog, /setStatus\(failed\.length > 0 \|\| !accessSaved \? failure\(text\) : ok\(text\)\);/);
+  // A memory result for a profile the user has since switched away from is
+  // dropped, and the switcher is held while an action runs.
+  assert.match(dialog, /if \(viewedProfileRef\.current === target\) setMemory\(next\);/);
+  assert.match(memorySection, /disabled=\{profiles\.length === 0 \|\| busy !== null\}/);
 });
 
 check("named profiles have a confirmed delete path at every layer", () => {

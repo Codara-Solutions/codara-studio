@@ -743,24 +743,33 @@ export default function AgentCapabilitiesDialog({
           return;
         }
         const key = mcpSessionKey(server.name);
-        if (current.cora || current.workers) {
-          await applySettings(
-            (settingsNow) =>
-              withPiAssignment(settingsNow, key, {
-                ...(current.cora ? { cora: true } : {}),
-                ...(current.workers ? { workers: true } : {}),
-              }),
-            null,
-          );
-        }
+        // The access switches are a settings write of their own. When it
+        // fails the server is still saved, so the message must not claim
+        // Cora can use it.
+        const accessSaved =
+          current.cora || current.workers
+            ? await applySettings(
+                (settingsNow) =>
+                  withPiAssignment(settingsNow, key, {
+                    ...(current.cora ? { cora: true } : {}),
+                    ...(current.workers ? { workers: true } : {}),
+                  }),
+                null,
+              )
+            : true;
         const who = [current.cora ? "Cora (from your next message)" : null, current.workers ? "Pi workers" : null]
           .filter(Boolean)
           .join(" and ");
+        const access = !accessSaved
+          ? " Could not switch it on for Cora and Pi workers; use the switches in its row."
+          : who
+            ? ` ${who} can use it.`
+            : " Cora and Pi workers do not use it until you switch them on.";
         const text =
           `Added ${server.name} to ${saved.join(" and ")}.` +
-          (who ? ` ${who} can use it.` : " Cora and Pi workers do not use it until you switch them on.") +
+          access +
           (failed.length > 0 ? ` Could not save to ${failed.join("; ")}` : "");
-        setStatus(failed.length > 0 ? failure(text) : ok(text));
+        setStatus(failed.length > 0 || !accessSaved ? failure(text) : ok(text));
         setEditor(null);
         setEditorBusy(false);
         afterAssetChange();
@@ -801,19 +810,21 @@ export default function AgentCapabilitiesDialog({
       };
       const before = latestSettings.current;
       const after = reassign(before);
-      if (
+      const accessChanged =
         after.agentMcpCoraManagerIds.join("\n") !== before.agentMcpCoraManagerIds.join("\n") ||
         after.agentMcpPiWorkerIds.join("\n") !== before.agentMcpPiWorkerIds.join("\n") ||
-        after.agentDisabledMcpIds.join("\n") !== before.agentDisabledMcpIds.join("\n")
-      ) {
-        await applySettings(reassign, null);
-      }
+        after.agentDisabledMcpIds.join("\n") !== before.agentDisabledMcpIds.join("\n");
+      const accessSaved = accessChanged ? await applySettings(reassign, null) : true;
       const text =
         `Saved ${server.name}.` +
         (updated.length > 0 ? ` Also updated the copy in ${updated.join(" and ")}.` : "") +
-        (current.cora ? " Cora picks up the change on your next message." : "") +
+        (!accessSaved
+          ? " Could not update who can use it; check the Cora and Workers switches in its row."
+          : current.cora
+            ? " Cora picks up the change on your next message."
+            : "") +
         (failed.length > 0 ? ` Not updated: ${failed.join("; ")}.` : "");
-      setStatus(failed.length > 0 ? failure(text) : ok(text));
+      setStatus(failed.length > 0 || !accessSaved ? failure(text) : ok(text));
       setEditor(null);
       setEditorBusy(false);
       afterAssetChange();
@@ -957,12 +968,19 @@ export default function AgentCapabilitiesDialog({
   };
 
   // Memory mutations land on disk immediately, so each one adopts the status
-  // pair the main process returns.
+  // pair the main process returns, unless the user switched to another
+  // profile meanwhile: that pair would show one profile's tiers under the
+  // other's name, and the next toggle would act on what is not shown.
+  const viewedProfileRef = useRef(viewedProfileId);
+  viewedProfileRef.current = viewedProfileId;
   const runMemoryAction = (scope: CoraMemoryScope, action: () => Promise<CoraMemoryStatus>) => {
+    const target = viewedProfileId;
     setMemoryBusy(scope);
     setStatus(null);
     void action()
-      .then(setMemory)
+      .then((next) => {
+        if (viewedProfileRef.current === target) setMemory(next);
+      })
       .catch((err) => setStatus(failure(errorText(err))))
       .finally(() => setMemoryBusy(null));
   };
@@ -1206,13 +1224,12 @@ export default function AgentCapabilitiesDialog({
                     enabled={view.coraWorkerModels}
                     usable={usableWorkers}
                     openRouterVerified={openRouterVerified}
-                    busy={false}
                     onToggle={toggleWorkerModel}
                   />
                 ) : null}
 
                 {renderedTab === "policy" ? (
-                  <BehaviorSection view={view} busy={busy} onChange={changeBehavior} />
+                  <BehaviorSection view={view} onChange={changeBehavior} />
                 ) : null}
               </>
             )}

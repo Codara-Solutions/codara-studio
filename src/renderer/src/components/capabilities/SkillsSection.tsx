@@ -160,7 +160,6 @@ function SkillRow({
       <Cell label="Cora and workers" title={enabled ? `Cora and Pi workers can load ${group.name}` : `${group.name} is switched off`}>
         <Switch
           checked={enabled}
-          disabled={busy.has(`${group.sessionKey}:access`)}
           onChange={(next) => onToggle(group, next)}
           ariaLabel={`Let Cora and workers use ${group.name}`}
         />

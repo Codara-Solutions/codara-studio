@@ -63,7 +63,7 @@ export default function MemorySection({
               className="spark-input"
               style={{ width: 200 }}
               value={viewedProfileId ?? memory?.profile.id ?? "default"}
-              disabled={profiles.length === 0}
+              disabled={profiles.length === 0 || busy !== null}
               onChange={(event) => onViewProfile(event.target.value)}
               aria-label="Show the memory of this profile"
             >
