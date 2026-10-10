@@ -111,7 +111,7 @@ Only in `execute`, except where noted.
 | Tool | What it does |
 |---|---|
 | `codara_spawn_workers` | Hands one or more focused tasks to Cora workers, with optional runtime, model and effort hints. |
-| `codara_wait_for_workers` | Waits until the listed workers finish, then returns their reports. |
+| `codara_wait_for_workers` | Waits until the listed workers finish, then returns their reports, why any of them failed, and what a slow one is doing. |
 | `codara_get_worker_status` | A one-off status check of one worker. |
 | `codara_message_workers` | Sends a message to one worker or all of them. |
 | `codara_check_messages` | Reads messages workers sent to Cora. |
