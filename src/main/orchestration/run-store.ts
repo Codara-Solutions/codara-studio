@@ -1146,13 +1146,19 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // entire worker roster, keep the request on the manager path: the manager's
   // injected contract tells it to answer directly or ask the user to enable a
   // worker, instead of creating a run that can never launch.
-  const canLaunchDirectWorker = directExecutionRequested
-    ? availableCoraWorkerModels(await loadSettings()).length > 0
-    : false;
+  const directWorkerModels = directExecutionRequested
+    ? availableCoraWorkerModels(await loadSettings())
+    : [];
   if (
     !input.runId &&
-    canLaunchDirectWorker
+    directWorkerModels.length > 0
   ) {
+    // The composer's chip names the manager model; the direct worker may only
+    // run a model the user left enabled in the worker roster.
+    const chipModel = input.chatModel?.trim();
+    const directModel = chipModel && directWorkerModels.includes(chipModel)
+      ? chipModel
+      : directWorkerModels[0];
     return startDirectWorkerRun({
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
@@ -1163,7 +1169,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       title: chatTitleFromInput(input),
       prompt: input.initialUserNote!.trim(),
       clientMessageId: input.initialUserNoteClientMessageId,
-      model: input.chatModel?.trim() || "gpt-5.6-sol",
+      model: directModel,
       effort: input.chatEffort ?? "medium",
       access: "full",
     });
