@@ -767,6 +767,32 @@ async function main() {
     `${resetFirst === null} / ${resetGated === null} / ${resetAgain === null}`,
   );
 
+  // ── the remember budget is per user turn, not per chat lifetime ───────────
+  const budgetRun = {
+    id: "run-budget",
+    humanMessages: [
+      { id: "m-1", author: "user" },
+      { id: "m-2", author: "spark" },
+    ],
+  };
+  const firstTurnKey = mem.rememberBudgetKey(budgetRun);
+  check(
+    "Cora's own replies do not start a new remember budget",
+    firstTurnKey === "run-budget:m-1",
+    firstTurnKey,
+  );
+  budgetRun.humanMessages.push({ id: "m-3", author: "user" });
+  check(
+    "a new user message starts a new remember budget",
+    mem.rememberBudgetKey(budgetRun) !== firstTurnKey && mem.rememberBudgetKey(budgetRun) === "run-budget:m-3",
+    mem.rememberBudgetKey(budgetRun),
+  );
+  check(
+    "a run with no user message keys the budget by the run",
+    mem.rememberBudgetKey({ id: "run-auto" }) === "run-auto",
+    mem.rememberBudgetKey({ id: "run-auto" }),
+  );
+
   // ── overlong bullets are rejected, never silently cut ─────────────────────
   const longPath = workspaceFile(mem, "ws-long");
   fs.writeFileSync(longPath, "# Cora memory (workspace: long)\n- a short user note\n", "utf8");

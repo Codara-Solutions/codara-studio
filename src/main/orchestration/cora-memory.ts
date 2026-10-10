@@ -79,6 +79,23 @@ export function userLinesExceedCapError(path: string): string {
   return `user-authored content alone exceeds the cap; ask the user to trim ${path}`;
 }
 
+/**
+ * What the codara_remember budget is counted against. The budget stops a
+ * runaway write loop inside one manager turn, not memory over a chat's whole
+ * life (a chat is one run that can last weeks), so each user message starts a
+ * fresh budget.
+ */
+export function rememberBudgetKey(run: {
+  id: string;
+  humanMessages?: ReadonlyArray<{ id: string; author: string }>;
+}): string {
+  const messages = run.humanMessages ?? [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].author === "user") return `${run.id}:${messages[i].id}`;
+  }
+  return run.id;
+}
+
 export function bulletTooLongError(index: number, length: number): string {
   return (
     `bullet ${index} is ${length} characters; the limit is ${MAX_BULLET_LENGTH}. ` +
@@ -246,6 +263,16 @@ function tierEnabled(
   if (!globalEnabled) return false;
   if (scope === "global") return true;
   return state.workspaces[profileWorkspaceKey(id, workspaceId)]?.enabled !== false;
+}
+
+/** Whether a tier is switched on, for readers outside this module (the prior
+ * runs ledger in run-memory.ts honors the same switches). */
+export function isMemoryEnabled(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): boolean {
+  return tierEnabled(readState(), scope, workspaceId, profileId);
 }
 
 // ── workspace metadata for the header (best-effort) ─────────────────────────

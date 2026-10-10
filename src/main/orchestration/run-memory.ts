@@ -11,6 +11,7 @@ import type {
   WorkspaceRunMemoryRuntimeOutcome,
 } from "@shared/types";
 import { classifyOutcomeMemory } from "@shared/outcome-memory";
+import { isMemoryEnabled } from "./cora-memory";
 
 // Per-workspace persistent orchestration memory. One distilled JSON ledger per
 // workspaceId under ~/.SparkAgent/memory. The writer (recordRunMemory) runs
@@ -18,14 +19,17 @@ import { classifyOutcomeMemory } from "@shared/outcome-memory";
 // reader (formatPriorRunsSection) is folded into the manager's plan_analysis
 // prompt so it can learn this repo's task shapes, which runtimes survived
 // verification, and which build/test commands actually worked. This module
-// imports only spark-home, fs-atomic + shared types, never run-store or manager-protocol
-// — so there is no import cycle.
+// imports only spark-home, fs-atomic, shared types and cora-memory's switch
+// reader, never run-store or manager-protocol, so there is no import cycle.
 
 const LEDGER_VERSION = 2;
 // Writer trims the ledger to this many newest-first records.
 const MAX_RECORDS = 50;
 // Reader returns at most this many records, ranked by similarity.
 const TOP_K = 5;
+// Below this Jaccard overlap a prior run shares no meaningful vocabulary with
+// the current plan, and injecting it only adds noise to the first turn.
+const MIN_SIMILARITY = 0.1;
 
 // Distillation caps. Kept small so the ledger stays a compact fingerprint and
 // the injected prompt block respects the manager's compaction budget.
@@ -234,6 +238,10 @@ function renderRecordEntry(record: WorkspaceRunMemoryRecord): string {
  * memory; the caller owns surrounding blank-line spacing.
  */
 export function formatPriorRunsSection(run: RunState): string | null {
+  // Workspace memory switched off (directly or through the global master
+  // switch) hides this history too. Writes continue, so switching memory back
+  // on does not lose the outcomes recorded meanwhile.
+  if (!isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId)) return null;
   const ledger = readWorkspaceMemory(run.workspaceId);
   if (!ledger) return null;
   const others = ledger.records.filter((record) => record.runId !== run.id);
@@ -252,6 +260,7 @@ export function formatPriorRunsSection(run: RunState): string | null {
         fingerprintTokens(record.planKeywords ?? [], record.touchedGlobs ?? []),
       ),
     }))
+    .filter(({ score }) => score >= MIN_SIMILARITY)
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       const verifiedDelta = Number(b.record.verificationStatus === "verified") -
@@ -260,6 +269,7 @@ export function formatPriorRunsSection(run: RunState): string | null {
       return (b.record.completedAt ?? "").localeCompare(a.record.completedAt ?? "");
     })
     .slice(0, TOP_K);
+  if (ranked.length === 0) return null;
 
   const lines = [
     "OUTCOME-CONDITIONED PRIOR RUNS (most similar first; only outcome=verified is reusable; mixed/unverified entries are cautions, never recipes)",
@@ -407,6 +417,25 @@ function distillRecord(run: RunState, attemptReports: AttemptReport[]): Workspac
   };
 }
 
+// Per-ledger write serialization: two runs completing together in one
+// workspace each re-read the ledger only after the other's rename landed, so
+// neither record is lost. Same shape as cora-memory's withPathLock.
+const ledgerWriteQueues = new Map<string, Promise<void>>();
+
+function withLedgerLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const prev = ledgerWriteQueues.get(path) ?? Promise.resolve();
+  const run = prev.then(fn);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  ledgerWriteQueues.set(path, tail);
+  void tail.then(() => {
+    if (ledgerWriteQueues.get(path) === tail) ledgerWriteQueues.delete(path);
+  });
+  return run;
+}
+
 /**
  * Best-effort writer for the non-complete -> complete transition. Gathers every
  * finished attempt's report, distills a single compact WorkspaceRunMemoryRecord
@@ -420,27 +449,36 @@ export async function recordRunMemory(
   readReport: (path: string) => Promise<WorkerReport | null>,
 ): Promise<void> {
   try {
+    // Automation passes repeat one task on a schedule, and a chat that never
+    // ran a worker has no outcome to learn from; both would only crowd the
+    // ledger with records that look similar and teach nothing.
+    if (run.automationId) return;
     const attemptReports = await gatherAttemptReports(run, readReport);
+    if (attemptReports.length === 0) return;
     const record = distillRecord(run, attemptReports);
 
-    const existing = readWorkspaceMemory(run.workspaceId);
-    const ledger: WorkspaceMemoryLedger = existing ?? {
-      version: LEDGER_VERSION,
-      workspaceId: run.workspaceId,
-      records: [],
-    };
-    const records = ledger.records.filter((r) => r.runId !== run.id);
-    records.unshift(record);
-    ledger.records = records.slice(0, MAX_RECORDS);
-    ledger.workspaceId = run.workspaceId;
-    ledger.version = LEDGER_VERSION;
+    const path = ledgerPath(run.workspaceId);
+    await withLedgerLock(path, async () => {
+      const existing = readWorkspaceMemory(run.workspaceId);
+      const ledger: WorkspaceMemoryLedger = existing ?? {
+        version: LEDGER_VERSION,
+        workspaceId: run.workspaceId,
+        records: [],
+      };
+      const records = ledger.records.filter((r) => r.runId !== run.id);
+      records.unshift(record);
+      ledger.records = records.slice(0, MAX_RECORDS);
+      ledger.workspaceId = run.workspaceId;
+      ledger.version = LEDGER_VERSION;
 
-    // Async + atomic. The old writeFileSync blocked the event loop for the size
-    // of the whole ledger, and a plain async write would let this module's
-    // synchronous reader observe a half-written file; the tmp+rename in
-    // fs-atomic hands the reader the old ledger or the new one, never a torn one.
-    await mkdir(memoryRoot(), { recursive: true });
-    await writeFileAtomic(ledgerPath(run.workspaceId), JSON.stringify(ledger));
+      // Async + atomic. The old writeFileSync blocked the event loop for the
+      // size of the whole ledger, and a plain async write would let this
+      // module's synchronous reader observe a half-written file; the tmp+rename
+      // in fs-atomic hands the reader the old ledger or the new one, never a
+      // torn one.
+      await mkdir(memoryRoot(), { recursive: true });
+      await writeFileAtomic(path, JSON.stringify(ledger));
+    });
   } catch (err) {
     console.warn("[run-memory] failed to record run memory:", err);
   }

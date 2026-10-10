@@ -743,6 +743,34 @@ async function main() {
         JSON.stringify(denied).slice(0, 180),
       );
     }
+    // The remember budget stops write loops within one turn; it does not cap
+    // a chat's whole life.
+    fabricateRun("run-remember-budget", {
+      chatMode: "execute",
+      humanMessages: [{
+        id: "msg-remember-budget-1",
+        runId: "run-remember-budget",
+        author: "user",
+        kind: "note",
+        message: "Remember a few things.",
+        createdAt: new Date().toISOString(),
+      }],
+    });
+    const budgetReplies = [];
+    for (let i = 0; i < 6; i += 1) {
+      budgetReplies.push(await rpc(handshake, "orchestrator.remember", {
+        runId: "run-remember-budget",
+        scope: "workspace",
+        action: "add",
+        bullets: [`Budget fact number ${i} for this workspace.`],
+      }));
+    }
+    check(
+      "remember accepts five calls in one turn and rejects the sixth with a per-turn limit",
+      budgetReplies.slice(0, 5).every((reply) => reply.result?.ok === true) &&
+        /limit reached for this turn/.test(budgetReplies[5].error?.message ?? ""),
+      JSON.stringify(budgetReplies.map((reply) => reply.error?.message ?? "ok")).slice(0, 300),
+    );
     const untrustedStatus = await rpc(handshake, "orchestrator.get_worker_status", {
       runId: "run-untrusted-pr",
       worker_task_id: "wt-untrusted-status",

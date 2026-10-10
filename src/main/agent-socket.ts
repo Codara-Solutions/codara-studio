@@ -47,6 +47,7 @@ import {
   MAX_BULLETS_ADDED_PER_RUN,
   MAX_REMEMBER_CALLS_PER_RUN,
   rememberAdd,
+  rememberBudgetKey,
   rememberReplace,
   type MemoryScope,
 } from "./orchestration/cora-memory";
@@ -5676,16 +5677,16 @@ async function handleOrchestratorBoardUpdate(
 // the tool name onto this method). Only Cora, the Execute/Auto manager, holds
 // this tool; workers never write memory. The heavy lifting (tag grammar,
 // dedup, TTL, byte caps, the user-line preservation guardrail) lives in
-// cora-memory.ts; this handler owns the per-run write budget, an in-memory
-// map that resets on app restart by design.
+// cora-memory.ts; this handler owns the per-turn write budget (keyed by
+// rememberBudgetKey), an in-memory map that resets on app restart by design.
 const rememberBudgetByRun = new Map<string, { calls: number; bulletsAdded: number }>();
 const REMEMBER_BUDGET_RUN_LIMIT = 256;
 
-function rememberBudgetFor(runId: string): { calls: number; bulletsAdded: number } {
-  let budget = rememberBudgetByRun.get(runId);
+function rememberBudgetFor(key: string): { calls: number; bulletsAdded: number } {
+  let budget = rememberBudgetByRun.get(key);
   if (!budget) {
     budget = { calls: 0, bulletsAdded: 0 };
-    rememberBudgetByRun.set(runId, budget);
+    rememberBudgetByRun.set(key, budget);
     while (rememberBudgetByRun.size > REMEMBER_BUDGET_RUN_LIMIT) {
       const oldest = rememberBudgetByRun.keys().next();
       if (oldest.done) break;
@@ -5713,12 +5714,12 @@ async function handleOrchestratorRemember(
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
 
-  const budget = rememberBudgetFor(runId);
+  const budget = rememberBudgetFor(rememberBudgetKey(run));
   if (budget.calls >= MAX_REMEMBER_CALLS_PER_RUN) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `memory write limit reached for this run (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
+      `memory write limit reached for this turn (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
     );
   }
 
@@ -5737,7 +5738,7 @@ async function handleOrchestratorRemember(
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
-        `memory bullet limit reached for this run (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
+        `memory bullet limit reached for this turn (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
       );
     }
   }
