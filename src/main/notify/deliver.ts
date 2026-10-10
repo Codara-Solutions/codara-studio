@@ -5,7 +5,7 @@ import type {
   NotifyEvent,
   TerminalAgentAttentionPayload,
 } from "@shared/types";
-import { revealWindow } from "../e2e-background";
+import { E2E_BACKGROUND, revealWindow } from "../e2e-background";
 import { logMain } from "../file-log";
 
 // The four delivery transports for an alert the policy let through, gated by
@@ -117,7 +117,9 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   // toast is NOT the alert — either the window isn't focused (minimized /
   // backgrounded), or the in-app channel is turned off — so enabling both
   // channels never produces the double notification.
-  if (channels.native && (!appFocused || !channels.inApp)) {
+  // An e2e app is never focused, so every alert it raised became a real OS
+  // notification on the desktop of whoever ran the suite.
+  if (channels.native && !E2E_BACKGROUND && (!appFocused || !channels.inApp)) {
     try {
       if (Notification.isSupported()) {
         // macOS has a subtitle line for the workspace; elsewhere it rides on
@@ -154,7 +156,7 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
     }
   }
 
-  if (channels.osCues && process.platform === "win32" && win) {
+  if (channels.osCues && !E2E_BACKGROUND && process.platform === "win32" && win) {
     try {
       win.flashFrame(true);
     } catch (err) {

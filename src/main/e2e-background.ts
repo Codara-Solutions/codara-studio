@@ -1,4 +1,4 @@
-import type { BrowserWindow } from "electron";
+import { app, type BrowserWindow } from "electron";
 
 /**
  * True when this process was launched by the e2e suite, which sets
@@ -16,6 +16,25 @@ import type { BrowserWindow } from "electron";
  * Nothing outside a test ever sets it.
  */
 export const E2E_BACKGROUND = process.env.SPARK_E2E_BACKGROUND === "1";
+
+/**
+ * Keep an e2e app from reaching the person at the machine at all: no window on
+ * the desktop, no sound. Must run before the app is ready, because Ozone picks
+ * its platform once, while the browser process starts.
+ *
+ * setOpacity, which hides the window on macOS and Windows, is a no-op on
+ * Linux, so every spec flashed a real window onto the desktop there. The
+ * headless Ozone backend never creates a native surface, yet the compositor
+ * still produces frames, so requestAnimationFrame, capturePage and Playwright
+ * screenshots keep working. Muting audio silences the notification chimes the
+ * renderer synthesizes without changing which events reach it, so specs can
+ * still assert on them.
+ */
+export function isolateE2eFromDesktop(): void {
+  if (!E2E_BACKGROUND) return;
+  app.commandLine.appendSwitch("mute-audio");
+  if (process.platform === "linux") app.commandLine.appendSwitch("ozone-platform", "headless");
+}
 
 /**
  * Make a window invisible to the person at the machine while leaving it fully

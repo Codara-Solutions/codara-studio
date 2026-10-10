@@ -43,6 +43,11 @@ npm run build && npx playwright test tests/e2e/tab-reorder.spec.ts
 SPARK_E2E_BACKGROUND=0 npx playwright test ...    # show the app window
 ```
 
+By default (`SPARK_E2E_BACKGROUND=1`) the test app stays off your desktop:
+it renders on Chromium's headless backend on Linux, is transparent and
+inactive on macOS and Windows, plays no sounds and raises no OS
+notifications.
+
 `playwright.config.ts` runs one spec at a time, and each spec boots a real
 Electron app. The config also removes the Codara variables a Studio pane
 exports, such as `SPARK_PANE_ID`, the agent socket and `CODARA_HOME_DIR`, so

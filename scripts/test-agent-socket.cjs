@@ -195,6 +195,8 @@ async function main() {
       SPARK_USER_DATA_DIR: HOME,
       SPARK_SKIP_LEGACY_MIGRATION: "1",
       SPARK_NO_SHELL_INTEGRATION: "1",
+      // Keeps the booted app off the user's desktop (headless on Linux).
+      SPARK_E2E_BACKGROUND: "1",
     },
     stdio: "ignore",
   });

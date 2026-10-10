@@ -52,7 +52,7 @@ import {
   resolveMainWindowAllowlistConfig,
   type NavigationAllowlistConfig,
 } from "./navigation-allowlist";
-import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow } from "./e2e-background";
+import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow, isolateE2eFromDesktop } from "./e2e-background";
 import { safeUserDataOverride } from "./private-user-data";
 import {
   cleanupNativeCliActivePointerArtifacts,
@@ -108,11 +108,13 @@ app.setName("Codara Studio");
 // has a tested DOM-renderer fallback when WebGL is unavailable. Explicit x11
 // and non-Wayland sessions remain untouched. Developers can opt back into the
 // native hardware path with CODARA_WAYLAND_HARDWARE_ACCELERATION=1.
+isolateE2eFromDesktop();
 const requestedOzonePlatform = app.commandLine.getSwitchValue("ozone-platform").toLowerCase();
 const isWaylandSession = process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland";
 const usesNativeWayland =
   isWaylandSession &&
-  requestedOzonePlatform !== "x11";
+  requestedOzonePlatform !== "x11" &&
+  requestedOzonePlatform !== "headless";
 const usesWaylandSoftwareFallback =
   usesNativeWayland && process.env.CODARA_WAYLAND_HARDWARE_ACCELERATION !== "1";
 const disabledChromiumFeatures = new Set(
