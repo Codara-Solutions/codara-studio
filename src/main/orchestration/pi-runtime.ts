@@ -118,6 +118,12 @@ export interface PiManagerLaunchOptions {
    * it by absolute path because a packaged extension cannot resolve bare
    * specifiers from inside app.asar. */
   mcpSdkDir?: string;
+  /** Exact skill folders (or skill .md files) the session loads. When set on a
+   * trusted launch, Pi's own skill discovery is turned off and only these
+   * load, so a skill switched off in the Capability Center stays off and
+   * Claude's and Codex's skill folders reach Pi. Undefined keeps Pi's
+   * default discovery. Untrusted launches never load skills. */
+  skillPaths?: readonly string[];
   processExecutable?: string;
   model?: string;
   thinking?: PiThinkingLevel;
@@ -604,6 +610,11 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
       "--no-prompt-templates",
       "--no-themes",
     );
+  } else if (options.skillPaths) {
+    // --skill paths stay additive under --no-skills, which is what makes the
+    // explicit list authoritative.
+    args.push("--no-skills");
+    for (const skillPath of options.skillPaths) args.push("--skill", resolve(skillPath));
   }
   if (options.sessionName?.trim()) args.push("--name", options.sessionName.trim());
   if (options.provider === "anthropic") {

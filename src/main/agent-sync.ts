@@ -1,10 +1,13 @@
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type {
   AgentAssetCompatibility,
+  AgentPiMcpDelivery,
+  AgentPiMcpLiveStatus,
+  AgentPiMcpPreview,
   AgentSyncResult,
   AppSettings,
   WorkerRuntime,
@@ -23,8 +26,24 @@ import type {
   AgentMcpTarget,
   AgentMcpTransport,
 } from "@shared/types";
-import { writeFileAtomic } from "./fs-atomic";
-import { RESERVED_MCP_SERVER_NAMES } from "./orchestration/pi-mcp-config";
+import { withConfigFileLock, writeConfigFileAtomic } from "./config-file-io";
+import {
+  parseTomlText,
+  removeTomlMcpServer,
+  renderTomlMcpServer,
+  scanTomlMcpServerNames,
+  tomlMcpServerNamesFromDocument,
+  tomlMcpServersFromDocument,
+  upsertTomlMcpServer,
+  type McpServerConfig,
+} from "./mcp-toml";
+import {
+  PI_MCP_DEFAULTS,
+  RESERVED_MCP_SERVER_NAMES,
+  normalizePiMcpServersDetailed,
+} from "./orchestration/pi-mcp-config";
+
+export type { McpServerConfig } from "./mcp-toml";
 
 type SyncKind = "mcp" | "skill";
 // Grok Build reads the same Codex-shaped TOML (`[mcp_servers.<name>]`), which
@@ -33,6 +52,7 @@ type SyncKind = "mcp" | "skill";
 type SyncSourceRuntime = "claude" | "codex" | "grok" | "shared";
 type TomlCopyRuntime = "codex" | "grok";
 type SyncScope = "user" | "workspace";
+type CliRuntime = "claude" | "codex" | "grok";
 
 interface SyncSource {
   kind: SyncKind;
@@ -40,36 +60,80 @@ interface SyncSource {
   scope: SyncScope;
   path: string;
   names: string[];
+  // ~/.claude.json only: the exact key under `projects` whose mcpServers map is
+  // Claude's local scope for the active workspace.
+  project?: string;
   // MCP only, and best effort: a name is discovered even when its definition
   // cannot be parsed, so a name may be missing from this map.
   configs?: Map<string, McpServerConfig>;
+  // Skills only: the directory and frontmatter description behind each name.
+  skillDirs?: Map<string, string>;
+  skillDescriptions?: Map<string, string>;
+  truncated?: boolean;
 }
 
-export interface McpServerConfig {
+interface ParsedAssetId {
+  kind: SyncKind;
+  runtime: SyncSourceRuntime;
+  scope: SyncScope;
   name: string;
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  url?: string;
-  type?: string;
-  // Read for remote servers only. Claude/Codex sync never writes it back, it
-  // exists so the Pi bridge can authenticate a streamable-http endpoint.
-  headers?: Record<string, string>;
-  enabled?: boolean;
+  path: string;
+  project?: string;
+  dir?: string;
 }
 
 /** Which Pi session role a discovered MCP server was assigned to. */
 export type PiMcpScope = "cora" | "worker";
 
-const MAX_CONFIG_BYTES = 512 * 1024;
+// ~/.claude.json keeps every project's history and grows well past what other
+// config files reach; parses are cached by mtime, so the size cap only guards
+// against a pathological file.
+const MAX_CONFIG_BYTES = 8 * 1024 * 1024;
+const MAX_CLAUDE_USER_CONFIG_BYTES = 64 * 1024 * 1024;
 const MAX_SKILL_DOC_BYTES = 16 * 1024;
+const MAX_SKILLS_PER_ROOT = 512;
+const MAX_PI_SKILLS = 256;
 const MAX_NAMES_PER_LINE = 12;
-// Keys that hold an MCP server map in a JSON config, at any nesting level.
+// Keys that hold an MCP server map in a JSON config.
 const MCP_MAP_KEYS = ["mcpServers", "mcp_servers"];
 const MAX_SOURCE_LINES = 8;
 const MCP_SYNC_START = "# >>> SPARK_AGENT_MCP_SYNC";
 const MCP_SYNC_END = "# <<< SPARK_AGENT_MCP_SYNC";
 const CODEX_SYSTEM_SKILL_ROOT = "/skills/.system/";
+
+const assetChangeListeners = new Set<() => void>();
+
+/** Called after every Capability Center write, so live Pi rosters can refresh. */
+export function onAgentAssetsChanged(listener: () => void): () => void {
+  assetChangeListeners.add(listener);
+  return () => assetChangeListeners.delete(listener);
+}
+
+function notifyAssetsChanged(): void {
+  for (const listener of assetChangeListeners) {
+    try {
+      listener();
+    } catch {
+      // A listener failure must never fail the write that already landed.
+    }
+  }
+}
+
+type TrashFn = (path: string) => Promise<void>;
+let trashItem: TrashFn | null = null;
+let defaultPiAgentDir: string | null = null;
+
+/**
+ * Main-process wiring this module cannot import itself, because it also runs
+ * in plain Node (tests, the remote bridge): removing a skill moves its folder
+ * to the OS trash through Electron's shell.trashItem, and Cora's Pi agent
+ * dir (under the Codara home) is a skill root Cora loads. Without a trash
+ * function a removal is permanent.
+ */
+export function configureAgentSync(options: { trashItem?: TrashFn | null; piAgentDir?: string | null }): void {
+  if (options.trashItem !== undefined) trashItem = options.trashItem;
+  if (options.piAgentDir !== undefined) defaultPiAgentDir = options.piAgentDir;
+}
 
 export function renderAgentSyncPromptLines(input: {
   cwd: string;
@@ -115,15 +179,16 @@ export function listAgentAssets(input: {
     cora: input.settings.agentMcpCoraManagerIds ?? [],
     worker: input.settings.agentMcpPiWorkerIds ?? [],
   };
+  const skillSources = discoverSkillSources(cwd || homedir());
+  const visibleSkillSources = cwd ? skillSources : skillSources.filter((source) => source.scope === "user");
+  const truncated = visibleSkillSources.some((source) => source.truncated);
   return {
     mcp: cwd
       ? sourcesToInventory(discoverMcpSources(cwd), input.settings.agentDisabledMcpIds, piScopes)
       : sourcesToInventory(discoverMcpSources(homedir()), input.settings.agentDisabledMcpIds, piScopes)
         .filter((item) => item.scope === "user"),
-    skills: cwd
-      ? sourcesToInventory(discoverSkillSources(cwd), input.settings.agentDisabledSkillIds)
-      : sourcesToInventory(discoverSkillSources(homedir()), input.settings.agentDisabledSkillIds)
-        .filter((item) => item.scope === "user"),
+    skills: sourcesToInventory(visibleSkillSources, input.settings.agentDisabledSkillIds),
+    ...(truncated ? { skillsTruncated: true } : {}),
   };
 }
 
@@ -140,49 +205,272 @@ export function listPiMcpServers(input: {
   scope: PiMcpScope;
   settings: Pick<AppSettings, "agentDisabledMcpIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds">;
 }): McpServerConfig[] {
+  return resolvePiMcpAssignments(input).servers;
+}
+
+function resolvePiMcpAssignments(input: {
+  cwd?: string | null;
+  scope: PiMcpScope;
+  settings: Pick<AppSettings, "agentDisabledMcpIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds">;
+}): {
+  servers: McpServerConfig[];
+  skipped: Array<{ key: string; name: string; state: AgentPiMcpDelivery["state"]; reason: string }>;
+} {
   const assigned = new Set(
     input.scope === "cora"
       ? input.settings.agentMcpCoraManagerIds ?? []
       : input.settings.agentMcpPiWorkerIds ?? [],
   );
-  if (assigned.size === 0) return [];
+  const skipped: Array<{ key: string; name: string; state: AgentPiMcpDelivery["state"]; reason: string }> = [];
+  if (assigned.size === 0) return { servers: [], skipped };
   const disabled = new Set(input.settings.agentDisabledMcpIds ?? []);
   const sources = discoverMcpSources(input.cwd?.trim() || homedir());
   const servers: McpServerConfig[] = [];
   const seen = new Set<string>();
+  const turnedOff = new Map<string, string>();
   for (const source of sources) {
     for (const name of source.names) {
       const key = sessionKey("mcp", name);
-      if (!assigned.has(key) || disabled.has(key) || seen.has(key)) continue;
-      const server = readMcpServerByName(source.path, name);
+      if (!assigned.has(key) || seen.has(key)) continue;
+      if (disabled.has(key)) {
+        turnedOff.set(key, name);
+        continue;
+      }
+      const server = source.configs?.get(name) ?? null;
       // First readable definition wins: workspace candidates are listed before
       // user-scope ones, matching how the runtimes themselves resolve a name.
-      if (!server || server.enabled === false) continue;
+      if (!server) continue;
+      if (server.enabled === false) {
+        turnedOff.set(key, name);
+        continue;
+      }
       seen.add(key);
+      turnedOff.delete(key);
       servers.push(server);
     }
   }
-  return servers;
+  for (const key of assigned) {
+    if (seen.has(key)) continue;
+    const name = turnedOff.get(key) ?? key.replace(/^mcp:/, "");
+    if (disabled.has(key)) {
+      skipped.push({ key, name, state: "turned-off", reason: "Turned off in the Capability Center." });
+    } else if (turnedOff.has(key)) {
+      skipped.push({ key, name, state: "turned-off", reason: "Its config entry sets enabled = false." });
+    } else {
+      skipped.push({ key, name, state: "no-definition", reason: "No readable definition was found for this workspace." });
+    }
+  }
+  return { servers, skipped };
+}
+
+/**
+ * What each assigned server's delivery to Pi looks like for this workspace:
+ * delivered, dropped and why, plus evidence that a remote server signs in
+ * through Claude's OAuth store (which the Pi bridge cannot use).
+ */
+export function describePiMcpDelivery(input: {
+  cwd?: string | null;
+  settings: Pick<AppSettings, "agentDisabledMcpIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds">;
+  env?: NodeJS.ProcessEnv;
+  // Bridge reports from running Cora chats, keyed by lowercased bridge name.
+  live?: ReadonlyMap<string, AgentPiMcpLiveStatus>;
+}): AgentPiMcpPreview {
+  const errors: string[] = [];
+  const oauthNames = claudeMcpOAuthNames();
+  const describe = (scope: PiMcpScope): AgentPiMcpDelivery[] => {
+    try {
+      const resolved = resolvePiMcpAssignments({ cwd: input.cwd, scope, settings: input.settings });
+      const normalized = normalizePiMcpServersDetailed(resolved.servers, {
+        cwd: input.cwd?.trim() || undefined,
+        env: input.env,
+      });
+      const out: AgentPiMcpDelivery[] = [];
+      for (const server of normalized.servers) {
+        const raw = resolved.servers.find((entry) => entry.name === server.rawName);
+        const live = scope === "cora" ? input.live?.get(server.name.toLowerCase()) : undefined;
+        const needsOAuth = Boolean(
+          raw?.url &&
+          !Object.keys(raw.headers ?? {}).some((header) => header.toLowerCase() === "authorization") &&
+          oauthNames.has(server.rawName.toLowerCase()),
+        );
+        out.push({
+          sessionKey: sessionKey("mcp", server.rawName),
+          name: server.rawName,
+          state: needsOAuth ? "needs-oauth" : "delivered",
+          ...(needsOAuth
+            ? { reason: "This server signs in through Claude's OAuth login, which Cora cannot reuse. Add an Authorization header to use it from Cora." }
+            : {}),
+          ...(live ? { live } : {}),
+        });
+      }
+      for (const dropped of normalized.dropped) {
+        out.push({
+          sessionKey: sessionKey("mcp", dropped.name),
+          name: dropped.name,
+          state: dropped.reason,
+          reason: dropped.detail,
+        });
+      }
+      for (const entry of resolved.skipped) {
+        out.push({ sessionKey: entry.key, name: entry.name, state: entry.state, reason: entry.reason });
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name));
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+      return [];
+    }
+  };
+  return {
+    cora: describe("cora"),
+    worker: describe("worker"),
+    maxServers: PI_MCP_DEFAULTS.maxServers,
+    errors,
+  };
+}
+
+// Key names only: the token values in Claude's credential store are never read
+// into Codara's memory beyond this parse.
+function claudeMcpOAuthNames(): Set<string> {
+  const names = new Set<string>();
+  const text = readSmallText(join(claudeConfigDir(), ".credentials.json"), MAX_CONFIG_BYTES);
+  if (!text) return names;
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const store = parsed?.mcpOAuth;
+    if (!store || typeof store !== "object" || Array.isArray(store)) return names;
+    for (const key of Object.keys(store)) {
+      const name = key.split("|")[0]?.trim().toLowerCase();
+      if (name) names.add(name);
+    }
+  } catch {
+    // An unreadable store is simply no evidence.
+  }
+  return names;
+}
+
+/**
+ * Skill folders a Pi session (Cora or a Pi worker) should load, in priority
+ * order. Pi starts with --no-skills plus one --skill per entry, so a skill the
+ * user switched off in the Capability Center is really gone from Cora, and
+ * skills kept in Claude's and Codex's folders reach her too. Pi's own roots
+ * (.pi/skills, .agents/skills up to the repository root, ~/.agents/skills and
+ * the agent dir) stay in the set, so nothing Pi loaded before is lost.
+ */
+export function listPiSkillPaths(input: {
+  cwd?: string | null;
+  piAgentDir?: string | null;
+  settings: Pick<AppSettings, "agentDisabledSkillIds">;
+}): string[] {
+  const cwd = input.cwd?.trim() ?? "";
+  const disabled = new Set(input.settings.agentDisabledSkillIds ?? []);
+  // `piNative` roots also hold single-file skills (a root .md with skill
+  // frontmatter), which Pi discovers there and nowhere else.
+  const roots: Array<{ path: string; piNative: boolean }> = [];
+  if (cwd) {
+    roots.push({ path: join(cwd, ".pi", "skills"), piNative: true });
+    for (const dir of ancestorsToRepoRoot(cwd)) roots.push({ path: join(dir, ".agents", "skills"), piNative: false });
+    roots.push({ path: join(cwd, ".claude", "skills"), piNative: false });
+    roots.push({ path: join(cwd, ".codex", "skills"), piNative: false });
+  }
+  if (input.piAgentDir) roots.push({ path: join(input.piAgentDir, "skills"), piNative: true });
+  if (defaultPiAgentDir) roots.push({ path: join(defaultPiAgentDir, "skills"), piNative: true });
+  roots.push(
+    { path: join(homedir(), ".agents", "skills"), piNative: false },
+    { path: join(claudeConfigDir(), "skills"), piNative: false },
+    { path: join(defaultPersonalCodexHomeDir(), "skills"), piNative: false },
+  );
+  const seenRoots = new Set<string>();
+  const seenNames = new Set<string>();
+  const out: string[] = [];
+  for (const root of roots) {
+    const rootKey = normalizePathForMatch(resolve(root.path));
+    if (seenRoots.has(rootKey)) continue;
+    seenRoots.add(rootKey);
+    const entries = [...indexSkillDirsByName(root.path).dirs];
+    if (root.piNative) entries.push(...rootSkillFiles(root.path));
+    for (const [name, location] of entries) {
+      const key = sessionKey("skill", name);
+      if (seenNames.has(key)) continue;
+      seenNames.add(key);
+      if (disabled.has(key)) continue;
+      // Codex's bundled system skills drive Codex-only tooling.
+      if (normalizePathForMatch(location).includes(CODEX_SYSTEM_SKILL_ROOT)) continue;
+      out.push(location);
+      if (out.length >= MAX_PI_SKILLS) return out;
+    }
+  }
+  return out;
+}
+
+function rootSkillFiles(root: string): Array<[string, string]> {
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+  const out: Array<[string, string]> = [];
+  for (const entry of entries.sort()) {
+    if (!entry.toLowerCase().endsWith(".md") || entry.toLowerCase() === "skill.md") continue;
+    const file = join(root, entry);
+    const frontmatter = readSkillFrontmatter(file);
+    if (!frontmatter?.description) continue;
+    out.push([frontmatter.name || entry.replace(/\.md$/i, ""), file]);
+  }
+  return out;
+}
+
+function ancestorsToRepoRoot(cwd: string): string[] {
+  const out: string[] = [];
+  let current = resolve(cwd);
+  for (let depth = 0; depth < 32; depth += 1) {
+    out.push(current);
+    if (pathExists(join(current, ".git"))) break;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return out;
 }
 
 /**
  * Config files the Capability Center is allowed to write a user-authored MCP
- * server into. Workspace entries come first so the add form defaults to the
- * project, and every path is one discoverMcpSources already reads back.
+ * server into. Private, user-scope files come first so the add form defaults
+ * to a location that is never committed; workspace files that usually are
+ * committed carry a hint. Every path is one discoverMcpSources reads back, and
+ * `readBy` names the CLIs that load it.
  */
 export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTarget[] {
   const cwd = input.cwd?.trim() ?? "";
   const home = homedir();
   const targets: AgentMcpTarget[] = [];
+  targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude", {
+    readBy: ["claude"],
+  }));
+  targets.push(mcpTarget("codex", "user", tomlRuntimeConfigPath("codex"), "Every workspace, Codex", {
+    readBy: ["codex"],
+  }));
+  targets.push(mcpTarget("grok", "user", tomlRuntimeConfigPath("grok"), "Every workspace, Grok", {
+    readBy: ["grok"],
+  }));
   if (cwd) {
-    targets.push(mcpTarget("shared", "workspace", join(cwd, ".mcp.json"), "This workspace, all agents"));
-    targets.push(mcpTarget("claude", "workspace", join(cwd, ".claude", "settings.json"), "This workspace, Claude"));
-    targets.push(mcpTarget("codex", "workspace", join(cwd, ".codex", "config.toml"), "This workspace, Codex"));
+    targets.push(mcpTarget("claude", "workspace", claudeUserConfigFile(), "This workspace, Claude (private)", {
+      readBy: ["claude"],
+      hint: "Stored in your own ~/.claude.json for this folder only, never in the repository.",
+    }));
+    targets.push(mcpTarget("shared", "workspace", join(cwd, ".mcp.json"), "This workspace, project .mcp.json (Claude)", {
+      readBy: ["claude"],
+      hint: "Claude asks before using project servers. This file is usually committed to git, so use ${VAR} placeholders for secrets.",
+    }));
+    targets.push(mcpTarget("codex", "workspace", join(cwd, ".codex", "config.toml"), "This workspace, Codex", {
+      readBy: ["codex"],
+      hint: "Codex loads it for trusted projects. It may be committed to git, so use ${VAR} placeholders for secrets.",
+    }));
   }
-  targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Every workspace, all agents"));
-  targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude"));
-  targets.push(mcpTarget("codex", "user", tomlRuntimeConfigPath("codex"), "Every workspace, Codex"));
-  targets.push(mcpTarget("grok", "user", tomlRuntimeConfigPath("grok"), "Every workspace, Grok"));
+  targets.push(mcpTarget("shared", "user", join(home, ".mcp.json"), "Workspaces under your home folder, Claude (~/.mcp.json)", {
+    readBy: ["claude"],
+    hint: "Claude reads it for workspaces inside your home folder and asks before using it. Codex and Grok never read it.",
+  }));
   return targets;
 }
 
@@ -190,7 +478,7 @@ export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTar
 export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail | null {
   const parsed = parseAssetId(input.id);
   if (!parsed || parsed.kind !== "mcp") return null;
-  const server = readMcpServerByName(parsed.path, parsed.name);
+  const server = readMcpServerByName(parsed.path, parsed.name, parsed.project);
   if (!server) return null;
   return {
     id: input.id,
@@ -207,11 +495,39 @@ export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail
   };
 }
 
+/**
+ * The raw definition behind an asset id, for a connection test. The id comes
+ * from the renderer and the result is started as a process, so only a config
+ * file the inventory itself lists for `cwd` is read: an id naming another
+ * folder's .mcp.json, or another project's map in ~/.claude.json, is refused.
+ */
+export function readMcpServerForAsset(
+  id: string,
+  cwd: string,
+): { server: McpServerConfig; scope: SyncScope; path: string } | null {
+  const parsed = parseAssetId(id);
+  if (!parsed || parsed.kind !== "mcp") return null;
+  const source = discoverMcpSources(cwd.trim() || homedir()).find((candidate) =>
+    candidate.runtime === parsed.runtime &&
+    candidate.scope === parsed.scope &&
+    normalizePathForMatch(resolve(candidate.path)) === normalizePathForMatch(resolve(parsed.path)) &&
+    (candidate.project ?? null) === (parsed.project ?? null));
+  if (!source || !source.names.includes(parsed.name)) return null;
+  const server = source.configs?.get(parsed.name) ?? null;
+  return server ? { server, scope: parsed.scope, path: source.path } : null;
+}
+
+/** Validate an unsaved form draft into the runtime-agnostic shape. */
+export function mcpServerFromDraft(draft: AgentMcpServerDraft): { server: McpServerConfig } | { error: string } {
+  return validateMcpDraft(draft);
+}
+
 let assetMutationTail: Promise<void> = Promise.resolve();
 
 function withAssetMutation<T>(mutation: () => Promise<T>): Promise<T> {
   const operation = assetMutationTail.then(mutation);
   assetMutationTail = operation.then(() => undefined, () => undefined);
+  void operation.then(notifyAssetsChanged, () => undefined);
   return operation;
 }
 
@@ -243,7 +559,8 @@ async function saveMcpServerUnlocked(input: {
     return { ok: false, error: "This server changed in Studio. Reload its current configuration before saving." };
   }
   const previous = input.replaceId ? parseAssetId(input.replaceId) : null;
-  let target = listMcpWriteTargets({ cwd: input.cwd ?? null }).find((item) => item.id === input.targetId);
+  const cwd = input.cwd?.trim() || "";
+  let target = listMcpWriteTargets({ cwd: cwd || null }).find((item) => item.id === input.targetId);
   // Editing in place: an entry's own file is always a legal destination, even
   // when discovery reads it but the add form does not offer it as a location.
   if (!target && previous && previous.kind === "mcp") {
@@ -256,25 +573,49 @@ async function saveMcpServerUnlocked(input: {
   const validated = validateMcpDraft(input.server);
   if ("error" in validated) return { ok: false, error: validated.error };
   const server = validated.server;
-  if (target.format === "toml" && server.headers) {
-    return { ok: false, error: `${target.runtime === "grok" ? "Grok" : "Codex"} config.toml cannot carry request headers. Save this server to a JSON config instead.` };
+  if (target.runtime === "grok" && server.headers) {
+    return { ok: false, error: "Grok config.toml cannot carry request headers. Save this server to a Claude or Codex config instead." };
   }
 
-  // Editing an entry that already lives in this file: the write rewrites it
-  // where it sits, so a rename inside the file is not a move either.
-  const editingHere = Boolean(previous && previous.kind === "mcp" && previous.path === target.path);
+  // ~/.claude.json at workspace scope is Claude's private per-project map.
+  const project = isClaudeUserConfig(target.path) && target.scope === "workspace"
+    ? previous?.project ?? (cwd ? claudeProjectKeyFor(target.path, cwd) : null)
+    : null;
+  if (isClaudeUserConfig(target.path) && target.scope === "workspace" && !project) {
+    return { ok: false, error: "Open a workspace to save a server for this folder only." };
+  }
+
+  const previousServer = previous && previous.kind === "mcp"
+    ? readMcpServerByName(previous.path, previous.name, previous.project)
+    : null;
+  if (isCommittableConfig(target, cwd)) {
+    const secret = firstNewLiteralSecret(server, previous?.path === target.path ? previousServer : null);
+    if (secret) {
+      return {
+        ok: false,
+        error: `${secret.label} looks like a secret, and ${target.path} is usually committed to git. Write it as \${${secret.variable}} and set ${secret.variable} in your environment, or save the server to a private location such as "Every workspace" or "This workspace, Claude (private)".`,
+      };
+    }
+  }
+
+  // Editing an entry that already lives in this file and map: the write
+  // rewrites it where it sits, so a rename inside the file is not a move.
+  const editingHere = Boolean(
+    previous && previous.kind === "mcp" && previous.path === target.path && (previous.project ?? null) === (project ?? null),
+  );
   const replaceName = editingHere ? previous!.name : null;
   const replacingHere = editingHere && previous!.name === server.name;
-  if (!replacingHere && mcpNameTaken(target, server.name, replaceName)) {
-    return { ok: false, error: `'${server.name}' already exists in ${target.path}.` };
+  if (!replacingHere) {
+    const taken = mcpNameTaken(target, server.name, project);
+    if (taken !== false) {
+      return { ok: false, error: taken === true ? `'${server.name}' already exists in ${target.path}.` : taken.error };
+    }
   }
 
   try {
-    if (target.format === "json") await upsertClaudeMcpServer(target.path, server, { replaceName });
-    else await upsertCodexMcpServer(target.path, server);
-    // A JSON rename in place already removed the old key; anything else that
-    // changed file or name still needs the old entry taken out.
-    const renamedInPlace = editingHere && target.format === "json";
+    if (target.format === "json") await upsertClaudeMcpServer(target.path, server, { replaceName, project });
+    else await upsertCodexMcpServer(target.path, server, replaceName);
+    const renamedInPlace = editingHere;
     if (previous && previous.kind === "mcp" && !replacingHere && !renamedInPlace) {
       await deleteMcpAsset(previous);
     }
@@ -294,24 +635,48 @@ async function deleteAgentAssetUnlocked(input: { id: string }): Promise<AgentAss
   try {
     if (parsed.kind === "mcp") {
       const deleted = await deleteMcpAsset(parsed);
+      if (deleted.length === 0) {
+        return { ok: false, deleted: [], error: `'${parsed.name}' was not found in ${parsed.path}. Refresh the list.` };
+      }
+      if (mcpNameListed(parsed)) {
+        return { ok: false, deleted: [], error: `'${parsed.name}' is still defined in ${parsed.path}. Edit the file by hand.` };
+      }
       return { ok: true, deleted };
     }
     const deleted = await deleteSkillAsset(parsed);
+    if (deleted.length === 0) {
+      return { ok: false, deleted: [], error: `Skill '${parsed.name}' was not found under ${parsed.path}. Refresh the list.` };
+    }
     return { ok: true, deleted };
   } catch (err) {
     return { ok: false, deleted: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
 
-export function syncAgentAssets(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+function mcpNameListed(asset: ParsedAssetId): boolean {
+  const loaded = loadConfig(asset.path);
+  if (!loaded) return false;
+  if (loaded.format === "json") {
+    if (!loaded.json) return false;
+    const container = jsonMcpContainer(loaded.json, asset.project);
+    return Boolean(container && Object.prototype.hasOwnProperty.call(container, asset.name));
+  }
+  return loaded.tomlNames.includes(asset.name);
+}
+
+// `dryRun` walks the same path and fills the same lists without writing, so
+// the Capability Center can show what a sync would copy before it asks.
+export function syncAgentAssets(input: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> {
+  if (input.dryRun) return syncAgentAssetsUnlocked(input);
   return withAssetMutation(() => syncAgentAssetsUnlocked(input));
 }
 
-async function syncAgentAssetsUnlocked(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+async function syncAgentAssetsUnlocked(input: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> {
   const startedAt = new Date().toISOString();
   const result: AgentSyncResult = {
     startedAt,
     completedAt: startedAt,
+    ...(input.dryRun ? { dryRun: true } : {}),
     mcp: { toClaude: [], toCodex: [], skipped: [], errors: [] },
     skills: { toClaude: [], toCodex: [], skipped: [], errors: [] },
   };
@@ -364,25 +729,39 @@ function blankSyncResult(): AgentSyncResult {
   };
 }
 
+// The workspace folder an asset belongs to, so a copy into Claude keeps its
+// scope: a project server lands in Claude's private map for that project,
+// never in the user-wide map where every Claude session would load it.
+function assetWorkspaceRoot(asset: ParsedAssetId): string | null {
+  if (asset.scope !== "workspace") return null;
+  if (asset.project) return asset.project;
+  const parent = dirname(asset.path);
+  const parentName = basename(parent);
+  if (parentName === ".codex" || parentName === ".grok" || parentName === ".claude") return dirname(parent);
+  return parent;
+}
+
 async function installMcpAssetToRuntime(
-  asset: { name: string; path: string },
+  asset: ParsedAssetId,
   target: "claude" | "codex" | "grok",
 ): Promise<AgentAssetInstallResult> {
-  const server = readMcpServerByName(asset.path, asset.name);
-  if (!server) {
+  const source = readMcpServerByName(asset.path, asset.name, asset.project);
+  if (!source) {
     return {
       ok: false,
       installed: [],
       error: `Could not read MCP server '${asset.name}' from ${asset.path}.`,
     };
   }
+  const workspaceRoot = assetWorkspaceRoot(asset);
   const result = blankSyncResult();
   if (target === "claude") {
-    // Unlike a full sync, an explicit copy of one server carries its headers:
-    // the destination is JSON, and a remote server without its Authorization
-    // header is a connection that fails on the first call.
-    const added = await writeClaudeMcpServers(claudeUserConfigFile(), [server], result, {
+    // An explicit copy of one server carries its headers: the destination is
+    // Claude's own private config, and a remote server without its
+    // Authorization header is a connection that fails on the first call.
+    const added = await writeClaudeMcpServers(claudeUserConfigFile(), [source], result, {
       keepHeaders: true,
+      project: workspaceRoot ?? undefined,
     });
     if (added.length === 0) {
       return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to Claude.`) };
@@ -390,20 +769,30 @@ async function installMcpAssetToRuntime(
     return { ok: true, installed: added };
   }
   const label = TOML_RUNTIME_LABEL[target];
-  if (server.url && server.headers) {
+  if (target === "grok" && source.url && source.headers) {
     return {
       ok: false,
       installed: [],
-      error: `'${asset.name}' sends request headers, which ${label} config.toml cannot carry. Keep it in a JSON config.`,
+      error: `'${asset.name}' sends request headers, which Grok Build config.toml cannot carry. Keep it in a Claude or Codex config.`,
     };
   }
-  const added = await writeCodexManagedMcpServers(tomlRuntimeConfigPath(target), [server], result, {
-    runtime: target,
+  // Codex and Grok load a project config only for projects they trust, so a
+  // copy lands in the user's own config, which works in every project.
+  const destination = tomlRuntimeConfigPath(target);
+  const server = source;
+  const outcome = await withConfigFileLock(destination, async () => {
+    const existing = await readTextIfExists(destination);
+    const parsed = parseTomlText(existing);
+    if (!parsed.ok) return { error: `Could not read ${destination}: ${parsed.error}` };
+    if (tomlMcpServerNamesFromDocument(parsed.value).includes(server.name)) {
+      return { error: `${label} already has MCP server '${server.name}'.` };
+    }
+    await fs.mkdir(dirname(destination), { recursive: true, mode: target === "grok" ? 0o700 : undefined });
+    await writeConfigFileAtomic(destination, ensureTrailingNewline(upsertTomlMcpServer(existing, server, destination)));
+    return { error: null };
   });
-  if (added.length === 0) {
-    return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to ${label}.`) };
-  }
-  return { ok: true, installed: added };
+  if (outcome.error) return { ok: false, installed: [], error: outcome.error };
+  return { ok: true, installed: [server.name] };
 }
 
 const TOML_RUNTIME_LABEL: Record<TomlCopyRuntime, string> = {
@@ -418,10 +807,10 @@ function tomlRuntimeConfigPath(runtime: TomlCopyRuntime): string {
 }
 
 async function installSkillAssetToRuntime(
-  asset: { name: string; path: string; scope: SyncScope },
+  asset: ParsedAssetId,
   target: "claude" | "codex",
 ): Promise<AgentAssetInstallResult> {
-  const sourceDir = findSkillDirByName(asset.path, asset.name);
+  const sourceDir = resolveSkillDir(asset);
   if (!sourceDir) {
     return { ok: false, installed: [], error: `Could not locate skill '${asset.name}' under ${asset.path}.` };
   }
@@ -448,91 +837,161 @@ function deriveSkillDestRoot(sourceRoot: string, scope: SyncScope, target: "clau
   if (scope === "user") {
     return join(target === "claude" ? claudeConfigDir() : defaultPersonalCodexHomeDir(), "skills");
   }
-  // Discovered workspace roots are <workspace>/.claude|.codex|.agents/skills.
+  // Discovered workspace roots are <workspace>/.claude|.codex|.agents|.pi/skills.
   // Scope, not a folder name inside a relocated user home, selects the target.
   return join(dirname(dirname(sourceRoot)), `.${target}`, "skills");
 }
 
 /**
  * Whether saving `name` into `target` would collide. Only the map the write
- * lands in counts: for a JSON add that is the top-level mcpServers map, so a
- * per-project entry nested deeper in the same file (a different scope the
- * writer never touches) does not block the add. `replaceName` names the entry
- * being edited in this same file, whose own map is the destination.
+ * lands in counts: the top-level mcpServers map, or the per-project map for
+ * Claude's private workspace scope. Fails closed: a file that exists but
+ * cannot be read or parsed is reported, never treated as free.
  */
-function mcpNameTaken(target: AgentMcpTarget, name: string, replaceName: string | null): boolean {
-  if (target.format !== "json") return readMcpServerByName(target.path, name) !== null;
-  const text = readSmallText(target.path, MAX_CONFIG_BYTES);
-  if (!text) return false;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Unparseable configs are refused by the writer, not here.
-    return false;
+function mcpNameTaken(target: AgentMcpTarget, name: string, project: string | null): boolean | { error: string } {
+  if (!pathExists(target.path)) return false;
+  const loaded = loadConfig(target.path);
+  if (!loaded) return { error: `Could not read ${target.path}.` };
+  if (target.format === "toml") {
+    if (loaded.tomlError) return { error: `Could not read ${target.path}: ${loaded.tomlError}` };
+    return loaded.tomlNames.includes(name);
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-  const record = parsed as Record<string, unknown>;
-  const located = replaceName ? locateJsonMcpServer(record, replaceName, 0) : null;
-  const container =
-    located?.container ??
-    (record.mcpServers && typeof record.mcpServers === "object" && !Array.isArray(record.mcpServers)
-      ? record.mcpServers as Record<string, unknown>
-      : null);
+  if (loaded.jsonError) return { error: `Could not read ${target.path}: ${loaded.jsonError}` };
+  if (!loaded.json) return false;
+  const container = jsonMcpContainer(loaded.json, project ?? undefined);
   return Boolean(container && Object.prototype.hasOwnProperty.call(container, name));
 }
 
-function readMcpServerByName(path: string, name: string): McpServerConfig | null {
-  const text = readSmallText(path, MAX_CONFIG_BYTES);
-  if (!text) return null;
-  if (path.toLowerCase().endsWith(".json")) {
-    return findJsonMcpServer(text, name);
+function readMcpServerByName(path: string, name: string, project?: string): McpServerConfig | null {
+  const loaded = loadConfig(path);
+  if (!loaded) return null;
+  if (loaded.format === "json") {
+    if (!loaded.json) return null;
+    const container = jsonMcpContainer(loaded.json, project);
+    if (!container || !Object.prototype.hasOwnProperty.call(container, name)) return null;
+    return normalizeMcpServer(name, container[name]);
   }
-  const servers = parseCodexTomlMcpServers(stripManagedMcpBlock(text).text);
-  return servers.find((server) => server.name === name) ?? null;
+  return loaded.tomlServers.find((server) => server.name === name) ?? null;
 }
 
-function findJsonMcpServer(text: string, name: string): McpServerConfig | null {
-  let parsed: unknown;
+// ---------------------------------------------------------------------------
+// Config loading
+// ---------------------------------------------------------------------------
+
+interface LoadedConfig {
+  format: "json" | "toml";
+  text: string;
+  json: Record<string, unknown> | null;
+  jsonError: string | null;
+  tomlServers: McpServerConfig[];
+  tomlNames: string[];
+  tomlError: string | null;
+}
+
+const configCache = new Map<string, { version: string; loaded: LoadedConfig }>();
+
+function maxBytesFor(path: string): number {
+  return isClaudeUserConfig(path) ? MAX_CLAUDE_USER_CONFIG_BYTES : MAX_CONFIG_BYTES;
+}
+
+function isClaudeUserConfig(path: string): boolean {
+  return normalizePathForMatch(resolve(path)) === normalizePathForMatch(resolve(claudeUserConfigFile()));
+}
+
+// Parsed once per file version: ~/.claude.json can be megabytes, and the
+// inventory, Pi delivery and every edit would otherwise re-parse it.
+function loadConfig(path: string): LoadedConfig | null {
+  let stat: ReturnType<typeof statSync>;
   try {
-    parsed = JSON.parse(text);
+    stat = statSync(path);
   } catch {
     return null;
   }
-  const located = locateJsonMcpServer(parsed, name, 0);
-  if (!located) return null;
-  return normalizeMcpServer(name, located.value);
+  if (!stat.isFile() || stat.size > maxBytesFor(path)) return null;
+  // The inode catches an atomic replace that lands within the same mtime tick.
+  const version = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${stat.ino}`;
+  const cached = configCache.get(path);
+  if (cached && cached.version === version) return cached.loaded;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const loaded: LoadedConfig = {
+    format: path.toLowerCase().endsWith(".json") ? "json" : "toml",
+    text,
+    json: null,
+    jsonError: null,
+    tomlServers: [],
+    tomlNames: [],
+    tomlError: null,
+  };
+  if (loaded.format === "json") {
+    if (text.trim()) {
+      try {
+        const value = JSON.parse(text) as unknown;
+        if (!value || typeof value !== "object" || Array.isArray(value)) loaded.jsonError = "Expected a JSON object.";
+        else loaded.json = value as Record<string, unknown>;
+      } catch (error) {
+        loaded.jsonError = error instanceof Error ? error.message : String(error);
+      }
+    }
+  } else {
+    const parsed = parseTomlText(text);
+    if (parsed.ok) {
+      loaded.tomlServers = tomlMcpServersFromDocument(parsed.value);
+      loaded.tomlNames = tomlMcpServerNamesFromDocument(parsed.value);
+    } else {
+      loaded.tomlError = parsed.error;
+      loaded.tomlNames = scanTomlMcpServerNames(text);
+    }
+  }
+  configCache.set(path, { version, loaded });
+  if (configCache.size > 64) configCache.delete(configCache.keys().next().value!);
+  return loaded;
+}
+
+function jsonMcpContainer(record: Record<string, unknown>, project?: string): Record<string, unknown> | null {
+  let holder: unknown = record;
+  if (project !== undefined) {
+    const projects = record.projects;
+    if (!projects || typeof projects !== "object" || Array.isArray(projects)) return null;
+    holder = (projects as Record<string, unknown>)[project];
+  }
+  if (!holder || typeof holder !== "object" || Array.isArray(holder)) return null;
+  for (const key of MCP_MAP_KEYS) {
+    const child = (holder as Record<string, unknown>)[key];
+    if (child && typeof child === "object" && !Array.isArray(child)) return child as Record<string, unknown>;
+  }
+  return null;
+}
+
+function normalizeProjectPath(path: string): string {
+  const unified = resolve(path).replace(/\\/g, "/").replace(/\/+$/, "") || "/";
+  return process.platform === "win32" || process.platform === "darwin" ? unified.toLowerCase() : unified;
 }
 
 /**
- * The map that actually holds `name` in a JSON config, plus its value. A map on
- * the record itself wins over one nested deeper (the per-project maps inside
- * ~/.claude.json), so reads, edits and deletes all agree on which definition a
- * single inventory row stands for.
+ * The key of the active workspace in ~/.claude.json `projects`, matched the
+ * way Claude Code keys it (absolute path, compared through realpath and the
+ * platform's case rules). Falls back to the cwd itself for a new entry.
  */
-function locateJsonMcpServer(
-  value: unknown,
-  name: string,
-  depth: number,
-): { container: Record<string, unknown>; value: unknown } | null {
-  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return null;
-  const record = value as Record<string, unknown>;
-  for (const key of MCP_MAP_KEYS) {
-    const child = record[key];
-    if (
-      child &&
-      typeof child === "object" &&
-      !Array.isArray(child) &&
-      Object.prototype.hasOwnProperty.call(child, name)
-    ) {
-      const container = child as Record<string, unknown>;
-      return { container, value: container[name] };
-    }
+function claudeProjectKeyFor(path: string, cwd: string): string {
+  return findClaudeProjectKey(loadConfig(path)?.json ?? null, cwd) ?? resolve(cwd);
+}
+
+function findClaudeProjectKey(record: Record<string, unknown> | null, cwd: string): string | null {
+  const projects = record?.projects;
+  if (!projects || typeof projects !== "object" || Array.isArray(projects)) return null;
+  const wanted = new Set([normalizeProjectPath(cwd)]);
+  try {
+    wanted.add(normalizeProjectPath(realpathSync(cwd)));
+  } catch {
+    // A workspace path that no longer exists still matches lexically.
   }
-  for (const [key, child] of Object.entries(record)) {
-    if (MCP_MAP_KEYS.includes(key)) continue;
-    const nested = locateJsonMcpServer(child, name, depth + 1);
-    if (nested) return nested;
+  for (const key of Object.keys(projects)) {
+    if (wanted.has(normalizeProjectPath(key))) return key;
   }
   return null;
 }
@@ -540,18 +999,35 @@ function locateJsonMcpServer(
 function discoverMcpSources(cwd: string): SyncSource[] {
   const sources: SyncSource[] = [];
   for (const candidate of mcpConfigCandidates(cwd)) {
-    const text = readSmallText(candidate.path, MAX_CONFIG_BYTES);
-    if (!text) continue;
-    // Names and definitions come out of one pass: ~/.claude.json can hold
-    // hundreds of entries and a second parse per read stalls the inventory.
-    const json = candidate.path.toLowerCase().endsWith(".json") ? collectJsonMcpEntries(text) : null;
-    const names = json ? json.names : extractTomlMcpNames(text);
+    const loaded = loadConfig(candidate.path);
+    if (!loaded) continue;
+    let names: string[];
+    let configs: Map<string, McpServerConfig>;
+    let project: string | undefined;
+    if (loaded.format === "json") {
+      if (!loaded.json) continue;
+      if (candidate.local) {
+        const key = findClaudeProjectKey(loaded.json, cwd);
+        if (!key) continue;
+        project = key;
+      }
+      const container = jsonMcpContainer(loaded.json, project);
+      if (!container) continue;
+      names = [];
+      configs = new Map();
+      for (const [rawName, raw] of Object.entries(container)) {
+        const name = rawName.trim();
+        if (!name) continue;
+        names.push(name);
+        const server = normalizeMcpServer(name, raw);
+        if (server) configs.set(name, server);
+      }
+      names.sort((a, b) => a.localeCompare(b));
+    } else {
+      names = [...loaded.tomlNames].sort((a, b) => a.localeCompare(b));
+      configs = new Map(loaded.tomlServers.map((server) => [server.name, server]));
+    }
     if (names.length === 0) continue;
-    const configs =
-      json?.configs ??
-      new Map(
-        parseCodexTomlMcpServers(stripManagedMcpBlock(text).text).map((server) => [server.name, server]),
-      );
     sources.push({
       kind: "mcp",
       runtime: candidate.runtime,
@@ -559,6 +1035,7 @@ function discoverMcpSources(cwd: string): SyncSource[] {
       path: candidate.path,
       names,
       configs,
+      ...(project !== undefined ? { project } : {}),
     });
   }
   return dedupeSources(sources);
@@ -567,14 +1044,17 @@ function discoverMcpSources(cwd: string): SyncSource[] {
 function discoverSkillSources(cwd: string): SyncSource[] {
   const sources: SyncSource[] = [];
   for (const candidate of skillRootCandidates(cwd)) {
-    const names = findSkillNames(candidate.path);
-    if (names.length === 0) continue;
+    const index = indexSkillDirsByName(candidate.path);
+    if (index.dirs.size === 0) continue;
     sources.push({
       kind: "skill",
       runtime: candidate.runtime,
       scope: candidate.scope,
       path: candidate.path,
-      names,
+      names: [...index.dirs.keys()].sort((a, b) => a.localeCompare(b)),
+      skillDirs: index.dirs,
+      skillDescriptions: index.descriptions,
+      ...(index.truncated ? { truncated: true } : {}),
     });
   }
   return dedupeSources(sources);
@@ -590,6 +1070,25 @@ function filterSourcesForSessions(sources: SyncSource[], disabledSessionKeys: st
     .filter((source) => source.names.length > 0);
 }
 
+/** Which agent CLIs actually load a given MCP config file, and a caveat if any. */
+function mcpSourceReaders(source: Pick<SyncSource, "runtime" | "scope" | "path" | "project">): {
+  readBy: CliRuntime[];
+  note?: string;
+} {
+  if (source.runtime === "codex") return { readBy: ["codex"] };
+  if (source.runtime === "grok") return { readBy: ["grok"] };
+  if (source.runtime === "shared") {
+    return source.scope === "workspace"
+      ? { readBy: ["claude"], note: "Claude asks before using a project .mcp.json server. Codex and Grok never read .mcp.json." }
+      : { readBy: ["claude"], note: "Claude reads ~/.mcp.json only for workspaces inside your home folder. Codex and Grok never read it." };
+  }
+  if (isClaudeUserConfig(source.path)) return { readBy: ["claude"] };
+  return {
+    readBy: [],
+    note: "Claude Code does not load MCP servers from settings.json. Only Cora and Pi workers can use this entry.",
+  };
+}
+
 function sourcesToInventory(
   sources: SyncSource[],
   disabledSessionKeys: string[],
@@ -599,19 +1098,30 @@ function sourcesToInventory(
   const coraAssigned = new Set(piScopes?.cora ?? []);
   const workerAssigned = new Set(piScopes?.worker ?? []);
   const items: AgentAssetInventoryItem[] = [];
+  // Mirrors resolvePiMcpAssignments: sources arrive in discovery order and the
+  // first readable, enabled definition of a name is the one Pi connects with.
+  const piDefined = new Set<string>();
   for (const source of sources) {
-    // Skill compatibility/protection used to call findSkillDirs twice for
-    // every item. With plugin caches it turns one inventory read into hundreds
-    // of repeated directory walks and leaves the Capability Center waiting on
-    // the main process. Index each source tree once instead.
-    const skillDirs = source.kind === "skill" ? indexSkillDirsByName(source.path) : null;
+    const readers = source.kind === "mcp" ? mcpSourceReaders(source) : null;
     for (const name of source.names) {
       const key = sessionKey(source.kind, name);
-      const skillDir = skillDirs?.get(name) ?? null;
+      const skillDir = source.skillDirs?.get(name) ?? null;
       const config = source.kind === "mcp" ? source.configs?.get(name) ?? null : null;
+      const piDefinition = Boolean(config && config.enabled !== false && !piDefined.has(key));
+      if (piDefinition) piDefined.add(key);
       const compatibility = describeAssetCompatibility(source, skillDir, config);
+      const skillDescription = source.skillDescriptions?.get(name);
+      const systemSkill = Boolean(skillDir && normalizePathForMatch(skillDir).includes(CODEX_SYSTEM_SKILL_ROOT));
       items.push({
-        id: assetId({ kind: source.kind, runtime: source.runtime, scope: source.scope, name, path: source.path }),
+        id: assetId({
+          kind: source.kind,
+          runtime: source.runtime,
+          scope: source.scope,
+          name,
+          path: source.path,
+          ...(source.project !== undefined ? { project: source.project } : {}),
+          ...(skillDir ? { dir: skillDir } : {}),
+        }),
         sessionKey: key,
         kind: source.kind,
         runtime: source.runtime,
@@ -628,6 +1138,12 @@ function sourcesToInventory(
         syncable: compatibility.syncable,
         mcpTransport: config ? mcpTransportOf(config) : undefined,
         mcpSummary: config ? describeMcpServer(config) : undefined,
+        ...(readers ? { readBy: readers.readBy, ...(readers.note ? { readByNote: readers.note } : {}) } : {}),
+        ...(source.project !== undefined ? { claudeLocalScope: true } : {}),
+        ...(piDefinition ? { piDefinition: true } : {}),
+        ...(skillDir ? { skillDir } : {}),
+        ...(skillDescription ? { skillDescription } : {}),
+        ...(source.kind === "skill" ? { piLoads: !disabled.has(key) && !systemSkill } : {}),
       });
     }
   }
@@ -640,14 +1156,13 @@ function describeAssetCompatibility(
   config?: McpServerConfig | null,
 ): { compatibility: AgentAssetCompatibility; reason: string; syncable: boolean } {
   if (source.kind === "mcp") {
-    // Codex reads its servers out of config.toml, which has no place for the
-    // request headers a remote server authenticates with. Copying such a server
-    // over would produce an entry that connects and then fails on the first
-    // call, so it is reported as Claude-only rather than silently degraded.
+    // Codex carries headers (http_headers, env_http_headers and
+    // bearer_token_env_var). Grok Build's support is unconfirmed, so a copy
+    // into Grok is refused with its own message instead.
     if (config?.url && config.headers) {
       return {
-        compatibility: "claude",
-        reason: "This server sends request headers, which Codex config.toml cannot carry. Keep it in a JSON config.",
+        compatibility: "both",
+        reason: "This server sends request headers. Claude and Codex can carry them; Grok Build config.toml cannot.",
         syncable: true,
       };
     }
@@ -689,23 +1204,11 @@ function sessionKey(kind: SyncKind, name: string): string {
   return `${kind}:${name.toLowerCase()}`;
 }
 
-function assetId(input: {
-  kind: SyncKind;
-  runtime: SyncSourceRuntime;
-  scope: SyncScope;
-  name: string;
-  path: string;
-}): string {
+function assetId(input: ParsedAssetId): string {
   return JSON.stringify(input);
 }
 
-function parseAssetId(id: string): {
-  kind: SyncKind;
-  runtime: SyncSourceRuntime;
-  scope: SyncScope;
-  name: string;
-  path: string;
-} | null {
+function parseAssetId(id: string): ParsedAssetId | null {
   try {
     const parsed = JSON.parse(id) as Record<string, unknown>;
     const kind = parsed.kind === "mcp" || parsed.kind === "skill" ? parsed.kind : null;
@@ -720,57 +1223,91 @@ function parseAssetId(id: string): {
     const name = typeof parsed.name === "string" ? parsed.name : null;
     const path = typeof parsed.path === "string" ? parsed.path : null;
     if (!kind || !runtime || !scope || !name || !path) return null;
-    return { kind, runtime, scope, name, path };
+    return {
+      kind,
+      runtime,
+      scope,
+      name,
+      path,
+      ...(typeof parsed.project === "string" ? { project: parsed.project } : {}),
+      ...(typeof parsed.dir === "string" ? { dir: parsed.dir } : {}),
+    };
   } catch {
     return null;
   }
 }
 
-async function deleteMcpAsset(asset: { runtime: SyncSourceRuntime; name: string; path: string }): Promise<string[]> {
+// Returns the names actually removed. An entry that is already gone is an
+// empty list, which the move path in saveMcpServerUnlocked tolerates and
+// deleteAgentAssetUnlocked reports.
+async function deleteMcpAsset(asset: ParsedAssetId): Promise<string[]> {
   if (asset.runtime === "claude" || asset.runtime === "shared") {
-    await deleteClaudeMcpServer(asset.path, asset.name);
-    return [asset.name];
+    return (await deleteClaudeMcpServer(asset.path, asset.name, asset.project)) ? [asset.name] : [];
   }
   if (asset.runtime === "codex" || asset.runtime === "grok") {
-    await deleteCodexMcpServer(asset.path, asset.name);
-    return [asset.name];
+    return (await deleteCodexMcpServer(asset.path, asset.name)) ? [asset.name] : [];
   }
   return [];
 }
 
-async function deleteSkillAsset(asset: { runtime: SyncSourceRuntime; name: string; path: string }): Promise<string[]> {
-  const root = asset.path;
-  const candidates = findSkillDirs(root).filter((dir) => basename(dir) === asset.name || readSkillName(join(dir, "SKILL.md")) === asset.name);
-  for (const dir of candidates) {
-    await fs.rm(dir, { recursive: true, force: true });
+function resolveSkillDir(asset: ParsedAssetId): string | null {
+  const root = resolve(asset.path);
+  if (asset.dir) {
+    const dir = resolve(asset.dir);
+    const rel = relative(root, dir);
+    // The id came through the renderer: only a skill folder inside the listed
+    // root is ever touched.
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+    return findSkillFile(dir) ? dir : null;
   }
-  return candidates;
+  return indexSkillDirsByName(root).dirs.get(asset.name) ?? null;
 }
 
+async function deleteSkillAsset(asset: ParsedAssetId): Promise<string[]> {
+  const dir = resolveSkillDir(asset);
+  if (!dir) return [];
+  if (trashItem) await trashItem(dir);
+  else await fs.rm(dir, { recursive: true, force: true });
+  return [dir];
+}
+
+// Sync never crosses scopes: a project's .mcp.json reaches only that
+// project's .codex/config.toml, and the user's Codex servers reach only the
+// user's own ~/.claude.json. Copying user servers into a committed project
+// file leaked their credentials, and copying project servers into the
+// user-wide Codex config activated them in every Codex session.
 async function syncMcpConfigs(cwd: string | null, result: AgentSyncResult): Promise<void> {
-  if (!cwd) {
-    result.mcp.skipped.push("No active workspace; project-scoped Claude .mcp.json sync was skipped.");
-    return;
-  }
-
-  const claudePath = join(cwd, ".mcp.json");
-  const codexPath = tomlRuntimeConfigPath("codex");
-
   try {
     // The built-in server is switched per CLI in the Capability Center, and its
-    // entry holds this machine's absolute paths, so it never rides a sync into
-    // another CLI or into a project .mcp.json that may be committed.
-    const claudeServers = readClaudeMcpServers(claudePath).filter((server) => !isReservedMcpName(server.name));
-    const codexServers = readCodexMcpServers(codexPath).filter((server) => !isReservedMcpName(server.name));
+    // entry holds this machine's absolute paths, so it never rides a sync.
+    // Only the user's own tables count: an older sync filled the managed block
+    // of the user Codex config with servers from project .mcp.json files, and
+    // copying those into ~/.claude.json would activate them everywhere. Claude
+    // has no `enabled` switch, so a server off in Codex would arrive on.
+    const userCodex = readCodexMcpServers(tomlRuntimeConfigPath("codex"), { excludeManagedBlock: true })
+      .filter((server) => !isReservedMcpName(server.name))
+      .filter((server) => {
+        if (server.enabled !== false) return true;
+        result.mcp.skipped.push(`Codex MCP server '${server.name}' is turned off (enabled = false) and was not copied to Claude.`);
+        return false;
+      });
+    const toClaude = await writeClaudeMcpServers(claudeUserConfigFile(), userCodex, result, { keepHeaders: true });
+    result.mcp.toClaude.push(...toClaude);
 
-    const codexAdded = await writeCodexManagedMcpServers(codexPath, claudeServers, result);
-    result.mcp.toCodex.push(...codexAdded);
+    let projectServers: McpServerConfig[] = [];
+    if (!cwd) {
+      result.mcp.skipped.push("No active workspace; the project .mcp.json to .codex/config.toml sync was skipped.");
+    } else {
+      projectServers = readClaudeMcpServers(join(cwd, ".mcp.json")).filter((server) => !isReservedMcpName(server.name));
+      const notes: string[] = [];
+      const safe = projectServers.map((server) => placeholderSecrets(server, notes));
+      const toCodex = await writeCodexManagedMcpServers(join(cwd, ".codex", "config.toml"), safe, result);
+      result.mcp.toCodex.push(...toCodex);
+      result.mcp.skipped.push(...notes);
+    }
 
-    const claudeAdded = await writeClaudeMcpServers(claudePath, codexServers, result);
-    result.mcp.toClaude.push(...claudeAdded);
-
-    if (claudeServers.length === 0 && codexServers.length === 0) {
-      result.mcp.skipped.push("No MCP servers found in workspace .mcp.json or user Codex config.toml.");
+    if (userCodex.length === 0 && projectServers.length === 0) {
+      result.mcp.skipped.push("No MCP servers found in the workspace .mcp.json or the user Codex config.toml.");
     }
   } catch (err) {
     result.mcp.errors.push(err instanceof Error ? err.message : String(err));
@@ -806,26 +1343,23 @@ function isReservedMcpName(name: string): boolean {
 }
 
 function readClaudeMcpServers(path: string): McpServerConfig[] {
-  const text = readSmallText(path, MAX_CONFIG_BYTES);
-  if (!text) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return [];
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
-  const raw = (parsed as Record<string, unknown>).mcpServers;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-  return Object.entries(raw as Record<string, unknown>)
+  const loaded = loadConfig(path);
+  if (!loaded?.json) return [];
+  const container = jsonMcpContainer(loaded.json);
+  if (!container) return [];
+  return Object.entries(container)
     .map(([name, value]) => normalizeMcpServer(name, value))
     .filter((server): server is McpServerConfig => Boolean(server));
 }
 
-function readCodexMcpServers(path: string): McpServerConfig[] {
-  const text = readSmallText(path, MAX_CONFIG_BYTES);
-  if (!text) return [];
-  return parseCodexTomlMcpServers(stripManagedMcpBlock(text).text);
+function readCodexMcpServers(path: string, options?: { excludeManagedBlock?: boolean }): McpServerConfig[] {
+  const loaded = loadConfig(path);
+  if (!loaded) return [];
+  if (!options?.excludeManagedBlock) return loaded.tomlServers;
+  const stripped = stripManagedMcpBlock(loaded.text);
+  if (!stripped.removed) return loaded.tomlServers;
+  const parsed = parseTomlText(stripped.text);
+  return parsed.ok ? tomlMcpServersFromDocument(parsed.value) : [];
 }
 
 function normalizeMcpServer(name: string, value: unknown): McpServerConfig | null {
@@ -862,145 +1396,98 @@ function normalizeMcpServer(name: string, value: unknown): McpServerConfig | nul
   return server;
 }
 
-function parseCodexTomlMcpServers(text: string): McpServerConfig[] {
-  const servers = new Map<string, McpServerConfig>();
-  let current: McpServerConfig | null = null;
-  let envTarget: McpServerConfig | null = null;
-  const lines = text.split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/\s+#.*$/, "").trim();
-    if (!line) continue;
-    const section = line.match(/^\[mcp_servers(?:\.(?:"([^"]+)"|'([^']+)'|([^\].\s]+)))?(?:\.env)?\]$/);
-    if (section) {
-      const name = section[1] || section[2] || section[3] || "";
-      const isEnv = /\.env\]$/.test(line);
-      current = name ? (servers.get(name) ?? { name }) : null;
-      if (current && !servers.has(name)) servers.set(name, current);
-      envTarget = isEnv ? current : null;
-      continue;
-    }
-    if (envTarget) {
-      const kv = parseTomlKeyValue(line);
-      if (kv) {
-        envTarget.env = { ...(envTarget.env ?? {}), [kv.key]: kv.value };
-      }
-      continue;
-    }
-    if (!current) continue;
-    const kv = parseTomlKeyValue(line);
-    if (!kv) continue;
-    if (kv.key === "command") current.command = kv.value;
-    if (kv.key === "url") current.url = kv.value;
-    if (kv.key === "enabled") current.enabled = kv.value !== "false";
-    if (kv.key === "args") current.args = parseTomlStringArray(kv.rawValue);
-  }
-  return [...servers.values()].filter((server) => server.command || server.url);
-}
-
-// Writes the Codex-shaped managed block. `options.runtime` only changes which
-// CLI the skip messages name and how carefully the file is replaced; the TOML
-// itself is identical, because Grok Build parses the same tables.
+// Writes the Codex managed block of a project's .codex/config.toml.
 async function writeCodexManagedMcpServers(
   path: string,
   sourceServers: McpServerConfig[],
   result: AgentSyncResult,
-  options?: { runtime?: TomlCopyRuntime },
 ): Promise<string[]> {
   if (sourceServers.length === 0) return [];
-  const runtime = options?.runtime ?? "codex";
-  const label = TOML_RUNTIME_LABEL[runtime];
-  let existing = "";
-  try {
-    existing = await fs.readFile(path, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-  }
-  const stripped = stripManagedMcpBlock(existing);
-  // The block is rewritten whole, so whatever an earlier sync put in it has to
-  // be carried over: a one-server copy from the Capability Center would
-  // otherwise uninstall every other managed server.
-  const managed = readManagedMcpBlockServers(existing);
-  const existingNames = new Set(parseCodexTomlMcpServers(stripped.text).map((server) => server.name));
-  const syncable = sourceServers.filter((server) => {
-    if (existingNames.has(server.name)) {
-      result.mcp.skipped.push(`${label} already has MCP server '${server.name}'.`);
-      return false;
+  const label = TOML_RUNTIME_LABEL.codex;
+  return withConfigFileLock(path, async () => {
+    const existing = await readTextIfExists(path);
+    const whole = parseTomlText(existing);
+    if (!whole.ok) {
+      result.mcp.errors.push(`Could not read ${path}: ${whole.error}`);
+      return [];
     }
-    // config.toml has no headers table, so copying one over would drop the
-    // credential and leave a server that connects but cannot call.
-    if (server.url && server.headers) {
-      result.mcp.skipped.push(
-        `MCP server '${server.name}' sends request headers, which ${label} config.toml cannot carry.`,
-      );
-      return false;
-    }
-    if (!server.command && !server.url) {
-      result.mcp.skipped.push(`Claude MCP server '${server.name}' is missing command/url and was skipped for ${label}.`);
-      return false;
-    }
-    return true;
-  });
-  if (syncable.length === 0 && !stripped.removed) return [];
+    const stripped = stripManagedMcpBlock(existing);
+    // The block is rewritten whole, so whatever an earlier sync put in it has
+    // to be carried over.
+    const managed = readManagedMcpBlockServers(existing);
+    // Names outside the block only: the block's own entries are refreshed.
+    const strippedParse = parseTomlText(stripped.text);
+    const existingNames = new Set(strippedParse.ok ? tomlMcpServerNamesFromDocument(strippedParse.value) : []);
+    const syncable = sourceServers.filter((server) => {
+      if (existingNames.has(server.name)) {
+        result.mcp.skipped.push(`${label} already has MCP server '${server.name}'.`);
+        return false;
+      }
+      if (!server.command && !server.url) {
+        result.mcp.skipped.push(`MCP server '${server.name}' is missing command/url and was skipped for ${label}.`);
+        return false;
+      }
+      return true;
+    });
+    if (syncable.length === 0 && !stripped.removed) return [];
+    if (result.dryRun) return syncable.map((server) => server.name);
 
-  await fs.mkdir(dirname(path), { recursive: true, mode: runtime === "grok" ? 0o700 : undefined });
-  // Source definitions win over the copy already in the block, so a re-sync
-  // still refreshes a changed command or env.
-  const merged = new Map(managed.map((server) => [server.name, server]));
-  for (const server of syncable) merged.set(server.name, server);
-  const block = merged.size > 0 ? renderCodexManagedBlock([...merged.values()]) : "";
-  const base = stripped.text.trimEnd();
-  const next = [base, block].filter(Boolean).join("\n\n") + "\n";
-  if (runtime === "grok") {
-    // ~/.grok/config.toml can be a share link into a Codara-managed account
-    // profile and carries credentials, so the swap has to land on the real
-    // file, atomically and owner-only, exactly as mcp-installer's
-    // installForGrok does.
-    const writePath = await fs.realpath(path).catch(() => path);
-    await writeFileAtomic(writePath, next, { mode: 0o600 });
-  } else {
-    await fs.writeFile(path, next, "utf8");
-  }
-  return syncable.map((server) => server.name);
+    await fs.mkdir(dirname(path), { recursive: true });
+    // Source definitions win over the copy already in the block, so a re-sync
+    // still refreshes a changed command or env.
+    const merged = new Map(managed.map((server) => [server.name, server]));
+    for (const server of syncable) merged.set(server.name, server);
+    const block = merged.size > 0 ? renderCodexManagedBlock([...merged.values()]) : "";
+    const base = stripped.text.trimEnd();
+    const next = [base, block].filter(Boolean).join("\n\n") + "\n";
+    const check = parseTomlText(next);
+    if (!check.ok) {
+      result.mcp.errors.push(`Could not update ${path} safely: ${check.error}`);
+      return [];
+    }
+    await writeConfigFileAtomic(path, next);
+    return syncable.map((server) => server.name);
+  });
 }
 
 async function writeClaudeMcpServers(
   path: string,
   sourceServers: McpServerConfig[],
   result: AgentSyncResult,
-  options?: { keepHeaders?: boolean },
+  options?: { keepHeaders?: boolean; project?: string },
 ): Promise<string[]> {
   if (sourceServers.length === 0) return [];
-  let parsed: Record<string, unknown> = {};
-  try {
-    const value: unknown = JSON.parse(await fs.readFile(path, "utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
-    parsed = value as Record<string, unknown>;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      result.mcp.errors.push(`Could not read ${path}: ${(err as Error).message}`);
-      return [];
+  return withConfigFileLock(path, async () => {
+    let parsed: Record<string, unknown> = {};
+    try {
+      const value: unknown = JSON.parse(await fs.readFile(path, "utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+      parsed = value as Record<string, unknown>;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        result.mcp.errors.push(`Could not read ${path}: ${(err as Error).message}`);
+        return [];
+      }
     }
-  }
-  const existing =
-    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
-      ? parsed.mcpServers as Record<string, unknown>
-      : {};
-  const added: string[] = [];
-  for (const server of sourceServers) {
-    if (existing[server.name]) {
-      result.mcp.skipped.push(`Claude already has MCP server '${server.name}'.`);
-      continue;
+    const existing = options?.project !== undefined
+      ? ensureProjectJsonMcpMap(parsed, findClaudeProjectKey(parsed, options.project) ?? resolve(options.project))
+      : ensureTopLevelJsonMcpMap(parsed);
+    const added: string[] = [];
+    for (const server of sourceServers) {
+      if (existing[server.name]) {
+        result.mcp.skipped.push(`Claude already has MCP server '${server.name}'.`);
+        continue;
+      }
+      existing[server.name] = options?.keepHeaders
+        ? renderUserMcpServer(server)
+        : renderClaudeMcpServer(server);
+      added.push(server.name);
     }
-    existing[server.name] = options?.keepHeaders
-      ? renderUserMcpServer(server)
-      : renderClaudeMcpServer(server);
-    added.push(server.name);
-  }
-  if (added.length === 0) return [];
-  parsed.mcpServers = existing;
-  await fs.mkdir(dirname(path), { recursive: true });
-  await writeMcpFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
-  return added;
+    if (added.length === 0 || result.dryRun) return added;
+    await fs.mkdir(dirname(path), { recursive: true });
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    return added;
+  });
 }
 
 function mcpTarget(
@@ -1008,6 +1495,7 @@ function mcpTarget(
   scope: SyncScope,
   path: string,
   label: string,
+  extra?: { readBy?: CliRuntime[]; hint?: string },
 ): AgentMcpTarget {
   return {
     id: mcpTargetId(runtime, scope, path),
@@ -1016,11 +1504,89 @@ function mcpTarget(
     path,
     label,
     format: path.toLowerCase().endsWith(".json") ? "json" : "toml",
+    ...(extra?.readBy ? { readBy: extra.readBy } : {}),
+    ...(extra?.hint ? { hint: extra.hint } : {}),
   };
 }
 
 function mcpTargetId(runtime: SyncSourceRuntime, scope: SyncScope, path: string): string {
   return `${runtime}:${scope}:${path}`;
+}
+
+// A file inside the workspace that teams commit. ~/.claude.json at workspace
+// scope is the user's private per-project map, not a repository file.
+function isCommittableConfig(target: Pick<AgentMcpTarget, "scope" | "path">, cwd: string): boolean {
+  if (target.scope !== "workspace" || isClaudeUserConfig(target.path)) return false;
+  if (!cwd) return true;
+  const rel = relative(resolve(cwd), resolve(target.path));
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+// Names follow the API key conventions MCP servers document (FOO_API_KEY,
+// GITHUB_TOKEN, Authorization), plus value shapes of well-known tokens.
+const SECRET_NAME_SEGMENTS = new Set([
+  "KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASS", "PWD", "CREDENTIAL", "CREDENTIALS",
+  "AUTH", "AUTHORIZATION", "BEARER", "COOKIE", "SESSION", "PRIVATE", "SIGNATURE", "PAT",
+]);
+const SECRET_VALUE_PATTERN = /^(?:Bearer\s+|Basic\s+)?(?:sk-|sk_|pk_live|rk_live|ghp_|gho_|ghu_|ghs_|github_pat_|glpat-|xox[abposr]-|AKIA|AIza|ya29\.|eyJ)/;
+
+function isPlaceholderOnly(value: string): boolean {
+  return /^(?:Bearer\s+)?\$\{(?:env:)?[A-Za-z_][A-Za-z0-9_]*\}$/.test(value.trim());
+}
+
+function looksSecret(name: string, value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || isPlaceholderOnly(trimmed)) return false;
+  const segments = name.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  if (segments.some((segment) => SECRET_NAME_SEGMENTS.has(segment))) return true;
+  return SECRET_VALUE_PATTERN.test(trimmed);
+}
+
+function placeholderName(server: string, name: string): string {
+  return `${server}_${name}`.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "MCP_SECRET";
+}
+
+function firstNewLiteralSecret(
+  server: McpServerConfig,
+  previous: McpServerConfig | null,
+): { label: string; variable: string } | null {
+  for (const [key, value] of Object.entries(server.env ?? {})) {
+    if (previous?.env?.[key] === value) continue;
+    if (looksSecret(key, value)) return { label: `Environment variable ${key}`, variable: /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : placeholderName(server.name, key) };
+  }
+  for (const [key, value] of Object.entries(server.headers ?? {})) {
+    if (previous?.headers?.[key] === value) continue;
+    if (looksSecret(key, value)) return { label: `Header ${key}`, variable: placeholderName(server.name, key === "Authorization" ? "token" : key) };
+  }
+  return null;
+}
+
+/**
+ * A copy of `server` safe to write into a committed workspace file: literal
+ * secrets become ${VAR} placeholders (expanded by Claude, Codex env_vars and
+ * the Pi bridge from the environment), and each replacement is noted so the
+ * user knows which variable to set.
+ */
+function placeholderSecrets(server: McpServerConfig, notes: string[]): McpServerConfig {
+  let changed = false;
+  const env = server.env ? { ...server.env } : undefined;
+  for (const [key, value] of Object.entries(env ?? {})) {
+    if (!looksSecret(key, value)) continue;
+    const variable = /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? key : placeholderName(server.name, key);
+    env![key] = `\${${variable}}`;
+    notes.push(`'${server.name}': ${key} was written as \${${variable}} instead of its value. Set ${variable} in your environment.`);
+    changed = true;
+  }
+  const headers = server.headers ? { ...server.headers } : undefined;
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (!looksSecret(key, value)) continue;
+    const bearer = /^Bearer\s+/i.test(value.trim());
+    const variable = placeholderName(server.name, bearer || key.toLowerCase() === "authorization" ? "token" : key);
+    headers![key] = bearer ? `Bearer \${${variable}}` : `\${${variable}}`;
+    notes.push(`'${server.name}': header ${key} was written with \${${variable}} instead of its value. Set ${variable} in your environment.`);
+    changed = true;
+  }
+  return changed ? { ...server, ...(env ? { env } : {}), ...(headers ? { headers } : {}) } : server;
 }
 
 // Names are used as TOML bare-or-quoted keys, JSON object keys, and Pi tool
@@ -1073,75 +1639,85 @@ function normalizeMcpPairs(
   return { value: Object.keys(out).length > 0 ? out : undefined };
 }
 
-async function writeMcpFileAtomic(path: string, content: string): Promise<void> {
-  let target = path;
-  let mode = 0o600;
+async function readTextIfExists(path: string): Promise<string> {
   try {
-    target = await fs.realpath(path);
-    mode = (await fs.stat(target)).mode & 0o777;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return await fs.readFile(path, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw err;
   }
-  // Dotfile managers often symlink these files. Preserve that link and the
-  // existing permissions while atomically replacing the actual target.
-  await writeFileAtomic(target, content, { mode });
+}
+
+function ensureTrailingNewline(text: string): string {
+  return text.endsWith("\n") ? text : `${text}\n`;
 }
 
 // Upsert, unlike writeClaudeMcpServers: an existing name is overwritten so an
 // edit takes effect. A file that exists but does not parse throws rather than
 // being replaced, so a hand-written config is never silently clobbered.
-// `replaceName` is the name being edited in this same file: its entry is
-// rewritten where it lives, including a per-project map nested inside
-// ~/.claude.json, so an edit never forks into a second top-level copy that
-// would apply to every workspace. New entries always land on the top-level map.
+// `project` selects Claude's private per-project map in ~/.claude.json;
+// without it the write lands on the top-level map.
 async function upsertClaudeMcpServer(
   path: string,
   server: McpServerConfig,
-  options?: { replaceName?: string | null },
+  options?: { replaceName?: string | null; project?: string | null },
 ): Promise<void> {
-  let parsed: Record<string, unknown> = {};
-  try {
-    const value = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
-    parsed = value as Record<string, unknown>;
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw new Error(`Could not read ${path}: ${(err as Error).message}`);
+  await withConfigFileLock(path, async () => {
+    let parsed: Record<string, unknown> = {};
+    try {
+      const value = JSON.parse(await fs.readFile(path, "utf8")) as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+      parsed = value as Record<string, unknown>;
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`Could not read ${path}: ${(err as Error).message}`);
+      }
     }
-  }
-  const replaceName = options?.replaceName ?? null;
-  const located = replaceName ? locateJsonMcpServer(parsed, replaceName, 0) : null;
-  const container = located?.container ?? ensureTopLevelJsonMcpMap(parsed);
-  if (located && replaceName && replaceName !== server.name) delete located.container[replaceName];
-  container[server.name] = renderUserMcpServer(server);
-  await fs.mkdir(dirname(path), { recursive: true });
-  await writeMcpFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    const container = options?.project
+      ? ensureProjectJsonMcpMap(parsed, options.project)
+      : ensureTopLevelJsonMcpMap(parsed);
+    const replaceName = options?.replaceName ?? null;
+    if (replaceName && replaceName !== server.name) delete container[replaceName];
+    container[server.name] = renderUserMcpServer(server);
+    await fs.mkdir(dirname(path), { recursive: true });
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+  });
 }
 
 function ensureTopLevelJsonMcpMap(parsed: Record<string, unknown>): Record<string, unknown> {
-  const existing =
-    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
-      ? parsed.mcpServers as Record<string, unknown>
+  const existing = jsonMcpContainer(parsed);
+  if (existing) return existing;
+  const created: Record<string, unknown> = {};
+  parsed.mcpServers = created;
+  return created;
+}
+
+function ensureProjectJsonMcpMap(parsed: Record<string, unknown>, project: string): Record<string, unknown> {
+  const projects =
+    parsed.projects && typeof parsed.projects === "object" && !Array.isArray(parsed.projects)
+      ? parsed.projects as Record<string, unknown>
       : {};
-  parsed.mcpServers = existing;
-  return existing;
+  parsed.projects = projects;
+  const entry =
+    projects[project] && typeof projects[project] === "object" && !Array.isArray(projects[project])
+      ? projects[project] as Record<string, unknown>
+      : {};
+  projects[project] = entry;
+  return ensureTopLevelJsonMcpMap(entry);
 }
 
-async function upsertCodexMcpServer(path: string, server: McpServerConfig): Promise<void> {
-  let existing = "";
-  try {
-    existing = await fs.readFile(path, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-  }
-  const base = removeCodexMcpServerBlock(existing, server.name).trimEnd();
-  const block = renderCodexMcpServer(server).join("\n").trimStart();
-  await fs.mkdir(dirname(path), { recursive: true });
-  await writeMcpFileAtomic(path, [base, block].filter(Boolean).join("\n\n") + "\n");
+async function upsertCodexMcpServer(path: string, server: McpServerConfig, replaceName: string | null): Promise<void> {
+  await withConfigFileLock(path, async () => {
+    let existing = await readTextIfExists(path);
+    if (replaceName && replaceName !== server.name) existing = removeTomlMcpServer(existing, replaceName, path);
+    const next = ensureTrailingNewline(upsertTomlMcpServer(existing, server, path));
+    await fs.mkdir(dirname(path), { recursive: true });
+    await writeConfigFileAtomic(path, next);
+  });
 }
 
-// renderClaudeMcpServer is shared with sync, which deliberately never copies
-// headers between runtimes. A user-authored remote server keeps them.
+// renderClaudeMcpServer is shared with sync, which never copies headers into a
+// file other people read. A user-authored or private copy keeps them.
 function renderUserMcpServer(server: McpServerConfig): Record<string, unknown> {
   const rendered = renderClaudeMcpServer(server);
   if (server.url && server.headers) rendered.headers = server.headers;
@@ -1166,35 +1742,40 @@ function describeMcpServer(server: McpServerConfig): string {
   return text.length > 72 ? `${text.slice(0, 71)}…` : text;
 }
 
-async function deleteClaudeMcpServer(path: string, name: string): Promise<void> {
-  let parsed: Record<string, unknown>;
-  try {
-    const value: unknown = JSON.parse(await fs.readFile(path, "utf8"));
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
-    parsed = value as Record<string, unknown>;
-  } catch {
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-  // Removes the entry where discovery found it, which for ~/.claude.json can be
-  // a per-project map rather than the top-level one.
-  const located = locateJsonMcpServer(parsed, name, 0);
-  if (!located) return;
-  delete located.container[name];
-  await fs.writeFile(path, JSON.stringify(parsed, null, 2) + "\n", "utf8");
+async function deleteClaudeMcpServer(path: string, name: string, project?: string): Promise<boolean> {
+  return withConfigFileLock(path, async () => {
+    let raw: string;
+    try {
+      raw = await fs.readFile(path, "utf8");
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw new Error(`Could not read ${path}: ${(err as Error).message}`);
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected a JSON object.");
+      parsed = value as Record<string, unknown>;
+    } catch (err) {
+      throw new Error(`Could not read ${path}: ${(err as Error).message}`);
+    }
+    const container = jsonMcpContainer(parsed, project);
+    if (!container || !Object.prototype.hasOwnProperty.call(container, name)) return false;
+    delete container[name];
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    return true;
+  });
 }
 
-async function deleteCodexMcpServer(path: string, name: string): Promise<void> {
-  let existing = "";
-  try {
-    existing = await fs.readFile(path, "utf8");
-  } catch {
-    return;
-  }
-  const next = removeCodexMcpServerBlock(existing, name);
-  if (next !== existing) {
-    await fs.writeFile(path, next, "utf8");
-  }
+async function deleteCodexMcpServer(path: string, name: string): Promise<boolean> {
+  return withConfigFileLock(path, async () => {
+    const existing = await readTextIfExists(path);
+    if (!existing) return false;
+    const next = removeTomlMcpServer(existing, name, path);
+    if (next === existing) return false;
+    await writeConfigFileAtomic(path, next);
+    return true;
+  });
 }
 
 async function copyMissingSkills(
@@ -1205,9 +1786,9 @@ async function copyMissingSkills(
   scope: string,
   result: AgentSyncResult,
 ): Promise<void> {
-  const skillDirs = findSkillDirs(sourceRoot);
+  const skillDirs = findSkillDirs(sourceRoot).dirs;
   if (skillDirs.length === 0) return;
-  await fs.mkdir(destRoot, { recursive: true });
+  if (!result.dryRun) await fs.mkdir(destRoot, { recursive: true });
   for (const source of skillDirs) {
     const name = basename(source);
     const compatibility = describeSkillDirCompatibility(sourceRuntime, source);
@@ -1227,7 +1808,7 @@ async function copyMissingSkills(
       continue;
     }
     try {
-      await copyDir(source, dest);
+      if (!result.dryRun) await copyDir(source, dest);
       const label = `${scope}:${name}`;
       if (destRuntime === "claude") result.skills.toClaude.push(label);
       else result.skills.toCodex.push(label);
@@ -1267,10 +1848,16 @@ function mcpConfigCandidates(cwd: string): Array<{
   runtime: SyncSourceRuntime;
   scope: SyncScope;
   path: string;
+  local?: boolean;
 }> {
   const home = homedir();
   return [
     { runtime: "shared", scope: "workspace", path: join(cwd, ".mcp.json") },
+    // Claude's private per-project servers: ~/.claude.json projects[<cwd>].
+    // Other projects' maps in the same file are never read.
+    { runtime: "claude", scope: "workspace", path: claudeUserConfigFile(), local: true },
+    // Claude Code does not load MCP servers from settings.json; these stay as
+    // read-only sources because existing configs rely on them for Pi delivery.
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "settings.json") },
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "settings.local.json") },
     { runtime: "codex", scope: "workspace", path: join(cwd, ".codex", "config.toml") },
@@ -1294,8 +1881,14 @@ function skillRootCandidates(cwd: string): Array<{
     { runtime: "codex", scope: "workspace", path: join(cwd, ".codex", "skills") },
     { runtime: "claude", scope: "workspace", path: join(cwd, ".claude", "skills") },
     { runtime: "shared", scope: "workspace", path: join(cwd, ".agents", "skills") },
+    // Pi's own roots: Cora loads these natively.
+    { runtime: "shared", scope: "workspace", path: join(cwd, ".pi", "skills") },
     { runtime: "codex", scope: "user", path: join(defaultPersonalCodexHomeDir(), "skills") },
     { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "skills") },
+    { runtime: "shared", scope: "user", path: join(homedir(), ".agents", "skills") },
+    ...(defaultPiAgentDir
+      ? [{ runtime: "shared" as const, scope: "user" as const, path: join(defaultPiAgentDir, "skills") }]
+      : []),
   ];
 }
 
@@ -1307,21 +1900,6 @@ function readSmallText(path: string, maxBytes: number): string | null {
   } catch {
     return null;
   }
-}
-
-function extractTomlMcpNames(text: string): string[] {
-  const names = new Set<string>();
-  // Match [mcp_servers.<name>] AND its sub-tables like [mcp_servers."name".env].
-  // The bare-key alternative excludes '.' so it never swallows a sub-table
-  // segment, and the trailing (?:\.[^\]]+)? consumes ".env" (or any sub-table)
-  // so it maps back to <name> instead of becoming a phantom "name".env server.
-  const sectionPattern =
-    /^\s*\[mcp_servers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))(?:\.[^\]]+)?\]\s*$/gm;
-  for (const match of text.matchAll(sectionPattern)) {
-    const name = (match[1] || match[2] || match[3] || "").trim();
-    if (name) names.add(name);
-  }
-  return [...names].sort((a, b) => a.localeCompare(b));
 }
 
 function stripManagedMcpBlock(text: string): { text: string; removed: boolean } {
@@ -1341,61 +1919,17 @@ function readManagedMcpBlockServers(text: string): McpServerConfig[] {
   const start = text.indexOf(MCP_SYNC_START);
   const end = text.indexOf(MCP_SYNC_END);
   if (start === -1 || end === -1 || end < start) return [];
-  return parseCodexTomlMcpServers(text.slice(start + MCP_SYNC_START.length, end));
-}
-
-function removeCodexMcpServerBlock(text: string, name: string): string {
-  const lines = text.split(/\r?\n/);
-  const out: string[] = [];
-  let skipping = false;
-  const serverSection = new RegExp(
-    `^\\s*\\[mcp_servers\\.(?:"${escapeRegExp(name)}"|'${escapeRegExp(name)}'|${escapeRegExp(name)})(?:\\.env)?\\]\\s*$`,
-  );
-  for (const line of lines) {
-    const isSection = /^\s*\[/.test(line);
-    if (serverSection.test(line)) {
-      skipping = true;
-      continue;
-    }
-    if (skipping && isSection) {
-      skipping = false;
-    }
-    if (!skipping) out.push(line);
-  }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const parsed = parseTomlText(text.slice(start + MCP_SYNC_START.length, end));
+  return parsed.ok ? tomlMcpServersFromDocument(parsed.value) : [];
 }
 
 function renderCodexManagedBlock(servers: McpServerConfig[]): string {
   return [
     MCP_SYNC_START,
     "# Managed by Codara Settings > Agents sync. Edit the source .mcp.json or remove this block to reset.",
-    ...servers.flatMap((server) => renderCodexMcpServer(server)),
+    ...servers.flatMap((server) => renderTomlMcpServer(server)),
     MCP_SYNC_END,
   ].join("\n");
-}
-
-function renderCodexMcpServer(server: McpServerConfig): string[] {
-  const lines = ["", `[mcp_servers.${quoteTomlBareOrString(server.name)}]`];
-  if (server.command) {
-    lines.push(`command = ${tomlString(server.command)}`);
-    if (server.args?.length) lines.push(`args = [${server.args.map(tomlString).join(", ")}]`);
-  }
-  if (server.url) lines.push(`url = ${tomlString(server.url)}`);
-  if (server.enabled === false) lines.push("enabled = false");
-  else lines.push("enabled = true");
-  const env = server.env ?? {};
-  const envKeys = Object.keys(env).sort();
-  if (envKeys.length > 0) {
-    lines.push("", `[mcp_servers.${quoteTomlBareOrString(server.name)}.env]`);
-    for (const key of envKeys) {
-      lines.push(`${quoteTomlBareOrString(key)} = ${tomlString(env[key])}`);
-    }
-  }
-  return lines;
 }
 
 function renderClaudeMcpServer(server: McpServerConfig): Record<string, unknown> {
@@ -1413,141 +1947,61 @@ function renderClaudeMcpServer(server: McpServerConfig): Record<string, unknown>
   };
 }
 
-function parseTomlKeyValue(line: string): { key: string; value: string; rawValue: string } | null {
-  const match = line.match(/^("[^"]+"|'[^']+'|[A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
-  if (!match) return null;
-  const key = unquoteTomlString(match[1]);
-  const rawValue = match[2].trim();
-  if (rawValue === "true" || rawValue === "false") return { key, value: rawValue, rawValue };
-  return { key, value: unquoteTomlString(rawValue), rawValue };
-}
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
 
-function parseTomlStringArray(value: string): string[] {
-  const trimmed = value.trim();
-  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return [];
-  const body = trimmed.slice(1, -1);
+function findSkillDirs(root: string): { dirs: string[]; truncated: boolean } {
+  if (!directoryExists(root)) return { dirs: [], truncated: false };
   const out: string[] = [];
-  const regex = /"((?:\\.|[^"\\])*)"|'([^']*)'/g;
-  for (const match of body.matchAll(regex)) {
-    out.push(match[1] !== undefined ? unescapeTomlString(match[1]) : match[2]);
-  }
-  return out;
+  const truncated = collectSkillDirs(root, 0, out);
+  return { dirs: out, truncated };
 }
 
-function unquoteTomlString(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-    return unescapeTomlString(trimmed.slice(1, -1));
-  }
-  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
-  return trimmed;
-}
-
-function unescapeTomlString(value: string): string {
-  return value.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-}
-
-function tomlString(value: string): string {
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-function quoteTomlBareOrString(value: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
-}
-
-// One walk over a JSON config: the names discovery needs plus the definitions
-// the inventory row and the edit form need. An entry with neither command nor
-// url normalizes to null, so it still counts as a discovered name while
-// carrying no definition, which is why callers treat the map as best effort.
-function collectJsonMcpEntries(text: string): {
-  names: string[];
-  configs: Map<string, McpServerConfig>;
+/**
+ * Each skill folder under `root`, keyed by the name the agents use for it:
+ * the SKILL.md frontmatter `name`, else the folder name. A Markdown heading is
+ * never a name; skills often share headings such as "# Instructions".
+ */
+function indexSkillDirsByName(root: string): {
+  dirs: Map<string, string>;
+  descriptions: Map<string, string>;
+  truncated: boolean;
 } {
-  let parsed: unknown;
-  const configs = new Map<string, McpServerConfig>();
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { names: [], configs };
-  }
-  const names = new Set<string>();
-  walkJsonMcpEntries(parsed, names, configs, 0);
-  return { names: [...names].sort((a, b) => a.localeCompare(b)), configs };
-}
-
-function walkJsonMcpEntries(
-  value: unknown,
-  names: Set<string>,
-  configs: Map<string, McpServerConfig>,
-  depth: number,
-): void {
-  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return;
-  const record = value as Record<string, unknown>;
-  // Own maps before nested ones so a top-level definition wins over a
-  // per-project copy of the same name, matching locateJsonMcpServer.
-  for (const key of MCP_MAP_KEYS) {
-    const child = record[key];
-    if (!child || typeof child !== "object" || Array.isArray(child)) continue;
-    for (const [rawName, raw] of Object.entries(child as Record<string, unknown>)) {
-      const name = rawName.trim();
-      if (!name) continue;
-      names.add(name);
-      const server = normalizeMcpServer(name, raw);
-      if (server && !configs.has(server.name)) configs.set(server.name, server);
-    }
-  }
-  for (const [key, child] of Object.entries(record)) {
-    if (MCP_MAP_KEYS.includes(key)) continue;
-    walkJsonMcpEntries(child, names, configs, depth + 1);
-  }
-}
-
-function findSkillNames(root: string): string[] {
-  if (!directoryExists(root)) return [];
-  const names = new Set<string>();
-  walkSkillDirs(root, 0, names);
-  return [...names].sort((a, b) => a.localeCompare(b));
-}
-
-function findSkillDirs(root: string): string[] {
-  if (!directoryExists(root)) return [];
-  const out: string[] = [];
-  collectSkillDirs(root, 0, out);
-  return out;
-}
-
-function indexSkillDirsByName(root: string): Map<string, string> {
   const indexed = new Map<string, string>();
-  for (const dir of findSkillDirs(root)) {
-    const skillFile = findSkillFile(dir);
-    const declaredName = skillFile ? readSkillName(skillFile) : "";
-    indexed.set(declaredName || basename(dir), dir);
+  const descriptions = new Map<string, string>();
+  const found = findSkillDirs(root);
+  for (const dir of found.dirs) {
+    const frontmatter = readSkillFrontmatter(findSkillFile(dir));
+    const name = frontmatter?.name || basename(dir);
+    if (indexed.has(name)) continue;
+    indexed.set(name, dir);
+    if (frontmatter?.description) descriptions.set(name, frontmatter.description);
   }
-  return indexed;
+  return { dirs: indexed, descriptions, truncated: found.truncated };
 }
 
-function findSkillDirByName(root: string, name: string): string | null {
-  return findSkillDirs(root).find((dir) => basename(dir) === name || readSkillName(join(dir, "SKILL.md")) === name) ?? null;
-}
-
-function collectSkillDirs(dir: string, depth: number, out: string[]): void {
-  if (depth > 3 || out.length >= 128) return;
+// Returns true when the per-root cap stopped the walk early.
+function collectSkillDirs(dir: string, depth: number, out: string[]): boolean {
+  if (out.length >= MAX_SKILLS_PER_ROOT) return true;
+  if (depth > 3) return false;
   if (findSkillFile(dir)) {
     out.push(dir);
-    return;
+    return false;
   }
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return;
+    return false;
   }
-  for (const entry of entries) {
+  for (const entry of entries.sort()) {
     if (entry === "node_modules" || entry === ".git") continue;
     const child = join(dir, entry);
     if (!directoryExists(child)) continue;
-    collectSkillDirs(child, depth + 1, out);
+    if (collectSkillDirs(child, depth + 1, out)) return true;
   }
+  return false;
 }
 
 async function copyDir(source: string, dest: string): Promise<void> {
@@ -1565,38 +2019,39 @@ async function copyDir(source: string, dest: string): Promise<void> {
   }
 }
 
-function walkSkillDirs(dir: string, depth: number, names: Set<string>): void {
-  if (depth > 3 || names.size >= 48) return;
-  const skillMd = findSkillFile(dir);
-  if (skillMd) {
-    names.add(readSkillName(skillMd) || basename(dir));
-    return;
-  }
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (entry === "node_modules" || entry === ".git") continue;
-    const child = join(dir, entry);
-    if (!directoryExists(child)) continue;
-    walkSkillDirs(child, depth + 1, names);
-    if (names.size >= 48) return;
-  }
-}
-
 function findSkillFile(dir: string): string | null {
   const candidates = [join(dir, "SKILL.md"), join(dir, "skill.md")];
   return candidates.find((path) => existsSync(path)) ?? null;
 }
 
-function readSkillName(path: string): string | null {
+function readSkillFrontmatter(path: string | null): { name?: string; description?: string } | null {
+  if (!path) return null;
   const text = readSmallText(path, MAX_SKILL_DOC_BYTES);
-  const heading = text?.match(/^#\s+(.+)$/m)?.[1]?.trim();
-  if (!heading) return null;
-  return heading.replace(/\s+/g, " ").slice(0, 80);
+  if (!text) return null;
+  const match = /^﻿?---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/.exec(text);
+  if (!match) return null;
+  const lines = match[1].split(/\r?\n/);
+  const out: { name?: string; description?: string } = {};
+  for (let index = 0; index < lines.length; index += 1) {
+    const field = /^(name|description)\s*:\s*(.*)$/.exec(lines[index]);
+    if (!field) continue;
+    let value = field[2].trim();
+    if (value === "|" || value === ">" || value === "|-" || value === ">-" || value === "") {
+      const block: string[] = [];
+      while (index + 1 < lines.length && /^\s+\S/.test(lines[index + 1])) {
+        index += 1;
+        block.push(lines[index].trim());
+      }
+      value = block.join(" ");
+    } else if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    value = value.replace(/\s+/g, " ").trim();
+    if (!value) continue;
+    if (field[1] === "name") out.name = value.slice(0, 80);
+    else out.description = value.slice(0, 400);
+  }
+  return out;
 }
 
 function directoryExists(path: string): boolean {
@@ -1625,14 +2080,14 @@ function isSymlink(path: string): boolean {
 }
 
 function normalizePathForMatch(path: string): string {
-  return path.replace(/\\/g, "/").toLowerCase();
+  return path.split(sep).join("/").replace(/\\/g, "/").toLowerCase();
 }
 
 function dedupeSources(sources: SyncSource[]): SyncSource[] {
   const out: SyncSource[] = [];
   const seen = new Set<string>();
   for (const source of sources) {
-    const key = `${source.kind}:${source.runtime}:${source.scope}:${source.path}`;
+    const key = `${source.kind}:${source.runtime}:${source.scope}:${source.path}:${source.project ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({

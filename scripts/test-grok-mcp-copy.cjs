@@ -17,6 +17,14 @@
 //      and the config file is left byte-for-byte unchanged.
 //   4. Discovery reads ~/.grok/config.toml back, so a server already in the
 //      Grok config shows as installed for Grok the way Claude/Codex do.
+//   5. A second copy of the same server is refused instead of duplicating or
+//      overwriting the user's section.
+//   6. Codex does carry headers: the same http server copies into
+//      ~/.codex/config.toml as http_headers and reads back intact.
+//   7. When two files define the same name differently, exactly one copy is
+//      marked as the definition Cora uses, and it is the one Pi resolves.
+//   8. A dry-run sync (the Capability Center's preview) plans copies and
+//      writes nothing.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -112,20 +120,10 @@ function grokId(name, configPath) {
   });
 }
 
-// A Capability Center copy lands inside the SPARK_AGENT_MCP_SYNC managed block,
-// which the in-place reader strips on purpose so an edit never rewrites synced
-// output (Codex behaves identically). To prove the rendered TOML really parses,
-// hand the block's body to the app's own reader with the markers taken off.
+// A Capability Center copy is an ordinary user-owned table, so the app's own
+// reader must parse it straight out of the real file.
 function readCopiedServer(name) {
-  const scratch = path.join(FAKE_HOME, `parse-check-${name}.toml`);
-  const body = fs
-    .readFileSync(GROK_CONFIG, "utf8")
-    .split(/\r?\n/)
-    .filter((line) => !line.startsWith("# >>> SPARK_AGENT_MCP_SYNC"))
-    .filter((line) => !line.startsWith("# <<< SPARK_AGENT_MCP_SYNC"))
-    .join("\n");
-  fs.writeFileSync(scratch, body);
-  return readMcpServerDetail({ id: grokId(name, scratch) });
+  return readMcpServerDetail({ id: grokId(name) });
 }
 
 fs.writeFileSync(
@@ -261,7 +259,7 @@ async function main() {
     assert.deepEqual(result.installed, []);
     assert.match(
       result.error ?? "",
-      /sends request headers, which Grok Build config\.toml cannot carry\. Keep it in a JSON config\./,
+      /sends request headers, which Grok Build config\.toml cannot carry\. Keep it in a Claude or Codex config\./,
       `unexpected refusal wording: ${result.error}`,
     );
     assert.equal(
@@ -272,15 +270,76 @@ async function main() {
     assert.doesNotMatch(fs.readFileSync(GROK_CONFIG, "utf8"), /needs-headers/);
   });
 
-  // ── 6. Repeating a copy rewrites the block, it does not duplicate sections ─
-  await check("copying the same server twice does not duplicate its section", async () => {
+  // ── 6. Repeating a copy is refused, it does not duplicate sections ────────
+  await check("copying the same server twice is refused and changes nothing", async () => {
+    const before = fs.readFileSync(GROK_CONFIG);
     const result = await installAgentAssetToRuntime({ id: sourceId("second-tool"), target: "grok" });
-    assert.equal(result.ok, true, `re-copy failed: ${result.error ?? "no error reported"}`);
+    assert.equal(result.ok, false, "a second copy must not overwrite the existing section");
+    assert.match(result.error ?? "", /Grok Build already has MCP server 'second-tool'/);
+    assert.equal(fs.readFileSync(GROK_CONFIG).equals(before), true, "a refused re-copy changed the file");
     const text = fs.readFileSync(GROK_CONFIG, "utf8");
     const sections = text.match(/^\[mcp_servers\.second-tool\]$/gm) ?? [];
     assert.equal(sections.length, 1, `expected one [mcp_servers.second-tool] section, got ${sections.length}`);
     assert.match(text, /^\[mcp_servers\.hand-written\]$/m, "the re-copy dropped a hand-written section");
     assert.match(text, /# >>> SPARK_AGENT_BUILTIN_MCP/, "the re-copy dropped the Codara built-in block");
+  });
+
+  // ── 7. Codex carries headers as http_headers ──────────────────────────────
+  await check("an http server with headers copies into Codex as http_headers", async () => {
+    const codexConfig = path.join(FAKE_HOME, ".codex", "config.toml");
+    const result = await installAgentAssetToRuntime({ id: sourceId("needs-headers"), target: "codex" });
+    assert.deepEqual(result, { ok: true, installed: ["needs-headers"] }, `copy into Codex failed: ${result.error}`);
+    const text = fs.readFileSync(codexConfig, "utf8");
+    assert.match(text, /^\[mcp_servers\.needs-headers\]$/m);
+    assert.match(text, /^url = "https:\/\/mcp\.example\.com\/v1"$/m);
+    const detail = readMcpServerDetail({
+      id: JSON.stringify({ kind: "mcp", runtime: "codex", scope: "user", name: "needs-headers", path: codexConfig }),
+    });
+    assert.ok(detail, "the Codex copy does not parse back");
+    assert.equal(detail.url, "https://mcp.example.com/v1");
+    assert.deepEqual(detail.headers, { Authorization: "Bearer secret" });
+  });
+
+  // ── 8. Two files, one name: the Capability Center names the copy Cora uses ─
+  await check("with two differing copies exactly one is marked as Cora's, matching Pi's resolution", () => {
+    const text = fs.readFileSync(GROK_CONFIG, "utf8");
+    fs.writeFileSync(GROK_CONFIG, text.replace('args = ["--stdio", "--verbose"]', 'args = ["--stdio", "--grok-copy"]'));
+    const settings = { ...EMPTY_SETTINGS, agentMcpCoraManagerIds: ["mcp:codara-cloud"] };
+    const copies = listAgentAssets({ cwd: FAKE_CWD, settings }).mcp.filter((item) => item.name === "codara-cloud");
+    assert.deepEqual(copies.map((item) => item.runtime).sort(), ["grok", "shared"]);
+    const marked = copies.filter((item) => item.piDefinition);
+    assert.equal(marked.length, 1, `expected one piDefinition copy, got ${marked.length}`);
+    const [server] = agentSync.listPiMcpServers({ cwd: FAKE_CWD, scope: "cora", settings });
+    assert.ok(server, "Pi resolved no definition for an assigned server");
+    const piRuntime = server.args.includes("--grok-copy") ? "grok" : "shared";
+    assert.equal(marked[0].runtime, piRuntime, "the marked copy is not the one Pi connects with");
+    // The copies disagree, which the summary the UI compares makes visible.
+    assert.notEqual(copies[0].mcpSummary, copies[1].mcpSummary);
+  });
+
+  // ── 9. A sync preview reports what it would copy and writes nothing ───────
+  await check("a dry-run sync plans copies without touching any file", async () => {
+    const snapshot = () => {
+      const files = new Map();
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.isFile()) files.set(full, fs.readFileSync(full, "utf8"));
+        }
+      };
+      walk(FAKE_HOME);
+      return files;
+    };
+    const before = snapshot();
+    const preview = await agentSync.syncAgentAssets({ cwd: FAKE_CWD, dryRun: true });
+    assert.equal(preview.dryRun, true);
+    const planned = preview.mcp.toClaude.length + preview.mcp.toCodex.length +
+      preview.skills.toClaude.length + preview.skills.toCodex.length;
+    assert.ok(planned > 0, `the preview planned nothing: ${JSON.stringify(preview)}`);
+    const after = snapshot();
+    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort(), "a dry run created or removed files");
+    for (const [file, content] of before) assert.equal(after.get(file), content, `a dry run changed ${file}`);
   });
 
   console.log(results.map((name) => `  ok  ${name}`).join("\n"));

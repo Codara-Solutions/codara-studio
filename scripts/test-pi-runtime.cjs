@@ -77,8 +77,12 @@ async function loadElectronLaunchPlans(outDirectory, bundleDirectory = outDirect
       getAppPath: () => ${JSON.stringify(ROOT)},
       getPath: () => ${JSON.stringify(outDirectory)},
     } };`,
-    storage: "module.exports = { loadSettings: async () => ({}) };",
-    "agent-sync": "module.exports = { listPiMcpServers: () => globalThis.__codaraTestMcpServers ?? [] };",
+    storage: "module.exports = { loadSettings: async () => ({}), onSettingsSaved: () => () => undefined };",
+    "agent-sync": `module.exports = {
+      listPiMcpServers: () => globalThis.__codaraTestMcpServers ?? [],
+      listPiSkillPaths: () => ["/fixture/skills/review"],
+      onAgentAssetsChanged: () => () => undefined,
+    };`,
     "path-reconstruction": "module.exports = { getEnrichedEnv: async () => process.env };",
     // The user's installed Pi: a fake global package outside the app tree.
     "binary-resolver": `module.exports = {
@@ -616,6 +620,35 @@ async function main() {
       `untrusted PR launch must include ${flag}`,
     );
   }
+  // The Capability Center's skill list is authoritative for a trusted launch:
+  // Pi's own discovery is off and each enabled folder is passed explicitly. An
+  // imported pull request never gets one, even when a list is supplied.
+  const skillPlanFor = (projectPolicyMode, skillPaths) => runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "openai-codex",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-skills",
+    runId: "run-skills",
+    mode: "execute",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+    ...(projectPolicyMode ? { projectPolicyMode } : {}),
+    ...(skillPaths ? { skillPaths } : {}),
+  }).args;
+  const skillArgs = (args) => args.flatMap((arg, index) => (arg === "--skill" ? [args[index + 1]] : []));
+  const trustedSkills = skillPlanFor(undefined, ["/home/me/.agents/skills/review", "/workspace/.pi/skills/ship"]);
+  assert.ok(trustedSkills.includes("--no-skills"));
+  assert.deepEqual(skillArgs(trustedSkills), [
+    path.resolve("/home/me/.agents/skills/review"),
+    path.resolve("/workspace/.pi/skills/ship"),
+  ]);
+  const noneEnabled = skillPlanFor(undefined, []);
+  assert.ok(noneEnabled.includes("--no-skills"), "an empty list still turns Pi's own discovery off");
+  assert.deepEqual(skillArgs(noneEnabled), []);
+  assert.equal(skillPlanFor(undefined, undefined).includes("--no-skills"), false);
+  assert.deepEqual(skillArgs(skillPlanFor("untrusted-pull-request", ["/workspace/.pi/skills/ship"])), []);
   const codexPlan = runtime.buildPiManagerLaunchPlan({
     runtime: fakeRuntime,
     provider: "openai-codex",
@@ -824,6 +857,8 @@ async function main() {
     });
     assert.equal(fs.readFileSync(agentSettingsPath, "utf8"), "{ not json");
     fs.rmSync(agentSettingsPath);
+    assert.ok(managerPlan.args.includes("--no-skills"), "Cora loads only the Capability Center's skills");
+    assert.equal(managerPlan.args[managerPlan.args.indexOf("--skill") + 1], path.resolve("/fixture/skills/review"));
 
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
@@ -847,6 +882,7 @@ async function main() {
       projectPolicyMode: "untrusted-pull-request",
     });
     assert.equal(untrustedManagerPlan.env.SPARK_AGENT_CAPABILITY, "scoped");
+    assert.equal(untrustedManagerPlan.args.includes("--skill"), false, "an imported PR loads no skills");
     assert.equal(
       untrustedManagerPlan.env.SPARK_AGENT_SOCKET,
       "http://127.0.0.1:43210",

@@ -2246,7 +2246,8 @@ a { color: inherit; }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
     max-width: 38cqi;
   }
-  .composer-profile-label {
+  .composer-profile-label,
+  .composer-tools-label {
     display: none;
   }
 }
@@ -2292,6 +2293,17 @@ a { color: inherit; }
 }
 .composer-profile-trigger {
   max-width: 150px;
+}
+/* A started chat keeps its profile, so the pill is a label there, not a menu. */
+.composer-profile-trigger.is-locked,
+.composer-profile-trigger.is-locked:hover,
+.composer-profile-trigger.is-locked:active {
+  background: transparent;
+  color: var(--muted);
+  border-style: dashed;
+}
+.composer-tools-trigger {
+  flex: 0 0 auto;
 }
 .composer-profile-glyph {
   color: var(--accent-text);
@@ -3220,7 +3232,8 @@ a { color: inherit; }
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────
-   A sidebar nav (MCP servers, Skills, Memory, Policy) over one content pane,
+   A sidebar nav (Tools, Skills, Profiles, Memory, Worker models, Behavior)
+   over one content pane,
    the same shape Settings uses. The outer surface stays pre-blended (see the
    performance gate above) so scrolling never re-rasterizes the entire
    workbench on Wayland. */
@@ -3291,6 +3304,44 @@ a { color: inherit; }
   }
   .agent-capability-row > * {
     justify-items: start !important;
+  }
+}
+
+/* The MCP table has six fixed columns (about 480px with gaps), so it needs
+   more room than the other lists. Below 1000px its rows switch to a compact
+   wrap instead of stacking every cell on its own line: the server takes the
+   first line, the five switches sit side by side with their labels, and the
+   actions and test result follow underneath. */
+@media (max-width: 1000px) {
+  .agent-capability-row--mcp {
+    display: flex !important;
+    flex-wrap: wrap;
+    align-items: center !important;
+    column-gap: 18px !important;
+    row-gap: 8px !important;
+  }
+  .agent-capability-row--mcp > *:first-child {
+    flex: 1 0 100%;
+  }
+  .agent-capability-row--mcp > .agent-capability-cell {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px !important;
+  }
+  .agent-capability-row--mcp > .agent-capability-actions,
+  .agent-capability-row--mcp > .agent-capability-probe {
+    flex: 1 0 100%;
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
+  }
+  .agent-capability-row--mcp > .agent-capability-actions:empty {
+    display: none;
+  }
+  .agent-capability-head--mcp {
+    display: none !important;
+  }
+  .agent-capability-row--mcp .agent-capability-cell-label {
+    display: inline;
   }
 }
 

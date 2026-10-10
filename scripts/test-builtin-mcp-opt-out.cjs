@@ -17,7 +17,11 @@
 //   5. Adding it back clears the record, so launch keeps it current again.
 //   6. A removal aimed at a caller-supplied Codex home is not recorded as the
 //      user switching off their own Codex.
-//   7. A Claude/Codex sync never copies the built-in into a project .mcp.json.
+//   7. A Claude/Codex sync keeps scope: the user's Codex server reaches the
+//      user's Claude config, nothing lands in a project .mcp.json, and the
+//      built-in is never copied.
+//   8. Adding the built-in to a Claude config that cannot be parsed reports a
+//      failure and keeps the user's earlier removal on record.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -194,12 +198,22 @@ async function main() {
   fs.mkdirSync(workspace);
   const sync = await bundle("agent-sync.ts", "agent-sync");
   const result = await sync.syncAgentAssets({ cwd: workspace });
-  const projectServers = Object.keys(
-    JSON.parse(fs.readFileSync(path.join(workspace, ".mcp.json"), "utf8")).mcpServers,
-  );
-  assert.deepEqual(projectServers, ["hand-written"]);
+  assert.equal(fs.existsSync(path.join(workspace, ".mcp.json")), false, "a user server leaked into the project");
+  const userServers = Object.keys(JSON.parse(fs.readFileSync(CLAUDE_JSON, "utf8")).mcpServers);
+  assert.ok(userServers.includes("hand-written"), "the user's Codex server did not reach the user's Claude config");
   assert.equal(result.mcp.toClaude.includes("codara-studio"), false);
-  console.log("ok 7 a sync never copies the built-in into a project .mcp.json");
+  assert.equal((fs.readFileSync(CODEX_TOML, "utf8").match(/codara-studio"?\]/g) ?? []).length, 1);
+  console.log("ok 7 a sync keeps scope and never copies the built-in");
+
+  assert.deepEqual(await mcp.uninstallSparkBuiltin("codara-studio", "claude"), { ok: true });
+  assert.ok(optedOut().includes("claude"));
+  fs.writeFileSync(CLAUDE_JSON, "{ not json");
+  const failed = await mcp.installSparkBuiltin("codara-studio", "claude");
+  assert.equal(failed.ok, false, "an unwritable Claude config was reported as installed");
+  assert.ok(failed.error, "the failure carries a message");
+  assert.ok(optedOut().includes("claude"), "a failed add cleared the user's removal");
+  assert.equal(fs.readFileSync(CLAUDE_JSON, "utf8"), "{ not json");
+  console.log("ok 8 a failed add reports the failure and keeps the removal");
 }
 
 main().catch((err) => {

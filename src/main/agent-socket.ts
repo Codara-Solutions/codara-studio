@@ -2780,7 +2780,7 @@ async function handleOrchestratorSpawnWorkers(
       ERR_FORBIDDEN,
       workerModelAvailability.disconnected.length > 0
         ? `None of Cora's enabled worker models has a connected account (${workerModelAvailability.disconnected.join(", ")}). Ask the user to sign in to one of those providers in Settings > Agents.`
-        : "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+        : "Cora has no enabled worker model. Turn one on in Capability Center > Worker models.",
     );
   }
   const liveFeedbackRetries = [

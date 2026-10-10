@@ -661,7 +661,7 @@ async function main() {
       "utf8",
     );
     const capabilitySource = fs.readFileSync(
-      path.join(ROOT, "src", "renderer", "src", "components", "AgentCapabilitiesDialog.tsx"),
+      path.join(ROOT, "src", "renderer", "src", "components", "capabilities", "WorkerModelsSection.tsx"),
       "utf8",
     );
     assert.match(

@@ -236,7 +236,14 @@ async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
 
 let agentSyncMod: typeof import("./agent-sync") | undefined;
 async function getAgentSync(): Promise<typeof import("./agent-sync")> {
-  agentSyncMod ??= await import("./agent-sync");
+  if (!agentSyncMod) {
+    const mod = await import("./agent-sync");
+    mod.configureAgentSync({
+      trashItem: (path) => shell.trashItem(path),
+      piAgentDir: join(codaraHome(), "pi-agent"),
+    });
+    agentSyncMod = mod;
+  }
   return agentSyncMod;
 }
 
@@ -341,6 +348,7 @@ import type {
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
+  AgentMcpProbeRequest,
   AgentMcpServerDraft,
   AppState,
   CreateEntryInput,
@@ -379,9 +387,12 @@ import type {
   CoraProfile,
   CoraProfileCreateInput,
   CoraProfileDeleteResult,
+  CoraProfileDocumentView,
   MemoryClearInput,
+  MemoryEnsureFileInput,
   MemorySetEnabledInput,
   MemoryStatusInput,
+  AgentMcpSnippetParseResult,
   UpdateChatBackendInput,
   UpdateCoraWhiteboardInput,
   ExportCoraWhiteboardFileInput,
@@ -976,11 +987,17 @@ export function registerIpc(): void {
     return inspectPiModelCatalog(input?.force === true);
   });
 
+  // Remote access imports agent-sync directly, so its trash and Pi wiring must
+  // be in place before any phone-initiated removal, not on first IPC use.
+  void getAgentSync();
   handle(
     "agents:sync",
-    async (_e, input?: { cwd?: string | null }) => {
+    async (_e, input?: { cwd?: string | null; dryRun?: boolean }) => {
       const { syncAgentAssets } = await getAgentSync();
-      const result = await syncAgentAssets({ cwd: input?.cwd ?? null });
+      const dryRun = input?.dryRun === true;
+      const result = await syncAgentAssets({ cwd: input?.cwd ?? null, dryRun });
+      // The built-in repair below writes, so a preview leaves it out.
+      if (dryRun) return result;
       // Sync is also the manual repair path for the built-in: an entry stranded
       // by a moved install (command path gone) is rewritten to the current app
       // path here instead of waiting for the next launch. Repair only: a runtime
@@ -993,6 +1010,7 @@ export function registerIpc(): void {
           const repaired = await repairSparkBuiltinEntries();
           if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
           if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
+          if (repaired.grok) (result.mcp.toGrok ??= []).push(SPARK_BUILTIN_SERVER_NAME);
         } catch (err) {
           result.mcp.errors.push(
             `Could not refresh the built-in MCP entry: ${err instanceof Error ? err.message : String(err)}`,
@@ -1057,6 +1075,51 @@ export function registerIpc(): void {
       });
     },
   );
+  handle(
+    "agents:piMcpPreview",
+    async (_e, input?: { cwd?: string | null }) => {
+      const [{ describePiMcpDelivery }, piElectron, settings] = await Promise.all([
+        getAgentSync(),
+        import("./orchestration/pi-runtime-electron"),
+        loadSettings(),
+      ]);
+      const preview = describePiMcpDelivery({
+        cwd: input?.cwd ?? null,
+        settings,
+        live: await piElectron.readLivePiMcpStatuses(),
+      });
+      const discoveryError = piElectron.piMcpDiscoveryError();
+      if (discoveryError) preview.errors.push(discoveryError);
+      return preview;
+    },
+  );
+  handle(
+    "agents:probeMcp",
+    async (_e, input: AgentMcpProbeRequest) => {
+      await getAgentSync();
+      const [{ runMcpProbe }, state] = await Promise.all([import("./mcp-probe"), loadState()]);
+      return runMcpProbe(input ?? {}, { workspaces: state.workspaces, piAgentDir: join(codaraHome(), "pi-agent") });
+    },
+  );
+  handle(
+    "agents:parseMcpSnippet",
+    async (_e, input: { text?: unknown }): Promise<AgentMcpSnippetParseResult> => {
+      const [{ parseMcpSnippet }, { mcpServerFromDraft }] = await Promise.all([
+        import("./mcp-snippet"),
+        getAgentSync(),
+      ]);
+      const parsed = parseMcpSnippet(typeof input?.text === "string" ? input.text : "");
+      if (!parsed.ok) return parsed;
+      // Same rules as the save path, reported up front. A missing name is
+      // left for the form, where the user types one.
+      for (const server of parsed.servers) {
+        if (!server.name) continue;
+        const checked = mcpServerFromDraft(server);
+        if ("error" in checked) parsed.notes.push(`'${server.name}': ${checked.error}`);
+      }
+      return parsed;
+    },
+  );
   handle("agents:builtins", async () => {
     const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
       mcpInstaller,
@@ -1117,7 +1180,7 @@ export function registerIpc(): void {
   handle(
     "memory:get",
     async (_e, input?: MemoryStatusInput): Promise<CoraMemoryStatus> => {
-      return readMemoryStatus(input?.workspaceId ?? null);
+      return readMemoryStatus(input?.workspaceId ?? null, input?.profileId);
     },
   );
 
@@ -1127,8 +1190,18 @@ export function registerIpc(): void {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { setMemoryEnabled } = coraMemory;
       const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
-      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile().id);
-      return readMemoryStatus(input.workspaceId ?? null);
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile(input.profileId).id);
+      return readMemoryStatus(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  handle(
+    "memory:ensureFile",
+    async (_e, input: MemoryEnsureFileInput): Promise<string> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { ensureMemoryFile } = coraMemory;
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+      return ensureMemoryFile(input.scope, workspaceId, resolveCoraProfile(input.profileId).id);
     },
   );
 
@@ -1144,9 +1217,9 @@ export function registerIpc(): void {
         input.scope,
         workspaceId,
         input.includeUserLines === true,
-        resolveCoraProfile().id,
+        resolveCoraProfile(input.profileId).id,
       );
-      return readMemoryStatus(input.workspaceId ?? null);
+      return readMemoryStatus(input.workspaceId ?? null, input.profileId);
     },
   );
 
@@ -1170,6 +1243,28 @@ export function registerIpc(): void {
       const { listCoraProfiles, setDefaultCoraProfile } = await import("./orchestration/cora-profiles");
       await setDefaultCoraProfile(reference);
       return listCoraProfiles();
+    },
+  );
+
+  // PROFILE.md as one revision-checked document, the same pair the phone
+  // edits through, so the Capability Center edits instructions in place
+  // instead of opening a file behind its own modal.
+  handle(
+    "cora-profiles:readDocument",
+    async (_e, reference: string): Promise<CoraProfileDocumentView> => {
+      const { readCoraProfileDocument } = await import("./orchestration/cora-profiles");
+      return readCoraProfileDocument(reference);
+    },
+  );
+
+  handle(
+    "cora-profiles:saveDocument",
+    async (
+      _e,
+      input: { reference: string; revision: string; content: string },
+    ): Promise<CoraProfileDocumentView> => {
+      const { saveCoraProfileDocument } = await import("./orchestration/cora-profiles");
+      return saveCoraProfileDocument(input.reference, input.revision, String(input.content ?? ""));
     },
   );
 
@@ -3579,16 +3674,20 @@ export function registerIpc(): void {
 // is given, so an empty id would silently resolve to a real "_unknown.md" file
 // the user could then toggle and clear. With no workspace open there is no
 // workspace tier to report, so say so instead of inventing one.
-async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
+// `profileId` absent means the default profile for new chats. An unknown id
+// throws (resolveCoraProfile), so a deleted profile is an error the dialog can
+// show rather than a silent switch to someone else's memory.
+async function readMemoryStatus(workspaceId: string | null, profileId?: string): Promise<CoraMemoryStatus> {
   const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = coraMemory;
   const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
-  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile().id);
+  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile(profileId).id);
   if (workspaceId) return status;
   return {
     profile: status.profile,
     global: status.global,
     workspace: {
       enabled: false,
+      blockedByGlobal: false,
       path: "",
       bytesUsed: 0,
       bytesCap: MEMORY_FILE_MAX_BYTES,

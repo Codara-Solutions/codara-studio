@@ -59,8 +59,8 @@ place to run several of them side by side, across projects and accounts.
 
 To connect to your agents, Codara adds its MCP server to the Claude Code,
 Codex and Grok configs and a hook to `~/.claude/settings.json`. Each CLI's MCP
-entry can be switched off in the Capability Center (the **MCP and skills**
-button in the Cora composer). Every file Codara touches outside its own
+entry can be switched off in the Capability Center (the **Tools** button in
+the Cora composer). Every file Codara touches outside its own
 `~/.codarastudio` folder is listed in
 [docs/on-your-machine.md](./docs/on-your-machine.md).
 

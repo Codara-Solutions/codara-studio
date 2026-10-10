@@ -497,8 +497,60 @@ async function main() {
     () => mem.rememberAdd("global", "", ["should not land"], "run-toggle-5"),
     /^memory is disabled for this global; tell the user if they asked you to remember something$/,
   );
+  // The Capability Center explains an off workspace tier: it is off because of
+  // the master switch, not because the user turned this workspace off.
+  await mem.setMemoryEnabled("workspace", "ws-main", true);
+  const masterOff = await mem.getMemoryStatus("ws-main");
+  check(
+    "a workspace tier switched on but silenced by the global switch reports blockedByGlobal",
+    masterOff.workspace.enabled === false && masterOff.workspace.blockedByGlobal === true &&
+      masterOff.global.blockedByGlobal === false,
+    JSON.stringify(masterOff),
+  );
+  await mem.setMemoryEnabled("workspace", "ws-main", false);
+  check(
+    "a workspace tier the user switched off is not reported as blocked by the global switch",
+    (await mem.getMemoryStatus("ws-main")).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus("ws-main")),
+  );
+  check(
+    "no workspace is never reported as blocked by the global switch",
+    (await mem.getMemoryStatus(null)).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus(null)),
+  );
   await mem.setMemoryEnabled("global", null, true);
   await mem.setMemoryEnabled("workspace", "ws-main", true);
+  check(
+    "with both switches on nothing is blocked",
+    (await mem.getMemoryStatus("ws-main")).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus("ws-main")),
+  );
+
+  // ── ensureMemoryFile: "Open in editor" on a tier with nothing in it ───────
+  const ensurePath = workspaceFile(mem, "ws-ensure");
+  check("the ensure fixture starts without a file", !fs.existsSync(ensurePath), ensurePath);
+  const ensured = await mem.ensureMemoryFile("workspace", "ws-ensure");
+  check(
+    "ensureMemoryFile creates the tier's file from its template and returns its path",
+    ensured === ensurePath && fs.existsSync(ensurePath) && fs.readFileSync(ensurePath, "utf8").length > 0,
+    ensured,
+  );
+  fs.appendFileSync(ensurePath, "- a note the user typed\n", "utf8");
+  const ensuredBefore = fs.readFileSync(ensurePath, "utf8");
+  await mem.ensureMemoryFile("workspace", "ws-ensure");
+  check(
+    "ensureMemoryFile leaves an existing file untouched",
+    fs.readFileSync(ensurePath, "utf8") === ensuredBefore,
+    fs.readFileSync(ensurePath, "utf8"),
+  );
+  const globalEnsured = await mem.ensureMemoryFile("global", null);
+  check("ensureMemoryFile works for the global tier", fs.existsSync(globalEnsured), globalEnsured);
+  await expectThrow(
+    "ensureMemoryFile refuses a workspace tier without a workspace",
+    () => mem.ensureMemoryFile("workspace", null),
+    /workspace scope requires a workspaceId/,
+  );
+
   const reEnabled = await mem.formatCoraMemoryForTurn("ws-main", "run-toggle-6");
   check("re-enabling restores both sections", reEnabled !== null && reEnabled.includes("CORA MEMORY, THIS WORKSPACE"), String(reEnabled));
 

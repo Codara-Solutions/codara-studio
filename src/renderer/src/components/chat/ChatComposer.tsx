@@ -31,6 +31,7 @@ import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
 import ProfilePicker from "./composer/ProfilePicker";
+import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
@@ -1020,9 +1021,14 @@ export default function ChatComposer({
   const openCapabilities = () => {
     window.dispatchEvent(new CustomEvent("spark:open-capabilities"));
   };
+  // A chat freezes its profile on the first send; before that (no run, or a
+  // run the board minted and never started) the draft's pick still applies.
+  const frozenProfileId = run_ && !isUnstartedChatRun(run_) ? run_.coraProfileId ?? "default" : null;
   const openProfileManager = () => {
     window.dispatchEvent(
-      new CustomEvent("spark:open-capabilities", { detail: { tab: "memory" } }),
+      new CustomEvent("spark:open-capabilities", {
+        detail: { tab: "profiles", profileId: frozenProfileId ?? draftCoraProfileId },
+      }),
     );
   };
 
@@ -1396,17 +1402,16 @@ export default function ChatComposer({
               openModelSignal={modelPickerSignal}
               openEffortSignal={effortPickerSignal}
             />
-            {!run_ ? (
-              <ProfilePicker
-                profiles={profiles}
-                activeProfileId={draftCoraProfileId}
-                onPick={(profileId) => {
-                  profileChosenRef.current = true;
-                  setDraftCoraProfileId(profileId);
-                }}
-                onManage={openProfileManager}
-              />
-            ) : null}
+            <ProfilePicker
+              profiles={profiles}
+              activeProfileId={frozenProfileId ?? draftCoraProfileId}
+              locked={frozenProfileId !== null}
+              onPick={(profileId) => {
+                profileChosenRef.current = true;
+                setDraftCoraProfileId(profileId);
+              }}
+              onManage={openProfileManager}
+            />
             {fastModeAvailable && (
               <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
             )}
@@ -1442,13 +1447,7 @@ export default function ChatComposer({
               used={tokensUsed}
               budget={DEFAULT_PI_COMPACT_AT_TOKENS}
             />
-            <IconButton
-              title="MCP and skills"
-              disabled={false}
-              onClick={openCapabilities}
-            >
-              <CapabilitiesGlyph />
-            </IconButton>
+            <CapabilitiesButton onOpen={openCapabilities} />
             {isPaused && (
               <TextButton onClick={resume} disabled={busy} tone="accent">
                 {isParkedTurn ? "Retry" : "Resume"}
@@ -2127,84 +2126,6 @@ function AttachmentChip({
         </svg>
       </button>
     </span>
-  );
-}
-
-function IconButton({
-  title,
-  disabled,
-  onClick,
-  children,
-}: {
-  title: string;
-  disabled: boolean;
-  onClick: () => void;
-  children?: React.ReactNode;
-}) {
-  const [hover, setHover] = useState(false);
-  const [pressed, setPressed] = useState(false);
-  const [focusRing, setFocusRing] = useState(false);
-  const live = !disabled;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => {
-        setHover(false);
-        setPressed(false);
-      }}
-      onMouseDown={() => setPressed(true)}
-      onMouseUp={() => setPressed(false)}
-      // Compose the global --focus-ring into the inline box-shadow on keyboard
-      // focus; an inline box-shadow would otherwise clobber the global rule.
-      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
-      onBlur={() => setFocusRing(false)}
-      style={{
-        appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: "var(--radius-control, 7px)",
-        background:
-          pressed && live
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover && live
-              ? "var(--hover)"
-              : "transparent",
-        boxShadow: focusRing
-          ? "var(--focus-ring)"
-          : pressed && live
-            ? "var(--well)"
-            : disabled
-              ? "none"
-              : "var(--lift-hi)",
-        color: disabled ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--ink-dim)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 0,
-        cursor: live ? "pointer" : "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function CapabilitiesGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
-      <path d="M2.5 4h9M2.5 10h9" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-      <circle cx="5" cy="4" r="1.4" stroke="currentColor" strokeWidth="1.25" />
-      <circle cx="9" cy="10" r="1.4" stroke="currentColor" strokeWidth="1.25" />
-    </svg>
   );
 }
 

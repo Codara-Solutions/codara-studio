@@ -131,11 +131,11 @@ async function main() {
   // but not there would render a row with Cora/Workers switches that silently
   // do nothing.
   const dialogSource = fs.readFileSync(
-    path.join(__dirname, "..", "src", "renderer", "src", "components", "AgentCapabilitiesDialog.tsx"),
+    path.join(__dirname, "..", "src", "renderer", "src", "components", "capabilities", "model.ts"),
     "utf8",
   );
   const dialogList = dialogSource.match(/const RESERVED_MCP_NAMES = new Set\(\[([\s\S]*?)\]\)/);
-  assert.ok(dialogList, "AgentCapabilitiesDialog.tsx declares RESERVED_MCP_NAMES");
+  assert.ok(dialogList, "capabilities/model.ts declares RESERVED_MCP_NAMES");
   const dialogNames = [...dialogList[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(
     dialogNames.slice().sort(),
@@ -151,12 +151,42 @@ async function main() {
   );
   assert.equal(unresolved[0].env.KEY, "${MISSING_VAR}");
 
-  // Server cap.
-  const many = config.normalizePiMcpServers(
-    Array.from({ length: 12 }, (_, index) => ({ name: `s${index}`, command: "node" })),
+  // Every entry Pi drops is reported with its reason, so the Capability
+  // Center can say why an assigned server never reached Cora.
+  const detailed = config.normalizePiMcpServersDetailed(
+    [
+      { name: "codara-studio", command: "node" },
+      { name: "off", command: "node", enabled: false },
+      { name: "dup", command: "node" },
+      { name: "dup", command: "other" },
+      { name: "nothing", type: "stdio" },
+    ],
     { env: {} },
   );
-  assert.equal(many.length, config.PI_MCP_DEFAULTS.maxServers);
+  assert.deepEqual(detailed.servers.map((server) => server.rawName), ["dup"]);
+  assert.deepEqual(
+    detailed.dropped.map((entry) => `${entry.name}:${entry.reason}`),
+    ["codara-studio:reserved", "off:turned-off", "dup:duplicate", "nothing:unsupported"],
+  );
+
+  // Server cap.
+  assert.equal(config.PI_MCP_DEFAULTS.maxServers, 16);
+  const manyDetailed = config.normalizePiMcpServersDetailed(
+    Array.from({ length: 20 }, (_, index) => ({ name: `s${index}`, command: "node" })),
+    { env: {} },
+  );
+  assert.equal(manyDetailed.servers.length, config.PI_MCP_DEFAULTS.maxServers);
+  assert.deepEqual(manyDetailed.dropped.map((entry) => `${entry.name}:${entry.reason}`), [
+    "s16:over-cap", "s17:over-cap", "s18:over-cap", "s19:over-cap",
+  ]);
+  assert.equal(
+    config.normalizePiMcpServers(
+      Array.from({ length: 20 }, (_, index) => ({ name: `s${index}`, command: "node" })),
+      { env: {} },
+    ).length,
+    config.PI_MCP_DEFAULTS.maxServers,
+  );
+  assert.equal(config.piMcpStatusPath("/tmp/x/cora-1.json"), "/tmp/x/cora-1.status.json");
 
   // Tool naming is identical on both sides of the handoff.
   assert.equal(config.piMcpToolName("linear", "create issue"), "mcp__linear__create_issue");
@@ -195,6 +225,20 @@ async function main() {
       null,
       "an empty roster must leave the bridge dormant",
     );
+    // A live roster stays loaded even when empty, so a server assigned later
+    // in the session can still be picked up.
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(config.buildPiMcpBridgeConfig([], { audience: "cora", live: true })),
+      "utf8",
+    );
+    const emptyLive = bridge.activeMcpBridgeConfig({ CODARA_PI_MCP_CONFIG: configPath, CODARA_PI_MCP_SDK_DIR: "/sdk" });
+    assert.ok(emptyLive, "an empty live roster still loads the bridge");
+    assert.equal(emptyLive.live, true);
+    assert.deepEqual(emptyLive.servers, []);
+    const dormantPi = fakePi();
+    bridge.registerMcpBridge(dormantPi, emptyLive);
+    assert.equal(dormantPi.tools.size, 0, "an empty live roster registers no tools until a server arrives");
 
     // A deliberately unreachable stdio server: the bridge must register, fail
     // softly, and describe the failure instead of throwing.
@@ -351,6 +395,58 @@ async function main() {
     assert.equal(slowEcho.content[0].text, "echo:late");
     assert.match(slowHandle.promptSuffix(), /Connected MCP servers: slow \(2 tools\)/);
     await slowPi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
+
+    // Live reload: a roster rewritten mid-session connects added servers before
+    // the next prompt, retires removed ones, and reports state to the sidecar.
+    const rosterPath = path.join(directory, "cora-live.json");
+    const statusPath = config.piMcpStatusPath(rosterPath);
+    const writeRoster = (entries) => fs.writeFileSync(
+      rosterPath,
+      JSON.stringify(config.buildPiMcpBridgeConfig(
+        config.normalizePiMcpServers(entries, { env: process.env }),
+        { audience: "cora", live: true },
+      )),
+      "utf8",
+    );
+    writeRoster([]);
+    const reloadConfig = bridge.activeMcpBridgeConfig({ CODARA_PI_MCP_CONFIG: rosterPath, CODARA_PI_MCP_SDK_DIR: sdkDir });
+    const reloadPi = fakePi();
+    const reloadHandle = bridge.registerMcpBridge(reloadPi, reloadConfig);
+    await reloadPi.handlers.get("session_start")({ type: "session_start", reason: "startup" });
+    assert.equal(reloadPi.tools.size, 0);
+    assert.ok(reloadPi.handlers.has("input"), "a live roster listens for the next prompt");
+
+    writeRoster([
+      { name: "first", command: process.execPath, args: [fixturePath], env: { FIXTURE_SECRET: "hunter2-secret" } },
+    ]);
+    await reloadPi.handlers.get("input")({ type: "input", text: "hello" });
+    assert.ok(reloadPi.tools.has("mcp__first__echo_tool"), "an added server's tools are registered");
+    assert.ok(reloadPi.tools.has(bridge.EXTERNAL_TOOL_LOADER_NAME), "core tools arrive with the first server");
+    assert.match(reloadHandle.promptSuffix(), /Connected MCP servers: first \(2 tools\)/);
+    const firstStatus = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    assert.deepEqual(firstStatus.servers.map((entry) => `${entry.name}:${entry.status}:${entry.tools}`), ["first:connected:2"]);
+    assert.doesNotMatch(fs.readFileSync(statusPath, "utf8"), /hunter2-secret/);
+    if (process.platform !== "win32") assert.equal(fs.statSync(statusPath).mode & 0o777, 0o600);
+
+    await reloadPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute("call-a", { activate: ["mcp__first__echo_tool"] });
+    assert.equal(reloadPi.activeTools.has("mcp__first__echo_tool"), true);
+    writeRoster([{ name: "second", command: process.execPath, args: [fixturePath] }]);
+    await reloadPi.handlers.get("input")({ type: "input", text: "again" });
+    assert.ok(reloadPi.tools.has("mcp__second__echo_tool"), "the replacement server connected");
+    assert.equal(reloadPi.activeTools.has("mcp__first__echo_tool"), false, "a removed server's tools are deactivated");
+    await assert.rejects(
+      () => reloadPi.tools.get("mcp__first__echo_tool").execute("call-b", { text: "x" }),
+      /removed from this session/,
+    );
+    assert.doesNotMatch(reloadHandle.promptSuffix(), /first/);
+    const secondStatus = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    assert.deepEqual(secondStatus.servers.map((entry) => entry.name), ["second"]);
+
+    // An unchanged roster is not re-read into reconnects.
+    const before = fs.readFileSync(statusPath, "utf8");
+    await reloadPi.handlers.get("input")({ type: "input", text: "third" });
+    assert.equal(fs.readFileSync(statusPath, "utf8"), before);
+    await reloadPi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

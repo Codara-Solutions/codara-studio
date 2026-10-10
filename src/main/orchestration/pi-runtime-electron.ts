@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   ChatMode,
@@ -16,7 +16,8 @@ import {
   revokeAgentSocketCapability,
 } from "../agent-socket-capabilities";
 import { codaraHome } from "../codara-home";
-import { loadSettings } from "../storage";
+import { loadSettings, onSettingsSaved } from "../storage";
+import type { AgentPiMcpLiveStatus } from "@shared/types";
 import {
   configuredOpenRouterCoraModels,
   hasVerifiedOpenRouterKey,
@@ -28,6 +29,7 @@ import { writeFileAtomic } from "../fs-atomic";
 import {
   buildPiMcpBridgeConfig,
   normalizePiMcpServers,
+  piMcpStatusPath,
   type PiMcpAudience,
   type PiMcpServerConfig,
 } from "./pi-mcp-config";
@@ -201,51 +203,177 @@ function codaraPiMcpSdkDir(): string | null {
 
 const MCP_CONFIG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+interface LivePiMcpRoster {
+  audience: PiMcpAudience;
+  cwd: string;
+  content: string;
+}
+
+// Rosters of running Cora sessions, by file path. A Capability Center change
+// rewrites them, and the bridge inside each session re-reads its file before
+// the next prompt, so an open chat gains or loses a server without a restart.
+const livePiMcpRosters = new Map<string, LivePiMcpRoster>();
+let livePiMcpRefreshHooked = false;
+let livePiMcpRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let livePiMcpRefreshTail: Promise<void> = Promise.resolve();
+let lastPiMcpDiscoveryError: string | null = null;
+
+/** The last MCP discovery failure behind a Pi launch, for the Capability Center. */
+export function piMcpDiscoveryError(): string | null {
+  return lastPiMcpDiscoveryError;
+}
+
 // Sessions that were SIGKILLed never reach their cleanup, so sweep on write.
+// A live roster is never swept: its session is still running.
 async function sweepStalePiMcpConfigs(directory: string): Promise<void> {
   const entries = await readdir(directory).catch(() => [] as string[]);
   const cutoff = Date.now() - MCP_CONFIG_MAX_AGE_MS;
   await Promise.all(entries.filter((name) => name.endsWith(".json")).map(async (name) => {
     const file = join(directory, name);
+    if (livePiMcpRosters.has(file) || livePiMcpRosters.has(file.replace(/\.status\.json$/, ".json"))) return;
     const info = await stat(file).catch(() => null);
     if (info && info.mtimeMs < cutoff) await rm(file, { force: true }).catch(() => undefined);
   }));
 }
 
+async function discoverPiMcpServers(audience: PiMcpAudience, cwd: string): Promise<PiMcpServerConfig[] | null> {
+  try {
+    const [{ listPiMcpServers }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    const servers = normalizePiMcpServers(
+      listPiMcpServers({ cwd, scope: audience, settings }),
+      { cwd },
+    );
+    lastPiMcpDiscoveryError = null;
+    return servers;
+  } catch (error) {
+    // A discovery failure must never block a Pi launch; the session simply
+    // starts without third-party MCP tools, and the Capability Center shows why.
+    lastPiMcpDiscoveryError = error instanceof Error ? error.message : String(error);
+    console.warn("[pi-mcp] MCP server discovery failed:", lastPiMcpDiscoveryError);
+    return null;
+  }
+}
+
+async function writeRosterFile(path: string, content: string): Promise<void> {
+  // Credentials live in this file because Pi's environment is stripped of every
+  // API key before launch; keep it owner-only like auth.json.
+  await writeFileAtomic(path, content);
+  if (process.platform !== "win32") await chmod(path, 0o600);
+}
+
 /**
- * Write the per-session MCP roster for one Pi scope. Returns null whenever no
- * server is assigned, keeping the no-MCP launch byte-identical to before: the
- * env vars stay unset and the bridge never loads the SDK.
+ * Write the per-session MCP roster for one Pi scope. A one-shot roster is not
+ * written when no server is assigned, keeping that launch byte-identical to
+ * before: the env vars stay unset and the bridge never loads the SDK. A live
+ * roster (Cora's own sessions) is always written, even empty, because a
+ * server assigned mid-chat must reach the session that is already running.
  */
 async function writePiMcpBridgeConfig(input: {
   audience: PiMcpAudience;
   sessionId: string;
   cwd: string;
   mcpConfigDir: string;
+  live?: boolean;
 }): Promise<{ mcpConfigPath: string; mcpSdkDir: string } | null> {
   const sdkDir = codaraPiMcpSdkDir();
   if (!sdkDir) return null;
-  let servers: PiMcpServerConfig[];
-  try {
-    const [{ listPiMcpServers }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
-    servers = normalizePiMcpServers(
-      listPiMcpServers({ cwd: input.cwd, scope: input.audience, settings }),
-      { cwd: input.cwd },
-    );
-  } catch {
-    // A discovery failure must never block a Pi launch; the session simply
-    // starts without third-party MCP tools.
-    return null;
-  }
-  if (servers.length === 0) return null;
+  const servers = await discoverPiMcpServers(input.audience, input.cwd);
+  if (!input.live && (!servers || servers.length === 0)) return null;
   await mkdir(input.mcpConfigDir, { recursive: true, mode: 0o700 });
   void sweepStalePiMcpConfigs(input.mcpConfigDir);
   const mcpConfigPath = join(input.mcpConfigDir, `${input.sessionId}.json`);
-  // Credentials live in this file because Pi's environment is stripped of every
-  // API key before launch; keep it owner-only like auth.json.
-  await writeFileAtomic(mcpConfigPath, JSON.stringify(buildPiMcpBridgeConfig(servers, { audience: input.audience })));
-  if (process.platform !== "win32") await chmod(mcpConfigPath, 0o600);
+  const content = JSON.stringify(buildPiMcpBridgeConfig(servers ?? [], { audience: input.audience, live: input.live }));
+  await writeRosterFile(mcpConfigPath, content);
+  if (input.live) {
+    livePiMcpRosters.set(mcpConfigPath, { audience: input.audience, cwd: input.cwd, content });
+    hookLivePiMcpRefresh();
+  }
   return { mcpConfigPath, mcpSdkDir: sdkDir };
+}
+
+function hookLivePiMcpRefresh(): void {
+  if (livePiMcpRefreshHooked) return;
+  livePiMcpRefreshHooked = true;
+  onSettingsSaved(() => scheduleLivePiMcpRefresh());
+  void import("../agent-sync")
+    .then(({ onAgentAssetsChanged }) => onAgentAssetsChanged(() => scheduleLivePiMcpRefresh()))
+    .catch(() => undefined);
+}
+
+function scheduleLivePiMcpRefresh(): void {
+  if (livePiMcpRosters.size === 0) return;
+  if (livePiMcpRefreshTimer) clearTimeout(livePiMcpRefreshTimer);
+  livePiMcpRefreshTimer = setTimeout(() => {
+    livePiMcpRefreshTimer = null;
+    void refreshLivePiMcpRosters();
+  }, 150);
+}
+
+/**
+ * Re-resolve every running Cora session's roster and rewrite the files whose
+ * servers changed. A failed discovery keeps the current roster rather than
+ * disconnecting servers that are working.
+ */
+export function refreshLivePiMcpRosters(): Promise<void> {
+  // One pass at a time: a pass that resolved before a later settings change
+  // must not land its older roster after the newer pass already wrote.
+  const pass = livePiMcpRefreshTail.then(refreshLivePiMcpRostersOnce);
+  livePiMcpRefreshTail = pass.catch(() => undefined);
+  return pass;
+}
+
+async function refreshLivePiMcpRostersOnce(): Promise<void> {
+  for (const [path, roster] of [...livePiMcpRosters]) {
+    const servers = await discoverPiMcpServers(roster.audience, roster.cwd);
+    if (!servers) continue;
+    const content = JSON.stringify(buildPiMcpBridgeConfig(servers, { audience: roster.audience, live: true }));
+    if (content === roster.content || !livePiMcpRosters.has(path)) continue;
+    try {
+      await writeRosterFile(path, content);
+      roster.content = content;
+      // The session ended while this write was in flight; its cleanup already
+      // ran, so the credentials file this write recreated is removed here.
+      if (!livePiMcpRosters.has(path)) await rm(path, { force: true }).catch(() => undefined);
+    } catch (error) {
+      console.warn("[pi-mcp] could not refresh a live MCP roster:", error);
+    }
+  }
+}
+
+/**
+ * Connection state per server, as reported by the bridges of running Cora
+ * sessions. Keyed by the sanitized server name the bridge uses; when several
+ * chats report the same server, the newest report wins.
+ */
+export async function readLivePiMcpStatuses(): Promise<Map<string, AgentPiMcpLiveStatus>> {
+  const merged = new Map<string, AgentPiMcpLiveStatus>();
+  for (const path of livePiMcpRosters.keys()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(piMcpStatusPath(path), "utf8"));
+    } catch {
+      continue;
+    }
+    const servers = (parsed as { servers?: unknown })?.servers;
+    if (!Array.isArray(servers)) continue;
+    for (const entry of servers) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const name = typeof record.name === "string" ? record.name : "";
+      const status = record.status;
+      if (!name || (status !== "pending" && status !== "connected" && status !== "failed" && status !== "disconnected")) continue;
+      const live: AgentPiMcpLiveStatus = {
+        status,
+        tools: typeof record.tools === "number" ? record.tools : 0,
+        updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : new Date(0).toISOString(),
+        ...(typeof record.error === "string" && record.error ? { error: record.error } : {}),
+      };
+      const key = name.toLowerCase();
+      const previous = merged.get(key);
+      if (!previous || previous.updatedAt < live.updatedAt) merged.set(key, live);
+    }
+  }
+  return merged;
 }
 
 /** Remove every process-scoped bridge resource once its Pi process is gone. */
@@ -255,7 +383,23 @@ export async function cleanupPiMcpBridgeConfig(plan: {
 }): Promise<void> {
   revokeAgentSocketCapability(plan.agentSocketCapabilityId);
   if (plan.mcpConfigPath) {
+    livePiMcpRosters.delete(plan.mcpConfigPath);
     await rm(plan.mcpConfigPath, { force: true }).catch(() => undefined);
+    await rm(piMcpStatusPath(plan.mcpConfigPath), { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * The skill folders a trusted Pi session loads. Undefined keeps Pi's own
+ * discovery, so a discovery failure never costs a session its skills.
+ */
+async function resolveCodaraPiSkillPaths(cwd: string, configDir: string): Promise<string[] | undefined> {
+  try {
+    const [{ listPiSkillPaths }, settings] = await Promise.all([import("../agent-sync"), loadSettings()]);
+    return listPiSkillPaths({ cwd, piAgentDir: configDir, settings });
+  } catch (error) {
+    console.warn("[pi-skills] skill discovery failed; Pi falls back to its own:", error);
+    return undefined;
   }
 }
 
@@ -502,9 +646,10 @@ export async function createCodaraPiLaunchPlan(
         sessionId: options.sessionId,
         cwd: options.cwd,
         mcpConfigDir: paths.mcpConfigDir,
+        live: true,
       });
   try {
-    const [runtime, auth, webSearchExtensionPath, mcp, settings] = await Promise.all([
+    const [runtime, auth, webSearchExtensionPath, mcp, settings, skillPaths] = await Promise.all([
       resolveCodaraPiRuntime(),
       isOpenRouter
         ? Promise.resolve(null)
@@ -512,6 +657,9 @@ export async function createCodaraPiLaunchPlan(
       resolveCodaraPiWebSearchExtension(),
       mcpWrite,
       loadSettings(),
+      untrustedPullRequest
+        ? Promise.resolve(undefined)
+        : resolveCodaraPiSkillPaths(options.cwd, paths.configDir),
     ]);
     if (auth?.expired && !auth.canRefresh) {
       throw expiredSignInError(options.provider);
@@ -547,6 +695,7 @@ export async function createCodaraPiLaunchPlan(
       ],
       mcpConfigPath: mcp?.mcpConfigPath,
       mcpSdkDir: mcp?.mcpSdkDir,
+      skillPaths,
       model: options.model,
       thinking: options.thinking ?? "high",
       sessionName: options.sessionName,
@@ -658,12 +807,15 @@ export async function createCodaraPiWorkerLaunchPlan(
         )
       : await resolveCodaraPiExecutionAccount(accountRequest);
   const paths = codaraPiPaths(account.configDir);
-  const [runtime, auth, webSearchExtensionPath] = await Promise.all([
+  const [runtime, auth, webSearchExtensionPath, skillPaths] = await Promise.all([
     resolveCodaraPiRuntime(),
     isOpenRouter
       ? Promise.resolve(null)
       : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
     resolveCodaraPiWebSearchExtension(),
+    untrustedPullRequest
+      ? Promise.resolve(undefined)
+      : resolveCodaraPiSkillPaths(options.cwd, paths.configDir),
   ]);
   if (auth?.expired && !auth.canRefresh) {
     throw expiredSignInError(options.provider);
@@ -721,6 +873,7 @@ export async function createCodaraPiWorkerLaunchPlan(
       ],
       mcpConfigPath: mcp?.mcpConfigPath,
       mcpSdkDir: mcp?.mcpSdkDir,
+      skillPaths,
       model: options.model,
       thinking: options.thinking ?? "high",
       sessionName: options.sessionName,

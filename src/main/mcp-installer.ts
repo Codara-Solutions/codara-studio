@@ -44,6 +44,7 @@ import type {
 
 import { resolveBinary } from "./binary-resolver";
 import { resolveBundledResourcePath } from "./bundled-resources";
+import { withConfigFileLock, writeConfigFileAtomic } from "./config-file-io";
 import { writeFileAtomic } from "./fs-atomic";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
 import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
@@ -315,7 +316,7 @@ export async function repairSparkBuiltinEntries(
     installForCodex(false, { repairOnly: true }, input.codexHome),
     installForGrok(false, { repairOnly: true }, input.grokHome),
   ]);
-  return { claude, codex, grok };
+  return { claude: claude.changed, codex: codex.changed, grok: grok.changed };
 }
 
 // Boot-time installer. Design rule #3 (stay conservative) says the auto-
@@ -334,9 +335,9 @@ export async function installSparkPreviewMcpAtBoot(): Promise<void> {
     resolveBinary("grok").catch(() => null),
   ]);
   await Promise.all([
-    optedOut.has("claude") ? false : installForClaude(Boolean(claudeBin)),
-    optedOut.has("codex") ? false : installForCodex(Boolean(codexBin)),
-    optedOut.has("grok") ? false : installForGrok(Boolean(grokBin)),
+    optedOut.has("claude") ? null : installForClaude(Boolean(claudeBin)),
+    optedOut.has("codex") ? null : installForCodex(Boolean(codexBin)),
+    optedOut.has("grok") ? null : installForGrok(Boolean(grokBin)),
   ]);
 }
 
@@ -351,15 +352,47 @@ export async function installSparkPreviewMcpForCodex(
 // Claude (~/.claude.json)
 // ---------------------------------------------------------------------------
 
+// Why an install pass did or did not write. `changed: false` with
+// "already-current" or "user-owned" is still a working built-in; the other
+// reasons mean the CLI does not have it and the caller must say so.
+type InstallSkipReason =
+  | "already-current"
+  | "user-owned"
+  | "sandboxed"
+  | "absent"
+  | "not-managed"
+  | "read-error"
+  | "parse-error"
+  | "write-error";
+
+interface InstallOutcome {
+  changed: boolean;
+  reason?: InstallSkipReason;
+  error?: string;
+}
+
+const unchanged = (reason: InstallSkipReason, error?: string): InstallOutcome => ({
+  changed: false,
+  reason,
+  ...(error ? { error } : {}),
+});
+
 // `repairOnly` restricts the write to an entry that is already ours: absent or
 // user-owned means the caller asked for a repair, not an install.
 async function installForClaude(
   createIfMissing = false,
   options?: { repairOnly?: boolean },
-): Promise<boolean> {
-  if (isSandboxedHome()) return false;
+): Promise<InstallOutcome> {
+  if (isSandboxedHome()) return unchanged("sandboxed");
+  return withConfigFileLock(CLAUDE_USER_CONFIG, () => installForClaudeLocked(createIfMissing, options));
+}
+
+async function installForClaudeLocked(
+  createIfMissing: boolean,
+  options?: { repairOnly?: boolean },
+): Promise<InstallOutcome> {
   const fileExists = existsSync(CLAUDE_USER_CONFIG);
-  if (!fileExists && !createIfMissing) return false;
+  if (!fileExists && !createIfMissing) return unchanged("absent");
 
   let raw = "";
   if (fileExists) {
@@ -367,7 +400,7 @@ async function installForClaude(
       raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
     } catch (err) {
       console.warn("[mcp-installer] could not read ~/.claude.json:", err);
-      return false;
+      return unchanged("read-error", `Could not read ~/.claude.json: ${(err as Error).message}`);
     }
   }
 
@@ -377,12 +410,12 @@ async function installForClaude(
       const value = JSON.parse(raw) as unknown;
       if (value === null || typeof value !== "object" || Array.isArray(value)) {
         console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping");
-        return false;
+        return unchanged("parse-error", "~/.claude.json is not a JSON object.");
       }
       parsed = value as Record<string, unknown>;
     } catch (err) {
       console.warn("[mcp-installer] ~/.claude.json parse failed; skipping:", (err as Error).message);
-      return false;
+      return unchanged("parse-error", `~/.claude.json could not be parsed: ${(err as Error).message}`);
     }
   } else {
     parsed = {};
@@ -393,7 +426,7 @@ async function installForClaude(
       ? (parsed.mcpServers as Record<string, unknown>)
       : {};
 
-  if (options?.repairOnly && !isSparkManaged(servers[SERVER_NAME])) return false;
+  if (options?.repairOnly && !isSparkManaged(servers[SERVER_NAME])) return unchanged("not-managed");
 
   let changed = false;
 
@@ -408,7 +441,8 @@ async function installForClaude(
   }
 
   const existing = servers[SERVER_NAME];
-  if (existing && !isSparkManaged(existing)) {
+  const userOwned = Boolean(existing && !isSparkManaged(existing));
+  if (userOwned) {
     // User owns this entry — never overwrite. If we made any cleanup change,
     // still write.
   } else if (!existing || !matchesCurrent(existing)) {
@@ -416,17 +450,20 @@ async function installForClaude(
     changed = true;
   }
 
-  if (!changed) return false;
+  const idle = unchanged(userOwned ? "user-owned" : "already-current");
+  if (!changed) return idle;
 
   parsed.mcpServers = servers;
   try {
     const payload = JSON.stringify(parsed, null, 2) + "\n";
-    if (raw === payload) return false;
-    await writeFileAtomic(CLAUDE_USER_CONFIG, payload);
-    return true;
+    if (raw === payload) return idle;
+    // Through the link and with the file's own mode: ~/.claude.json is often a
+    // dotfile-manager symlink and is owner-only.
+    await writeConfigFileAtomic(CLAUDE_USER_CONFIG, payload);
+    return { changed: true };
   } catch (err) {
     console.warn("[mcp-installer] failed to write ~/.claude.json:", err);
-    return false;
+    return unchanged("write-error", `Could not write ~/.claude.json: ${(err as Error).message}`);
   }
 }
 
@@ -475,114 +512,116 @@ async function installForCodex(
   createIfMissing = false,
   options?: { repairOnly?: boolean },
   codexHome?: string | null,
-): Promise<boolean> {
-  if (isSandboxedHome()) return false;
+): Promise<InstallOutcome> {
+  if (isSandboxedHome()) return unchanged("sandboxed");
   let target = resolveCodexMcpConfigTarget(codexHome);
   const dirExists = directoryExists(target.codexHome);
-  if (!dirExists && !createIfMissing) return false;
+  if (!dirExists && !createIfMissing) return unchanged("absent");
   if (!dirExists) {
     try {
       await fs.mkdir(target.codexHome, { recursive: true, mode: 0o700 });
       target = resolveCodexMcpConfigTarget(codexHome);
     } catch (err) {
       console.warn("[mcp-installer] could not create the selected Codex home:", err);
-      return false;
+      return unchanged("write-error", `Could not create ${target.codexHome}: ${(err as Error).message}`);
     }
   }
-
-  let existing = "";
-  try {
-    existing = await fs.readFile(target.configPath, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[mcp-installer] could not read the selected Codex config:", err);
-      return false;
+  return withConfigFileLock(target.configPath, async () => {
+    let existing = "";
+    try {
+      existing = await fs.readFile(target.configPath, "utf8");
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn("[mcp-installer] could not read the selected Codex config:", err);
+        return unchanged("read-error", `Could not read ${target.configPath}: ${(err as Error).message}`);
+      }
     }
-  }
 
-  // If the user has a non-Codara `codara-studio` server defined outside our
-  // managed block, leave the file alone. A Codara-shaped entry that lost its
-  // markers is ours to rewrite, so it is swept with the rest.
-  const section = classifyCodexBuiltinSection(existing);
-  if (section === "user") return false;
+    // If the user has a non-Codara `codara-studio` server defined outside our
+    // managed block, leave the file alone. A Codara-shaped entry that lost its
+    // markers is ours to rewrite, so it is swept with the rest.
+    const section = classifyCodexBuiltinSection(existing);
+    if (section === "user") return unchanged("user-owned");
 
-  // A repair pass only rewrites an entry that is already there: our managed
-  // block, or one of our tables outside it. Absent means the user removed it,
-  // and re-adding it here would undo that.
-  const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return false;
+    // A repair pass only rewrites an entry that is already there: our managed
+    // block, or one of our tables outside it. Absent means the user removed it,
+    // and re-adding it here would undo that.
+    const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
+    if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return unchanged("not-managed");
 
-  // Strip our managed block, the retired orchestrator block, and any broken
-  // legacy-named tables, then append one fresh block.
-  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
-  const block = renderCodexBlock();
-  const base = stripped.trimEnd();
-  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
-  if (next === existing) return false;
+    // Strip our managed block, the retired orchestrator block, and any broken
+    // legacy-named tables, then append one fresh block.
+    const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
+    const block = renderCodexBlock();
+    const base = stripped.trimEnd();
+    const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+    if (next === existing) return unchanged("already-current");
 
-  try {
-    resolveCodexMcpConfigTarget(codexHome);
-    // A managed account's config.toml is a share link to the personal
-    // ~/.codex config (native-cli-shared-state.ts); the atomic rename must
-    // land on the real file, not replace the link with a private fork.
-    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
-    await writeFileAtomic(writePath, next, { mode: 0o600 });
-    return true;
-  } catch (err) {
-    console.warn("[mcp-installer] failed to write the selected Codex config:", err);
-    return false;
-  }
+    try {
+      resolveCodexMcpConfigTarget(codexHome);
+      // A managed account's config.toml is a share link to the personal
+      // ~/.codex config (native-cli-shared-state.ts); the atomic rename must
+      // land on the real file, not replace the link with a private fork.
+      const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+      await writeFileAtomic(writePath, next, { mode: 0o600 });
+      return { changed: true };
+    } catch (err) {
+      console.warn("[mcp-installer] failed to write the selected Codex config:", err);
+      return unchanged("write-error", `Could not write ${target.configPath}: ${(err as Error).message}`);
+    }
+  });
 }
 
 async function installForGrok(
   createIfMissing = false,
   options?: { repairOnly?: boolean },
   grokHome?: string | null,
-): Promise<boolean> {
-  if (isSandboxedHome()) return false;
+): Promise<InstallOutcome> {
+  if (isSandboxedHome()) return unchanged("sandboxed");
   let target = resolveGrokMcpConfigTarget(grokHome);
   const dirExists = directoryExists(target.grokHome);
-  if (!dirExists && !createIfMissing) return false;
+  if (!dirExists && !createIfMissing) return unchanged("absent");
   if (!dirExists) {
     try {
       await fs.mkdir(target.grokHome, { recursive: true, mode: 0o700 });
       target = resolveGrokMcpConfigTarget(grokHome);
     } catch (err) {
       console.warn("[mcp-installer] could not create the selected Grok home:", err);
-      return false;
+      return unchanged("write-error", `Could not create ${target.grokHome}: ${(err as Error).message}`);
     }
   }
-
-  let existing = "";
-  try {
-    existing = await fs.readFile(target.configPath, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[mcp-installer] could not read the selected Grok config:", err);
-      return false;
+  return withConfigFileLock(target.configPath, async () => {
+    let existing = "";
+    try {
+      existing = await fs.readFile(target.configPath, "utf8");
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn("[mcp-installer] could not read the selected Grok config:", err);
+        return unchanged("read-error", `Could not read ${target.configPath}: ${(err as Error).message}`);
+      }
     }
-  }
 
-  const section = classifyCodexBuiltinSection(existing);
-  if (section === "user") return false;
+    const section = classifyCodexBuiltinSection(existing);
+    if (section === "user") return unchanged("user-owned");
 
-  const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return false;
+    const managedBlockPresent = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
+    if (options?.repairOnly && !managedBlockPresent && !isCodaraOwnedSection(section)) return unchanged("not-managed");
 
-  const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
-  const block = renderCodexBlock();
-  const base = stripped.trimEnd();
-  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
-  if (next === existing) return false;
+    const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
+    const block = renderCodexBlock();
+    const base = stripped.trimEnd();
+    const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+    if (next === existing) return unchanged("already-current");
 
-  try {
-    const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
-    await writeFileAtomic(writePath, next, { mode: 0o600 });
-    return true;
-  } catch (err) {
-    console.warn("[mcp-installer] failed to write the selected Grok config:", err);
-    return false;
-  }
+    try {
+      const writePath = await fs.realpath(target.configPath).catch(() => target.configPath);
+      await writeFileAtomic(writePath, next, { mode: 0o600 });
+      return { changed: true };
+    } catch (err) {
+      console.warn("[mcp-installer] failed to write the selected Grok config:", err);
+      return unchanged("write-error", `Could not write ${target.configPath}: ${(err as Error).message}`);
+    }
+  });
 }
 
 function directoryExists(path: string): boolean {
@@ -1061,9 +1100,18 @@ export async function installSparkBuiltin(
   options: CodexMcpHomeOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
-    if (runtime === "claude") await installForClaude(true);
-    else if (runtime === "grok") await installForGrok(true, undefined, options.grokHome);
-    else await installForCodex(true, undefined, options.codexHome);
+    const outcome =
+      runtime === "claude"
+        ? await installForClaude(true)
+        : runtime === "grok"
+          ? await installForGrok(true, undefined, options.grokHome)
+          : await installForCodex(true, undefined, options.codexHome);
+    // The switch reports what the config file now holds: only a real write, an
+    // entry that was already current, or the user's own entry count, and only
+    // those clear the opt-out.
+    if (!outcome.changed && outcome.reason !== "already-current" && outcome.reason !== "user-owned") {
+      return { ok: false, error: installFailureMessage(runtime, outcome) };
+    }
     if (targetsPersonalConfig(runtime, options)) await setSparkBuiltinOptOut(runtime, false);
     return { ok: true };
   } catch (err) {
@@ -1090,6 +1138,15 @@ export async function uninstallSparkBuiltin(
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function installFailureMessage(runtime: SparkBuiltinRuntime, outcome: InstallOutcome): string {
+  const label = runtime === "claude" ? "Claude" : runtime === "grok" ? "Grok Build" : "Codex";
+  if (outcome.error) return `${outcome.error} The Codara Studio tools were not added to ${label}.`;
+  if (outcome.reason === "sandboxed") {
+    return `This Codara instance runs with a temporary home, so it does not change ${label}'s own configuration.`;
+  }
+  return `The Codara Studio tools were not added to ${label}.`;
 }
 
 function targetsPersonalConfig(
@@ -1183,6 +1240,10 @@ async function readClaudeServerEntry(serverName: string): Promise<unknown | unde
 // Remove a Codara-managed entry from ~/.claude.json. Refuses to touch a
 // user-defined entry of the same name and treats "already absent" as success.
 async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBuiltinActionResult> {
+  return withConfigFileLock(CLAUDE_USER_CONFIG, () => uninstallManagedClaudeServerLocked(serverName));
+}
+
+async function uninstallManagedClaudeServerLocked(serverName: string): Promise<SparkBuiltinActionResult> {
   if (!existsSync(CLAUDE_USER_CONFIG)) return { ok: true };
   let raw: string;
   try {
@@ -1212,7 +1273,7 @@ async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBu
   delete servers[serverName];
   parsed.mcpServers = servers;
   try {
-    await writeFileAtomic(CLAUDE_USER_CONFIG, JSON.stringify(parsed, null, 2) + "\n");
+    await writeConfigFileAtomic(CLAUDE_USER_CONFIG, JSON.stringify(parsed, null, 2) + "\n");
     return { ok: true };
   } catch (err) {
     return { ok: false, error: `Could not write ~/.claude.json: ${(err as Error).message}` };
@@ -1222,6 +1283,12 @@ async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBu
 // Strip the Codara-managed Codex block. Refuses when the user keeps their own
 // codara-studio section outside the managed markers.
 async function uninstallCodexBuiltinBlock(
+  codexHome?: string | null,
+): Promise<SparkBuiltinActionResult> {
+  return withConfigFileLock(resolveCodexMcpConfigTarget(codexHome).configPath, () => uninstallCodexBuiltinBlockLocked(codexHome));
+}
+
+async function uninstallCodexBuiltinBlockLocked(
   codexHome?: string | null,
 ): Promise<SparkBuiltinActionResult> {
   const target = resolveCodexMcpConfigTarget(codexHome);
@@ -1253,6 +1320,12 @@ async function uninstallCodexBuiltinBlock(
 }
 
 async function uninstallGrokBuiltinBlock(
+  grokHome?: string | null,
+): Promise<SparkBuiltinActionResult> {
+  return withConfigFileLock(resolveGrokMcpConfigTarget(grokHome).configPath, () => uninstallGrokBuiltinBlockLocked(grokHome));
+}
+
+async function uninstallGrokBuiltinBlockLocked(
   grokHome?: string | null,
 ): Promise<SparkBuiltinActionResult> {
   const target = resolveGrokMcpConfigTarget(grokHome);

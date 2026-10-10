@@ -120,6 +120,9 @@ export type MemoryScope = "workspace" | "global";
 
 export interface MemoryTierStatus {
   enabled: boolean;
+  // The tier's own switch is on, but the profile's global switch is off and
+  // overrides it, so `enabled` reports false.
+  blockedByGlobal: boolean;
   path: string;
   bytesUsed: number;
   bytesCap: number;
@@ -1121,6 +1124,7 @@ function tierStatus(
   if (scope === "workspace" && workspaceId === null) {
     return {
       enabled: false,
+      blockedByGlobal: false,
       path: "",
       bytesUsed: 0,
       bytesCap: MEMORY_FILE_MAX_BYTES,
@@ -1143,8 +1147,12 @@ function tierStatus(
     else if (line.kind === "auto") counts.auto += 1;
   }
   const bytesUsed = file ? fileBytes(file) : 0;
+  const enabled = tierEnabled(state, scope, workspaceId ?? "", profileId);
+  const ownSwitch = scope === "workspace" &&
+    state.workspaces[profileWorkspaceKey(normalizeCoraProfileId(profileId), workspaceId ?? "")]?.enabled !== false;
   return {
-    enabled: tierEnabled(state, scope, workspaceId ?? "", profileId),
+    enabled,
+    blockedByGlobal: !enabled && ownSwitch,
     path,
     bytesUsed,
     bytesCap: MEMORY_FILE_MAX_BYTES,
@@ -1266,6 +1274,31 @@ export async function setMemoryEnabled(
     await mkdir(memoryRoot(), { recursive: true });
     await writeFileAtomic(statePath(), `${JSON.stringify(state, null, 2)}\n`);
   });
+}
+
+/**
+ * Create a tier's file from the fresh template when it does not exist yet, so
+ * the editor has a file to open. An existing file is never touched, and the
+ * existence check runs inside the path lock so a racing remember call cannot
+ * be overwritten by the template.
+ */
+export async function ensureMemoryFile(
+  scope: MemoryScope,
+  workspaceId: string | null,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): Promise<string> {
+  await ensureMigrated();
+  if (scope === "workspace" && !workspaceId) {
+    throw new Error("workspace scope requires a workspaceId");
+  }
+  const wsId = workspaceId ?? "";
+  resolveCoraProfile(profileId);
+  const path = tierPath(scope, wsId, profileId);
+  await withPathLock(path, async () => {
+    if (existsSync(path)) return;
+    await writeMemoryFile(scope, wsId, templateFile(scope, wsId, profileId), profileId);
+  });
+  return path;
 }
 
 /** Remove toggle records owned by a deleted named profile. Its markdown tree

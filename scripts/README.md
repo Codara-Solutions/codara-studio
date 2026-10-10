@@ -178,6 +178,8 @@ calls.
 `test-cora-memory`, `test-cora-profiles`, `test-cora-profile-subscriptions`,
 `test-workspace-lessons`, `test-outcome-memory`: `cora-memory.ts`,
 `cora-profiles.ts`, `workspace-lessons.ts`, `src/shared/outcome-memory.ts`.
+`test-unstarted-run-profile` covers the profile a board-minted chat takes on
+its first send (`run-store.ts`).
 
 ### Automations, looms and the board
 
@@ -202,7 +204,9 @@ calls.
 `test-hook-installer`, `test-hook-watcher-lifecycle`, `test-codara-studio-mcp`
 (the tool list for each `SPARK_MCP_MODE`), `test-standing-terminals` (what
 `codara_spawn_terminals` opens), `test-builtin-mcp-opt-out`,
-`test-builtin-mcp-ownership`, `test-grok-mcp-copy`,
+`test-builtin-mcp-ownership`, `test-grok-mcp-copy`, `test-agent-sync-toml`
+(Capability Center config reads and edits, sync scope, skills, the MCP
+probe), `test-mcp-snippet-parse` (the Add server paste box),
 `test-capability-center-ui`, `test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket` (needs a build).
 

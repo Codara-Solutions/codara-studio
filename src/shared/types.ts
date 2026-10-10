@@ -1689,9 +1689,14 @@ export interface AgentRuntimeDiagnostic {
 export interface AgentSyncResult {
   startedAt: string;
   completedAt: string;
+  // A preview: the lists name what a real sync would copy, and nothing was
+  // written.
+  dryRun?: boolean;
   mcp: {
     toClaude: string[];
     toCodex: string[];
+    // Built-in entries the sync repaired in Grok Build's config.
+    toGrok?: string[];
     skipped: string[];
     errors: string[];
   };
@@ -1731,6 +1736,24 @@ export interface AgentAssetInventoryItem {
   // discovered by name but its definition could not be parsed.
   mcpTransport?: AgentMcpTransport;
   mcpSummary?: string;
+  // MCP only: the agent CLIs that actually load this entry's config file, and
+  // a caveat when that differs from what the file's location suggests (a
+  // .claude/settings.json entry reaches no CLI; a project .mcp.json needs
+  // Claude's approval). Cora and Pi workers read every listed file.
+  readBy?: AgentFamilyRuntime[];
+  readByNote?: string;
+  // MCP only: the entry lives in Claude's private per-project map in
+  // ~/.claude.json (Claude's "local" scope) for the active workspace.
+  claudeLocalScope?: boolean;
+  // MCP only: this copy is the definition Cora and Pi workers connect with
+  // when the name is defined in several files (the first readable, enabled
+  // one in discovery order).
+  piDefinition?: boolean;
+  // Skills only: the skill's own folder, its SKILL.md frontmatter
+  // description, and whether Cora's and Pi workers' sessions load it.
+  skillDir?: string;
+  skillDescription?: string;
+  piLoads?: boolean;
 }
 
 // stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
@@ -1748,6 +1771,10 @@ export interface AgentMcpTarget {
   path: string;
   label: string;
   format: "json" | "toml";
+  // The CLIs that load this file, and a short caveat for the location picker
+  // (for example that a project file is usually committed to git).
+  readBy?: AgentFamilyRuntime[];
+  hint?: string;
 }
 
 export interface AgentMcpServerDraft {
@@ -1775,7 +1802,74 @@ export interface AgentMcpSaveResult {
 export interface AgentAssetInventory {
   mcp: AgentAssetInventoryItem[];
   skills: AgentAssetInventoryItem[];
+  // A skill root held more skill folders than the scan reads.
+  skillsTruncated?: boolean;
 }
+
+// How one MCP server assigned to Cora or Pi workers reaches a Pi session for
+// the active workspace. "needs-oauth" is delivered but will fail: the server
+// signs in through Claude's OAuth store, which Pi cannot use.
+export type AgentPiMcpDeliveryState =
+  | "delivered"
+  | "needs-oauth"
+  | "turned-off"
+  | "no-definition"
+  | "reserved"
+  | "duplicate"
+  | "unsupported"
+  | "over-cap";
+
+export interface AgentPiMcpLiveStatus {
+  status: "pending" | "connected" | "failed" | "disconnected";
+  tools: number;
+  error?: string;
+  updatedAt: string;
+}
+
+export interface AgentPiMcpDelivery {
+  sessionKey: string;
+  name: string;
+  state: AgentPiMcpDeliveryState;
+  reason?: string;
+  // Connection state reported by an open Cora chat, when one is running.
+  live?: AgentPiMcpLiveStatus;
+}
+
+export interface AgentPiMcpPreview {
+  cora: AgentPiMcpDelivery[];
+  worker: AgentPiMcpDelivery[];
+  maxServers: number;
+  errors: string[];
+}
+
+// Connection test for one MCP server: either a discovered entry (`id`) or an
+// unsaved add/edit form draft. It starts the server, so it runs only on an
+// explicit click.
+export interface AgentMcpProbeRequest {
+  cwd?: string | null;
+  id?: string;
+  draft?: AgentMcpServerDraft;
+}
+
+export interface AgentMcpProbeResult {
+  ok: boolean;
+  transport?: AgentMcpTransport;
+  tools: Array<{ name: string; description?: string }>;
+  serverName?: string;
+  serverVersion?: string;
+  durationMs: number;
+  error?: string;
+  // Last stderr lines of a stdio server, with env and header values redacted.
+  stderrTail?: string[];
+}
+
+// A pasted server definition (an mcpServers JSON block, one server object, a
+// Codex [mcp_servers.*] TOML table, or a `claude mcp add` / `codex mcp add`
+// command line) turned into form drafts. Several servers come back when the
+// snippet held several, and the form asks which one to use.
+export type AgentMcpSnippetParseResult =
+  | { ok: true; servers: AgentMcpServerDraft[]; notes: string[] }
+  | { ok: false; error: string };
 
 export interface AgentAssetDeleteResult {
   ok: boolean;
@@ -2979,6 +3073,10 @@ export interface CoraProfileDeleteResult {
 export interface MemoryTierStatus {
   /** Whether this tier is read into prompts and writable by `codara_remember`. */
   enabled: boolean;
+  /** The workspace tier's own switch is on, but the profile's global switch
+   *  is off and acts as the master switch, so `enabled` is false. Optional
+   *  so an older main process still type-checks against this shape. */
+  blockedByGlobal?: boolean;
   /** Absolute path of the backing markdown file, resolved by the main process.
    *  The UI opens exactly this, it never recomputes the location. */
   path: string;
@@ -3007,6 +3105,9 @@ export interface CoraMemoryStatus {
  *  the workspace tier then reports disabled with an empty path. */
 export interface MemoryStatusInput {
   workspaceId: string | null;
+  /** The profile whose memory to report. Absent means the default profile
+   *  for new chats; an unknown id is an error, not a silent fallback. */
+  profileId?: string;
 }
 
 /** `memory:setEnabled` payload. */
@@ -3014,6 +3115,7 @@ export interface MemorySetEnabledInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   enabled: boolean;
+  profileId?: string;
 }
 
 /** `memory:clear` payload. `includeUserLines` defaults to false at the handler,
@@ -3022,6 +3124,22 @@ export interface MemoryClearInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   includeUserLines?: boolean;
+  profileId?: string;
+}
+
+/** `memory:ensureFile` payload: create the tier's file from its template when
+ *  it does not exist yet, and resolve to its path. */
+export interface MemoryEnsureFileInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  profileId?: string;
+}
+
+/** A profile's PROFILE.md as one revision-checked document. */
+export interface CoraProfileDocumentView {
+  content: string;
+  revision: string;
+  maxChars: number;
 }
 
 export interface Checkpoint {

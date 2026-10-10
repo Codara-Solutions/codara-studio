@@ -223,6 +223,7 @@
     "rehype-sanitize": "^6.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.0",
+    "smol-toml": "^1.9.1",
     "sodium-native": "^5.1.0",
     "ssh-config": "^5.2.1",
     "ssh2": "^1.17.0",

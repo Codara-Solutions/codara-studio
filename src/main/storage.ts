@@ -558,7 +558,21 @@ export async function loadSettings(): Promise<AppSettings> {
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
   settingsCache = normalizeSettings(settings);
   await enqueueSettingsWrite();
+  for (const listener of settingsSavedListeners) {
+    try {
+      listener(settingsCache);
+    } catch (err) {
+      console.error("[storage] settings-saved listener failed:", err);
+    }
+  }
   return settingsCache;
+}
+
+const settingsSavedListeners = new Set<(settings: AppSettings) => void>();
+
+export function onSettingsSaved(listener: (settings: AppSettings) => void): () => void {
+  settingsSavedListeners.add(listener);
+  return () => settingsSavedListeners.delete(listener);
 }
 
 // Writes whatever settingsCache holds when the queued write runs, so a

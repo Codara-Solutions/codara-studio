@@ -518,7 +518,7 @@ export default function SettingsDialog({
             )}
             {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
             {renderedTab === "agents" && (
-              <AgentsSettings />
+              <AgentsSettings onClose={onClose} />
             )}
             {renderedTab === "sessions" && (
               <SessionsSettings
@@ -3037,10 +3037,16 @@ function accountCardShowsUsage(usage: UsageEntry): boolean {
   return Boolean(usage.message);
 }
 
-// Accounts, plus a pointer to the Capability Center. The fast-mode toggle used
+// Accounts, plus a way into the Capability Center. The fast-mode toggle used
 // to sit here; it now lives on the composer's flash button, next to the model
 // it applies to.
-function AgentsSettings() {
+function AgentsSettings({ onClose }: { onClose: () => void }) {
+  // Settings closes first so two modals never stack and fight over focus and
+  // Escape. Nothing on this tab is a draft, so closing loses nothing.
+  const openCapabilities = (tab: "mcp" | "workers") => {
+    onClose();
+    window.dispatchEvent(new CustomEvent("spark:open-capabilities", { detail: { tab } }));
+  };
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <AccountsSettings />
@@ -3058,10 +3064,24 @@ function AgentsSettings() {
           fontSize: 12,
           lineHeight: 1.45,
           boxShadow: "var(--well)",
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 12,
         }}
       >
-        MCP servers and skills now live in the Capability Center from the Cora composer. That space is larger and gives
-        per-item activation, compatibility, deletion, and sync controls.
+        <span style={{ flex: "1 1 260px", minWidth: 0 }}>
+          MCP servers, skills, Cora profiles and memory, and the worker models Cora may use live in the Capability
+          Center. It is also behind the Tools button in the Cora composer.
+        </span>
+        <span style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" className="spark-btn" onClick={() => openCapabilities("workers")}>
+            Worker models
+          </button>
+          <button type="button" className="spark-btn is-primary" onClick={() => openCapabilities("mcp")}>
+            Open Capability Center
+          </button>
+        </span>
       </div>
     </div>
   );

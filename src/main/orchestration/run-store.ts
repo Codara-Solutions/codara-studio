@@ -1371,6 +1371,39 @@ export async function reassignCoraProfileRuns(
   return reassigned;
 }
 
+// Mirrors isUnstartedChatRun in the renderer (chat/cora-view.ts): a run the
+// board minted that has never had a conversation.
+function isUnstartedRun(run: RunState): boolean {
+  return (
+    run.status === "idle" &&
+    run.humanMessages.length === 0 &&
+    run.steps.length === 0 &&
+    run.workerTasks.length === 0
+  );
+}
+
+/** The composer still offers a profile for a board-minted chat that has never
+ * had a conversation, so its first send carries the pick here: nothing has
+ * read the profile it was minted with yet. A started run keeps its profile. */
+export async function adoptCoraProfileForUnstartedRun(
+  run: RunState,
+  reference: string | undefined,
+): Promise<RunState> {
+  if (!reference?.trim() || !isUnstartedRun(run)) return run;
+  const profileId = resolveCoraProfile(reference).id;
+  if (run.coraProfileId === profileId) return run;
+  return commitRunChange(run, {
+    type: "cora_profile.selected",
+    message: "Cora profile picked before the first message",
+    payload: { profileId },
+    mutate: (draft, timestamp) => {
+      if (!isUnstartedRun(draft) || draft.coraProfileId === profileId) return false;
+      draft.coraProfileId = profileId;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // A run is a chat in the panel, so it needs a title the user can tell apart
 // from its siblings. A plan run is named after the plan; a conversational
 // chat (no plan, just an opening message) is named after that message, the
@@ -1439,6 +1472,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   }
 
   let run = input.runId ? await requireRun(input.runId) : null;
+  if (run) run = await adoptCoraProfileForUnstartedRun(run, input.coraProfileId);
   if (!run) {
     run = await createRun({
       workspaceId: input.workspaceId,
@@ -14459,7 +14493,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     : task.runtimePreference;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
-      "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
+      "Cora has no enabled worker model. Turn one on in Capability Center > Worker models.",
     );
   }
   if (workerLaunchAborted(attempt.id)) return run;

@@ -14,6 +14,7 @@ export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
   | "settings.open"
+  | "capabilities.open"
   | "automations.open"
   | "usage.open"
   | "board.open"
@@ -110,6 +111,14 @@ export const COMMANDS: Command[] = [
     label: "Open settings",
     group: "General",
     defaultChords: [mod(",")],
+  },
+  {
+    id: "capabilities.open",
+    label: "Open Capability Center (tools, skills, memory)",
+    group: "General",
+    // No default chord: the obvious Mod+Shift+K is CodeMirror's delete-line.
+    // Bind one in Settings, Keybindings if you open it often.
+    defaultChords: [],
   },
   {
     id: "automations.open",
