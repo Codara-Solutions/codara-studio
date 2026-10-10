@@ -854,3 +854,16 @@ export function inspectCachedPiSubscriptionUsageProfiles(): PiUsageProfile[] {
     })
     .map(refreshUsageProfileCountdowns);
 }
+
+/** The last usage each account reported, kept while its read is younger than
+ * maxAgeMs even after the provider TTL lapsed. For prompt hints that must never
+ * wait on a vendor round trip; routing decisions keep reading the live path. */
+export function inspectLastKnownPiSubscriptionUsageProfiles(maxAgeMs: number): PiUsageProfile[] {
+  if (!cachedProfileProjection) return [];
+  return cachedProfileProjection.profiles
+    .filter((profile) => {
+      const cached = profileCache.get(profile.profileId);
+      return cached && Date.now() - cached.at < maxAgeMs;
+    })
+    .map(refreshUsageProfileCountdowns);
+}

@@ -244,7 +244,7 @@ import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memo
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
 import {
   describeHeadroomForPrompt,
-  readSubscriptionHeadroomSummary,
+  readCachedSubscriptionHeadroomSummary,
 } from "./subscription-headroom";
 import {
   createCheckpoint,
@@ -5774,11 +5774,11 @@ async function prepareManagerTurn(
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
   // Subscription headroom rides the same dynamic tail as the memory. The read
-  // hits pi-subscription-usage's 60s cache (never forced), and any failure
+  // takes the last known usage without waiting on the network, and any failure
   // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
   let subscriptionHeadroom: string | null = null;
   try {
-    subscriptionHeadroom = describeHeadroomForPrompt(await readSubscriptionHeadroomSummary());
+    subscriptionHeadroom = describeHeadroomForPrompt(await readCachedSubscriptionHeadroomSummary());
   } catch {
     subscriptionHeadroom = null;
   }
