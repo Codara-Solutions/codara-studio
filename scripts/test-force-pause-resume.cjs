@@ -60,7 +60,7 @@ const USER_INTENT_TS = path.join(ROOT, "src", "main", "orchestration", "user-int
 const CACHE = path.join(ROOT, "node_modules", ".cache", "cora-force-pause-resume-test");
 
 const ELECTRON_STUB = `const noop = () => {};
-export const app = { getPath: () => "/tmp", getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
+export const app = { getPath: () => "/tmp", getAppPath: () => process.cwd(), getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
 export class BrowserWindow { static getAllWindows() { return []; } }
 export class Notification { static isSupported() { return false; } show() {} on() {} }
 export const ipcMain = { on: noop, handle: noop, removeHandler: noop };
@@ -1321,6 +1321,99 @@ async function main() {
     cancelledLaunch.piPrompts === 0,
     String(cancelledLaunch.piPrompts),
   );
+
+  // ── 4b2. the Runs inspector's per-worker Stop, Retry, and log ───────────
+  {
+    const fixture = launchingRun("run-stop-one-worker");
+    const stoppedLaunch = await stopWhileLaunching(fixture, (id) =>
+      runStore.stopWorkerAttempt(id, fixture.attemptId),
+    );
+    check(
+      "Stop worker cancels that worker while it is still starting",
+      stoppedLaunch.attempt?.status === "cancelled" && stoppedLaunch.task?.status === "cancelled",
+      JSON.stringify({ attempt: stoppedLaunch.attempt?.status, task: stoppedLaunch.task?.status }),
+    );
+    check(
+      "Stop worker leaves the run itself running",
+      stoppedLaunch.run.status === "running",
+      stoppedLaunch.run.status,
+    );
+    check(
+      "a worker stopped while starting never starts Pi",
+      stoppedLaunch.piStarts === 0 && stoppedLaunch.piPrompts === 0,
+      JSON.stringify({ starts: stoppedLaunch.piStarts, prompts: stoppedLaunch.piPrompts }),
+    );
+    check(
+      "the stopped worker's step is not failed",
+      stoppedLaunch.run.steps[0]?.status !== "failed",
+      stoppedLaunch.run.steps[0]?.status,
+    );
+
+    // Retry runs the task again as a NEW attempt; the stopped one stays put.
+    globalThis.__coraWorkerPlanHook = () => new Promise(() => {});
+    const retried = await runStore.retryWorkerTask(fixture.id, fixture.taskId).catch((error) => error);
+    check("Retry worker accepts a stopped worker", !(retried instanceof Error), retried?.message);
+    const afterRetry = readRun(fixture.id);
+    const retryAttempts = afterRetry.workerAttempts.filter((item) => item.workerTaskId === fixture.taskId);
+    check(
+      "Retry worker adds a second attempt and keeps the first",
+      retryAttempts.length === 2 &&
+        retryAttempts.some((item) => item.id === fixture.attemptId && item.status === "cancelled"),
+      JSON.stringify(retryAttempts.map((item) => `${item.id}:${item.status}`)),
+    );
+    const newAttempt = retryAttempts.find((item) => item.id !== fixture.attemptId);
+    if (newAttempt) await runStore.stopWorkerAttempt(fixture.id, newAttempt.id).catch(() => undefined);
+    globalThis.__coraWorkerPlanHook = undefined;
+    await sleep(50);
+
+    const pausedFixture = launchingRun("run-retry-paused");
+    const pausedRun = readRun(pausedFixture.id);
+    pausedRun.status = "paused";
+    pausedRun.workerTasks[0].status = "failed";
+    pausedRun.workerAttempts[0].status = "failed";
+    writeRun(pausedRun);
+    await runStore.getRun(pausedFixture.id);
+    const refused = await runStore
+      .retryWorkerTask(pausedFixture.id, pausedFixture.taskId)
+      .catch((error) => error);
+    check(
+      "Retry worker refuses a paused run and says why",
+      refused instanceof Error && /Resume the run/.test(refused.message),
+      refused?.message,
+    );
+
+    // The log is read from the attempt's own record, confined to its run.
+    const logFixture = launchingRun("run-worker-log");
+    const logRun = readRun(logFixture.id);
+    const logDir = path.join(HOME, "runs", logFixture.id, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, "stdout.log"), "read the parser\nran npm test\n");
+    const outside = path.join(HOME, "outside.log");
+    fs.writeFileSync(outside, "secret");
+    logRun.workerAttempts[0].status = "failed";
+    logRun.workerAttempts[0].stdoutLogPath = path.join(logDir, "stdout.log");
+    logRun.workerAttempts.push({
+      ...logRun.workerAttempts[0],
+      id: "attempt-outside-log",
+      attemptNumber: 2,
+      stdoutLogPath: outside,
+    });
+    writeRun(logRun);
+    const log = await runStore.readWorkerAttemptLog(logFixture.id, logFixture.attemptId).catch((error) => error);
+    check(
+      "a worker's log is readable after its terminal is gone",
+      !(log instanceof Error) && log?.text.includes("ran npm test") && log.truncated === false,
+      log instanceof Error ? log.message : JSON.stringify(log),
+    );
+    const escaped = await runStore
+      .readWorkerAttemptLog(logFixture.id, "attempt-outside-log")
+      .catch((error) => error);
+    check(
+      "a log path outside the run is refused",
+      escaped instanceof Error && /outside its run artifacts/.test(escaped.message),
+      escaped instanceof Error ? escaped.message : JSON.stringify(escaped),
+    );
+  }
 
   // ── 4c. the quit guard counts only work a quit would kill ───────────────
   {

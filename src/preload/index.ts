@@ -837,6 +837,15 @@ const api = {
       ipcRenderer.invoke("orchestration:getRun", runId),
     readWorkerPrompt: (runId: string, attemptId: string): Promise<string> =>
       ipcRenderer.invoke("orchestration:readWorkerPrompt", { runId, attemptId }),
+    readWorkerLog: (
+      runId: string,
+      attemptId: string,
+    ): Promise<{ text: string; truncated: boolean } | null> =>
+      ipcRenderer.invoke("orchestration:readWorkerLog", { runId, attemptId }),
+    stopWorkerAttempt: (runId: string, attemptId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:stopWorkerAttempt", { runId, attemptId }),
+    retryWorkerTask: (runId: string, workerTaskId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:retryWorkerTask", { runId, workerTaskId }),
     listRuns: (workspaceId?: string): Promise<RunState[]> =>
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>

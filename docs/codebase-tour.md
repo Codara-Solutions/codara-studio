@@ -189,7 +189,10 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
     and broadcast as `orchestration:event` (or `orchestration:events-batch`).
     `components/chat/ChatConversation.tsx` builds the chat timeline from
     them (`lib/useRunExecutionRecord.ts`). The Runs view is
-    `components/RunsView.tsx` and `components/runs/`.
+    `components/RunsView.tsx` and `components/runs/`. Its worker inspector
+    can stop one worker, retry a failed or stopped one as a new attempt, and
+    read a worker's log from disk after its terminal is gone
+    (`stopWorkerAttempt`, `retryWorkerTask`, `readWorkerAttemptLog`).
 
 Cora can also open real terminals. `codara_spawn_terminals` opens
 interactive Claude Code, Codex, Grok or Pi sessions for you to drive

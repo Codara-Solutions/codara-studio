@@ -1004,6 +1004,152 @@ export async function readWorkerAttemptPrompt(
   return fs.readFile(promptPath, "utf8");
 }
 
+const WORKER_LOG_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The tail of a worker attempt's transcript (stdout.log, what its pane
+ * showed), so the user can read a worker whose terminal is gone. Confined the
+ * same way as readWorkerAttemptPrompt: the path comes from the attempt record
+ * and must resolve inside the run's own directory.
+ */
+export async function readWorkerAttemptLog(
+  runId: string,
+  attemptId: string,
+): Promise<{ text: string; truncated: boolean } | null> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt?.stdoutLogPath) return null;
+  let logPath: string;
+  try {
+    logPath = await fs.realpath(resolvePath(attempt.stdoutLogPath));
+  } catch {
+    return null;
+  }
+  const artifactRoot = await fs.realpath(runDir(run.id));
+  const relativeLog = relative(artifactRoot, logPath);
+  if (
+    relativeLog === "" ||
+    relativeLog.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    relativeLog === ".." ||
+    isAbsolute(relativeLog)
+  ) {
+    throw new Error("Worker log path is outside its run artifacts.");
+  }
+  const size = (await fs.stat(logPath)).size;
+  const text = await readFileTailUtf8(logPath, WORKER_LOG_TAIL_BYTES);
+  return { text: text ?? "", truncated: size > WORKER_LOG_TAIL_BYTES };
+}
+
+/**
+ * Stop one worker without pausing its run. The attempt is marked cancelled
+ * BEFORE the kill: the finish path reads a cancelled attempt as an
+ * interruption, so the stopped worker is never reviewed, failed over to the
+ * other provider, or allowed to fail its step. A launch still starting backs
+ * out at its next checkpoint instead of starting Pi.
+ */
+export async function stopWorkerAttempt(runId: string, attemptId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((item) => item.id === attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+  if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return run;
+  const launching = launchingWorkerAttempts.get(attemptId);
+  if (launching) launching.aborted = true;
+  const stopped = await commitRunChange(run, {
+    type: "worker_attempt.stopped_by_user",
+    message: "Worker stopped by the user",
+    workerTaskId: attempt.workerTaskId,
+    payload: { attemptId },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerAttempts.find((item) => item.id === attemptId);
+      if (!target || ATTEMPT_TERMINAL_STATUSES.has(target.status)) return false;
+      target.status = "cancelled";
+      target.error = target.error ?? "Stopped by the user.";
+      target.finishedAt = target.finishedAt ?? timestamp;
+      const task = draft.workerTasks.find((item) => item.id === target.workerTaskId);
+      if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
+        task.status = "cancelled";
+        task.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  const active = activeWorkerProcesses.get(attemptId);
+  if (active) {
+    try {
+      active.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    pty.killImmediate(attemptId);
+  } catch {
+    /* no display PTY */
+  }
+  return stopped;
+}
+
+/**
+ * Run a failed, stopped, or blocked worker task again as a new attempt, so the
+ * old attempt's log and report stay as they were. Only while the run is
+ * working: a paused or blocked run must be resumed (or its question answered)
+ * first, and an ended run belongs to Cora's follow-up flow.
+ */
+export async function retryWorkerTask(runId: string, workerTaskId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const task = run.workerTasks.find((item) => item.id === workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${workerTaskId}`);
+  if (!["failed", "cancelled", "blocked"].includes(task.status)) {
+    throw new Error("Only a failed, stopped, or blocked worker can be retried.");
+  }
+  if (run.status === "paused" || run.status === "blocked") {
+    throw new Error("Resume the run before retrying a worker.");
+  }
+  if (run.status !== "running" && run.status !== "reviewing") {
+    throw new Error("This run has ended. Ask Cora to continue the work instead.");
+  }
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  if (step && isImmutableStepStatus(step.status)) {
+    throw new Error("That worker's step is already settled. Ask Cora for a follow-up instead.");
+  }
+  const lastAttempt = run.workerAttempts
+    .filter((attempt) => attempt.workerTaskId === task.id)
+    .reduce<WorkerAttempt | undefined>(
+      (latest, attempt) => (!latest || attempt.attemptNumber > latest.attemptNumber ? attempt : latest),
+      undefined,
+    );
+  if (lastAttempt && !ATTEMPT_TERMINAL_STATUSES.has(lastAttempt.status)) {
+    throw new Error("That worker is still running.");
+  }
+  await commitRunChange(run, {
+    type: "worker_task.retry_requested",
+    message: `Worker retried by the user: ${task.title}`,
+    workerTaskId: task.id,
+    payload: { previousAttemptId: lastAttempt?.id ?? null },
+    mutate: (draft, timestamp) => {
+      const draftStep = task.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
+      if (draftStep && (draftStep.status === "failed" || draftStep.status === "blocked")) {
+        draftStep.status = "running";
+        draftStep.updatedAt = timestamp;
+        draft.currentStepId = draftStep.id;
+      }
+      draft.status = "running";
+      draft.updatedAt = timestamp;
+    },
+  });
+  // A sandboxed attempt's cwd is its throwaway worktree; the retry forks a new
+  // one from the real workspace.
+  const cwd = lastAttempt?.sandboxBaseRepo ?? lastAttempt?.cwd ?? autopilotInputFromRun(run).cwd;
+  const envelope = await prepareWorkerTask({
+    runId,
+    workerTaskId,
+    cwd,
+    unattended: Boolean(lastAttempt?.sandboxWorktreePath),
+  });
+  scheduleAutopilotCycles(runId, [envelope.attemptId]);
+  return requireRun(runId);
+}
+
 async function purgeTerminalRunForRetention(runId: string): Promise<void> {
   // Serialize the final status check with normal run commits. A run can be
   // resumed while the sweep is scanning; checking only the earlier disk
@@ -13327,6 +13473,8 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   let run = await requireRun(input.runId);
   const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
   if (!attempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
+  // Stopped before its cycle reached it: a cancelled attempt never launches.
+  if (attempt.status === "cancelled") return run;
   if (attempt.status !== "prompt_ready" && attempt.status !== "failed") {
     throw new Error(`Worker attempt is not ready to launch: ${attempt.status}`);
   }

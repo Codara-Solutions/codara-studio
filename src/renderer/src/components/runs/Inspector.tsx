@@ -1224,7 +1224,7 @@ function WorkerDetail({
                 aria-label="Open worker terminal"
                 title={
                   terminalMiss
-                    ? "This worker's terminal is no longer open — its pane closed or did not survive a restart."
+                    ? "This worker's terminal is no longer open: its pane closed or did not survive a restart. Its output is under Log below."
                     : "Open this worker's terminal"
                 }
                 onClick={() => {
@@ -1281,6 +1281,7 @@ function WorkerDetail({
               {meta}
             </span>
           )}
+          <WorkerActions key={`${task.id}:${attempt?.id ?? ""}`} task={task} attempt={attempt} />
         </SnapshotCard>
       </Section>
 
@@ -1436,6 +1437,12 @@ function WorkerDetail({
         </Section>
       )}
 
+      {attempt?.stdoutLogPath && (
+        <Section title="Log">
+          <LogBlock key={`${task.runId}:${attempt.id}`} runId={task.runId} attemptId={attempt.id} />
+        </Section>
+      )}
+
       {attempt?.promptPath && (
         <Section title="Prompt">
           <PromptBlock
@@ -1446,6 +1453,161 @@ function WorkerDetail({
         </Section>
       )}
     </>
+  );
+}
+
+const LIVE_ATTEMPT_STATUSES = new Set<WorkerAttempt["status"]>([
+  "preparing",
+  "prompt_ready",
+  "launching",
+  "running",
+  "finishing",
+]);
+
+// Stop one worker without pausing the whole run, or run a failed or stopped
+// one again as a new attempt. Main refuses a retry the run cannot take (paused,
+// ended, settled step) and says why; that message is shown as is.
+function WorkerActions({ task, attempt }: { task: WorkerTask; attempt: WorkerAttempt | null }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const live = attempt !== null && LIVE_ATTEMPT_STATUSES.has(attempt.status);
+  const retryable = !live && (task.status === "failed" || task.status === "cancelled" || task.status === "blocked");
+  if (!live && !retryable) return null;
+  const run = (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    void action()
+      .catch((err: unknown) => setError(err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(err)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      {live && attempt && (
+        <WorkerActionButton
+          label={busy ? "Stopping…" : "Stop worker"}
+          title="Stop this worker. The rest of the run keeps going."
+          tone="var(--danger)"
+          disabled={busy}
+          onClick={() => run(() => window.spark.orchestration.stopWorkerAttempt(task.runId, attempt.id))}
+        />
+      )}
+      {retryable && (
+        <WorkerActionButton
+          label={busy ? "Retrying…" : "Retry worker"}
+          title="Run this worker again as a new attempt. The previous attempt's log and report are kept."
+          tone="var(--ink-dim)"
+          disabled={busy}
+          onClick={() => run(() => window.spark.orchestration.retryWorkerTask(task.runId, task.id))}
+        />
+      )}
+      {error && (
+        <span style={{ color: "var(--warn)", fontFamily: "var(--font-sans)", fontSize: 10.5 }}>{error}</span>
+      )}
+    </div>
+  );
+}
+
+function WorkerActionButton({
+  label,
+  title,
+  tone,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  tone: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "4px 9px",
+        border: "1px solid var(--rule)",
+        borderRadius: 7,
+        background: "var(--bg)",
+        color: tone,
+        fontSize: 10.5,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// The worker's transcript as its pane showed it, read from disk, so a worker
+// whose terminal is gone (finished, or lost to a restart) can still be read.
+// Re-read on every open: a live worker's log keeps growing.
+function LogBlock({ runId, attemptId }: { runId: string; attemptId: string }) {
+  const [open, setOpen] = useState(false);
+  const [log, setLog] = useState<{ text: string; truncated: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLog(null);
+    setError(null);
+    void window.spark.orchestration
+      .readWorkerLog(runId, attemptId)
+      .then((result) => {
+        if (!cancelled) setLog(result ?? { text: "", truncated: false });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, runId, attemptId]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <WorkerActionButton
+        label={open ? "Hide log" : "View worker log"}
+        title="Read this attempt's output from disk"
+        tone="var(--ink-dim)"
+        disabled={false}
+        onClick={() => setOpen((v) => !v)}
+      />
+      {open && (
+        <pre
+          style={{
+            margin: 0,
+            padding: "11px 12px",
+            background: "color-mix(in oklab, var(--bg) 72%, transparent)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 7,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            lineHeight: 1.55,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 420,
+            overflow: "auto",
+          }}
+        >
+          {error
+            ? `Failed to read the log: ${error}`
+            : log === null
+              ? "Loading log…"
+              : log.text.trim()
+                ? `${log.truncated ? "(earlier output omitted)\n" : ""}${log.text}`
+                : "This attempt wrote no output."}
+        </pre>
+      )}
+    </div>
   );
 }
 
