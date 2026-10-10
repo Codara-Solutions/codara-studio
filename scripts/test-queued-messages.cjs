@@ -1305,6 +1305,85 @@ async function main() {
     JSON.stringify(restartedV),
   );
 
+  // ── 5g. the manager plan belongs to the request that recorded it ────────
+  const openPlan = (requestMessageId) => ({
+    goal: "Ship auth, billing and docs",
+    milestones: [
+      { id: "m1", title: "Auth", status: "done" },
+      { id: "m2", title: "Billing", status: "pending" },
+    ],
+    updatedAt: PAUSED_AT,
+    ...(requestMessageId ? { requestMessageId } : {}),
+  });
+  const runW = writeRun(pausedRun("run-plan-stamp"));
+  await runStore.updateManagerPlan(runW, {
+    goal: "Ship the parser",
+    milestones: [{ id: "m1", title: "Lexer", status: "pending" }],
+  });
+  check(
+    "a recorded plan is stamped with the request it serves",
+    readRun(runW).managerPlan?.requestMessageId === "msg-1",
+    JSON.stringify(readRun(runW).managerPlan),
+  );
+
+  const runX = writeRun(
+    pausedRun("run-plan-new-request", {
+      status: "complete",
+      autopilot: { status: "complete", lastAction: "completed", updatedAt: PAUSED_AT },
+      managerPlan: openPlan("msg-1"),
+    }),
+  );
+  managerBehavior.set(runX, async () => completeResult());
+  await runStore.addRunMessage({ runId: runX, author: "user", kind: "note", message: "Fix the typo in the README" });
+  await runStore.settleScheduledManagerWork(runX);
+  check(
+    "a new request on a finished run drops the old plan",
+    !readRun(runX).managerPlan,
+    JSON.stringify(readRun(runX).managerPlan),
+  );
+
+  const runY = writeRun(pausedRun("run-plan-cancel", { managerPlan: openPlan("msg-1") }));
+  await runStore.cancelRun({ runId: runY });
+  check("cancel drops the plan", !readRun(runY).managerPlan, JSON.stringify(readRun(runY).managerPlan));
+
+  const planRewind = (id, requestMessageId) =>
+    writeRun(
+      pausedRun(id, {
+        humanMessages: [
+          ...pausedRun(id).humanMessages,
+          {
+            id: "msg-plan-request",
+            runId: id,
+            author: "user",
+            kind: "note",
+            message: "Now add billing and docs",
+            attachments: [],
+            createdAt: new Date(Date.parse(PAUSED_AT) + 60_000).toISOString(),
+            deliveryState: "queued",
+            intent: "steer",
+            conversationEpoch: 1,
+          },
+        ],
+        managerPlan: openPlan(requestMessageId),
+      }),
+    );
+  const runZ = planRewind("run-plan-rewound", "msg-plan-request");
+  await runStore.stopAndUndoPending(runZ);
+  await runStore.settleScheduledManagerWork(runZ);
+  check(
+    "undoing the message a plan was recorded for drops the plan",
+    !readRun(runZ).managerPlan,
+    JSON.stringify(readRun(runZ).managerPlan),
+  );
+  const runZ2 = planRewind("run-plan-kept", "msg-1");
+  await runStore.stopAndUndoPending(runZ2);
+  await runStore.settleScheduledManagerWork(runZ2);
+  check(
+    "undoing a later message keeps the plan of the request it belongs to",
+    readRun(runZ2).managerPlan?.requestMessageId === "msg-1",
+    JSON.stringify(readRun(runZ2).managerPlan),
+  );
+
   // ── 6. source seams ──────────────────────────────────────────────────────
   const socketSource = fs.readFileSync(AGENT_SOCKET_TS, "utf8");
   const waitStart = socketSource.indexOf("async function handleOrchestratorWaitForWorkers(");

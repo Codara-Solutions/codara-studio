@@ -12112,6 +12112,7 @@ function commitCancelledRun(run: RunState, reason: string): Promise<RunState> {
     payload: { reason },
     mutate: (draft, timestamp) => {
       abandonRunQuestionOwnership(draft);
+      delete draft.managerPlan;
       for (const call of draft.sparkCalls) {
         if (call.status !== "started" || call.completedAt) continue;
         call.status = "failed";
@@ -12482,6 +12483,9 @@ export async function addRunMessage(
       // transitions, and a stray user note must never wake a manager.
       if (input.author === "user" && draftWasTerminal && draft.executionMode !== "direct") {
         revivedTerminal = true;
+        // The finished request's plan is not this one's: left in place it
+        // would gate codara_complete and steer every turn of the new request.
+        delete draft.managerPlan;
         draft.status = "planning";
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -13903,7 +13907,20 @@ export async function updateManagerPlan(
         failure = plan;
         return false;
       }
-      draft.managerPlan = plan;
+      const previousRequestId = draft.managerPlan?.requestMessageId;
+      const requestMessageId =
+        previousRequestId && draft.humanMessages.some((message) => message.id === previousRequestId)
+          ? previousRequestId
+          : [...draft.humanMessages]
+              .reverse()
+              .find(
+                (message) =>
+                  message.author === "user" &&
+                  !message.compaction &&
+                  !message.boardNote &&
+                  !message.resumeNote,
+              )?.id;
+      draft.managerPlan = requestMessageId ? { ...plan, requestMessageId } : plan;
       draft.updatedAt = timestamp;
     },
   });
@@ -15796,6 +15813,18 @@ async function performConversationRewind(
       if (conversationEpoch(draft) !== newEpoch) return false;
       draft.humanMessages = draft.humanMessages.slice(0, pointer);
       draft.checkpoints = keptCheckpoints;
+      // A plan recorded for a request this rewind removed (or, unstamped, after
+      // the cutoff) belongs to the undone conversation.
+      const plan = draft.managerPlan;
+      if (
+        plan &&
+        (!cutoff ||
+          (plan.requestMessageId
+            ? !draft.humanMessages.some((message) => message.id === plan.requestMessageId)
+            : plan.updatedAt >= cutoff))
+      ) {
+        delete draft.managerPlan;
+      }
       delete draft.pendingManagerResume;
       delete draft.managerTurnRecovery;
       delete draft.pendingConversationRewind;

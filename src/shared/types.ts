@@ -2586,6 +2586,9 @@ export interface RunManagerPlan {
   decisions?: string[];
   nextActions?: string[];
   updatedAt: string;
+  /** The user message whose request this plan serves. A rewind that removes
+   * it drops the plan with the conversation it belonged to. */
+  requestMessageId?: string;
 }
 
 export interface RunState {
