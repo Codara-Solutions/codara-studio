@@ -29,11 +29,69 @@ export async function readWorkerReport(path: string): Promise<WorkerReport | nul
   }
 }
 
-function normalizeWorkerReport(raw: Record<string, unknown>): WorkerReport {
-  const status = raw.status;
-  if (status !== "complete" && status !== "partial" && status !== "blocked" && status !== "failed") {
-    throw new Error("Invalid worker report status.");
+export const WORKER_REPORT_STATUSES: ReadonlyArray<WorkerReport["status"]> = [
+  "complete",
+  "partial",
+  "blocked",
+  "failed",
+];
+
+// Words workers reach for instead of "complete". Only unambiguous synonyms of
+// success: anything that could mean partial or failed work must stay invalid
+// rather than be read as a clean finish.
+const WORKER_REPORT_STATUS_ALIASES: Readonly<Record<string, WorkerReport["status"]>> = {
+  success: "complete",
+  succeeded: "complete",
+  successful: "complete",
+  done: "complete",
+  completed: "complete",
+};
+
+function normalizeReportStatus(value: unknown): WorkerReport["status"] {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if ((WORKER_REPORT_STATUSES as readonly string[]).includes(text)) return text as WorkerReport["status"];
+  const alias = WORKER_REPORT_STATUS_ALIASES[text];
+  if (alias) return alias;
+  throw new Error(
+    `status ${JSON.stringify(value ?? null)} is not one of ${WORKER_REPORT_STATUSES.map((item) => `"${item}"`).join(", ")}`,
+  );
+}
+
+/**
+ * Like readWorkerReport, but says what is wrong with a report it cannot use,
+ * so the worker can be told exactly what to fix. readWorkerReport stays the
+ * quiet reader every other consumer relies on.
+ */
+export async function readWorkerReportWithProblem(
+  path: string,
+): Promise<{ report: WorkerReport | null; problem: string | null }> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { report: null, problem: "the file does not exist" };
+    }
+    return { report: null, problem: `the file could not be read (${(err as Error).message})` };
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    return { report: null, problem: `the file is not valid JSON (${(err as Error).message})` };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { report: null, problem: "the file must hold a single JSON object" };
+  }
+  try {
+    return { report: normalizeWorkerReport(parsed as Record<string, unknown>), problem: null };
+  } catch (err: unknown) {
+    return { report: null, problem: (err as Error).message };
+  }
+}
+
+function normalizeWorkerReport(raw: Record<string, unknown>): WorkerReport {
+  const status = normalizeReportStatus(raw.status);
 
   return {
     status,

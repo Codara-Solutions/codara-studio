@@ -112,6 +112,11 @@ async function main() {
     // timeout
     ["Pi worker timed out after 90 minutes.", "timeout"],
     ["Worker timed out after 90 minutes.", "timeout"],
+    ["Pi worker timed out: no finished tool call or message for 92 min.", "timeout"],
+    [
+      "Pi worker exceeded its 6h turn ceiling while still making progress and did not wrap up within 15 min.",
+      "timeout",
+    ],
     // tool
     ["Pi worker extension failed.", "tool"],
     ["Codara Pi bridge is incompatible: /tmp/bridge.cjs", "tool"],

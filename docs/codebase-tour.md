@@ -157,9 +157,17 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
    attempt (`ensurePiWorkerDisplayPty`) and writes the worker's activity into
    it. The renderer attaches a pane to that PTY: a loop in `App.tsx` calls
    `ensureWorkerTerminalTab` once the PTY exists. `parallel-wave.ts` in
-   `src/shared/` decides which tasks can run at the same time.
+   `src/shared/` decides which tasks can run at the same time. A worker turn
+   has no fixed length: it is stopped only after 90 minutes without a
+   finished tool call or message, or, after 6 hours, if it ignores the
+   request to wrap up with a partial report (`classifyWorkerTurnCeiling` in
+   `agent-liveness.ts`).
 8. **Reports.** A worker ends by writing `final-report.json`. `worker-report.ts`
-   reads it and decides whether to accept it. `codara_wait_for_workers`
+   reads it and decides whether to accept it. A missing or malformed report
+   gets one follow-up turn that names the exact problem; if that fails too,
+   the worker's file is kept as `final-report.invalid.json` and the failure is
+   left to Cora instead of rerunning the task on another provider.
+   `codara_wait_for_workers`
    returns the reports to Cora. Only a `complete` report is accepted: when no
    Cora turn reviews it, `runAutopilotWorkerCycle` marks a failed or missing
    report `failed` and a partial or blocked one `blocked`

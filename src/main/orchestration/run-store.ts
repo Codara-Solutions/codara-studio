@@ -169,9 +169,13 @@ import {
 } from "./step-lifecycle";
 import { describeRunSettlement, isRunSettled } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
-import { decideWorkerReport, readWorkerReport } from "./worker-report";
+import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
-import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
+import {
+  classifyWorkerSilence,
+  classifyWorkerTurnCeiling,
+  isWorkerTurnCeilingFailure,
+} from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
   managerTurnRetryDelayMs,
@@ -19211,8 +19215,8 @@ async function waitForPiWorkerTurn(
   interrupted: () => boolean = () => false,
   onCompaction?: (phase: "compacting" | "resuming") => void,
   taskContract?: () => string,
+  onWrapUp?: () => void,
 ): Promise<void> {
-  let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
   let compaction: PiWorkerCompaction | undefined;
@@ -19223,9 +19227,19 @@ async function waitForPiWorkerTurn(
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
       let stallReported = false;
+      const startedAt = Date.now();
+      let lastProgressAt = startedAt;
+      let wrapUpRequestedAt: number | null = null;
       unsubscribe = client.onEvent((event) => {
         lastEventAt = Date.now();
         lastEventType = event.type;
+        if (
+          event.type === "tool_execution_end" ||
+          event.type === "message_end" ||
+          event.type === "compaction_end"
+        ) {
+          lastProgressAt = lastEventAt;
+        }
         // Any traffic at all means the worker is reachable again. Clear the
         // stall mark so the pane returns to its real state rather than wearing
         // an amber badge for the rest of a turn that recovered.
@@ -19269,13 +19283,23 @@ async function waitForPiWorkerTurn(
           stallReported = true;
           onStallChange?.({ stalled: true, detail: verdict.detail });
         }
+        const ceiling = classifyWorkerTurnCeiling({
+          now: Date.now(),
+          startedAt,
+          lastProgressAt,
+          wrapUpRequestedAt,
+        });
+        if (ceiling.action === "fail") {
+          reject(new Error(ceiling.detail));
+          return;
+        }
+        if (ceiling.action === "wrap_up") {
+          wrapUpRequestedAt = Date.now();
+          onWrapUp?.();
+          void client.prompt(ceiling.detail, "steer").catch(() => undefined);
+        }
       }, 500);
       poll.unref();
-      timer = setTimeout(
-        () => reject(new Error("Pi worker timed out after 90 minutes.")),
-        PI_WORKER_TURN_CEILING_MS,
-      );
-      timer.unref();
     });
     await client.prompt(prompt);
     await settled;
@@ -19283,7 +19307,6 @@ async function waitForPiWorkerTurn(
     compaction?.dispose();
     unsubscribe();
     if (poll) clearInterval(poll);
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -19366,6 +19389,7 @@ async function runPiWorkerSession({
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  let reportInvalid = false;
   const taskSteering: string[] = [];
   const taskContract = () => [
     task.description.trim(),
@@ -19790,24 +19814,48 @@ async function runPiWorkerSession({
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
     };
-    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
+    const wrapUpRequested = () => {
+      reportActivity("Time limit reached: writing a partial report…");
+      paint("\r\n  \x1b[33m⏱ Turn time limit reached: asking the worker to hand in a partial report\x1b[0m\r\n");
+    };
+    await waitForPiWorkerTurn(
+      client,
+      promptText,
+      reportStall,
+      () => interrupted,
+      compactionProgress,
+      taskContract,
+      wrapUpRequested,
+    );
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
     if (!report) {
+      // Tell the worker exactly what is wrong. A bare "not parseable" made it
+      // rewrite the same shape, and the second miss threw its work away.
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
       paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
       await waitForPiWorkerTurn(
         client,
-        `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
+        `Your task turn ended without a valid final report at ${paths.finalReportJson}` +
+          `${problem ? `: ${problem}` : ""}. ` +
+          'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
           "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
         reportStall,
         () => interrupted,
         compactionProgress,
         taskContract,
+        wrapUpRequested,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }
-    if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
+    if (!report) {
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
+      reportInvalid = true;
+      throw new Error(
+        `Pi worker completed without a parseable final-report.json${problem ? ` (${problem})` : ""}.`,
+      );
+    }
 
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
@@ -19821,7 +19869,14 @@ async function runPiWorkerSession({
     // provider "servers overloaded" arriving during shutdown, long after the
     // validated report), writeAutoFailureReport preserves it and this session
     // settles as succeeded so the report's verdict decides the node.
-    const failureWrite = await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
+    const failureWrite = await writeAutoFailureReport(paths, task, message, {
+      interrupted,
+      cause: reportInvalid
+        ? "no_valid_report"
+        : isWorkerTurnCeilingFailure(message)
+          ? "turn_ceiling"
+          : undefined,
+    }).catch(() => null);
     if (failureWrite?.preservedExisting) {
       const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
       if (report && (report.status === "complete" || report.status === "partial")) {
