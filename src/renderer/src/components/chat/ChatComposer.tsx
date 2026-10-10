@@ -1700,11 +1700,12 @@ function WorkerActivityStatus({
         }}
       />
       <span style={{ color: tone, fontWeight: 600 }}>{headline}</span>
-      {/* The only elastic child: when the row runs out of room this segment
-          ellipsises, rather than every child being cut mid-glyph. Sizing lives
-          in .composer-toolbar__hint--worker so the rule sits with the rest of
-          the row's collapse behaviour. Solo shows the task title; a fleet
-          shows the model mix, which says more than one truncated title. */}
+      {/* When the row runs out of room the children ellipsise in a fixed
+          order (tail, then this segment, then the headline) rather than being
+          cut mid-glyph. Sizing lives in .composer-toolbar__hint--worker so the
+          rule sits with the rest of the row's collapse behaviour. Solo shows
+          the task title; a fleet shows the model mix, which says more than
+          one truncated title. */}
       {solo
         ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
         : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
@@ -1712,9 +1713,9 @@ function WorkerActivityStatus({
           follows the RUN, not the workers: a paused run takes notes, only a
           run with a turn in flight queues steering. */}
       {runPaused ? (
-        <span style={{ flex: "0 0 auto" }}>· paused</span>
+        <span>· paused</span>
       ) : steeringQueues ? (
-        <span style={{ flex: "0 0 auto" }}>· messages queue</span>
+        <span>· messages queue</span>
       ) : null}
     </span>
   );

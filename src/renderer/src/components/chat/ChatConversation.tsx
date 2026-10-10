@@ -358,6 +358,10 @@ export default function ChatConversation({
             initialItemCount={Math.min(rowCount, 24)}
             defaultItemHeight={96}
             initialTopMostItemIndex={Math.max(0, rowCount - 1)}
+            // A short chat sits against the composer, like the end of a long
+            // one, instead of leaving a void between the last turn and the
+            // box the reader types the next one into.
+            alignToBottom
             // "auto" (instant) rather than "smooth": while a turn streams, a new
             // frame lands several times a second, and queueing an animated
             // scroll for each one is exactly the compounding jank a pinned
@@ -437,7 +441,7 @@ export default function ChatConversation({
             atBottomThreshold={72}
             // Tall enough to scroll the last row clear of that pill (bottom 18 +
             // ~32 tall) instead of leaving it pinned under it.
-            components={{ Footer: () => <div style={{ height: 84 }} /> }}
+            components={{ Footer: () => <div style={{ height: 56 }} /> }}
           />
         )}
         <ConversationMinimap
@@ -3642,7 +3646,7 @@ const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 14,
+  marginBottom: 12,
 };
 
 const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
@@ -3672,7 +3676,7 @@ const USER_HEADER_STYLE: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 26,
+  minHeight: 24,
 };
 
 const USER_TIME_STYLE: React.CSSProperties = {

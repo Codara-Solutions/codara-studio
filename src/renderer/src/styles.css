@@ -1346,10 +1346,11 @@ a { color: inherit; }
   gap: 12px;
   width: min(620px, 100%);
   box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid var(--accent-edge);
-  border-radius: var(--radius-surface, 10px);
-  background: var(--accent-soft);
+  padding: 11px 12px 11px 14px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--accent) 5%, var(--panel-2));
+  box-shadow: inset 2px 0 0 var(--accent-edge), var(--lift-hi);
 }
 .cora-welcome__connect-copy {
   display: flex;
@@ -2541,6 +2542,7 @@ a { color: inherit; }
 
 .cora-assistant-turn__meta {
   min-height: 22px;
+  margin-top: -5px;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -2742,11 +2744,17 @@ a { color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.composer-toolbar__hint--worker > [aria-hidden] {
+.composer-toolbar__hint--worker > [aria-hidden],
+.composer-toolbar__hint--worker > :nth-child(2) {
   flex: 0 0 auto;
 }
+/* Shed order under pressure: the trailing note first, then the task title,
+   and the headline ("2 workers running") last. */
+.composer-toolbar__hint--worker > :last-child {
+  flex-shrink: 40;
+}
 .composer-toolbar__hint--worker > .composer-toolbar__hint-title {
-  flex: 0 10 auto;
+  flex-shrink: 10;
 }
 
 /* The model name is the one pill whose text has no upper bound, so its
