@@ -24,7 +24,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `hooks/`, `hooks/processed/` | Claude Code hook events, one JSON file each. Processed files are kept for a week. |
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |
 | `builtin-mcp.json` | The CLIs you switched the Codara Studio MCP server off for. |
-| `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, and the MCP bridge config. Cora never reads your own `~/.pi`. |
+| `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, the MCP bridge config, and a `settings.json` holding Cora's provider retry budget (mode 0600; other keys you add there are kept). Cora never reads your own `~/.pi`. |
 | `claude-cli/`, `codex-cli/` | The saved logins of every Claude Code and Codex account that is not the Active one (mode 0600), and a record of which account's login is live in your `~/.claude` or `~/.codex`. |
 | `grok-cli/` | One private home per managed Grok account. |
 | `shell/active-cli-env` | Which Grok home running Studio shells should follow. |
@@ -42,7 +42,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | Your Claude Code login (the `Claude Code-credentials` Keychain item on macOS, `~/.claude/.credentials.json` elsewhere) and `oauthAccount` in `~/.claude.json` | Switching the Active Claude account replaces only these sign-in keys and the account identity, the way `/login` as another account does. MCP sign-ins, settings, history and project trust are never touched. While Studio runs, Codara also renews this login before it expires. | Keep a single Claude account; the Active one is then your own login. |
 | `~/.codex/auth.json` | Switching the Active Codex account swaps this file. | Keep a single Codex account. |
 | Managed Grok homes under `~/.codarastudio/grok-cli/` | Link your personal `~/.grok` state into each account's home so a switch keeps your sessions. Credentials stay private to each account. | Remove the account in Settings, Agents. |
-| Your global npm packages | **Install Pi** in Settings runs `npm install -g @earendil-works/pi-coding-agent` once, when you click it. Codara never updates or removes it. | Install Pi yourself, or not at all: until Pi is installed, Cora runs on a Pi build bundled with the app. |
+| Your global npm packages | **Install Pi** in Settings runs `npm install -g @earendil-works/pi-coding-agent@~0.85.1` (the Pi line Codara is tested against) once, when you click it. Codara never updates or removes it. | Install Pi yourself, or not at all: until Pi is installed, Cora runs on a Pi build bundled with the app. |
 | `~/.cache/spark/shell-integration/` | Staged copies of the shell integration files that Studio terminals source. Your `~/.zshrc`, `~/.bashrc` and PowerShell profile are never modified. | No setting yet; worker and agent panes already run without it (`SPARK_NO_SHELL_INTEGRATION=1`). |
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |
