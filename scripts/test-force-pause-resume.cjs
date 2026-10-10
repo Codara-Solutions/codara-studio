@@ -117,19 +117,58 @@ const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount()
 export async function resolveCodaraPiRuntime() { throw new Error("pi runtime is stubbed"); } export async function resolveCodaraPiLibrary() { throw new Error("pi runtime is stubbed"); } export async function resolveUserPiRuntime() { throw new Error("pi runtime is stubbed"); }
 export function codaraPiPaths() { return { home: "/tmp/cora-stub-pi" }; }
 export async function cleanupPiMcpBridgeConfig() {}
-export async function createCodaraPiWorkerLaunchPlan() { throw new Error("pi worker launch is stubbed"); }`;
+export async function createCodaraPiWorkerLaunchPlan() {
+  // Armed only by the launching-stop case: hold the launch inside its startup
+  // window until the test has stopped the run, then hand back a usable plan.
+  if (!globalThis.__coraWorkerPlanHook) throw new Error("pi worker launch is stubbed");
+  await globalThis.__coraWorkerPlanHook();
+  return {
+    provider: "anthropic",
+    model: "claude-opus-5",
+    thinking: "high",
+    sessionId: "stub-session",
+    mcpConfigPath: null,
+    accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",
+  };
+}`;
+
+// The worker's display PTY and its Pi process, observable instead of real.
+const PTY_MANAGER_STUB = `const noop = () => {};
+export function exists() { return false; }
+export async function spawn(opts) { (globalThis.__coraPtySpawns ??= []).push(opts.id); }
+export function resize() {}
+export async function waitForResize() {}
+export async function waitForSpawn() { return false; }
+export function publishOutput() {}
+export function killImmediate(id) { (globalThis.__coraPtyKills ??= []).push(id); }
+export function dispose() {}
+export function onExit() { return noop; }
+export function readTail() { return ""; }
+export function tap() { return noop; }
+export function write() {}`;
+
+const PI_RPC_CLIENT_STUB = `export class PiRpcClient {
+  async start() { globalThis.__coraPiStarts = (globalThis.__coraPiStarts ?? 0) + 1; }
+  async prompt() { globalThis.__coraPiPrompts = (globalThis.__coraPiPrompts ?? 0) + 1; }
+  onEvent() { return () => {}; }
+  state() { return { phase: "running" }; }
+  async abort() {}
+  async stop() {}
+}`;
 
 const STUBS = {
   electron: ELECTRON_STUB,
   "node-pty": PTY_STUB,
   "./backend-registry": BACKEND_REGISTRY_STUB,
   "./pi-runtime-electron": PI_RUNTIME_STUB,
+  "../pty-manager": PTY_MANAGER_STUB,
+  "./pi-rpc-client": PI_RPC_CLIENT_STUB,
 };
 
 const stubPlugin = {
   name: "cora-force-pause-stubs",
   setup(build) {
-    build.onResolve({ filter: /^(electron|node-pty|\.\/backend-registry|\.\/pi-runtime-electron)$/ }, (args) => ({
+    build.onResolve({ filter: /^(electron|node-pty|\.\/backend-registry|\.\/pi-runtime-electron|\.\.\/pty-manager|\.\/pi-rpc-client)$/ }, (args) => ({
       path: args.path,
       namespace: "stub",
     }));
@@ -1048,6 +1087,152 @@ async function main() {
       exitCode: 1,
       attemptStatus: "running",
     }) === false,
+  );
+
+  // ── 4b. a Stop that lands while a worker is still starting ──────────────
+  // The attempt is "launching" but has no live process yet (account, launch
+  // plan and Pi startup are still in flight). The Stop used to find nothing to
+  // kill, and the worker then ran its whole task in the paused run.
+  const launchingRun = (id) => {
+    const stepId = `step-${id}`;
+    const taskId = `task-${id}`;
+    const attemptId = `attempt-${id}`;
+    const attemptDir = path.join(HOME, "runs", id, "steps", stepId, "workers", taskId, "attempts", attemptId);
+    fs.mkdirSync(attemptDir, { recursive: true });
+    fs.writeFileSync(path.join(attemptDir, "prompt.md"), "Build the parser.\n");
+    writeRun(
+      forcePausedRun(id, {
+        status: "running",
+        autopilot: { status: "running", lastAction: "started", updatedAt: NOW },
+        sparkCalls: [],
+        steps: [
+          {
+            id: stepId,
+            runId: id,
+            index: 1,
+            title: "Build",
+            goal: "Build",
+            kind: "worker_batch",
+            status: "running",
+            plannedAgents: [],
+            acceptanceCriteria: [],
+            verificationCommands: [],
+            workerTaskIds: [taskId],
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+        workerTasks: [
+          {
+            id: taskId,
+            runId: id,
+            stepId,
+            title: "build the parser",
+            description: "Build the parser.",
+            status: "queued",
+            runtimePreference: "claude",
+            allowedPaths: [],
+            forbiddenPaths: [],
+            expectedOutputs: [],
+            verificationCommands: [],
+            canRunParallel: false,
+            conflictsWith: [],
+            taskClass: "verifier",
+            createdBy: "spark",
+            createdAt: NOW,
+            updatedAt: NOW,
+          },
+        ],
+        workerAttempts: [
+          {
+            id: attemptId,
+            runId: id,
+            workerTaskId: taskId,
+            attemptNumber: 1,
+            runtime: "claude",
+            cwd: HOME,
+            status: "prompt_ready",
+            createdAt: NOW,
+          },
+        ],
+      }),
+    );
+    return { id, taskId, attemptId };
+  };
+  const stopWhileLaunching = async (fixture, stop) => {
+    let releasePlan = () => {};
+    const planReached = new Promise((resolve) => {
+      globalThis.__coraWorkerPlanHook = () => {
+        resolve(true);
+        return new Promise((release) => {
+          releasePlan = release;
+        });
+      };
+    });
+    globalThis.__coraPiStarts = 0;
+    globalThis.__coraPiPrompts = 0;
+    globalThis.__coraPtyKills = [];
+    const launch = runStore
+      .launchWorkerAttempt({ runId: fixture.id, attemptId: fixture.attemptId })
+      .catch((error) => error);
+    const reached = await Promise.race([planReached, sleep(10_000).then(() => false)]);
+    await stop(fixture.id);
+    releasePlan();
+    const launchResult = await launch;
+    globalThis.__coraWorkerPlanHook = undefined;
+    const after = readRun(fixture.id);
+    return {
+      reached,
+      launchError: launchResult instanceof Error ? launchResult.message : null,
+      run: after,
+      attempt: after.workerAttempts.find((item) => item.id === fixture.attemptId),
+      task: after.workerTasks.find((item) => item.id === fixture.taskId),
+      piStarts: globalThis.__coraPiStarts,
+      piPrompts: globalThis.__coraPiPrompts,
+      ptyKills: [...globalThis.__coraPtyKills],
+    };
+  };
+
+  const pausedLaunch = await stopWhileLaunching(launchingRun("run-pause-launching"), (id) =>
+    runStore.forcePauseRun(id),
+  );
+  check("the launch reached its startup window before the Stop", pausedLaunch.reached === true);
+  check("a launch stopped mid-startup does not throw", pausedLaunch.launchError === null, pausedLaunch.launchError);
+  check("Stop during startup keeps the run paused", pausedLaunch.run.status === "paused", pausedLaunch.run.status);
+  check(
+    "Stop during startup cancels the launching attempt",
+    pausedLaunch.attempt?.status === "cancelled",
+    pausedLaunch.attempt?.status,
+  );
+  check(
+    "Stop during startup cancels its task",
+    pausedLaunch.task?.status === "cancelled",
+    pausedLaunch.task?.status,
+  );
+  check(
+    "a worker stopped during startup never starts Pi or receives its prompt",
+    pausedLaunch.piStarts === 0 && pausedLaunch.piPrompts === 0,
+    JSON.stringify({ starts: pausedLaunch.piStarts, prompts: pausedLaunch.piPrompts }),
+  );
+  check(
+    "Stop during startup closes the worker's display terminal",
+    pausedLaunch.ptyKills.includes("attempt-run-pause-launching"),
+    JSON.stringify(pausedLaunch.ptyKills),
+  );
+
+  const cancelledLaunch = await stopWhileLaunching(launchingRun("run-cancel-launching"), (id) =>
+    runStore.cancelRun({ runId: id, reason: "test cancel" }),
+  );
+  check("Cancel during startup cancels the run", cancelledLaunch.run.status === "cancelled", cancelledLaunch.run.status);
+  check(
+    "Cancel during startup cancels the launching attempt and its task",
+    cancelledLaunch.attempt?.status === "cancelled" && cancelledLaunch.task?.status === "cancelled",
+    JSON.stringify({ attempt: cancelledLaunch.attempt?.status, task: cancelledLaunch.task?.status }),
+  );
+  check(
+    "a worker cancelled during startup never receives its prompt",
+    cancelledLaunch.piPrompts === 0,
+    String(cancelledLaunch.piPrompts),
   );
 
   // ── 5. source seams ─────────────────────────────────────────────────────
