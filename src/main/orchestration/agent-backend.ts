@@ -160,6 +160,10 @@ export interface ManagerCallResult {
    * belongs. Wins over turnFailed when both could apply.
    */
   turnAborted?: boolean;
+  /** With turnAborted: the session was still streaming another turn, so this
+   *  prompt never reached the provider. Nobody stopped it; its input still
+   *  needs a turn of its own once the other one ends. */
+  sessionBusy?: boolean;
 }
 
 /** One user message handed to the manager turn that is already running. */

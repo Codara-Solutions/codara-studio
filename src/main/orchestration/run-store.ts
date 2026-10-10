@@ -7181,6 +7181,11 @@ async function askManagerBackendUnderTurnLock(
         message: result.notice ?? "Chat turn interrupted by user.",
         payload: { backend: chatConfig.backend, interrupted: true },
       });
+      // Nobody stopped a turn the session refused as busy, so no Stop path
+      // will re-drive its requeued input.
+      if (result.sessionBusy && !result.decisionAlreadyApplied) {
+        scheduleQueuedSteeringFollowup(settledRun, { explicit: true });
+      }
       return settledRun;
     }
 
@@ -15423,6 +15428,27 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
  * interrupting work or racing queued input.
  */
 export async function compactConversation(runId: string): Promise<RunState> {
+  if (runsMidAutoCompaction.has(runId)) {
+    throw new Error("This conversation is already being compacted.");
+  }
+  if (managerTurnBusy(runId)) {
+    throw new Error("Wait for Cora's current turn to finish before compacting.");
+  }
+  // The summarize call is a turn on the run's one Pi session, so it holds the
+  // manager turn lock: a turn started meanwhile queues behind it and
+  // re-decides on the state the compaction left, instead of being rejected by
+  // the session as a second concurrent turn.
+  managerTurnDepth.set(runId, (managerTurnDepth.get(runId) ?? 0) + 1);
+  try {
+    return await managerTurnLock(runId, () => compactConversationUnderTurnLock(runId));
+  } finally {
+    const depth = (managerTurnDepth.get(runId) ?? 1) - 1;
+    if (depth > 0) managerTurnDepth.set(runId, depth);
+    else managerTurnDepth.delete(runId);
+  }
+}
+
+async function compactConversationUnderTurnLock(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   if (runsMidAutoCompaction.has(runId)) {
     throw new Error("This conversation is already being compacted.");

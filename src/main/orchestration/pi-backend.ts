@@ -730,6 +730,7 @@ async function requestPiDecision(
       accountProfileId: session.accountProfileId,
       notice: "Cora is already working on a turn in this chat; this message waits for it.",
       turnAborted: true,
+      sessionBusy: true,
     };
   }
   const activeTurn: ActivePiTurn = { acceptingSteers: false, pendingSteers: new Map() };

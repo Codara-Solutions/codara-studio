@@ -918,6 +918,110 @@ async function main() {
     readRun(runM).humanMessages.filter((message) => message.message === RESENT_M).length === 2,
   );
 
+  // /compact summarizes on the run's one manager session. A message sent while
+  // it runs starts a turn that must queue behind it, not run on top of it.
+  const QUEUED_S = "Now wire the parser into the CLI";
+  const runS = writeRun(
+    pausedRun("run-compact-holds-turn-lock", {
+      status: "complete",
+      chatSessionUuid: "00000000-0000-4000-8000-0000000000c1",
+      settingsSnapshot: { workspaceCwd: HOME },
+      autopilot: { status: "complete", lastAction: "completed", updatedAt: PAUSED_AT },
+    }),
+  );
+  const enteredS = gate();
+  const releaseS = gate();
+  let inFlightS = 0;
+  let maxInFlightS = 0;
+  managerBehavior.set(runS, async (calls) => {
+    inFlightS += 1;
+    maxInFlightS = Math.max(maxInFlightS, inFlightS);
+    try {
+      if (calls.length === 1) {
+        enteredS.open();
+        await releaseS.opened;
+        return {
+          decision: {
+            status: "complete",
+            summary: "compaction",
+            chatReply: "Summary of the parser work so far. ".repeat(12),
+            steps: [],
+            tasks: [],
+          },
+          durationMs: 1,
+          model: "stub-model",
+        };
+      }
+      return completeResult();
+    } finally {
+      inFlightS -= 1;
+    }
+  });
+  const compactingS = runStore.compactConversation(runS).then(
+    () => null,
+    (error) => error,
+  );
+  check("the compaction summary call started", await gateOpened(enteredS));
+  await runStore.addRunMessage({ runId: runS, author: "user", kind: "note", message: QUEUED_S });
+  await sleep(300);
+  check(
+    "a turn started during compaction waits for it",
+    callsFor(runS).length === 1,
+    `calls=${callsFor(runS).length}`,
+  );
+  releaseS.open();
+  const compactErrorS = await compactingS;
+  await runStore.settleScheduledManagerWork(runS);
+  check("compaction and a turn never overlap", maxInFlightS === 1, `max=${maxInFlightS}`);
+  check(
+    "compaction yields to the message that arrived during it",
+    /abandoned/i.test(compactErrorS?.message ?? ""),
+    compactErrorS?.message,
+  );
+  check(
+    "the message sent during compaction is delivered once",
+    callsFor(runS).filter((call) => call.prompt.includes(QUEUED_S)).length === 1 &&
+      messageText(runS, QUEUED_S)?.deliveryState === "acknowledged",
+    JSON.stringify(messageText(runS, QUEUED_S)),
+  );
+
+  // A turn the session refused as busy was never stopped by anyone, so its
+  // requeued input needs a turn of its own afterwards.
+  const QUEUED_T = "Then add the benchmark";
+  const runT = writeRun(
+    pausedRun("run-session-busy-redrive", {
+      status: "complete",
+      autopilot: { status: "complete", lastAction: "completed", updatedAt: PAUSED_AT },
+    }),
+  );
+  managerBehavior.set(runT, async (calls) => {
+    if (calls.length === 1) {
+      return {
+        decision: {
+          status: "complete",
+          summary: "busy",
+          chatReply: "Cora is already working on a turn in this chat.",
+          steps: [],
+          tasks: [],
+        },
+        durationMs: 1,
+        model: "stub-model",
+        notice: "Cora is already working on a turn in this chat; this message waits for it.",
+        turnAborted: true,
+        sessionBusy: true,
+      };
+    }
+    return completeResult();
+  });
+  await runStore.addRunMessage({ runId: runT, author: "user", kind: "note", message: QUEUED_T });
+  await runStore.settleScheduledManagerWork(runT);
+  check(
+    "input refused by a busy session gets its own turn afterwards",
+    callsFor(runT).filter((call) => call.prompt.includes(QUEUED_T)).length === 2 &&
+      messageText(runT, QUEUED_T)?.deliveryState === "acknowledged",
+    JSON.stringify({ calls: callsFor(runT).length, message: messageText(runT, QUEUED_T) }),
+  );
+
   // ── 5d. a runtime that fails to start ───────────────────────────────────
   // The backend throwing means no provider turn ran. The message is requeued;
   // a dead login parks for Retry, a slow start is retried once, and anything
