@@ -40,7 +40,11 @@ assert.match(
   row[0],
   /worker\.runtimeState !== undefined \|\| worker\.status === "claimed" \|\| worker\.status === "running"/,
 );
-assert.match(row[0], /if \(!openWorkerTerminal\(worker\.taskId\)\) setTerminalClosed\(true\);/);
+assert.match(row[0], /if \(!openWorkerTerminal\(worker\.taskId\)\) setClosedTerminalKey\(terminalKey\);/);
+// A retry or fallback (new task id or runtime state) must re-offer the pane
+// instead of leaving the button disabled for the life of the row.
+assert.match(row[0], /const terminalKey = `\$\{worker\.taskId \?\? ""\}:\$\{worker\.runtimeState \?\? ""\}`;/);
+assert.match(row[0], /const terminalClosed = closedTerminalKey === terminalKey;/);
 assert.match(row[0], /\{terminalClosed \? "Terminal closed" : "Open terminal"\}/);
 assert.doesNotMatch(row[0], /openWorkerTerminal\(worker\.id\)/);
 

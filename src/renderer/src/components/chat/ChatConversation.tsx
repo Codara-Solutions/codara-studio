@@ -2705,7 +2705,12 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
   const openWorkerTerminal = React.useContext(WorkerTerminalContext);
-  const [terminalClosed, setTerminalClosed] = useState(false);
+  // "Closed" holds only for the task and runtime state it was observed on: a
+  // retry or a runtime fallback opens a new pane, and a row the virtualizer
+  // keeps mounted must offer it again rather than stay disabled.
+  const terminalKey = `${worker.taskId ?? ""}:${worker.runtimeState ?? ""}`;
+  const [closedTerminalKey, setClosedTerminalKey] = useState<string | null>(null);
+  const terminalClosed = closedTerminalKey === terminalKey;
   const hasLiveAttempt =
     worker.runtimeState !== undefined || worker.status === "claimed" || worker.status === "running";
   const canOpenTerminal = Boolean(openWorkerTerminal && worker.taskId && hasLiveAttempt);
@@ -2739,7 +2744,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
             title={terminalClosed ? "This worker's terminal is closed" : "Open this worker's terminal"}
             onClick={() => {
               if (!worker.taskId || !openWorkerTerminal) return;
-              if (!openWorkerTerminal(worker.taskId)) setTerminalClosed(true);
+              if (!openWorkerTerminal(worker.taskId)) setClosedTerminalKey(terminalKey);
             }}
           >
             {terminalClosed ? "Terminal closed" : "Open terminal"}
