@@ -1545,6 +1545,94 @@ async function main() {
         /verify async contract/.test(failedVerifierComplete.error?.message ?? ""),
       JSON.stringify(failedVerifierComplete).slice(0, 240),
     );
+    check(
+      "the refusal names the accept_unverified exit and the blocking verifier id",
+      /accept_unverified/.test(failedVerifierComplete.error?.message ?? "") &&
+        /wt-verifier/.test(failedVerifierComplete.error?.message ?? ""),
+      JSON.stringify(failedVerifierComplete).slice(0, 400),
+    );
+
+    // An adjudicated out-of-contract verdict must not wedge the run: the
+    // manager overrules it explicitly, naming every blocking verifier, and the
+    // run lands with the implementation step labelled completed_unverified.
+    fabricateRun("run-overrule", {
+      ...liveManagerTurn("run-overrule", "spark-overrule"),
+      chatMode: "execute",
+      steps: [
+        { id: "step-impl", title: "implement", status: "complete", createdAt: "2026-07-18T09:59:00.000Z", updatedAt: "2026-07-18T10:00:00.000Z" },
+        { id: "step-verify", title: "verify", status: "complete", createdAt: "2026-07-18T10:00:00.000Z", updatedAt: "2026-07-18T10:01:00.000Z" },
+      ],
+      workerTasks: [
+        { id: "wt-ov-impl", stepId: "step-impl", title: "implement async contract", status: "accepted", taskClass: "feature" },
+        {
+          id: "wt-ov-verifier",
+          stepId: "step-verify",
+          title: "verify async contract",
+          status: "accepted",
+          taskClass: "verifier",
+          autoVerifierForTaskId: "wt-ov-impl",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-ov-impl",
+          workerTaskId: "wt-ov-impl",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: implementationReportPath,
+        },
+        {
+          id: "attempt-ov-verifier",
+          workerTaskId: "wt-ov-verifier",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:01:00.000Z",
+          finalReportPath: verifierReportPath,
+        },
+      ],
+    });
+    const overruleNoReason = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: " ", overruled_verifier_task_ids: ["wt-ov-verifier"] },
+    });
+    check(
+      "accept_unverified requires a reason",
+      /reason must say why/.test(overruleNoReason.error?.message ?? ""),
+      JSON.stringify(overruleNoReason).slice(0, 240),
+    );
+    const overruleWrongId = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: "out of contract", overruled_verifier_task_ids: ["wt-ov-impl"] },
+    });
+    check(
+      "accept_unverified must list every blocking verifier",
+      /must list every blocking verifier/.test(overruleWrongId.error?.message ?? "") &&
+        /wt-ov-verifier/.test(overruleWrongId.error?.message ?? ""),
+      JSON.stringify(overruleWrongId).slice(0, 300),
+    );
+    const overruled = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "Implemented the async contract.",
+      accept_unverified: {
+        reason: "The verifier demanded unicode handling the brief never asked for.",
+        overruled_verifier_task_ids: ["wt-ov-verifier"],
+      },
+    });
+    const overruledSnapshot = JSON.parse(
+      fs.readFileSync(path.join(HOME, "runs", "run-overrule", "run.json"), "utf8"),
+    );
+    check(
+      "accept_unverified lands the run as completed_unverified with the reason disclosed",
+      Boolean(overruled.result?.ok) &&
+        overruledSnapshot.status === "complete" &&
+        overruledSnapshot.steps.find((step) => step.id === "step-impl")?.status === "completed_unverified" &&
+        overruledSnapshot.humanMessages.some((message) =>
+          /Landed unverified: Cora overruled "verify async contract"\. Reason: The verifier demanded unicode/.test(message.message)),
+      JSON.stringify({ overruled, steps: overruledSnapshot.steps }).slice(0, 500),
+    );
 
     // Deadlock-avoidance: a task stuck at "created" (prepareWorkerTask never
     // succeeded, or a user hand-added task that was never launched) must NOT

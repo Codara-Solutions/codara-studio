@@ -1390,6 +1390,25 @@ const EXECUTE_TOOLS = [
           type: "string",
           description: "Optional human-readable summary to attach as a system note.",
         },
+        accept_unverified: {
+          type: "object",
+          description:
+            "Only after you adjudicated a FEEDBACK/FAILED verifier verdict as out of contract, or after verification_cap_reached: land the work anyway as completed_unverified. List every blocking verifier you overrule; the reason is appended to the summary the user sees. Never use it to skip verification of work no verifier has judged.",
+          required: ["reason", "overruled_verifier_task_ids"],
+          properties: {
+            reason: {
+              type: "string",
+              description: "Why each overruled verdict does not apply (for example: claims outside the brief's acceptance criteria).",
+            },
+            overruled_verifier_task_ids: {
+              type: "array",
+              minItems: 1,
+              items: { type: "string" },
+              description: "Task ids of every non-passing verifier over the current workspace.",
+            },
+          },
+          additionalProperties: false,
+        },
       },
       additionalProperties: false,
     },

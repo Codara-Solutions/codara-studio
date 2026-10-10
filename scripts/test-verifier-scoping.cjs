@@ -291,6 +291,33 @@ async function main() {
     results.push("a failing scope blocks completion even when its siblings pass");
   }
   {
+    // codara_complete's accept_unverified must name EVERY blocking verifier,
+    // so the gate reports all of them with their task ids.
+    const twoRed = await describeVerificationFreshness(splitRound(["FAILED", "VERIFIED", "FEEDBACK"]));
+    assert.equal(twoRed.ok, false);
+    assert.deepEqual(
+      twoRed.blockingVerifiers,
+      [
+        { taskId: "v0", confidence: "FAILED", title: "Verify scope 0" },
+        { taskId: "v2", confidence: "FEEDBACK", title: "Verify scope 2" },
+      ],
+    );
+    const green = await describeVerificationFreshness(splitRound(["VERIFIED"]));
+    assert.deepEqual(green.blockingVerifiers, []);
+    results.push("every blocking verifier is listed for an explicit overrule");
+  }
+
+  check("codara_complete exposes the accept_unverified overrule and the socket enforces it", () => {
+    const server = read("resources/codara-studio-mcp/server.js");
+    assert.match(server, /accept_unverified: \{[\s\S]*?overruled_verifier_task_ids/);
+    const socket = read("src/main/agent-socket.ts");
+    assert.match(socket, /function parseAcceptUnverified\(/);
+    assert.match(socket, /must list every blocking verifier/);
+    assert.match(socket, /codara_complete accept_unverified/, "the verification cap note names the exit");
+    const prompt = read("resources/pi-cora/prompt.ts");
+    assert.match(prompt, /accept_unverified/);
+  });
+  {
     // The normal ping-pong must still terminate: an old FEEDBACK answered by a
     // newer corrective edit is superseded, not permanently blocking.
     reports.clear();

@@ -4550,6 +4550,8 @@ export interface RunVerificationFreshness {
    * the verdict for the round.
    */
   blockingVerifier: { confidence: string; title: string } | null;
+  /** Every non-passing verifier over the current tree, for a manager overrule. */
+  blockingVerifiers: Array<{ taskId: string; confidence: string; title: string }>;
 }
 
 /**
@@ -4569,7 +4571,7 @@ export async function describeVerificationFreshness(
 ): Promise<RunVerificationFreshness> {
   let latestChangedImplementationAt = 0;
   let latestVerifierConfidence: string | null = null;
-  const verdicts: Array<{ at: number; confidence: string; title: string }> = [];
+  const verdicts: Array<{ at: number; confidence: string; title: string; taskId: string }> = [];
   for (const attempt of run.workerAttempts ?? []) {
     if (!attempt.finalReportPath) continue;
     const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
@@ -4579,7 +4581,7 @@ export async function describeVerificationFreshness(
     const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
     if (task.taskClass === "verifier" && report.verifier) {
       latestVerifierConfidence = report.verifier.confidence;
-      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title });
+      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title, taskId: task.id });
     } else if (report.filesChanged.length > 0) {
       latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
     }
@@ -4599,7 +4601,8 @@ export async function describeVerificationFreshness(
   // That was mostly latent while every verifier covered the whole surface;
   // splitting a round into disjoint scopes makes "one shard fails" the
   // expected case, so the gate has to see the whole round, not its best member.
-  const blocking = current.find((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence)) ?? null;
+  const blockingVerdicts = current.filter((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence));
+  const blocking = blockingVerdicts[0] ?? null;
   return {
     ok:
       latestChangedImplementationAt === 0 ||
@@ -4608,6 +4611,11 @@ export async function describeVerificationFreshness(
     latestChangedImplementationAt,
     latestPassingVerifierAt,
     blockingVerifier: blocking ? { confidence: blocking.confidence, title: blocking.title } : null,
+    blockingVerifiers: [
+      ...new Map(
+        blockingVerdicts.map((v) => [v.taskId, { taskId: v.taskId, confidence: v.confidence, title: v.title }]),
+      ).values(),
+    ],
   };
 }
 
@@ -12198,9 +12206,22 @@ export interface CodaraCompleteApplicationOutcome {
 export async function applyCodaraCompleteFromManagerCall(input: {
   runId: string;
   summary: string;
+  /** The manager overruled non-passing verifiers (validated by the caller). */
+  acceptUnverified?: { reason: string; overruledVerifierTaskIds: string[] };
 }): Promise<CodaraCompleteApplicationOutcome> {
   const run = await requireRun(input.runId);
-  const summary = canonicalCodaraCompleteSummary(input.summary);
+  const overruled = input.acceptUnverified
+    ? run.workerTasks.filter((task) => input.acceptUnverified!.overruledVerifierTaskIds.includes(task.id))
+    : [];
+  // The overrule is disclosed in the user-visible summary, so a run that
+  // landed against a verifier never reads as a verified success.
+  const overruleNote = input.acceptUnverified
+    ? `Landed unverified: Cora overruled ${overruled.map((task) => `"${task.title}"`).join(", ")}. ` +
+      `Reason: ${input.acceptUnverified.reason.trim()}`
+    : "";
+  const summary = canonicalCodaraCompleteSummary(
+    overruleNote ? `${input.summary.trim()}\n\n${overruleNote}`.trim() : input.summary,
+  );
   const payloadSha256 = hashCodaraCompletePayload(summary);
   let outcome: Omit<CodaraCompleteApplicationOutcome, "run"> | undefined;
   const eventPayload: Record<string, unknown> = {
@@ -12295,6 +12316,29 @@ export async function applyCodaraCompleteFromManagerCall(input: {
           : {}),
       };
       call.applicationReceipts = [receipt];
+
+      if (overruled.length > 0) {
+        // An auto-spawned verifier may sit on its own step; the work it judged
+        // is on the implementation task's step, which must carry the label.
+        const overruledStepIds = new Set(
+          overruled
+            .flatMap((task) => [
+              task.stepId,
+              draft.workerTasks.find((candidate) => candidate.id === task.autoVerifierForTaskId)?.stepId,
+            ])
+            .filter((stepId): stepId is string => Boolean(stepId)),
+        );
+        for (const step of draft.steps) {
+          if (!overruledStepIds.has(step.id)) continue;
+          if (step.status === "failed" || step.status === "skipped") continue;
+          step.status = "completed_unverified";
+          step.updatedAt = timestamp;
+        }
+        eventPayload.acceptUnverified = {
+          reason: input.acceptUnverified!.reason.trim(),
+          overruledVerifierTaskIds: overruled.map((task) => task.id),
+        };
+      }
 
       delete draft.blockedOn;
       abandonRunQuestionOwnership(draft);

@@ -2842,7 +2842,8 @@ async function handleOrchestratorSpawnWorkers(
       const capNote =
         `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
         `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
-        "the implementation now (it lands as completed_unverified carrying the existing verifier caveats) " +
+        "the implementation now with codara_complete accept_unverified (a reason plus the task ids of the " +
+        "verifiers you overrule; it lands as completed_unverified with the reason in the summary) " +
         "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
         "treat that as an environmental caveat, not a code failure.";
       if (requestedVerifiers.length === workerEntries.length) {
@@ -3489,6 +3490,24 @@ function summaryDisclosesPath(summary: string, path: string): boolean {
   return base.length > 2 && haystack.includes(base);
 }
 
+/** Parsed accept_unverified, null when absent, or an error message. */
+function parseAcceptUnverified(
+  value: unknown,
+): { reason: string; overruledVerifierTaskIds: string[] } | null | string {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return "accept_unverified must be an object with reason and overruled_verifier_task_ids.";
+  }
+  const raw = value as Record<string, unknown>;
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const ids = Array.isArray(raw.overruled_verifier_task_ids)
+    ? raw.overruled_verifier_task_ids.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (!reason) return "accept_unverified.reason must say why the verifier verdicts are overruled.";
+  if (ids.length === 0) return "accept_unverified.overruled_verifier_task_ids must list the verifier task ids you overrule.";
+  return { reason: reason.slice(0, 2_000), overruledVerifierTaskIds: ids.map((item) => item.trim()) };
+}
+
 async function handleOrchestratorComplete(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -3575,7 +3594,35 @@ async function handleOrchestratorComplete(
   // orchestrator-side terminal hops that complete a run when this tool never
   // arrives, so a manager that skips codara_complete cannot skip the rule.
   const verification = await runStore.describeVerificationFreshness(run);
-  if (!verification.ok) {
+  const acceptUnverified = parseAcceptUnverified(params.accept_unverified);
+  if (typeof acceptUnverified === "string") {
+    return errorResponse(id, ERR_INVALID_PARAMS, acceptUnverified);
+  }
+  // The overrule exit exists so a verdict the manager adjudicated as out of
+  // contract cannot wedge the run. It must name every blocking verifier, so a
+  // second failing shard is never waved through by overruling the first.
+  if (!verification.ok && acceptUnverified) {
+    const listed = new Set(acceptUnverified.overruledVerifierTaskIds);
+    const missing = verification.blockingVerifiers.filter((verifier) => !listed.has(verifier.taskId));
+    if (verification.blockingVerifiers.length === 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: no verifier returned a non-passing verdict over the current workspace; " +
+          "the work simply has not been verified yet. Spawn a read-only verifier, or ask the user.",
+      );
+    }
+    if (missing.length > 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: overruled_verifier_task_ids must list every blocking verifier. Missing: " +
+          missing.map((verifier) => `"${verifier.title}" (${verifier.taskId}, ${verifier.confidence})`).join(", ") +
+          ".",
+      );
+    }
+  }
+  if (!verification.ok && !acceptUnverified) {
     // A failing verifier over the current tree is named explicitly, because
     // with a scope-split round the manager may be looking at one or more GREEN
     // sibling reports and reasonably believe the round passed.
@@ -3586,7 +3633,9 @@ async function handleOrchestratorComplete(
         ? `Cannot complete: "${verification.blockingVerifier.title}" returned ` +
             `${verification.blockingVerifier.confidence} over the current workspace. A passing verdict from ` +
             "another verifier in the same round does not cover its scope. Address its FEEDBACK/FAILED claims, " +
-            "then re-verify the corrected workspace before calling codara_complete."
+            "then re-verify the corrected workspace before calling codara_complete. If you adjudicated its claims as " +
+            "out of contract, call codara_complete with accept_unverified naming " +
+            `${verification.blockingVerifiers.map((verifier) => verifier.taskId).join(", ")}.`
         : "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
             `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
             "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
@@ -3619,6 +3668,7 @@ async function handleOrchestratorComplete(
     const applied = await runStore.applyCodaraCompleteFromManagerCall({
       runId,
       summary,
+      ...(!verification.ok && acceptUnverified ? { acceptUnverified } : {}),
     });
     return successResponse(id, applied.result);
   } catch (err) {
