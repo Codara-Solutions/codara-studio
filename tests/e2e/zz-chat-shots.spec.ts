@@ -146,13 +146,39 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
       await expect(page.getByRole("textbox", { name: "Message Cora" }).last()).toBeVisible();
       await shoot(page, "long", size.name);
     }
+
+    // The complaint's window was short as well as narrow: the composer must
+    // stay whole when the panel loses height.
+    await applySize(page, { name: "short", panelWidth: 680, height: 600 });
+    await openChat(page, "Autopilot manager loop");
+    await expect(page.locator('[data-message-author="user"]').last()).toBeVisible({ timeout: 15_000 });
+    const composer = await page.getByRole("textbox", { name: "Message Cora" }).locator("visible=true").last().boundingBox();
+    const viewport = page.viewportSize();
+    expect((composer?.y ?? 0) + (composer?.height ?? 0)).toBeLessThanOrEqual((viewport?.height ?? 0) - 8);
+    await shoot(page, "paused-auth", "short");
+
+    await page.evaluate(() => {
+      document.documentElement.dataset.theme = "codara-daylight";
+      document.documentElement.dataset.themeMode = "light";
+    });
+    await applySize(page, SIZES[1]);
+    await shoot(page, "paused-auth", "wide-light");
+    await openChat(page, "Manager loop design");
+    await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Rollout plan", {
+      timeout: 15_000,
+    });
+    await scrollConversation(page, "top");
+    await shoot(page, "markdown", "wide-light");
+    await openChat(page, "Ship the run-store refactor");
+    await scrollConversation(page, "bottom");
+    await shoot(page, "running", "wide-light");
   } finally {
     await app?.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-type Size = (typeof SIZES)[number];
+type Size = { name: string; height: number } & ({ panelWidth: number } | { windowWidth: number });
 
 async function applySize(page: Page, size: Size): Promise<void> {
   if ("windowWidth" in size) {
