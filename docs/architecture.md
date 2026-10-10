@@ -142,7 +142,9 @@ launch.
 `resources/pi-cora/index.ts`. It is reused from turn to turn until a
 launch setting changes (account, model, effort, mode, policy, fast mode), and
 the restart note names what changed. After an interrupt the same process is
-reused once Pi confirms it is idle. A manager process idle for 10 minutes is
+reused once Pi confirms it is idle, unless Pi had not yet accepted the
+interrupted prompt (Pi would start that prompt's run after the abort). A
+manager process idle for 10 minutes is
 stopped, and at most 4 stay alive at once (the least recently used idle one
 goes first); the next turn starts a fresh process on the saved session. If
 the process crashes mid-turn, the turn fails at once with Pi's stderr in the
