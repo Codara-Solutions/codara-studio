@@ -280,11 +280,19 @@ function sortedEqual(actual, expected, label) {
       /action `replace`/,
       "codara_remember must tell the manager to consolidate with replace when the file is full",
     );
+    // worker-prompt.ts renderWorkerMemorySection hands chat workers a
+    // read-only copy and skips automation runs; the description must say so.
     assert.match(
       remember.description,
-      /Workers do NOT see memory/,
-      "codara_remember must tell the manager to copy relevant memory into worker descriptions",
+      /Workers in chat runs receive a read-only copy of this memory/,
+      "codara_remember must say chat workers already receive memory",
     );
+    assert.match(remember.description, /Automation workers do not see memory/);
+    assert.doesNotMatch(remember.description, /do NOT see memory/);
+    for (const name of ["codara_name_chat"]) {
+      const tool = execute.definitions.find((candidate) => candidate.name === name);
+      assert.doesNotMatch(tool.description, /Call this EARLY/, `${name} must not demand its own early round trip`);
+    }
 
     const directMemory = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1" });
     sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");

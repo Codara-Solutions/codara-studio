@@ -909,7 +909,7 @@ const STEP_ACTION_SCHEMA = {
 const GRAPH_SCHEMA = {
   type: "object",
   description:
-    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify); its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
+    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a Pi worker on a prompt; 'step' runs a deterministic action with NO AI (shell command, inline python/node/bash script, HTTP request, write file, notify); its stdout/response becomes its output; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. A loom may be steps-only (no worker at all), e.g. run a script on a cron and notify. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges), {{lastOutput}} (the previous pass's summary).",
   required: ["version", "nodes", "edges", "entryNodeIds"],
   properties: {
     version: { type: "number", enum: [1] },
@@ -1003,7 +1003,7 @@ const AUTOMATION_TOOLS = [
         loop: LOOP_SCHEMA,
         prompt_template: {
           type: "string",
-          description: "The instruction a single-worker loom runs each iteration (required when no graph is given). With a graph, each worker node carries its own prompt and this is ignored; omit it for a steps-only graph. Supports {{var}}/{{node:id}}/{{incoming}} tokens.",
+          description: "The instruction a single-worker loom runs each iteration (required when no graph is given). With a graph, each worker node carries its own prompt and this is ignored; omit it for a steps-only graph. Supports {{var}}/{{node:id}}/{{incoming}} tokens, and {{lastOutput}} (the previous pass's summary) so a looping worker continues instead of starting over. Without that token, passes after the first get the previous summary appended.",
         },
         worker: WORKER_SCHEMA,
         graph: GRAPH_SCHEMA,
@@ -1026,7 +1026,7 @@ const AUTOMATION_TOOLS = [
         name: { type: "string" },
         trigger: TRIGGER_SCHEMA,
         loop: LOOP_SCHEMA,
-        prompt_template: { type: "string" },
+        prompt_template: { type: "string", description: "Replacement prompt for a single-worker loom. Supports the same tokens as codara_create_automation, including {{lastOutput}}." },
         worker: WORKER_SCHEMA,
         graph: GRAPH_SCHEMA,
       },
@@ -1118,7 +1118,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY, right after you understand what the user wants automated, and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
+      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Codara already derives a title from the first message, so call this only when that title is wrong or the topic shifts substantially, in the same step as another tool call rather than as its own round trip. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1397,7 +1397,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_name_chat",
     description:
-      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY, once the goal for the session is clear, and again if the topic shifts substantially. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
+      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Codara already derives a title from the first message, so call this only when that title is wrong or the topic shifts substantially, in the same step as your first inspection call rather than as its own round trip. The title shows live in the chat panel header and the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -1421,7 +1421,7 @@ const EXECUTE_TOOLS = [
       "Write a durable fact to Cora's memory so a LATER session starts already knowing it. Two tiers, each a plain markdown file the user can open and edit: `global` for facts about the user and this machine (preferences, how they want you to work, installed tooling), `workspace` for facts about this repository (a verified command, an environment gotcha, a convention the repo does not state). " +
       "Remember only when one of three things happened: the user corrected you or stated a durable preference, an environmental fact cost a worker an attempt or a retry, or a repo-specific command or gotcha was verified to work. Never remember task status, one-off details, or anything a later session could read out of the repo itself. One plain sentence per memory, no provenance tags, at most a couple of memories per run. " +
       "Each file is capped at 4096 bytes and starts warning near 3277. When the result reports the file is full, do NOT skip the write: re-read the file, merge and shorten the existing lines, and call this tool again with action `replace` and the complete new body. `replace` rewrites the whole file, so it must carry forward every line still worth keeping; lines the user wrote by hand are preserved unless you pass confirm_drop_user_lines. " +
-      "Workers do NOT see memory. When a remembered fact matters for a task you are delegating, copy that line into the worker's description.",
+      "Workers in chat runs receive a read-only copy of this memory and the active profile; do not copy memory lines into worker briefs. Automation workers do not see memory.",
     inputSchema: {
       type: "object",
       required: ["scope", "action"],
