@@ -3846,13 +3846,16 @@ async function handleOrchestratorWaitForWorkers(
           // An accepted implementation whose declared verifier has not been
           // minted yet is NOT settled: the auto-spawn is imminent, and
           // returning "all_terminal" in that gap would hand the manager a
-          // wait result missing the verdict its brief paid for. A no-files
-          // report never spawns one, so it stays terminal.
+          // wait result missing the verdict its brief paid for. The harness
+          // spawns one only for a complete report that changed files; a
+          // partial or blocked report accepted by the execute-mode cycle
+          // never gets one, and holding for it froze the wait to its timeout.
           !(
             task != null &&
             task.taskClass !== "verifier" &&
             typeof task.verifierBrief === "string" &&
             task.status === "accepted" &&
+            report?.status === "complete" &&
             (report?.filesChanged.length ?? 0) > 0 &&
             !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
           ) &&

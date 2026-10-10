@@ -1237,6 +1237,52 @@ async function main() {
       JSON.stringify(waitedDeclared).slice(0, 280),
     );
 
+    // The harness spawns a declared verifier only for a complete report. A
+    // partial one the execute-mode cycle accepted never gets a verifier, so a
+    // wait holding for it froze Cora until the timeout (run-mv1b57e8).
+    const partialReportPath = path.join(HOME, "partial-report.json");
+    fs.writeFileSync(partialReportPath, JSON.stringify({
+      status: "partial",
+      summary: "Wrote the script; python was not on PATH.",
+      files_changed: [{ path: "tool.py", reason: "the requested script" }],
+      proof: [],
+      risks: [],
+      followups: [],
+    }));
+    fabricateRun("run-declared-partial-wait", {
+      chatMode: "execute",
+      workerTasks: [
+        {
+          id: "wt-partial-impl",
+          title: "write the script",
+          status: "accepted",
+          taskClass: "feature",
+          verifierBrief: "Run the script on the sample input.",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-partial-impl",
+          workerTaskId: "wt-partial-impl",
+          status: "succeeded",
+          runtime: "codex",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: partialReportPath,
+        },
+      ],
+    });
+    const waitedPartial = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-declared-partial-wait",
+      worker_task_ids: ["wt-partial-impl"],
+      timeout_ms: 5000,
+    });
+    check(
+      "wait_for_workers returns a partial report instead of holding for a verifier that never spawns",
+      waitedPartial.result?.reason === "all_terminal" &&
+        waitedPartial.result?.workers?.[0]?.final_report?.status === "partial",
+      JSON.stringify(waitedPartial).slice(0, 280),
+    );
+
     // Runtime fallback lineage: waiting on the cancelled predecessor must
     // transparently follow the system replacement. Otherwise the manager sees
     // a terminal cancellation, spawns another verifier, and duplicates work.
