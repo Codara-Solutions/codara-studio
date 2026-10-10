@@ -117,6 +117,10 @@ The two picker chords always open the pickers of a Cora chat.
 chat: it ends the current turn and stops its live workers, keeping the
 conversation and finished work. It does nothing when that chat is idle.
 
+Mod+F with focus in the Cora panel opens find for that conversation (Enter
+and Shift+Enter step through matches, Escape closes it). It is not a
+rebindable command; editors and terminals keep their own Mod+F.
+
 On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 `agent.cycleModel` if the window minimizes instead.
 
