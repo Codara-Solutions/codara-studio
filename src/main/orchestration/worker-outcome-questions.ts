@@ -11,6 +11,7 @@
 // Pure and dependency-light so the parser can be pinned in a node harness
 // without bundling the run store.
 
+import type { RunManagerPlanMilestone } from "@shared/types";
 import type { SparkManagerQuestionOption } from "./manager-protocol";
 
 export const UNVERIFIED_COMPLETION_QUESTION =
@@ -87,6 +88,38 @@ export const UNFINISHED_WORKER_OPTIONS: SparkManagerQuestionOption[] = [
     label: "Stop here",
     description: "Keep what is done and wrap up.",
     answer: "Stop here: keep the work that is done and summarize what is left.",
+    recommended: false,
+  },
+];
+
+// Asked when every worker task settled but Cora's own recorded plan still has
+// open milestones, and her turn ended without codara_complete. The plan is her
+// definition of done, so the run is not complete; the answer goes to her next
+// turn as ordinary text.
+export function openPlanMilestonesQuestion(
+  milestones: ReadonlyArray<Pick<RunManagerPlanMilestone, "id" | "title">>,
+): string {
+  const listed = milestones
+    .slice(0, 6)
+    .map((milestone) => `${milestone.id} "${milestone.title}"`)
+    .join(", ");
+  const more = milestones.length > 6 ? ` and ${milestones.length - 6} more` : "";
+  return `The work so far is done, but my plan still has ${milestones.length} open milestone${milestones.length === 1 ? "" : "s"}: ${listed}${more}. Should I continue with ${milestones.length === 1 ? "it" : "them"}?`;
+}
+
+export const OPEN_PLAN_MILESTONES_OPTIONS: SparkManagerQuestionOption[] = [
+  {
+    id: "continue_open_milestones",
+    label: "Continue",
+    description: "Carry on with the open milestones of the plan.",
+    answer: "Continue with the open milestones of the plan.",
+    recommended: true,
+  },
+  {
+    id: "stop_at_finished_milestones",
+    label: "Stop here",
+    description: "Keep what is done and wrap up.",
+    answer: "Stop here: mark the open milestones deferred, keep the work that is done and summarize what is left.",
     recommended: false,
   },
 ];

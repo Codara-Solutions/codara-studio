@@ -17,6 +17,8 @@ import type { RunState } from "@shared/types";
  * or cancelled worker task, or a task still awaiting review is a decision the
  * user or the manager still owes, and startAutopilot already has accurate
  * questions for those. Only unanimous success terminalizes without a human.
+ * The one exception is a failed, blocked or cancelled task that a later
+ * accepted task replaced (supersededTaskIds): that decision was already made.
  *
  * Unverified success is not success either. `completed_unverified` and
  * `forceAccepted` are the honest markers the force-accept paths leave when work
@@ -51,6 +53,41 @@ export interface RunSettlement {
   blockedBy?: string;
 }
 
+const REPLACEABLE_TASK_STATUSES = new Set(["failed", "blocked", "cancelled"]);
+
+/**
+ * Failed, blocked or cancelled tasks that a later, cleanly accepted task
+ * replaced through its supersedesTaskId / followUpOfTaskId lineage. Cora
+ * continuing a partial worker with follow_up_of, or a retry superseding a
+ * failed one, resolves the original: its outcome is no longer a decision
+ * anyone owes.
+ */
+export function supersededTaskIds(run: Pick<RunState, "workerTasks">): Set<string> {
+  const byId = new Map(run.workerTasks.map((task) => [task.id, task]));
+  const superseded = new Set<string>();
+  for (const task of run.workerTasks) {
+    if (task.status !== "accepted" || task.forceAccepted === true) continue;
+    const seen = new Set([task.id]);
+    let parentId = task.supersedesTaskId ?? task.followUpOfTaskId;
+    while (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      const parent = byId.get(parentId);
+      if (!parent) break;
+      if (REPLACEABLE_TASK_STATUSES.has(parent.status)) superseded.add(parent.id);
+      parentId = parent.supersedesTaskId ?? parent.followUpOfTaskId;
+    }
+  }
+  return superseded;
+}
+
+/** Failed, blocked or cancelled tasks nothing has replaced yet. */
+export function unresolvedWorkerTasks(run: Pick<RunState, "workerTasks">): RunState["workerTasks"] {
+  const superseded = supersededTaskIds(run);
+  return run.workerTasks.filter(
+    (task) => REPLACEABLE_TASK_STATUSES.has(task.status) && !superseded.has(task.id),
+  );
+}
+
 export function describeRunSettlement(run: RunState): RunSettlement {
   // Direct (loom) runs are finalized by finalizeDirectRun, never by a manager.
   if (run.executionMode === "direct") return { settled: false, reason: "direct_run" };
@@ -61,15 +98,36 @@ export function describeRunSettlement(run: RunState): RunSettlement {
   // finished; the plan/chat paths own it.
   if (run.steps.length === 0) return { settled: false, reason: "no_steps" };
 
-  const unverifiedStep = run.steps.find((step) => UNVERIFIED_STEP_STATUSES.has(step.status));
+  const superseded = supersededTaskIds(run);
+  // A step left completed_unverified or failed by a worker that a later
+  // accepted task replaced (often in a new step) holds no open decision once
+  // every one of its tasks is either cleanly accepted or replaced.
+  const replacedStep = (step: RunState["steps"][number]): boolean => {
+    if (step.status !== "completed_unverified" && step.status !== "failed") return false;
+    const stepTasks = run.workerTasks.filter((task) => task.stepId === step.id);
+    return (
+      stepTasks.some((task) => superseded.has(task.id)) &&
+      stepTasks.every(
+        (task) =>
+          superseded.has(task.id) || (task.status === "accepted" && task.forceAccepted !== true),
+      )
+    );
+  };
+  const unverifiedStep = run.steps.find(
+    (step) => UNVERIFIED_STEP_STATUSES.has(step.status) && !replacedStep(step),
+  );
   if (unverifiedStep) {
     return { settled: false, reason: "step_unverified", blockedBy: unverifiedStep.id };
   }
-  const unfinishedStep = run.steps.find((step) => !SUCCEEDED_STEP_STATUSES.has(step.status));
+  const unfinishedStep = run.steps.find(
+    (step) => !SUCCEEDED_STEP_STATUSES.has(step.status) && !replacedStep(step),
+  );
   if (unfinishedStep) {
     return { settled: false, reason: "step_unfinished", blockedBy: unfinishedStep.id };
   }
-  const unfinishedTask = run.workerTasks.find((task) => task.status !== "accepted");
+  const unfinishedTask = run.workerTasks.find(
+    (task) => task.status !== "accepted" && !superseded.has(task.id),
+  );
   if (unfinishedTask) {
     return { settled: false, reason: "worker_task_unfinished", blockedBy: unfinishedTask.id };
   }

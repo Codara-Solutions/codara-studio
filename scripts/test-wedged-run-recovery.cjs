@@ -303,6 +303,45 @@ async function main() {
     }),
     "worker_task_unfinished",
   );
+  // A partial worker that Cora continued with follow_up_of in a new step is
+  // decided: the follow-up was accepted, so the earlier step holds nothing.
+  const continuedRun = (id, followUp = {}) =>
+    wedgedRun(id, {
+      steps: [step("step-1", "completed_unverified"), step("step-2", "complete")],
+      workerTasks: [
+        task("task-1", "blocked", "step-1"),
+        { ...task("task-2", "accepted", "step-2"), followUpOfTaskId: "task-1", ...followUp },
+      ],
+      workerAttempts: [attempt("att-1", "succeeded", "task-1"), attempt("att-2", "succeeded", "task-2")],
+    });
+  check(
+    "a blocked task replaced by an accepted follow-up settles",
+    isRunSettled(continuedRun("run-k5")) === true,
+    JSON.stringify(describeRunSettlement(continuedRun("run-k5"))),
+  );
+  check(
+    "a failed task superseded by an accepted retry settles",
+    isRunSettled(
+      wedgedRun("run-k6", {
+        steps: [step("step-1", "failed"), step("step-2", "complete")],
+        workerTasks: [
+          task("task-1", "failed", "step-1"),
+          { ...task("task-2", "accepted", "step-2"), supersedesTaskId: "task-1" },
+        ],
+        workerAttempts: [attempt("att-1", "failed", "task-1"), attempt("att-2", "succeeded", "task-2")],
+      }),
+    ) === true,
+  );
+  notSettled(
+    "a blocked task with an unlinked later success is not settled",
+    continuedRun("run-k7", { followUpOfTaskId: undefined }),
+    "step_unverified",
+  );
+  notSettled(
+    "a force-accepted follow-up does not replace the blocked task",
+    continuedRun("run-k8", { forceAccepted: true }),
+    "step_unverified",
+  );
   check("a skipped step still counts as finished", isRunSettled(
     wedgedRun("run-l", { steps: [step("step-1", "skipped")] }),
   ) === true);
@@ -358,6 +397,66 @@ async function main() {
     "post-turn hop leaves an unfinished run alone",
     afterPending.status !== "complete",
     afterPending.status,
+  );
+
+  // A partial worker nobody continued leaves only an unverified step. Nothing
+  // remains to run, so the question names that worker instead of claiming the
+  // remaining steps wait on a blocker.
+  const partialReport = path.join(HOME, "runs", "run-partial-only", "final-report.json");
+  const partialId = writeRun(
+    wedgedRun("run-partial-only", {
+      steps: [step("step-1", "completed_unverified")],
+      workerTasks: [task("task-1", "blocked")],
+      workerAttempts: [
+        { ...attempt("att-1", "succeeded", "task-1"), finishedAt: NOW, finalReportPath: partialReport },
+      ],
+    }),
+  );
+  fs.mkdirSync(path.dirname(partialReport), { recursive: true });
+  fs.writeFileSync(
+    partialReport,
+    JSON.stringify({ status: "partial", summary: "half the endpoints", filesChanged: [] }),
+  );
+  await runStore.startAutopilot({ workspaceId: WS, workspaceName: "partial", cwd: HOME, runId: partialId });
+  const afterPartial = readRun(partialId);
+  const partialQuestion = (afterPartial.humanMessages || []).filter((m) => m.kind === "question").at(-1);
+  check(
+    "an unverified-only run asks about the unfinished worker",
+    afterPartial.status === "blocked" &&
+      /only finished part of its task/.test(partialQuestion?.message ?? "") &&
+      !/None of the remaining steps/.test(partialQuestion?.message ?? ""),
+    partialQuestion?.message,
+  );
+
+  // A settled run whose recorded plan still has open milestones is not done:
+  // the hop asks instead of completing after the first green slice.
+  const openPlanId = writeRun(
+    wedgedRun("run-open-plan-live", {
+      managerPlan: {
+        goal: "Ship auth, billing and docs",
+        milestones: [
+          { id: "m1", title: "Auth", status: "done", note: "tests pass" },
+          { id: "m2", title: "Billing", status: "in_progress" },
+          { id: "m3", title: "Docs", status: "pending" },
+        ],
+        updatedAt: NOW,
+      },
+    }),
+  );
+  await runStore.startAutopilot({ workspaceId: WS, workspaceName: "plan", cwd: HOME, runId: openPlanId });
+  const afterOpenPlan = readRun(openPlanId);
+  const planQuestion = (afterOpenPlan.humanMessages || []).filter((m) => m.kind === "question").at(-1);
+  check(
+    "post-turn hop does not complete a run with open plan milestones",
+    afterOpenPlan.status !== "complete",
+    afterOpenPlan.status,
+  );
+  check(
+    "post-turn hop asks about the open milestones by name",
+    afterOpenPlan.status === "blocked" &&
+      /m2 "Billing"/.test(planQuestion?.message ?? "") &&
+      /m3 "Docs"/.test(planQuestion?.message ?? ""),
+    planQuestion?.message,
   );
 
   // ── 3. boot recovery ────────────────────────────────────────────────────
@@ -490,8 +589,28 @@ async function main() {
     }),
   );
 
+  // Cora's own plan says more work remains. Every recorded task settled, but
+  // the run is not done until the plan is.
+  const bootOpenPlan = writeRun(
+    wedgedRun("run-boot-open-plan", {
+      managerPlan: {
+        goal: "Ship auth, billing and docs",
+        milestones: [
+          { id: "m1", title: "Auth", status: "done" },
+          { id: "m2", title: "Billing", status: "pending" },
+        ],
+        updatedAt: NOW,
+      },
+    }),
+  );
+
   await runStore.completeSettledManagedRunsAfterRestart();
 
+  check(
+    "boot recovery never completes a run whose plan has open milestones",
+    readRun(bootOpenPlan).status === "running",
+    readRun(bootOpenPlan).status,
+  );
   check("boot recovery completes a settled running run", readRun(bootSettled).status === "complete", readRun(bootSettled).status);
   check(
     "boot recovery completes a settled reviewing run",
@@ -673,7 +792,7 @@ async function main() {
   // no wait_for_workers RPC unblocks and no post-turn hop is coming either.
   const fallbackGuardAt = runStoreSrc.indexOf("if (activeManagerCall(settled)");
   const fallbackSettledAt = runStoreSrc.indexOf("if (isRunSettled(settled)) {");
-  const fallbackCompleteAt = runStoreSrc.indexOf("await completeRunFromOrchestrator(runId);");
+  const fallbackCompleteAt = runStoreSrc.indexOf("await completeSettledRunOrAsk(settled);");
   check(
     "the worker cycle finishes a settled run when no manager turn is live",
     fallbackGuardAt > 0 &&
@@ -697,9 +816,15 @@ async function main() {
   // manager's codara_complete must earn the same verifier freshness that tool
   // demands, and boot recovery must read the restart marker rather than
   // "started" (the orphan pass has already cleared every live call by then).
+  // One gate (open plan milestones, then verifier freshness) serves every
+  // hop: the post-turn hop, the worker cycle, the manual-review accept, and
+  // boot recovery.
   check(
-    "all three terminal hops gate on verifier freshness",
-    (runStoreSrc.match(/await describeVerificationFreshness\(/g) || []).length >= 3,
+    "every terminal hop goes through the shared completion gate",
+    /async function canAutoCompleteRun\(run: RunState\)[\s\S]*?openPlanMilestones\(run\.managerPlan\)[\s\S]*?await describeVerificationFreshness\(run\)/.test(runStoreSrc) &&
+      (runStoreSrc.match(/completeSettledRunOrAsk\(/g) || []).length >= 4 &&
+      /if \(!\(await canAutoCompleteRun\(run\)\)\.ok\) continue;/.test(runStoreSrc) &&
+      (runStoreSrc.match(/return completeRunFromOrchestrator\(|await completeRunFromOrchestrator\(/g) || []).length === 2,
   );
   check(
     "boot recovery detects a manager turn the restart cut off",

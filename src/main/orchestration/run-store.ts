@@ -50,6 +50,7 @@ import type {
   RunBlocker,
   HumanRunMessage,
   RunConversationMessageIntent,
+  RunManagerPlanMilestone,
   RunMessageDeliveryState,
   RunMessageAttachment,
   RunQuestionCategory,
@@ -174,7 +175,7 @@ import {
   resolveFollowUpDestinationStep,
   settledReviewedStepStatus,
 } from "./step-lifecycle";
-import { describeRunSettlement, isRunSettled } from "./run-settled";
+import { describeRunSettlement, isRunSettled, unresolvedWorkerTasks } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
 import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
@@ -201,9 +202,11 @@ import {
 // the call, rather than a cap-broken or never-verified run being reported as a
 // clean green finish.
 import {
+  OPEN_PLAN_MILESTONES_OPTIONS,
   UNFINISHED_WORKER_OPTIONS,
   UNVERIFIED_COMPLETION_OPTIONS,
   UNVERIFIED_COMPLETION_QUESTION,
+  openPlanMilestonesQuestion,
   parseUnverifiedCompletionChoice,
 } from "./worker-outcome-questions";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
@@ -264,7 +267,7 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
-import { normalizeManagerPlanInput, renderRunStateDigest } from "./manager-plan";
+import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
@@ -1692,14 +1695,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     // auto-accepts a task on process exit without reading its report, so
     // "everything accepted" is not evidence anything was verified.
     if (isRunSettled(run)) {
-      const verification = await describeVerificationFreshness(run);
-      if (verification.ok) {
-        return completeRunFromOrchestrator(run.id);
-      }
-      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
-        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-        managerMode: "worker_result_review",
-      });
+      return completeSettledRunOrAsk(run);
     }
     // A step sitting in review is NOT blocked on the user, it is blocked on
     // Cora. Boot recovery produces exactly this shape (a worker whose report
@@ -1710,6 +1706,25 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     if (reviewPending) {
       scheduleAutopilotReview(run.id, input.cwd);
       return run;
+    }
+    // Only steps a partial, blocked or force-accepted worker left unverified
+    // remain. Nothing is left to run, so say what the actual open decision is
+    // instead of claiming the remaining steps wait on a blocker.
+    if (
+      run.steps.length > 0 &&
+      failedSteps.length === 0 &&
+      unfinishedSteps.length === 0 &&
+      run.steps.some((step) => step.status === "completed_unverified")
+    ) {
+      const unresolved = unresolvedWorkerTasks(run).at(-1);
+      if (unresolved) {
+        await escalateUnfinishedWorkerOutcome(run, unresolved.id);
+        return (await getRun(run.id)) ?? run;
+      }
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
+        reason: "Some steps finished without a check.",
+        managerMode: "worker_result_review",
+      });
     }
     // This branch knows the decision, so its choices must match the failure.
     const allStepsResolved =
@@ -5049,6 +5064,41 @@ export async function describeVerificationFreshness(
   };
 }
 
+/**
+ * Whether an orchestrator-side terminal hop may complete a settled run when
+ * the manager never called codara_complete. It enforces the same two gates
+ * codara_complete does: the manager's recorded plan has no open milestone,
+ * and the work is verified.
+ */
+type AutoCompletionGate =
+  | { ok: true }
+  | { ok: false; kind: "plan"; milestones: RunManagerPlanMilestone[] }
+  | { ok: false; kind: "unverified"; verification: RunVerificationFreshness };
+
+async function canAutoCompleteRun(run: RunState): Promise<AutoCompletionGate> {
+  const milestones = openPlanMilestones(run.managerPlan);
+  if (milestones.length > 0) return { ok: false, kind: "plan", milestones };
+  const verification = await describeVerificationFreshness(run);
+  if (!verification.ok) return { ok: false, kind: "unverified", verification };
+  return { ok: true };
+}
+
+/** Complete a settled run, or ask the user about whatever gate held it back. */
+async function completeSettledRunOrAsk(run: RunState): Promise<RunState> {
+  const gate = await canAutoCompleteRun(run);
+  if (gate.ok) return completeRunFromOrchestrator(run.id);
+  if (gate.kind === "plan") {
+    return askHumanQuestion(run.id, openPlanMilestonesQuestion(gate.milestones), OPEN_PLAN_MILESTONES_OPTIONS, {
+      reason: `Open plan milestones: ${gate.milestones.map((milestone) => milestone.id).join(", ")}.`,
+      managerMode: "worker_result_review",
+    });
+  }
+  return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
+    reason: `Latest verifier confidence: ${gate.verification.latestVerifierConfidence ?? "none"}.`,
+    managerMode: "worker_result_review",
+  });
+}
+
 export interface RunHandoffArtifactAudit {
   /** false when a worker-declared in-workspace artifact no longer exists. */
   ok: boolean;
@@ -5159,10 +5209,10 @@ export async function completeSettledManagedRunsAfterRestart(): Promise<void> {
     if (activeWorkersForRun(run.id).length > 0) continue;
     const settlement = describeRunSettlement(run);
     if (!settlement.settled) continue;
-    // Unverified work is never completed unattended, same rule codara_complete
-    // enforces. The pause pass below parks it instead, so Resume re-drives it
-    // into startAutopilot's question.
-    if (!(await describeVerificationFreshness(run)).ok) continue;
+    // Unverified work, or a plan with open milestones, is never completed
+    // unattended, same rules codara_complete enforces. The pause pass below
+    // parks it instead, so Resume re-drives it into startAutopilot's question.
+    if (!(await canAutoCompleteRun(run)).ok) continue;
     await appendEvent({
       workspaceId: run.workspaceId,
       runId: run.id,
@@ -5648,15 +5698,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       return;
     }
     if (isRunSettled(settled)) {
-      const verification = await describeVerificationFreshness(settled);
-      if (verification.ok) {
-        await completeRunFromOrchestrator(runId);
-        return;
-      }
-      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
-        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-        managerMode: "worker_result_review",
-      });
+      await completeSettledRunOrAsk(settled);
       return;
     }
     // A worker that failed or did not finish is a decision someone still owes,
@@ -5671,14 +5713,18 @@ async function escalateUnfinishedWorkerOutcome(
   taskId: string | undefined,
 ): Promise<void> {
   const finished = taskId ? run.workerTasks.find((item) => item.id === taskId) : undefined;
-  const unfinished = (item: WorkerTask) => item.status === "failed" || item.status === "blocked";
+  const unresolved = unresolvedWorkerTasks(run);
+  const unfinished = (item: WorkerTask) => unresolved.some((entry) => entry.id === item.id);
   // The last worker of a step to land may have succeeded after a sibling did
-  // not; the step's failure is still the open decision.
+  // not; the step's failure is still the open decision. Failing that, any
+  // unreplaced failure elsewhere in the run is: a worker that succeeded in a
+  // later step leaves an earlier step's failure undecided, and with no manager
+  // turn live the run would otherwise sit at "reviewing" with no driver.
   const task = finished && unfinished(finished)
     ? finished
-    : finished?.stepId
-      ? run.workerTasks.find((item) => item.stepId === finished.stepId && unfinished(item))
-      : undefined;
+    : (finished?.stepId
+        ? run.workerTasks.find((item) => item.stepId === finished.stepId && unfinished(item))
+        : undefined) ?? unresolved.at(-1);
   if (!task) return;
   if (resolveOpenRunQuestionPure(run)) return;
   if (run.steps.some((step) => step.status === "running" || step.status === "reviewing")) return;
@@ -5687,11 +5733,13 @@ async function escalateUnfinishedWorkerOutcome(
     ? await readWorkerReport(attempt.finalReportPath).catch(() => null)
     : null;
   const outcome =
-    report?.status === "partial"
-      ? "only finished part of its task"
-      : report?.status === "blocked"
-        ? "got stuck and needs a decision"
-        : "failed";
+    task.status === "cancelled"
+      ? "was stopped before it finished"
+      : report?.status === "partial"
+        ? "only finished part of its task"
+        : report?.status === "blocked"
+          ? "got stuck and needs a decision"
+          : "failed";
   const summary = (report?.summary ?? attempt?.error ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
   const question = `The worker "${task.title}" ${outcome}${summary ? `: ${summary}` : "."} How should I continue?`;
   try {
@@ -11161,14 +11209,7 @@ async function maybeApplyManualReviewAnswer(
   if (!changed) return null;
 
   if (verdict === "accept" && isRunSettled(applied)) {
-    const verification = await describeVerificationFreshness(applied);
-    if (verification.ok) {
-      return completeRunFromOrchestrator(applied.id);
-    }
-    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
-      reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-      managerMode: "worker_result_review",
-    });
+    return completeSettledRunOrAsk(applied);
   }
   return applied;
 }
