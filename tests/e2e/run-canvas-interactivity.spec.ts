@@ -3,7 +3,6 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LINUX_DISPLAY_ARGS } from "./linux-display";
 
 test("run graph can be dragged and zoomed from the node surface", async () => {
   const { userDataDir, workspaceDir } = await prepareElectronWorkspace("spark-agent-run-canvas-e2e-");
@@ -11,8 +10,7 @@ test("run graph can be dragged and zoomed from the node surface", async () => {
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      // LINUX_DISPLAY_ARGS keeps Linux runs off Wayland; see linux-display.ts.
-      args: [".", ...LINUX_DISPLAY_ARGS],
+      args: ["."],
       env: {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app

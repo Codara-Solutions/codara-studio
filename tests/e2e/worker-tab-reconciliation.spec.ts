@@ -4,7 +4,6 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { LINUX_DISPLAY_ARGS } from "./linux-display";
 
 test("a live worker pane returns after the renderer misses its launch event", async () => {
   // The worker is genuinely launched now, so the budget covers a real session:
@@ -16,8 +15,7 @@ test("a live worker pane returns after the renderer misses its launch event", as
 
   try {
     app = await electron.launch({
-      // LINUX_DISPLAY_ARGS keeps Linux runs off Wayland; see linux-display.ts.
-      args: [".", ...LINUX_DISPLAY_ARGS],
+      args: ["."],
       env: {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app

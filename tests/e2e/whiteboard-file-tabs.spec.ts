@@ -3,7 +3,6 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LINUX_DISPLAY_ARGS } from "./linux-display";
 
 test("the + picker opens an editable whiteboard draft and Ctrl+S saves it into the workspace", async () => {
   const root = await mkdtemp(join(tmpdir(), "codara-whiteboard-files-"));
@@ -30,8 +29,7 @@ test("the + picker opens an editable whiteboard draft and Ctrl+S saves it into t
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      // LINUX_DISPLAY_ARGS keeps Linux runs off Wayland; see linux-display.ts.
-      args: [".", ...LINUX_DISPLAY_ARGS],
+      args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

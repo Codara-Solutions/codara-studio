@@ -3,7 +3,6 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LINUX_DISPLAY_ARGS } from "./linux-display";
 
 // The Runs node graph, exercised against a persisted run that was mid-flight
 // when the app "closed": a completed step (auto-collapses to its compact
@@ -153,7 +152,7 @@ test("finished steps fold, crashed workers explain, dead terminals say so", asyn
 
 async function launchApp(userDataDir: string): Promise<ElectronApplication> {
   return electron.launch({
-    args: [".", ...LINUX_DISPLAY_ARGS],
+    args: ["."],
     env: {
       ...process.env,
       SPARK_USER_DATA_DIR: userDataDir,

@@ -27,6 +27,7 @@ import {
   type ComposerWorkerActivity,
 } from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
+import { retryableFailedCallId } from "./failed-turn";
 import { isBackendFailureQuestion } from "@shared/run-questions";
 import { loadCoraAccountReadiness } from "./account-readiness";
 import { chordToHint, mod } from "../../shortcuts/chord";
@@ -745,8 +746,8 @@ export default function ChatComposer({
       kind: "file" as const,
     })),
   ];
-  const canSend =
-    !busy && !pastingImages && !disabled && (draft.trim().length > 0 || attachmentsForSend.length > 0);
+  const hasDraftToSend = draft.trim().length > 0 || attachmentsForSend.length > 0;
+  const canSend = !busy && !pastingImages && !disabled && hasDraftToSend;
 
   const run_ = run; // local alias so the async helpers narrow cleanly
 
@@ -1359,6 +1360,23 @@ export default function ChatComposer({
     window.addEventListener("spark:stop-chat", onStop);
     return () => window.removeEventListener("spark:stop-chat", onStop);
   }, [suspendGlobalEvents]);
+  // A failed turn's card in the conversation offers Retry; it runs exactly
+  // what this composer's own Retry button would for the same run.
+  const retryRef = useRef<(() => void) | null>(null);
+  retryRef.current = isParkedTurn
+    ? () => void resume()
+    : backendFailureQuestion && failedTurnRetryText
+      ? () => void retryFailedTurn()
+      : null;
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onRetry = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      if (runId && runId === runRef.current?.id) retryRef.current?.();
+    };
+    window.addEventListener("spark:retry-turn", onRetry);
+    return () => window.removeEventListener("spark:retry-turn", onRetry);
+  }, [suspendGlobalEvents]);
 
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
@@ -1368,12 +1386,19 @@ export default function ChatComposer({
   // Click-outside / Escape handling lives in the shared AnchoredMenu; this
   // composer only gates the app-wide keyboard broadcasts by tab visibility.
 
+  // While the conversation shows the failed turn as a card with its own Retry,
+  // the composer is just the place for a follow-up: repeating the failure in
+  // the placeholder and a second Retry here said the same thing three times.
+  const failureCardOffersRetry = run_ ? retryableFailedCallId(run_) !== null : false;
+
   // An unstarted board-minted run still reads like a fresh chat: its first
   // send is a first message (see the isUnstartedChatRun branch in send()).
   const placeholder = !run_ || isUnstartedChatRun(run_)
     ? lockedMode === "automation"
       ? "Describe the loom you want — trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
+    : failureCardOffersRetry
+      ? "Send a follow-up. Cora picks the work back up."
     : backendFailureQuestion
       ? "Cora's last turn failed. Retry it, or send a new message."
     : openQuestion
@@ -1389,7 +1414,9 @@ export default function ChatComposer({
           // still works on its own for an empty composer.
           ? "Send to resume — your message goes with it."
           : isActive
-            ? "Message Cora. She reads it as soon as she can."
+            ? midTurnDelivery === "queue"
+              ? "Message Cora. It is delivered when this turn ends."
+              : "Message Cora. She reads it as soon as she can."
             : "Reply, steer, or add context.";
 
   return (
@@ -1569,24 +1596,11 @@ export default function ChatComposer({
               steeringQueues={isActive}
             />
           ) : (
+            // Status only. Keyboard tips competed with the model pill for the
+            // same row and truncated both; the placeholder and the Send
+            // button's tooltip already say what Enter does.
             <span className="composer-toolbar__hint">
-              {busy
-                ? "Working..."
-                : pastingImages
-                  ? "Adding pasted image..."
-                : isActive
-                  ? midTurnDelivery === "queue"
-                    ? "Enter to queue · delivered when this turn ends"
-                    : "Enter to send · Cora reads it while she works"
-                  : backendFailureQuestion
-                    ? "Enter to send, Shift+Enter for a new line"
-                  : openQuestion
-                    // No Resume button here — the answer IS the resume — so the
-                    // hint must not point at one.
-                    ? "Enter to answer · Cora picks the work back up"
-                    : isPaused
-                      ? "Enter to send and resume · Resume alone skips the note"
-                      : "Enter to send, Shift+Enter for a new line"}
+              {busy ? "Working..." : pastingImages ? "Adding pasted image..." : null}
             </span>
           )}
           {/* Right cluster: context gauge | capabilities | resume | send read
@@ -1599,21 +1613,25 @@ export default function ChatComposer({
               budget={DEFAULT_PI_COMPACT_AT_TOKENS}
             />
             <CapabilitiesButton onOpen={openCapabilities} />
-            {isPaused && (
+            {isPaused && !(isParkedTurn && failureCardOffersRetry) && (
               <TextButton onClick={resume} disabled={busy} tone="accent">
                 {isParkedTurn ? "Retry" : "Resume"}
               </TextButton>
             )}
-            {backendFailureQuestion && failedTurnRetryText && (
+            {backendFailureQuestion && failedTurnRetryText && !failureCardOffersRetry && (
               <TextButton onClick={retryFailedTurn} disabled={busy} tone="accent">
                 Retry
               </TextButton>
             )}
-            <SendButton
-              onClick={send}
-              disabled={!canSend}
-              label={isActive ? "Queue" : "Send"}
-            />
+            {/* While Cora works and there is nothing to queue, Stop takes the
+                send slot alone instead of sitting beside a dead arrow. */}
+            {!(canStop && !hasDraftToSend) && (
+              <SendButton
+                onClick={send}
+                disabled={!canSend}
+                label={isActive ? "Queue" : "Send"}
+              />
+            )}
             {/* Stop follows the work, not only the run status. A soft-paused
                 run can still own a live worker process (pause stops autopilot;
                 it doesn't reach into a worker already running), and in that
@@ -1675,25 +1693,28 @@ function WorkerActivityStatus({
       className="composer-toolbar__hint composer-toolbar__hint--worker"
       title={titles.join("\n") || undefined}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: "50%",
-          background: tone,
-          // Only a running worker pulses. A steady dot for a queued one keeps
-          // the "something is happening right now" signal honest.
-          ...(live ? { animation: "spark-pulse 1.3s ease-in-out infinite" } : {}),
-          flex: "0 0 auto",
-        }}
-      />
-      <span style={{ color: tone, fontWeight: 600 }}>{headline}</span>
-      {/* The only elastic child: when the row runs out of room this segment
-          ellipsises, rather than every child being cut mid-glyph. Sizing lives
-          in .composer-toolbar__hint--worker so the rule sits with the rest of
-          the row's collapse behaviour. Solo shows the task title; a fleet
-          shows the model mix, which says more than one truncated title. */}
+      <span className="composer-toolbar__hint-head">
+        <span
+          aria-hidden
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: tone,
+            // Only a running worker pulses. A steady dot for a queued one keeps
+            // the "something is happening right now" signal honest.
+            ...(live ? { animation: "spark-pulse 1.3s ease-in-out infinite" } : {}),
+            flex: "0 0 auto",
+          }}
+        />
+        <span style={{ color: live ? "var(--ink-dim)" : tone, fontWeight: 600 }}>{headline}</span>
+      </span>
+      {/* When the row runs out of room whole segments drop off the end (tail
+          first, then this one) instead of ending on a cut word or a dangling
+          separator. Sizing lives in .composer-toolbar__hint--worker so the
+          rule sits with the rest of the row's collapse behaviour. Solo shows
+          the task title; a fleet shows the model mix, which says more than
+          one truncated title. */}
       {solo
         ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
         : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
@@ -1701,9 +1722,9 @@ function WorkerActivityStatus({
           follows the RUN, not the workers: a paused run takes notes, only a
           run with a turn in flight queues steering. */}
       {runPaused ? (
-        <span style={{ flex: "0 0 auto" }}>· paused</span>
+        <span>· paused</span>
       ) : steeringQueues ? (
-        <span style={{ flex: "0 0 auto" }}>· messages queue</span>
+        <span>· messages queue</span>
       ) : null}
     </span>
   );
@@ -2322,17 +2343,15 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
         flex: "0 0 26px",
         border: "none",
         borderRadius: "var(--radius-control, 7px)",
-        background: hover
-          ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
-          : "var(--danger)",
+        background: hover ? "var(--panel-3)" : "var(--panel-2)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
         boxShadow: focusRing
           ? "var(--focus-ring)"
           : pressed
             ? "var(--well)"
-            : "var(--lift-hi)",
-        color: "var(--accent-ink)",
+            : "inset 0 0 0 1px var(--rule)",
+        color: "var(--ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -2376,7 +2395,7 @@ function SendButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title={label}
+      title={`${label} (Enter) · Shift+Enter for a new line`}
       aria-label={label}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {

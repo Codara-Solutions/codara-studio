@@ -33,6 +33,10 @@ export const E2E_BACKGROUND = process.env.SPARK_E2E_BACKGROUND === "1";
 export function isolateE2eFromDesktop(): void {
   if (!E2E_BACKGROUND) return;
   app.commandLine.appendSwitch("mute-audio");
+  // Only takes effect when the launch passed no Ozone switch: one on the
+  // command line wins (x11 puts a real window on screen, and headless passed
+  // that way crashes the app), which is why scripts/test-e2e-desktop-
+  // isolation.cjs keeps every spec from passing one.
   if (process.platform === "linux") app.commandLine.appendSwitch("ozone-platform", "headless");
 }
 

@@ -3,7 +3,6 @@ import { _electron as electron, type ElectronApplication } from "playwright";
 import { copyFile, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LINUX_DISPLAY_ARGS } from "./linux-display";
 
 // The Cora Board (kanban): lanes, the card side panel, attached images and
 // the lightbox, driven end to end against the real board store. Screenshots
@@ -54,7 +53,7 @@ test("the kanban renders cards with images, opens the card panel, and the lightb
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", ...LINUX_DISPLAY_ARGS],
+      args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

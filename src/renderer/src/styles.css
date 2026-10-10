@@ -1346,10 +1346,10 @@ a { color: inherit; }
   gap: 12px;
   width: min(620px, 100%);
   box-sizing: border-box;
-  padding: 10px 12px;
-  border: 1px solid var(--accent-edge);
+  padding: 11px 12px 11px 14px;
+  border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
-  background: var(--accent-soft);
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
 }
 .cora-welcome__connect-copy {
   display: flex;
@@ -1358,12 +1358,13 @@ a { color: inherit; }
   gap: 2px;
   min-width: 0;
   font-size: 12px;
-  line-height: 1.4;
-  color: var(--ink-dim);
+  line-height: 1.45;
+  color: var(--muted);
   text-align: left;
 }
 .cora-welcome__connect-copy strong {
   color: var(--ink);
+  font-size: 12.5px;
   font-weight: 600;
 }
 .cora-welcome__connect .cora-failure-action {
@@ -1388,7 +1389,7 @@ a { color: inherit; }
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 11px 34px 11px 12px;
+  padding: 11px 14px 11px 12px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
   background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
@@ -1411,7 +1412,7 @@ a { color: inherit; }
 }
 .cora-starter:active { transform: translateY(0); }
 .cora-starter__label {
-  color: var(--accent-text);
+  color: var(--muted);
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.12em;
@@ -1427,17 +1428,22 @@ a { color: inherit; }
   font-size: 10.5px;
   line-height: 1.4;
 }
-.cora-starter__arrow {
-  position: absolute;
-  top: 11px;
-  right: 12px;
-  color: var(--muted-2);
-  font-size: 12px;
-  transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+.cora-starter__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.cora-starter:hover .cora-starter__arrow {
+.cora-starter__arrow {
+  display: inline-flex;
   color: var(--accent-text);
-  transform: translate(1px, -1px);
+  opacity: 0;
+  transform: translate(-2px, 1px);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+.cora-starter:hover .cora-starter__arrow,
+.cora-starter:focus-visible .cora-starter__arrow {
+  opacity: 1;
+  transform: translate(0, 0);
 }
 /* The welcome's door to Automations: one quiet full-width row under the
    starter cards. While an automation runs (or needs an answer) it lights up
@@ -1510,14 +1516,17 @@ a { color: inherit; }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
   font-size: 11px;
+  line-height: 1;
   font-weight: 600;
   color: var(--muted);
 }
 .cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent-text); }
 .cora-welcome__automations-arrow {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: -4px;
   color: var(--muted-2);
-  font-size: 12px;
   transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
@@ -1961,19 +1970,196 @@ a { color: inherit; }
     background var(--motion-fast) var(--ease-out);
 }
 
+/* Read by assistive tech, never painted. !important because the elements
+   it hides are inline-styled. */
+.spark-sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
+/* Cora chat header: title, then quiet status and cost pills, then the
+   copy-id button. Only the title ellipsizes. */
+.cora-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.cora-header-meta__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 600 13px/1.2 var(--font-sans);
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}
+.cora-status-pill {
+  --cora-status-color: var(--muted);
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--cora-status-color) 11%, transparent);
+  color: var(--ink-dim);
+  font: 500 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.cora-status-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cora-status-color);
+  flex: 0 0 6px;
+}
+.cora-status-pill[data-tone="live"] .cora-status-pill__dot {
+  box-shadow: 0 0 6px color-mix(in oklch, var(--cora-status-color) 55%, transparent);
+  animation: spark-pulse 1.3s ease-in-out infinite;
+}
+
+/* Inter's tabular figures (the body default) also give the hyphen a fixed
+   advance, which spaced out every "run-store" in prose. Chat text sets
+   normal figures; times, durations and counters opt back in inline. */
+.cora-conversation,
+.cora-welcome,
+.cora-header-meta,
+.composer-shell {
+  font-variant-numeric: normal;
+}
+.composer-context-label {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A command, path or pattern inside an activity row. */
+.cora-tool-arg {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.cora-tool-arg--inline {
+  color: var(--ink-dim);
+}
+
+/* The header's copy-id control: a glyph at rest that names itself on hover. */
+.run-id-chip--labelled {
+  width: auto !important;
+  min-width: var(--spark-icon-btn-size);
+  gap: 0;
+  padding: 0 5px !important;
+}
+.run-id-chip__label {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: 500 11px/1 var(--font-sans);
+  opacity: 0;
+  transition:
+    max-width var(--motion) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    margin var(--motion) var(--ease-out);
+}
+.run-id-chip--labelled:hover .run-id-chip__label,
+.run-id-chip--labelled:focus-visible .run-id-chip__label {
+  max-width: 90px;
+  margin-left: 5px;
+  opacity: 1;
+}
+
+/* The chat composer is a plain raised surface. The glass rim and sheen made
+   its top edge the brightest line on screen. */
+.composer-shell.spark-glass--strong,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong {
+  background-color: var(--panel-2);
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--rule);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.10), 0 10px 28px oklch(0 0 0 / 0.16);
+}
+.composer-shell.spark-glass--strong:focus-within,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
+  border-color: var(--rule-strong);
+}
+
+/* The conversation column's side padding. Where the minimap shows, the
+   padding grows just enough that text never runs under its marks; on a wide
+   pane the centered column already clears it and the base padding holds. */
+.cora-conversation-column {
+  padding-left: clamp(12px, 2.4vw, 20px);
+  padding-right: clamp(12px, 2.4vw, 20px);
+}
+@container (min-width: 720px) {
+  .cora-conversation-column {
+    padding-left: max(20px, calc(52px - (100cqw - 768px) / 2));
+    padding-right: max(20px, calc(52px - (100cqw - 768px) / 2));
+  }
+}
+
+/* Consecutive tool calls inside a turn: one tight list, not spaced rows. */
+.cora-tool-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: -2px 0;
+}
+
+/* The hover row (time, copy, undo) floats in the gap under the bubble
+   instead of reserving its height at rest; a row with a delivery state
+   (Queued, Send now, Unqueue) stays in flow and keeps only its time and copy
+   for hover. */
+.cora-user-turn {
+  position: relative;
+}
 .cora-user-turn__meta {
   opacity: 0;
-  transform: translateY(-2px);
   pointer-events: none;
-  transition:
-    opacity var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out);
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn__meta:not(.has-status) {
+  position: absolute;
+  z-index: 2;
+  top: 100%;
+  right: 0;
+  height: 18px;
+  margin-top: 2px;
+}
+.cora-user-turn__hover-meta .cora-message-ghost-action,
+.cora-assistant-turn__meta .cora-message-ghost-action {
+  width: 20px;
+  height: 18px;
+}
+.cora-user-turn__hover-meta time,
+.cora-assistant-turn__meta time {
+  padding: 0 2px;
 }
 .cora-user-turn:hover .cora-user-turn__meta,
 .cora-user-turn:focus-within .cora-user-turn__meta,
 .cora-user-turn__meta.has-status {
   opacity: 1;
-  transform: translateY(0);
+  pointer-events: auto;
+}
+.cora-user-turn__hover-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn:hover .cora-user-turn__meta.has-status .cora-user-turn__hover-meta,
+.cora-user-turn:focus-within .cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 1;
   pointer-events: auto;
 }
 .cora-message-ghost-action {
@@ -1993,6 +2179,93 @@ a { color: inherit; }
 .cora-message-ghost-action:hover {
   background: var(--hover);
   color: var(--ink-dim);
+}
+.cora-message-ghost-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Small secondary action beside a message or inside a card (Send now,
+   Unqueue, Retry). A real control: hairline edge, hover fill, focus ring. */
+.cora-chip-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 500 11.5px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-chip-btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.cora-chip-btn:active:not(:disabled) {
+  background: var(--press);
+}
+.cora-chip-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-chip-btn:disabled {
+  opacity: 0.5;
+}
+.cora-chip-btn > svg {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.cora-chip-btn:hover:not(:disabled) > svg {
+  color: inherit;
+}
+.cora-chip-btn--primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.cora-chip-btn--primary > svg {
+  color: inherit;
+}
+.cora-chip-btn--primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
+  color: var(--accent-ink);
+}
+/* Same box as its siblings so a row of actions shares one height and
+   baseline; only the edge is missing until hover. */
+.cora-chip-btn--ghost {
+  border-color: transparent;
+  color: var(--muted);
+  padding: 0 8px 0 10px;
+}
+
+.cora-queued-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink-dim);
+  font: 500 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.cora-queued-pill > svg {
+  color: var(--warn);
 }
 
 .cora-error-dismiss {
@@ -2091,6 +2364,71 @@ a { color: inherit; }
 /* Chat markdown. highlight.js token colours come from theme tokens so light
    themes stay readable; the markdown preview keeps its own .spark-markdown
    palette in markdown-preview/markdown.css. */
+/* Markdown rhythm for Cora messages. One body size, a short heading scale,
+   and the outer margins of the first and last block dropped so a message
+   (or a user bubble) hugs its content. */
+.cora-md {
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.cora-md p,
+.cora-md ul,
+.cora-md ol,
+.cora-md blockquote,
+.cora-md table,
+.cora-md hr {
+  margin: 0 0 10px;
+}
+.cora-md li + li {
+  margin-top: 3px;
+}
+.cora-md li > ul,
+.cora-md li > ol,
+.cora-md li > p {
+  margin: 3px 0 0;
+}
+.cora-md li::marker {
+  color: var(--muted);
+}
+.cora-md h1,
+.cora-md h2,
+.cora-md h3,
+.cora-md h4 {
+  margin: 18px 0 6px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.cora-md h1 { font-size: 17px; }
+.cora-md h2 { font-size: 15px; }
+.cora-md h3 { font-size: 13.5px; }
+.cora-md h4 { font-size: 13px; color: var(--ink-dim) !important; }
+.cora-md .cora-md-code,
+.cora-md > pre {
+  margin: 10px 0 12px;
+}
+.cora-md > :first-child { margin-top: 0; }
+.cora-md > :last-child { margin-bottom: 0; }
+.cora-md strong { font-weight: 650; }
+.cora-user-md .cora-md h1 { font-size: 15px; }
+.cora-user-md .cora-md h2,
+.cora-user-md .cora-md h3 { font-size: 13.5px; }
+.cora-user-md .cora-md h1,
+.cora-user-md .cora-md h2,
+.cora-user-md .cora-md h3,
+.cora-user-md .cora-md h4 {
+  margin: 10px 0 4px;
+}
+.cora-user-md .cora-md p,
+.cora-user-md .cora-md ul,
+.cora-user-md .cora-md ol {
+  margin-bottom: 6px;
+}
+.cora-user-md .cora-md > :first-child { margin-top: 0; }
+.cora-user-md .cora-md > :last-child { margin-bottom: 0; }
+
 .cora-md .hljs {
   color: var(--ink-dim, var(--ink));
   background: transparent;
@@ -2189,28 +2527,105 @@ a { color: inherit; }
 }
 .cora-md-file-ref {
   cursor: pointer;
-  text-decoration: underline dotted color-mix(in oklab, var(--accent-text) 60%, transparent);
-  text-underline-offset: 2px;
+  text-decoration: none;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
 }
 .cora-md-file-ref:hover {
   color: var(--accent-text) !important;
+  background: color-mix(in oklch, var(--accent) 12%, transparent) !important;
+}
+
+/* A failed Cora turn or manager stage. A quiet card with a danger accent on
+   its icon and edge only; the message wraps in full and actions sit below. */
+.cora-turn-error {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 12px 13px;
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid color-mix(in oklch, var(--danger) 75%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
+}
+.cora-turn-error__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cora-turn-error__icon {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+.cora-turn-error__title {
+  min-width: 0;
+  color: var(--ink);
+  font: 600 13px/1.35 var(--font-sans);
+}
+.cora-turn-error__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 22px;
+}
+.cora-turn-error__lead {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.cora-turn-error__hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cora-turn-error__raw {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-control, 7px);
+  background: color-mix(in oklab, var(--bg) 70%, transparent);
+  color: var(--muted);
+  font: 400 11px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cora-turn-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding-left: 22px;
+}
+.cora-turn-error__details {
+  margin-left: 22px;
+  padding-top: 4px;
+}
+.cora-chip-btn--quiet {
+  border-color: transparent;
+  color: var(--muted);
+  padding: 0 6px 0 8px;
 }
 
 /* The one action a failure card offers (open the accounts tab). */
 .cora-failure-action {
   appearance: none;
   align-self: flex-start;
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--accent-edge);
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent;
   border-radius: var(--radius-control, 7px);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font: 600 11px/1 var(--font-sans);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: 600 11.5px/1 var(--font-sans);
   cursor: default;
 }
 .cora-failure-action:hover {
-  background: color-mix(in oklch, var(--accent) 26%, transparent);
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
 }
 .cora-failure-action:focus-visible {
   outline: none;
@@ -2220,16 +2635,24 @@ a { color: inherit; }
 .cora-worker-terminal {
   appearance: none;
   flex: 0 0 auto;
-  height: 18px;
-  padding: 0 7px;
-  border: 1px solid var(--rule-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px 0 6px;
+  border: 1px solid transparent;
   border-radius: var(--radius-control, 7px);
   background: transparent;
-  color: var(--ink-dim);
-  font: 600 10.5px/1 var(--font-sans);
+  color: var(--muted);
+  font: 500 11px/1 var(--font-sans);
   cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 .cora-worker-terminal:hover:not(:disabled) {
+  border-color: var(--rule);
   background: var(--hover);
   color: var(--ink);
 }
@@ -2258,11 +2681,20 @@ a { color: inherit; }
   outline-offset: -1px;
 }
 
+.cora-turn {
+  position: relative;
+}
+/* Drawn in the row gap under the turn (MESSAGE_META_GAP in
+   ChatConversation.tsx reserves it), lined up with the prose's left edge. */
 .cora-assistant-turn__meta {
-  min-height: 22px;
+  position: absolute;
+  z-index: 2;
+  left: 4px;
+  top: calc(100% + 2px);
+  height: 18px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
@@ -2298,56 +2730,56 @@ a { color: inherit; }
   .cora-timeline-minimap {
     position: absolute;
     z-index: 8;
-    top: 24px;
-    bottom: 24px;
-    left: 10px;
-    width: 38px;
+    top: 28px;
+    bottom: 28px;
+    /* Clear of the scroller's own bar, which must stay draggable. */
+    right: 14px;
+    width: 22px;
     display: block;
-    opacity: 0.38;
-    transition: opacity var(--motion-fast) var(--ease-out);
+    opacity: 0;
+    transition: opacity var(--motion-slow) var(--ease-out);
+  }
+  [data-scrolling="true"] > .cora-timeline-minimap {
+    opacity: 0.6;
+    transition-duration: var(--motion-fast);
   }
   .cora-timeline-minimap:hover,
   .cora-timeline-minimap:focus-within {
-    opacity: 1;
+    opacity: 1 !important;
   }
   .cora-timeline-minimap__rail {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 17px;
-    width: 1px;
-    background: color-mix(in oklab, var(--rule-soft) 55%, transparent);
+    display: none;
   }
   .cora-timeline-minimap__mark {
     position: absolute;
-    left: 10px;
-    width: 9px;
+    right: 6px;
+    width: 8px;
     height: 2px;
     padding: 0;
     transform: translateY(-50%);
     border: 0;
     border-radius: 999px;
-    background: var(--muted);
-    opacity: 0.72;
+    background: var(--muted-2);
     cursor: default;
     transition:
       width var(--motion-fast) var(--ease-out),
-      background var(--motion-fast) var(--ease-out),
-      opacity var(--motion-fast) var(--ease-out);
+      background var(--motion-fast) var(--ease-out);
   }
   .cora-timeline-minimap__mark.is-visible {
-    width: 16px;
-    background: var(--ink-dim);
-    opacity: 1;
+    width: 12px;
+    background: var(--muted);
   }
   .cora-timeline-minimap__mark.is-active {
-    width: 24px;
+    width: 16px;
     background: var(--accent);
-    opacity: 1;
+  }
+  .cora-timeline-minimap__mark:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
   }
   .cora-timeline-minimap__preview {
     position: absolute;
-    left: 34px;
+    right: 30px;
     width: min(310px, calc(100cqw - 110px));
     padding: 10px 12px;
     transform: translateY(-50%);
@@ -2373,6 +2805,115 @@ a { color: inherit; }
     font: 400 11px/1.4 var(--font-sans);
     -webkit-line-clamp: 3;
   }
+}
+
+/* One 14px status slot leading every activity row. */
+.cora-activity-icon {
+  --cora-activity-color: var(--muted);
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="failed"] {
+  color: var(--danger);
+}
+.cora-activity-icon__spin {
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in oklch, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+}
+.cora-activity-icon__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="hollow"] .cora-activity-icon__dot {
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid var(--cora-activity-color);
+}
+
+.cora-step-worker__failure {
+  padding: 0 6px 4px 26px;
+  color: color-mix(in oklch, var(--danger) 70%, var(--ink-dim));
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* Scrolled up, the last lines fade into the composer edge, so the jump
+   button below sits on a quiet band instead of on top of a sentence. */
+.cora-conversation-fade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72px;
+  background: linear-gradient(to bottom, transparent, var(--panel) 55%);
+  pointer-events: none;
+}
+.cora-conversation-topfade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 12px;
+  top: 0;
+  height: 14px;
+  background: linear-gradient(to bottom, var(--panel), transparent);
+  pointer-events: none;
+}
+
+/* Back to the newest turn: a quiet round button centered above the composer,
+   outside the text column's reading line. The accent marks only new activity. */
+.cora-jump-latest {
+  appearance: none;
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 12px;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink-dim);
+  box-shadow: var(--shadow-1);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-jump-latest:hover {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+.cora-jump-latest:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-jump-latest__badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--panel);
 }
 
 /* ── Composer toolbar: the bottom pill row ───────────────────────────────────
@@ -2432,35 +2973,49 @@ a { color: inherit; }
    the whole deficit (ellipsizing continuously) before the pills give
    anything up. min-width:0 lets it collapse all the way to nothing. */
 .composer-toolbar__hint {
-  flex: 1 20 auto;
+  flex: 1 1 0;
   min-width: 0;
-  font-size: 10px;
+  padding-left: 4px;
+  font-size: 11px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
+  text-align: left;
 }
 /* The worker variant is a flex container, which makes the parent's
    text-overflow inert: its children would be cut mid-glyph at both edges
    instead of ellipsised. The truncation has to move onto the child that is
    actually elastic, which is the task title. The dot and the two fixed labels
    never shrink, so the row degrades by shortening the title. */
+/* Segments that do not fit wrap onto a second line that the fixed height
+   clips, so the row always ends on a whole segment: the tail goes first, then
+   the title, and only the headline itself ever ellipsizes. */
 .composer-toolbar__hint--worker {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  justify-content: flex-start;
+  column-gap: 5px;
+  height: 16px;
+  line-height: 16px;
 }
 .composer-toolbar__hint--worker > * {
   flex: 0 0 auto;
+  white-space: nowrap;
 }
-.composer-toolbar__hint--worker > .composer-toolbar__hint-title {
-  flex: 0 1 auto;
+.composer-toolbar__hint-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 1 !important;
+  min-width: 0;
+  overflow: hidden;
+}
+.composer-toolbar__hint-head > :last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* The model name is the one pill whose text has no upper bound, so its
@@ -2474,7 +3029,7 @@ a { color: inherit; }
   flex: 0 0 auto;
 }
 .composer-toolbar .composer-model:has(.composer-pill-label) {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   max-width: min(240px, 42cqi);
 }
@@ -2489,12 +3044,6 @@ a { color: inherit; }
   min-width: 0;
 }
 
-@container composer-bar (max-width: 640px) {
-  /* A keyboard tip is the least valuable thing in the row. */
-  .composer-toolbar__hint:not(.composer-toolbar__hint--worker) {
-    display: none;
-  }
-}
 @container composer-bar (max-width: 560px) {
   /* The bar alone still shows context fullness at a glance; the pill's
      tooltip keeps the exact used/budget numbers. */
@@ -2520,6 +3069,7 @@ a { color: inherit; }
     display: none;
   }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
+    flex-shrink: 1;
     max-width: 38cqi;
   }
   .composer-profile-label,
@@ -2570,13 +3120,21 @@ a { color: inherit; }
 .composer-profile-trigger {
   max-width: 150px;
 }
-/* A started chat keeps its profile, so the pill is a label there, not a menu. */
-.composer-profile-trigger.is-locked,
-.composer-profile-trigger.is-locked:hover,
-.composer-profile-trigger.is-locked:active {
+/* A started chat keeps its profile, so the pill is a label there, not a menu.
+   It still opens the profile, so hover answers like any ghost control. */
+.composer-profile-trigger.is-locked {
+  border-color: transparent;
   background: transparent;
   color: var(--muted);
-  border-style: dashed;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.composer-profile-trigger.is-locked:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+.composer-profile-trigger.is-locked .composer-profile-glyph {
+  color: inherit;
 }
 .composer-tools-trigger {
   flex: 0 0 auto;
