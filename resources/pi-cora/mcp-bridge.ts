@@ -830,7 +830,18 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       toConnect.push(existing);
     }
     if (activeStates().length > 0) registerCoreTools();
-    await connectStates(toConnect);
+    // Pi holds the user's prompt until this input handler returns, so a slow
+    // or dead server gets the same bound as at session start; it finishes in
+    // the background and ensureConnecting records its outcome.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      connectStates(toConnect),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SESSION_START_CONNECT_WAIT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
     deactivateUnselectedRemoteTools();
     writeStatus();
   }

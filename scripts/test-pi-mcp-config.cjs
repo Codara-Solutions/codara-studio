@@ -442,6 +442,26 @@ async function main() {
     const secondStatus = JSON.parse(fs.readFileSync(statusPath, "utf8"));
     assert.deepEqual(secondStatus.servers.map((entry) => entry.name), ["second"]);
 
+    // A server added mid-chat that is slow to start must not hold the user's
+    // next prompt for its whole connect timeout either.
+    writeRoster([
+      { name: "second", command: process.execPath, args: [fixturePath] },
+      { name: "slow", command: process.execPath, args: [slowFixturePath] },
+    ]);
+    const reloadStartedAt = Date.now();
+    await reloadPi.handlers.get("input")({ type: "input", text: "with a slow server" });
+    const reloadWait = Date.now() - reloadStartedAt;
+    assert.ok(
+      reloadWait < bridge.SESSION_START_CONNECT_WAIT_MS + 1_000,
+      `the prompt waited ${reloadWait}ms for a slow server added mid-chat`,
+    );
+    assert.match(reloadHandle.promptSuffix(), /slow \(connecting\)/);
+    const lateDiscovery = await reloadPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+      "call-late",
+      { activate: ["mcp__slow__echo_tool"] },
+    );
+    assert.deepEqual(lateDiscovery.details.activated, ["mcp__slow__echo_tool"], "the slow server finishes in the background");
+
     // An unchanged roster is not re-read into reconnects.
     const before = fs.readFileSync(statusPath, "utf8");
     await reloadPi.handlers.get("input")({ type: "input", text: "third" });
