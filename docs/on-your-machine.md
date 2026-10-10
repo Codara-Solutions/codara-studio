@@ -24,7 +24,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `hooks/`, `hooks/processed/` | Claude Code hook events, one JSON file each. Processed files are kept for a week. |
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |
 | `builtin-mcp.json` | The CLIs you switched the Codara Studio MCP server off for. |
-| `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, and the MCP bridge config. Cora never reads your own `~/.pi`. |
+| `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, the MCP bridge config of each running session and its `.status.json` connection report (no secrets), and `skills/` for skills only Cora should load. Cora never reads your own `~/.pi`. |
 | `claude-cli/`, `codex-cli/` | The saved logins of every Claude Code and Codex account that is not the Active one (mode 0600), and a record of which account's login is live in your `~/.claude` or `~/.codex`. |
 | `grok-cli/` | One private home per managed Grok account. |
 | `shell/active-cli-env` | Which Grok home running Studio shells should follow. |
@@ -39,6 +39,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `~/.claude/settings.json` | Adds a `hooks` block that runs `codara-hook.py` for session, tool, subagent and notification events. Every Claude Code session reads it, but the hook exits at once unless it runs in a Codara pane. Dead entries from older versions are pruned. | No setting yet. Removing the entries whose command mentions `codara-hook.py` lasts until the next app start. |
 | `~/.claude.json` | Adds the `codara-studio` MCP server entry. | The Claude switch for the Codara Studio server in the Capability Center, MCP servers. |
 | `~/.codex/config.toml`, and Grok's `config.toml` | Adds a `[mcp_servers.codara-studio]` section. | The Codex or Grok switch in the same place. |
+| The MCP configs above and a project's `.mcp.json` or `.codex/config.toml` | Only when you add, edit, copy, sync or remove a server in the Capability Center. Writes are atomic, keep the file's permissions and the keys Codara does not edit. | Do not use those actions. |
 | Your Claude Code login (the `Claude Code-credentials` Keychain item on macOS, `~/.claude/.credentials.json` elsewhere) and `oauthAccount` in `~/.claude.json` | Switching the Active Claude account replaces only these sign-in keys and the account identity, the way `/login` as another account does. MCP sign-ins, settings, history and project trust are never touched. While Studio runs, Codara also renews this login before it expires. | Keep a single Claude account; the Active one is then your own login. |
 | `~/.codex/auth.json` | Switching the Active Codex account swaps this file. | Keep a single Codex account. |
 | Managed Grok homes under `~/.codarastudio/grok-cli/` | Link your personal `~/.grok` state into each account's home so a switch keeps your sessions. Credentials stay private to each account. | Remove the account in Settings, Agents. |

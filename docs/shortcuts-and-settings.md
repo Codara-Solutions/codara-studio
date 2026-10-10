@@ -151,3 +151,46 @@ Center, a separate dialog with five tabs:
 
 The tools the built-in server provides are listed in
 [mcp-tools.md](./mcp-tools.md).
+
+### Where your MCP servers live
+
+The Capability Center reads and edits each CLI's own config file, so a server
+you add is the same entry the CLI would write itself:
+
+- **Every workspace** saves to your private user config: `~/.claude.json`,
+  `~/.codex/config.toml` or Grok's `config.toml`. This is the default.
+- **This workspace, Claude (private)** saves to your own `~/.claude.json`
+  under this folder only, the way `claude mcp add` does in local scope.
+  Servers other projects keep there are never listed or changed.
+- **Project `.mcp.json`** and the project's `.codex/config.toml` are usually
+  committed to git. A value that looks like a secret (a token, key or
+  password, or an `Authorization` header) is refused there: write it as
+  `${VAR}` and set `VAR` in your environment, or pick a private location.
+
+Editing a Codex or Grok server rewrites only the command, arguments,
+environment, URL and headers. Other keys such as `cwd`,
+`startup_timeout_sec`, `enabled` or per-tool tables stay as you wrote them,
+and the rest of the file is untouched. Codex headers are read from
+`http_headers`, `env_http_headers` and `bearer_token_env_var`. Grok's
+`config.toml` cannot carry request headers, so a server that needs them stays
+in a Claude or Codex config.
+
+**Sync** keeps scope: servers from your user configs are copied to the other
+CLIs' user configs, and project servers to the other CLIs' project files. A
+secret copied into a project file becomes a `${VAR}` placeholder and the sync
+summary names the variable to set. **Copy to Codex or Grok** adds the server
+to your user config there; a name that already exists is left alone.
+
+### What reaches Cora
+
+Servers switched on for Cora or for Pi workers are handed to Pi when a
+session starts, up to 16 per session. An open Cora chat picks up servers you
+add, change or remove on your next message, without a restart. A server that
+signs in through Claude's OAuth login cannot be used from Cora; give it an
+`Authorization` header instead.
+
+Skills reach Cora too. Cora loads the skills kept in `.pi/skills`,
+`.agents/skills`, the workspace's `.claude/skills` and `.codex/skills`, and
+your user skill folders for Pi, Claude and Codex. A skill switched off here
+is not loaded by new Cora sessions. Removing a skill moves its folder to the
+trash.
