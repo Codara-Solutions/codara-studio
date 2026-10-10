@@ -157,9 +157,7 @@ function MemoryRow({
         <div style={{ ...rowNoteStyle, marginTop: 3 }}>{detail}</div>
         {status && status.path ? (
           <div style={rowMetaStyle}>
-            <span style={rowSummaryStyle} title={status.path}>
-              {shortPath(status.path)}
-            </span>
+            <MemoryPath path={status.path} />
           </div>
         ) : null}
         <div style={rowMetaStyle}>
@@ -177,7 +175,7 @@ function MemoryRow({
         </div>
       </div>
       <div style={memoryControlsStyle}>
-        <div style={{ display: "grid", justifyItems: "center", gap: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={cellLabelStyle}>{enabled ? "On" : "Off"}</span>
           <Switch
             checked={enabled}
@@ -207,6 +205,19 @@ function MemoryRow({
         />
       </div>
     </div>
+  );
+}
+
+// The folder part gives way first so a narrow pane still shows which file
+// this is; the full path stays in the tooltip.
+function MemoryPath({ path }: { path: string }) {
+  const short = shortPath(path);
+  const cut = Math.max(short.lastIndexOf("/"), short.lastIndexOf("\\")) + 1;
+  return (
+    <span style={memoryPathStyle} title={path}>
+      <span style={{ ...rowSummaryStyle, flex: "0 1 auto", minWidth: 0 }}>{short.slice(0, cut)}</span>
+      <span style={{ ...rowSummaryStyle, flex: "0 0 auto" }}>{short.slice(cut)}</span>
+    </span>
   );
 }
 
@@ -315,6 +326,12 @@ function MemoryClearControl({
     </div>
   );
 }
+
+const memoryPathStyle: React.CSSProperties = {
+  display: "flex",
+  minWidth: 0,
+  maxWidth: "100%",
+};
 
 const memoryControlsStyle: React.CSSProperties = {
   display: "flex",

@@ -132,7 +132,7 @@ export default function ProfilesSection({
                 className="spark-input"
                 value={draft.name}
                 maxLength={80}
-                placeholder="Reviewer"
+                placeholder="e.g. Reviewer"
                 disabled={busy}
                 onChange={(event) => onDraftChange({ ...draft, name: event.target.value })}
               />
@@ -160,7 +160,7 @@ export default function ProfilesSection({
             value={draft.instructions}
             maxLength={PROFILE_MAX_CHARS}
             rows={4}
-            placeholder="Review every change for security and test coverage before saying it is done. Be brief."
+            placeholder="e.g. Review every change for security and test coverage before saying it is done. Be brief."
             disabled={busy}
             onChange={(event) => onDraftChange({ ...draft, instructions: event.target.value })}
             style={{ ...textareaStyle, fontFamily: "var(--font-sans)" }}

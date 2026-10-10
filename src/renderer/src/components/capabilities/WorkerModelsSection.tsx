@@ -53,6 +53,15 @@ export default function WorkerModelsSection({
       cancelled = true;
     };
   }, []);
+  const signedOutModel = (modelId: string): boolean => {
+    const subscription = workerModelSubscription(modelId);
+    return Boolean(usableSubscriptions && subscription && !usableSubscriptions.has(subscription));
+  };
+  // Switched on is not the same as runnable: with every switched-on model's
+  // provider signed out, Cora has no worker to start.
+  const runnable = enabled.filter((modelId) => usableSet.has(modelId));
+  const noneSignedIn =
+    usableSubscriptions !== null && runnable.length > 0 && runnable.every(signedOutModel);
   return (
     <section style={sectionStyle}>
       <SectionHead
@@ -72,6 +81,22 @@ export default function WorkerModelsSection({
             Grok model{openRouterVerified === false ? ", or verify your OpenRouter key in Settings, API and model" : ""}.
           </span>
         </div>
+      ) : noneSignedIn ? (
+        <div style={noticeStyle} role="alert">
+          <WarnGlyph />
+          <span>
+            None of the switched-on models has a signed-in account, so Cora cannot start workers yet.{" "}
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={() =>
+                window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents" } }))
+              }
+            >
+              Sign in under Settings &gt; Agents
+            </button>
+          </span>
+        </div>
       ) : null}
       <div role="group" aria-label="Cora worker models" style={toggleListStyle}>
         {groups.map((group) => (
@@ -84,10 +109,7 @@ export default function WorkerModelsSection({
                   ? "Not usable: the OpenRouter key is not verified, or this model is no longer a Cora favorite in Settings, API and model."
                   : "Not usable right now."
                 : null;
-              const subscription = workerModelSubscription(modelId);
-              const signedOut = Boolean(
-                usableSubscriptions && subscription && !usableSubscriptions.has(subscription),
-              );
+              const signedOut = signedOutModel(modelId);
               return (
                 <WorkerModelRow
                   key={modelId}

@@ -218,7 +218,9 @@ export default function McpSection(props: McpSectionProps) {
               <EmptyRow
                 text={
                   totalGroups === 0
-                    ? "No MCP servers are set up yet. Add one with Add server, or paste the snippet from the server's README."
+                    ? visibleBuiltins.length > 0
+                      ? "No other MCP servers are set up yet. Add one with Add server, or paste the snippet from the server's README."
+                      : "No MCP servers are set up yet. Add one with Add server, or paste the snippet from the server's README."
                     : "No servers match this filter."
                 }
               />

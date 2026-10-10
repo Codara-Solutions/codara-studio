@@ -68,7 +68,7 @@ export default function SkillsSection({
             A skill is a folder of instructions an agent loads when a task needs it, like a release
             checklist or a house style. Cora and Pi workers load every skill switched on here, from the
             Claude, Codex, .agents and .pi skill folders.{" "}
-            {loading ? null : `${activeCount} of ${totalGroups} on.`}
+            {loading || totalGroups === 0 ? null : `${activeCount} of ${totalGroups} on.`}
           </>
         }
         actions={<SearchField value={search} onChange={onSearch} placeholder="Filter skills" />}
