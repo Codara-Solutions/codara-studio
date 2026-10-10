@@ -678,7 +678,7 @@ async function main() {
   {
     const fetchTool = registered.find((candidate) => candidate.name === "fetch_url");
     assert.deepEqual(fetchTool.parameters.required, ["url"]);
-    assert.doesNotMatch(fetchTool.description, /[–—]/);
+    assert.doesNotMatch(fetchTool.description, /[\u2013\u2014]/);
     const page = "<html><head><title>x</title><script>evil()</script></head><body><nav>menu</nav><h1>Webhooks</h1><p>Send a POST with the event.</p></body></html>";
     const text = await deepSearch.executeFetchUrl(
       { url: "https://docs.example.com/v2/webhooks" },
