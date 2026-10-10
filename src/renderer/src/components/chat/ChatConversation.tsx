@@ -25,6 +25,7 @@ import {
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
+import { chordToHint, mod } from "../../shortcuts/chord";
 import { openAccountsSettings } from "./account-readiness";
 import {
   compactPreview,
@@ -254,6 +255,23 @@ export default function ChatConversation({
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
+  // "New activity" only when something arrived after the reader left the
+  // bottom; an old chat whose last answer is taller than the viewport opens
+  // scrolled up with nothing new. The event count is ignored until history
+  // hydrates, or the hydration itself would read as activity.
+  const activityMark = execution.hydrated ? `${rowCount}:${execution.events.length}` : null;
+  const leftBottomMarkRef = useRef<string | null>(null);
+  const [newActivity, setNewActivity] = useState(false);
+  useEffect(() => {
+    if (readerAtBottom) {
+      leftBottomMarkRef.current = null;
+      setNewActivity(false);
+      return;
+    }
+    if (activityMark === null) return;
+    if (leftBottomMarkRef.current === null) leftBottomMarkRef.current = activityMark;
+    else if (leftBottomMarkRef.current !== activityMark) setNewActivity(true);
+  }, [readerAtBottom, activityMark]);
   const summarizeWait = useMemo(
     () => (taskIds: string[]) => summarizeWorkerWait(run, taskIds)?.label || null,
     [run],
@@ -375,7 +393,7 @@ export default function ChatConversation({
             onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
             style={NEW_ACTIVITY_BUTTON_STYLE}
           >
-            New activity ↓
+            {newActivity ? "New activity ↓" : "Jump to latest ↓"}
           </button>
         )}
       </div>
@@ -2049,6 +2067,10 @@ function AssistantLiveTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const waiting = segments.length === 0;
+  // A tool still running (wait_for_workers above all) is legitimately silent
+  // for as long as the workers take, so only a turn with nothing in flight
+  // can be called stalled.
+  const toolInFlight = blocks.some((block) => block.kind === "tool" && block.output === undefined);
   return (
     <SparkTurn>
       <div
@@ -2089,6 +2111,9 @@ function AssistantLiveTurn({
             ) : null}
           </div>
         )}
+        {!item.awaitingReply && !compaction && !toolInFlight ? (
+          <StallHint since={executionTurn?.lastEventAt || item.at} />
+        ) : null}
         <TurnSegments segments={segments} />
       </div>
     </SparkTurn>
@@ -2217,6 +2242,28 @@ function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
     segments.push({ kind: "tool", id: block.id, call: block });
   }
   return segments;
+}
+
+const STALL_AFTER_MS = 90_000;
+const STOP_CHORD_HINT = chordToHint(mod("."));
+
+// Shown once a live turn has produced nothing for STALL_AFTER_MS. Ticks on its
+// own so the turn above it does not re-render.
+function StallHint({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const last = Date.parse(since);
+  if (!Number.isFinite(last) || now - last < STALL_AFTER_MS) return null;
+  const minutes = Math.floor((now - last) / 60_000);
+  const silence = minutes >= 1 ? `${minutes}m` : `${Math.floor((now - last) / 1000)}s`;
+  return (
+    <div className="cora-stall-hint" role="status" style={STALL_HINT_STYLE}>
+      No output for {silence}. Keep waiting, or stop Cora ({STOP_CHORD_HINT}) and retry.
+    </div>
+  );
 }
 
 // Ticks " for 12s" onto the Working header without re-rendering the turn each
@@ -3929,6 +3976,12 @@ const TOOL_META_LINE_STYLE: React.CSSProperties = {
 // The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
 // completed turn's "Worked for Ns" disclosure line will land, so the
 // live → done transition swaps copy without moving anything.
+const STALL_HINT_STYLE: React.CSSProperties = {
+  color: "var(--warn)",
+  fontSize: 11.5,
+  lineHeight: 1.4,
+};
+
 const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
