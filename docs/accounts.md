@@ -20,8 +20,12 @@ design behind it, with file references, is in
 ## Adding an account
 
 Open Settings (Cmd+, on macOS, Ctrl+, elsewhere), go to **Agents**, and click
-**+** next to **Accounts**. The first-run guide offers the same sign-in (see
-[getting-started.md](./getting-started.md)). From a terminal:
+**+** next to **Accounts**. A provider with no account yet also has its own
+**Sign in to ...** button. The first-run guide offers the same sign-in (see
+[getting-started.md](./getting-started.md)), and so does the Cora chat: with
+no account connected, the welcome screen says so and opens these settings, and a turn
+that fails because an account is missing or signed out shows **Open
+accounts** next to **Retry**. From a terminal:
 
 ```sh
 cora auth add anthropic "Work Claude"

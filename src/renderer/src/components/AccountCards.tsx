@@ -405,13 +405,29 @@ function AccountProviderGroup({
         {view.cards.length === 0 ? (
           <div
             style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              flexWrap: "wrap",
               color: "var(--muted)",
               fontFamily: "var(--font-sans)",
               fontSize: 11,
               padding: "4px 2px",
             }}
           >
-            No {descriptor.label} account yet.
+            <span>No {descriptor.label} account yet.</span>
+            {/* view.busy covers any sign-in in flight, for every provider:
+                only one browser login may run at a time. */}
+            <ActionButton
+              compact
+              primary
+              tone={brand}
+              disabled={view.disabled || view.busy}
+              onClick={() => actions.onAdd(descriptor.provider)}
+            >
+              Sign in to {descriptor.label}
+            </ActionButton>
           </div>
         ) : null}
         {view.footer ? (
