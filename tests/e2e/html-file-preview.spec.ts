@@ -3,6 +3,7 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LINUX_DISPLAY_ARG } from "./linux-display";
 
 // Opening an .html file from the tree lands in a rendered preview (webview
 // guest with relative css/js resolved through file://), with the same
@@ -55,7 +56,7 @@ test("html files open rendered by default and toggle to the source editor", asyn
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", "--ozone-platform=x11"],
+      args: [".", LINUX_DISPLAY_ARG],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

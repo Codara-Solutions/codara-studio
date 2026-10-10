@@ -3,6 +3,7 @@ import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LINUX_DISPLAY_ARG } from "./linux-display";
 
 test("every Cora run exposes a stable Runs surface immediately and the Whiteboard appears once a board exists", async () => {
   const root = await mkdtemp(join(tmpdir(), "codara-cora-surfaces-"));
@@ -48,10 +49,8 @@ test("every Cora run exposes a stable Runs surface immediately and the Whiteboar
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      // --ozone-platform=x11 keeps Linux launches deterministic: Chromium's
-      // Wayland auto-detection can hang the whole app when the compositor
-      // is unavailable to new clients (headless CI, stale sessions).
-      args: [".", "--ozone-platform=x11"],
+      // LINUX_DISPLAY_ARG skips Wayland auto-detection; see linux-display.ts.
+      args: [".", LINUX_DISPLAY_ARG],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
@@ -344,7 +343,7 @@ test("a draft chat's Board promotes to an idle run on the first card without sta
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", "--ozone-platform=x11"],
+      args: [".", LINUX_DISPLAY_ARG],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

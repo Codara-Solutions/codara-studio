@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { LINUX_DISPLAY_ARG } from "./linux-display";
 
 test("a live worker pane returns after the renderer misses its launch event", async () => {
   // The worker is genuinely launched now, so the budget covers a real session:
@@ -15,10 +16,8 @@ test("a live worker pane returns after the renderer misses its launch event", as
 
   try {
     app = await electron.launch({
-      // --ozone-platform=x11 keeps Linux launches deterministic: Chromium's
-      // Wayland auto-detection can hang the whole app when the compositor
-      // is unavailable to new clients (headless CI, stale sessions).
-      args: [".", "--ozone-platform=x11"],
+      // LINUX_DISPLAY_ARG skips Wayland auto-detection; see linux-display.ts.
+      args: [".", LINUX_DISPLAY_ARG],
       env: {
         ...process.env,
         // Pin every home override the app honors: a shell inside the dev app
