@@ -113,4 +113,40 @@ assert.match(composer, /<DismissErrorButton onClick=\{\(\) => setError\(null\)\}
 assert.match(sidebar, /onDismissError=\{dismissError\}/);
 assert.match(sidebar, /useEffect\(\(\) => \{\s*setError\(null\);\s*\}, \[activeRunId, creatingNewRun\]\);/);
 
-console.log("chat composer ux: ok");
+// ── Prefill (welcome starters, undo) ───────────────────────────────────────
+assert.match(composer, /setDraft\(\(current\) => prefillDraft\(current, text, \{ replace, prepend \}\)\);/);
+
+(async () => {
+  const esbuild = require("esbuild");
+  const out = await esbuild.build({
+    entryPoints: [path.join(ROOT, "src/renderer/src/components/chat/composer/prefill-draft.ts")],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  const mod = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  const { prefillDraft } = mod.exports;
+  // A lead-in starter runs into the draft.
+  assert.equal(
+    prefillDraft("  the login loop", "Investigate and fix this bug in the current project: ", { prepend: true }),
+    "Investigate and fix this bug in the current project: the login loop",
+  );
+  // A complete starter must not glue the draft onto its last sentence.
+  assert.equal(
+    prefillDraft("focus on auth", "Map this project for me.", { prepend: true }),
+    "Map this project for me.\n\nfocus on auth",
+  );
+  assert.equal(prefillDraft("   ", "Map this project for me.", { prepend: true }), "Map this project for me.");
+  assert.equal(prefillDraft("draft", "restored", { replace: true }), "restored");
+  assert.equal(prefillDraft("draft", "more"), "draft\nmore");
+  assert.equal(prefillDraft("draft\n", "more"), "draft\nmore");
+  console.log("chat composer ux: ok");
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

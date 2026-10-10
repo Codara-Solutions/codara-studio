@@ -32,6 +32,7 @@ import DismissErrorButton from "./DismissErrorButton";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import { prefillDraft } from "./composer/prefill-draft";
 import ProfilePicker from "./composer/ProfilePicker";
 import {
   DEFAULT_CHAT_BACKEND,
@@ -516,12 +517,7 @@ export default function ChatComposer({
       // Welcome starters frame a task ("Investigate and fix this bug: "), so
       // they go in front of what the user already typed instead of replacing it.
       const prepend = detail?.prepend === true;
-      setDraft((current) => {
-        if (replace) return text;
-        if (!current.trim()) return text;
-        if (prepend) return `${text}${current.trimStart()}`;
-        return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
-      });
+      setDraft((current) => prefillDraft(current, text, { replace, prepend }));
       window.setTimeout(() => {
         const node = textareaRef.current;
         if (!node) return;
