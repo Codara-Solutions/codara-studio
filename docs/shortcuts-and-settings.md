@@ -149,7 +149,7 @@ by default; bind it in Keybindings). It has six sections:
 |---|---|
 | Tools (MCP servers) | Your MCP servers, one row per name. **Cora** and **Workers** switch a server on for Cora and for Pi workers; the **Claude CLI**, **Codex CLI** and **Grok Build** columns show whether that CLI loads it, with **Add** to copy it there. Each row says what Cora and workers actually get, has **Test** (starts the server once and lists its tools), **Edit** and **Remove**. The built-in Codara Studio server sits on top with an on/off switch per CLI; switching it off removes Codara's entry from that CLI's config, and it stays off across restarts. |
 | Skills | The skills agents can load, with a switch for Cora and workers and the same CLI columns. |
-| Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat picks its profile from the composer's profile menu; a started chat shows its profile and keeps it. |
+| Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat (including a board chat with no messages yet) picks its profile from the composer's profile menu; a started chat shows its profile as a chip that opens it here, and keeps it. |
 | Memory | What Cora remembers for the profile you pick, globally and for this workspace. Global memory is the master switch: while it is off, workspace memory is off too and says so. **Open in editor** creates the file if nothing was remembered yet. |
 | Worker models | Which models Cora may pick for its workers. The last usable model cannot be switched off; an OpenRouter model only counts once its key is verified. |
 | Behavior | Three switches that apply to all workspaces: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
@@ -166,8 +166,9 @@ this one. You can paste what a README publishes instead of typing: an
 table, a `claude mcp add`, `claude mcp add-json` or `codex mcp add` command,
 or a bare command line. **Test connection** starts the server before you save
 and lists its tools. Values that look like secrets are masked until you
-reveal them. Editing a server that several files define offers to update the
-other copies too, marks copies that differ, and names the one Cora uses.
+reveal them. Editing a server that several files define opens the copy Cora
+uses and offers to update the other copies too. When the copies disagree, the
+row carries a **copies differ** badge whose tooltip names the file Cora uses.
 
 The tools the built-in server provides are listed in
 [mcp-tools.md](./mcp-tools.md).

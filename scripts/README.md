@@ -178,6 +178,8 @@ calls.
 `test-cora-memory`, `test-cora-profiles`, `test-cora-profile-subscriptions`,
 `test-workspace-lessons`, `test-outcome-memory`: `cora-memory.ts`,
 `cora-profiles.ts`, `workspace-lessons.ts`, `src/shared/outcome-memory.ts`.
+`test-unstarted-run-profile` covers the profile a board-minted chat takes on
+its first send (`run-store.ts`).
 
 ### Automations, looms and the board
 

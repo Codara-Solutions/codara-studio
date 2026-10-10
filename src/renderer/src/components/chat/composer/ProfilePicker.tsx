@@ -38,18 +38,21 @@ export default function ProfilePicker({
   if (locked) {
     // A deleted profile's chats were moved to the built-in one, which is
     // named Cora; an id the list no longer has reads the same way.
+    // No menu: it opens that profile in the Capability Center, where its
+    // instructions and memory live.
     const name = active?.name ?? "Cora";
     return (
       <div className="composer-profile">
-        <span
+        <button
+          type="button"
           className="composer-pill composer-profile-trigger is-locked"
-          title={`Cora profile: ${name}. Profile is fixed for this chat.`}
+          title={`Cora profile: ${name}. Profile is fixed for this chat. Open its instructions and memory.`}
           aria-label={`Cora profile: ${name}. Profile is fixed for this chat.`}
-          role="img"
+          onClick={onManage}
         >
           <span className="composer-profile-glyph" aria-hidden>✦</span>
           <span className="composer-profile-label">{name}</span>
-        </span>
+        </button>
       </div>
     );
   }
