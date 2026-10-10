@@ -15246,15 +15246,14 @@ async function maybeQueueCliLaunchFallback({
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
   if (!isLaunchFailure) return null;
-  if (
-    task.runtimePreference !== "claude" &&
-    task.runtimePreference !== "codex"
-  ) {
+  if (task.runtimePreference === "shell" || task.runtimePreference === "manual") {
     return null;
   }
   const availableRuntimes = await detectConfiguredAgentRuntimes();
   // Prefer the first installed runtime OTHER than the one that just failed.
-  // Order claude → codex by default, but skip the failing one.
+  // Every agent runtime (Grok included) gets the same-runtime fast retry, but
+  // only claude and codex are switch targets: the hint translators below map
+  // a model and effort into those two rosters and no other.
   const preferenceOrder: WorkerRuntime[] = ["claude", "codex"];
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)

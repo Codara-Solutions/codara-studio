@@ -288,6 +288,38 @@ async function main() {
     assert.ok(plan.reason.length > 0);
   }
 
+  // run-store's launch fallback cannot bundle standalone, so its runtime gate
+  // is pinned by source: a Grok worker hitting a one-off 500 must get the same
+  // fast retry as Claude and Codex instead of failing outright, while switch
+  // targets stay limited to the runtimes the hint translators understand.
+  const runStoreSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+    "utf8",
+  );
+  const fallbackStart = runStoreSource.indexOf("async function maybeQueueCliLaunchFallback(");
+  const fallbackBody = runStoreSource.slice(fallbackStart, runStoreSource.indexOf("\n}\n", fallbackStart));
+  assert.ok(fallbackStart >= 0, "maybeQueueCliLaunchFallback exists");
+  assert.doesNotMatch(
+    fallbackBody,
+    /task\.runtimePreference !== "claude" &&\s*task\.runtimePreference !== "codex"/,
+    "the fallback no longer rejects every runtime but claude and codex",
+  );
+  assert.match(
+    fallbackBody,
+    /task\.runtimePreference === "shell" \|\| task\.runtimePreference === "manual"/,
+    "only non-agent runtimes skip the fallback",
+  );
+  assert.match(fallbackBody, /const preferenceOrder: WorkerRuntime\[\] = \["claude", "codex"\];/);
+  assert.ok(
+    fallbackBody.indexOf("planWorkerFailureRetry(") < fallbackBody.indexOf("retriesSameRuntime ? task.runtimePreference"),
+    "a same-runtime retry keeps the task's own runtime",
+  );
+  assert.equal(
+    planWorkerFailureRetry({ kind: "transport", sameRuntimeAttempts: 1, oppositeRuntimeAvailable: false }).action,
+    "retry_same_runtime",
+    "a Grok transport failure with no switch target still earns one fast retry",
+  );
+
   console.log("failure taxonomy: ok");
 }
 
