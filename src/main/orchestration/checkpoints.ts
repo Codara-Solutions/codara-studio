@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Checkpoint } from "@shared/types";
 import { makeId } from "@shared/ids";
@@ -81,6 +81,39 @@ export interface CreateCheckpointInput {
   messageId?: string;
   messagePointer: number;
   label: string;
+  /** Called with the reason when a git workspace could not be snapshotted. */
+  onError?: (message: string) => void;
+}
+
+// Seed the temp index from the real one so `add -A` keeps git's stat cache and
+// hashes only changed files; seeding from `read-tree HEAD` re-hashes every
+// tracked file, which on a large repository outlasts TIMEOUT_MS. A split index
+// keeps its entries in a separate sharedindex file, so copying the main file
+// alone would corrupt it; those repositories fall back to read-tree.
+async function seedTempIndex(
+  cwd: string,
+  tempIndex: string,
+  env: NodeJS.ProcessEnv,
+  headSha: string | null,
+): Promise<void> {
+  try {
+    const splitIndex = await git(cwd, ["config", "--bool", "core.splitIndex"]).catch(() => null);
+    const { stdout } = await git(cwd, ["rev-parse", "--git-path", "index"]);
+    const realIndex = resolve(cwd, stdout.trim());
+    const shared = (await readdir(dirname(realIndex)).catch(() => [] as string[]))
+      .some((name) => name.startsWith("sharedindex."));
+    if (splitIndex?.stdout.trim() !== "true" && !shared && (await stat(realIndex)).isFile()) {
+      await copyFile(realIndex, tempIndex);
+      return;
+    }
+  } catch {
+    // No usable index (fresh repository): fall through to HEAD.
+  }
+  if (headSha) {
+    // Seed the temp index with HEAD so files we don't touch keep their mode
+    // bits, and binary blobs stay deduped against the existing pack.
+    await git(cwd, ["read-tree", "HEAD"], env);
+  }
 }
 
 // Create a snapshot of `cwd` and append a checkpoint to the shadow ref. Returns
@@ -111,11 +144,7 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
     };
 
     const headSha = await refSha(cwd, "HEAD");
-    if (headSha) {
-      // Seed the temp index with HEAD so files we don't touch keep their mode
-      // bits, and binary blobs stay deduped against the existing pack.
-      await git(cwd, ["read-tree", "HEAD"], env);
-    }
+    await seedTempIndex(cwd, tempIndex, env, headSha);
 
     // -A picks up modifications, additions, and deletions, all relative to
     // gitignore. This is the same surface area as a normal stage-all commit.
@@ -149,9 +178,11 @@ export async function createCheckpoint(input: CreateCheckpointInput): Promise<Ch
     await git(cwd, ["update-ref", shadowRef(runId), commit]);
 
     return { ...baseCheckpoint, sha: commit };
-  } catch {
+  } catch (error) {
     // Checkpoint creation is best-effort. A failed snapshot returns the
-    // sha-less entry so the undo-chat-only path still works.
+    // sha-less entry so the undo-chat-only path still works; the caller hears
+    // why, so the run can say undo and regression restore are unavailable.
+    input.onError?.(error instanceof Error ? error.message.slice(0, 500) : String(error));
     return baseCheckpoint;
   } finally {
     if (tempDir) {
@@ -182,6 +213,39 @@ export async function restoreCheckpointCode(input: {
   // Pull the index back to HEAD so the user keeps their branch pointer and
   // sees the restored files as pending changes against HEAD.
   await git(cwd, ["reset", "HEAD"]);
+}
+
+// Restore only `paths` (workspace-relative) to their content in a checkpoint,
+// leaving every other file and the index alone. A path the snapshot does not
+// contain was created after it and is removed. Used by the automatic
+// green-claim regression restore, which must not touch work outside the
+// regressing worker's own files.
+export async function restoreCheckpointPaths(input: {
+  cwd: string;
+  sha: string;
+  paths: string[];
+}): Promise<{ restored: string[]; removed: string[] }> {
+  const { cwd, sha } = input;
+  if (!cwd) throw new Error("Workspace path missing; cannot restore code.");
+  if (!(await isGitRepo(cwd))) throw new Error("Workspace is not a git repository.");
+  if (!(await refSha(cwd, sha))) throw new Error("Checkpoint commit is missing from the shadow ref.");
+  const root = resolve(cwd);
+  const restored: string[] = [];
+  const removed: string[] = [];
+  for (const raw of input.paths) {
+    const path = raw.replace(/\\/g, "/").replace(/^\.\//, "");
+    const absolute = resolve(root, path);
+    if (!path || isAbsolute(path) || (absolute !== root && !absolute.startsWith(`${root}${sep}`))) continue;
+    const inSnapshot = await git(cwd, ["cat-file", "-e", `${sha}:${path}`]).then(() => true, () => false);
+    if (inSnapshot) {
+      await git(cwd, ["restore", `--source=${sha}`, "--worktree", "--", path]);
+      restored.push(path);
+    } else {
+      await rm(absolute, { force: true, recursive: false }).catch(() => undefined);
+      removed.push(path);
+    }
+  }
+  return { restored, removed };
 }
 
 // Drop the run's shadow ref when the run is deleted. Best-effort — a missing

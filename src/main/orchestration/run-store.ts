@@ -251,6 +251,7 @@ import {
   createCheckpoint,
   deleteRunCheckpoints,
   restoreCheckpointCode,
+  restoreCheckpointPaths,
   rewindShadowRef,
   runCheckpointStartPoint,
 } from "./checkpoints";
@@ -11032,6 +11033,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       if (input.author === "user") {
         draft.verificationRounds = 0;
         delete draft.verificationRoundsByLineage;
+        // A claim verified in an earlier turn says nothing about behavior the
+        // user has since asked to change.
+        delete draft.greenClaims;
       }
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
@@ -13127,6 +13131,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ) {
     try {
       const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+      let checkpointError: string | undefined;
       const checkpoint = await withCheckpointLock(run.id, () =>
         createCheckpoint({
           runId: run.id,
@@ -13134,6 +13139,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           kind: "pre-worker",
           messagePointer: run.humanMessages.length,
           label: `pre-worker ${task.title}`,
+          onError: (message) => {
+            checkpointError = message;
+          },
         }),
       );
       attempt.preWorkerCheckpointSha = checkpoint.sha;
@@ -13147,9 +13155,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
         stepId: task.stepId,
         workerTaskId: task.id,
         attemptId: attempt.id,
-        type: "run.checkpoint_created",
-        message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
-        payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
+        type: checkpointError ? "run.checkpoint_failed" : "run.checkpoint_created",
+        message: checkpointError
+          ? `Checkpoint ${checkpoint.kind} failed; undo and regression restore are unavailable for this worker`
+          : `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
+        payload: {
+          checkpointId: checkpoint.id,
+          sha: checkpoint.sha,
+          kind: checkpoint.kind,
+          ...(checkpointError ? { error: checkpointError } : {}),
+        },
       });
     } catch {
       // Checkpoint capture is best-effort; never let it abort the launch.
@@ -16122,6 +16137,13 @@ async function maybeQueueVerifierFeedbackRetry({
   return commitRunChange(run, change);
 }
 
+// Claims are scoped to the implementation lineage a verifier judged, so a
+// generic "tests pass" verified for one area cannot trigger a revert when
+// another area's verifier fails the same words mid-migration.
+function greenClaimKey(lineage: string, claim: string): string {
+  return `${lineage}::${normalizeClaimKey(claim)}`;
+}
+
 // Marks the report's newly-verified atomic claims green on the run (claim key ->
 // the attempt that verified it). Records green even when the same report also
 // triggers a FEEDBACK re-enqueue, so a partial pass isn't lost on the retry.
@@ -16145,8 +16167,10 @@ async function recordGreenClaims({
     payload: { attemptId: attempt.id, count: verified.length },
     mutate: (draft, timestamp) => {
       const greenClaims = (draft.greenClaims ??= {});
+      const verifier = draft.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
+      const lineage = verifier ? verifierLineageRoot(draft, verifier) : attempt.workerTaskId;
       for (const claim of verified) {
-        greenClaims[normalizeClaimKey(claim.claim)] = attempt.id;
+        greenClaims[greenClaimKey(lineage, claim.claim)] = attempt.id;
       }
       draft.updatedAt = timestamp;
     },
@@ -16172,11 +16196,12 @@ async function maybeRestoreGreenClaimRegression({
 }): Promise<{ run: RunState; restoreFailed: boolean } | null> {
   const green = run.greenClaims;
   if (!green) return null;
+  const lineage = verifierLineageRoot(run, task);
   const regressedKeys: string[] = [];
   const regressedClaims: string[] = [];
   for (const claim of report.verifier?.atomicClaims ?? []) {
     if (claim.verdict !== "failed") continue;
-    const key = normalizeClaimKey(claim.claim);
+    const key = greenClaimKey(lineage, claim.claim);
     if (green[key]) {
       regressedKeys.push(key);
       regressedClaims.push(claim.claim.trim());
@@ -16184,25 +16209,47 @@ async function maybeRestoreGreenClaimRegression({
   }
   if (regressedKeys.length === 0) return null;
 
-  // Latest impl pre-worker snapshot that predates the regressing change.
+  // The snapshot taken before this lineage's newest implementation attempt,
+  // and only the files that attempt reported changing. A whole-tree reset to
+  // the newest snapshot in the run would also wipe other areas' finished work.
   let restoredSha: string | null = null;
+  let restorePaths: string[] = [];
   for (let i = run.workerAttempts.length - 1; i >= 0; i--) {
-    const sha = run.workerAttempts[i].preWorkerCheckpointSha;
-    if (sha) {
-      restoredSha = sha;
-      break;
-    }
+    const candidate = run.workerAttempts[i];
+    const candidateTask = run.workerTasks.find((item) => item.id === candidate.workerTaskId);
+    if (!candidateTask || candidateTask.taskClass === "verifier") continue;
+    if (implementationLineageRoot(run, candidateTask.id) !== lineage) continue;
+    if (!candidate.preWorkerCheckpointSha) continue;
+    const candidateReport = candidate.finalReportPath
+      ? await readWorkerReport(candidate.finalReportPath).catch(() => null)
+      : null;
+    restoredSha = candidate.preWorkerCheckpointSha;
+    restorePaths = (candidateReport?.filesChanged ?? []).map((file) => file.path).filter(Boolean);
+    break;
   }
+  // Restoring under a live writer would race its edits; the manager decides.
+  const otherLiveWriters =
+    activeWorkersForRun(run.id).some((worker) => worker.workerTaskId !== task.id) ||
+    run.workerTasks.some(
+      (item) =>
+        item.id !== task.id &&
+        (item.status === "running" || item.status === "claimed") &&
+        taskWritesWorkspace(item),
+    );
   const cwd = workspaceCwdFromRun(run);
-  if (!restoredSha || !cwd) {
-    // Nothing to restore to (non-git workspace or no prior snapshot). Still drop
-    // the stale green entries below so the regression isn't silently retained.
+  if (!restoredSha || !cwd || restorePaths.length === 0 || otherLiveWriters) {
+    // Nothing safe to restore (non-git workspace, no snapshot or changed-file
+    // list for this lineage, or another writer is live). Still drop the stale
+    // green entries so the regression isn't silently retained.
+    const reason = otherLiveWriters
+      ? "another worker is still writing, so nothing was restored"
+      : "no pre-worker snapshot of this area is available to restore";
     const unavailable = await commitRunChange(run, {
       type: "autopilot.green_claim_regression_detected",
       stepId: task.stepId,
       workerTaskId: task.id,
-      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); no pre-worker snapshot available to restore`,
-      payload: { claims: regressedClaims, attemptId: attempt.id },
+      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); ${reason}`,
+      payload: { claims: regressedClaims, attemptId: attempt.id, lineage, otherLiveWriters },
       mutate: (draft, timestamp) => {
         if (draft.greenClaims) {
           for (const key of regressedKeys) delete draft.greenClaims[key];
@@ -16214,7 +16261,7 @@ async function maybeRestoreGreenClaimRegression({
   }
 
   try {
-    await restoreCheckpointCode({ cwd, sha: restoredSha });
+    await restoreCheckpointPaths({ cwd, sha: restoredSha, paths: restorePaths });
   } catch (error) {
     const restoreError = error instanceof Error ? error.message : String(error);
     const failed = await commitRunChange(run, {
@@ -16263,8 +16310,8 @@ async function maybeRestoreGreenClaimRegression({
     type: "autopilot.green_claim_regression_reverted",
     stepId: task.stepId,
     workerTaskId: task.id,
-    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s) to pre-worker snapshot`,
-    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id },
+    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s): restored ${restorePaths.length} file(s) to the pre-worker snapshot`,
+    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id, paths: restorePaths },
     mutate: (draft, timestamp) => {
       if (draft.greenClaims) {
         for (const key of regressedKeys) delete draft.greenClaims[key];
