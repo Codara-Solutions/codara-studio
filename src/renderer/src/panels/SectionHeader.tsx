@@ -176,7 +176,9 @@ export function SectionHeader({
             minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
-            flex: "0 1 auto",
+            // Next to a meta node the label is a short section name that
+            // must stay legible; the meta is what gives way.
+            flex: meta != null ? "0 0 auto" : "0 1 auto",
             transition: "color var(--motion-fast) var(--ease-out)",
           }}
         >

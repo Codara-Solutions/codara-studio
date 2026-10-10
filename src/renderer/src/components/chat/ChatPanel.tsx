@@ -369,52 +369,22 @@ export default function ChatPanel({
 }
 
 function HeaderMeta({ run }: { run: RunState }) {
-  // Status + cost + run-id share one row to keep the SectionHeader compact.
-  // The cost pill hides itself until the run records a priced manager call;
-  // the id chip is always shown so the user has something to copy and share
-  // for support / debugging on every chat.
-  //
-  // The status text is the ONLY elastic member. SectionHeader's meta slot
-  // clips its overflow, and a paused run's detail is the manager-turn park
-  // reason — a whole sentence — which used to push the cost pill and the id
-  // chip past the clip line: the id became invisible and unclickable exactly
-  // when a user hit trouble and wanted to copy it (run-msa0s2t6-sz26w1).
-  // Status now ellipsizes and the chips hold their width in every run state.
+  // Title, status and cost share one row to keep the SectionHeader compact.
+  // The title is the only member that gives way: the status pill, the cost
+  // pill and the copy-id button hold their width in every run state, so the id
+  // stays reachable exactly when a user hits trouble and wants to share it
+  // (run-msa0s2t6-sz26w1). A paused run's park reason is a whole sentence; it
+  // lives in the pill's tooltip and in the conversation, never in this row.
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        minWidth: 0,
-        maxWidth: "100%",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {/* The chat's name — Cora titles the run early via name_chat and may
-          rename it later; run.renamed events re-render this live. Capped so
-          the status/cost/id chips always keep their row space. */}
+    <span className="cora-header-meta">
       {run.title ? (
-        <span
-          title={run.title}
-          style={{
-            flex: "0 1 auto",
-            minWidth: 0,
-            maxWidth: 200,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontSize: 11,
-            fontWeight: 600,
-            color: "var(--ink)",
-          }}
-        >
+        <span className="cora-header-meta__title" title={run.title}>
           {run.title}
         </span>
       ) : null}
       <StatusMeta run={run} />
       <CostPill run={run} />
-      <RunIdChip runId={run.id} />
+      <RunIdChip runId={run.id} compact />
     </span>
   );
 }
@@ -765,18 +735,17 @@ function ChatHistoryRow({
           style={{
             flex: 1,
             minWidth: 0,
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            color: "var(--ink-dim)",
+            fontSize: 11,
+            color: "var(--muted)",
             whiteSpace: "nowrap",
             overflow: "hidden",
             textOverflow: "ellipsis",
           }}
         >
-          {status.label}
-          {status.detail ? ` ${status.detail}` : ""}
+          <span style={{ color: "var(--ink-dim)" }}>{status.label}</span>
+          {status.detail ? ` · ${status.detail}` : ""}
         </span>
-        <RunIdChip runId={run.id} />
+        <RunIdChip runId={run.id} compact />
       </div>
       {snippet ? (
         <div
@@ -913,53 +882,13 @@ function StatusMeta({ run }: { run: RunState }) {
   const color = statusToneColor(status.tone);
   return (
     <span
-      // The one shrinkable member of the header meta row: it gives up width
-      // (and ellipsizes its detail) so the cost pill and the run-id chip stay
-      // whole. The full detail survives in the tooltip.
+      className="cora-status-pill"
+      data-tone={status.tone}
       title={status.detail ? `${status.label} · ${status.detail}` : status.label}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        flex: "0 1 auto",
-        minWidth: 0,
-        overflow: "hidden",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        fontVariantNumeric: "tabular-nums",
-        color: "var(--muted)",
-        whiteSpace: "nowrap",
-      }}
+      style={{ "--cora-status-color": color } as React.CSSProperties}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 999,
-          background: color,
-          flex: "0 0 6px",
-          // The done state glows softly off only when live; everything else is
-          // a static token-colored dot (--ok for done) reading as calm meta.
-          boxShadow:
-            status.tone === "live"
-              ? `0 0 6px color-mix(in oklch, ${color} 55%, transparent)`
-              : "none",
-          animation: status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
-        }}
-      />
-      <span style={{ color: "var(--ink-dim)", flex: "0 0 auto" }}>{status.label}</span>
-      {status.detail && (
-        <span
-          style={{
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {status.detail}
-        </span>
-      )}
+      <span aria-hidden className="cora-status-pill__dot" />
+      {status.label}
     </span>
   );
 }
@@ -1080,18 +1009,19 @@ function CostPill({ run }: { run: RunState }) {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        height: 18,
-        padding: "0 7px",
+        gap: 2,
+        height: 20,
+        padding: "0 8px",
         borderRadius: 999,
         border: "1px solid var(--rule-soft)",
-        background: "var(--panel-2)",
+        background: "transparent",
         color: "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 500,
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
-        // Never the member that gives way when the status text is long.
+        // Never the member that gives way when the title is long.
         flex: "0 0 auto",
       }}
     >

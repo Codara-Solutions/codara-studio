@@ -29,6 +29,7 @@ import { unwrapIpcError } from "../../lib/ipc-error";
 import { chordToHint, mod } from "../../shortcuts/chord";
 import { findMatchingRows, stepMatch } from "./conversation-search";
 import { openAccountsSettings } from "./account-readiness";
+import { isBackendFailurePark } from "@shared/run-questions";
 import {
   compactPreview,
   formatToolPayload,
@@ -169,6 +170,17 @@ export default function ChatConversation({
     ],
   );
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
+  // The failed turn the composer's Retry would re-run: the latest manager
+  // call, only while the run is parked on it. Its card offers the same Retry.
+  const retryableCallId = useMemo(() => {
+    const parked =
+      run.status === "paused" &&
+      (run.autopilot?.lastAction === "chat_turn_parked" ||
+        run.autopilot?.lastAction === "manager_turn_parked");
+    if (!parked && !isBackendFailurePark(run)) return null;
+    const last = run.sparkCalls[run.sparkCalls.length - 1];
+    return last?.status === "failed" ? last.id : null;
+  }, [run]);
   // On a completed run, stamp a tiny "done" marker under the LAST Cora prose
   // message so the user sees the run finished without a separate completion
   // turn duplicating the answer. The id-matching keys the marker to that one
@@ -368,9 +380,7 @@ export default function ChatConversation({
                   data-cora-conversation-column
                   style={{
                     ...CONVERSATION_COLUMN_STYLE,
-                    padding: index === 0
-                      ? "20px clamp(12px, 2.4vw, 20px) 0"
-                      : "0 clamp(12px, 2.4vw, 20px)",
+                    paddingTop: index === 0 ? 20 : 0,
                   }}
                 >
                   <div
@@ -393,6 +403,11 @@ export default function ChatConversation({
                     ) : item?.kind === "tool" ? (
                       <ToolActivityRow
                         item={item}
+                        retryRunId={
+                          retryableCallId && item.activity === "manager" && timelineSparkCallId(item) === retryableCallId
+                            ? run.id
+                            : undefined
+                        }
                         executionTurn={item.activity === "manager" ? context.executionByCallId.get(timelineSparkCallId(item)) : undefined}
                         // The durable final answer belongs to the turn's LAST
                         // slice: earlier slices of a question-split turn ended
@@ -840,7 +855,7 @@ const MessageTurn = React.memo(function MessageTurn({
         className={`cora-user-turn${queued ? " cora-user-turn--queued" : ""}`}
         data-message-intent={item.intent ?? "turn"}
         data-delivery-state={item.deliveryState ?? "acknowledged"}
-        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}
+        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}
       >
         <div
           className={`cora-message cora-message--user${queued ? " cora-message--queued" : ""}`}
@@ -850,18 +865,20 @@ const MessageTurn = React.memo(function MessageTurn({
             ...(queued ? USER_QUEUED_BUBBLE_STYLE : null),
           }}
         >
-          <div>{item.text}</div>
+          <div className="cora-user-md">
+            <Markdown text={item.text} />
+          </div>
           <AttachmentStrip attachments={item.attachments} align="end" />
         </div>
         <div
           className={`cora-user-turn__meta${hasPersistentStatus ? " has-status" : ""}`}
           style={USER_HEADER_STYLE}
         >
-          <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
-            {formatMessageTime(item.at)}
-          </time>
           {queued ? (
-            <span style={QUEUED_CHIP_STYLE}>Queued</span>
+            <span className="cora-queued-pill" title="Cora reads this when her current turn ends">
+              <ClockGlyph />
+              Queued
+            </span>
           ) : (
             item.deliveryState &&
             item.deliveryState !== "acknowledged" &&
@@ -869,6 +886,9 @@ const MessageTurn = React.memo(function MessageTurn({
               <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
             )
           )}
+          <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
+            {formatMessageTime(item.at)}
+          </time>
           {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
           <CopyMessageControl text={item.text} />
           {/* A blocked run is waiting for an answer, and the answer carries
@@ -1017,6 +1037,32 @@ function CopyGlyph() {
   );
 }
 
+function SendNowGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function UnqueueGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M5.5 4 2.75 6.75 5.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 6.75h6.5a3.75 3.75 0 0 1 0 7.5H8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ClockGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 5.2V8l1.9 1.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function CheckGlyph() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -1160,24 +1206,130 @@ function BackendFailureMessage({
 }) {
   return (
     <div
-      className="cora-message cora-message--error"
+      className="cora-message cora-message--error cora-turn-error"
       data-message-author="cora"
       role="alert"
-      style={BACKEND_FAILURE_STYLE}
     >
-      <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t complete this turn</div>
-      <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
-      <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
-      {action === "accounts" ? <OpenAccountsButton /> : null}
+      <div className="cora-turn-error__head">
+        <ErrorGlyph />
+        <span className="cora-turn-error__title">Cora couldn’t complete this turn</span>
+      </div>
+      <div className="cora-turn-error__lead">{detail}</div>
+      <div className="cora-turn-error__hint">{hint}</div>
+      {action === "accounts" ? (
+        <div className="cora-turn-error__actions">
+          <OpenAccountsButton />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function OpenAccountsButton() {
+function OpenAccountsButton({ label = "Open accounts" }: { label?: string }) {
   return (
-    <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
-      Open accounts
+    <button
+      type="button"
+      className="cora-chip-btn cora-chip-btn--primary"
+      onClick={openAccountsSettings}
+      title="Open Settings > Agents"
+    >
+      {label}
     </button>
+  );
+}
+
+// Asks the open composer to run its own Retry (the same resume or re-answer
+// its Retry button performs), so the card never grows a second retry path.
+function RetryTurnButton({ runId }: { runId: string }) {
+  return (
+    <button
+      type="button"
+      className="cora-chip-btn"
+      onClick={() =>
+        window.dispatchEvent(new CustomEvent("spark:retry-turn", { detail: { runId } }))
+      }
+    >
+      <RetryGlyph />
+      Retry
+    </button>
+  );
+}
+
+// A failed Cora turn or manager stage as a calm card: what failed, the
+// friendly reading of the error when it is classified, the raw error in full,
+// and what to do next. The raw text is never truncated: it is what a user
+// pastes into a bug report.
+function TurnErrorCard({
+  title,
+  error,
+  retryRunId,
+  details,
+}: {
+  title: string;
+  error: string;
+  retryRunId?: string | null;
+  details?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const explanation = error ? failedTurnExplanation(error) : null;
+  return (
+    <div className="cora-turn-error">
+      <div className="cora-turn-error__head">
+        <ErrorGlyph />
+        <span className="cora-turn-error__title">{title}</span>
+      </div>
+      <div className="cora-turn-error__lead">{explanation?.detail ?? (error || "The turn failed.")}</div>
+      {explanation && <div className="cora-turn-error__hint">{explanation.hint}</div>}
+      {explanation && error && <div className="cora-turn-error__raw">{error}</div>}
+      {(explanation?.action === "accounts" || retryRunId || details) && (
+        <div className="cora-turn-error__actions">
+          {explanation?.action === "accounts" && (
+            <OpenAccountsButton label={explanation.kind === "auth" ? "Connect account" : "Open accounts"} />
+          )}
+          {retryRunId && <RetryTurnButton runId={retryRunId} />}
+          {details && (
+            <button
+              type="button"
+              className="cora-chip-btn cora-chip-btn--quiet"
+              aria-expanded={open}
+              onClick={() => setOpen((value) => !value)}
+            >
+              {open ? "Hide details" : "Details"}
+              <Caret open={open} />
+            </button>
+          )}
+        </div>
+      )}
+      {open && details ? <div className="cora-turn-error__details">{details}</div> : null}
+    </div>
+  );
+}
+
+function WorkedGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden style={{ color: "var(--muted-2)", flex: "0 0 auto" }}>
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.3" />
+      <path d="m5.4 8.2 1.8 1.8 3.5-3.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ErrorGlyph() {
+  return (
+    <svg className="cora-turn-error__icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 4.9v3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="10.9" r="0.85" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RetryGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M13 8a5 5 0 1 1-1.6-3.67" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M13.25 2.75v3.1h-3.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -2056,11 +2208,14 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   embedded = false,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   embedded?: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  /** Set on the failed turn the run is parked on; its card offers Retry. */
+  retryRunId?: string;
 }) {
   const live = item.tone === "live";
   // Drives the elapsed readouts (the inline stats and the expanded meta line)
@@ -2094,11 +2249,17 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
     // (plan/review) keep the compact disclosure.
     if (item.maintenance !== "compaction" && toolMetaValue(item, "Mode") === "chat") {
       return (
-        <AssistantSettledTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
+        <AssistantSettledTurn
+          item={item}
+          executionTurn={executionTurn}
+          finalAnswer={finalAnswer}
+          retryRunId={retryRunId}
+        />
       );
     }
     return (
       <ManagerActivityDisclosure
+        retryRunId={retryRunId}
         item={item}
         open={open}
         setOpen={setOpen}
@@ -2157,6 +2318,7 @@ function ManagerActivityDisclosure({
   hasDetails,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   open: boolean;
@@ -2164,15 +2326,39 @@ function ManagerActivityDisclosure({
   hasDetails: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  retryRunId?: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
   const windowedBlocks = executionTurn
     ? blocksInTraceWindow(executionTurn.blocks, item.traceWindow)
     : [];
   const actionCount = windowedBlocks.filter((block) => block.kind === "tool").length;
+  if (item.status === "failed") {
+    return (
+      <div
+        className="cora-manager-disclosure is-failed"
+        data-manager-call-id={sparkCallId}
+        data-has-execution={windowedBlocks.length ? "true" : "false"}
+      >
+        <TurnErrorCard
+          title={`${item.title} failed`}
+          error={item.detail}
+          retryRunId={retryRunId}
+          details={
+            <>
+              {executionTurn && windowedBlocks.length > 0 && (
+                <ExecutionTrace turn={executionTurn} finalAnswer={finalAnswer} window={item.traceWindow} />
+              )}
+              <ToolDetails item={{ ...item, detail: "" }} compact={windowedBlocks.length > 0} />
+            </>
+          }
+        />
+      </div>
+    );
+  }
   return (
     <div
-      className={`cora-manager-disclosure${item.status === "failed" ? " is-failed" : ""}`}
+      className="cora-manager-disclosure"
       data-manager-call-id={sparkCallId}
       data-has-execution={windowedBlocks.length ? "true" : "false"}
       data-open={open ? "true" : "false"}
@@ -2180,9 +2366,7 @@ function ManagerActivityDisclosure({
         ...MANAGER_DISCLOSURE_STYLE,
         width: "100%",
         borderBottom: open
-          ? `1px solid ${item.status === "failed"
-            ? "color-mix(in oklch, var(--danger) 25%, transparent)"
-            : "color-mix(in oklab, var(--rule-soft) 62%, transparent)"}`
+          ? "1px solid color-mix(in oklab, var(--rule-soft) 62%, transparent)"
           : "1px solid transparent",
       }}
     >
@@ -2195,14 +2379,12 @@ function ManagerActivityDisclosure({
         }}
         title={item.detail || item.title}
       >
+        <WorkedGlyph />
         <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
-        {actionCount > 0 && item.status !== "failed" && (
+        {actionCount > 0 && (
           <span style={TOOL_INLINE_DETAIL_STYLE}>
             {actionCount === 1 ? "1 action" : `${actionCount} actions`}
           </span>
-        )}
-        {item.status === "failed" && (
-          <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
         )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
@@ -2309,10 +2491,12 @@ function AssistantSettledTurn({
   item,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  retryRunId?: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
   const failed = item.status === "failed";
@@ -2324,7 +2508,6 @@ function AssistantSettledTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const actionCount = blocks.filter((block) => block.kind === "tool").length;
-  const explanation = failed && item.detail ? failedTurnExplanation(item.detail) : null;
   return (
     <SparkTurn>
       <div
@@ -2333,27 +2516,17 @@ function AssistantSettledTurn({
         data-turn-status={item.status}
         style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}
       >
-        <div style={WORKING_LINE_STYLE}>
-          <StatusDot color={failed ? "var(--danger)" : "var(--muted-2)"} pulse={false} size={5} />
-          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
-          {!failed && actionCount > 0 && (
-            <span style={TOOL_INLINE_DETAIL_STYLE}>
-              {actionCount === 1 ? "1 action" : `${actionCount} actions`}
-            </span>
-          )}
-          {failed && item.detail && (
-            <span
-              style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}
-              title={explanation ? item.detail : undefined}
-            >
-              {explanation?.detail ?? item.detail}
-            </span>
-          )}
-        </div>
-        {explanation && (
-          <div className="cora-failed-turn-hint" style={FAILED_TURN_HINT_STYLE}>
-            <span>{explanation.hint}</span>
-            {explanation.action === "accounts" ? <OpenAccountsButton /> : null}
+        {failed ? (
+          <TurnErrorCard title={item.title} error={item.detail} retryRunId={retryRunId} />
+        ) : (
+          <div style={WORKING_LINE_STYLE}>
+            <WorkedGlyph />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+            {actionCount > 0 && (
+              <span style={TOOL_INLINE_DETAIL_STYLE}>
+                {actionCount === 1 ? "1 action" : `${actionCount} actions`}
+              </span>
+            )}
           </div>
         )}
         <TurnSegments segments={segments} />
@@ -2365,9 +2538,29 @@ function AssistantSettledTurn({
 // The one segment renderer both the live and the settled turn share, so a
 // turn finishing never changes what its prose and tool rows look like.
 function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
+  const groups: Array<LiveTurnSegment | LiveTurnSegment[]> = [];
+  for (const segment of segments) {
+    const previous = groups[groups.length - 1];
+    if (segment.kind === "tool" && Array.isArray(previous)) previous.push(segment);
+    else groups.push(segment.kind === "tool" ? [segment] : segment);
+  }
   return (
     <>
-      {segments.map((segment) => {
+      {groups.map((group) => {
+        if (Array.isArray(group)) {
+          return (
+            <div key={`tools:${group[0].id}`} className="cora-tool-stack">
+              {group.map((segment) =>
+                segment.kind === "tool" ? (
+                  <div key={segment.id} data-execution-kind="tool">
+                    <LiveToolRow call={segment.call} live={live} />
+                  </div>
+                ) : null,
+              )}
+            </div>
+          );
+        }
+        const segment = group;
         if (segment.kind === "text") {
           return (
             <div
@@ -2868,7 +3061,6 @@ function deliveryStateLabel(
 function SendNowControl({ runId }: { runId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hover, setHover] = useState(false);
 
   const sendNow = async () => {
     if (busy) return;
@@ -2892,31 +3084,13 @@ function SendNowControl({ runId }: { runId: string }) {
         title="Interrupt Cora's current response and deliver the queue now"
         aria-label="Send queued messages now"
         disabled={busy}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 20,
-          padding: "0 8px",
-          border: "1px solid transparent",
-          borderRadius: "var(--radius-control, 7px)",
-          background: hover && !busy ? "var(--hover)" : "transparent",
-          color: hover ? "var(--ink-dim)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          fontWeight: 600,
-          cursor: "default",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+        className="cora-chip-btn"
       >
+        <SendNowGlyph />
         <span>Send now</span>
       </button>
       {error && (
-        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+        <span style={{ color: "var(--danger)", fontSize: 11 }} title={error}>
           {error}
         </span>
       )}
@@ -2934,7 +3108,6 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
   // Losing the race to the turn that just took the message is not a failure:
   // the message reached Cora, which is what Send already promised.
   const [notice, setNotice] = useState<string | null>(null);
-  const [hover, setHover] = useState(false);
 
   const unqueue = async () => {
     if (busy) return;
@@ -2975,32 +3148,14 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
         title="Remove from the queue and edit it in the composer"
         aria-label="Unqueue message"
         disabled={busy}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 20,
-          padding: "0 8px",
-          border: "1px solid transparent",
-          borderRadius: "var(--radius-control, 7px)",
-          background: hover && !busy ? "var(--hover)" : "transparent",
-          color: hover ? "var(--ink-dim)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          fontWeight: 600,
-          cursor: "default",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+        className="cora-chip-btn"
       >
+        <UnqueueGlyph />
         <span>Unqueue</span>
       </button>
-      {notice && <span style={{ color: "var(--muted)", fontSize: 10.5 }}>{notice}</span>}
+      {notice && <span style={{ color: "var(--muted)", fontSize: 11 }}>{notice}</span>}
       {error && (
-        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+        <span style={{ color: "var(--danger)", fontSize: 11 }} title={error}>
           {error}
         </span>
       )}
@@ -3487,7 +3642,7 @@ const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 16,
+  marginBottom: 14,
 };
 
 const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
@@ -3513,70 +3668,50 @@ const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
 // it tint-first depth instead of a hard drop shadow.
 const USER_HEADER_STYLE: React.CSSProperties = {
   display: "flex",
+  flexWrap: "wrap",
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 20,
+  minHeight: 26,
 };
 
 const USER_TIME_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
-};
-
-const QUEUED_CHIP_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  height: 18,
-  padding: "0 7px",
-  borderRadius: 999,
-  border: "1px solid color-mix(in oklch, var(--warn) 38%, transparent)",
-  background: "color-mix(in oklch, var(--warn) 10%, transparent)",
-  color: "var(--warn)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.05em",
-  textTransform: "uppercase",
 };
 
 const DELIVERY_CHIP_STYLE: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  height: 18,
-  padding: "0 7px",
+  height: 20,
+  padding: "0 8px",
   borderRadius: 999,
-  border: "1px solid var(--rule-soft)",
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
+  background: "color-mix(in oklab, var(--ink) 6%, transparent)",
+  color: "var(--ink-dim)",
+  fontSize: 11,
+  fontWeight: 500,
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "80%",
-  background: "color-mix(in oklab, var(--ink) 4%, var(--panel-2))",
-  // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
-  // calm premium surface rather than a hard-outlined box.
+  maxWidth: "min(80%, 620px)",
+  boxSizing: "border-box",
+  background: "color-mix(in oklab, var(--ink) 5%, var(--panel-2))",
+  // One soft hairline; the bubble reads as a calm surface, not a box.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 16,
-  padding: 12,
+  borderRadius: 18,
+  borderBottomRightRadius: 6,
+  padding: "9px 14px",
   color: "var(--ink)",
-  fontSize: 13.5,
-  lineHeight: 1.55,
-  whiteSpace: "pre-wrap",
   wordBreak: "break-word",
   boxShadow: "none",
 };
 
+// Waiting, not failed: the bubble keeps its surface and only its edge turns
+// dashed, while the Queued pill under it carries the state in words.
 const USER_QUEUED_BUBBLE_STYLE: React.CSSProperties = {
-  background: "color-mix(in oklch, var(--warn) 5%, var(--panel-2))",
-  borderColor: "color-mix(in oklch, var(--warn) 28%, var(--rule-soft))",
-  boxShadow: "inset -3px 0 0 color-mix(in oklch, var(--warn) 62%, transparent), var(--lift-hi)",
+  borderStyle: "dashed",
+  borderColor: "color-mix(in oklch, var(--warn) 30%, var(--rule))",
 };
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
@@ -3610,53 +3745,6 @@ const SPARK_BUBBLE_STYLE: React.CSSProperties = {
   padding: "2px 4px",
   boxShadow: "none",
   overflowWrap: "anywhere",
-};
-
-const BACKEND_FAILURE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: "min(100%, 68ch)",
-  boxSizing: "border-box",
-  display: "flex",
-  flexDirection: "column",
-  gap: 5,
-  padding: "10px 12px 11px",
-  borderRadius: 12,
-  borderTopLeftRadius: "var(--radius-control, 7px)",
-  border: "1px solid color-mix(in oklch, var(--danger) 28%, var(--rule-soft))",
-  background: "color-mix(in oklch, var(--danger) 7%, var(--panel-2))",
-  boxShadow: "var(--lift-hi)",
-};
-
-const BACKEND_FAILURE_TITLE_STYLE: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 12.5,
-  fontWeight: 700,
-  lineHeight: 1.35,
-};
-
-const BACKEND_FAILURE_DETAIL_STYLE: React.CSSProperties = {
-  color: "var(--danger)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10.5,
-  lineHeight: 1.45,
-  overflowWrap: "anywhere",
-};
-
-const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.4,
-};
-
-const FAILED_TURN_HINT_STYLE: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  alignItems: "center",
-  gap: 8,
-  paddingLeft: 12,
-  color: "var(--muted)",
-  fontSize: 11.5,
-  lineHeight: 1.45,
 };
 
 // The run-level verdict pill on its own full-width row under the final Cora
@@ -4059,7 +4147,7 @@ const EXECUTION_TEXT_STYLE: React.CSSProperties = {
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 25,
+  minHeight: 26,
   border: "none",
   background: "transparent",
   color: "inherit",
@@ -4073,8 +4161,8 @@ const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
 
 const TOOL_TITLE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
-  fontSize: 11.5,
-  fontWeight: 600,
+  fontSize: 12,
+  fontWeight: 500,
   minWidth: 0,
   flex: "0 1 auto",
   overflow: "hidden",
@@ -4083,8 +4171,8 @@ const TOOL_TITLE_STYLE: React.CSSProperties = {
 };
 
 const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontSize: 10.5,
+  color: "var(--muted)",
+  fontSize: 11.5,
   minWidth: 0,
   flex: 1,
   overflow: "hidden",

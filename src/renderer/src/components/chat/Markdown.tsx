@@ -180,6 +180,8 @@ const COMPONENTS: Components = {
   h1: ({ children }) => <h1 style={HEADING_STYLE}>{children}</h1>,
   h2: ({ children }) => <h2 style={HEADING_STYLE}>{children}</h2>,
   h3: ({ children }) => <h3 style={HEADING_STYLE}>{children}</h3>,
+  h4: ({ children }) => <h4 style={HEADING_STYLE}>{children}</h4>,
+  hr: () => <hr style={RULE_STYLE} />,
 };
 
 /** Shared safe markdown renderer for chat and result prose. Raw HTML is not
@@ -225,21 +227,25 @@ function MermaidDiagram({ source }: { source: string }) {
 }
 
 const INLINE_CODE_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)", fontSize: "0.9em",
+  fontFamily: "var(--font-mono)", fontSize: "0.86em",
   background: "color-mix(in oklab, var(--ink) 8%, transparent)",
-  padding: "1px 5px", borderRadius: 4, color: "var(--ink)",
+  padding: "1px 5px", borderRadius: 5, color: "var(--ink)",
 };
+// Block margins and the heading scale live in styles.css (.cora-md) so the
+// first and last block of a message can drop their outer margins; inline
+// margins here would outrank those rules.
 const CODE_BLOCK_STYLE: React.CSSProperties = {
-  margin: "8px 0", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5,
-  background: "var(--bg)", border: "1px solid var(--rule-soft)", borderRadius: 7,
-  boxShadow: "var(--well)", padding: "10px 12px", overflow: "auto", maxHeight: 420,
+  margin: 0, fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55,
+  background: "var(--bg)", border: "1px solid var(--rule-soft)", borderRadius: 10,
+  padding: "11px 13px", overflow: "auto", maxHeight: 420,
   color: "var(--ink-dim)", whiteSpace: "pre",
 };
-const PARA_STYLE: React.CSSProperties = { margin: "0 0 8px", fontSize: 13.5, lineHeight: 1.62 };
-const LIST_STYLE: React.CSSProperties = { margin: "0 0 8px", paddingLeft: 20, fontSize: 13, lineHeight: 1.55 };
-const HEADING_STYLE: React.CSSProperties = { margin: "12px 0 6px", color: "var(--ink)", fontSize: 15, lineHeight: 1.3 };
-const QUOTE_STYLE: React.CSSProperties = { margin: "8px 0", padding: "4px 12px", borderLeft: "3px solid var(--accent-edge)", color: "var(--ink-dim)" };
-const TABLE_STYLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 12.5, margin: "8px 0" };
+const PARA_STYLE: React.CSSProperties = {};
+const LIST_STYLE: React.CSSProperties = { paddingLeft: 20 };
+const HEADING_STYLE: React.CSSProperties = { color: "var(--ink)" };
+const RULE_STYLE: React.CSSProperties = { border: "none", borderTop: "1px solid var(--rule-soft)" };
+const QUOTE_STYLE: React.CSSProperties = { padding: "2px 12px", borderLeft: "2px solid var(--rule-strong)", color: "var(--ink-dim)" };
+const TABLE_STYLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 12.5 };
 const TABLE_CELL_STYLE: React.CSSProperties = { border: "1px solid var(--rule-soft)", padding: "4px 8px", verticalAlign: "top" };
 const TABLE_HEAD_STYLE: React.CSSProperties = {
   ...TABLE_CELL_STYLE, textAlign: "left", fontWeight: 600, color: "var(--ink)",

@@ -1353,6 +1353,23 @@ export default function ChatComposer({
     window.addEventListener("spark:stop-chat", onStop);
     return () => window.removeEventListener("spark:stop-chat", onStop);
   }, [suspendGlobalEvents]);
+  // A failed turn's card in the conversation offers Retry; it runs exactly
+  // what this composer's own Retry button would for the same run.
+  const retryRef = useRef<(() => void) | null>(null);
+  retryRef.current = isParkedTurn
+    ? () => void resume()
+    : backendFailureQuestion && failedTurnRetryText
+      ? () => void retryFailedTurn()
+      : null;
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onRetry = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      if (runId && runId === runRef.current?.id) retryRef.current?.();
+    };
+    window.addEventListener("spark:retry-turn", onRetry);
+    return () => window.removeEventListener("spark:retry-turn", onRetry);
+  }, [suspendGlobalEvents]);
 
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes

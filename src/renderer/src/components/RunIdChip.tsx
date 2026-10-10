@@ -77,9 +77,9 @@ export default function RunIdChip({
         aria-label={`Copy ${label}`}
         style={
           {
-            "--spark-icon-btn-size": "18px",
-            fontSize: 10,
-            color: copied ? "var(--accent-text)" : "var(--muted-2)",
+            "--spark-icon-btn-size": "22px",
+            borderRadius: "var(--radius-control, 7px)",
+            color: copied ? "var(--accent-text)" : "var(--muted)",
             // Copy must survive a cramped row: the chip holds its width
             // instead of being shrunk (or clipped) out of reach by a long
             // sibling such as a paused run's park reason.
@@ -87,7 +87,15 @@ export default function RunIdChip({
           } as React.CSSProperties
         }
       >
-        {copied ? "✓" : "⧉"}
+        {copied ? (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="m3 8.2 3.1 3.1L13 4.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M6.2 2.5 5 13.5M11 2.5 9.8 13.5M2.75 5.75h11M2.25 10.25h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+        )}
       </button>
     );
   }
