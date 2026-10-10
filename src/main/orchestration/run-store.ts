@@ -1360,8 +1360,8 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       attemptInFlight ||
       activeWorkersForRun(run.id).length > 0 ||
       // A live manager turn is the driver: it can complete the run itself, and
-      // a question posted under it is answered into a second turn on the same
-      // session (W2).
+      // a question posted under it would be answered into a second turn on
+      // the same session.
       Boolean(activeManagerCall(run))
     ) {
       return run;
@@ -3661,7 +3661,7 @@ function scheduleInitialManagerDecision(
 // A queued message whose delivery already failed this many times stops
 // driving turns on its own: the user resends it, presses Send now, or Resume.
 // Without the cap, a turn that fails the same way every time re-armed itself
-// back to back (Q1: 1041 manager calls in 4 seconds).
+// back to back (one run made 1041 manager calls in 4 seconds).
 const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 2;
 
 function hasQueuedSteering(run: RunState, opts?: { explicit?: boolean }): boolean {
@@ -4053,8 +4053,8 @@ function schedulePendingManagerResume(run: RunState): void {
   activePendingManagerResumes.add(key);
 
   // Claim only once no manager turn is live. A continuation claimed while a
-  // turn streams would start a second prompt on the same session (W2:
-  // answering a question posted during a resumed chat turn failed the run).
+  // turn streams would start a second prompt on the same session (answering a
+  // question posted during a resumed chat turn failed the run).
   const start = Promise.all(managerWorkSettled(run.id)).then(() => undefined);
   const cycle = start
     .then(async () => {
@@ -6350,9 +6350,15 @@ async function askManagerBackend(
   try {
     return await managerTurnLock(run.id, async () => {
       let current = run;
-      if (waited) {
-        // The caller decided to start this turn before the previous one
-        // finished. Re-decide on the state that turn left behind: a Stop, a
+      // Stop and cancel dispose the live session first and commit the paused
+      // or cancelled state after it. A turn that starts in between launches a
+      // fresh runtime that commit never stops, so wait for the commit and
+      // re-decide on it.
+      const stopping = forcePauseWindowClosed(run.id);
+      if (stopping) await stopping;
+      if (waited || stopping) {
+        // The caller decided to start this turn before the previous one (or
+        // the Stop) finished. Re-decide on the state left behind: a Stop, a
         // rewind, a new question or a terminal verdict all mean this turn is
         // no longer wanted.
         const latest = await getRun(run.id);
@@ -11172,7 +11178,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     // The chat turn runs as a scheduled cycle, not inside this call. Awaiting
     // it held Resume's IPC (and the composer, disabled while it waited) for
     // the whole turn, and kept the turn out of the cycle maps every other
-    // scheduler waits behind (Q2, Q9).
+    // scheduler waits behind.
     scheduleResumeChatTurn(run, driving, resumeInput, shouldScheduleManagerAfterResume);
     return driving;
   }
@@ -15051,6 +15057,7 @@ export async function undoToCheckpoint(
 // on the same run (double click, Stop + stopAndUndoPending) must not have the
 // first one to finish close the window under the second.
 const forcePausingRuns = new Map<string, number>();
+const forcePauseWindowWaiters = new Map<string, Array<() => void>>();
 
 function openForcePauseWindow(runId: string): void {
   forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
@@ -15058,8 +15065,24 @@ function openForcePauseWindow(runId: string): void {
 
 function closeForcePauseWindow(runId: string): void {
   const depth = (forcePausingRuns.get(runId) ?? 0) - 1;
-  if (depth > 0) forcePausingRuns.set(runId, depth);
-  else forcePausingRuns.delete(runId);
+  if (depth > 0) {
+    forcePausingRuns.set(runId, depth);
+    return;
+  }
+  forcePausingRuns.delete(runId);
+  const waiters = forcePauseWindowWaiters.get(runId) ?? [];
+  forcePauseWindowWaiters.delete(runId);
+  for (const resolve of waiters) resolve();
+}
+
+/** Resolves once no Stop or cancel is tearing the run down; null when none is. */
+function forcePauseWindowClosed(runId: string): Promise<void> | null {
+  if ((forcePausingRuns.get(runId) ?? 0) === 0) return null;
+  return new Promise<void>((resolve) => {
+    const waiters = forcePauseWindowWaiters.get(runId) ?? [];
+    waiters.push(resolve);
+    forcePauseWindowWaiters.set(runId, waiters);
+  });
 }
 
 /**
@@ -15106,7 +15129,7 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
  * Move user input still waiting in the queue into the new conversation epoch.
  * Stop bumps the epoch, and the queue, Send now and Resume only read the
  * current one: a message queued before the Stop otherwise kept its Queued chip
- * forever while nothing could deliver it (Q3). A reservation that named an
+ * forever while nothing could deliver it. A reservation that named an
  * interrupted call or the old epoch's next turn no longer means anything.
  */
 function carryQueuedInputAcrossEpoch(

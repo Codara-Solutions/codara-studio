@@ -1038,6 +1038,56 @@ async function main() {
     inactiveError?.message,
   );
 
+  // ── 5e. Stop and cancel teardown ────────────────────────────────────────
+  // Stop and cancel dispose the live session, then commit. A turn queued
+  // behind the interrupted one must not start in between: it would launch a
+  // fresh runtime that the paused or cancelled commit never stops.
+  for (const action of ["stop", "cancel"]) {
+    const QUEUED_S = `Queued before the ${action}`;
+    const runS = writeRun(pausedRun(`run-teardown-${action}`));
+    const enteredS = gate();
+    const releaseS = gate();
+    managerBehavior.set(runS, async (calls) => {
+      if (calls.length === 1) {
+        enteredS.open();
+        await releaseS.opened;
+        return { ...completeResult(), turnAborted: true };
+      }
+      return askUserResult();
+    });
+    await runStore.resumeRun({ runId: runS });
+    await gateOpened(enteredS);
+    await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "queue" });
+    await runStore.addRunMessage({ runId: runS, author: "user", kind: "note", message: QUEUED_S });
+    await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "steer" });
+    // The interrupted turn returns while the session is still being torn
+    // down, which is when the queued follow-up used to slip in.
+    globalThis.__coraDisposeHook = async (id) => {
+      if (id !== runS) return;
+      releaseS.open();
+      await sleep(400);
+    };
+    try {
+      if (action === "stop") await runStore.forcePauseRun(runS);
+      else await runStore.cancelRun({ runId: runS });
+    } finally {
+      globalThis.__coraDisposeHook = undefined;
+    }
+    await runStore.settleScheduledManagerWork(runS);
+    const afterS = readRun(runS);
+    check(
+      `no manager turn starts while ${action} tears the run down`,
+      callsFor(runS).length === 1 &&
+        !afterS.sparkCalls.some((call) => call.status === "started" && !call.completedAt),
+      JSON.stringify({ calls: callsFor(runS).length, status: afterS.status }),
+    );
+    check(
+      `${action} leaves the run ${action === "stop" ? "paused" : "cancelled"}`,
+      afterS.status === (action === "stop" ? "paused" : "cancelled"),
+      afterS.status,
+    );
+  }
+
   // ── 6. source seams ──────────────────────────────────────────────────────
   const socketSource = fs.readFileSync(AGENT_SOCKET_TS, "utf8");
   const waitStart = socketSource.indexOf("async function handleOrchestratorWaitForWorkers(");
