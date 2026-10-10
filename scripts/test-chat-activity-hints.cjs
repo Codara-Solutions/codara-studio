@@ -6,8 +6,8 @@
 //   node scripts/test-chat-activity-hints.cjs
 //
 // Pinned:
-//   - The floating pill says "New activity" only when rows or events arrived
-//     after the reader left the bottom (history hydration does not count);
+//   - The floating jump button says "New activity" only when rows or events
+//     arrived after the reader left the bottom (history hydration does not count);
 //     otherwise it is "Jump to latest".
 //   - A live turn that produced nothing for 90s says so and names the Stop
 //     chord, but never while a tool is in flight (wait_for_workers is silent
@@ -31,7 +31,7 @@ assert.match(
   conversation,
   /if \(readerAtBottom\) \{\s*leftBottomMarkRef\.current = null;\s*setNewActivity\(false\);\s*return;\s*\}\s*if \(activityMark === null\) return;\s*if \(leftBottomMarkRef\.current === null\) leftBottomMarkRef\.current = activityMark;\s*else if \(leftBottomMarkRef\.current !== activityMark\) setNewActivity\(true\);/,
 );
-assert.match(conversation, /\{newActivity \? "New activity ↓" : "Jump to latest ↓"\}/);
+assert.match(conversation, /aria-label=\{newActivity \? "New activity" : "Jump to latest"\}/);
 
 const liveTurn = conversation.match(/function AssistantLiveTurn\([\s\S]*?\n\}\n/);
 assert.ok(liveTurn, "AssistantLiveTurn not found");

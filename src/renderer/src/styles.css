@@ -1348,9 +1348,8 @@ a { color: inherit; }
   box-sizing: border-box;
   padding: 11px 12px 11px 14px;
   border: 1px solid var(--rule-soft);
-  border-radius: 12px;
-  background: color-mix(in oklch, var(--accent) 5%, var(--panel-2));
-  box-shadow: inset 2px 0 0 var(--accent-edge), var(--lift-hi);
+  border-radius: var(--radius-surface, 10px);
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
 }
 .cora-welcome__connect-copy {
   display: flex;
@@ -1389,7 +1388,7 @@ a { color: inherit; }
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 11px 34px 11px 12px;
+  padding: 11px 14px 11px 12px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
   background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
@@ -1428,17 +1427,22 @@ a { color: inherit; }
   font-size: 10.5px;
   line-height: 1.4;
 }
-.cora-starter__arrow {
-  position: absolute;
-  top: 11px;
-  right: 12px;
-  color: var(--muted-2);
-  font-size: 12px;
-  transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+.cora-starter__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.cora-starter:hover .cora-starter__arrow {
+.cora-starter__arrow {
+  display: inline-flex;
   color: var(--accent-text);
-  transform: translate(1px, -1px);
+  opacity: 0;
+  transform: translate(-2px, 1px);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+.cora-starter:hover .cora-starter__arrow,
+.cora-starter:focus-visible .cora-starter__arrow {
+  opacity: 1;
+  transform: translate(0, 0);
 }
 /* The welcome's door to Automations: one quiet full-width row under the
    starter cards. While an automation runs (or needs an answer) it lights up
@@ -1511,14 +1515,17 @@ a { color: inherit; }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
   font-size: 11px;
+  line-height: 1;
   font-weight: 600;
   color: var(--muted);
 }
 .cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent-text); }
 .cora-welcome__automations-arrow {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: -4px;
   color: var(--muted-2);
-  font-size: 12px;
   transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
@@ -1962,6 +1969,17 @@ a { color: inherit; }
     background var(--motion-fast) var(--ease-out);
 }
 
+/* Read by assistive tech, never painted. !important because the elements
+   it hides are inline-styled. */
+.spark-sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
 /* Cora chat header: title, then quiet status and cost pills, then the
    copy-id button. Only the title ellipsizes. */
 .cora-header-meta {
@@ -1977,9 +1995,7 @@ a { color: inherit; }
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  padding-left: 9px;
-  border-left: 1px solid var(--rule);
-  font: 600 12.5px/1.2 var(--font-sans);
+  font: 600 13px/1.2 var(--font-sans);
   color: var(--ink);
   letter-spacing: -0.005em;
 }
@@ -1992,8 +2008,8 @@ a { color: inherit; }
   height: 20px;
   padding: 0 8px 0 7px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--cora-status-color) 13%, transparent);
-  color: color-mix(in oklab, var(--cora-status-color) 55%, var(--ink));
+  background: color-mix(in oklch, var(--cora-status-color) 11%, transparent);
+  color: var(--ink-dim);
   font: 500 11px/1 var(--font-sans);
   white-space: nowrap;
 }
@@ -2031,19 +2047,44 @@ a { color: inherit; }
   margin: -2px 0;
 }
 
+/* The hover row (time, copy, undo) floats in the gap under the bubble
+   instead of reserving its height at rest; a row with a delivery state
+   (Queued, Send now, Unqueue) stays in flow and keeps only its time and copy
+   for hover. */
+.cora-user-turn {
+  position: relative;
+}
 .cora-user-turn__meta {
   opacity: 0;
-  transform: translateY(-2px);
   pointer-events: none;
-  transition:
-    opacity var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out);
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn__meta:not(.has-status) {
+  position: absolute;
+  z-index: 2;
+  top: 100%;
+  right: 0;
+  margin-top: 1px;
 }
 .cora-user-turn:hover .cora-user-turn__meta,
 .cora-user-turn:focus-within .cora-user-turn__meta,
 .cora-user-turn__meta.has-status {
   opacity: 1;
-  transform: translateY(0);
+  pointer-events: auto;
+}
+.cora-user-turn__hover-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn:hover .cora-user-turn__meta.has-status .cora-user-turn__hover-meta,
+.cora-user-turn:focus-within .cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 1;
   pointer-events: auto;
 }
 .cora-message-ghost-action {
@@ -2114,17 +2155,25 @@ a { color: inherit; }
   color: inherit;
 }
 .cora-chip-btn--primary {
-  border-color: var(--accent-edge);
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
 }
 .cora-chip-btn--primary > svg {
   color: inherit;
 }
 .cora-chip-btn--primary:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 24%, transparent);
-  color: var(--accent-text);
+  border-color: transparent;
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
+  color: var(--accent-ink);
+}
+/* Same box as its siblings so a row of actions shares one height and
+   baseline; only the edge is missing until hover. */
+.cora-chip-btn--ghost {
+  border-color: transparent;
+  color: var(--muted);
+  padding: 0 8px 0 10px;
 }
 
 .cora-queued-pill {
@@ -2135,10 +2184,13 @@ a { color: inherit; }
   height: 20px;
   padding: 0 8px 0 7px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--warn) 13%, transparent);
-  color: color-mix(in oklab, var(--warn) 72%, var(--ink));
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink-dim);
   font: 500 11px/1 var(--font-sans);
   white-space: nowrap;
+}
+.cora-queued-pill > svg {
+  color: var(--warn);
 }
 
 .cora-error-dismiss {
@@ -2400,11 +2452,14 @@ a { color: inherit; }
 }
 .cora-md-file-ref {
   cursor: pointer;
-  text-decoration: underline dotted color-mix(in oklab, var(--accent-text) 60%, transparent);
-  text-underline-offset: 2px;
+  text-decoration: none;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
 }
 .cora-md-file-ref:hover {
   color: var(--accent-text) !important;
+  background: color-mix(in oklch, var(--accent) 12%, transparent) !important;
 }
 
 /* A failed Cora turn or manager stage. A quiet card with a danger accent on
@@ -2412,15 +2467,15 @@ a { color: inherit; }
 .cora-turn-error {
   box-sizing: border-box;
   width: 100%;
-  max-width: 640px;
+  max-width: 560px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in oklch, var(--danger) 18%, var(--rule-soft));
-  border-radius: 12px;
-  background: color-mix(in oklch, var(--danger) 3%, var(--panel-2));
-  box-shadow: var(--lift-hi);
+  gap: 8px;
+  padding: 12px 14px 12px 13px;
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid color-mix(in oklch, var(--danger) 75%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
 }
 .cora-turn-error__head {
   display: flex;
@@ -2437,21 +2492,25 @@ a { color: inherit; }
   color: var(--ink);
   font: 600 13px/1.35 var(--font-sans);
 }
-.cora-turn-error__lead {
+.cora-turn-error__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   padding-left: 22px;
+}
+.cora-turn-error__lead {
   color: var(--ink);
   font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 .cora-turn-error__hint {
-  padding-left: 22px;
-  color: var(--ink-dim);
+  color: var(--muted);
   font-size: 12.5px;
   line-height: 1.5;
 }
 .cora-turn-error__raw {
-  margin-left: 22px;
+  margin-bottom: 8px;
   padding: 7px 9px;
   border-radius: var(--radius-control, 7px);
   background: color-mix(in oklab, var(--bg) 70%, transparent);
@@ -2465,7 +2524,7 @@ a { color: inherit; }
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 4px;
+  margin-top: 2px;
   padding-left: 22px;
 }
 .cora-turn-error__details {
@@ -2482,17 +2541,17 @@ a { color: inherit; }
 .cora-failure-action {
   appearance: none;
   align-self: flex-start;
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid var(--accent-edge);
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent;
   border-radius: var(--radius-control, 7px);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font: 600 11px/1 var(--font-sans);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: 600 11.5px/1 var(--font-sans);
   cursor: default;
 }
 .cora-failure-action:hover {
-  background: color-mix(in oklch, var(--accent) 26%, transparent);
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
 }
 .cora-failure-action:focus-visible {
   outline: none;
@@ -2502,13 +2561,13 @@ a { color: inherit; }
 .cora-worker-terminal {
   appearance: none;
   flex: 0 0 auto;
-  height: 18px;
-  padding: 0 7px;
+  height: 22px;
+  padding: 0 8px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-control, 7px);
   background: transparent;
   color: var(--ink-dim);
-  font: 600 10.5px/1 var(--font-sans);
+  font: 500 11px/1 var(--font-sans);
   cursor: default;
 }
 .cora-worker-terminal:hover:not(:disabled) {
@@ -2540,12 +2599,21 @@ a { color: inherit; }
   outline-offset: -1px;
 }
 
+.cora-turn {
+  position: relative;
+}
 .cora-assistant-turn__meta {
-  min-height: 22px;
-  margin-top: -5px;
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: -20px;
+  height: 22px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+  padding: 0 2px 0 8px;
+  border-radius: var(--radius-control, 7px);
+  background: var(--panel);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
@@ -2581,56 +2649,56 @@ a { color: inherit; }
   .cora-timeline-minimap {
     position: absolute;
     z-index: 8;
-    top: 24px;
-    bottom: 24px;
-    left: 10px;
-    width: 38px;
+    top: 28px;
+    bottom: 28px;
+    /* Clear of the scroller's own bar, which must stay draggable. */
+    right: 14px;
+    width: 22px;
     display: block;
-    opacity: 0.38;
-    transition: opacity var(--motion-fast) var(--ease-out);
+    opacity: 0;
+    transition: opacity var(--motion-slow) var(--ease-out);
+  }
+  [data-scrolling="true"] > .cora-timeline-minimap {
+    opacity: 0.6;
+    transition-duration: var(--motion-fast);
   }
   .cora-timeline-minimap:hover,
   .cora-timeline-minimap:focus-within {
-    opacity: 1;
+    opacity: 1 !important;
   }
   .cora-timeline-minimap__rail {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 17px;
-    width: 1px;
-    background: color-mix(in oklab, var(--rule-soft) 55%, transparent);
+    display: none;
   }
   .cora-timeline-minimap__mark {
     position: absolute;
-    left: 10px;
-    width: 9px;
+    right: 6px;
+    width: 8px;
     height: 2px;
     padding: 0;
     transform: translateY(-50%);
     border: 0;
     border-radius: 999px;
-    background: var(--muted);
-    opacity: 0.72;
+    background: var(--muted-2);
     cursor: default;
     transition:
       width var(--motion-fast) var(--ease-out),
-      background var(--motion-fast) var(--ease-out),
-      opacity var(--motion-fast) var(--ease-out);
+      background var(--motion-fast) var(--ease-out);
   }
   .cora-timeline-minimap__mark.is-visible {
-    width: 16px;
-    background: var(--ink-dim);
-    opacity: 1;
+    width: 12px;
+    background: var(--muted);
   }
   .cora-timeline-minimap__mark.is-active {
-    width: 24px;
+    width: 16px;
     background: var(--accent);
-    opacity: 1;
+  }
+  .cora-timeline-minimap__mark:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
   }
   .cora-timeline-minimap__preview {
     position: absolute;
-    left: 34px;
+    right: 30px;
     width: min(310px, calc(100cqw - 110px));
     padding: 10px 12px;
     transform: translateY(-50%);
@@ -2656,6 +2724,105 @@ a { color: inherit; }
     font: 400 11px/1.4 var(--font-sans);
     -webkit-line-clamp: 3;
   }
+}
+
+/* One 14px status slot leading every activity row. */
+.cora-activity-icon {
+  --cora-activity-color: var(--muted);
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="failed"] {
+  color: var(--danger);
+}
+.cora-activity-icon__spin {
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in oklch, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+}
+.cora-activity-icon__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="hollow"] .cora-activity-icon__dot {
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid var(--cora-activity-color);
+}
+
+.cora-step-worker__failure {
+  padding: 0 6px 4px 26px;
+  color: color-mix(in oklch, var(--danger) 70%, var(--ink-dim));
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* Scrolled up, the last lines fade into the composer edge, so the jump
+   button below sits on a quiet band instead of on top of a sentence. */
+.cora-conversation-fade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 56px;
+  background: linear-gradient(to bottom, transparent, var(--panel) 85%);
+  pointer-events: none;
+}
+
+/* Back to the newest turn: a quiet round button centered above the composer,
+   outside the text column's reading line. The accent marks only new activity. */
+.cora-jump-latest {
+  appearance: none;
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 12px;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink-dim);
+  box-shadow: var(--shadow-1);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-jump-latest:hover {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+.cora-jump-latest:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-jump-latest__badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--panel);
 }
 
 /* ── Composer toolbar: the bottom pill row ───────────────────────────────────
@@ -2715,9 +2882,9 @@ a { color: inherit; }
    the whole deficit (ellipsizing continuously) before the pills give
    anything up. min-width:0 lets it collapse all the way to nothing. */
 .composer-toolbar__hint {
-  flex: 1 20 auto;
+  flex: 1 1 0;
   min-width: 0;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2729,32 +2896,34 @@ a { color: inherit; }
    instead of ellipsised. The truncation has to move onto the child that is
    actually elastic, which is the task title. The dot and the two fixed labels
    never shrink, so the row degrades by shortening the title. */
+/* Segments that do not fit wrap onto a second line that the fixed height
+   clips, so the row always ends on a whole segment: the tail goes first, then
+   the title, and only the headline itself ever ellipsizes. */
 .composer-toolbar__hint--worker {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  /* safe: when the row is too narrow the overflow falls off the end, where
-     the children ellipsize, instead of cutting the headline at both edges. */
-  justify-content: safe center;
-  gap: 6px;
+  justify-content: center;
+  column-gap: 5px;
+  height: 16px;
+  line-height: 16px;
 }
 .composer-toolbar__hint--worker > * {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.composer-toolbar__hint-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 1 !important;
+  min-width: 0;
+  overflow: hidden;
+}
+.composer-toolbar__hint-head > :last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.composer-toolbar__hint--worker > [aria-hidden],
-.composer-toolbar__hint--worker > :nth-child(2) {
-  flex: 0 0 auto;
-}
-/* Shed order under pressure: the trailing note first, then the task title,
-   and the headline ("2 workers running") last. */
-.composer-toolbar__hint--worker > :last-child {
-  flex-shrink: 40;
-}
-.composer-toolbar__hint--worker > .composer-toolbar__hint-title {
-  flex-shrink: 10;
 }
 
 /* The model name is the one pill whose text has no upper bound, so its
@@ -2768,7 +2937,7 @@ a { color: inherit; }
   flex: 0 0 auto;
 }
 .composer-toolbar .composer-model:has(.composer-pill-label) {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   max-width: min(240px, 42cqi);
 }
@@ -2783,12 +2952,6 @@ a { color: inherit; }
   min-width: 0;
 }
 
-@container composer-bar (max-width: 640px) {
-  /* A keyboard tip is the least valuable thing in the row. */
-  .composer-toolbar__hint:not(.composer-toolbar__hint--worker) {
-    display: none;
-  }
-}
 @container composer-bar (max-width: 560px) {
   /* The bar alone still shows context fullness at a glance; the pill's
      tooltip keeps the exact used/budget numbers. */
@@ -2814,6 +2977,7 @@ a { color: inherit; }
     display: none;
   }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
+    flex-shrink: 1;
     max-width: 38cqi;
   }
   .composer-profile-label,

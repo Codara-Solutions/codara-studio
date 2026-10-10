@@ -26,6 +26,13 @@ export interface SectionHeaderProps extends SectionHeaderDragProps {
   // Right-aligned controls. Siblings of the toggle target, so they keep their
   // own click behaviour without toggling the section.
   actions?: React.ReactNode;
+  // A header that stands alone (no stacked siblings to align with, no drag,
+  // no collapse) drops the reserved handle and chevron slots, so its content
+  // lines up with the body below instead of starting 40px in.
+  compactLead?: boolean;
+  // Keep the label as the accessible name but do not paint it, for a header
+  // whose meta already names what the section shows.
+  hideLabel?: boolean;
 }
 
 // The shared header band for a side-panel section: one row, fixed height
@@ -46,9 +53,12 @@ export function SectionHeader({
   dragging = false,
   onDragStart,
   onDragEnd,
+  compactLead = false,
+  hideLabel = false,
 }: SectionHeaderProps) {
   const [hover, setHover] = useState(false);
   const suppressClick = useRef(false);
+  const leadSlots = !(compactLead && !draggable && !collapsible);
   return (
     <div
       style={{
@@ -61,7 +71,7 @@ export function SectionHeader({
         display: "flex",
         alignItems: "center",
         gap: 6,
-        padding: "0 7px 0 5px",
+        padding: leadSlots ? "0 7px 0 5px" : "0 10px 0 20px",
         borderBottom: "1px solid var(--rule-soft)",
         background: hover
           ? "color-mix(in oklab, var(--ink) 3%, var(--panel))"
@@ -134,7 +144,7 @@ export function SectionHeader({
             header (a header without a drag handle still reserves its 14px so
             stacked labels align). The handle itself fades in only when
             draggable; the slot never collapses, so nothing reflows. */}
-        <span
+        {leadSlots && <span
           aria-hidden={!draggable}
           title={draggable ? `Move ${label}` : undefined}
           style={{
@@ -151,20 +161,21 @@ export function SectionHeader({
           }}
         >
           <DragHandleIcon size={13} />
-        </span>
+        </span>}
         {collapsible ? (
           <Chevron collapsed={collapsed} hover={hover} />
-        ) : (
+        ) : leadSlots ? (
           // Reserve the chevron's 16px advance even when not collapsible so the
           // label x-origin is identical to a collapsible header's.
           <span aria-hidden style={{ flex: "0 0 16px", width: 16, height: 16 }} />
-        )}
+        ) : null}
         {glyph != null && (
           <span style={{ display: "inline-flex", alignItems: "center", flex: "0 0 auto" }}>
             {glyph}
           </span>
         )}
         <span
+          className={hideLabel ? "spark-sr-only" : undefined}
           style={{
             fontFamily: "var(--font-sans)",
             fontSize: 10,

@@ -14,6 +14,7 @@ import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
 import { describeRunStatus, statusToneColor } from "./timeline";
+import { retryableFailedCallId } from "./failed-turn";
 import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
@@ -203,6 +204,8 @@ export default function ChatPanel({
         onToggleCollapse={onToggleCollapse}
         collapsible={collapsible}
         {...headerDrag}
+        compactLead
+        hideLabel={Boolean(activeRun?.title)}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
           onSelectChat ? (
@@ -879,7 +882,10 @@ function formatRelativeTime(iso: string): string {
 
 function StatusMeta({ run }: { run: RunState }) {
   const status = describeRunStatus(run);
-  const color = statusToneColor(status.tone);
+  // A run parked on a failed turn is paused, but the reason is a failure the
+  // user has to act on; the calm info tone undersold it next to the error
+  // card below.
+  const color = retryableFailedCallId(run) ? "var(--warn)" : statusToneColor(status.tone);
   return (
     <span
       className="cora-status-pill"
@@ -1155,9 +1161,15 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
             onClick={() => prefill(starter.prompt)}
           >
             <span className="cora-starter__label">{starter.label}</span>
-            <span className="cora-starter__title">{starter.title}</span>
+            <span className="cora-starter__title">
+              {starter.title}
+              <span className="cora-starter__arrow" aria-hidden>
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                  <path d="M3.5 8.5 8.5 3.5M4.5 3.5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </span>
             <span className="cora-starter__body">{starter.body}</span>
-            <span className="cora-starter__arrow" aria-hidden>↗</span>
           </button>
         ))}
       </div>

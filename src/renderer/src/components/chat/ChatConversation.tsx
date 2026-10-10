@@ -29,7 +29,7 @@ import { unwrapIpcError } from "../../lib/ipc-error";
 import { chordToHint, mod } from "../../shortcuts/chord";
 import { findMatchingRows, stepMatch } from "./conversation-search";
 import { openAccountsSettings } from "./account-readiness";
-import { isBackendFailurePark } from "@shared/run-questions";
+import { retryableFailedCallId } from "./failed-turn";
 import {
   compactPreview,
   formatToolPayload,
@@ -89,6 +89,10 @@ const WorkerWaitContext = React.createContext<
 // step cards.
 const WorkerTerminalContext = React.createContext<((workerTaskId: string) => boolean) | null>(null);
 
+// The standalone worker rows folded into step cards (see foldStepWorkers),
+// keyed by logical worker id. A context for the same reason as above.
+const StepWorkerRowsContext = React.createContext<Map<string, ToolItem>>(new Map());
+
 export default function ChatConversation({
   run,
   cwd = null,
@@ -144,16 +148,18 @@ export default function ChatConversation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [contentfulKey],
   );
-  const items = useMemo(
-    () =>
-      groupCompletedActivity(
+  const { items, stepWorkerRows } = useMemo(
+    () => {
+      const folded = foldStepWorkers(
         buildChatTimeline(run).filter(
           (item) =>
             !isRedundantParkedBackendFailure(item, run, contentfulCalls) &&
             !isSupersededFailedManagerTurn(item, run) &&
             shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated),
         ),
-      ),
+      );
+      return { items: groupCompletedActivity(folded.items), stepWorkerRows: folded.workerRows };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       execution.hydrated,
@@ -172,15 +178,7 @@ export default function ChatConversation({
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
   // The failed turn the composer's Retry would re-run: the latest manager
   // call, only while the run is parked on it. Its card offers the same Retry.
-  const retryableCallId = useMemo(() => {
-    const parked =
-      run.status === "paused" &&
-      (run.autopilot?.lastAction === "chat_turn_parked" ||
-        run.autopilot?.lastAction === "manager_turn_parked");
-    if (!parked && !isBackendFailurePark(run)) return null;
-    const last = run.sparkCalls[run.sparkCalls.length - 1];
-    return last?.status === "failed" ? last.id : null;
-  }, [run]);
+  const retryableCallId = useMemo(() => retryableFailedCallId(run), [run]);
   // On a completed run, stamp a tiny "done" marker under the LAST Cora prose
   // message so the user sees the run finished without a separate completion
   // turn duplicating the answer. The id-matching keys the marker to that one
@@ -238,6 +236,9 @@ export default function ChatConversation({
   }, [run.checkpoints, run.humanMessages]);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [readerAtBottom, setReaderAtBottom] = useState(true);
+  // Shows the conversation map while the reader scrolls; at rest it stays out
+  // of sight until hovered.
+  const [scrolling, setScrolling] = useState(false);
   const [visibleRange, setVisibleRange] = useState({ startIndex: 0, endIndex: 0 });
 
   // One durable projection owns history hydration and live frames. It
@@ -334,8 +335,9 @@ export default function ChatConversation({
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
       <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
+      <StepWorkerRowsContext.Provider value={stepWorkerRows}>
       <MarkdownWorkspaceContext.Provider value={cwd || null}>
-      <div style={SCROLL_STYLE} data-testid="cora-conversation">
+      <div style={SCROLL_STYLE} data-testid="cora-conversation" data-scrolling={scrolling ? "true" : undefined}>
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
         ) : (
@@ -369,6 +371,7 @@ export default function ChatConversation({
             // bottom edge and never falls behind.
             followOutput={readerAtBottom ? "auto" : false}
             atBottomStateChange={setReaderAtBottom}
+            isScrolling={setScrolling}
             rangeChanged={setVisibleRange}
             increaseViewportBy={{ top: 600, bottom: 400 }}
             computeItemKey={(index) =>
@@ -377,7 +380,6 @@ export default function ChatConversation({
             itemContent={(index, _data, context) => {
               const item = items[index];
               const rowKind = item?.kind === "activity-group" ? "work" : item?.kind ?? "empty";
-              const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
               return (
                 <div
                   className="cora-conversation-column"
@@ -385,6 +387,9 @@ export default function ChatConversation({
                   style={{
                     ...CONVERSATION_COLUMN_STYLE,
                     paddingTop: index === 0 ? 20 : 0,
+                    // Padding, not margin: the virtualizer measures each row's
+                    // box, and a child margin would collapse out of it.
+                    paddingBottom: rowGapBelow(item, items[index + 1]),
                   }}
                 >
                   <div
@@ -392,7 +397,6 @@ export default function ChatConversation({
                       context.findCurrentIndex === index ? " is-find-current" : ""
                     }`}
                     data-timeline-kind={rowKind}
-                    style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
                   >
                     {item?.kind === "message" ? (
                       <MessageTurn
@@ -432,16 +436,14 @@ export default function ChatConversation({
               );
             }}
             // "At bottom" must mean "you can actually SEE the last row", not
-            // "the scroller is within 4px of its end" (Virtuoso's default). The
-            // floating "New activity" pill and the minimap are absolutely
-            // positioned over the list's bottom-right, so the final rows sit
-            // underneath them: with the tight default the reader would scroll
-            // down, still be told there was new activity, and never reach a
-            // resting position where the last response was fully visible.
+            // "the scroller is within 4px of its end" (Virtuoso's default):
+            // with the tight default a reader a few pixels short of the end
+            // would keep being offered the jump button and told there was new
+            // activity while the last response sat fully in view.
             atBottomThreshold={72}
-            // Tall enough to scroll the last row clear of that pill (bottom 18 +
-            // ~32 tall) instead of leaving it pinned under it.
-            components={{ Footer: () => <div style={{ height: 56 }} /> }}
+            // Only breathing room above the composer. A taller spacer pushed a
+            // short chat up under the header and left a void above the box.
+            components={{ Footer: () => <div style={{ height: 16 }} /> }}
           />
         )}
         <ConversationMinimap
@@ -506,17 +508,24 @@ export default function ChatConversation({
             </button>
           </div>
         )}
+        {!readerAtBottom && rowCount > 0 && <div className="cora-conversation-fade" aria-hidden />}
         {!readerAtBottom && rowCount > 0 && (
           <button
             type="button"
+            className={`cora-jump-latest${newActivity ? " has-new" : ""}`}
             onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
-            style={NEW_ACTIVITY_BUTTON_STYLE}
+            aria-label={newActivity ? "New activity" : "Jump to latest"}
+            title={newActivity ? "New activity, jump to latest" : "Jump to latest"}
           >
-            {newActivity ? "New activity ↓" : "Jump to latest ↓"}
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M8 3v9.5M3.75 8.25 8 12.5l4.25-4.25" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {newActivity && <span className="cora-jump-latest__badge" aria-hidden />}
           </button>
         )}
       </div>
       </MarkdownWorkspaceContext.Provider>
+      </StepWorkerRowsContext.Provider>
       </WorkerTerminalContext.Provider>
     </WorkerWaitContext.Provider>
   );
@@ -807,6 +816,46 @@ function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
   return grouped;
 }
 
+// One vertical rhythm for the whole stream: a wide gap before each user turn,
+// a medium one between the parts of Cora's answer, and almost none between
+// consecutive activity rows so they read as one list.
+const TURN_GAP = 28;
+const IN_TURN_GAP = 14;
+const ACTIVITY_GAP = 2;
+
+function isActivityRow(item: ConversationItem | undefined): boolean {
+  return item?.kind === "step" || item?.kind === "activity-group" || (item?.kind === "tool" && item.activity !== "manager");
+}
+
+function rowGapBelow(item: ConversationItem | undefined, next: ConversationItem | undefined): number {
+  if (!item || !next) return 0;
+  if (next.kind === "message" && next.author === "user") return TURN_GAP;
+  if (isActivityRow(item) && isActivityRow(next)) return ACTIVITY_GAP;
+  return IN_TURN_GAP;
+}
+
+// A worker that belongs to a step is listed inside that step's card, so its
+// standalone row would show the same worker twice (and, sorted by creation
+// time, after a later step). The standalone row is dropped and kept aside
+// for the step's worker row, which reads its elapsed time and failure from it.
+function foldStepWorkers(items: ChatTimelineItem[]): {
+  items: ChatTimelineItem[];
+  workerRows: Map<string, ToolItem>;
+} {
+  const stepWorkerIds = new Set<string>();
+  for (const item of items) {
+    if (item.kind === "step") for (const worker of item.workers) stepWorkerIds.add(`worker:${worker.id}`);
+  }
+  const workerRows = new Map<string, ToolItem>();
+  if (stepWorkerIds.size === 0) return { items, workerRows };
+  const kept = items.filter((item) => {
+    if (item.kind !== "tool" || item.activity !== "worker" || !stepWorkerIds.has(item.id)) return true;
+    workerRows.set(item.id.slice("worker:".length), item);
+    return false;
+  });
+  return { items: kept, workerRows };
+}
+
 const MessageTurn = React.memo(function MessageTurn({
   item,
   runId,
@@ -878,6 +927,15 @@ const MessageTurn = React.memo(function MessageTurn({
           className={`cora-user-turn__meta${hasPersistentStatus ? " has-status" : ""}`}
           style={USER_HEADER_STYLE}
         >
+          {/* Time and copy are reference, shown on hover; only the delivery
+              state and its controls stay visible at rest. */}
+          <span className="cora-user-turn__hover-meta">
+            <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
+              {formatMessageTime(item.at)}
+            </time>
+            <CopyMessageControl text={item.text} />
+          </span>
+          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
           {queued ? (
             <span className="cora-queued-pill" title="Cora reads this when her current turn ends">
               <ClockGlyph />
@@ -890,11 +948,6 @@ const MessageTurn = React.memo(function MessageTurn({
               <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
             )
           )}
-          <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
-            {formatMessageTime(item.at)}
-          </time>
-          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-          <CopyMessageControl text={item.text} />
           {/* A blocked run is waiting for an answer, and the answer carries
               the queue with it; Send now there would only race that answer. */}
           {queued && !runBlocked && <SendNowControl runId={runId} />}
@@ -1260,9 +1313,9 @@ function RetryTurnButton({ runId }: { runId: string }) {
 }
 
 // A failed Cora turn or manager stage as a calm card: what failed, the
-// friendly reading of the error when it is classified, the raw error in full,
-// and what to do next. The raw text is never truncated: it is what a user
-// pastes into a bug report.
+// friendly reading of the error when it is classified, and what to do next.
+// The raw error sits behind Details whenever a friendly reading replaces it,
+// and is never truncated there: it is what a user pastes into a bug report.
 function TurnErrorCard({
   title,
   error,
@@ -1276,25 +1329,28 @@ function TurnErrorCard({
 }) {
   const [open, setOpen] = useState(false);
   const explanation = error ? failedTurnExplanation(error) : null;
+  const rawError = explanation && error ? error : null;
+  const hasDetails = Boolean(rawError || details);
   return (
     <div className="cora-turn-error">
       <div className="cora-turn-error__head">
         <ErrorGlyph />
         <span className="cora-turn-error__title">{title}</span>
       </div>
-      <div className="cora-turn-error__lead">{explanation?.detail ?? (error || "The turn failed.")}</div>
-      {explanation && <div className="cora-turn-error__hint">{explanation.hint}</div>}
-      {explanation && error && <div className="cora-turn-error__raw">{error}</div>}
-      {(explanation?.action === "accounts" || retryRunId || details) && (
+      <div className="cora-turn-error__body">
+        <div className="cora-turn-error__lead">{explanation?.detail ?? (error || "The turn failed.")}</div>
+        {explanation && <div className="cora-turn-error__hint">{explanation.hint}</div>}
+      </div>
+      {(explanation?.action === "accounts" || retryRunId || hasDetails) && (
         <div className="cora-turn-error__actions">
           {explanation?.action === "accounts" && (
             <OpenAccountsButton label={explanation.kind === "auth" ? "Connect account" : "Open accounts"} />
           )}
           {retryRunId && <RetryTurnButton runId={retryRunId} />}
-          {details && (
+          {hasDetails && (
             <button
               type="button"
-              className="cora-chip-btn cora-chip-btn--quiet"
+              className="cora-chip-btn cora-chip-btn--ghost"
               aria-expanded={open}
               onClick={() => setOpen((value) => !value)}
             >
@@ -1304,17 +1360,13 @@ function TurnErrorCard({
           )}
         </div>
       )}
-      {open && details ? <div className="cora-turn-error__details">{details}</div> : null}
+      {open && hasDetails ? (
+        <div className="cora-turn-error__details">
+          {rawError && <div className="cora-turn-error__raw">{rawError}</div>}
+          {details}
+        </div>
+      ) : null}
     </div>
-  );
-}
-
-function WorkedGlyph() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden style={{ color: "var(--muted-2)", flex: "0 0 auto" }}>
-      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.3" />
-      <path d="m5.4 8.2 1.8 1.8 3.5-3.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
   );
 }
 
@@ -1395,22 +1447,13 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
   const inlineDetail = failed
     ? compactPreview(readableOutput) || "failed"
     : liveWait ?? headline.detail;
-  const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
 
   return (
     <div
       style={{
         ...LIVE_TOOL_ROW_STYLE,
-        borderColor: failed
-          ? "color-mix(in oklch, var(--danger) 24%, transparent)"
-          : open
-            ? "var(--rule-soft)"
-            : "transparent",
-        background: failed
-          ? "color-mix(in oklch, var(--danger) 5%, transparent)"
-          : open
-            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-            : "transparent",
+        borderColor: open ? "var(--rule-soft)" : "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -1418,11 +1461,14 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
         baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={`${headline.title} · ${call.toolName}`}
       >
-        <StatusDot color={color} pulse={!finished} size={5} />
-        <span style={{ ...TOOL_TITLE_STYLE, color: failed ? "var(--danger)" : undefined }}>
+        <ActivityIcon
+          state={running ? "running" : failed ? "failed" : finished ? "done" : "dot"}
+          title={failed ? "This action failed" : finished ? "This action completed" : undefined}
+        />
+        <span style={TOOL_TITLE_STYLE}>
           {headline.title}
         </span>
-        <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
+        <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "color-mix(in oklch, var(--danger) 70%, var(--ink-dim))" : undefined }}>
           {inlineDetail}
         </span>
         {running && (
@@ -1436,7 +1482,6 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
             <span style={{ color: "var(--danger)" }}>−{appliedFileDiff.deletions}</span>
           </span>
         )}
-        {finished && <ToolOutcomeGlyph failed={failed} />}
         <Caret open={open} />
       </DisclosureButton>
       {appliedFileDiff && <ToolFileDiffPreview change={appliedFileDiff} />}
@@ -1586,27 +1631,43 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
   );
 }
 
-// Tiny check / cross at the row's trailing edge once a call settles — status
-// as a glyph, not a text chip, so the line stays quiet. The title carries the
-// words for anyone who hovers.
-function ToolOutcomeGlyph({ failed }: { failed: boolean }) {
+type ActivityIconState = "running" | "done" | "failed" | "dot" | "hollow";
+
+// The one status slot every activity row leads with (tool calls, steps,
+// workers, manager stages), so state reads down a single left edge and the
+// chevron stays the only thing on the right. `color` tints dots and checks;
+// running and failed keep their fixed tones.
+function ActivityIcon({
+  state,
+  color,
+  title,
+}: {
+  state: ActivityIconState;
+  color?: string;
+  title?: string;
+}) {
   return (
     <span
-      title={failed ? "This action failed" : "This action completed"}
-      style={{
-        flex: "0 0 auto",
-        display: "inline-flex",
-        color: failed ? "var(--danger)" : "var(--muted-2)",
-      }}
+      className="cora-activity-icon"
+      data-state={state}
+      title={title}
+      aria-hidden={title ? undefined : true}
+      style={color ? ({ "--cora-activity-color": color } as React.CSSProperties) : undefined}
     >
-      {failed ? (
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-          <path d="m3 3 6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      {state === "running" ? (
+        <span className="cora-activity-icon__spin spark-activity-spin" />
+      ) : state === "done" ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path d="m2.6 6.3 2.2 2.2 4.6-4.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : state === "failed" ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <circle cx="6" cy="6" r="5.25" fill="currentColor" opacity="0.16" />
+          <path d="M6 3.4v3.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          <circle cx="6" cy="8.5" r="0.75" fill="currentColor" />
         </svg>
       ) : (
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-          <path d="m2.4 6.3 2.3 2.3 4.9-5.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <span className="cora-activity-icon__dot" />
       )}
     </span>
   );
@@ -1644,16 +1705,16 @@ function CompletionMessage({ text }: { text: string }) {
   if (!body) {
     return (
       <div style={COMPLETION_INLINE_STYLE}>
-        <StatusDot color="var(--ok)" pulse={false} size={5} />
-        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
+        <ActivityIcon state="done" color="var(--ok)" />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>Done</span>
       </div>
     );
   }
   return (
     <div style={SPARK_BUBBLE_STYLE}>
       <div style={COMPLETION_INLINE_STYLE}>
-        <StatusDot color="var(--ok)" pulse={false} size={5} />
-        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
+        <ActivityIcon state="done" color="var(--ok)" />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>Done</span>
       </div>
       <div style={COMPLETION_BODY_STYLE}>
         <Markdown text={body} />
@@ -2126,8 +2187,8 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
       style={{
         ...TOOL_ROW_STYLE,
         ...TOOL_ROW_STANDALONE_STYLE,
-        borderColor: open ? "var(--rule-soft)" : "transparent",
-        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
+        borderColor: "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 2.5%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -2142,10 +2203,12 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
         }}
         title={item.goal || item.title}
       >
-        <StatusDot color={color} pulse={live} size={6} />
-        <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index} ·</span>
+        <ActivityIcon state={stepIconState(item.status)} color={color} />
+        <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index}</span>
         <span style={STEP_TITLE_STYLE}>{item.title}</span>
-        <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>
+        {/* Open, the goal reads in full below; repeating it here only
+            truncated the same sentence twice. */}
+        <span style={STEP_GOAL_INLINE_STYLE}>{open && hasBody ? null : item.goal}</span>
         {stepDiff.fileCount > 0 && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span>{stepDiff.fileCount} {stepDiff.fileCount === 1 ? "file" : "files"}</span>
@@ -2180,6 +2243,14 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   );
 });
 
+function stepIconState(status: StepItem["status"]): ActivityIconState {
+  if (status === "running" || status === "planning" || status === "reviewing") return "running";
+  if (status === "complete" || status === "completed_unverified") return "done";
+  if (status === "failed") return "failed";
+  if (status === "blocked") return "dot";
+  return "hollow";
+}
+
 const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: ActivityGroupItem }) {
   const [open, setOpen] = useState(false);
   const summary = activityGroupSummary(item.items);
@@ -2191,7 +2262,7 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
         baseStyle={ACTIVITY_GROUP_HEADER_STYLE}
         title={summary.detail}
       >
-        <StatusDot color="var(--muted-2)" pulse={false} size={5} />
+        <ActivityIcon state="done" />
         <span style={ACTIVITY_GROUP_TITLE_STYLE}>{summary.title}</span>
         {summary.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{summary.detail}</span>}
         <Caret open={open} />
@@ -2280,18 +2351,10 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         ...TOOL_ROW_STYLE,
         ...(embedded ? TOOL_ROW_EMBEDDED_STYLE : {}),
         ...(!embedded ? TOOL_ROW_STANDALONE_STYLE : {}),
-        // Same chrome discipline as LiveToolRow: transparent until opened,
-        // the pulsing dot alone says "running"; only failure earns a tint.
-        borderColor: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 38%, transparent)"
-          : open
-            ? "var(--rule-soft)"
-            : "transparent",
-        background: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 9%, transparent)"
-          : open
-            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-            : "transparent",
+        // Same chrome discipline as LiveToolRow: transparent until opened;
+        // the status icon alone says running, done or failed.
+        borderColor: open ? "var(--rule-soft)" : "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -2301,13 +2364,23 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={item.detail || item.title}
       >
-        <StatusDot color={color} pulse={live} size={5} />
+        <ActivityIcon
+          state={
+            live
+              ? "running"
+              : item.status === "failed"
+                ? "failed"
+                : item.status === "completed"
+                  ? "done"
+                  : item.tone === "queued"
+                    ? "hollow"
+                    : "dot"
+          }
+          color={item.tone === "queued" ? color : undefined}
+        />
         <span style={TOOL_TITLE_STYLE}>{item.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
         {stats && <span style={TOOL_STATS_STYLE}>{stats}</span>}
-        {(item.status === "completed" || item.status === "failed") && (
-          <ToolOutcomeGlyph failed={item.status === "failed"} />
-        )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
       {open && hasDetails && <ToolDetails item={item} />}
@@ -2383,7 +2456,7 @@ function ManagerActivityDisclosure({
         }}
         title={item.detail || item.title}
       >
-        <WorkedGlyph />
+        <ActivityIcon state="done" />
         <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
         {actionCount > 0 && (
           <span style={TOOL_INLINE_DETAIL_STYLE}>
@@ -2449,7 +2522,7 @@ function AssistantLiveTurn({
           // pulsing dots, no elapsed ticker — a working timer here would
           // claim activity that is not happening until the user answers.
           <div style={WORKING_LINE_STYLE}>
-            <StatusDot color="var(--warn)" pulse={false} size={6} />
+            <ActivityIcon state="dot" color="var(--warn)" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
             {item.detail ? (
               <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
@@ -2457,7 +2530,7 @@ function AssistantLiveTurn({
           </div>
         ) : compaction ? (
           <div style={WORKING_LINE_STYLE}>
-            <WorkingDots />
+            <ActivityIcon state="running" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
               {item.title}<ElapsedSince since={item.at} />
             </span>
@@ -2467,7 +2540,7 @@ function AssistantLiveTurn({
           </div>
         ) : (
           <div style={WORKING_LINE_STYLE}>
-            <WorkingDots />
+            <ActivityIcon state="running" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
               Working<ElapsedSince since={item.at} />
             </span>
@@ -2524,7 +2597,7 @@ function AssistantSettledTurn({
           <TurnErrorCard title={item.title} error={item.detail} retryRunId={retryRunId} />
         ) : (
           <div style={WORKING_LINE_STYLE}>
-            <WorkedGlyph />
+            <ActivityIcon state="done" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
             {actionCount > 0 && (
               <span style={TOOL_INLINE_DETAIL_STYLE}>
@@ -2661,16 +2734,6 @@ function ElapsedSince({ since }: { since: string }) {
     return () => window.clearInterval(timer);
   }, [since]);
   return <span ref={ref} style={{ fontVariantNumeric: "tabular-nums" }}>…</span>;
-}
-
-function WorkingDots() {
-  return (
-    <span className="cora-working-dots" aria-hidden>
-      <span />
-      <span />
-      <span />
-    </span>
-  );
 }
 
 function ExecutionTrace({
@@ -2900,17 +2963,30 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   const pulse = worker.runtimeState === "working";
   const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
   const attemptCount = worker.attemptCount ?? 0;
+  const folded = React.useContext(StepWorkerRowsContext).get(worker.id);
+  useNowTick(1000, folded ? isToolRowTicking(folded) : false);
+  const elapsed = folded ? toolDurationLabel(folded) : null;
+  const failure = folded?.tone === "failed" && folded.detail ? folded.detail : null;
+  const iconState: ActivityIconState = pulse
+    ? "running"
+    : worker.status === "accepted"
+      ? "done"
+      : worker.status === "failed" || worker.status === "cancelled"
+        ? "failed"
+        : "dot";
   const detail = [
     // The model, not the runtime: "claude" only names the subscription Pi
     // authenticates against, and two workers wearing it can be very different
     // models. Falls back to the runtime label until an attempt reports one.
     workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
-    workerStatusLabel(worker.status),
+    // The spinner already says running; any other state is worth the words.
+    pulse ? null : workerStatusLabel(worker.status),
     retryPending
       ? `retry ${worker.pending?.number} of ${workerAttemptDenominator((worker.pending?.number ?? 1))}`
       : attemptCount > 1
         ? `attempt ${attemptCount} of ${workerAttemptDenominator(attemptCount)}`
         : null,
+    elapsed,
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
@@ -2937,15 +3013,22 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 7,
-          minHeight: 20,
+          gap: 8,
+          minHeight: 26,
           minWidth: 0,
           padding: "1px 0",
         }}
       >
-        <StatusDot color={color} pulse={pulse} size={5} />
+        <ActivityIcon state={iconState} color={iconState === "done" ? "var(--ok)" : color} />
         <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+        {hasDiff && diff && (
+          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
+            <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
+            <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
+          </span>
+        )}
         {canOpenTerminal && (
           <button
             type="button"
@@ -2960,14 +3043,8 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
             {terminalClosed ? "Terminal closed" : "Open terminal"}
           </button>
         )}
-        {hasDiff && diff && (
-          <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
-            <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>
-            <span style={{ color: "var(--ok)" }}>+{diff.additions}</span>
-            <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
-          </span>
-        )}
       </div>
+      {failure && <div className="cora-step-worker__failure">{failure}</div>}
       {hasDiff && diff && (
         <div
           style={{
@@ -3545,6 +3622,9 @@ function Caret({ open }: { open: boolean }) {
       style={{
         flex: "0 0 auto",
         display: "inline-flex",
+        // The chevron always closes the row at its right edge, even when no
+        // elastic detail text sits between it and the title.
+        marginLeft: "auto",
         color: "var(--muted-2)",
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
         transition: "transform var(--motion-fast) var(--ease-out)",
@@ -3645,27 +3725,6 @@ const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
   margin: "0 auto",
 };
 
-const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 12,
-};
-
-const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
-  position: "absolute",
-  right: 22,
-  bottom: 18,
-  zIndex: 4,
-  border: "1px solid var(--accent-edge)",
-  borderRadius: 999,
-  background: "var(--panel-2)",
-  color: "var(--accent-text)",
-  boxShadow: "var(--shadow-float)",
-  padding: "7px 12px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
 // The user bubble is a calm neutral panel-2 surface with a single hairline —
 // the accent is reserved for live / needs-you / recommended moments, not for
 // every message the user has ever sent. A subtle --lift-hi top highlight gives
@@ -3676,7 +3735,7 @@ const USER_HEADER_STYLE: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 24,
+  minHeight: 22,
 };
 
 const USER_TIME_STYLE: React.CSSProperties = {
@@ -3711,11 +3770,10 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
   boxShadow: "none",
 };
 
-// Waiting, not failed: the bubble keeps its surface and only its edge turns
-// dashed, while the Queued pill under it carries the state in words.
+// Waiting, not failed: the bubble is the same surface, only quieter, while
+// the Queued pill under it carries the state in words.
 const USER_QUEUED_BUBBLE_STYLE: React.CSSProperties = {
-  borderStyle: "dashed",
-  borderColor: "color-mix(in oklch, var(--warn) 30%, var(--rule))",
+  opacity: 0.72,
 };
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
@@ -3770,11 +3828,8 @@ const COMPLETION_INLINE_STYLE: React.CSSProperties = {
 };
 
 const COMPLETION_INLINE_LABEL_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
+  fontSize: 12,
+  fontWeight: 500,
   color: "var(--muted)",
 };
 
@@ -3991,7 +4046,8 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
 // chip.
 const STEP_INDEX_TEXT_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontSize: 11,
+  fontSize: 12,
+  fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
 };
 
@@ -3999,7 +4055,7 @@ const STEP_TITLE_STYLE: React.CSSProperties = {
   flex: "0 1 auto",
   minWidth: 0,
   color: "var(--ink)",
-  fontSize: 12,
+  fontSize: 12.5,
   fontWeight: 600,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -4010,7 +4066,7 @@ const STEP_GOAL_INLINE_STYLE: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
   color: "var(--muted)",
-  fontSize: 11,
+  fontSize: 12,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -4021,19 +4077,20 @@ const STEP_PROGRESS_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
   marginLeft: "auto",
   color: "var(--muted)",
-  fontSize: 10.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
   whiteSpace: "nowrap",
 };
 
 // Expanded step content is indentation under the row, not a boxed body.
-// Left padding lines the body up with the header title (7px button padding +
-// 6px dot + 7px gap).
+// Left padding lines the goal up with the header title (4px button padding +
+// 14px status slot + 8px gap); worker rows bring their own slot and sit one
+// slot further in.
 const STEP_BODY_STYLE: React.CSSProperties = {
-  padding: "2px 9px 8px 20px",
+  padding: "0 8px 8px 26px",
   display: "flex",
   flexDirection: "column",
-  gap: 7,
+  gap: 4,
 };
 
 const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
@@ -4044,23 +4101,23 @@ const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
 const ACTIVITY_GROUP_HEADER_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 25,
-  border: "1px solid transparent",
+  minHeight: 28,
+  border: "none",
   borderRadius: "var(--radius-control, 7px)",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  padding: "3px 7px",
+  gap: 8,
+  padding: "3px 8px 3px 4px",
   cursor: "default",
   textAlign: "left",
 };
 
 const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  fontWeight: 600,
+  color: "var(--ink-dim)",
+  fontSize: 12,
+  fontWeight: 500,
   minWidth: 0,
   flex: "0 1 auto",
   overflow: "hidden",
@@ -4069,8 +4126,8 @@ const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
 };
 
 const ACTIVITY_GROUP_BODY_STYLE: React.CSSProperties = {
-  marginLeft: 12,
-  paddingLeft: 8,
+  marginLeft: 10,
+  paddingLeft: 4,
   borderLeft: "1px solid var(--rule-soft)",
   display: "flex",
   flexDirection: "column",
@@ -4110,14 +4167,15 @@ const MANAGER_DISCLOSURE_STYLE: React.CSSProperties = {
 const MANAGER_DISCLOSURE_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 24,
+  minHeight: 28,
   border: "none",
+  borderRadius: "var(--radius-control, 7px)",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  padding: "2px 4px",
+  gap: 8,
+  padding: "3px 8px 3px 4px",
   cursor: "default",
   textAlign: "left",
 };
@@ -4127,6 +4185,7 @@ const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 500,
   whiteSpace: "nowrap",
+  fontVariantNumeric: "tabular-nums",
 };
 
 const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {
@@ -4148,17 +4207,20 @@ const EXECUTION_TEXT_STYLE: React.CSSProperties = {
   lineHeight: 1.55,
 };
 
+// Every activity row shares one geometry: the 14px status slot sits on the
+// prose's left edge (4px in) and the label starts 8px after it, so icons and
+// titles line up down the whole turn.
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 26,
+  minHeight: 28,
   border: "none",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  padding: "3px 7px",
+  gap: 8,
+  padding: "3px 8px 3px 4px",
   cursor: "default",
   textAlign: "left",
 };
@@ -4176,7 +4238,7 @@ const TOOL_TITLE_STYLE: React.CSSProperties = {
 
 const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontSize: 11.5,
+  fontSize: 12,
   minWidth: 0,
   flex: 1,
   overflow: "hidden",
@@ -4186,8 +4248,7 @@ const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
 
 const TOOL_STATS_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
   whiteSpace: "nowrap",
@@ -4301,8 +4362,9 @@ const STALL_HINT_STYLE: React.CSSProperties = {
 const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  minHeight: 22,
+  gap: 8,
+  minHeight: 24,
+  padding: "0 4px",
 };
 
 const ISSUE_PIP_STYLE: React.CSSProperties = {

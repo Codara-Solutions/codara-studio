@@ -93,7 +93,8 @@ export default function RunIdChip({
           </svg>
         ) : (
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
-            <path d="M6.2 2.5 5 13.5M11 2.5 9.8 13.5M2.75 5.75h11M2.25 10.25h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <rect x="5.25" y="5.25" width="7.5" height="7.5" rx="1.5" stroke="currentColor" strokeWidth="1.25" />
+            <path d="M10.5 5.25V4A1.75 1.75 0 0 0 8.75 2.25H4A1.75 1.75 0 0 0 2.25 4v4.75A1.75 1.75 0 0 0 4 10.5h1.25" stroke="currentColor" strokeWidth="1.25" />
           </svg>
         )}
       </button>
