@@ -71,6 +71,30 @@ async function main() {
     assert.equal(readiness.settled, true);
   });
 
+  const sections = await (async () => {
+    const out = await esbuild.build({
+      entryPoints: [path.join(ROOT, "src", "renderer", "src", "lib", "settings-sections.ts")],
+      bundle: true,
+      format: "cjs",
+      platform: "node",
+      write: false,
+      logLevel: "silent",
+      tsconfig: path.join(ROOT, "tsconfig.node.json"),
+    });
+    const mod = { exports: {} };
+    // eslint-disable-next-line no-new-func
+    new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+    return mod.exports;
+  })();
+
+  test("a settings deep link accepts real tabs only", () => {
+    assert.equal(sections.isSettingsTab("agents"), true);
+    assert.equal(sections.isSettingsTab("remote-access"), true);
+    assert.equal(sections.isSettingsTab("accounts"), false);
+    assert.equal(sections.isSettingsTab("toString"), false);
+    assert.equal(sections.isSettingsTab(undefined), false);
+  });
+
   test("the accounts action deep-links to Settings > Agents", () => {
     const source = fs.readFileSync(READINESS, "utf8");
     assert.match(source, /"spark:open-settings", \{ detail: \{ section: "agents" \} \}/);
