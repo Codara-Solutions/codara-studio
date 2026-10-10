@@ -3195,8 +3195,14 @@ async function handleOrchestratorSpawnWorkers(
       resumedSessionCount += 1;
       guardrailNotes.push(
         `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id}, whose ` +
-          `attempt ${resumePlan.sourceAttempt.attemptNumber} was cut off by a ` +
-          `${resumePlan.sourceAttempt.interruptedBy === "app_restart" ? "app restart" : "pause"}. ` +
+          `attempt ${resumePlan.sourceAttempt.attemptNumber} was cut off by ` +
+          `${
+            resumePlan.sourceAttempt.interruptedBy === "app_restart"
+              ? "an app restart"
+              : resumePlan.sourceAttempt.interruptedBy === "pause"
+                ? "a pause"
+                : "the turn time limit"
+          }. ` +
           "The new prompt lands as the next turn of that worker's session; its edits so far are on disk.",
       );
     } else if (resumePlan) {

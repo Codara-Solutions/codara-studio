@@ -1,6 +1,7 @@
 import type { RunState, WorkerAttempt, WorkerTask } from "@shared/types";
 import { contextWindowForModel } from "@shared/context-window";
 import { effectiveCompactionCapTokens } from "@shared/context-compaction";
+import { isWorkerTurnCeilingFailure } from "./agent-liveness";
 
 /**
  * Warm follow-up gate for codara_spawn_workers `follow_up_of`.
@@ -41,7 +42,10 @@ export type WorkerSessionReuseDecision =
       /** 0 when the interrupted attempt never recorded a gauge. */
       contextTokens: number;
       contextWindowTokens: number;
-      /** The source was cut off by a pause or app restart, not finished. */
+      /**
+       * The source was cut off (a pause, an app restart, or the turn time
+       * limit while still making progress), not finished.
+       */
       interrupted: boolean;
     }
   /** Gate failed; spawn cold and tell the manager why in the result note. */
@@ -84,21 +88,29 @@ export function evaluateWorkerSessionReuse(input: {
         !latest || attempt.attemptNumber > latest.attemptNumber ? attempt : latest,
       null,
     );
-  // A pause or an app quit kills a worker mid-slice through no fault of its
+  // A pause, an app quit, or the turn time limit reached while the worker was
+  // still making progress cuts a worker off mid-slice through no fault of its
   // own. Its session holds the plan and everything it read, so continuing it
   // beats a cold relaunch. A worker that failed or was cancelled for any
   // other reason is never continued: its session is what went wrong.
   const interrupted =
     sourceAttempt !== null &&
-    sourceAttempt.interruptedBy !== undefined &&
+    (sourceAttempt.interruptedBy !== undefined ||
+      (sourceAttempt.status === "failed" && isWorkerTurnCeilingFailure(sourceAttempt.error))) &&
     (sourceAttempt.status === "cancelled" || sourceAttempt.status === "failed") &&
     (sourceTask.status === "cancelled" || sourceTask.status === "failed");
-  if (sourceTask.status !== "accepted" && !interrupted) {
+  // A worker that exited cleanly with a partial or blocked report is parked at
+  // `blocked` by the worker cycle. Its session is sound and holds the plan for
+  // the remaining work, so it continues under the same headroom cap as an
+  // accepted one.
+  const finishedShort = sourceTask.status === "blocked";
+  if (sourceTask.status !== "accepted" && !finishedShort && !interrupted) {
     return {
       kind: "cold",
       reason:
         `Task ${sourceTask.id} is not terminal-successful (status ${sourceTask.status}); only an accepted ` +
-        "worker's session, or one interrupted by a pause or app restart, can be continued. Spawned cold instead.",
+        "or partially finished worker's session, or one cut off by a pause, an app restart, or the turn " +
+        "time limit, can be continued. Spawned cold instead.",
     };
   }
   if (!sourceAttempt || (!interrupted && sourceAttempt.status !== "succeeded")) {
