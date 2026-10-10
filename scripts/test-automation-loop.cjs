@@ -1418,6 +1418,59 @@ async function main() {
     ok("a failing entry step records a FAILED pass and stops the loop (iteration-failed)", badRec && badRec.status === "failed" && /Step "x" failed:[\s\S]*\[exit 2\]/.test(badRec.summary) && badFin.state.status === "stopped" && badFin.state.lastStopReason === "iteration-failed" && L.launches.length === 1);
   }
 
+  // ── 31) A repeating single-worker loop without {{lastOutput}} hands the ──
+  // previous pass's summary to the next pass (signal lines dropped, so the
+  // agent footer still appears); a template that uses the token, a first pass,
+  // and a count loop get nothing extra.
+  {
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const job = await sched.createJob({
+      name: "handoff",
+      trigger: { kind: "manual" },
+      loop: { kind: "agent", stop: { maxIterations: 5 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "migrate the next module" },
+    });
+    await sched.runJobNow(job.id);
+    const first = L.launches.at(-1);
+    ok("pass 1 has no previous-pass block", !/\[Previous pass summary\]/.test(first.note));
+    await completeRun(nextPending(), { summary: "migrated auth.ts; next is billing.ts\nSPARK_LOOP_CONTINUE" });
+    const second = L.launches.at(-1);
+    ok(
+      "pass 2 receives the previous summary without its signal line",
+      /\[Previous pass summary\]\nmigrated auth\.ts; next is billing\.ts\n\[End previous pass summary\]/.test(second.note) &&
+        (second.note.match(/SPARK_LOOP_CONTINUE/g) ?? []).length === 1,
+    );
+    ok("pass 2 still carries the agent-loop footer", /This is an automation loop/.test(second.note));
+
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const tokenJob = await sched.createJob({
+      name: "handoff-token",
+      trigger: { kind: "manual" },
+      loop: { kind: "agent", stop: { maxIterations: 5 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "continue from: {{lastOutput}}" },
+    });
+    await sched.runJobNow(tokenJob.id);
+    await completeRun(nextPending(), { summary: "step one done\nSPARK_LOOP_CONTINUE" });
+    ok("a template using {{lastOutput}} gets no extra block", !/\[Previous pass summary\]/.test(L.launches.at(-1).note));
+
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const countJob = await sched.createJob({
+      name: "handoff-count",
+      trigger: { kind: "manual" },
+      loop: { kind: "count", stop: { maxIterations: 2 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "independent pass" },
+    });
+    await sched.runJobNow(countJob.id);
+    await completeRun(nextPending(), { summary: "pass one" });
+    ok("a count loop keeps independent passes", !/\[Previous pass summary\]/.test(L.launches.at(-1).note));
+  }
+
   sched.stopScheduler();
   try {
     fs.rmSync(tmpHome, { recursive: true, force: true });

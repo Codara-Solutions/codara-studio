@@ -3,6 +3,7 @@ import type {
   AgentEffortLevel,
   AgentLoopSignal,
   AutomationContinuationSource,
+  AutomationLoopKind,
   AutomationRunRecord,
   AutomationStatus,
   AutomationStopReason,
@@ -346,13 +347,14 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       // BYTE-IDENTICAL: pendingNextPrompt takes precedence over the rendered
       // template, then BOTH flavors get the firedPath note + agent footer (the
       // legacy code applied those transforms after the `??`, to either source).
+      const template = job.prompt?.template ?? job.input.initialUserNote ?? "";
       const prompt = decoratePrompt(
         job.state.pendingNextPrompt ??
-          renderNodePrompt(job.prompt?.template ?? job.input.initialUserNote ?? "", {
+          `${renderNodePrompt(template, {
             vars: passVars,
             nodeOutputs: {},
             incoming: [],
-          }),
+          })}${previousPassHandoff(job, template, passIter, lastRecord?.summary)}`,
       );
       const resolved = resolveWorker(job);
       // Per-worker tool access lives on the graph node (not job.worker), so the
@@ -1206,10 +1208,40 @@ const answerResumes = new Set<string>();
 // ONLY on the job-level worker (degenerate single-node passes + answer
 // resumes) — resolveWorker never consumes a handoff for a graph entry node's
 // own worker, so steerable=false there keeps the prompt honest.
+const PREVIOUS_PASS_MAX_CHARS = 4_000;
+const PREVIOUS_PASS_LOOPS: ReadonlySet<AutomationLoopKind> = new Set(["agent", "continuous", "until"]);
+
+// A repeating single-worker loop whose template never asks for {{lastOutput}}
+// would otherwise start every pass from scratch and redo the first pass's work.
+// Graph entry nodes are excluded: their inputs arrive through {{node:id}}, and
+// appending text there would change graph semantics.
+export function previousPassHandoff(
+  job: Pick<ScheduledJob, "loop">,
+  template: string,
+  passIter: number,
+  lastSummary: string | undefined,
+): string {
+  if (passIter <= 0 || !PREVIOUS_PASS_LOOPS.has(job.loop.kind)) return "";
+  if (/\{\{\s*last(?:Output|Summary)\b/.test(template)) return "";
+  // Signal lines are dropped: decoratePrompt skips the agent-loop footer when
+  // the prompt already mentions the signal, and the old signal is no answer
+  // for this pass anyway.
+  const summary = lastSummary
+    ?.split("\n")
+    .filter((line) => !/SPARK_LOOP_(?:CONTINUE|DONE)|codara_request_next_iteration/.test(line))
+    .join("\n")
+    .trim();
+  if (!summary) return "";
+  const clipped = summary.length > PREVIOUS_PASS_MAX_CHARS
+    ? `${summary.slice(0, PREVIOUS_PASS_MAX_CHARS).trimEnd()}\n[truncated]`
+    : summary;
+  return `\n\n[Previous pass summary]\n${clipped}\n[End previous pass summary]\nContinue from where the previous pass stopped instead of starting over.`;
+}
+
 function agentLoopFooter(job: ScheduledJob, steerable = true): string {
   if (job.loop.kind !== "agent") return "";
   const handoffNote = steerable
-    ? ` You may also pass nextModel (claude-opus-5, claude-fable-5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) and nextEffort to codara_request_next_iteration to pick the next pass's worker.`
+    ? ` You may also pass nextModel (claude-opus-5, claude-fable-5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) and nextEffort to codara_request_next_iteration to pick the next pass's worker, and a prompt to hand the next pass its exact instructions.`
     : "";
   return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the codara_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
 }
