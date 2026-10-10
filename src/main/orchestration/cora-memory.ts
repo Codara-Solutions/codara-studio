@@ -864,9 +864,9 @@ export function releaseCoraMemoryInjection(runId: string): void {
 
 /**
  * Forget that a run's session carries the memory sections, so the next manager
- * turn injects them again. Called when the session lost its earlier injection
- * without the run noticing: an in-session compaction summarized the turn that
- * carried it, or a fresh manager session replaced the old one. Unlike
+ * turn injects them again. Called when an in-session compaction summarized
+ * the turn that carried them, which the run cannot otherwise notice (a
+ * replaced session is covered by canonical replay's force instead). Unlike
  * releaseCoraMemoryInjection this keeps no history to roll back to.
  */
 export function resetCoraMemoryInjection(runId: string): void {
