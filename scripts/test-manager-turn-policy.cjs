@@ -376,6 +376,39 @@ async function main() {
     );
   });
 
+  test("a failed recovery replay re-parks with the reason of its own kind", () => {
+    // Auth and timeout recoveries now survive normalizeRun, so a Retry that
+    // fails again (the account is still not connected) returns to parked. It
+    // must keep saying "connect it", not "the provider is unavailable".
+    for (const kind of ["auth", "timeout", "rate_limit", "transport", "provider"]) {
+      const plan = P.planManagerTurnFailure({
+        error:
+          kind === "auth"
+            ? "Cora is not authenticated with a Claude account (anthropic)."
+            : kind === "timeout"
+              ? "Pi manager turn timed out after 600s"
+              : kind === "rate_limit"
+                ? "429 rate limit exceeded"
+                : kind === "transport"
+                  ? "ECONNRESET socket hang up"
+                  : "Our servers are currently overloaded. Please try again later.",
+        runStatus: "running",
+        mode: "chat",
+        transientRetryCount: 0,
+        backend: "pi",
+      });
+      assert.equal(plan.action, "park", kind);
+      assert.equal(plan.kind, kind);
+      assert.equal(plan.parkReason, P.managerTurnParkReason(kind), kind);
+    }
+    assert.match(P.managerTurnParkReason("auth"), /Settings > Agents/);
+    const repark = runStoreSource.slice(
+      runStoreSource.indexOf("async function returnUnfinishedManagerRecoveryToParked"),
+      runStoreSource.indexOf("function scheduleClaimedManagerTurnRecovery"),
+    );
+    assert.match(repark, /stopReason: managerTurnParkReason\(recovery\.failureKind\)/);
+  });
+
   console.log(`\n${passed} manager turn policy contract tests passed`);
 }
 
