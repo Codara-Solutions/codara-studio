@@ -4484,9 +4484,12 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           for (const message of draft.humanMessages) {
             if (!message.backendTurnId || !staleOrphanIds.has(message.backendTurnId)) continue;
             if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+            if (message.deliveryState === "submitted") message.redelivered = true;
             message.deliveryState = "queued";
             message.conversationEpoch = epoch;
             delete message.backendTurnId;
+            delete message.steeredAt;
+            delete message.steerDeliveredAt;
             if (message.targetTurnId && staleOrphanIds.has(message.targetTurnId)) {
               delete message.targetTurnId;
             }
@@ -4704,8 +4707,13 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         for (const message of draft.humanMessages) {
           if (!message.backendTurnId || !interruptedIds.has(message.backendTurnId)) continue;
           if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+          // The provider had "submitted" input; the replay must say so, or Cora
+          // redoes work the cut-off turn already started.
+          if (message.deliveryState === "submitted") message.redelivered = true;
           message.deliveryState = "queued";
           delete message.backendTurnId;
+          delete message.steeredAt;
+          delete message.steerDeliveredAt;
           if (message.targetTurnId && orphanedIds.has(message.targetTurnId)) {
             delete message.targetTurnId;
           }
@@ -15514,6 +15522,7 @@ async function markConversationRewindFailed(
       for (const userMessage of draft.humanMessages) {
         if (!userMessage.backendTurnId || !activeCallIds.has(userMessage.backendTurnId)) continue;
         if (userMessage.deliveryState === "acknowledged" || userMessage.deliveryState === "cancelled") continue;
+        if (userMessage.deliveryState === "submitted") userMessage.redelivered = true;
         userMessage.deliveryState = "queued";
         delete userMessage.backendTurnId;
         if (userMessage.targetTurnId && activeCallIds.has(userMessage.targetTurnId)) {
@@ -16111,6 +16120,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
       for (const message of draft.humanMessages) {
         if (!message.backendTurnId || !interruptedCallIds.has(message.backendTurnId)) continue;
         if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        if (message.deliveryState === "submitted") message.redelivered = true;
         message.deliveryState = "queued";
         message.conversationEpoch = oldEpoch + 1;
         delete message.backendTurnId;

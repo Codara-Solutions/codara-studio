@@ -1211,6 +1211,100 @@ async function main() {
     );
   }
 
+  // ── 5f. requeued input the provider already had ─────────────────────────
+  // Stop and an app restart both hand a submitted message back to the queue.
+  // The replay must label it as delivered before, or Cora redoes the work the
+  // cut-off turn already started.
+  const SUBMITTED_U = "Add auth to the API";
+  const runU = writeRun(
+    pausedRun("run-stop-submitted-input", {
+      humanMessages: [
+        {
+          id: "msg-submitted-u",
+          runId: "run-stop-submitted-input",
+          author: "user",
+          kind: "note",
+          message: SUBMITTED_U,
+          attachments: [],
+          createdAt: PAUSED_AT,
+          deliveryState: "queued",
+          intent: "turn",
+          conversationEpoch: 1,
+        },
+      ],
+    }),
+  );
+  const enteredU = gate();
+  const releaseU = gate();
+  managerBehavior.set(runU, async (calls, input) => {
+    if (calls.length === 1) {
+      await input.onPromptAccepted?.();
+      enteredU.open();
+      await releaseU.opened;
+      return { ...completeResult(), turnAborted: true };
+    }
+    return askUserResult();
+  });
+  await runStore.resumeRun({ runId: runU });
+  await gateOpened(enteredU);
+  await waitFor(() => messageText(runU, SUBMITTED_U)?.deliveryState === "submitted");
+  await runStore.forcePauseRun(runU);
+  releaseU.open();
+  await runStore.settleScheduledManagerWork(runU);
+  check(
+    "Stop marks a submitted message as redelivered when it requeues it",
+    messageText(runU, SUBMITTED_U)?.deliveryState === "queued" &&
+      messageText(runU, SUBMITTED_U)?.redelivered === true,
+    JSON.stringify(messageText(runU, SUBMITTED_U)),
+  );
+
+  const SUBMITTED_V = "Spawn the auth workers";
+  const restartedAt = new Date().toISOString();
+  writeRun(
+    pausedRun("run-restart-submitted-input", {
+      status: "running",
+      autopilot: { status: "running", lastAction: "chat_turn", updatedAt: restartedAt },
+      humanMessages: [
+        {
+          id: "msg-submitted-v",
+          runId: "run-restart-submitted-input",
+          author: "user",
+          kind: "note",
+          message: SUBMITTED_V,
+          attachments: [],
+          createdAt: restartedAt,
+          deliveryState: "submitted",
+          backendTurnId: "spark-cut-by-restart",
+          targetTurnId: "spark-cut-by-restart",
+          steeredAt: restartedAt,
+          intent: "turn",
+          conversationEpoch: 1,
+        },
+      ],
+      sparkCalls: [
+        {
+          id: "spark-cut-by-restart",
+          runId: "run-restart-submitted-input",
+          mode: "chat",
+          model: "stub-model",
+          status: "started",
+          inputMessageIds: ["msg-submitted-v"],
+          conversationEpoch: 1,
+          createdAt: restartedAt,
+        },
+      ],
+    }),
+  );
+  await runStore.recoverOrphanedManagerTurns();
+  const restartedV = messageText("run-restart-submitted-input", SUBMITTED_V);
+  check(
+    "restart recovery marks a submitted message as redelivered when it requeues it",
+    restartedV?.deliveryState === "queued" &&
+      restartedV?.redelivered === true &&
+      !restartedV?.steeredAt,
+    JSON.stringify(restartedV),
+  );
+
   // ── 6. source seams ──────────────────────────────────────────────────────
   const socketSource = fs.readFileSync(AGENT_SOCKET_TS, "utf8");
   const waitStart = socketSource.indexOf("async function handleOrchestratorWaitForWorkers(");
