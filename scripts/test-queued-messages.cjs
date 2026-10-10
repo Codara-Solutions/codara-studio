@@ -1038,6 +1038,25 @@ async function main() {
     inactiveError?.message,
   );
 
+  // A backend that throws after the provider accepted the prompt ran a real
+  // turn, whose tools may already have acted. That is not a runtime that
+  // failed to start, so it is never retried or parked for a replay.
+  const runR = writeRun(finishedRun("run-throw-after-accept"));
+  managerBehavior.set(runR, async (calls, input) => {
+    if (calls.length === 1) {
+      await input.onPromptAccepted?.();
+      throw new Error("Pi RPC request codara-7 timed out");
+    }
+    return askUserResult();
+  });
+  await runStore.addRunMessage({ runId: runR, author: "user", kind: "note", message: "Tag the release" });
+  await runStore.settleScheduledManagerWork(runR);
+  check(
+    "a turn that throws after its prompt was accepted is not replayed as a startup failure",
+    callsFor(runR).length === 1 && !readRun(runR).managerTurnRecovery,
+    JSON.stringify({ calls: callsFor(runR).length, recovery: readRun(runR).managerTurnRecovery }),
+  );
+
   // ── 5e. Stop and cancel teardown ────────────────────────────────────────
   // Stop and cancel dispose the live session, then commit. A turn queued
   // behind the interrupted one must not start in between: it would launch a

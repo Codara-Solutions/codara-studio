@@ -6532,6 +6532,11 @@ async function askManagerBackendUnderTurnLock(
   };
 
   const callStartedMs = Date.now();
+  // Set once the provider had this turn's prompt or the backend answered.
+  // Only an error before that is a runtime that failed to start; one after it
+  // may follow tools or decision effects that already ran, so it must never be
+  // replayed as a startup retry or parked for a replay.
+  let providerTurnStarted = false;
   try {
     const result = await backend.requestManagerDecision(
       {
@@ -6543,6 +6548,7 @@ async function askManagerBackendUnderTurnLock(
         inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
         conversationEpoch: preparedTurn.conversationEpoch,
         onPromptAccepted: async () => {
+          providerTurnStarted = true;
           await updateManagerInputDelivery(
             run.id,
             callId,
@@ -6584,6 +6590,7 @@ async function askManagerBackendUnderTurnLock(
       },
       onStream,
     );
+    providerTurnStarted = true;
     acceptingStreamEvents = false;
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
@@ -7084,6 +7091,7 @@ async function askManagerBackendUnderTurnLock(
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
       payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
     });
+    if (providerTurnStarted) return null;
     return handleManagerStartupFailure({
       runId: run.id,
       error,
@@ -7105,13 +7113,14 @@ async function askManagerBackendUnderTurnLock(
 }
 
 /**
- * A backend that throws never ran a provider turn: the runtime failed to come
- * up (handshake timeout, process exit) or the login is dead. The turn's input
- * is already requeued. One retry covers a runtime that was merely slow to
- * start; a dead login, a quota or provider trouble parks the run with the
- * same recovery record a failed turn writes, so Retry replays the saved input.
- * Nothing ran, so this never fails the run. Returns null for an unclassified
- * error, which the caller turns into a question.
+ * A backend that throws before the provider accepted the prompt never ran a
+ * provider turn: the runtime failed to come up (handshake timeout, process
+ * exit) or the login is dead. The caller routes only that case here. The
+ * turn's input is already requeued. One retry covers a runtime that was merely
+ * slow to start; a dead login, a quota or provider trouble parks the run with
+ * the same recovery record a failed turn writes, so Retry replays the saved
+ * input. Nothing ran, so this never fails the run. Returns null for an
+ * unclassified error, which the caller turns into a question.
  */
 async function handleManagerStartupFailure(input: {
   runId: string;
