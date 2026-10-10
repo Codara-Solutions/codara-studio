@@ -1322,6 +1322,51 @@ async function main() {
     String(cancelledLaunch.piPrompts),
   );
 
+  // ── 4c. the quit guard counts only work a quit would kill ───────────────
+  {
+    const before = runStore.liveWorkForQuit();
+    const withCall = (id, status, executionMode) =>
+      forcePausedRun(id, {
+        status,
+        executionMode,
+        workerTasks: [],
+        workerAttempts: [],
+        sparkCalls: [{ id: `call-${id}`, mode: "chat", status: "started", startedAt: NOW }],
+      });
+    for (const run of [
+      withCall("run-quit-live-chat", "running", "managed"),
+      withCall("run-quit-live-loom", "running", "direct"),
+      withCall("run-quit-paused", "paused", "managed"),
+      { ...withCall("run-quit-idle", "running", "managed"), sparkCalls: [] },
+    ]) {
+      writeRun(run);
+      await runStore.getRun(run.id);
+    }
+    const after = runStore.liveWorkForQuit();
+    check(
+      "a chat with a manager turn in flight counts as live work",
+      after.chats === before.chats + 1,
+      JSON.stringify({ before, after }),
+    );
+    check(
+      "an automation run with a turn in flight is counted as an automation",
+      after.automations === before.automations + 1,
+      JSON.stringify({ before, after }),
+    );
+    const indexSource = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+    const beforeQuit = indexSource.slice(indexSource.indexOf('app.on("before-quit"'));
+    check(
+      "before-quit asks before it starts tearing down live work",
+      beforeQuit.indexOf("confirmQuitWithLiveWork()") !== -1 &&
+        beforeQuit.indexOf("confirmQuitWithLiveWork()") < beforeQuit.indexOf("cleanupRan = true"),
+    );
+    check(
+      "the e2e suite and OS shutdown never see the quit prompt",
+      /if \(quitWithLiveWorkConfirmed \|\| E2E_BACKGROUND\) return true;/.test(indexSource) &&
+        /powerMonitor\.on\("shutdown", \(\) => \{\s*quitWithLiveWorkConfirmed = true;/.test(indexSource),
+    );
+  }
+
   // ── 5. source seams ─────────────────────────────────────────────────────
   const storeSource = fs.readFileSync(RUN_STORE_TS, "utf8");
   const launchStart = storeSource.indexOf("export async function launchWorkerAttempt(");

@@ -582,6 +582,35 @@ export function shutdownRunRuntimeResources(maxWaitMs?: number): Promise<void> {
   return drainRunRuntimeResources(maxWaitMs);
 }
 
+/**
+ * The work a quit would kill right now: runs with a manager turn in flight or
+ * a worker process alive or starting. Synchronous and memory-only, because the
+ * quit guard has to decide inside before-quit. Run status alone is not enough:
+ * an idle chat can sit at "running" long after its last turn ended.
+ */
+export function liveWorkForQuit(): { chats: number; automations: number; workers: number } {
+  const runIds = new Set<string>();
+  for (const worker of activeWorkerProcesses.values()) runIds.add(worker.runId);
+  for (const launching of launchingWorkerAttempts.values()) {
+    if (!launching.aborted) runIds.add(launching.runId);
+  }
+  for (const run of runCache.values()) {
+    if (isTerminalRunStatus(run.status) || run.status === "paused") continue;
+    if (run.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) runIds.add(run.id);
+  }
+  let chats = 0;
+  let automations = 0;
+  for (const runId of runIds) {
+    if (runCache.get(runId)?.executionMode === "direct") automations += 1;
+    else chats += 1;
+  }
+  return {
+    chats,
+    automations,
+    workers: activeWorkerProcesses.size + [...launchingWorkerAttempts.values()].filter((item) => !item.aborted).length,
+  };
+}
+
 interface ManagerDecisionMutationContext {
   runId: string;
   conversationEpoch: number;
