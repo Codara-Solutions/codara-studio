@@ -105,7 +105,7 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
         attempts: run?.workerAttempts?.map((attempt: any) => attempt.status),
       };
     }, RUN_RUNNING);
-    expect(live).toEqual({ status: "running", attempts: ["succeeded", "running", "running"] });
+    expect(live).toEqual({ status: "running", attempts: ["succeeded", "running", "running", "failed"] });
 
     await selectCoraTab(page);
 
@@ -130,7 +130,7 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
         "Build the first autonomous manager loop.",
         { timeout: 15_000 },
       );
-      await expect(page.getByText("Unqueue").first()).toBeVisible();
+      await expect(page.getByRole("button", { name: "Unqueue message" }).first()).toBeVisible();
       await shoot(page, "paused-auth", size.name);
 
       await openChat(page, "Ship the run-store refactor");
@@ -603,13 +603,14 @@ function runningRun(home: string, cwd: string): Json {
     updatedAt: ago(5),
     steps: [
       step("step-1", 0, "Map run-store persistence", "List every writer of run.json.", "complete", ["task-map"], ago(390)),
-      step("step-2", 1, "Split run-store persistence", "Move disk IO into run-persistence.ts without behavior change.", "running", ["task-split", "task-tests"], ago(240)),
+      step("step-2", 1, "Split run-store persistence", "Move disk IO into run-persistence.ts without behavior change.", "running", ["task-split", "task-tests", "task-cache"], ago(240)),
       step("step-3", 2, "Verify and land", "Typecheck, unit suites, and a review pass.", "queued", [], ago(239)),
     ],
     workerTasks: [
       task("task-map", "step-1", "Map run.json writers", "codex", "accepted", ago(385)),
       task("task-split", "step-2", "Split run-store persistence", "codex", "running", ago(235)),
       task("task-tests", "step-2", "Port the persistence unit suite", "claude", "running", ago(234)),
+      task("task-cache", "step-2", "Move the cache invalidation", "codex", "failed", ago(233)),
     ],
     workerAttempts: [
       attempt("attempt-map", "task-map", "codex", "gpt-5.6-sol", {
@@ -635,6 +636,15 @@ function runningRun(home: string, cwd: string): Json {
         runtimeStateUpdatedAt: ago(6),
         runtimeActivity: "Running npm test -- run-store",
         runtimeActivityAt: ago(6),
+      }),
+      // A failed worker, so the failure line under a worker row is shot too.
+      attempt("attempt-cache", "task-cache", "codex", "gpt-5.6-sol", {
+        status: "failed",
+        startedAt: ago(226),
+        finishedAt: ago(150),
+        exitCode: 2,
+        error:
+          "npm run typecheck failed: src/main/orchestration/run-persistence.ts(42,7): error TS2339: Property 'cacheKey' does not exist on type 'RunState'.",
       }),
     ],
     sparkCalls: [
