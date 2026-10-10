@@ -1557,7 +1557,10 @@ function confirmQuitWithLiveWork(): boolean {
   };
   const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
   const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
-  if (choice !== 0) return false;
+  if (choice !== 0) {
+    if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
+    return false;
+  }
   quitWithLiveWorkConfirmed = true;
   return true;
 }

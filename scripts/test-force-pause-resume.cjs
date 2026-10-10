@@ -1554,6 +1554,12 @@ async function main() {
         beforeQuit.indexOf("confirmQuitWithLiveWork()") < beforeQuit.indexOf("cleanupRan = true"),
     );
     check(
+      "declining a restart for an update drops the install request, so the next quit stays a plain quit",
+      /if \(choice !== 0\) \{\s*if \(restartingForUpdate\) updaterModCached\?\.cancelInstallRequest\(\);\s*return false;/.test(
+        indexSource,
+      ),
+    );
+    check(
       "the e2e suite and OS shutdown never see the quit prompt",
       /if \(quitWithLiveWorkConfirmed \|\| E2E_BACKGROUND\) return true;/.test(indexSource) &&
         /powerMonitor\.on\("shutdown", \(\) => \{\s*quitWithLiveWorkConfirmed = true;/.test(indexSource),

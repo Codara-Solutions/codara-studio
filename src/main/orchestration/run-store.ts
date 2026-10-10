@@ -616,9 +616,17 @@ export function liveWorkerActivity(workspaceId: string): LiveWorkerActivity[] {
  */
 export function liveWorkForQuit(): { chats: number; automations: number; workers: number } {
   const runIds = new Set<string>();
-  for (const worker of activeWorkerProcesses.values()) runIds.add(worker.runId);
-  for (const launching of launchingWorkerAttempts.values()) {
-    if (!launching.aborted) runIds.add(launching.runId);
+  // A launch entry lives until its attempt finishes, so a running worker sits
+  // in both maps: count attempts, not entries.
+  const attemptIds = new Set<string>();
+  for (const worker of activeWorkerProcesses.values()) {
+    runIds.add(worker.runId);
+    attemptIds.add(worker.attemptId);
+  }
+  for (const [attemptId, launching] of launchingWorkerAttempts) {
+    if (launching.aborted) continue;
+    runIds.add(launching.runId);
+    attemptIds.add(attemptId);
   }
   for (const run of runCache.values()) {
     if (isTerminalRunStatus(run.status) || run.status === "paused") continue;
@@ -633,7 +641,7 @@ export function liveWorkForQuit(): { chats: number; automations: number; workers
   return {
     chats,
     automations,
-    workers: activeWorkerProcesses.size + [...launchingWorkerAttempts.values()].filter((item) => !item.aborted).length,
+    workers: attemptIds.size,
   };
 }
 
