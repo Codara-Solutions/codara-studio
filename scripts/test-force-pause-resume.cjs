@@ -1302,8 +1302,24 @@ async function main() {
     JSON.stringify(pausedLaunch.ptyKills),
   );
 
-  const cancelledLaunch = await stopWhileLaunching(launchingRun("run-cancel-launching"), (id) =>
-    runStore.cancelRun({ runId: id, reason: "test cancel" }),
+  // Cancel kills before it commits and has no pause window, so a worker exit
+  // that lands first still sees a live attempt status. The aborted launch
+  // entry is what must classify that exit as the stop's, not a failure that
+  // gets reviewed.
+  let cancelExitIsStop = null;
+  const cancelledLaunch = await stopWhileLaunching(launchingRun("run-cancel-launching"), async (id) => {
+    await runStore.cancelRun({ runId: id, reason: "test cancel" });
+    cancelExitIsStop = runStore.workerExitInterruptedByForcePause({
+      runId: id,
+      attemptId: "attempt-run-cancel-launching",
+      exitCode: 1,
+      attemptStatus: "running",
+    });
+  });
+  check(
+    "a worker exit that beats Cancel's commit is still an interruption, not a failure",
+    cancelExitIsStop === true,
+    String(cancelExitIsStop),
   );
   check("Cancel during startup cancels the run", cancelledLaunch.run.status === "cancelled", cancelledLaunch.run.status);
   check(
@@ -1382,12 +1398,44 @@ async function main() {
       refused?.message,
     );
 
+    // A partial worker parks its step at completed_unverified; retrying that
+    // blocked worker is the decision the step waits on, so it reopens.
+    const blockedFixture = launchingRun("run-retry-blocked");
+    const blockedRun = readRun(blockedFixture.id);
+    blockedRun.status = "reviewing";
+    blockedRun.steps[0].status = "completed_unverified";
+    blockedRun.workerTasks[0].status = "blocked";
+    blockedRun.workerAttempts[0].status = "succeeded";
+    writeRun(blockedRun);
+    await runStore.getRun(blockedFixture.id);
+    globalThis.__coraWorkerPlanHook = () => new Promise(() => {});
+    const blockedRetry = await runStore
+      .retryWorkerTask(blockedFixture.id, blockedFixture.taskId)
+      .catch((error) => error);
+    const afterBlockedRetry = readRun(blockedFixture.id);
+    check(
+      "Retry worker reopens the unverified step of a partially finished worker",
+      !(blockedRetry instanceof Error) &&
+        afterBlockedRetry.steps[0].status === "running" &&
+        afterBlockedRetry.workerAttempts.length === 2,
+      blockedRetry instanceof Error
+        ? blockedRetry.message
+        : JSON.stringify({ step: afterBlockedRetry.steps[0].status, attempts: afterBlockedRetry.workerAttempts.length }),
+    );
+    const blockedNew = afterBlockedRetry.workerAttempts.find((item) => item.id !== blockedFixture.attemptId);
+    if (blockedNew) await runStore.stopWorkerAttempt(blockedFixture.id, blockedNew.id).catch(() => undefined);
+    globalThis.__coraWorkerPlanHook = undefined;
+    await sleep(50);
+
     // The log is read from the attempt's own record, confined to its run.
     const logFixture = launchingRun("run-worker-log");
     const logRun = readRun(logFixture.id);
     const logDir = path.join(HOME, "runs", logFixture.id, "logs");
     fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(path.join(logDir, "stdout.log"), "read the parser\nran npm test\n");
+    fs.writeFileSync(
+      path.join(logDir, "stdout.log"),
+      "\x1b[2J\x1b[H  CORA PI WORKER\r\nread the parser\nran npm test\n",
+    );
     const outside = path.join(HOME, "outside.log");
     fs.writeFileSync(outside, "secret");
     logRun.workerAttempts[0].status = "failed";
@@ -1404,6 +1452,11 @@ async function main() {
       "a worker's log is readable after its terminal is gone",
       !(log instanceof Error) && log?.text.includes("ran npm test") && log.truncated === false,
       log instanceof Error ? log.message : JSON.stringify(log),
+    );
+    check(
+      "the log reads as plain text, without the pane's terminal escapes",
+      !(log instanceof Error) && !log?.text.includes("\x1b") && log?.text.includes("CORA PI WORKER"),
+      log instanceof Error ? log.message : JSON.stringify(log?.text),
     );
     const escaped = await runStore
       .readWorkerAttemptLog(logFixture.id, "attempt-outside-log")

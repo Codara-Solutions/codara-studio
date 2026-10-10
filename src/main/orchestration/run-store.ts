@@ -1063,7 +1063,9 @@ export async function readWorkerAttemptLog(
   }
   const size = (await fs.stat(logPath)).size;
   const text = await readFileTailUtf8(logPath, WORKER_LOG_TAIL_BYTES);
-  return { text: text ?? "", truncated: size > WORKER_LOG_TAIL_BYTES };
+  // The log mirrors the pane, so it carries cursor and screen escapes the
+  // inspector would print as literal junk.
+  return { text: stripAnsiAndControls(text ?? ""), truncated: size > WORKER_LOG_TAIL_BYTES };
 }
 
 /**
@@ -1128,14 +1130,21 @@ export async function retryWorkerTask(runId: string, workerTaskId: string): Prom
   if (!["failed", "cancelled", "blocked"].includes(task.status)) {
     throw new Error("Only a failed, stopped, or blocked worker can be retried.");
   }
-  if (run.status === "paused" || run.status === "blocked") {
+  if (run.status === "paused") {
     throw new Error("Resume the run before retrying a worker.");
+  }
+  if (run.status === "blocked") {
+    throw new Error("Answer the open question in the chat before retrying a worker.");
   }
   if (run.status !== "running" && run.status !== "reviewing") {
     throw new Error("This run has ended. Ask Cora to continue the work instead.");
   }
   const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
-  if (step && isImmutableStepStatus(step.status)) {
+  // The worker cycle settles a step with a partial or blocked worker at
+  // completed_unverified, and that step is waiting on exactly this decision, so
+  // retrying the blocked worker reopens it. Any other settled step is history.
+  const reopensUnverifiedStep = step?.status === "completed_unverified" && task.status === "blocked";
+  if (step && isImmutableStepStatus(step.status) && !reopensUnverifiedStep) {
     throw new Error("That worker's step is already settled. Ask Cora for a follow-up instead.");
   }
   const lastAttempt = run.workerAttempts
@@ -1154,7 +1163,12 @@ export async function retryWorkerTask(runId: string, workerTaskId: string): Prom
     payload: { previousAttemptId: lastAttempt?.id ?? null },
     mutate: (draft, timestamp) => {
       const draftStep = task.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
-      if (draftStep && (draftStep.status === "failed" || draftStep.status === "blocked")) {
+      if (
+        draftStep &&
+        (draftStep.status === "failed" ||
+          draftStep.status === "blocked" ||
+          (reopensUnverifiedStep && draftStep.status === "completed_unverified"))
+      ) {
         draftStep.status = "running";
         draftStep.updatedAt = timestamp;
         draft.currentStepId = draftStep.id;
@@ -13727,6 +13741,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // user stopped on purpose.
   const pauseInterrupted = workerExitInterruptedByForcePause({
     runId: run.id,
+    attemptId: finishedAttempt.id,
     exitCode: result.exitCode,
     attemptStatus: finishedAttempt.status,
   });
@@ -14952,17 +14967,24 @@ function closeForcePauseWindow(runId: string): void {
  * flight, so Resume and the report surfaces showed a step that "failed" when in
  * truth it was interrupted. `forcePausingRuns` covers the exit landing first,
  * the persisted `cancelled` status covers the pause commit landing first.
- * Everything outside that window is a genuine failure and stays `failed`.
+ * Cancel and the per-worker Stop have no pause window; they mark the attempt's
+ * launch entry aborted before they kill, which covers their exit landing ahead
+ * of their commit. Everything else is a genuine failure and stays `failed`.
  *
  * Exported for scripts/test-force-pause-resume.cjs.
  */
 export function workerExitInterruptedByForcePause(input: {
   runId: string;
+  attemptId?: string;
   exitCode: number;
   attemptStatus: WorkerAttempt["status"];
 }): boolean {
   if (input.exitCode === 0) return false;
-  return (forcePausingRuns.get(input.runId) ?? 0) > 0 || input.attemptStatus === "cancelled";
+  return (
+    (forcePausingRuns.get(input.runId) ?? 0) > 0 ||
+    input.attemptStatus === "cancelled" ||
+    (input.attemptId !== undefined && workerLaunchAborted(input.attemptId))
+  );
 }
 
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
