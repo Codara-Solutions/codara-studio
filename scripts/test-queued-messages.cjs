@@ -918,6 +918,126 @@ async function main() {
     readRun(runM).humanMessages.filter((message) => message.message === RESENT_M).length === 2,
   );
 
+  // ── 5d. a runtime that fails to start ───────────────────────────────────
+  // The backend throwing means no provider turn ran. The message is requeued;
+  // a dead login parks for Retry, a slow start is retried once, and anything
+  // else asks the user without calling for a resend of a saved message.
+  const finishedRun = (id) =>
+    pausedRun(id, {
+      status: "complete",
+      autopilot: { status: "complete", lastAction: "completed", updatedAt: PAUSED_AT },
+    });
+
+  const STARTUP_N = "Rename the parser module";
+  const runN = writeRun(finishedRun("run-startup-auth"));
+  managerBehavior.set(runN, async () => {
+    throw new Error("Pi provider anthropic OAuth session expired and cannot refresh");
+  });
+  await runStore.addRunMessage({ runId: runN, author: "user", kind: "note", message: STARTUP_N });
+  await runStore.settleScheduledManagerWork(runN);
+  const parkedN = readRun(runN);
+  check(
+    "a runtime that cannot start on a dead login parks the run for Retry",
+    parkedN.status === "paused" && parkedN.managerTurnRecovery?.failureKind === "auth",
+    JSON.stringify({ status: parkedN.status, recovery: parkedN.managerTurnRecovery }),
+  );
+  check(
+    "the parked turn's message stays queued for the retry",
+    messageText(runN, STARTUP_N)?.deliveryState === "queued",
+    JSON.stringify(messageText(runN, STARTUP_N)),
+  );
+
+  const STARTUP_O = "Add a changelog entry";
+  const runO = writeRun(finishedRun("run-startup-timeout"));
+  managerBehavior.set(runO, async (calls) => {
+    if (calls.length === 1) {
+      throw new Error("Pi RPC startup handshake failed: Pi RPC request codara-1 timed out");
+    }
+    return askUserResult();
+  });
+  await runStore.addRunMessage({ runId: runO, author: "user", kind: "note", message: STARTUP_O });
+  await runStore.settleScheduledManagerWork(runO);
+  check("a runtime that timed out starting is retried once", callsFor(runO).length === 2, `calls=${callsFor(runO).length}`);
+  check(
+    "the retried turn delivers the message once",
+    callsFor(runO).filter((call) => call.prompt.includes(STARTUP_O)).length === 2 &&
+      (callsFor(runO)[1].prompt.split(STARTUP_O).length - 1) === 1,
+  );
+
+  const STARTUP_P = "Ship the release notes";
+  const runP = writeRun(finishedRun("run-startup-unclassified"));
+  managerBehavior.set(runP, async (calls) => {
+    if (calls.length === 1) throw new Error("stub runtime refused the session");
+    return askUserResult();
+  });
+  await runStore.addRunMessage({ runId: runP, author: "user", kind: "note", message: STARTUP_P });
+  await runStore.settleScheduledManagerWork(runP);
+  const blockedP = readRun(runP);
+  const failureQuestion = blockedP.humanMessages.find(
+    (message) => message.kind === "question" && message.questionContext?.backendFailure,
+  );
+  check(
+    "an unclassified startup failure asks instead of failing",
+    blockedP.status === "blocked" && Boolean(failureQuestion),
+    blockedP.status,
+  );
+  check(
+    "the failure notice says the message is saved instead of asking for a resend",
+    /Your message is saved/.test(failureQuestion?.message ?? "") &&
+      !/send the message again/.test(failureQuestion?.message ?? ""),
+    failureQuestion?.message,
+  );
+  if (failureQuestion) {
+    await runStore.answerRunQuestion({
+      runId: runP,
+      questionMessageId: failureQuestion.id,
+      message: STARTUP_P,
+    });
+    await runStore.settleScheduledManagerWork(runP);
+  }
+  const continuationP = callsFor(runP).at(-1)?.prompt ?? "";
+  check(
+    "retyping the failed message as the answer delivers it once",
+    callsFor(runP).length === 2 && continuationP.split(STARTUP_P).length - 1 === 1,
+    `calls=${callsFor(runP).length} occurrences=${continuationP.split(STARTUP_P).length - 1}`,
+  );
+
+  // A reply aimed at a question the run no longer waits on (a Stop or a park
+  // landed first) fails with a code the composer turns into a normal send.
+  const runQ = writeRun(
+    pausedRun("run-answer-inactive", {
+      humanMessages: [
+        ...pausedRun("run-answer-inactive").humanMessages,
+        {
+          id: "msg-stale-question",
+          runId: "run-answer-inactive",
+          author: "spark",
+          kind: "question",
+          message: "Which branch should I target?",
+          attachments: [],
+          createdAt: PAUSED_AT,
+          deliveryState: "acknowledged",
+          conversationEpoch: 1,
+        },
+      ],
+    }),
+  );
+  let inactiveError = null;
+  try {
+    await runStore.answerRunQuestion({
+      runId: runQ,
+      questionMessageId: "msg-stale-question",
+      message: "main",
+    });
+  } catch (error) {
+    inactiveError = error;
+  }
+  check(
+    "answering a question the run no longer waits on fails with QUESTION_INACTIVE",
+    /^QUESTION_INACTIVE:/.test(inactiveError?.message ?? ""),
+    inactiveError?.message,
+  );
+
   // ── 6. source seams ──────────────────────────────────────────────────────
   const socketSource = fs.readFileSync(AGENT_SOCKET_TS, "utf8");
   const waitStart = socketSource.indexOf("async function handleOrchestratorWaitForWorkers(");

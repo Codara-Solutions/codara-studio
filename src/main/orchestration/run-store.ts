@@ -85,6 +85,7 @@ import {
   MANAGER_TURN_FAILURE_REASON,
   normalizeHumanRunQuestionMessages,
   normalizeQuestionOptionsForMessage,
+  QUESTION_INACTIVE_ERROR_PREFIX,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
   resolveSingleUnresolvedRunQuestion,
   resumeBlockingRunQuestion,
@@ -5063,7 +5064,7 @@ async function runInitialAutopilotPlanning(
     await askHumanQuestion(
       run.id,
       mode === "chat"
-        ? "Cora's manager turn failed before it could answer this chat message. Check the run log for the backend error, then send the message again."
+        ? "Cora's manager turn failed before it could answer this chat message. Your message is saved. Check the run log for the backend error, then reply here (for example, \"retry\") and Cora will try it again."
         : "Cora's manager turn failed before it could plan worker tasks. Check the run log for the backend error, then run the plan again.",
       undefined,
       {
@@ -7077,8 +7078,151 @@ async function askManagerBackendUnderTurnLock(
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
       payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
     });
-    return null;
+    return handleManagerStartupFailure({
+      runId: run.id,
+      error,
+      mode,
+      cwd,
+      callId,
+      conversationEpoch: preparedTurn.conversationEpoch,
+      backend: chatConfig.backend,
+      failedAccountProfileId:
+        sparkCall.accountProfileId ??
+        sparkCall.nativeClaudeProfileId ??
+        sparkCall.nativeCodexProfileId,
+      managerResumeClaimId,
+      autonomyRetryCount,
+      transientRetryCount,
+      managerRecoveryClaimId,
+    });
   }
+}
+
+/**
+ * A backend that throws never ran a provider turn: the runtime failed to come
+ * up (handshake timeout, process exit) or the login is dead. The turn's input
+ * is already requeued. One retry covers a runtime that was merely slow to
+ * start; a dead login, a quota or provider trouble parks the run with the
+ * same recovery record a failed turn writes, so Retry replays the saved input.
+ * Nothing ran, so this never fails the run. Returns null for an unclassified
+ * error, which the caller turns into a question.
+ */
+async function handleManagerStartupFailure(input: {
+  runId: string;
+  error: string;
+  mode: SparkCall["mode"];
+  cwd: string;
+  callId: string;
+  conversationEpoch: number;
+  backend: ChatBackendKind;
+  failedAccountProfileId?: string;
+  managerResumeClaimId?: string;
+  autonomyRetryCount: number;
+  transientRetryCount: number;
+  managerRecoveryClaimId?: string;
+}): Promise<RunState | null> {
+  // A claimed recovery hands its token back to "parked" itself when the
+  // replay fails; a second park here would replace that token.
+  if (input.managerRecoveryClaimId) return null;
+  const current = await getRun(input.runId);
+  if (!current || conversationEpoch(current) !== input.conversationEpoch) return null;
+  const plan = planManagerTurnFailure({
+    error: input.error,
+    runStatus: current.status,
+    mode: input.mode,
+    transientRetryCount: input.transientRetryCount,
+    backend: input.backend,
+  });
+  if (plan.action === "keep_state") return current;
+  // The taxonomy has no class for a runtime process that exited during
+  // startup, but it is the same "try once more" case as a handshake timeout.
+  const processExited = /\bPi RPC process (?:exited|failed)\b/.test(input.error);
+  const retryOnce =
+    input.transientRetryCount === 0 &&
+    (plan.action === "retry" ||
+      (plan.action === "park" && (plan.kind === "transport" || plan.kind === "timeout")) ||
+      (plan.action === "fail" && processExited));
+  if (retryOnce) {
+    const delayMs = managerTurnRetryDelayMs(1);
+    await appendEvent({
+      workspaceId: current.workspaceId,
+      runId: current.id,
+      sparkCallId: input.callId,
+      type: "run.chat_turn_retrying",
+      message: `Cora's runtime did not start (${plan.kind ?? "process exit"}); retrying in ${Math.round(delayMs / 1000)}s`,
+      payload: {
+        backend: input.backend,
+        mode: input.mode,
+        error: input.error,
+        failureKind: plan.kind,
+        attempt: 1,
+        delayMs,
+        startup: true,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const fresh = await getRun(input.runId);
+    if (
+      !fresh ||
+      conversationEpoch(fresh) !== input.conversationEpoch ||
+      (fresh.status !== "planning" && fresh.status !== "running" && fresh.status !== "reviewing") ||
+      activeManagerCall(fresh)
+    ) {
+      return fresh ?? null;
+    }
+    return askManagerBackendUnderTurnLock(
+      fresh,
+      input.cwd,
+      input.mode,
+      input.managerResumeClaimId,
+      input.autonomyRetryCount,
+      input.transientRetryCount + 1,
+    );
+  }
+  if (plan.action !== "park") return null;
+  console.warn(
+    `[run-store] manager turn ${input.callId} (${input.backend}/${input.mode}) could not start; parked after ${plan.kind} failure: ${input.error}`,
+  );
+  return commitRunChange(current, {
+    type: "run.chat_turn_parked",
+    message: `Cora's ${input.backend} runtime could not start: ${input.error}`,
+    payload: {
+      backend: input.backend,
+      sparkCallId: input.callId,
+      mode: input.mode,
+      error: input.error,
+      failureKind: plan.kind,
+      reason: plan.parkReason,
+      startup: true,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== input.conversationEpoch) return false;
+      if (draft.status !== "planning" && draft.status !== "running" && draft.status !== "reviewing") {
+        return false;
+      }
+      draft.status = "paused";
+      draft.managerTurnRecovery = {
+        id: makeId("recovery"),
+        state: "parked",
+        failureKind: plan.kind as ManagerTurnRecoveryFailureKind,
+        backend: input.backend,
+        managerMode: input.mode,
+        conversationEpoch: input.conversationEpoch,
+        failedSparkCallId: input.callId,
+        failedAccountProfileId: input.failedAccountProfileId,
+        parkedAt: timestamp,
+      };
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: plan.lastAction,
+        stopReason: plan.parkReason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 // Top-tier worker assignments for trivial-classified runs. The verifier
@@ -10121,7 +10265,7 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     run.status === "failed" ||
     run.status === "cancelled"
   ) {
-    throw new Error(`Run question is no longer active: ${questionMessageId}`);
+    throw new Error(`${QUESTION_INACTIVE_ERROR_PREFIX} Run question is no longer active: ${questionMessageId}`);
   }
   if (run.blockedOn && run.blockedOn.questionMessageId !== questionMessageId) {
     throw new Error(
@@ -10183,7 +10327,32 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
       const applied = applyRunQuestionAnswer(draft, answerMessage, timestamp);
       if (applied.duplicate) return false;
       answerRecorded = true;
+      // A failed-turn notice keeps the message that failed queued for the
+      // retry. A user who retypes it as the answer means the same request,
+      // and the continuation turn would otherwise read it twice.
+      if (isBackendFailureQuestion(applied.question)) {
+        const answerText = message.trim();
+        for (const queued of draft.humanMessages) {
+          if (
+            queued.author === "user" &&
+            queued.id !== messageId &&
+            queued.intent !== "answer" &&
+            (queued.deliveryState ?? "queued") === "queued" &&
+            !queued.backendTurnId &&
+            (queued.conversationEpoch ?? 0) === conversationEpoch(draft) &&
+            queued.message.trim() === answerText
+          ) {
+            queued.deliveryState = "cancelled";
+          }
+        }
+      }
     },
+  }).catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/Run question is no longer active/.test(detail) && !detail.startsWith(QUESTION_INACTIVE_ERROR_PREFIX)) {
+      throw new Error(`${QUESTION_INACTIVE_ERROR_PREFIX} ${detail}`);
+    }
+    throw error;
   });
   if (!answerRecorded) {
     schedulePendingManagerResume(updated);
