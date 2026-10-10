@@ -285,6 +285,58 @@ async function main() {
     assert.match(liveHandle.promptSuffix(), /Connected MCP servers: fixture \(2 tools\)/);
     assert.match(liveHandle.promptSuffix(), /codara_external_tools/);
     await livePi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
+
+    // A slow server must not hold the first prompt for its whole connect
+    // timeout: session_start returns after a short wait, the server is offered
+    // as connecting, and the loader and its tool work once it is up.
+    const slowFixturePath = path.join(directory, "slow-fixture-server.cjs");
+    fs.writeFileSync(
+      slowFixturePath,
+      fixtureServerSource(sdkDir).replace(
+        "server.connect(new StdioServerTransport());",
+        "setTimeout(() => server.connect(new StdioServerTransport()), 4000);",
+      ),
+      "utf8",
+    );
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        config.buildPiMcpBridgeConfig(
+          config.normalizePiMcpServers(
+            [{ name: "slow", command: process.execPath, args: [slowFixturePath] }],
+            { env: process.env },
+          ),
+          { audience: "cora", connectTimeoutMs: 15_000 },
+        ),
+      ),
+      "utf8",
+    );
+    const slowConfig = bridge.activeMcpBridgeConfig({
+      CODARA_PI_MCP_CONFIG: configPath,
+      CODARA_PI_MCP_SDK_DIR: sdkDir,
+    });
+    const slowPi = fakePi();
+    const slowHandle = bridge.registerMcpBridge(slowPi, slowConfig);
+    const startedAt = Date.now();
+    await slowPi.handlers.get("session_start")({ type: "session_start", reason: "startup" });
+    const startWait = Date.now() - startedAt;
+    assert.ok(
+      startWait < bridge.SESSION_START_CONNECT_WAIT_MS + 1_000,
+      `session_start waited ${startWait}ms for a slow server`,
+    );
+    assert.equal(slowPi.tools.has("mcp__slow__echo_tool"), false, "the slow server is still connecting");
+    assert.match(slowHandle.promptSuffix(), /Connected MCP servers: slow \(connecting\)/);
+    assert.doesNotMatch(slowHandle.promptSuffix(), /Unavailable MCP servers/);
+    const slowDiscovery = await slowPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+      "call-slow-discover",
+      { query: "echo", limit: 1 },
+    );
+    assert.deepEqual(slowDiscovery.details.activated, ["mcp__slow__echo_tool"], "the loader waits for the connection");
+    assert.equal(slowPi.activeTools.has("mcp__slow__fail"), false, "a late connection does not activate every tool");
+    const slowEcho = await slowPi.tools.get("mcp__slow__echo_tool").execute("call-slow-echo", { text: "late" });
+    assert.equal(slowEcho.content[0].text, "echo:late");
+    assert.match(slowHandle.promptSuffix(), /Connected MCP servers: slow \(2 tools\)/);
+    await slowPi.handlers.get("session_shutdown")({ type: "session_shutdown", reason: "quit" });
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
