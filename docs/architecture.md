@@ -155,6 +155,19 @@ chat timeline and the Runs view are rebuilt from them. Because runs are
 files, the `cora` CLI can read them while the app is closed, and a run can
 recover after a crash.
 
+**Manager turns.** A run runs one manager turn at a time. `askManagerBackend`
+takes a per-run lock (`keyed-task-queue.ts`), and Resume, Retry, answers,
+queued-message follow-ups and planning all go through it, because a second
+prompt on a Pi session that is still streaming fails, and that failure used
+to stop the live turn's process. Resume and Send now return once the run is
+"running" and schedule their turn behind the lock. A message sent during a
+turn is steered into it: run-store claims the message for the live call and
+`pi-backend.ts` hands it to Pi's `steer` command, which injects it between
+tool calls (`codara_wait_for_workers` returns early with reason
+`user_message` so a long wait does not hold it). A steer the turn never read
+is withdrawn from Pi (`clear_queue`) and goes back to the queue when the turn
+ends. `AppSettings.coraMidTurnDelivery` set to `"queue"` turns steering off.
+
 **Automations and looms.** `scheduler.ts` arms triggers (cron, interval,
 folder, git, manual, and others). `automation-loop.ts` starts iterations.
 `loom-graph.ts`, `loom-resolve.ts` and `loom-steps.ts` run a loom's graph of

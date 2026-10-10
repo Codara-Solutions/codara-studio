@@ -295,10 +295,12 @@ import {
   isCheckpointJobCurrent,
   isManagerTurnCurrent,
   renderBundledManagerInput,
+  renderSteeredManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
   type ChatBackendConfig,
   type ChatStreamEvent,
+  type ManagerSteerInput,
 } from "./agent-backend";
 import {
   buildDirectTurnPrompt,
@@ -1350,7 +1352,11 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       ["paused", "blocked", "cancelled", "complete"].includes(run.status) ||
       forcePausedJustNow ||
       attemptInFlight ||
-      activeWorkersForRun(run.id).length > 0
+      activeWorkersForRun(run.id).length > 0 ||
+      // A live manager turn is the driver: it can complete the run itself, and
+      // a question posted under it is answered into a second turn on the same
+      // session (W2).
+      Boolean(activeManagerCall(run))
     ) {
       return run;
     }
@@ -3646,8 +3652,48 @@ function scheduleInitialManagerDecision(
   void cycle;
 }
 
-function hasQueuedSteering(run: RunState): boolean {
-  return queuedManagerInputMessages(run).some((message) => message.intent === "steer");
+// A queued message whose delivery already failed this many times stops
+// driving turns on its own: the user resends it, presses Send now, or Resume.
+// Without the cap, a turn that fails the same way every time re-armed itself
+// back to back (Q1: 1041 manager calls in 4 seconds).
+const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 2;
+
+function hasQueuedSteering(run: RunState, opts?: { explicit?: boolean }): boolean {
+  return queuedManagerInputMessages(run).some(
+    (message) =>
+      opts?.explicit === true ||
+      (message.intent === "steer" &&
+        (message.deliveryAttempts ?? 0) < MAX_AUTOMATIC_DELIVERY_ATTEMPTS),
+  );
+}
+
+/**
+ * Did the steering follow-up that just ended earn another turn?
+ *
+ * Only input that arrived while that turn ran does. When every queued steer
+ * was already part of the turn's own input, the turn failed or was aborted
+ * with it and released it again, so re-arming would replay the same failure
+ * forever. A turn that never registered a call made no progress either.
+ */
+function steeringFollowupEarnedAnotherTurn(
+  run: RunState,
+  callsBefore: ReadonlySet<string> | null,
+): boolean {
+  if (!callsBefore) return true;
+  const epoch = conversationEpoch(run);
+  const newest = [...run.sparkCalls]
+    .reverse()
+    .find(
+      (call) =>
+        !callsBefore.has(call.id) &&
+        call.purpose !== "compaction" &&
+        (call.conversationEpoch ?? 0) === epoch,
+    );
+  if (!newest) return false;
+  const delivered = new Set(newest.inputMessageIds ?? []);
+  return queuedManagerInputMessages(run).some(
+    (message) => message.intent === "steer" && !delivered.has(message.id),
+  );
 }
 
 /**
@@ -3682,11 +3728,8 @@ function scheduleResumeForUserMessage(
   activeUserMessageResumes.add(run.id);
 
   // Same ordering discipline as the other schedulers: never start a turn on
-  // top of planning/review work that is still settling.
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  void Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  // top of planning/review work or a manager turn that is still settling.
+  void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
@@ -3713,20 +3756,72 @@ function scheduleResumeForUserMessage(
     });
 }
 
-function scheduleQueuedSteeringFollowup(run: RunState): void {
-  if (run.executionMode === "direct" || !hasQueuedSteering(run)) return;
+/**
+ * Everything a newly scheduled manager turn must wait behind: planning and
+ * review cycles still settling, and any manager turn holding the turn lock
+ * (Resume, Retry and answer continuations are not always in the cycle maps).
+ */
+function managerWorkSettled(runId: string): Promise<void>[] {
+  return [
+    activeAutopilotPlans.get(runId),
+    activeAutopilotReviews.get(runId),
+    managerTurnsSettled(runId),
+  ]
+    .filter((promise): promise is Promise<void> => Boolean(promise))
+    .map((promise) => promise.catch(() => undefined));
+}
+
+/**
+ * Resolves once nothing is scheduled or running to drive the run's manager:
+ * planning and review cycles, steering follow-ups, parked-turn recoveries,
+ * answer continuations and the turn lock. Resume and Send now return before
+ * their turn runs; a caller that needs the outcome waits here.
+ */
+export async function settleScheduledManagerWork(runId: string, timeoutMs = 60_000): Promise<void> {
+  const prefix = `${runId}:`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // Cycles hand off through setTimeout(0) and a commit or two; let the
+    // hand-off land before deciding the run is idle.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const pending = [
+      activeAutopilotPlans.get(runId),
+      activeAutopilotReviews.get(runId),
+      activeSteeringFollowups.get(runId),
+      ...[...activeManagerTurnRecoveries.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([, promise]) => promise),
+    ].filter((promise): promise is Promise<void> => Boolean(promise));
+    const busy =
+      pending.length > 0 ||
+      managerTurnBusy(runId) ||
+      activeUserMessageResumes.has(runId) ||
+      [...activePendingManagerResumes].some((key) => key.startsWith(prefix));
+    if (!busy) return;
+    await Promise.all([...pending, managerTurnsSettled(runId)].map((promise) => promise.catch(() => undefined)));
+    if (pending.length === 0 && !managerTurnBusy(runId)) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+function scheduleQueuedSteeringFollowup(
+  run: RunState,
+  // An explicit user action (Send now) delivers input whose automatic
+  // delivery budget is spent.
+  opts?: { explicit?: boolean },
+): void {
+  if (run.executionMode === "direct" || !hasQueuedSteering(run, opts)) return;
   if (activeSteeringFollowups.has(run.id)) return;
   const scheduledEpoch = conversationEpoch(run);
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  const cycle = Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  let callsBefore: Set<string> | null = null;
+  const cycle = Promise.all(managerWorkSettled(run.id))
     .then(async () => {
       let latest = await getRun(run.id);
       if (
         !latest ||
         conversationEpoch(latest) !== scheduledEpoch ||
-        !hasQueuedSteering(latest)
+        !hasQueuedSteering(latest, opts)
       ) return;
       if (
         latest.status === "paused" ||
@@ -3735,13 +3830,14 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
       ) {
         return;
       }
+      callsBefore = new Set(latest.sparkCalls.map((call) => call.id));
       if (latest.status === "complete" || latest.status === "failed") {
         latest = await commitRunChange(latest, {
           type: "run.steering_followup_started",
           message: "Queued steering started a fresh Cora manager turn",
           payload: { conversationEpoch: conversationEpoch(latest) },
           mutate: (draft, timestamp) => {
-            if (!hasQueuedSteering(draft)) return false;
+            if (!hasQueuedSteering(draft, opts)) return false;
             draft.status = "planning";
             draft.autopilot = {
               ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -3767,7 +3863,8 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
         activeSteeringFollowups.delete(run.id);
         // Steering can arrive while this follow-up turn itself is active. The
         // in-flight map dedupes that arrival; re-arm after settlement so it gets
-        // its own next Cora turn instead of remaining queued forever.
+        // its own next Cora turn instead of remaining queued forever. Only new
+        // input earns that turn: see steeringFollowupEarnedAnotherTurn.
         void getRun(run.id).then((latest) => {
           if (
             latest &&
@@ -3775,7 +3872,8 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
             latest.status !== "paused" &&
             latest.status !== "blocked" &&
             latest.status !== "cancelled" &&
-            hasQueuedSteering(latest)
+            hasQueuedSteering(latest) &&
+            steeringFollowupEarnedAnotherTurn(latest, callsBefore)
           ) {
             scheduleQueuedSteeringFollowup(latest);
           }
@@ -3948,15 +4046,17 @@ function schedulePendingManagerResume(run: RunState): void {
   if (activePendingManagerResumes.has(key)) return;
   activePendingManagerResumes.add(key);
 
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  const start = Promise.all(waits.map((promise) => promise.catch(() => undefined))).then(
-    () => undefined,
-  );
+  // Claim only once no manager turn is live. A continuation claimed while a
+  // turn streams would start a second prompt on the same session (W2:
+  // answering a question posted during a resumed chat turn failed the run).
+  const start = Promise.all(managerWorkSettled(run.id)).then(() => undefined);
   const cycle = start
     .then(async () => {
-      const beforeClaim = await getRun(run.id);
+      let beforeClaim = await getRun(run.id);
+      while (beforeClaim && managerTurnBusy(run.id)) {
+        await managerTurnsSettled(run.id);
+        beforeClaim = await getRun(run.id);
+      }
       if (!beforeClaim || conversationEpoch(beforeClaim) !== scheduledEpoch) return;
       const launchClaimId = await claimScheduledManagerResume(run.id, pending);
       if (!launchClaimId) return;
@@ -4086,6 +4186,23 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
             if (message.targetTurnId && staleOrphanIds.has(message.targetTurnId)) {
               delete message.targetTurnId;
             }
+            changed = true;
+          }
+          // Input queued behind one of those turns never got a backendTurnId,
+          // so the loop above misses it; it is just as undelivered.
+          for (const message of draft.humanMessages) {
+            const target = message.targetTurnId;
+            if (
+              message.author !== "user" ||
+              message.backendTurnId ||
+              (message.deliveryState ?? "queued") !== "queued" ||
+              !target?.startsWith("after:") ||
+              !staleOrphanIds.has(target.slice("after:".length))
+            ) {
+              continue;
+            }
+            message.conversationEpoch = epoch;
+            delete message.targetTurnId;
             changed = true;
           }
           if (!changed) return false;
@@ -5184,6 +5301,12 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // here: unverified work is handed to the user instead of being reported as
     // a clean finish.
     if (activeManagerCall(settled) || activeWorkersForRun(runId).length > 0) return;
+    // A message the user sent while these workers ran is the next thing to
+    // do: hand it to a manager turn rather than completing around it.
+    if (hasQueuedSteering(settled)) {
+      scheduleQueuedSteeringFollowup(settled);
+      return;
+    }
     if (isRunSettled(settled)) {
       const verification = await describeVerificationFreshness(settled);
       if (verification.ok) {
@@ -5761,6 +5884,9 @@ async function prepareManagerTurn(
       for (const message of selected) {
         message.targetTurnId ??= call.id;
         message.backendTurnId = call.id;
+        // This prompt delivers it now; any earlier mid-turn steer is history.
+        delete message.steeredAt;
+        delete message.steerDeliveredAt;
       }
       draft.sparkCalls.push(call);
       draft.updatedAt = timestamp;
@@ -5860,12 +5986,211 @@ async function releaseUnsubmittedManagerInput(
       for (const message of draft.humanMessages) {
         if (message.backendTurnId !== callId) continue;
         if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        // "submitted" means the provider had the message: the replay must say
+        // so, or Cora treats it as a fresh request and redoes started work.
+        if (message.deliveryState === "submitted") message.redelivered = true;
+        message.deliveryAttempts = (message.deliveryAttempts ?? 0) + 1;
         message.deliveryState = "queued";
         delete message.backendTurnId;
+        delete message.steeredAt;
+        delete message.steerDeliveredAt;
         if (message.targetTurnId === callId) delete message.targetTurnId;
         changed = true;
       }
       if (!changed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Mid-turn steering (AppSettings.coraMidTurnDelivery, default "steer"): a
+// message sent while a manager turn is live is handed to that turn through
+// the backend's steer channel, so Cora reads it at her next step instead of
+// after the turn. run-store owns the message row and the backend owns the
+// runtime's queue, so every step that moves a steered message (the steer, the
+// runtime's delivery notice, the reconcile when the turn ends) runs in this
+// one per-run chain. That ordering is what keeps a steer from being both
+// acknowledged by a turn that never read it and delivered again later.
+const managerSteerQueue = createKeyedTaskQueue();
+
+async function midTurnDeliveryMode(): Promise<"steer" | "queue"> {
+  try {
+    return (await loadSettings()).coraMidTurnDelivery === "queue" ? "queue" : "steer";
+  } catch {
+    return "steer";
+  }
+}
+
+/** A steered message the live turn has not read yet. Long tool waits yield
+ * while one exists, because the runtime injects it only between steps. */
+export function hasUndeliveredSteer(run: RunState): boolean {
+  const call = activeManagerCall(run);
+  if (!call) return false;
+  return run.humanMessages.some(
+    (message) =>
+      message.author === "user" &&
+      message.backendTurnId === call.id &&
+      message.deliveryState === "submitted" &&
+      typeof message.steeredAt === "string" &&
+      !message.steerDeliveredAt &&
+      message.steeredAt >= call.createdAt,
+  );
+}
+
+function isSteerableQueuedMessage(run: RunState, message: HumanRunMessage): boolean {
+  return (
+    message.author === "user" &&
+    message.intent !== "answer" &&
+    !message.boardNote &&
+    !message.resumeNote &&
+    (message.deliveryState ?? "queued") === "queued" &&
+    !message.backendTurnId &&
+    (message.conversationEpoch ?? 0) === conversationEpoch(run)
+  );
+}
+
+/** Steer queued messages into the live manager turn, oldest first. */
+function steerQueuedInputIntoLiveTurn(runId: string, onlyMessageId?: string): void {
+  void managerSteerQueue(runId, async () => {
+    if ((await midTurnDeliveryMode()) !== "steer") return;
+    const run = await getRun(runId);
+    if (!run || run.executionMode === "direct") return;
+    const call = activeManagerCall(run);
+    if (!call) return;
+    const backend = getBackend(run.chatBackend ?? "pi");
+    if (!backend.steerChat) return;
+    const steerChat = backend.steerChat.bind(backend);
+    const candidates = run.humanMessages.filter(
+      (message) =>
+        (!onlyMessageId || message.id === onlyMessageId) &&
+        isSteerableQueuedMessage(run, message),
+    );
+    for (const candidate of candidates) {
+      if (!(await steerOneMessage(run.id, call.id, candidate.id, steerChat))) return;
+    }
+  }).catch((err) => {
+    console.warn(`[run-store] steering a message into run ${runId}'s live turn failed:`, err);
+  });
+}
+
+/**
+ * Claim the message for the live call first, then hand it to the runtime, and
+ * undo the claim if the runtime refuses. Claiming first means a turn that ends
+ * in between reconciles a row it can see; the reverse order could leave the
+ * runtime holding a message run-store still shows as queued.
+ */
+async function steerOneMessage(
+  runId: string,
+  callId: string,
+  messageId: string,
+  steerChat: (runId: string, steer: ManagerSteerInput) => Promise<boolean>,
+): Promise<boolean> {
+  const run = await getRun(runId);
+  if (!run) return false;
+  const epoch = conversationEpoch(run);
+  let claimed: HumanRunMessage | undefined;
+  await commitRunChange(run, {
+    type: "run.manager_input_steered",
+    message: "User message handed to Cora's live turn",
+    sparkCallId: callId,
+    payload: { callId, messageId, conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      const call = draft.sparkCalls.find(
+        (entry) => entry.id === callId && entry.status === "started" && !entry.completedAt,
+      );
+      const message = draft.humanMessages.find((entry) => entry.id === messageId);
+      if (!call || !message || !isSteerableQueuedMessage(draft, message)) return false;
+      message.backendTurnId = callId;
+      message.targetTurnId = callId;
+      message.deliveryState = "submitted";
+      message.steeredAt = timestamp;
+      delete message.steerDeliveredAt;
+      call.inputMessageIds = [...(call.inputMessageIds ?? []), messageId];
+      claimed = structuredClone(message);
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!claimed) return false;
+  const accepted = await steerChat(runId, {
+    messageId,
+    text: renderSteeredManagerInput(claimed),
+    onDelivered: () => {
+      void managerSteerQueue(runId, () => markSteerDelivered(runId, callId, messageId, epoch)).catch(
+        () => undefined,
+      );
+    },
+  }).catch(() => false);
+  if (accepted) return true;
+  await requeueSteeredInput(runId, callId, epoch, new Set([messageId]));
+  return false;
+}
+
+async function markSteerDelivered(
+  runId: string,
+  callId: string,
+  messageId: string,
+  epoch: number,
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  await commitRunChange(run, {
+    type: "run.manager_input_steer_delivered",
+    message: "Cora read the message sent during her turn",
+    sparkCallId: callId,
+    payload: { callId, messageId, conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      const message = draft.humanMessages.find((entry) => entry.id === messageId);
+      if (!message || message.backendTurnId !== callId || !message.steeredAt) return false;
+      if (message.steerDeliveredAt) return false;
+      message.steerDeliveredAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/**
+ * Return steered messages the turn never read to the queue, unclaimed and
+ * outside the call's frozen input list, so settlement does not acknowledge
+ * them and the next turn delivers them as ordinary input. Without an id set,
+ * every unread steer of the call returns.
+ */
+async function requeueSteeredInput(
+  runId: string,
+  callId: string,
+  epoch: number,
+  messageIds?: ReadonlySet<string>,
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  await commitRunChange(run, {
+    type: "run.manager_input_steer_returned",
+    message: "A message sent during Cora's turn returned to the queue for her next turn",
+    sparkCallId: callId,
+    payload: {
+      callId,
+      messageIds: messageIds ? [...messageIds] : undefined,
+      conversationEpoch: epoch,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      const returned = new Set<string>();
+      for (const message of draft.humanMessages) {
+        if (message.backendTurnId !== callId || !message.steeredAt || message.steerDeliveredAt) continue;
+        if (messageIds && !messageIds.has(message.id)) continue;
+        if (message.deliveryState === "cancelled") continue;
+        message.deliveryState = "queued";
+        delete message.backendTurnId;
+        delete message.steeredAt;
+        if (message.targetTurnId === callId) delete message.targetTurnId;
+        returned.add(message.id);
+      }
+      if (returned.size === 0) return false;
+      const call = draft.sparkCalls.find((entry) => entry.id === callId);
+      if (call?.inputMessageIds) {
+        call.inputMessageIds = call.inputMessageIds.filter((id) => !returned.has(id));
+      }
       draft.updatedAt = timestamp;
     },
   });
@@ -5980,7 +6305,81 @@ async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<
 // question escalates to the human instead of another silent self-answer.
 const MAX_MANAGER_QUESTION_REPROMPTS = 2;
 
+// One manager turn per run at a time. Every path that reaches the provider
+// (initial planning, steering follow-ups, Resume, Retry of a parked turn,
+// question continuations, reviews, step planning) goes through
+// askManagerBackend, so this lock is the single place that enforces it. Two
+// turns on one run share one Pi session: the second prompt is rejected while
+// the first streams, and before this lock the rejection tore down the process
+// the first turn was using (run-mv1b57e8-03y1is).
+//
+// The lock is NOT re-entrant. Nothing that runs while it is held may await
+// another manager turn on the same run: the transient retry calls
+// askManagerBackendUnderTurnLock directly, and every continuation a turn
+// schedules (follow-ups, reprompts, reviews) runs in the background and queues
+// behind the lock.
+const managerTurnLock = createKeyedTaskQueue();
+const managerTurnDepth = new Map<string, number>();
+
+/** Resolves once every manager turn queued on this run so far has finished. */
+function managerTurnsSettled(runId: string): Promise<void> {
+  return managerTurnLock.wait(runId);
+}
+
+function managerTurnBusy(runId: string): boolean {
+  return (managerTurnDepth.get(runId) ?? 0) > 0;
+}
+
 async function askManagerBackend(
+  run: RunState,
+  cwd: string,
+  mode: SparkCall["mode"],
+  managerResumeClaimId?: string,
+  autonomyRetryCount = 0,
+  transientRetryCount = 0,
+  managerRecoveryClaimId?: string,
+): Promise<RunState | null> {
+  const waited = managerTurnBusy(run.id);
+  managerTurnDepth.set(run.id, (managerTurnDepth.get(run.id) ?? 0) + 1);
+  try {
+    return await managerTurnLock(run.id, async () => {
+      let current = run;
+      if (waited) {
+        // The caller decided to start this turn before the previous one
+        // finished. Re-decide on the state that turn left behind: a Stop, a
+        // rewind, a new question or a terminal verdict all mean this turn is
+        // no longer wanted.
+        const latest = await getRun(run.id);
+        if (
+          !latest ||
+          conversationEpoch(latest) !== conversationEpoch(run) ||
+          latest.status === "paused" ||
+          latest.status === "blocked" ||
+          latest.status === "cancelled" ||
+          isTerminalRunStatus(latest.status)
+        ) {
+          return latest ?? null;
+        }
+        current = latest;
+      }
+      return askManagerBackendUnderTurnLock(
+        current,
+        cwd,
+        mode,
+        managerResumeClaimId,
+        autonomyRetryCount,
+        transientRetryCount,
+        managerRecoveryClaimId,
+      );
+    });
+  } finally {
+    const depth = (managerTurnDepth.get(run.id) ?? 1) - 1;
+    if (depth > 0) managerTurnDepth.set(run.id, depth);
+    else managerTurnDepth.delete(run.id);
+  }
+}
+
+async function askManagerBackendUnderTurnLock(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
@@ -6131,13 +6530,16 @@ async function askManagerBackend(
         prompt: preparedTurn.prompt,
         inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
         conversationEpoch: preparedTurn.conversationEpoch,
-        onPromptAccepted: () => {
-          return updateManagerInputDelivery(
+        onPromptAccepted: async () => {
+          await updateManagerInputDelivery(
             run.id,
             callId,
             preparedTurn.conversationEpoch,
             "submitted",
           );
+          // Messages sent between this turn's start and now could not be
+          // steered yet; the turn can take them from here.
+          steerQueuedInputIntoLiveTurn(run.id);
         },
         onSessionEstablished: async (sessionUuid: string) => {
           // Persist the provider session id BEFORE the turn settles. The
@@ -6174,6 +6576,13 @@ async function askManagerBackend(
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
+    // Before anything reads or settles this call: steers it never read go
+    // back to the queue, so settlement cannot acknowledge them.
+    await managerSteerQueue(run.id, () =>
+      requeueSteeredInput(run.id, callId, preparedTurn.conversationEpoch),
+    ).catch((error) => {
+      console.warn(`[run-store] returning unread steers of ${callId} failed:`, error);
+    });
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -6260,9 +6669,11 @@ async function askManagerBackend(
     // Doing this before saveRun(latest) lets that stale snapshot overwrite the
     // delivery transition. A failed Pi turn may also have successfully applied
     // a live orchestration tool before its final provider request died; that
-    // input is acknowledged, never replayed on Resume.
+    // input is acknowledged, never replayed on Resume. The same holds for an
+    // interrupted turn (Send now) whose tools already spawned workers: handing
+    // its request back as new input invited Cora to spawn them again.
     let settledRun = latest;
-    if (turnFailed && result.decisionAlreadyApplied) {
+    if ((turnFailed || turnAborted) && result.decisionAlreadyApplied) {
       await updateManagerInputDelivery(
         run.id,
         callId,
@@ -6392,7 +6803,7 @@ async function askManagerBackend(
         if (fresh.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) {
           return fresh;
         }
-        return askManagerBackend(
+        return askManagerBackendUnderTurnLock(
           fresh,
           cwd,
           mode,
@@ -6627,6 +7038,9 @@ async function askManagerBackend(
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
+    await managerSteerQueue(run.id, () =>
+      requeueSteeredInput(run.id, callId, preparedTurn.conversationEpoch),
+    ).catch(() => undefined);
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -10484,15 +10898,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     run.executionMode !== "direct" &&
     !run.automationId &&
     !activeManagerCall(run);
-  // Sticky for the fallback below: a resume that already spent its chat turn
-  // must still leave a driver behind if that turn neither settled the run nor
-  // spawned work (a failed/suppressed manager call returns null here).
-  let routedToChat = false;
   if (
     activeWorkersForRun(run.id).length === 0 &&
     (parkedChatTurn || pausedWithNoWorkers || shouldRoutePausedResumeToChat(run))
   ) {
-    routedToChat = true;
     // Leave "paused" BEFORE the turn dispatches. The turn-failure policy and
     // its retry guards read run.status: a turn resumed while the run still
     // says "paused" would forfeit its transient-retry budget (the post-sleep
@@ -10591,50 +11000,98 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         });
       }
     }
-    // askManagerBackend's own failure policy (park / retry / fail) only covers
-    // what happens INSIDE a turn. Everything before the turn exists throws
-    // straight out: the untrusted-pull-request backend refusal, an account that
-    // will not resolve or freeze, a turn that went stale during startup. Left
-    // unguarded, that throw escapes resumeRun with the commit above already
-    // applied — "running", no driver, and no Resume button to try again, which
-    // is the exact wedge this function is being fixed for. Catch it, journal it,
-    // and fall through: routedToChat is already set, so the tail below still
-    // schedules a driver (and that turn surfaces the same failure through
-    // markAutopilotCycleFailed, where the UI can see it).
-    let chatDecision: RunState | null = null;
-    try {
-      chatDecision = await askManagerForChat(driving, resumeInput.cwd);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.warn(`[run-store] resume chat turn for ${driving.id} could not start: ${detail}`);
-      await appendEvent({
-        workspaceId: driving.workspaceId,
-        runId: driving.id,
-        type: "run.resume_chat_turn_failed",
-        message: `Cora's resume chat turn could not start: ${detail}`,
-        payload: { route: "chat", error: detail },
-      });
-    }
-    if (chatDecision) {
-      if (
-        chatDecision.status === "paused" ||
-        chatDecision.status === "blocked" ||
-        chatDecision.status === "cancelled" ||
-        chatDecision.status === "complete" ||
-        // "failed" must stay failed. Feeding a just-failed turn into
-        // startAutopilot below revived the run to "running" and, with no
-        // runnable tasks, converted the honest failure (observed: an expired
-        // provider credential) into a misleading "nothing left to run"
-        // question. The failed state carries its own Retry affordance.
-        chatDecision.status === "failed"
-      ) {
-        return chatDecision;
-      }
-      if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
-        return startAutopilot({ ...resumeInput, runId: chatDecision.id });
-      }
-    }
+    // The chat turn runs as a scheduled cycle, not inside this call. Awaiting
+    // it held Resume's IPC (and the composer, disabled while it waited) for
+    // the whole turn, and kept the turn out of the cycle maps every other
+    // scheduler waits behind (Q2, Q9).
+    scheduleResumeChatTurn(run, driving, resumeInput, shouldScheduleManagerAfterResume);
+    return driving;
   }
+  return finishResumeAfterChatRoute(run, resumeInput, shouldScheduleManagerAfterResume, false);
+}
+
+function scheduleResumeChatTurn(
+  run: RunState,
+  driving: RunState,
+  resumeInput: StartAutopilotInput,
+  shouldScheduleManagerAfterResume: boolean,
+): void {
+  const resumedEpoch = conversationEpoch(driving);
+  const cycle: Promise<void> = Promise.all(managerWorkSettled(run.id))
+    .then(async () => {
+      const current = await getRun(run.id);
+      if (
+        !current ||
+        conversationEpoch(current) !== resumedEpoch ||
+        current.status !== "running"
+      ) {
+        return;
+      }
+      // askManagerBackend's own failure policy (park / retry / fail) only covers
+      // what happens INSIDE a turn. Everything before the turn exists throws
+      // straight out: the untrusted-pull-request backend refusal, an account that
+      // will not resolve or freeze, a turn that went stale during startup. Left
+      // unguarded, that throw escapes this cycle with resumeRun's commit already
+      // applied: "running", no driver, and no Resume button to try again. Catch
+      // it, journal it, and fall through: the tail below still schedules a
+      // driver (and that turn surfaces the same failure through
+      // markAutopilotCycleFailed, where the UI can see it).
+      let chatDecision: RunState | null = null;
+      try {
+        chatDecision = await askManagerForChat(current, resumeInput.cwd);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[run-store] resume chat turn for ${driving.id} could not start: ${detail}`);
+        await appendEvent({
+          workspaceId: driving.workspaceId,
+          runId: driving.id,
+          type: "run.resume_chat_turn_failed",
+          message: `Cora's resume chat turn could not start: ${detail}`,
+          payload: { route: "chat", error: detail },
+        });
+      }
+      if (chatDecision) {
+        if (
+          chatDecision.status === "paused" ||
+          chatDecision.status === "blocked" ||
+          chatDecision.status === "cancelled" ||
+          chatDecision.status === "complete" ||
+          // "failed" must stay failed. Feeding a just-failed turn into
+          // startAutopilot below revived the run to "running" and, with no
+          // runnable tasks, converted the honest failure (observed: an expired
+          // provider credential) into a misleading "nothing left to run"
+          // question. The failed state carries its own Retry affordance.
+          chatDecision.status === "failed"
+        ) {
+          return;
+        }
+        if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
+          await startAutopilot({ ...resumeInput, runId: chatDecision.id });
+          return;
+        }
+      }
+      await finishResumeAfterChatRoute(run, resumeInput, shouldScheduleManagerAfterResume, true);
+    })
+    .catch(async (err) => {
+      await markInitialAutopilotPlanningFailed(run.id, err);
+    })
+    .finally(() => {
+      if (activeAutopilotPlans.get(run.id) === cycle) {
+        activeAutopilotPlans.delete(run.id);
+      }
+    });
+  activeAutopilotPlans.set(run.id, cycle);
+}
+
+async function finishResumeAfterChatRoute(
+  run: RunState,
+  resumeInput: StartAutopilotInput,
+  shouldScheduleManagerAfterResume: boolean,
+  // Sticky: a resume that already spent its chat turn must still leave a
+  // driver behind if that turn neither settled the run nor spawned work (a
+  // failed or suppressed manager call returns null).
+  routedToChat: boolean,
+): Promise<RunState> {
   const resumePrompt = buildResumePrompt(run);
   await sendResumeSignals(run, resumePrompt);
   const resumed = await commitRunChange(run, {
@@ -10806,7 +11263,23 @@ function sameMessageDeliverySignature(
   );
 }
 
-export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
+/**
+ * A repeated user message reads as a double-send only while the first copy is
+ * still waiting for Cora. Once a turn has taken it, the same text again is a
+ * new request ("continue" after a quick reply, a retype after a failure), and
+ * swallowing it cleared the composer while nothing happened.
+ */
+function repeatedCopyStillPending(prior: HumanRunMessage): boolean {
+  if (prior.author !== "user") return true;
+  const state = prior.deliveryState ?? "queued";
+  return state === "queued" || state === "submitted";
+}
+
+export async function addRunMessage(
+  input: AddRunMessageInput,
+  // Internal: set on the single retry after Stop moved the epoch mid-send.
+  retriedAfterEpochMove = false,
+): Promise<RunState> {
   const run = await requireRun(input.runId);
   if (
     !input.skipDirectDispatch &&
@@ -10909,6 +11382,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     }) &&
     !answersDifferentQuestion &&
     !distinctQuestionRepost &&
+    repeatedCopyStillPending(priorSameAuthor) &&
     Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
   ) {
     return run;
@@ -10944,13 +11418,17 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 
   let messageRecorded = false;
   let revivedTerminal = false;
+  let epochMoved = false;
   let recordedIntent = intent;
   const updated = await commitRunChange(run, {
     type: `human.${input.kind}`,
     message: `${input.author}: ${message.slice(0, 160)}`,
     payload: { message: humanMessage },
     mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== messageEpoch) return false;
+      if (conversationEpoch(draft) !== messageEpoch) {
+        epochMoved = true;
+        return false;
+      }
       if (
         clientMessageId &&
         draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
@@ -10987,6 +11465,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
         }) &&
         !answersDifferentQuestionInDraft &&
         !distinctQuestionRepostInDraft &&
+        repeatedCopyStillPending(latestSameAuthor) &&
         Date.now() - new Date(latestSameAuthor.createdAt).getTime() < 20000
       ) {
         return false;
@@ -11027,7 +11506,19 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       draft.updatedAt = timestamp;
     },
   });
-  if (!messageRecorded) return updated;
+  if (!messageRecorded) {
+    // Stop landed between reading the run and recording the message. The user
+    // still sent it: record it in the new conversation (once), and if that
+    // races too, fail loudly so the composer keeps the draft instead of
+    // clearing text that was never recorded.
+    if (epochMoved && input.author === "user" && input.conversationEpoch === undefined) {
+      if (retriedAfterEpochMove) {
+        throw new Error("Cora was stopped while your message was sending, so it was not sent. Send it again.");
+      }
+      return addRunMessage(input, true);
+    }
+    return updated;
+  }
 
   // Land the message checkpoint before any new manager turn is allowed to edit
   // the workspace. This makes Chat+Code undo restore the send-time tree rather
@@ -11057,9 +11548,10 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     const autopilotInput = autopilotInputFromRun(updated);
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
-  // A message sent mid-turn is never delivered into the live manager call: it
-  // stays queued and this follow-up scheduler gives it a fresh turn once the
-  // active call (or planning/review work) settles.
+  // A message sent mid-turn goes into the live manager call as a steer (unless
+  // coraMidTurnDelivery is "queue"), so Cora reads it at her next step. The
+  // follow-up scheduler stays armed behind it: whatever the live turn does
+  // not read is still queued when it settles, and gets a fresh turn then.
   if (
     input.author === "user" &&
     recordedIntent === "steer" &&
@@ -11067,6 +11559,19 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       activeAutopilotPlans.has(updated.id) ||
       activeAutopilotReviews.has(updated.id))
   ) {
+    if (activeManagerCall(updated)) steerQueuedInputIntoLiveTurn(updated.id, messageId);
+    scheduleQueuedSteeringFollowup(updated);
+  } else if (
+    input.author === "user" &&
+    recordedIntent === "steer" &&
+    (updated.status === "running" || updated.status === "reviewing") &&
+    updated.executionMode !== "direct"
+  ) {
+    // Workers are running but no manager turn is (the turn spawned them and
+    // ended without waiting). Nothing else would ever read this message, and
+    // the last worker finishing could even complete the run around it. A run
+    // still "planning" is left alone: its first turn is being registered and
+    // will claim the message itself.
     scheduleQueuedSteeringFollowup(updated);
   }
   // A paused run has no manager turn to queue behind, so neither branch above
@@ -11158,8 +11663,11 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
   if (run.executionMode === "direct") {
     throw new Error("Direct runs deliver messages through their loop driver.");
   }
-  if (queuedManagerInputMessages(run).length === 0) {
-    throw new Error("No queued messages to deliver.");
+  // The queue emptied in the meantime: the scheduler already claimed it, which
+  // is what the user asked for, so this is not an error.
+  if (queuedManagerInputMessages(run).length === 0) return run;
+  if (run.status === "blocked") {
+    throw new Error("Cora is waiting for your answer. Queued messages are delivered with it.");
   }
   const scheduledEpoch = conversationEpoch(run);
   await appendEvent({
@@ -11177,10 +11685,7 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
   }
   // Deliver once the interrupted turn (or any planning/review work) settles.
   // Re-read and re-decide then: another scheduler may already own the queue.
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  void Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
@@ -11191,7 +11696,7 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
         // queue into the retried turn.
         await resumeRun({ runId: latest.id });
       } else if (latest.status !== "blocked" && latest.status !== "cancelled") {
-        scheduleQueuedSteeringFollowup(latest);
+        scheduleQueuedSteeringFollowup(latest, { explicit: true });
       }
     })
     .catch(async (err) => {
@@ -14378,6 +14883,43 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
   }
 }
 
+/**
+ * Move user input still waiting in the queue into the new conversation epoch.
+ * Stop bumps the epoch, and the queue, Send now and Resume only read the
+ * current one: a message queued before the Stop otherwise kept its Queued chip
+ * forever while nothing could deliver it (Q3). A reservation that named an
+ * interrupted call or the old epoch's next turn no longer means anything.
+ */
+function carryQueuedInputAcrossEpoch(
+  draft: RunState,
+  oldEpoch: number,
+  newEpoch: number,
+  interruptedCallIds: ReadonlySet<string>,
+): void {
+  for (const message of draft.humanMessages) {
+    // A resume note describes the pause that created it; the next resume
+    // supersedes it with a current one (settleResumeInterruptedNotes).
+    if (
+      message.author !== "user" ||
+      message.resumeNote ||
+      (message.conversationEpoch ?? 0) !== oldEpoch ||
+      (message.deliveryState ?? "queued") !== "queued" ||
+      message.backendTurnId
+    ) {
+      continue;
+    }
+    message.conversationEpoch = newEpoch;
+    const target = message.targetTurnId;
+    if (
+      target &&
+      (target === `epoch:${oldEpoch}:next` ||
+        (target.startsWith("after:") && interruptedCallIds.has(target.slice("after:".length))))
+    ) {
+      delete message.targetTurnId;
+    }
+  }
+}
+
 async function forcePauseRunInner(run: RunState): Promise<RunState> {
   const reason = "Force-paused by user";
   const activeWorkers = activeWorkersForRun(run.id);
@@ -14450,10 +14992,13 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
         message.deliveryState = "queued";
         message.conversationEpoch = oldEpoch + 1;
         delete message.backendTurnId;
+        delete message.steeredAt;
+        delete message.steerDeliveredAt;
         if (message.targetTurnId && interruptedCallIds.has(message.targetTurnId)) {
           delete message.targetTurnId;
         }
       }
+      carryQueuedInputAcrossEpoch(draft, oldEpoch, oldEpoch + 1, interruptedCallIds);
       abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {

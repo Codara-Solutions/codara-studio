@@ -149,6 +149,14 @@ export interface ManagerCallResult {
   turnAborted?: boolean;
 }
 
+/** One user message handed to the manager turn that is already running. */
+export interface ManagerSteerInput {
+  messageId: string;
+  text: string;
+  /** Called once the runtime injects the message into the live turn. */
+  onDelivered?: () => void;
+}
+
 /**
  * Streaming event a Talk-mode (and Execute-mode) backend emits between
  * request and response. The run-store dispatcher relays each event onto the
@@ -304,6 +312,16 @@ export interface AgentBackend {
    * the backend has no active session for this run.
    */
   interruptChat?(runId: string): void;
+
+  /**
+   * Hand a user message to the manager turn that is live right now, so the
+   * model reads it at its next step instead of after the turn. Resolves true
+   * once the runtime queued it, false when no turn is live or the runtime
+   * refused it (the message then stays in run-store's queue). A message the
+   * turn ends without injecting is withdrawn from the runtime before
+   * requestManagerDecision resolves, and onDelivered never fires for it.
+   */
+  steerChat?(runId: string, steer: ManagerSteerInput): Promise<boolean>;
 }
 
 /**
@@ -392,6 +410,9 @@ function renderMessageAttachments(message: HumanRunMessage): string[] {
  * renders every turn-start input (fresh sends and messages queued during the
  * previous turn) through buildManagerTurnPrompt with these section labels.
  */
+const REDELIVERED_INPUT_LABEL =
+  "Already received; your previous reply was interrupted. Do not redo work already started";
+
 export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 0) {
     return "Continue Cora's current manager workflow from the existing run state. There is no new user message attached to this turn.";
@@ -399,8 +420,8 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 1) {
     const attachments = renderMessageAttachments(messages[0]);
     const text = messages[0].message.trim();
-    if (attachments.length === 0) return text;
-    return [text, "", ...attachments].join("\n").trim();
+    const body = attachments.length === 0 ? text : [text, "", ...attachments].join("\n").trim();
+    return messages[0].redelivered ? `[${REDELIVERED_INPUT_LABEL}]\n${body}` : body;
   }
   return [
     "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:",
@@ -410,12 +431,27 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
       // that numbered section rather than in one merged list at the end.
       const attachments = renderMessageAttachments(message);
       return [
-        `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued message" : "User turn"}]`,
+        `${index + 1}. [${message.redelivered ? REDELIVERED_INPUT_LABEL : message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued message" : "User turn"}]`,
         message.message.trim(),
         ...(attachments.length === 0 ? [] : ["", ...attachments]),
         "",
       ];
     }),
+  ].join("\n").trim();
+}
+
+/**
+ * Render one user message for delivery into the manager turn that is already
+ * running (Pi steer). The bracketed header keeps the text from ever starting
+ * with "/", which Pi would expand as a command or template, and tells Cora the
+ * message arrived mid-turn rather than as a fresh request.
+ */
+export function renderSteeredManagerInput(message: HumanRunMessage): string {
+  const attachments = renderMessageAttachments(message);
+  return [
+    "[New message from the user, sent while you were working. Read it before your next step; it can change what you should do.]",
+    message.message.trim(),
+    ...(attachments.length === 0 ? [] : ["", ...attachments]),
   ].join("\n").trim();
 }
 

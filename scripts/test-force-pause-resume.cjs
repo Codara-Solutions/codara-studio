@@ -25,10 +25,12 @@
 //      zero live workers dispatches a mode="chat" manager turn whose prompt
 //      names the interrupted attempts (id, task title, step) so the manager
 //      can relaunch them;
-//   2. the driver invariant — after resumeRun returns on a paused run, the run
-//      is never left "running" with no driver: no in-flight spark call, no
-//      scheduled manager turn, no live worker. Asserted for a chat turn that
-//      settles the run AND for one whose provider call dies;
+//   2. the driver invariant: once resumeRun's scheduled chat turn settles on a
+//      paused run, the run is never left "running" with no driver: no
+//      in-flight spark call, no scheduled manager turn, no live worker.
+//      Asserted for a chat turn that settles the run AND for one whose
+//      provider call dies. resumeRun itself returns before that turn runs, so
+//      the UI never waits a whole turn on the Resume button;
 //   3. the kill race — workerExitInterruptedByForcePause reports "interrupted"
 //      for both orderings of the race (pause window still open; pause commit
 //      already landed on the attempt) and only for those, plus a source pin
@@ -421,10 +423,15 @@ async function main() {
     }
     return askUserResult();
   });
-  const resumePromise = runStore.resumeRun({ runId }).catch((error) => {
+  const resumeReturned = await runStore.resumeRun({ runId }).catch((error) => {
     check("resumeRun does not throw on a force-paused run", false, error?.message);
     return readRun(runId);
   });
+  check(
+    "resumeRun returns the running snapshot before its chat turn finishes",
+    resumeReturned.status === "running" && callsFor(runId).length <= 1,
+    `${resumeReturned.status} calls=${callsFor(runId).length}`,
+  );
   const chatTurnDispatched = await gateOpened(chatTurnEntered);
   const midFlight = chatTurnDispatched ? readRun(runId) : null;
   check(
@@ -443,7 +450,8 @@ async function main() {
     : { ok: false, why: "no chat turn was dispatched" };
   check(`the driver invariant holds on the live run (${midInvariant.why})`, midInvariant.ok);
   releaseChatTurn.open();
-  const resumed = await resumePromise;
+  await runStore.settleScheduledManagerWork(runId);
+  const resumed = readRun(runId);
   const chatCalls = callsFor(runId);
 
   check(
@@ -565,6 +573,7 @@ async function main() {
   });
   writeRun(forcePausedRun(deadId));
   const afterDead = await runStore.resumeRun({ runId: deadId });
+  await waitFor(() => callsFor(deadId).length >= 1);
   const deadTurnCalls = callsFor(deadId);
   check(
     "a dead chat turn still took the chat route first",
@@ -576,7 +585,8 @@ async function main() {
     afterDead.status === "running",
     afterDead.status,
   );
-  const deadCallsAtReturn = deadTurnCalls.length;
+  // Only the chat turn itself counts; the driver after it may already be in.
+  const deadCallsAtReturn = 1;
   // The scheduler hands off through setTimeout(0); give it a moment to land.
   const deadDriverArrived = await waitFor(() => callsFor(deadId).length > deadCallsAtReturn);
   check(
@@ -609,6 +619,7 @@ async function main() {
     }),
   );
   await runStore.resumeRun({ runId: bareId });
+  await runStore.settleScheduledManagerWork(bareId);
   const bareCalls = callsFor(bareId);
   check("a paused run with no workers routes to chat too", bareCalls[0]?.mode === "chat", bareCalls[0]?.mode);
   const barePersisted = readRun(bareId);
@@ -649,6 +660,7 @@ async function main() {
     runId: messageResumeId,
     triggerMessageId: "msg-message-resume",
   });
+  await runStore.settleScheduledManagerWork(messageResumeId);
   const messageResumePersisted = readRun(messageResumeId);
   const messageResumePrompt = callsFor(messageResumeId)[0]?.prompt ?? "";
   check(
@@ -728,12 +740,16 @@ async function main() {
   } catch (error) {
     throwEscaped = error;
   }
-  globalThis.__coraAccountFailures = 0;
   check(
     "a manager turn that throws before its SparkCall does not escape resumeRun",
     throwEscaped === null,
     throwEscaped?.message,
   );
+  // The chat turn is scheduled, so the injected failure must outlive resumeRun.
+  await waitFor(() =>
+    readEvents(throwId).some((event) => event.type === "run.resume_chat_turn_failed"),
+  );
+  globalThis.__coraAccountFailures = 0;
   check(
     "the failed resume turn is journalled",
     readEvents(throwId).some((event) => event.type === "run.resume_chat_turn_failed"),
@@ -764,6 +780,7 @@ async function main() {
   // ── 3d. Stop → Resume → Stop must not put the note in the user's composer ──
   const undoId = writeRun(forcePausedRun("run-resume-then-stop"));
   await runStore.resumeRun({ runId: undoId });
+  await runStore.settleScheduledManagerWork(undoId);
   const undoPersisted = readRun(undoId);
   check(
     "the resume note is on the run before the second Stop",
@@ -863,6 +880,7 @@ async function main() {
     }),
   );
   await runStore.resumeRun({ runId: strandedId });
+  await runStore.settleScheduledManagerWork(strandedId);
   const strandedPersisted = readRun(strandedId);
   const strandedNotes = resumeNotes(strandedPersisted);
   check(
@@ -903,6 +921,7 @@ async function main() {
     }),
   );
   await runStore.resumeRun({ runId: liveNoteId });
+  await runStore.settleScheduledManagerWork(liveNoteId);
   check(
     "a resume note still queued in this conversation is not duplicated",
     resumeNotes(readRun(liveNoteId)).length === 1,

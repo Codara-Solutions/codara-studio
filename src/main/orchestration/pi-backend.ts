@@ -31,6 +31,7 @@ import {
   type ChatStreamHandler,
   type ManagerCallResult,
   type ManagerRequestInput,
+  type ManagerSteerInput,
   type AgentBackend,
 } from "./agent-backend";
 import { runProjectPolicyMode } from "./project-policy";
@@ -58,7 +59,20 @@ interface PiBackendSession extends PiProcessOwner {
   sessionId: string;
   fastMode: boolean;
   interrupted: boolean;
-  settleActiveTurn: (() => void) | null;
+  activeTurn: ActivePiTurn | null;
+}
+
+/**
+ * The one turn a session is running. A session serves one turn at a time:
+ * prompting it while another turn streams is rejected by Pi, and the old
+ * failure handling then stopped the process the live turn was using.
+ */
+interface ActivePiTurn {
+  settle: () => void;
+  /** True between the accepted prompt and the end of the turn. */
+  acceptingSteers: boolean;
+  /** Steered messages Pi has queued but not yet injected, by message id. */
+  pendingSteers: Map<string, { text: string; onDelivered?: () => void }>;
 }
 
 interface PendingPiBackendSession extends PiProcessOwner {}
@@ -72,6 +86,8 @@ const GENERATIONS = new Map<string, number>();
  * shape for an orchestrator.
  */
 const PI_TURN_IDLE_CHECK_MS = 15 * 1000;
+const PI_PROCESS_CHECK_MS = 1000;
+const STARTUP_STDERR_TAIL_CHARS = 2048;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -176,8 +192,7 @@ async function stopSession(
   if (session && (!expected || session === expected)) {
     SESSIONS.delete(runId);
     session.interrupted = true;
-    session.settleActiveTurn?.();
-    session.settleActiveTurn = null;
+    session.activeTurn?.settle();
     cleanup.push(cleanupPiProcess(session));
   }
   const pending = PENDING_SESSIONS.get(runId);
@@ -286,11 +301,19 @@ async function ensureSession(
   try {
     state = await client.start();
   } catch (error) {
+    // The handshake error alone ("timed out", "process exited (1)") hides the
+    // cause; Pi's own stderr names it (a stack trace, a broken extension).
+    const stderr = client.diagnostics().stderr.trim();
     if (PENDING_SESSIONS.get(runId) === pending) {
       PENDING_SESSIONS.delete(runId);
     }
     await cleanupPiProcess(pending);
-    throw error;
+    if (!stderr) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const tail = stderr.length > STARTUP_STDERR_TAIL_CHARS
+      ? stderr.slice(-STARTUP_STDERR_TAIL_CHARS)
+      : stderr;
+    throw new Error(`${message}\n${tail}`);
   }
   if (
     PENDING_SESSIONS.get(runId) !== pending ||
@@ -321,7 +344,7 @@ async function ensureSession(
     fastMode,
     generation,
     interrupted: false,
-    settleActiveTurn: null,
+    activeTurn: null,
     cleanupPromise: pending.cleanupPromise,
   };
   PENDING_SESSIONS.delete(runId);
@@ -344,15 +367,30 @@ interface PiTurnLiveness {
 /**
  * Resolve when the turn settles; reject when it goes QUIET (see
  * PI_TURN_IDLE_TIMEOUT_MS) or blows the absolute ceiling. A turn parked inside
- * a long-poll orchestration tool is never idle, however long it waits.
+ * a long-poll orchestration tool is never idle, however long it waits. A Pi
+ * process that died mid-turn never emits agent_settled, so a stopped or failed
+ * client rejects at the next check instead of waiting out the idle timeout.
  */
-async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness): Promise<void> {
+async function waitForSettled(
+  settled: Promise<void>,
+  liveness: PiTurnLiveness,
+  session: PiBackendSession,
+): Promise<void> {
   let poll: ReturnType<typeof setInterval> | null = null;
+  let processPoll: ReturnType<typeof setInterval> | null = null;
   const startedAt = Date.now();
   try {
     await Promise.race([
       settled,
       new Promise<never>((_, reject) => {
+        processPoll = setInterval(() => {
+          if (session.interrupted) return;
+          const phase = session.client.state().phase;
+          if (phase === "failed" || phase === "stopped") {
+            reject(new Error(`Cora's Pi runtime ${phase === "failed" ? "failed" : "exited"} in the middle of the turn.`));
+          }
+        }, PI_PROCESS_CHECK_MS);
+        processPoll.unref();
         poll = setInterval(() => {
           const verdict = classifyTurnLiveness({
             now: Date.now(),
@@ -367,6 +405,7 @@ async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness):
     ]);
   } finally {
     if (poll) clearInterval(poll);
+    if (processPoll) clearInterval(processPoll);
   }
 }
 
@@ -382,9 +421,7 @@ async function requestPiDecision(
 ): Promise<ManagerCallResult> {
   const startedAt = Date.now();
   const runId = input.run.id;
-  let session: PiBackendSession | undefined;
-  let unsubscribe: (() => void) | undefined;
-  let compaction: PiManagerCompaction | undefined;
+  let session: PiBackendSession;
   // Session STARTUP is outside the turn-failure envelope on purpose. A missing
   // or expired subscription auth, an uninstalled pinned runtime, or an RPC
   // process that never came up all mean NO provider turn ever started —
@@ -408,6 +445,97 @@ async function requestPiDecision(
   } catch (error) {
     console.warn(`[pi-backend] failed to persist session id for ${runId}:`, error);
   }
+  // Never prompt a session that is still streaming another turn, and never
+  // touch that turn's process: report this one as aborted so run-store
+  // requeues its input behind the live turn.
+  if (session.activeTurn) {
+    return {
+      decision: buildTalkReplyDecision("Cora is already working on a turn in this chat."),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      accountProfileId: session.accountProfileId,
+      notice: "Cora is already working on a turn in this chat; this message waits for it.",
+      turnAborted: true,
+    };
+  }
+  const activeTurn: ActivePiTurn = {
+    settle: () => undefined,
+    acceptingSteers: false,
+    pendingSteers: new Map(),
+  };
+  session.activeTurn = activeTurn;
+  let result: ManagerCallResult;
+  try {
+    result = await runPiTurn(input, session, activeTurn, startedAt, onStream);
+  } finally {
+    activeTurn.acceptingSteers = false;
+    if (session.activeTurn === activeTurn) session.activeTurn = null;
+  }
+  return withdrawUndeliveredSteers(runId, session, activeTurn, result);
+}
+
+/**
+ * A steer Pi queued but never injected (it arrived after the model's last
+ * step) would otherwise open the next turn on its own, on top of run-store
+ * delivering it again. Withdraw it from Pi before the turn reports back;
+ * run-store returns every steer whose delivery it never heard about.
+ */
+async function withdrawUndeliveredSteers(
+  runId: string,
+  session: PiBackendSession,
+  turn: ActivePiTurn,
+  result: ManagerCallResult,
+): Promise<ManagerCallResult> {
+  if (turn.pendingSteers.size === 0) return result;
+  turn.pendingSteers.clear();
+  if (SESSIONS.get(runId) === session && session.client.state().phase === "running") {
+    await session.client.request({ type: "clear_queue" }).catch(() => undefined);
+  }
+  return result;
+}
+
+function piUserMessageText(message: unknown): string {
+  const record = asRecord(message);
+  if (record?.role !== "user") return "";
+  const content = record.content;
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      const entry = asRecord(part);
+      return entry?.type === "text" && typeof entry.text === "string" ? entry.text : "";
+    })
+    .join("")
+    .trim();
+}
+
+async function runPiTurn(
+  input: ManagerRequestInput,
+  session: PiBackendSession,
+  activeTurn: ActivePiTurn,
+  startedAt: number,
+  onStream?: ChatStreamHandler,
+): Promise<ManagerCallResult> {
+  const runId = input.run.id;
+  let unsubscribe: (() => void) | undefined;
+  let compaction: PiManagerCompaction | undefined;
+  let turn: PiTurnAccumulator | undefined;
+  const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
+  // An interrupted turn may already have run live tools (spawned workers).
+  // Saying so lets run-store acknowledge its input instead of handing the same
+  // request to the next turn as new.
+  const interruptedResult = (): ManagerCallResult => ({
+    decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
+    decisionAlreadyApplied:
+      (turn !== undefined &&
+        executes &&
+        executeDecisionWasAppliedDuringTurn(turn.result().successfulToolCalls)) ||
+      undefined,
+    durationMs: Date.now() - startedAt,
+    model: input.chat.model,
+    accountProfileId: session.accountProfileId,
+    turnAborted: true,
+  });
   try {
     const generation = session.generation;
     // `interrupted` belongs to the preceding turn. Generation/map ownership
@@ -419,20 +547,15 @@ async function requestPiDecision(
       GENERATIONS.get(runId) !== generation ||
       !launchPlanCapabilityIsReusable(session.plan)
     ) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
-    const turn = new PiTurnAccumulator(onStream, {
+    const accumulator = new PiTurnAccumulator(onStream, {
       // Pi's native model catalog also reports API-equivalent prices for
       // subscription models. Those are not an OpenRouter charge and must not
       // enter the chat cost pill or run budget.
       captureCost: session.provider === "openrouter",
     });
+    turn = accumulator;
     let settle: () => void = () => undefined;
     const liveness: PiTurnLiveness = {
       lastEventAt: Date.now(),
@@ -442,7 +565,7 @@ async function requestPiDecision(
       liveness.lastEventAt = Date.now();
       liveness.inFlightTools.clear();
       const next = new Promise<void>((resolve) => { settle = resolve; });
-      session.settleActiveTurn = settle;
+      activeTurn.settle = settle;
       return next;
     };
     let settled = armSettlement();
@@ -468,34 +591,36 @@ async function requestPiDecision(
       if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
         liveness.inFlightTools.delete(event.toolCallId);
       }
-      turn.consume(event);
+      if (event.type === "message_start" && activeTurn.pendingSteers.size > 0) {
+        const text = piUserMessageText(event.message);
+        for (const [messageId, steer] of activeTurn.pendingSteers) {
+          if (steer.text.trim() !== text) continue;
+          activeTurn.pendingSteers.delete(messageId);
+          try {
+            steer.onDelivered?.();
+          } catch {
+            // Delivery bookkeeping is best-effort; the turn goes on.
+          }
+          break;
+        }
+      }
+      accumulator.consume(event);
       if (compaction?.consume(event)) return;
       if (event.type === "agent_settled") settle();
     });
 
     await session.client.prompt(input.prompt);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
+    activeTurn.acceptingSteers = true;
     await input.onPromptAccepted?.();
-    await waitForSettled(settled, liveness);
+    await waitForSettled(settled, liveness, session);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
 
-    let accumulated = turn.result();
+    let accumulated = accumulator.result();
     // A model can finish its tool loop with an explicit empty assistant
     // message. Never promote earlier progress prose into a fake successful
     // answer. Give it one hidden, tightly-scoped chance to produce the result
@@ -503,17 +628,11 @@ async function requestPiDecision(
     if (!compactionFailure && !accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
       settled = armSettlement();
       await session.client.prompt(EMPTY_FINAL_REPROMPT);
-      await waitForSettled(settled, liveness);
+      await waitForSettled(settled, liveness, session);
       if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-        return {
-          decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-          durationMs: Date.now() - startedAt,
-          model: input.chat.model,
-          accountProfileId: session.accountProfileId,
-          turnAborted: true,
-        };
+        return interruptedResult();
       }
-      accumulated = turn.result();
+      accumulated = accumulator.result();
     }
 
     if (compactionFailure) {
@@ -529,7 +648,7 @@ async function requestPiDecision(
           turnAborted: true,
         };
       }
-      accumulated = turn.result();
+      accumulated = accumulator.result();
       onStream?.({ kind: "system_note", message: `Context compaction failed. The conversation remains saved; Cora will restart its runtime on the next turn. ${compactionFailure}` });
     }
     // costUsd is an OpenRouter catalog-priced estimate for the whole turn.
@@ -562,7 +681,6 @@ async function requestPiDecision(
       const last = asRecord(await session.client.request({ type: "get_last_assistant_text" }));
       if (typeof last?.text === "string") finalText = last.text.trim();
     }
-    const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
     const liveDecisionApplied = executes &&
       executeDecisionWasAppliedDuringTurn(accumulated.successfulToolCalls);
     if (accumulated.failure) {
@@ -617,25 +735,26 @@ async function requestPiDecision(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const diagnostic = session?.client.diagnostics().stderr.trim();
+    const diagnostic = session.client.diagnostics().stderr.trim();
     const detail = diagnostic ? `${message}\n${diagnostic}` : message;
     // A turn exception means this runtime cannot be trusted for reuse. Stop it
-    // before parking/requeueing so native tools cannot outlive their run.
-    if (session) await stopSession(runId, session);
+    // before parking/requeueing so native tools cannot outlive their run. Only
+    // the turn that owns the session may do so: stopping a process another
+    // turn is streaming from left that turn hanging until the idle timeout.
+    if (session.activeTurn === activeTurn) await stopSession(runId, session);
     onStream?.({ kind: "error", message: detail });
     return {
       decision: buildTalkReplyDecision(`Cora Pi backend error: ${detail}`),
       durationMs: Date.now() - startedAt,
       model: input.chat.model,
-      accountProfileId: session?.accountProfileId,
-      newSessionUuid: session?.sessionId,
+      accountProfileId: session.accountProfileId,
+      newSessionUuid: session.sessionId,
       notice: detail,
       turnFailed: true,
     };
   } finally {
     compaction?.dispose();
     unsubscribe?.();
-    if (session) session.settleActiveTurn = null;
   }
 }
 
@@ -658,7 +777,30 @@ export const piBackend = {
     const session = SESSIONS.get(runId);
     if (!session) return;
     session.interrupted = true;
-    session.settleActiveTurn?.();
+    session.activeTurn?.settle();
     void session.client.abort().catch(() => undefined);
+  },
+  async steerChat(runId: string, steer: ManagerSteerInput): Promise<boolean> {
+    const session = SESSIONS.get(runId);
+    const turn = session?.activeTurn;
+    if (
+      !session ||
+      !turn ||
+      !turn.acceptingSteers ||
+      session.interrupted ||
+      session.client.state().phase !== "running"
+    ) {
+      return false;
+    }
+    // Registered before the request goes out: Pi can inject the message
+    // before the steer response arrives.
+    turn.pendingSteers.set(steer.messageId, { text: steer.text, onDelivered: steer.onDelivered });
+    try {
+      await session.client.request({ type: "steer", message: steer.text });
+    } catch {
+      turn.pendingSteers.delete(steer.messageId);
+      return false;
+    }
+    return true;
   },
 } satisfies AgentBackend;

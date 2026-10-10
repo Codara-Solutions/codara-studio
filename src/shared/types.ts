@@ -625,7 +625,13 @@ export interface AppSettings {
   // Anthropic sessions are unaffected and can never run a fast/priority tier;
   // resources/pi-cora/service-tier.ts strips one structurally.
   openAiFastMode: boolean;
+  // How a message sent while Cora's turn is running reaches her. "steer"
+  // hands it to the live turn (Pi steer), so she reads it at her next step;
+  // "queue" holds it until the turn ends and then starts a fresh turn.
+  coraMidTurnDelivery: CoraMidTurnDelivery;
 }
+
+export type CoraMidTurnDelivery = "steer" | "queue";
 
 export interface OpenRouterValidationInput {
   apiKey: string;
@@ -3146,6 +3152,20 @@ export interface HumanRunMessage {
    *  the synthetic resume note is backend-only context and UI surfaces fold it
    *  into this message instead of showing a second, fake user turn. */
   resumesMessageId?: string;
+  /** Manager turns that took this message as input and then failed or were
+   *  aborted, releasing it back to the queue. Past a small cap the message no
+   *  longer drives automatic turns; an explicit user action still delivers it. */
+  deliveryAttempts?: number;
+  /** A turn that had already received this message was interrupted before it
+   *  finished, so the next turn is told it is not new and not to redo work
+   *  that already started. */
+  redelivered?: true;
+  /** When the message was handed to the live manager turn as a mid-turn steer
+   *  (AppSettings.coraMidTurnDelivery "steer"). */
+  steeredAt?: string;
+  /** When the runtime actually injected the steered message into the turn.
+   *  Between steeredAt and this, a long tool wait yields so Cora can read it. */
+  steerDeliveredAt?: string;
 }
 
 export interface WorkerArtifactPaths {

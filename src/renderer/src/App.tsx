@@ -220,6 +220,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   agentMcpPiWorkerIds: [],
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
+  coraMidTurnDelivery: "steer",
 };
 
 function resolveDefaultShell(
