@@ -334,6 +334,44 @@ async function main() {
   assert.equal(readRun("run-frozen-config").chatModel, undefined);
   console.log("PASS an accepted recovery claim freezes provider configuration");
 
+  for (const failureKind of ["runtime", "timeout", "auth"]) {
+    const id = `run-${failureKind}-park`;
+    writeRun(run(id, { managerTurnRecovery: recovery({ failureKind }) }));
+    const loaded = await store.getRun(id);
+    assert.equal(loaded.managerTurnRecovery?.failureKind, failureKind);
+    const resumed = await store.resumeManagerTurnRecovery({
+      runId: id,
+      recoveryId: "recovery-ms7-test",
+      account: { kind: "native-cli", backend: "codex", profileId: "personal" },
+    });
+    // Reaching the account check proves the token survived the load and is
+    // claimable; the incompatible selector keeps the test off the provider.
+    assert.equal(resumed.outcome, "account-incompatible");
+    assert.equal(readRun(id).managerTurnRecovery.failureKind, failureKind);
+  }
+  console.log("PASS every kind the policy parks with keeps its recovery token");
+
+  writeRun(
+    run("run-runtime-interrupted-claim", {
+      status: "running",
+      managerTurnRecovery: recovery({
+        failureKind: "runtime",
+        state: "resuming",
+        resumeClaimId: "recovery-claim-ms7-runtime",
+        resumeRequestedAt: NOW,
+      }),
+    }),
+  );
+  await store.recoverManagerTurnRecoveries();
+  const runtimeReparked = readRun("run-runtime-interrupted-claim");
+  assert.equal(runtimeReparked.status, "paused");
+  assert.equal(runtimeReparked.managerTurnRecovery.state, "parked");
+  assert.equal(
+    runtimeReparked.autopilot.stopReason,
+    "Cora's turn did not finish. Retry the saved turn.",
+  );
+  console.log("PASS a reparked runtime recovery names its own cause");
+
   writeRun(
     run("run-malformed", {
       managerTurnRecovery: {

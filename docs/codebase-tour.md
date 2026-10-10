@@ -181,7 +181,8 @@ example to run a dev server; `agent-terminal-registry.ts` and
 **Which Pi runs Cora.** `resolveCodaraPiRuntime` in `pi-runtime-electron.ts`
 picks the user's own Pi install (`npm install -g
 @earendil-works/pi-coding-agent`, 0.85.1 or newer) when there is one, and
-otherwise the Pi build bundled with the app. `resolveCodaraPiLibrary` is that
+otherwise the Pi build bundled with the app. A user install that fails to
+start is skipped in favor of the bundled build. `resolveCodaraPiLibrary` is that
 bundled copy, which main also uses as a library for credential storage,
 sign-in flows and the model catalog.
 

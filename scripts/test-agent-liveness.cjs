@@ -281,6 +281,39 @@ check("one tool result does not clear another parallel in-flight tool", () => {
   assert.match(verdict.detail, /bash/);
 });
 
+check("a normal tool that keeps streaming output is alive, a silent one is not", () => {
+  // A long build or test suite in the manager's bash prints the whole time.
+  const streaming = classifyTurnLiveness({
+    ...base,
+    now: 40 * MIN,
+    lastEventAt: 39 * MIN,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false, lastProgressAt: 39 * MIN }],
+  });
+  assert.equal(streaming.action, "continue", "40 min of streamed output is progress, not a hang");
+
+  const silent = classifyTurnLiveness({
+    ...base,
+    now: 40 * MIN,
+    lastEventAt: 14 * MIN,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false, lastProgressAt: 14 * MIN }],
+  });
+  assert.equal(silent.action, "fail");
+  assert.match(silent.detail, /stuck in bash: 26 min with no result or output/);
+
+  // A long-poll's bound is its own legal duration, so progress never extends it.
+  const longPoll = classifyTurnLiveness({
+    ...base,
+    now: PI_LONG_POLL_TRUST_MS,
+    inFlightTools: [{
+      name: "codara_wait_for_workers",
+      startedAt: 0,
+      longPoll: true,
+      lastProgressAt: PI_LONG_POLL_TRUST_MS - MIN,
+    }],
+  });
+  assert.equal(longPoll.action, "fail");
+});
+
 check("the absolute ceiling still bounds everything, even mid-long-poll", () => {
   const verdict = classifyTurnLiveness({
     ...base,

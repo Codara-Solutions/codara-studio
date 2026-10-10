@@ -2,9 +2,10 @@
 //
 // Cora's sessions run the `pi` the user installed, the same one their
 // terminals run, so updating it is the user's call. When it is missing,
-// Settings offers to install it with the standard global npm install:
+// Settings offers to install it with the standard global npm install, pinned
+// to the minor line Codara is tested against rather than npm's latest:
 //
-//   npm install -g @earendil-works/pi-coding-agent
+//   npm install -g @earendil-works/pi-coding-agent@~<CODARA_PI_VERSION>
 //
 // The result is re-resolved through the same lookup Cora's launcher uses
 // before the install is reported as done, so "installed" means "Cora will
@@ -23,7 +24,7 @@ import { join } from "node:path";
 import { forgetResolvedBinary } from "../binary-resolver";
 import { codaraHome } from "../codara-home";
 import { getEnrichedEnv } from "../path-reconstruction";
-import { CODARA_PI_PACKAGE, PI_INSTALL_COMMAND } from "./pi-runtime";
+import { CODARA_PI_INSTALL_SPEC, PI_INSTALL_COMMAND } from "./pi-runtime";
 
 const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 /** npm chatter is unbounded; only the tail is worth surfacing in a dialog. */
@@ -112,7 +113,7 @@ async function runInstall(
   const args = [
     "install",
     "--global",
-    CODARA_PI_PACKAGE,
+    CODARA_PI_INSTALL_SPEC,
     "--no-audit",
     "--no-fund",
     "--loglevel=http",

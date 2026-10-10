@@ -38,6 +38,10 @@ export interface PiTurnResult {
   /** The provider's context window when it reported one, else null. */
   contextWindowTokens: number | null;
   failure: string | null;
+  /** True once Pi started its own provider retry loop during this turn, so
+   *  the manager-turn policy knows whether a further replay would multiply
+   *  load or is the first retry the turn gets. */
+  providerRetried: boolean;
   settled: boolean;
 }
 
@@ -128,6 +132,32 @@ function assistantMessageId(messageValue: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Extension hooks that only observe a turn. Pi catches a throwing handler,
+ * reports extension_error and carries on, so a failure here leaves the answer
+ * intact and is reported as a diagnostic. Every other hook (before_agent_start
+ * injects Cora's contract, before_provider_request and tool_call enforce
+ * policy, session_start wires the bridge) stays fatal, as does an unnamed one.
+ */
+const OBSERVER_EXTENSION_EVENTS: ReadonlySet<string> = new Set([
+  "agent_start",
+  "agent_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "tool_result",
+  "input",
+  "session_before_compact",
+  "session_compact",
+  "session_compact_failed",
+  "session_shutdown",
+]);
+
 function toolOutput(resultValue: unknown): string {
   const text = textBlocks(resultValue);
   if (text) return text;
@@ -164,6 +194,7 @@ export class PiTurnAccumulator {
   // response can clear only the retryable failure, never a broken bridge.
   private providerFailure: string | null = null;
   private fatalFailure: string | null = null;
+  private providerRetried = false;
   private readonly providerResponseIds = new Set<string>();
   private settled = false;
 
@@ -183,14 +214,27 @@ export class PiTurnAccumulator {
     }
 
     if (event.type === "message_update") {
-      const message = asRecord(event.message);
       const delta = asRecord(event.assistantMessageEvent);
-      if (message?.role !== "assistant" || delta?.type !== "text_delta" || typeof delta.delta !== "string") {
-        return;
-      }
-      const messageId = this.ensureAssistant(message);
+      if (delta?.type !== "text_delta" || typeof delta.delta !== "string") return;
+      // Pi 0.84+ strips `message` from message_update, so the delta belongs
+      // to the assistant message message_start opened. Older builds still
+      // send it and keep their own attribution.
+      const message = asRecord(event.message);
+      if (message && message.role !== "assistant") return;
+      // Without message_start there is no id that message_end will later
+      // agree with, and minting one would count a phantom assistant message.
+      if (!message && !this.currentAssistantId) return;
+      const messageId = message ? this.ensureAssistant(message) : this.currentAssistantId!;
       this.streamedText.set(messageId, `${this.streamedText.get(messageId) ?? ""}${delta.delta}`);
       this.onStream?.({ kind: "assistant_block", messageId, text: delta.delta });
+      return;
+    }
+
+    if (event.type === "compaction_start") {
+      this.onStream?.({
+        kind: "system_note",
+        message: "Compacting the conversation so Cora stays fast. This can take a minute.",
+      });
       return;
     }
 
@@ -267,8 +311,29 @@ export class PiTurnAccumulator {
       const detail = typeof event.error === "string" && event.error.trim()
         ? event.error.trim()
         : "Pi extension failed.";
+      const hook = typeof event.event === "string" ? event.event : "";
+      if (OBSERVER_EXTENSION_EVENTS.has(hook)) {
+        this.onStream?.({
+          kind: "system_note",
+          message: `A Cora extension hook (${hook}) failed and was skipped: ${detail}`,
+        });
+        return;
+      }
       this.fatalFailure = detail;
       this.onStream?.({ kind: "error", message: detail });
+      return;
+    }
+
+    if (event.type === "auto_retry_start") {
+      this.providerRetried = true;
+      const attempt = finiteCount(event.attempt);
+      const maxAttempts = finiteCount(event.maxAttempts);
+      const seconds = Math.max(1, Math.round(finiteCount(event.delayMs) / 1000));
+      const count = attempt > 0 && maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
+      this.onStream?.({
+        kind: "system_note",
+        message: `The provider is busy or unreachable; retrying${count} in ${seconds}s.`,
+      });
       return;
     }
 
@@ -311,6 +376,7 @@ export class PiTurnAccumulator {
       contextTokens: this.contextTokens,
       contextWindowTokens: this.contextWindowTokens,
       failure: this.fatalFailure ?? this.providerFailure,
+      providerRetried: this.providerRetried,
       settled: this.settled,
     };
   }

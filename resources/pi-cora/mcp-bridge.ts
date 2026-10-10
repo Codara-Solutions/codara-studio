@@ -65,6 +65,7 @@ interface ServerState {
   stderr: string[];
   client: McpClient | null;
   registered: Set<string>;
+  connecting: Promise<void> | null;
 }
 
 interface McpToolDescriptor {
@@ -96,6 +97,10 @@ interface RegisteredRemoteTool {
 const MAX_TOOL_NAME_LENGTH = 128;
 const MAX_RESULT_BYTES = 64 * 1024;
 const MAX_STDERR_LINES = 40;
+// How long session_start holds the first prompt for MCP connections. A slow or
+// dead server keeps connecting in the background instead of delaying Cora's
+// first token by its full connect and listTools timeouts.
+export const SESSION_START_CONNECT_WAIT_MS = 2_500;
 const DEFAULT_TOOL_SEARCH_LIMIT = 5;
 const MAX_TOOL_SEARCH_LIMIT = 8;
 
@@ -239,6 +244,7 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       stderr: [],
       client: null,
       registered: new Set(),
+      connecting: null,
     });
   }
   let sdk: ReturnType<typeof loadMcpSdk> | null = null;
@@ -387,10 +393,43 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       await (transport as { close?: () => Promise<void> }).close?.().catch(() => undefined);
       throw error;
     }
+    // Connections finish in the background now, so one can land after
+    // session_shutdown already closed every client it knew about.
+    if (shutDown) {
+      await client.close().catch(() => undefined);
+      throw new Error("the session shut down while the server was connecting");
+    }
     state.client = client;
     state.status = "connected";
     state.error = null;
     registerServerTools(state, listed?.tools ?? []);
+  }
+
+  /** One in-flight connection per server, shared by session_start, the loader,
+   * remote calls, and reconnect. Failures are recorded, never thrown. */
+  function ensureConnecting(state: ServerState): Promise<void> {
+    if (state.connecting) return state.connecting;
+    const attempt = connectServer(state)
+      .catch((error) => {
+        state.status = "failed";
+        state.error = errorText(error);
+        state.client = null;
+      })
+      .finally(() => {
+        if (state.connecting === attempt) state.connecting = null;
+        // A late connection registers its tools as active; only the loader
+        // may activate a remote definition.
+        try { deactivateUnselectedRemoteTools(); } catch { /* best effort */ }
+      });
+    state.connecting = attempt;
+    return attempt;
+  }
+
+  async function awaitPendingConnections(): Promise<void> {
+    const pending = [...states.values()]
+      .map((state) => state.connecting)
+      .filter((attempt): attempt is Promise<void> => attempt !== null);
+    if (pending.length > 0) await Promise.allSettled(pending);
   }
 
   function registerServerTools(state: ServerState, tools: McpToolDescriptor[]): void {
@@ -457,6 +496,7 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       prepareArguments: ((args: unknown) =>
         (args && typeof args === "object" && !Array.isArray(args) ? args : {})) as never,
       async execute(_toolCallId: string, params: unknown, signal?: AbortSignal) {
+        if (state.connecting) await state.connecting;
         const client = state.client;
         if (!client || state.status !== "connected") {
           throw new Error(
@@ -519,6 +559,9 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
       _toolCallId: string,
       params: { query?: string; activate?: string[]; limit?: number },
     ) {
+      // A server still connecting has no tools registered yet; searching now
+      // would report its capabilities as missing.
+      await awaitPendingConnections();
       const explicit = Array.isArray(params?.activate) ? params.activate : [];
       const query = typeof params?.query === "string" ? params.query.trim() : "";
       const limit = Number.isInteger(params?.limit)
@@ -607,14 +650,7 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
         if (!state) {
           throw new Error(`Unknown MCP server. Configured: ${[...states.keys()].join(", ") || "none"}.`);
         }
-        try {
-          await connectServer(state);
-          deactivateUnselectedRemoteTools();
-        } catch (error) {
-          state.status = "failed";
-          state.error = errorText(error);
-          state.client = null;
-        }
+        await ensureConnecting(state);
         return { content: [{ type: "text", text: statusLine(state) }] as never };
       }
       const lines = [...states.values()].map(statusLine);
@@ -631,19 +667,22 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
     },
   } as never);
 
-  // Pi awaits session_start before the session accepts a prompt, so connecting
-  // here cannot race the first turn. Every failure is recorded, never thrown.
+  // Pi awaits session_start before the session accepts a prompt. Fast servers
+  // connect within the wait and the first turn sees them; slower ones finish
+  // in the background, and the loader and remote calls wait on them on first
+  // use. Every failure is recorded, never thrown.
   pi.on("session_start", async () => {
     try {
-      await Promise.allSettled([...states.values()].map(async (state) => {
-        try {
-          await connectServer(state);
-        } catch (error) {
-          state.status = "failed";
-          state.error = errorText(error);
-          state.client = null;
-        }
-      }));
+      const attempts = [...states.values()].map(ensureConnecting);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled(attempts),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, SESSION_START_CONNECT_WAIT_MS);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
       // Remote definitions remain registered so the loader can activate them,
       // but only Codara's small discovery/status surface is sent initially.
       deactivateUnselectedRemoteTools();
@@ -669,12 +708,16 @@ export function registerMcpBridge(pi: ExtensionAPI, config: McpBridgeConfig): Mc
 
   return {
     promptSuffix(): string {
-      const healthy = [...states.values()].filter((state) => state.status === "connected");
-      const broken = [...states.values()].filter((state) => state.status !== "connected");
+      // A server still connecting is offered like a connected one: the loader
+      // waits for it, so telling the model it is unavailable would be wrong.
+      const usable = (state: ServerState) =>
+        state.status === "connected" || (state.status === "pending" && state.connecting !== null);
+      const healthy = [...states.values()].filter(usable);
+      const broken = [...states.values()].filter((state) => !usable(state));
       const lines: string[] = [];
       if (healthy.length > 0) {
         lines.push(
-          `Connected MCP servers: ${healthy.map((state) => `${state.config.name} (${state.toolNames.length} tools)`).join(", ")}. Use ${EXTERNAL_TOOL_LOADER_NAME} to discover and activate only the relevant tools.`,
+          `Connected MCP servers: ${healthy.map((state) => `${state.config.name} (${state.status === "connected" ? `${state.toolNames.length} tools` : "connecting"})`).join(", ")}. Use ${EXTERNAL_TOOL_LOADER_NAME} to discover and activate only the relevant tools.`,
         );
       }
       if (broken.length > 0) {

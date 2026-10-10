@@ -57,7 +57,7 @@ const FAILURE_PATTERNS: ReadonlyArray<readonly [WorkerFailureKind, RegExp]> = [
   ],
   [
     "auth",
-    /not authenticated|no OAuth access token|OAuth session expired|invalidated oauth token|oauth token[^.]{0,30}invalid|token (?:was |is )?invalidated|refresh token|token (?:has )?expired|session expired|invalid api key|missing api key|no api key|api key (?:is )?(?:invalid|missing|expired)|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|forbidden|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)|subscription (?:required|expired)/i,
+    /not authenticated|token refresh was refused|no OAuth access token|OAuth session expired|invalidated oauth token|oauth token[^.]{0,30}invalid|token (?:was |is )?invalidated|refresh token|token (?:has )?expired|session expired|invalid api key|missing api key|no api key|api key (?:is )?(?:invalid|missing|expired)|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|forbidden|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)|subscription (?:required|expired)/i,
   ],
   [
     "launch",
@@ -84,12 +84,17 @@ const FAILURE_PATTERNS: ReadonlyArray<readonly [WorkerFailureKind, RegExp]> = [
     /timed out|\btimeout\b|ETIMEDOUT|deadline exceeded|no response (?:within|from)|went quiet for|\bstalled\b|stuck in \S|exceeded its .{0,20}ceiling/i,
   ],
   [
+    // Also the agent runtime itself going away (Pi's process exit, broken
+    // stdio, or protocol violation): the same "the pipe broke" condition, and
+    // a worker earns the same one fast retry for it. `terminated` is undici's
+    // bare message for a dropped stream, so it only counts at the start of
+    // the text or right after a colon.
     "transport",
-    /socket (?:connection|hang ?up)|connection (?:was )?(?:closed|reset|refused|aborted)|ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|ENOTFOUND|EAI_AGAIN|network (?:error|failure|fetch)|fetch failed|fetch\(\)|stream (?:closed|disconnected|ended) (?:unexpectedly|early)|premature close|transport (?:closed|error)|websocket/i,
+    /connection error|(?:^|:\s*)terminated\b|stream disconnected|request was aborted|Pi RPC (?:process exited|process failed|stdin failed|write failed|output exceeded|emitted)|Pi RPC client (?:stopped|is not running)|socket (?:connection|hang ?up)|connection (?:was )?(?:closed|reset|refused|aborted)|ECONNRESET|ECONNREFUSED|ECONNABORTED|EPIPE|ENOTFOUND|EAI_AGAIN|network (?:error|failure|fetch)|fetch failed|fetch\(\)|stream (?:closed|disconnected|ended) (?:unexpectedly|early)|premature close|transport (?:closed|error)|websocket/i,
   ],
   [
     "provider",
-    /(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:500|502|503|504|529)\b|overloaded|temporarily unavailable|service unavailable|internal server error|server error|upstream error|An error occurred while processing your request|provider (?:error|turn failed)|exhausted its provider retries|API Error|runtime API error|capacity|high demand|servers? (?:are )?(?:too )?busy|model (?:is )?unavailable/i,
+    /(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:500|502|503|504|529)\b|overloaded|temporarily unavailable|service unavailable|internal server error|server error|upstream error|An error occurred while processing your request|provider (?:error|turn failed)|exhausted (?:its )?(?:provider |automatic )?retries|high load|had an error processing|API Error|runtime API error|capacity|high demand|servers? (?:are )?(?:too )?busy|model (?:is )?unavailable/i,
   ],
   [
     "tool",

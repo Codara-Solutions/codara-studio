@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type {
   ChatMode,
@@ -9,6 +9,7 @@ import type {
   ProjectPolicyMode,
 } from "@shared/types";
 
+import { familyForSubscription } from "../../shared/agent-families";
 import { resolveBundledResourcePath } from "../bundled-resources";
 import {
   mintAgentSocketCapability,
@@ -33,6 +34,7 @@ import {
 import {
   buildPiManagerLaunchPlan,
   inspectPiSubscriptionAuth,
+  mergeCodaraPiAgentSettings,
   piPackageRootsForBinary,
   resolveInstalledPiRuntime,
   resolvePinnedPiRuntime,
@@ -42,6 +44,7 @@ import {
   type PiSubscriptionProvider,
   type PiThinkingLevel,
   type PiRuntimeLocation,
+  windowsGitBashCandidates,
 } from "./pi-runtime";
 import {
   normalizePiAccountProfileId,
@@ -384,14 +387,77 @@ async function npmGlobalRoot(): Promise<string | null> {
   return value;
 }
 
+let failedUserPiVersion: string | null = null;
+
+/**
+ * Stop launching the user's Pi at `version` for the rest of this app session,
+ * after a Cora process on it failed to start. Updating Pi to any other
+ * version makes it eligible again.
+ */
+export function markUserPiRuntimeFailed(version: string): void {
+  failedUserPiVersion = version;
+}
+
 /**
  * The Pi that runs Cora's sessions: the user's own install once there is
  * one, and until then the build bundled with the app, so Cora keeps
  * working on a machine without Node while Settings recommends installing
- * Pi.
+ * Pi. A user install that already failed to start falls back the same way.
  */
 export async function resolveCodaraPiRuntime(): Promise<PiRuntimeLocation> {
-  return resolveUserPiRuntime().catch(() => resolveCodaraPiLibrary());
+  const user = await resolveUserPiRuntime().catch(() => null);
+  if (user && user.version !== failedUserPiVersion) return user;
+  return resolveCodaraPiLibrary();
+}
+
+function expiredSignInError(provider: PiProvider): Error {
+  const name = provider === "openrouter" ? "OpenRouter" : familyForSubscription(provider).displayName;
+  return new Error(
+    `Cora's ${name} sign-in expired and cannot be renewed (OAuth session expired). Sign in again in Settings > Accounts.`,
+  );
+}
+
+let windowsBashPath: Promise<string | null> | null = null;
+
+/** Git for Windows' bash.exe, resolved once; null off Windows or when absent. */
+function resolveWindowsBashPath(): Promise<string | null> {
+  if (process.platform !== "win32") return Promise.resolve(null);
+  windowsBashPath ??= (async () => {
+    const git = await resolveBinary("git").catch(() => null);
+    for (const candidate of windowsGitBashCandidates(process.env, git)) {
+      const found = await stat(candidate).catch(() => null);
+      if (found?.isFile()) return candidate;
+    }
+    return null;
+  })();
+  return windowsBashPath;
+}
+
+/**
+ * Keep Codara's keys in the isolated agent dir's settings.json: Pi's retry
+ * budget and, on Windows, the bash it must use. Rewritten only when the
+ * merged content differs, since manager and worker processes of one account
+ * share the file. Best-effort: Pi's defaults still launch a working session.
+ */
+async function writeCodaraPiAgentSettings(configDir: string): Promise<void> {
+  const file = join(configDir, "settings.json");
+  try {
+    const raw = await readFile(file, "utf8").catch(() => null);
+    let existing: unknown = {};
+    if (raw !== null) {
+      // A file that does not parse was edited by hand; never overwrite it.
+      try { existing = JSON.parse(raw); }
+      catch { return; }
+    }
+    const merged = mergeCodaraPiAgentSettings(existing, {
+      shellPath: await resolveWindowsBashPath(),
+    });
+    const next = `${JSON.stringify(merged, null, 2)}\n`;
+    if (next === raw) return;
+    await writeFileAtomic(file, next, { mode: 0o600 });
+  } catch (error) {
+    console.warn(`[pi-runtime] could not write ${file}:`, error);
+  }
 }
 
 /**
@@ -427,69 +493,79 @@ export async function createCodaraPiLaunchPlan(
   const paths = codaraPiPaths(account.configDir);
   const untrustedPullRequest =
     options.projectPolicyMode === "untrusted-pull-request";
-  const [runtime, auth, webSearchExtensionPath, mcp, settings] = await Promise.all([
-    resolveCodaraPiRuntime(),
-    isOpenRouter
-      ? Promise.resolve(null)
-      : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
-    resolveCodaraPiWebSearchExtension(),
-    untrustedPullRequest
-      ? Promise.resolve(null)
-      : writePiMcpBridgeConfig({
-          audience: "cora",
-          sessionId: options.sessionId,
-          cwd: options.cwd,
-          mcpConfigDir: paths.mcpConfigDir,
-        }),
-    loadSettings(),
-  ]);
-  if (auth?.expired && !auth.canRefresh) {
-    throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
+  // The roster holds MCP credentials, so every path that throws after it was
+  // written, including a sibling of this Promise.all rejecting, removes it.
+  const mcpWrite = untrustedPullRequest
+    ? Promise.resolve(null)
+    : writePiMcpBridgeConfig({
+        audience: "cora",
+        sessionId: options.sessionId,
+        cwd: options.cwd,
+        mcpConfigDir: paths.mcpConfigDir,
+      });
+  try {
+    const [runtime, auth, webSearchExtensionPath, mcp, settings] = await Promise.all([
+      resolveCodaraPiRuntime(),
+      isOpenRouter
+        ? Promise.resolve(null)
+        : inspectPiSubscriptionAuth(paths.authFile, options.provider as PiSubscriptionProvider),
+      resolveCodaraPiWebSearchExtension(),
+      mcpWrite,
+      loadSettings(),
+    ]);
+    if (auth?.expired && !auth.canRefresh) {
+      throw expiredSignInError(options.provider);
+    }
+    await Promise.all([
+      mkdir(paths.configDir, { recursive: true, mode: 0o700 }),
+      mkdir(paths.sessionDir, { recursive: true, mode: 0o700 }),
+    ]);
+    await writeCodaraPiAgentSettings(paths.configDir);
+    const plan = buildPiManagerLaunchPlan({
+      runtime,
+      provider: options.provider,
+      apiKey: options.apiKey,
+      accountProfileId: account.accountProfileId,
+      openAiFastMode:
+        options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
+      configDir: paths.configDir,
+      sessionDir: paths.sessionDir,
+      sessionId: options.sessionId,
+      runId: options.runId,
+      mode: options.mode,
+      chatMode: options.chatMode,
+      executionPolicy: options.executionPolicy,
+      cwd: options.cwd,
+      bridgePath: paths.bridgePath,
+      extensionPaths: [
+        paths.extensionPath,
+        // Web search is optional: an absent package simply leaves the roster
+        // unchanged rather than handing Pi a path it cannot load.
+        ...(!untrustedPullRequest && webSearchExtensionPath
+          ? [webSearchExtensionPath]
+          : []),
+      ],
+      mcpConfigPath: mcp?.mcpConfigPath,
+      mcpSdkDir: mcp?.mcpSdkDir,
+      model: options.model,
+      thinking: options.thinking ?? "high",
+      sessionName: options.sessionName,
+      projectPolicyMode: options.projectPolicyMode,
+      codaraHomeDir: codaraHome(),
+      processExecutable: electronAsNodeInterpreter(),
+    });
+    plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(availableCoraWorkerModels(settings));
+    return untrustedPullRequest
+      ? attachUntrustedSocketCapability(plan, {
+          audience: "untrusted-pi-manager",
+          runId: options.runId,
+        })
+      : plan;
+  } catch (error) {
+    const written = await mcpWrite.catch(() => null);
+    await cleanupPiMcpBridgeConfig({ mcpConfigPath: written?.mcpConfigPath ?? null });
+    throw error;
   }
-  await Promise.all([
-    mkdir(paths.configDir, { recursive: true, mode: 0o700 }),
-    mkdir(paths.sessionDir, { recursive: true, mode: 0o700 }),
-  ]);
-  const plan = buildPiManagerLaunchPlan({
-    runtime,
-    provider: options.provider,
-    apiKey: options.apiKey,
-    accountProfileId: account.accountProfileId,
-    openAiFastMode:
-      options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
-    configDir: paths.configDir,
-    sessionDir: paths.sessionDir,
-    sessionId: options.sessionId,
-    runId: options.runId,
-    mode: options.mode,
-    chatMode: options.chatMode,
-    executionPolicy: options.executionPolicy,
-    cwd: options.cwd,
-    bridgePath: paths.bridgePath,
-    extensionPaths: [
-      paths.extensionPath,
-      // Web search is optional: an absent package simply leaves the roster
-      // unchanged rather than handing Pi a path it cannot load.
-      ...(!untrustedPullRequest && webSearchExtensionPath
-        ? [webSearchExtensionPath]
-        : []),
-    ],
-    mcpConfigPath: mcp?.mcpConfigPath,
-    mcpSdkDir: mcp?.mcpSdkDir,
-    model: options.model,
-    thinking: options.thinking ?? "high",
-    sessionName: options.sessionName,
-    projectPolicyMode: options.projectPolicyMode,
-    codaraHomeDir: codaraHome(),
-    processExecutable: electronAsNodeInterpreter(),
-  });
-  plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(availableCoraWorkerModels(settings));
-  return untrustedPullRequest
-    ? attachUntrustedSocketCapability(plan, {
-        audience: "untrusted-pi-manager",
-        runId: options.runId,
-      })
-    : plan;
 }
 
 export interface CreateCodaraPiWorkerLaunchOptions {
@@ -583,12 +659,13 @@ export async function createCodaraPiWorkerLaunchPlan(
     resolveCodaraPiWebSearchExtension(),
   ]);
   if (auth?.expired && !auth.canRefresh) {
-    throw new Error(`Pi provider ${options.provider} OAuth session expired and cannot refresh`);
+    throw expiredSignInError(options.provider);
   }
   await Promise.all([
     mkdir(paths.configDir, { recursive: true, mode: 0o700 }),
     mkdir(paths.sessionDir, { recursive: true, mode: 0o700 }),
   ]);
+  await writeCodaraPiAgentSettings(paths.configDir);
   // A follow-up resume reuses the source attempt's exact id (it went through
   // this same sanitizer when first minted; buildPiManagerLaunchPlan re-asserts
   // the safe charset). Everything else derives a fresh per-attempt id.

@@ -2417,7 +2417,11 @@ export type ManagerTurnRecoveryFailureKind =
   | "timeout"
   // Expired/revoked provider credential: only the user can re-authenticate,
   // so the run parks with a sign-in-again prompt instead of failing.
-  | "auth";
+  | "auth"
+  // Cora's own runtime crashed, the model ended without a reply, or the turn
+  // failed for an unnamed reason while workers were still running. Parked so
+  // the workers survive.
+  | "runtime";
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach

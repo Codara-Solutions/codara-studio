@@ -121,7 +121,7 @@ export function classifyWorkerSilence(input: {
  */
 export const PI_TURN_IDLE_TIMEOUT_MS = 25 * 60 * 1000;
 export const PI_TURN_ABSOLUTE_CEILING_MS = 6 * 60 * 60 * 1000;
-/** Maximum time a normal Pi tool may produce no result. */
+/** Maximum time a normal Pi tool may produce neither a result nor progress. */
 export const PI_TOOL_RESULT_TIMEOUT_MS = 25 * 60 * 1000;
 export const PI_LONG_POLL_TRUST_MS = 30 * 60 * 1000;
 
@@ -136,6 +136,8 @@ export interface TurnInFlightTool {
   name: string;
   startedAt: number;
   longPoll: boolean;
+  /** Last streamed progress (tool_execution_update), e.g. bash output. */
+  lastProgressAt?: number;
 }
 
 export function classifyTurnLiveness(input: {
@@ -155,14 +157,23 @@ export function classifyTurnLiveness(input: {
   }
 
   if (inFlightTools.length > 0) {
+    // A normal tool that keeps streaming output (a long build, a test suite)
+    // is alive, so it is timed from its latest progress. A long-poll is timed
+    // from its start: its bound is the RPC's own legal duration.
     const expired = inFlightTools
-      .map((tool) => ({
-        tool,
-        waitingFor: now - tool.startedAt,
-        timeout: tool.longPoll ? PI_LONG_POLL_TRUST_MS : PI_TOOL_RESULT_TIMEOUT_MS,
-      }))
+      .map((tool) => {
+        const since = tool.longPoll
+          ? tool.startedAt
+          : Math.max(tool.startedAt, tool.lastProgressAt ?? tool.startedAt);
+        return {
+          tool,
+          since,
+          waitingFor: now - since,
+          timeout: tool.longPoll ? PI_LONG_POLL_TRUST_MS : PI_TOOL_RESULT_TIMEOUT_MS,
+        };
+      })
       .filter((entry) => entry.waitingFor >= entry.timeout)
-      .sort((left, right) => (left.tool.startedAt + left.timeout) - (right.tool.startedAt + right.timeout))[0];
+      .sort((left, right) => (left.since + left.timeout) - (right.since + right.timeout))[0];
     if (!expired) return { action: "continue", detail: "" };
     return {
       action: "fail",
@@ -170,7 +181,7 @@ export function classifyTurnLiveness(input: {
         ? `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
           `${Math.round(expired.waitingFor / 60_000)} min with no result, past the point that call can legally take.`
         : `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
-          `${Math.round(expired.waitingFor / 60_000)} min with no result.`,
+          `${Math.round(expired.waitingFor / 60_000)} min with no result or output.`,
     };
   }
 

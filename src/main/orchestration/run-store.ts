@@ -172,6 +172,7 @@ import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonom
 import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
+  managerTurnParkReason,
   managerTurnRetryDelayMs,
   MAX_MANAGER_TRANSIENT_RETRIES,
   planManagerTurnFailure,
@@ -244,7 +245,7 @@ import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memo
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
 import {
   describeHeadroomForPrompt,
-  readSubscriptionHeadroomSummary,
+  readCachedSubscriptionHeadroomSummary,
 } from "./subscription-headroom";
 import {
   createCheckpoint,
@@ -5774,11 +5775,11 @@ async function prepareManagerTurn(
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
   // Subscription headroom rides the same dynamic tail as the memory. The read
-  // hits pi-subscription-usage's 60s cache (never forced), and any failure
+  // takes the last known usage without waiting on the network, and any failure
   // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
   let subscriptionHeadroom: string | null = null;
   try {
-    subscriptionHeadroom = describeHeadroomForPrompt(await readSubscriptionHeadroomSummary());
+    subscriptionHeadroom = describeHeadroomForPrompt(await readCachedSubscriptionHeadroomSummary());
   } catch {
     subscriptionHeadroom = null;
   }
@@ -6315,6 +6316,10 @@ async function askManagerBackend(
         mode,
         transientRetryCount,
         backend: chatConfig.backend,
+        failureCause: result.failureCause,
+        providerRetried: result.providerRetried,
+        replaySafe: result.replaySafe,
+        activeWorkerCount: activeWorkersForRun(settledRun.id).length,
       });
 
       // The run already carries a state this dead turn must not rewrite: a
@@ -6418,6 +6423,7 @@ async function askManagerBackend(
           model: result.model,
           backend: chatConfig.backend,
           error: failureMessage,
+          ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
           providerResponseIds: result.providerResponseIds,
         },
       });
@@ -6426,6 +6432,13 @@ async function askManagerBackend(
       // so would make an overload string a future manager prompt. The failed
       // SparkCall and typed events above are the sole durable error surface.
       const failedRun = settledRun;
+
+      // A billing decline fails this turn and nothing else: the run keeps
+      // its status and its workers, and the failed SparkCall above is the
+      // visible error.
+      if (failurePlan.action === "fail_turn") {
+        return failedRun;
+      }
 
       // Provider trouble that outlived the retries (or a rate limit, which a
       // fast retry can never clear): park instead of failing. The work did
@@ -6634,6 +6647,10 @@ async function askManagerBackend(
     }
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
+    const diagnostics =
+      err && typeof (err as { diagnostics?: unknown }).diagnostics === "string"
+        ? (err as { diagnostics: string }).diagnostics
+        : undefined;
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;
@@ -6656,7 +6673,13 @@ async function askManagerBackend(
       sparkCallId: callId,
       type: "spark_call.failed",
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
-      payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
+      payload: {
+        mode,
+        model: chatConfig.model,
+        backend: chatConfig.backend,
+        error,
+        ...(diagnostics ? { diagnostics } : {}),
+      },
     });
     return null;
   }
@@ -10117,12 +10140,7 @@ async function returnUnfinishedManagerRecoveryToParked(
           recovery.managerMode === "chat"
             ? "chat_turn_parked"
             : "manager_turn_parked",
-        stopReason:
-          recovery.failureKind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : recovery.failureKind === "transport"
-              ? "Cora lost its provider connection. Retry when the connection is stable."
-              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        stopReason: managerTurnParkReason(recovery.failureKind),
         pausedAt: timestamp,
         updatedAt: timestamp,
       };
@@ -15224,15 +15242,14 @@ async function maybeQueueCliLaunchFallback({
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
   if (!isLaunchFailure) return null;
-  if (
-    task.runtimePreference !== "claude" &&
-    task.runtimePreference !== "codex"
-  ) {
+  if (task.runtimePreference === "shell" || task.runtimePreference === "manual") {
     return null;
   }
   const availableRuntimes = await detectConfiguredAgentRuntimes();
   // Prefer the first installed runtime OTHER than the one that just failed.
-  // Order claude → codex by default, but skip the failing one.
+  // Every agent runtime (Grok included) gets the same-runtime fast retry, but
+  // only claude and codex are switch targets: the hint translators below map
+  // a model and effort into those two rosters and no other.
   const preferenceOrder: WorkerRuntime[] = ["claude", "codex"];
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
@@ -16388,9 +16405,15 @@ function normalizeRun(run: RunState): RunState {
       typeof recovery.id === "string" &&
       recovery.id.startsWith("recovery-") &&
       (recovery.state === "parked" || recovery.state === "resuming") &&
+      // Every kind manager-turn-policy parks with. A kind missing here is
+      // deleted by the first saveRun after the park, which strands the run
+      // paused without the exact-replay token its Retry needs.
       (recovery.failureKind === "rate_limit" ||
         recovery.failureKind === "provider" ||
-        recovery.failureKind === "transport") &&
+        recovery.failureKind === "transport" ||
+        recovery.failureKind === "timeout" ||
+        recovery.failureKind === "auth" ||
+        recovery.failureKind === "runtime") &&
       // A recovery parked by a retired claude/codex manager backend cannot
       // be replayed on Pi; dropping it leaves the run paused and answerable.
       recovery.backend === "pi" &&

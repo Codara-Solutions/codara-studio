@@ -86,6 +86,24 @@ process.stdin.on("data", (chunk) => {
       process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false, error: "fixture failure" }) + "\n");
     } else if (command.type === "malformed") {
       process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false }) + "\n");
+    } else if (command.type === "exit_later") {
+      process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data: null }) + "\n");
+      setTimeout(() => process.exit(3), 30);
+    } else if (command.type === "big_agent_end") {
+      const head = JSON.stringify({ type: "agent_end", messages: [{ text: "x".repeat(6000) }] });
+      if (command.split) {
+        process.stdout.write(head.slice(0, 3000));
+        setTimeout(() => {
+          process.stdout.write(head.slice(3000) + "\n");
+          process.stdout.write(JSON.stringify({ type: "agent_settled" }) + "\n");
+          process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data: "ok" }) + "\n");
+        }, 20);
+      } else {
+        process.stdout.write(head + "\n" + JSON.stringify({ type: "agent_settled" }) + "\n");
+        process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data: "ok" }) + "\n");
+      }
+    } else if (command.type === "big_message_end") {
+      process.stdout.write(JSON.stringify({ type: "message_end", message: { text: "x".repeat(6000) } }) + "\n");
     } else if (command.type === "spawn_descendant") {
       const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
         detached: true,
@@ -202,10 +220,56 @@ async function main() {
   assert.equal(stderr.diagnostics().stderr, "😀tail");
   assert.equal(stderr.diagnostics().droppedStderrBytes, 6);
   await stderr.stop();
+  // A crash after the last response leaves nothing pending to reject; the
+  // failure subscription is the only way a waiting turn hears about it.
+  const crashing = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  await crashing.start();
+  const failures = [];
+  crashing.onFailure((failure) => failures.push(failure));
+  const removed = [];
+  crashing.onFailure((failure) => removed.push(failure))();
+  await crashing.request({ type: "exit_later" });
+  await waitFor(() => failures.length === 1, 3_000, "failure listener after child exit");
+  assert.equal(failures[0].code, "PROCESS_EXIT");
+  assert.equal(failures[0].message, "Pi RPC process exited (3)");
+  assert.equal(removed.length, 0, "an unsubscribed listener is not called");
+  assert.equal(crashing.state().phase, "failed");
+  await crashing.stop();
+
+  const stopped = new PiRpcClient(plan(), { requestTimeoutMs: 250, shutdownGraceMs: 30 });
+  await stopped.start();
+  let stopFailures = 0;
+  stopped.onFailure(() => { stopFailures += 1; });
+  await stopped.stop();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(stopFailures, 0, "our own stop is not a failure");
+
+  // agent_end repeats the whole run and is the one record that may outgrow
+  // the line limit; it is skipped, whole or split across chunks, and the
+  // session carries on. Any other oversized record is still fatal.
+  for (const split of [false, true]) {
+    const oversized = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
+    await oversized.start();
+    const seen = [];
+    oversized.onEvent((event) => seen.push(event.type));
+    assert.equal(await oversized.request({ type: "big_agent_end", split }), "ok");
+    assert.deepEqual(seen, ["agent_settled"], `split=${split}`);
+    assert.equal(oversized.state().phase, "running");
+    assert.equal(oversized.diagnostics().droppedOversizedEvents, 1);
+    await oversized.stop();
+  }
+  const fatal = new PiRpcClient(plan(), { requestTimeoutMs: 500, maxLineBytes: 1024, shutdownGraceMs: 30 });
+  await fatal.start();
+  await assert.rejects(fatal.request({ type: "big_message_end" }), (error) => error.code === "PROTOCOL_ERROR");
+  assert.equal(fatal.state().failure.message, "Pi RPC output exceeded the line limit");
+  await fatal.stop();
   console.log("pi rpc client: ok");
 }
 
+// The client's shutdown timers are unref'd so they never hold the app open;
+// hold the loop here so a slow teardown cannot end the test early as a pass.
+const keepAlive = setInterval(() => undefined, 1_000);
 main().catch((error) => {
   console.error(error.stack || error.message);
   process.exitCode = 1;
-});
+}).finally(() => clearInterval(keepAlive));

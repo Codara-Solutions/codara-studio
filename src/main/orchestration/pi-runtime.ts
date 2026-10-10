@@ -8,6 +8,7 @@ import type {
 } from "@shared/types";
 import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
+import { isRemotePath } from "@shared/remote";
 import { sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -22,8 +23,14 @@ export const CODARA_PI_VERSION = "0.85.1";
  * the extension events Cora's extensions use are unchanged through 0.87.
  */
 export const CODARA_PI_MIN_VERSION = "0.85.1";
+/**
+ * What Settings' Install button installs: the tested minor line, never npm's
+ * latest. A user who updates Pi themselves still runs that build; the
+ * launcher falls back to the bundled Pi when it cannot start.
+ */
+export const CODARA_PI_INSTALL_SPEC = `${CODARA_PI_PACKAGE}@~${CODARA_PI_VERSION}`;
 /** How the user installs, and later updates, Pi themselves. */
-export const PI_INSTALL_COMMAND = `npm install -g ${CODARA_PI_PACKAGE}`;
+export const PI_INSTALL_COMMAND = `npm install -g ${CODARA_PI_INSTALL_SPEC}`;
 /** Vendored Pi extension that registers the provider-native web_search tool.
  * It is a normal dependency of this repo, never the user's own pi packages. */
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
@@ -70,6 +77,9 @@ export interface PiRuntimeLocation {
   packageJsonPath: string;
   entrypoint: string;
   version: string;
+  /** Whether this is the user's own install or the build bundled with the
+   *  app. Absent means unknown and is never retried on another build. */
+  source?: "user" | "bundled";
 }
 
 export interface PiSubscriptionAuthStatus {
@@ -154,6 +164,10 @@ export interface PiManagerLaunchPlan {
   /** Absolute lease boundary for the process-local socket claim. Main-only;
    * a live Pi process must be rotated instead of reusing an expired lease. */
   agentSocketCapabilityExpiresAt?: number;
+  /** Which Pi build this plan runs, so a failed start on the user's install
+   *  can be retried on the bundled one. */
+  runtimeSource?: "user" | "bundled";
+  runtimeVersion?: string;
 }
 
 const DEFAULT_MODELS: Record<PiProvider, string> = {
@@ -242,6 +256,7 @@ export async function resolvePinnedPiRuntime(
       packageJsonPath,
       entrypoint,
       version: CODARA_PI_VERSION,
+      source: "bundled",
     };
   }
   const detail = mismatches.length ? ` Version mismatches: ${mismatches.join(", ")}.` : "";
@@ -297,7 +312,7 @@ export async function resolveInstalledPiRuntime(
     const entrypoint = join(packageRoot, bin);
     const entryStat = await stat(entrypoint).catch(() => null);
     if (!entryStat?.isFile()) continue;
-    return { packageRoot, packageJsonPath, entrypoint, version: manifest.version };
+    return { packageRoot, packageJsonPath, entrypoint, version: manifest.version, source: "user" };
   }
   if (tooOld.length > 0) {
     throw new Error(
@@ -432,6 +447,67 @@ export async function inspectPiSubscriptionAuth(
 }
 
 /**
+ * Pi's own provider retry budget for every Cora process. Pi's default (3
+ * retries from 2s, about 14s in all) is shorter than a typical provider
+ * overload burst, which then parked the run. Six retries back off for about
+ * two minutes; the longest single sleep (64s) stays under the worker's
+ * provider-failure grace in agent-liveness.ts, and Pi emits auto_retry_start
+ * before each sleep, so liveness sees progress throughout.
+ */
+export const CODARA_PI_RETRY_SETTINGS = {
+  enabled: true,
+  maxRetries: 6,
+  baseDelayMs: 2_000,
+} as const;
+
+/**
+ * Merge Codara's keys into the settings.json of an isolated Pi agent dir and
+ * return the result, leaving every other key as it was. `shellPath` is set
+ * only when one was resolved, so a path the user wrote by hand survives.
+ */
+export function mergeCodaraPiAgentSettings(
+  existing: unknown,
+  options: { shellPath?: string | null } = {},
+): Record<string, unknown> {
+  const base = isRecord(existing) ? { ...existing } : {};
+  const retry = isRecord(base.retry) ? base.retry : {};
+  base.retry = { ...retry, ...CODARA_PI_RETRY_SETTINGS };
+  if (options.shellPath) base.shellPath = options.shellPath;
+  return base;
+}
+
+/**
+ * Where Git for Windows' bash.exe may live, best first. Pi itself only checks
+ * %ProgramFiles%\Git and then any bash.exe on PATH, which misses user-scope
+ * installs (winget, scoop) and can land on System32\bash.exe, the WSL
+ * launcher, which runs Cora's commands in Linux against /mnt/c paths.
+ * `gitExecutable` is the git.exe found on PATH, when there is one.
+ */
+export function windowsGitBashCandidates(
+  env: NodeJS.ProcessEnv,
+  gitExecutable?: string | null,
+): string[] {
+  const win = (...parts: string[]): string => parts.join("\\");
+  const candidates: string[] = [];
+  for (const root of [env.ProgramFiles, env.ProgramW6432, env["ProgramFiles(x86)"]]) {
+    if (root) candidates.push(win(root, "Git", "bin", "bash.exe"));
+  }
+  if (env.LOCALAPPDATA) candidates.push(win(env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"));
+  const scoop = env.SCOOP || (env.USERPROFILE ? win(env.USERPROFILE, "scoop") : "");
+  if (scoop) candidates.push(win(scoop, "apps", "git", "current", "bin", "bash.exe"));
+  if (gitExecutable) {
+    // <git root>\cmd\git.exe or <git root>\mingw64\bin\git.exe
+    const segments = gitExecutable.split(/[\\/]/);
+    for (const depth of [2, 3]) {
+      if (segments.length > depth) {
+        candidates.push(win(...segments.slice(0, segments.length - depth), "bin", "bash.exe"));
+      }
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+/**
  * Strip every API-key override before launching Pi. OAuth is read only from
  * Codara's isolated, mode-600 auth store; inheriting a shell API key would
  * silently turn a subscription experiment into metered API usage.
@@ -470,6 +546,13 @@ export function buildPiSubscriptionEnvironment(
 
 /** Build the deterministic RPC launch used by the experimental Cora backend. */
 export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiManagerLaunchPlan {
+  // An ssh:// workspace path resolves to a nonsense local directory and the
+  // spawn then fails with a misleading ENOENT.
+  if (isRemotePath(options.cwd)) {
+    throw new Error(
+      "Cora runs on local folders only for now. Open a local clone of this project, or use a terminal agent on the SSH host.",
+    );
+  }
   assertSafeSegment(options.sessionId, "Pi session id");
   assertSafeSegment(options.runId, "Codara run id");
   const model = options.model?.trim() || DEFAULT_MODELS[options.provider];
@@ -599,5 +682,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     executionPolicy,
     projectPolicyMode,
     mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
+    ...(options.runtime.source ? { runtimeSource: options.runtime.source } : {}),
+    runtimeVersion: options.runtime.version,
   };
 }

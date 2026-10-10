@@ -26,6 +26,7 @@ import type {
 } from "./manager-protocol";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
+import type { ManagerTurnFailureCause } from "./manager-turn-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -138,6 +139,18 @@ export interface ManagerCallResult {
    * or mark a genuine turn failure.
    */
   turnFailed?: boolean;
+  /** Structured cause of a failed turn, when the backend knows it better
+   *  than its error text says. Wins over text classification in
+   *  manager-turn-policy. */
+  failureCause?: ManagerTurnFailureCause;
+  /** Raw diagnostic output (a stderr tail) for a failed turn. Kept out of
+   *  `notice` so it never drives classification or the user-facing text. */
+  diagnostics?: string;
+  /** The backend's own provider retry loop ran during this turn. */
+  providerRetried?: boolean;
+  /** No tool started during this turn, so replaying it cannot repeat a side
+   *  effect. Absent means unknown. */
+  replaySafe?: boolean;
   /**
    * The turn ended because the USER interrupted it (Stop button →
    * interruptChat), not because anything went wrong. run-store treats this

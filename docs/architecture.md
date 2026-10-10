@@ -124,15 +124,32 @@ the repeat guard, compaction, the MCP bridge, deep search, peer comms and
 Claude login renewal. `resolveCodaraPiRuntime` in `pi-runtime-electron.ts`
 uses the Pi the user installed (0.85.1 or newer, found through the `pi` on
 their PATH) when there is one, and otherwise the Pi build bundled with the
-app. Settings offers `npm install -g` to install Pi, and updates are the
+app. If the user's Pi fails to start, that version is skipped until Codara
+restarts and the turn retries once on the bundled build, with a note in
+the chat. Settings offers `npm install -g` to install Pi, pinned to the tested
+minor line (`CODARA_PI_INSTALL_SPEC` in `pi-runtime.ts`), and updates are the
 user's. The bundled copy (`resolveCodaraPiLibrary`) is also what the main
 process uses as a library for credential storage, sign-in flows and the
 model catalog. `pi-backend.ts` and `pi-rpc-client.ts` run Pi as a child
-process in RPC mode. `pi-account-router.ts` picks the subscription.
+process in RPC mode. `pi-account-router.ts` picks the subscription. Every
+launch merges Codara's provider retry budget (and, on Windows, the Git Bash
+path) into the `settings.json` of Cora's isolated Pi config directory, so Pi
+itself rides out a busy or briefly unreachable provider. Cora runs on local
+folders only; an `ssh://` workspace gets a clear error instead of a broken
+launch.
 
 **Manager and workers.** Each chat has one manager Pi process, loaded with
 `resources/pi-cora/index.ts`. It is reused from turn to turn until a
-launch setting changes (account, model, effort, mode, policy, fast mode). Each worker
+launch setting changes (account, model, effort, mode, policy, fast mode), and
+the restart note names what changed. After an interrupt the same process is
+reused once Pi confirms it is idle, unless Pi had not yet accepted the
+interrupted prompt (Pi would start that prompt's run after the abort). A
+manager process idle for 10 minutes is
+stopped, and at most 4 stay alive at once (the least recently used idle one
+goes first); the next turn starts a fresh process on the saved session. If
+the process crashes mid-turn, the turn fails at once with Pi's stderr in the
+technical details, and the run parks with the turn saved for a retry instead
+of failing outright. Each worker
 attempt is its own Pi process, loaded with `resources/pi-cora/worker.ts`.
 Every autonomous worker runs this way. The worker's runtime (`claude`,
 `codex` or `grok`) picks the model provider (Anthropic, OpenAI or xAI), not a
