@@ -34,10 +34,6 @@ export interface PiRuntimeInstallProgress {
 }
 
 /**
- * Where earlier Codara builds installed their own copy of Pi. Nothing reads
- * it any more; it is removed once the user's own install is in place.
- */
-/**
  * The next step after npm was refused write access to its global folder.
  * Re-running the same command would fail the same way, so the advice is about
  * the folder or the process holding it, and it always says the step is
@@ -60,6 +56,10 @@ export function piInstallPermissionAdvice(platform: NodeJS.Platform = process.pl
   );
 }
 
+/**
+ * Where earlier Codara builds installed their own copy of Pi. Nothing reads
+ * it any more; it is removed once the user's own install is in place.
+ */
 export function retiredPiRuntimeRoot(): string {
   return join(codaraHome(), "pi-runtime");
 }
