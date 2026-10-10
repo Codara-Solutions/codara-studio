@@ -13,7 +13,7 @@
 //     on click, never during a streamed render.
 //   - Markdown outside a run (no workspace context) keeps external-only links.
 //   - Chat code is highlighted with theme tokens scoped to .cora-md, code
-//     blocks offer Copy (skipping Mermaid), and table cells have borders.
+//     blocks offer Copy (skipping Mermaid), and table rows are divided by horizontal rules.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -146,7 +146,7 @@ async function main() {
     assert.match(markdown, /getText=\{\(\) => nodeText\(children\)/);
     assert.match(markdown, /th: \(\{ children, style \}\) => <th style=\{\{ \.\.\.TABLE_HEAD_STYLE/);
     assert.match(markdown, /td: \(\{ children, style \}\) => <td style=\{\{ \.\.\.TABLE_CELL_STYLE/);
-    assert.match(markdown, /border: "1px solid var\(--rule-soft\)", padding: "4px 8px"/);
+    assert.match(markdown, /borderBottom: "1px solid var\(--rule-soft\)", padding: "6px 10px"/);
     const styles = read("src/renderer/src/styles.css");
     for (const token of ["hljs-keyword", "hljs-string", "hljs-comment", "hljs-number", "hljs-title"]) {
       assert.match(styles, new RegExp(`\\.cora-md \\.${token}`), token);

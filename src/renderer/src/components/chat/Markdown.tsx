@@ -246,8 +246,11 @@ const HEADING_STYLE: React.CSSProperties = { color: "var(--ink)" };
 const RULE_STYLE: React.CSSProperties = { border: "none", borderTop: "1px solid var(--rule-soft)" };
 const QUOTE_STYLE: React.CSSProperties = { padding: "2px 12px", borderLeft: "2px solid var(--rule-strong)", color: "var(--ink-dim)" };
 const TABLE_STYLE: React.CSSProperties = { width: "100%", borderCollapse: "collapse", fontSize: 12.5 };
-const TABLE_CELL_STYLE: React.CSSProperties = { border: "1px solid var(--rule-soft)", padding: "4px 8px", verticalAlign: "top" };
+const TABLE_CELL_STYLE: React.CSSProperties = {
+  borderBottom: "1px solid var(--rule-soft)", padding: "6px 10px", verticalAlign: "top",
+};
 const TABLE_HEAD_STYLE: React.CSSProperties = {
-  ...TABLE_CELL_STYLE, textAlign: "left", fontWeight: 600, color: "var(--ink)",
-  background: "color-mix(in oklab, var(--ink) 5%, transparent)",
+  ...TABLE_CELL_STYLE, textAlign: "left", fontWeight: 600, fontSize: 12, color: "var(--ink-dim)",
+  borderBottom: "1px solid var(--rule)",
+  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
 };
