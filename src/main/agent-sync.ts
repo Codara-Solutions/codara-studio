@@ -664,15 +664,19 @@ function mcpNameListed(asset: ParsedAssetId): boolean {
   return loaded.tomlNames.includes(asset.name);
 }
 
-export function syncAgentAssets(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+// `dryRun` walks the same path and fills the same lists without writing, so
+// the Capability Center can show what a sync would copy before it asks.
+export function syncAgentAssets(input: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> {
+  if (input.dryRun) return syncAgentAssetsUnlocked(input);
   return withAssetMutation(() => syncAgentAssetsUnlocked(input));
 }
 
-async function syncAgentAssetsUnlocked(input: { cwd?: string | null }): Promise<AgentSyncResult> {
+async function syncAgentAssetsUnlocked(input: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> {
   const startedAt = new Date().toISOString();
   const result: AgentSyncResult = {
     startedAt,
     completedAt: startedAt,
+    ...(input.dryRun ? { dryRun: true } : {}),
     mcp: { toClaude: [], toCodex: [], skipped: [], errors: [] },
     skills: { toClaude: [], toCodex: [], skipped: [], errors: [] },
   };
@@ -1094,12 +1098,17 @@ function sourcesToInventory(
   const coraAssigned = new Set(piScopes?.cora ?? []);
   const workerAssigned = new Set(piScopes?.worker ?? []);
   const items: AgentAssetInventoryItem[] = [];
+  // Mirrors resolvePiMcpAssignments: sources arrive in discovery order and the
+  // first readable, enabled definition of a name is the one Pi connects with.
+  const piDefined = new Set<string>();
   for (const source of sources) {
     const readers = source.kind === "mcp" ? mcpSourceReaders(source) : null;
     for (const name of source.names) {
       const key = sessionKey(source.kind, name);
       const skillDir = source.skillDirs?.get(name) ?? null;
       const config = source.kind === "mcp" ? source.configs?.get(name) ?? null : null;
+      const piDefinition = Boolean(config && config.enabled !== false && !piDefined.has(key));
+      if (piDefinition) piDefined.add(key);
       const compatibility = describeAssetCompatibility(source, skillDir, config);
       const skillDescription = source.skillDescriptions?.get(name);
       const systemSkill = Boolean(skillDir && normalizePathForMatch(skillDir).includes(CODEX_SYSTEM_SKILL_ROOT));
@@ -1131,6 +1140,7 @@ function sourcesToInventory(
         mcpSummary: config ? describeMcpServer(config) : undefined,
         ...(readers ? { readBy: readers.readBy, ...(readers.note ? { readByNote: readers.note } : {}) } : {}),
         ...(source.project !== undefined ? { claudeLocalScope: true } : {}),
+        ...(piDefinition ? { piDefinition: true } : {}),
         ...(skillDir ? { skillDir } : {}),
         ...(skillDescription ? { skillDescription } : {}),
         ...(source.kind === "skill" ? { piLoads: !disabled.has(key) && !systemSkill } : {}),
@@ -1420,6 +1430,7 @@ async function writeCodexManagedMcpServers(
       return true;
     });
     if (syncable.length === 0 && !stripped.removed) return [];
+    if (result.dryRun) return syncable.map((server) => server.name);
 
     await fs.mkdir(dirname(path), { recursive: true });
     // Source definitions win over the copy already in the block, so a re-sync
@@ -1472,7 +1483,7 @@ async function writeClaudeMcpServers(
         : renderClaudeMcpServer(server);
       added.push(server.name);
     }
-    if (added.length === 0) return [];
+    if (added.length === 0 || result.dryRun) return added;
     await fs.mkdir(dirname(path), { recursive: true });
     await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
     return added;
@@ -1777,7 +1788,7 @@ async function copyMissingSkills(
 ): Promise<void> {
   const skillDirs = findSkillDirs(sourceRoot).dirs;
   if (skillDirs.length === 0) return;
-  await fs.mkdir(destRoot, { recursive: true });
+  if (!result.dryRun) await fs.mkdir(destRoot, { recursive: true });
   for (const source of skillDirs) {
     const name = basename(source);
     const compatibility = describeSkillDirCompatibility(sourceRuntime, source);
@@ -1797,7 +1808,7 @@ async function copyMissingSkills(
       continue;
     }
     try {
-      await copyDir(source, dest);
+      if (!result.dryRun) await copyDir(source, dest);
       const label = `${scope}:${name}`;
       if (destRuntime === "claude") result.skills.toClaude.push(label);
       else result.skills.toCodex.push(label);

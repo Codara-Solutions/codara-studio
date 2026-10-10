@@ -21,6 +21,10 @@
 //      overwriting the user's section.
 //   6. Codex does carry headers: the same http server copies into
 //      ~/.codex/config.toml as http_headers and reads back intact.
+//   7. When two files define the same name differently, exactly one copy is
+//      marked as the definition Cora uses, and it is the one Pi resolves.
+//   8. A dry-run sync (the Capability Center's preview) plans copies and
+//      writes nothing.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -294,6 +298,48 @@ async function main() {
     assert.ok(detail, "the Codex copy does not parse back");
     assert.equal(detail.url, "https://mcp.example.com/v1");
     assert.deepEqual(detail.headers, { Authorization: "Bearer secret" });
+  });
+
+  // ── 8. Two files, one name: the Capability Center names the copy Cora uses ─
+  await check("with two differing copies exactly one is marked as Cora's, matching Pi's resolution", () => {
+    const text = fs.readFileSync(GROK_CONFIG, "utf8");
+    fs.writeFileSync(GROK_CONFIG, text.replace('args = ["--stdio", "--verbose"]', 'args = ["--stdio", "--grok-copy"]'));
+    const settings = { ...EMPTY_SETTINGS, agentMcpCoraManagerIds: ["mcp:codara-cloud"] };
+    const copies = listAgentAssets({ cwd: FAKE_CWD, settings }).mcp.filter((item) => item.name === "codara-cloud");
+    assert.deepEqual(copies.map((item) => item.runtime).sort(), ["grok", "shared"]);
+    const marked = copies.filter((item) => item.piDefinition);
+    assert.equal(marked.length, 1, `expected one piDefinition copy, got ${marked.length}`);
+    const [server] = agentSync.listPiMcpServers({ cwd: FAKE_CWD, scope: "cora", settings });
+    assert.ok(server, "Pi resolved no definition for an assigned server");
+    const piRuntime = server.args.includes("--grok-copy") ? "grok" : "shared";
+    assert.equal(marked[0].runtime, piRuntime, "the marked copy is not the one Pi connects with");
+    // The copies disagree, which the summary the UI compares makes visible.
+    assert.notEqual(copies[0].mcpSummary, copies[1].mcpSummary);
+  });
+
+  // ── 9. A sync preview reports what it would copy and writes nothing ───────
+  await check("a dry-run sync plans copies without touching any file", async () => {
+    const snapshot = () => {
+      const files = new Map();
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.isFile()) files.set(full, fs.readFileSync(full, "utf8"));
+        }
+      };
+      walk(FAKE_HOME);
+      return files;
+    };
+    const before = snapshot();
+    const preview = await agentSync.syncAgentAssets({ cwd: FAKE_CWD, dryRun: true });
+    assert.equal(preview.dryRun, true);
+    const planned = preview.mcp.toClaude.length + preview.mcp.toCodex.length +
+      preview.skills.toClaude.length + preview.skills.toCodex.length;
+    assert.ok(planned > 0, `the preview planned nothing: ${JSON.stringify(preview)}`);
+    const after = snapshot();
+    assert.deepEqual([...after.keys()].sort(), [...before.keys()].sort(), "a dry run created or removed files");
+    for (const [file, content] of before) assert.equal(after.get(file), content, `a dry run changed ${file}`);
   });
 
   console.log(results.map((name) => `  ok  ${name}`).join("\n"));

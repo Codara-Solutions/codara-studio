@@ -68,6 +68,38 @@ async function main() {
 
   const hostile = await profiles.createCoraProfile({ name: "../../Review Agent" });
   check("profile ids cannot traverse directories", hostile.id === "review-agent", hostile.id);
+
+  // A profile created without instructions gets a hint for the reader, never
+  // placeholder prose that Cora would take as the user's direction.
+  const blankIdentity = fs.readFileSync(hostile.identityPath, "utf8");
+  check("a blank profile's template carries its hint as a comment", /<!-- Describe this profile's role/.test(blankIdentity), blankIdentity);
+  check(
+    "a blank profile injects nothing into Cora's turn",
+    profiles.formatCoraProfileForTurn(hostile.id) === null,
+    String(profiles.formatCoraProfileForTurn(hostile.id)),
+  );
+  fs.writeFileSync(
+    hostile.identityPath,
+    "# Review Agent\n\n## Instructions\n\nDescribe this profile's role, priorities, and communication style here. Keep project facts in workspace memory.\n",
+    "utf8",
+  );
+  check(
+    "a legacy placeholder line written by older builds is not injected either",
+    profiles.formatCoraProfileForTurn(hostile.id) === null,
+    String(profiles.formatCoraProfileForTurn(hostile.id)),
+  );
+  fs.writeFileSync(hostile.identityPath, "# Review Agent\n\n<!-- private note -->\nReview for security first.\n", "utf8");
+  const reviewTurn = profiles.formatCoraProfileForTurn(hostile.id) ?? "";
+  check(
+    "real instructions reach the turn without the reader's comments",
+    reviewTurn.includes("Review for security first.") && !reviewTurn.includes("private note"),
+    reviewTurn,
+  );
+  check(
+    "creating a profile does not make it the default",
+    profiles.resolveCoraProfile().id === "default",
+    profiles.resolveCoraProfile().id,
+  );
   check(
     "profile paths stay below the profile root",
     hostile.identityPath.startsWith(path.join(HOME, "memory", "profiles") + path.sep),

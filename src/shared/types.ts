@@ -1678,6 +1678,9 @@ export interface AgentRuntimeDiagnostic {
 export interface AgentSyncResult {
   startedAt: string;
   completedAt: string;
+  // A preview: the lists name what a real sync would copy, and nothing was
+  // written.
+  dryRun?: boolean;
   mcp: {
     toClaude: string[];
     toCodex: string[];
@@ -1731,6 +1734,10 @@ export interface AgentAssetInventoryItem {
   // MCP only: the entry lives in Claude's private per-project map in
   // ~/.claude.json (Claude's "local" scope) for the active workspace.
   claudeLocalScope?: boolean;
+  // MCP only: this copy is the definition Cora and Pi workers connect with
+  // when the name is defined in several files (the first readable, enabled
+  // one in discovery order).
+  piDefinition?: boolean;
   // Skills only: the skill's own folder, its SKILL.md frontmatter
   // description, and whether Cora's and Pi workers' sessions load it.
   skillDir?: string;
@@ -1844,6 +1851,14 @@ export interface AgentMcpProbeResult {
   // Last stderr lines of a stdio server, with env and header values redacted.
   stderrTail?: string[];
 }
+
+// A pasted server definition (an mcpServers JSON block, one server object, a
+// Codex [mcp_servers.*] TOML table, or a `claude mcp add` / `codex mcp add`
+// command line) turned into form drafts. Several servers come back when the
+// snippet held several, and the form asks which one to use.
+export type AgentMcpSnippetParseResult =
+  | { ok: true; servers: AgentMcpServerDraft[]; notes: string[] }
+  | { ok: false; error: string };
 
 export interface AgentAssetDeleteResult {
   ok: boolean;
@@ -3003,6 +3018,10 @@ export interface CoraProfileDeleteResult {
 export interface MemoryTierStatus {
   /** Whether this tier is read into prompts and writable by `codara_remember`. */
   enabled: boolean;
+  /** The workspace tier's own switch is on, but the profile's global switch
+   *  is off and acts as the master switch, so `enabled` is false. Optional
+   *  so an older main process still type-checks against this shape. */
+  blockedByGlobal?: boolean;
   /** Absolute path of the backing markdown file, resolved by the main process.
    *  The UI opens exactly this, it never recomputes the location. */
   path: string;
@@ -3031,6 +3050,9 @@ export interface CoraMemoryStatus {
  *  the workspace tier then reports disabled with an empty path. */
 export interface MemoryStatusInput {
   workspaceId: string | null;
+  /** The profile whose memory to report. Absent means the default profile
+   *  for new chats; an unknown id is an error, not a silent fallback. */
+  profileId?: string;
 }
 
 /** `memory:setEnabled` payload. */
@@ -3038,6 +3060,7 @@ export interface MemorySetEnabledInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   enabled: boolean;
+  profileId?: string;
 }
 
 /** `memory:clear` payload. `includeUserLines` defaults to false at the handler,
@@ -3046,6 +3069,22 @@ export interface MemoryClearInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   includeUserLines?: boolean;
+  profileId?: string;
+}
+
+/** `memory:ensureFile` payload: create the tier's file from its template when
+ *  it does not exist yet, and resolve to its path. */
+export interface MemoryEnsureFileInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  profileId?: string;
+}
+
+/** A profile's PROFILE.md as one revision-checked document. */
+export interface CoraProfileDocumentView {
+  content: string;
+  revision: string;
+  maxChars: number;
 }
 
 export interface Checkpoint {

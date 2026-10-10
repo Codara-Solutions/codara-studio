@@ -180,10 +180,32 @@ export function resolveCoraProfile(reference?: string | null): CoraProfile {
   return match;
 }
 
+// The hint is an HTML comment because formatCoraProfileForTurn strips those:
+// a profile created without instructions must not hand Cora placeholder prose
+// as if it were the user's direction. Profiles created before the hint became
+// a comment carry it as a bare line, which is stripped the same way.
+const PROFILE_INSTRUCTIONS_PLACEHOLDER =
+  "Describe this profile's role, priorities, and communication style here. Keep project facts in workspace memory.";
+const PROFILE_INSTRUCTIONS_HINT = `<!-- ${PROFILE_INSTRUCTIONS_PLACEHOLDER} -->`;
+
 function profileTemplate(name: string, description: string, instructions: string): string {
-  const body = instructions.trim() ||
-    "Describe this profile's role, priorities, and communication style here. Keep project facts in workspace memory.";
+  const body = instructions.trim() || PROFILE_INSTRUCTIONS_HINT;
   return `# ${name}\n\n${description ? `${description}\n\n` : ""}## Instructions\n\n${body}\n`;
+}
+
+// What of PROFILE.md reaches the prompt: comments are notes to the reader, and
+// a file left with nothing but headings says nothing Cora could act on.
+export function profileInstructionsForPrompt(content: string): string | null {
+  const text = content
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, "")
+    .split("\n")
+    .filter((line) => line.trim() !== PROFILE_INSTRUCTIONS_PLACEHOLDER)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!text) return null;
+  const meaningful = text.split("\n").some((line) => line.trim() && !/^\s{0,3}#{1,6}\s/.test(line));
+  return meaningful ? text : null;
 }
 
 export async function createCoraProfile(input: CoraProfileCreateInput): Promise<CoraProfile> {
@@ -294,7 +316,7 @@ export function formatCoraProfileForTurn(profileId: string): string | null {
   const path = profile.identityPath;
   if (!existsSync(path)) return null;
   try {
-    const content = readFileSync(path, "utf8").trim().slice(0, PROFILE_INSTRUCTIONS_MAX_CHARS);
+    const content = profileInstructionsForPrompt(readFileSync(path, "utf8"))?.slice(0, PROFILE_INSTRUCTIONS_MAX_CHARS);
     if (!content) return null;
     return [
       `CORA PROFILE: ${profile.name} (user-editable file: ${path})`,

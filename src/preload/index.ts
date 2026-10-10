@@ -49,6 +49,7 @@ import type {
   AgentMcpProbeRequest,
   AgentMcpProbeResult,
   AgentMcpServerDraft,
+  AgentMcpSnippetParseResult,
   AgentPiMcpPreview,
   AgentMcpTarget,
   AgentSyncResult,
@@ -72,6 +73,7 @@ import type {
   CoraProfile,
   CoraProfileCreateInput,
   CoraProfileDeleteResult,
+  CoraProfileDocumentView,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -357,7 +359,7 @@ const api = {
       ipcRenderer.invoke("usage-analytics:summary", input),
   },
   agents: {
-    sync: (input?: { cwd?: string | null }): Promise<AgentSyncResult> =>
+    sync: (input?: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> =>
       ipcRenderer.invoke("agents:sync", input ?? {}).catch((err: unknown) => {
         if (!isMissingIpcHandlerError(err, "agents:sync")) throw err;
         const now = new Date().toISOString();
@@ -419,6 +421,11 @@ const api = {
         if (!isMissingIpcHandlerError(err, "agents:probeMcp")) throw err;
         return { ok: false, tools: [], durationMs: 0, error: "Restart Codara to enable testing MCP servers." };
       }),
+    parseMcpSnippet: (text: string): Promise<AgentMcpSnippetParseResult> =>
+      ipcRenderer.invoke("agents:parseMcpSnippet", { text }).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:parseMcpSnippet")) throw err;
+        return { ok: false, error: "Restart Codara to paste server definitions." };
+      }),
     builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
       ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:builtins")) return [];
@@ -448,21 +455,31 @@ const api = {
   // Cora's writable memory files. Reads and mutations both resolve to the
   // fresh status pair for both tiers, so a toggle or a clear needs no follow-up
   // read. Content is edited in the editor, not through this bridge.
+  // `profileId` picks whose memory; leaving it out means the default profile
+  // for new chats.
   memory: {
-    get: (workspaceId: string | null): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:get", { workspaceId }),
+    get: (workspaceId: string | null, profileId?: string): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:get", { workspaceId, profileId }),
     setEnabled: (
       scope: CoraMemoryScope,
       workspaceId: string | null,
       enabled: boolean,
+      profileId?: string,
     ): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled }),
+      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled, profileId }),
     clear: (
       scope: CoraMemoryScope,
       workspaceId: string | null,
       includeUserLines: boolean,
+      profileId?: string,
     ): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
+      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines, profileId }),
+    ensureFile: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      profileId?: string,
+    ): Promise<string> =>
+      ipcRenderer.invoke("memory:ensureFile", { scope, workspaceId, profileId }),
   },
   coraProfiles: {
     onChanged: (handler: () => void): (() => void) => {
@@ -477,6 +494,14 @@ const api = {
       ipcRenderer.invoke("cora-profiles:use", reference),
     delete: (reference: string): Promise<CoraProfileDeleteResult> =>
       ipcRenderer.invoke("cora-profiles:delete", reference),
+    readDocument: (reference: string): Promise<CoraProfileDocumentView> =>
+      ipcRenderer.invoke("cora-profiles:readDocument", reference),
+    saveDocument: (
+      reference: string,
+      revision: string,
+      content: string,
+    ): Promise<CoraProfileDocumentView> =>
+      ipcRenderer.invoke("cora-profiles:saveDocument", { reference, revision, content }),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),

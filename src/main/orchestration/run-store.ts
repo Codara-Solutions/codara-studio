@@ -12969,7 +12969,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     : undefined;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
-      "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
+      "Cora has no enabled worker model. Turn one on in Capability Center > Worker models.",
     );
   }
   const command = isPiWorker
