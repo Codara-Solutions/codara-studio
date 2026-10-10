@@ -746,8 +746,8 @@ export default function ChatComposer({
       kind: "file" as const,
     })),
   ];
-  const canSend =
-    !busy && !pastingImages && !disabled && (draft.trim().length > 0 || attachmentsForSend.length > 0);
+  const hasDraftToSend = draft.trim().length > 0 || attachmentsForSend.length > 0;
+  const canSend = !busy && !pastingImages && !disabled && hasDraftToSend;
 
   const run_ = run; // local alias so the async helpers narrow cleanly
 
@@ -1617,11 +1617,15 @@ export default function ChatComposer({
                 Retry
               </TextButton>
             )}
-            <SendButton
-              onClick={send}
-              disabled={!canSend}
-              label={isActive ? "Queue" : "Send"}
-            />
+            {/* While Cora works and there is nothing to queue, Stop takes the
+                send slot alone instead of sitting beside a dead arrow. */}
+            {!(canStop && !hasDraftToSend) && (
+              <SendButton
+                onClick={send}
+                disabled={!canSend}
+                label={isActive ? "Queue" : "Send"}
+              />
+            )}
             {/* Stop follows the work, not only the run status. A soft-paused
                 run can still own a live worker process (pause stops autopilot;
                 it doesn't reach into a worker already running), and in that
@@ -2333,17 +2337,15 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
         flex: "0 0 26px",
         border: "none",
         borderRadius: "var(--radius-control, 7px)",
-        background: hover
-          ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
-          : "var(--danger)",
+        background: hover ? "var(--panel-3)" : "var(--panel-2)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
         boxShadow: focusRing
           ? "var(--focus-ring)"
           : pressed
             ? "var(--well)"
-            : "var(--lift-hi)",
-        color: "var(--accent-ink)",
+            : "inset 0 0 0 1px var(--rule)",
+        color: "var(--ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
