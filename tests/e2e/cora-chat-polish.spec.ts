@@ -198,6 +198,9 @@ test("plain conversational Cora turns omit empty technical disclosures", async (
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

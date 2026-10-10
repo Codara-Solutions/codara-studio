@@ -7622,6 +7622,10 @@ async function handleManagerStartupFailure(input: {
   // A claimed recovery hands its token back to "parked" itself when the
   // replay fails; a second park here would replace that token.
   if (input.managerRecoveryClaimId) return null;
+  // Manual fallback (the e2e seam) drives a run with no account through
+  // plain-shell workers: every caller's null path, which creates the fallback
+  // task or re-drives review after Resume, must run instead of a park.
+  if (manualFallbackEnabled()) return null;
   const current = await getRun(input.runId);
   if (!current || conversationEpoch(current) !== input.conversationEpoch) return null;
   const plan = planManagerTurnFailure({
@@ -12496,7 +12500,10 @@ export async function addRunMessage(
     input.author === "user" &&
     recordedIntent === "steer" &&
     (updated.status === "running" || updated.status === "reviewing") &&
-    updated.executionMode !== "direct"
+    updated.executionMode !== "direct" &&
+    // Manual fallback runs with no manager at all; its plain-shell workers
+    // are reviewed by the user, and a turn here could only fail.
+    !manualFallbackEnabled()
   ) {
     // Workers are running but no manager turn is (the turn spawned them and
     // ended without waiting). Nothing else would ever read this message, and
