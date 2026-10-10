@@ -12,10 +12,10 @@ are the source of truth; update this page when a tool is added or renamed.
 - **Claude Code, Codex and Grok.** On launch Codara adds the server to
   `~/.claude.json`, `~/.codex/config.toml` and Grok's `config.toml` when the
   CLI is installed. Each CLI has its own on/off switch in the Capability
-  Center (the **MCP and skills** button in the Cora composer), under MCP
-  servers. A CLI you switch off stays off. The Policy tab's **Auto-install
-  Codara Studio MCP** controls whether Codara keeps the entries current on
-  launch.
+  Center (the **Tools** button in the Cora composer), under Tools (MCP
+  servers). A CLI you switch off stays off. The Behavior section's **Keep
+  Codara Studio tools installed in Claude, Codex and Grok** controls whether
+  Codara keeps the entries current on launch.
 - **Cora and its Pi workers.** They load the same tools in-process, so there
   is nothing to install.
 

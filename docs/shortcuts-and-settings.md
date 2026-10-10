@@ -19,6 +19,7 @@ the Keybindings tab and that file call it.
 |---|---|---|
 | Show keyboard shortcuts | Mod+Shift+/ | `shortcuts.open` |
 | Open settings | Mod+, | `settings.open` |
+| Open Capability Center (tools, skills, memory) | (unbound) | `capabilities.open` |
 | Show run details | Mod+Shift+I | `session.openInspector` |
 
 ### Navigation
@@ -125,7 +126,7 @@ Open Settings with `Mod+,`. The tabs, top to bottom:
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
-| Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and a note pointing to the Capability Center for MCP servers and skills. |
+| Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
@@ -138,16 +139,35 @@ Failed closes retry automatically.
 
 ## The Capability Center
 
-The **MCP and skills** button in the Cora composer opens the Capability
-Center, a separate dialog with five tabs:
+The Capability Center is where you decide what Cora, its workers and your
+CLIs can use. Open it from the **Tools** button in the Cora composer, the
+**Open Capability Center** button in Settings > Agents, the profile menu in
+the composer (**New profile**), or the `capabilities.open` command (unbound
+by default; bind it in Keybindings). It has six sections:
 
-| Tab | What lives there |
+| Section | What lives there |
 |---|---|
-| MCP servers | Your MCP servers, and the built-in Codara Studio server with an on/off switch per CLI (Claude, Codex, Grok). Switching it off for a CLI removes Codara's entry from that CLI's config, and it stays off across restarts. |
-| Skills | The skills agents can load. |
-| Memory | What Cora remembers, globally and per workspace. |
-| Worker models | Which models Cora may pick for its workers. |
-| Policy | Session policy: MCP awareness, skill awareness, and **Auto-install Codara Studio MCP**, which keeps the built-in server current in each CLI on launch (setting key `playwrightMcpAutoInstall`). |
+| Tools (MCP servers) | Your MCP servers, one row per name. **Cora** and **Workers** switch a server on for Cora and for Pi workers; the **Claude CLI**, **Codex CLI** and **Grok Build** columns show whether that CLI loads it, with **Add** to copy it there. Each row says what Cora and workers actually get, has **Test** (starts the server once and lists its tools), **Edit** and **Remove**. The built-in Codara Studio server sits on top with an on/off switch per CLI; switching it off removes Codara's entry from that CLI's config, and it stays off across restarts. |
+| Skills | The skills agents can load, with a switch for Cora and workers and the same CLI columns. |
+| Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat picks its profile from the composer's profile menu; a started chat shows its profile and keeps it. |
+| Memory | What Cora remembers for the profile you pick, globally and for this workspace. Global memory is the master switch: while it is off, workspace memory is off too and says so. **Open in editor** creates the file if nothing was remembered yet. |
+| Worker models | Which models Cora may pick for its workers. The last usable model cannot be switched off; an OpenRouter model only counts once its key is verified. |
+| Behavior | Three switches that apply to all workspaces: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
+
+Every switch applies as soon as you flip it; there is no Save step and
+nothing to lose by closing. Forms you type into (a server you are adding or
+editing, a new profile, profile instructions) ask before Escape, a click
+outside or **Done** throws away what you typed.
+
+**Add server** asks for the server once and where it should be available:
+Cora, Pi workers, and which CLIs (Claude, Codex, Grok) for every workspace or
+this one. You can paste what a README publishes instead of typing: an
+`mcpServers` JSON block or one entry of it, a Codex `[mcp_servers.name]`
+table, a `claude mcp add`, `claude mcp add-json` or `codex mcp add` command,
+or a bare command line. **Test connection** starts the server before you save
+and lists its tools. Values that look like secrets are masked until you
+reveal them. Editing a server that several files define offers to update the
+other copies too, marks copies that differ, and names the one Cora uses.
 
 The tools the built-in server provides are listed in
 [mcp-tools.md](./mcp-tools.md).
@@ -175,12 +195,13 @@ and the rest of the file is untouched. Codex headers are read from
 `config.toml` cannot carry request headers, so a server that needs them stays
 in a Claude or Codex config.
 
-**Sync** keeps scope: the servers in your user `~/.codex/config.toml` are
+**Sync Claude and Codex** first lists what it would copy and writes nothing
+until you confirm. It keeps scope: the servers in your user `~/.codex/config.toml` are
 copied to your user `~/.claude.json`, and the project's `.mcp.json` servers
 to the project's `.codex/config.toml`. A Codex server turned off with
 `enabled = false` is not copied, because Claude has no such switch. A secret
 copied into a project file becomes a `${VAR}` placeholder and the sync
-summary names the variable to set. **Copy to Codex or Grok** adds the server
+summary names the variable to set. **Add** in a CLI column adds the server
 to your user config there; a name that already exists is left alone.
 
 ### What reaches Cora
