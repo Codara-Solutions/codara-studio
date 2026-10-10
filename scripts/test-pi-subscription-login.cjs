@@ -225,6 +225,31 @@ async function main() {
   auth.setPiLoginTimingForTests({ flowMs: 10 * 60 * 1000 });
   console.log("PASS an abandoned browser sign-in times out");
 
+  // ── a replaced flow that ignores its abort cannot take the panel back ─────
+  let staleInteraction = null;
+  harness.script = (_provider, interaction) => new Promise(() => {
+    staleInteraction = interaction;
+    interaction.notify({ type: "auth_url", url: "https://example.test/authorize?state=old" });
+  });
+  const ownerF = makeOwner("window:f");
+  const stale = await auth.startPiSubscriptionProfileLoginForOwner({ provider: "anthropic" }, ownerF);
+  await waitFor(() => staleInteraction !== null, "the first flow should start");
+  harness.script = browserLogin();
+  const fresh = await auth.startPiSubscriptionProfileLoginForOwner({ provider: "xai" }, ownerF);
+  ownerF.events.length = 0;
+  staleInteraction.notify({ type: "auth_url", url: "https://example.test/authorize?state=late" });
+  staleInteraction.notify({ type: "progress", message: "late progress" });
+  assert.deepEqual(
+    ownerF.events.filter((event) => event.requestId === stale.requestId),
+    [],
+    "a replaced flow's late browser step never reaches the panel",
+  );
+  assert.deepEqual(auth.resumePiSubscriptionLoginForOwner(ownerF)?.requestId, fresh.requestId);
+  assert.ok(!ownerF.events.some((event) => event.type === "auth_url" && event.url.includes("state=late")));
+  auth.cancelPiSubscriptionLoginForOwner(fresh.requestId, ownerF);
+  await waitFor(() => ownerF.events.some((event) => event.type === "cancelled"), "owner F cancel should settle");
+  console.log("PASS a replaced flow that ignores its abort stays silent");
+
   // ── a provider timeout is a failure with a plain message, not a cancel ────
   harness.script = async () => {
     throw new Error(
@@ -254,11 +279,26 @@ async function main() {
   console.log("PASS sign-in errors map to plain sentences without diagnostics");
 }
 
+// The flow timers are unref'd, as they must be in the app, so a flow parked on
+// one of them would otherwise let Node exit mid-test with status 0.
+const keepAlive = setInterval(() => undefined, 1_000);
+let finished = false;
+process.on("exit", () => {
+  if (!finished && process.exitCode === undefined) {
+    console.error("test-pi-subscription-login exited before every case ran");
+    process.exitCode = 1;
+  }
+});
+
 main()
+  .then(() => {
+    finished = true;
+  })
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;
   })
   .finally(() => {
+    clearInterval(keepAlive);
     fs.rmSync(TMP, { recursive: true, force: true });
   });

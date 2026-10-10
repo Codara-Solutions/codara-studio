@@ -789,6 +789,10 @@ async function runLogin(flow: ActiveFlow): Promise<void> {
         throw settled.error;
       },
       notify: (event) => {
+        // A stopped flow whose module ignores the abort may still report a
+        // URL; it must neither open a browser nor take over the owner's panel,
+        // which may already show the sign-in that replaced it.
+        if (flow.abort.signal.aborted) return;
         markLoginSignal();
         if (event.type === "auth_url" && event.url) {
           // Pi's authorize URL carries the state its callback expects. Learning
