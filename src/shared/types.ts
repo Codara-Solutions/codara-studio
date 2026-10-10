@@ -3045,6 +3045,10 @@ export interface Checkpoint {
   /** Short label rendered in the undo popover. */
   label: string;
   createdAt: string;
+  /** Why sha is null when the workspace is a git repository (a git timeout
+   * on a large repo, a git error), so the undo menu can say why the code
+   * undo is unavailable. */
+  snapshotError?: string;
 }
 
 export interface UndoToCheckpointInput {

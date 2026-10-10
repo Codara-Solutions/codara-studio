@@ -18,10 +18,10 @@ import {
 import { codaraHome } from "../codara-home";
 import { loadSettings } from "../storage";
 import {
-  availableCoraWorkerModels,
   configuredOpenRouterCoraModels,
   hasVerifiedOpenRouterKey,
 } from "../openrouter-config";
+import { coraWorkerModelAvailability } from "./worker-model-availability";
 import { forgetResolvedBinary, resolveBinary } from "../binary-resolver";
 import { getEnrichedEnv } from "../path-reconstruction";
 import { writeFileAtomic } from "../fs-atomic";
@@ -554,7 +554,13 @@ export async function createCodaraPiLaunchPlan(
       codaraHomeDir: codaraHome(),
       processExecutable: electronAsNodeInterpreter(),
     });
-    plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(availableCoraWorkerModels(settings));
+    // Cora is offered only models it can launch; the ones waiting on a sign-in
+    // are named separately so it can tell the user instead of planning on them.
+    const workerModels = await coraWorkerModelAvailability(settings);
+    plan.env.CODARA_PI_WORKER_MODELS = JSON.stringify(workerModels.connected);
+    if (workerModels.disconnected.length > 0) {
+      plan.env.CODARA_PI_WORKER_MODELS_DISCONNECTED = JSON.stringify(workerModels.disconnected);
+    }
     if (settings.coraAlwaysVerifyEdits) plan.env.CODARA_PI_ALWAYS_VERIFY_EDITS = "1";
     return untrustedPullRequest
       ? attachUntrustedSocketCapability(plan, {

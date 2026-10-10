@@ -93,21 +93,35 @@ function alwaysVerifyEdits(value = process.env.CODARA_PI_ALWAYS_VERIFY_EDITS): b
   return value === "1";
 }
 
-function workerModelContract(value = process.env.CODARA_PI_WORKER_MODELS): string {
-  if (!value) return "";
+function modelIdList(value: string | undefined): string[] | null {
+  if (!value) return null;
   try {
     const models = JSON.parse(value);
-    if (!Array.isArray(models)) return "";
-    const ids = models
+    if (!Array.isArray(models)) return null;
+    return models
       .filter((model): model is string => typeof model === "string" && model.trim().length > 0)
       .map((model) => model.trim());
-    if (ids.length === 0) {
-      return "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Settings.";
-    }
-    return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.`;
   } catch {
-    return "";
+    return null;
   }
+}
+
+function workerModelContract(
+  value = process.env.CODARA_PI_WORKER_MODELS,
+  disconnectedValue = process.env.CODARA_PI_WORKER_MODELS_DISCONNECTED,
+): string {
+  const ids = modelIdList(value);
+  if (ids === null) return "";
+  const disconnected = modelIdList(disconnectedValue) ?? [];
+  const waiting = disconnected.length > 0
+    ? `\n- Enabled but not signed in, so unavailable: ${disconnected.join(", ")}. If the user wants one of them, tell them to sign in to its provider in Settings > Agents.`
+    : "";
+  if (ids.length === 0) {
+    return disconnected.length > 0
+      ? `\n\nWorker model availability:\n- No enabled worker model has a connected account. Do not call codara_spawn_workers; answer directly or explain that the user must sign in to a provider in Settings > Agents.${waiting}`
+      : "\n\nWorker model availability:\n- No worker models are enabled. Do not call codara_spawn_workers; answer directly or explain that the user must enable one in Settings.";
+  }
+  return `\n\nWorker model availability:\n- You may spawn workers only on these exact model ids: ${ids.join(", ")}.\n- Set modelHint to one of these ids. This user allowlist overrides cross-provider and tier preferences.${waiting}`;
 }
 
 function bridgeErrorMessage(result: BridgeToolResult, fallback: string): string {

@@ -28,8 +28,9 @@ import {
 // start with [auto YYYY-MM-DD run:<runId>], [auto YYYY-MM-DD], or
 // [cora YYYY-MM-DD]. Everything else (untagged bullets, prose, headings) is
 // user-authored: preserved verbatim, never deleted by the app, counted toward
-// the byte cap. Tagged bullets belong to Cora and may be pruned, rewritten, or
-// expired.
+// the byte cap. Tagged bullets belong to Cora and may be pruned or rewritten.
+// Only [auto] bullets expire: a [cora] line is something the user said or Cora
+// deliberately curated, so it stays until a consolidation or the user drops it.
 //
 // Writers: manager and direct Cora chats (via codara_remember), plus the
 // run-completion auto-emitters (workspace-lessons.ts -> appendAutoMemories).
@@ -51,15 +52,18 @@ import {
 export const MEMORY_FILE_MAX_BYTES = 4096;
 /** Soft cap: the injected section grows a consolidation footer past this. */
 export const MEMORY_FILE_SOFT_BYTES = 3277;
-/** Programmatic bullets are whitespace-collapsed and ellipsis-truncated here. */
-export const MAX_BULLET_LENGTH = 300;
-/** Per-run codara_remember call budget (counted at the agent-socket handler). */
+/** Auto bullets are ellipsis-truncated here; codara_remember rejects longer ones. */
+export const MAX_BULLET_LENGTH = 500;
+/** codara_remember call budget per manager turn (counted at the agent-socket handler). */
 export const MAX_REMEMBER_CALLS_PER_RUN = 5;
-/** Per-run cap on bullets added via codara_remember (agent-socket handler). */
+/** Per-turn cap on bullets added via codara_remember (agent-socket handler). */
 export const MAX_BULLETS_ADDED_PER_RUN = 10;
 
 const AUTO_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const CORA_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+// The global template's starter heading. The app wrote it, so it never counts
+// as a line the user authored (status counts, replace preservation).
+const TEMPLATE_HEADING = "## About the user";
 
 export const MEMORY_TRUNCATION_NOTICE =
   "[memory truncated at 4 KB: ask Cora to consolidate, or trim the file]";
@@ -73,6 +77,30 @@ export function memoryFullError(usedBytes: number, capBytes: number): string {
 
 export function userLinesExceedCapError(path: string): string {
   return `user-authored content alone exceeds the cap; ask the user to trim ${path}`;
+}
+
+/**
+ * What the codara_remember budget is counted against. The budget stops a
+ * runaway write loop inside one manager turn, not memory over a chat's whole
+ * life (a chat is one run that can last weeks), so each user message starts a
+ * fresh budget.
+ */
+export function rememberBudgetKey(run: {
+  id: string;
+  humanMessages?: ReadonlyArray<{ id: string; author: string }>;
+}): string {
+  const messages = run.humanMessages ?? [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].author === "user") return `${run.id}:${messages[i].id}`;
+  }
+  return run.id;
+}
+
+export function bulletTooLongError(index: number, length: number): string {
+  return (
+    `bullet ${index} is ${length} characters; the limit is ${MAX_BULLET_LENGTH}. ` +
+    `Nothing was saved: shorten it and call codara_remember again`
+  );
 }
 
 export function memoryDisabledError(scope: MemoryScope): string {
@@ -237,6 +265,16 @@ function tierEnabled(
   return state.workspaces[profileWorkspaceKey(id, workspaceId)]?.enabled !== false;
 }
 
+/** Whether a tier is switched on, for readers outside this module (the prior
+ * runs ledger in run-memory.ts honors the same switches). */
+export function isMemoryEnabled(
+  scope: MemoryScope,
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): boolean {
+  return tierEnabled(readState(), scope, workspaceId, profileId);
+}
+
 // ── workspace metadata for the header (best-effort) ─────────────────────────
 
 // The header names the workspace and its cwd so a user browsing
@@ -302,7 +340,7 @@ function templateFile(
     scope === "global"
       ? [
           { raw: "", kind: "blank" },
-          { raw: "## About the user", kind: "user" },
+          { raw: TEMPLATE_HEADING, kind: "user" },
           { raw: "", kind: "blank" },
         ]
       : [{ raw: "", kind: "blank" }];
@@ -406,11 +444,15 @@ function fileBytes(file: MemoryFile): number {
 
 /** Unparseable dates read as fresh: we cannot prove such a line stale. */
 function isExpired(line: MemoryLine, now: number): boolean {
-  if (!line.tag) return false;
+  if (line.tag?.source !== "auto") return false;
   const created = Date.parse(line.tag.date);
   if (!Number.isFinite(created)) return false;
-  const ttl = line.tag.source === "auto" ? AUTO_TTL_MS : CORA_TTL_MS;
-  return now - created > ttl;
+  return now - created > AUTO_TTL_MS;
+}
+
+/** The bare starter heading the app wrote; anything the user typed counts. */
+function isTemplateHeading(line: MemoryLine): boolean {
+  return line.kind === "user" && line.raw.trim() === TEMPLATE_HEADING;
 }
 
 /** Read-side filter; never rewrites the file (pure reads must not write). */
@@ -435,11 +477,25 @@ function lineKey(line: MemoryLine): string | null {
   return key.length > 0 ? key : null;
 }
 
+function collapseBulletText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 /** Collapse whitespace and cap at MAX_BULLET_LENGTH with an ellipsis. */
 function cleanBulletText(value: string): string {
-  const collapsed = value.replace(/\s+/g, " ").trim();
+  const collapsed = collapseBulletText(value);
   if (collapsed.length <= MAX_BULLET_LENGTH) return collapsed;
   return `${collapsed.slice(0, MAX_BULLET_LENGTH - 1)}…`;
+}
+
+// codara_remember never truncates: a cut-off memory loses its actionable tail
+// while the tool reports success, so an overlong bullet fails the whole call
+// before anything is written and Cora retries with a shorter sentence.
+function assertBulletsFit(texts: string[]): void {
+  texts.forEach((text, index) => {
+    const length = collapseBulletText(text).length;
+    if (length > MAX_BULLET_LENGTH) throw new Error(bulletTooLongError(index + 1, length));
+  });
 }
 
 function todayStamp(): string {
@@ -719,12 +775,15 @@ function renderMemorySections(
   profileId = DEFAULT_CORA_PROFILE_ID,
 ): string | null {
   const state = readState();
-  // Global disabled is the master off switch: nothing is injected at all.
-  if (!tierEnabled(state, "global", workspaceId, profileId)) return null;
   const sections: string[] = [];
-  const profile = resolveCoraProfile(profileId);
+  // The profile is identity, not memory: the memory switches never hide it.
   const profileSection = formatCoraProfileForTurn(profileId);
   if (profileSection) sections.push(profileSection);
+  // Global disabled is the master off switch for memory: no tier is injected.
+  if (!tierEnabled(state, "global", workspaceId, profileId)) {
+    return sections.length > 0 ? sections.join("\n") : null;
+  }
+  const profile = resolveCoraProfile(profileId);
   const globalPath = globalMemoryPath(profileId);
   const globalTier = renderTier(globalPath, now);
   if (globalTier) {
@@ -801,6 +860,17 @@ export function releaseCoraMemoryInjection(runId: string): void {
   if (!entry) return;
   if (entry.prior === undefined) runMemoryHashes.delete(runId);
   else runMemoryHashes.set(runId, { hash: entry.prior });
+}
+
+/**
+ * Forget that a run's session carries the memory sections, so the next manager
+ * turn injects them again. Called when an in-session compaction summarized
+ * the turn that carried them, which the run cannot otherwise notice (a
+ * replaced session is covered by canonical replay's force instead). Unlike
+ * releaseCoraMemoryInjection this keeps no history to roll back to.
+ */
+export function resetCoraMemoryInjection(runId: string): void {
+  runMemoryHashes.delete(runId);
 }
 
 /**
@@ -891,6 +961,7 @@ export async function rememberAdd(
   if (!tierEnabled(state, scope, workspaceId, profileId)) {
     throw new Error(memoryDisabledError(scope));
   }
+  assertBulletsFit(bullets);
   return withPathLock(tierPath(scope, workspaceId, profileId), async () => {
     const file = loadForWrite(scope, workspaceId, profileId);
     const date = todayStamp();
@@ -959,6 +1030,7 @@ export async function rememberReplace(
 
     const currentUserKeys = new Set<string>();
     for (const line of current?.lines ?? []) {
+      if (isTemplateHeading(line)) continue;
       const key = preservationKey(line);
       if (key) currentUserKeys.add(key);
     }
@@ -968,6 +1040,7 @@ export async function rememberReplace(
     // and catch minted non-bullet lines.
     const nextUserKeys = new Set<string>();
     const mintedNonBullets: string[] = [];
+    const newBullets: string[] = [];
     for (let i = 0; i < next.lines.length; i += 1) {
       const line = next.lines[i];
       if (line.kind !== "user") continue;
@@ -977,12 +1050,17 @@ export async function rememberReplace(
         // Untagged bullet: the user's if it matches a current user line
         // verbatim, otherwise it is new and gets Cora's stamp.
         if (currentUserKeys.has(text)) nextUserKeys.add(text);
-        else next.lines[i] = parseLine(coraBulletRaw(cleanBulletText(line.bulletText), date));
-      } else {
-        if (currentUserKeys.has(text)) nextUserKeys.add(text);
-        else mintedNonBullets.push(text);
+        else {
+          newBullets.push(line.bulletText);
+          next.lines[i] = parseLine(coraBulletRaw(collapseBulletText(line.bulletText), date));
+        }
+      } else if (currentUserKeys.has(text)) {
+        nextUserKeys.add(text);
+      } else if (!isTemplateHeading(line)) {
+        mintedNonBullets.push(text);
       }
     }
+    assertBulletsFit(newBullets);
 
     if (mintedNonBullets.length > 0) {
       throw new Error(
@@ -1055,7 +1133,11 @@ function tierStatus(
     : workspaceMemoryPath(workspaceId as string, profileId);
   const file = readMemoryFile(path);
   const counts = { user: 0, cora: 0, auto: 0 };
-  for (const line of file?.lines ?? []) {
+  // Counts describe what Cora sees: expired lines still on disk until the next
+  // write prunes them are not injected, so they are not counted either.
+  const live = file ? withoutExpired(file, Date.now()) : null;
+  for (const line of live?.lines ?? []) {
+    if (isTemplateHeading(line)) continue;
     if (line.kind === "user") counts.user += 1;
     else if (line.kind === "cora") counts.cora += 1;
     else if (line.kind === "auto") counts.auto += 1;
@@ -1151,7 +1233,7 @@ export async function updateMemoryDocument(
         throw new Error("Memory is limited to 4 KB including its heading. Shorten the text and try again.");
       }
     } else if (change.includeUserLines) {
-      file = templateFile(scope, wsId, profileId);
+      file = emptyFile(scope, wsId, profileId);
     } else {
       file = loadForWrite(scope, wsId, profileId);
       file.lines = file.lines.filter((line) => line.kind !== "auto" && line.kind !== "cora");
@@ -1205,10 +1287,15 @@ export async function deleteProfileMemoryState(profileId: string): Promise<void>
   });
 }
 
+/** What "delete all" leaves behind: the managed header and nothing else. */
+function emptyFile(scope: MemoryScope, workspaceId: string, profileId: string): MemoryFile {
+  return { headerLines: buildHeader(scope, workspaceId, profileId), lines: [] };
+}
+
 /**
  * Default: remove only Cora's [auto]/[cora] lines, keeping every user line.
- * includeUserLines rewrites the file to the fresh template (the one action
- * allowed to discard user content; it is user-initiated from the UI).
+ * includeUserLines leaves only the managed header (the one action allowed to
+ * discard user content; it is user-initiated from the UI).
  * Works regardless of toggles: clearing disabled memory must still be possible.
  */
 export async function clearMemory(
@@ -1224,7 +1311,7 @@ export async function clearMemory(
   const wsId = workspaceId ?? "";
   await withPathLock(tierPath(scope, wsId, profileId), async () => {
     if (includeUserLines) {
-      await writeMemoryFile(scope, wsId, templateFile(scope, wsId, profileId), profileId);
+      await writeMemoryFile(scope, wsId, emptyFile(scope, wsId, profileId), profileId);
       return;
     }
     const file = readMemoryFile(tierPath(scope, wsId, profileId));

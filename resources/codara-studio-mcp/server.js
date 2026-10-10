@@ -1475,7 +1475,7 @@ const EXECUTE_TOOLS = [
     name: "codara_remember",
     description:
       "Write a durable fact to Cora's memory so a LATER session starts already knowing it. Two tiers, each a plain markdown file the user can open and edit: `global` for facts about the user and this machine (preferences, how they want you to work, installed tooling), `workspace` for facts about this repository (a verified command, an environment gotcha, a convention the repo does not state). " +
-      "Remember only when one of three things happened: the user corrected you or stated a durable preference, an environmental fact cost a worker an attempt or a retry, or a repo-specific command or gotcha was verified to work. Never remember task status, one-off details, or anything a later session could read out of the repo itself. One plain sentence per memory, no provenance tags, at most a couple of memories per run. " +
+      "Remember only when one of three things happened: the user corrected you or stated a durable preference, an environmental fact cost a worker an attempt or a retry, or a repo-specific command or gotcha was verified to work. Never remember task status, one-off details, or anything a later session could read out of the repo itself. One plain sentence per memory (at most 500 characters; a longer bullet rejects the whole call), no provenance tags, at most a couple of memories per turn. " +
       "Each file is capped at 4096 bytes and starts warning near 3277. When the result reports the file is full, do NOT skip the write: re-read the file, merge and shorten the existing lines, and call this tool again with action `replace` and the complete new body. `replace` rewrites the whole file, so it must carry forward every line still worth keeping; lines the user wrote by hand are preserved unless you pass confirm_drop_user_lines. " +
       "Workers in chat runs receive a read-only copy of this memory and the active profile; do not copy memory lines into worker briefs. Automation workers do not see memory.",
     inputSchema: {
@@ -1718,7 +1718,7 @@ const STUDIO_TOOL_TO_RPC = {
 
 const DIRECT_MEMORY_TOOL = {
   name: "codara_remember",
-  description: "Save a durable user preference or verified workspace lesson for later chats. Use workspace scope for repo-specific facts and global scope only for user/machine facts. Never store secrets, task status, or guesses. Prefer one short bullet. Use replace to correct or consolidate existing memory, preserving all still-valid facts and user-authored lines. Each scope is capped at 4096 bytes.",
+  description: "Save a durable user preference or verified workspace lesson for later chats. Use workspace scope for repo-specific facts and global scope only for user/machine facts. Never store secrets, task status, or guesses. Prefer one short bullet (at most 500 characters; a longer one rejects the call). Use replace to correct or consolidate existing memory, preserving all still-valid facts and user-authored lines. Each scope is capped at 4096 bytes.",
   inputSchema: {
     type: "object",
     required: ["scope", "action"],

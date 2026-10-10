@@ -47,6 +47,7 @@ import {
   MAX_BULLETS_ADDED_PER_RUN,
   MAX_REMEMBER_CALLS_PER_RUN,
   rememberAdd,
+  rememberBudgetKey,
   rememberReplace,
   type MemoryScope,
 } from "./orchestration/cora-memory";
@@ -88,7 +89,7 @@ import {
   enabledWorkerModelFor,
   rosterModelFor,
 } from "./orchestration/worker-model-hint";
-import { availableCoraWorkerModels } from "./openrouter-config";
+import { coraWorkerModelAvailability } from "./orchestration/worker-model-availability";
 import {
   constrainedRuntimesForHeadroom,
   headroomForRuntime,
@@ -2764,14 +2765,22 @@ async function handleOrchestratorSpawnWorkers(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
-  const enabledWorkerModels = untrustedPullRequest
-    ? [...ALLOWED_WORKER_MODELS]
-    : availableCoraWorkerModels(await loadSettings());
-  if (!untrustedPullRequest && enabledWorkerModels.length === 0) {
+  // Filtered by connected accounts here, not only in the manager's prompt: a
+  // session keeps the roster it was launched with, so a provider signed out
+  // since then must still never receive a worker.
+  const workerModelAvailability = untrustedPullRequest
+    ? null
+    : await coraWorkerModelAvailability(await loadSettings());
+  const enabledWorkerModels = workerModelAvailability
+    ? workerModelAvailability.connected
+    : [...ALLOWED_WORKER_MODELS];
+  if (workerModelAvailability && enabledWorkerModels.length === 0) {
     return errorResponse(
       id,
       ERR_FORBIDDEN,
-      "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+      workerModelAvailability.disconnected.length > 0
+        ? `None of Cora's enabled worker models has a connected account (${workerModelAvailability.disconnected.join(", ")}). Ask the user to sign in to one of those providers in Settings > Agents.`
+        : "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
     );
   }
   const liveFeedbackRetries = [
@@ -5855,16 +5864,16 @@ async function handleOrchestratorBoardUpdate(
 // the tool name onto this method). Only Cora, the Execute/Auto manager, holds
 // this tool; workers never write memory. The heavy lifting (tag grammar,
 // dedup, TTL, byte caps, the user-line preservation guardrail) lives in
-// cora-memory.ts; this handler owns the per-run write budget, an in-memory
-// map that resets on app restart by design.
+// cora-memory.ts; this handler owns the per-turn write budget (keyed by
+// rememberBudgetKey), an in-memory map that resets on app restart by design.
 const rememberBudgetByRun = new Map<string, { calls: number; bulletsAdded: number }>();
 const REMEMBER_BUDGET_RUN_LIMIT = 256;
 
-function rememberBudgetFor(runId: string): { calls: number; bulletsAdded: number } {
-  let budget = rememberBudgetByRun.get(runId);
+function rememberBudgetFor(key: string): { calls: number; bulletsAdded: number } {
+  let budget = rememberBudgetByRun.get(key);
   if (!budget) {
     budget = { calls: 0, bulletsAdded: 0 };
-    rememberBudgetByRun.set(runId, budget);
+    rememberBudgetByRun.set(key, budget);
     while (rememberBudgetByRun.size > REMEMBER_BUDGET_RUN_LIMIT) {
       const oldest = rememberBudgetByRun.keys().next();
       if (oldest.done) break;
@@ -5892,12 +5901,12 @@ async function handleOrchestratorRemember(
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
 
-  const budget = rememberBudgetFor(runId);
+  const budget = rememberBudgetFor(rememberBudgetKey(run));
   if (budget.calls >= MAX_REMEMBER_CALLS_PER_RUN) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `memory write limit reached for this run (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
+      `memory write limit reached for this turn (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
     );
   }
 
@@ -5916,7 +5925,7 @@ async function handleOrchestratorRemember(
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
-        `memory bullet limit reached for this run (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
+        `memory bullet limit reached for this turn (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
       );
     }
   }

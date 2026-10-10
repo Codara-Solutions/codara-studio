@@ -83,6 +83,45 @@ async function main() {
     concurrentIds.has("concurrent-one") && concurrentIds.has("concurrent-two"),
   );
 
+  const nonLatin = await profiles.createCoraProfile({ name: "日本語" });
+  check("a non-ASCII profile name gets a hashed id", /^p-[0-9a-f]{8}$/.test(nonLatin.id), nonLatin.id);
+  check(
+    "a non-ASCII profile name resolves to itself, not the built-in",
+    profiles.resolveCoraProfile("日本語").id === nonLatin.id,
+    profiles.resolveCoraProfile("日本語").id,
+  );
+  let unknownNonLatin = "";
+  try {
+    profiles.resolveCoraProfile("한국어");
+  } catch (error) {
+    unknownNonLatin = error.message;
+  }
+  check("an unknown non-ASCII reference is unknown, not the built-in", /Unknown Cora profile/.test(unknownNonLatin), unknownNonLatin);
+  let reservedDefault = "";
+  try {
+    await profiles.createCoraProfile({ name: "Default" });
+  } catch (error) {
+    reservedDefault = error.message;
+  }
+  check("the built-in id stays reserved with a plain message", /reserved for the built-in profile/.test(reservedDefault), reservedDefault);
+
+  await profiles.setDefaultCoraProfile("日本語");
+  check("a non-ASCII profile can become the default", profiles.resolveCoraProfile().id === nonLatin.id);
+  const builtInByName = await profiles.setDefaultCoraProfile("Cora");
+  check(
+    "the built-in profile is selectable by the name list prints",
+    builtInByName.id === "default" && profiles.resolveCoraProfile().id === "default",
+    builtInByName.id,
+  );
+  await profiles.deleteCoraProfile(nonLatin.id);
+  let builtInByNameDelete = "";
+  try {
+    await profiles.deleteCoraProfile("Cora");
+  } catch (error) {
+    builtInByNameDelete = error.message;
+  }
+  check("the built-in profile cannot be deleted by name either", /built-in Cora profile cannot be deleted/.test(builtInByNameDelete), builtInByNameDelete);
+
   await profiles.setDefaultCoraProfile("Careful Coder");
   check("profiles resolve by name", profiles.resolveCoraProfile().id === coder.id);
   check(
@@ -111,6 +150,20 @@ async function main() {
   check("memory status reports both isolated files", status.global.bytesUsed > 0 && status.workspace.bytesUsed > 0);
 
   await memory.setMemoryEnabled("global", "", false, coder.id);
+  const identityOnlyWorker = memory.formatCoraMemoryForWorker("ws-a", coder.id) ?? "";
+  check(
+    "turning global memory off keeps the profile identity for workers",
+    identityOnlyWorker.includes("CORA PROFILE: Careful Coder") && !identityOnlyWorker.includes("CORA MEMORY"),
+    identityOnlyWorker,
+  );
+  const identityOnlyTurn = (await memory.formatCoraMemoryForTurn("ws-a", "run-identity", { profileId: coder.id })) ?? "";
+  check(
+    "turning global memory off keeps the profile identity for Cora's turns",
+    identityOnlyTurn.includes("CORA PROFILE: Careful Coder") &&
+      identityOnlyTurn.includes("Prefer small patches") &&
+      !identityOnlyTurn.includes("CORA MEMORY"),
+    identityOnlyTurn,
+  );
   await memory.setMemoryEnabled("workspace", "ws-a", false, coder.id);
   await memory.deleteProfileMemoryState(coder.id);
   const memoryState = JSON.parse(

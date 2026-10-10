@@ -324,8 +324,12 @@ const api = {
       ipcRenderer.invoke("pi-subscriptions:share-login", input),
     respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:respond", input),
-    cancel: (requestId: string): Promise<void> =>
+    // Without a request id, cancels every sign-in this window has open.
+    cancel: (requestId?: string): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:cancel", { requestId }),
+    // Re-sends this window's open sign-in as events; resolves to its request.
+    resumeLogin: (): Promise<PiSubscriptionProfileLoginRequest | null> =>
+      ipcRenderer.invoke("pi-subscriptions:resume-login"),
     onEvent: (handler: (event: PiSubscriptionAuthEvent) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, authEvent: PiSubscriptionAuthEvent) =>
         handler(authEvent);

@@ -34,6 +34,7 @@ export const CORA_COMPACTION_INSTRUCTIONS = [
   "completed work and verification, current",
   "state, failures, blockers, pending tasks, and next actions. Remove repetition and stale",
   "exploration. Do not invent requirements or broaden permissions. Use concise structured Markdown.",
+  "Keep the newest CORA PROFILE and CORA MEMORY sections verbatim.",
 ].join(" ");
 
 /** Read the configured trigger. Absurd values (empty, 0, negative, NaN, an

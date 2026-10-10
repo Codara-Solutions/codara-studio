@@ -19,6 +19,7 @@ import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
 import {
   CORA_WORKER_MODEL_CHOICES,
   WORKER_MODEL_ROSTER,
+  workerModelSubscription,
 } from "@shared/worker-model-roster";
 
 // codara-studio ships inside Codara itself. It stays at the top of the MCP list
@@ -354,6 +355,27 @@ export default function AgentCapabilitiesDialog({
       (label) => ({ label, models: buckets.get(label)! }),
     );
   }, [workerChoices]);
+  // Cora is offered only models whose provider has a usable account, so a row
+  // for a signed-out provider says why it will not be used.
+  const [usableSubscriptions, setUsableSubscriptions] = useState<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    if (renderedTab !== "workers") return;
+    let cancelled = false;
+    void window.spark.piSubscriptions
+      .status()
+      .then((overview) => {
+        if (cancelled) return;
+        setUsableSubscriptions(new Set(
+          (overview.profiles ?? [])
+            .filter((profile) => profile.connected && (!profile.expired || profile.canRefresh))
+            .map((profile) => profile.provider),
+        ));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [renderedTab]);
 
   const mcpGroups = useMemo(() => groupByName(mcp, "mcp"), [mcp]);
   const skillGroups = useMemo(() => groupByName(skills, "skill"), [skills]);
@@ -1025,7 +1047,7 @@ export default function AgentCapabilitiesDialog({
                     <MemoryRow
                       scope="global"
                       title="Global memory"
-                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository. Turning this off also turns off workspace memory; profile instructions still apply."
                       status={memory?.global ?? null}
                       busy={memoryBusy === "global"}
                       unavailable={null}
@@ -1061,6 +1083,10 @@ export default function AgentCapabilitiesDialog({
                             key={modelId}
                             modelId={modelId}
                             checked={draft.coraWorkerModels.includes(modelId)}
+                            signedOut={(() => {
+                              const subscription = workerModelSubscription(modelId);
+                              return Boolean(usableSubscriptions && subscription && !usableSubscriptions.has(subscription));
+                            })()}
                             onToggle={() => toggleWorkerModel(modelId)}
                           />
                         ))}
@@ -1632,7 +1658,7 @@ function MemoryRow({
             <span style={memoryNoteStyle}>{unavailable}</span>
           ) : status === null ? (
             <span style={memoryNoteStyle}>Reading the file</span>
-          ) : status.bytesUsed === 0 ? (
+          ) : status.bytesUsed === 0 || lines === 0 ? (
             <span style={memoryNoteStyle}>Nothing remembered yet.</span>
           ) : (
             <MemoryMeter status={status} lines={lines} />
@@ -1662,7 +1688,7 @@ function MemoryRow({
         </button>
         <MemoryClearControl
           busy={busy}
-          disabled={blocked || (status?.bytesUsed ?? 0) === 0}
+          disabled={blocked || lines === 0}
           userLineCount={status?.counts.user ?? 0}
           onClear={(includeUserLines) => onClear(scope, includeUserLines)}
         />
@@ -2387,10 +2413,12 @@ function workerModelPresentation(modelId: string): {
 function WorkerModelRow({
   modelId,
   checked,
+  signedOut,
   onToggle,
 }: {
   modelId: string;
   checked: boolean;
+  signedOut: boolean;
   onToggle: () => void;
 }) {
   const { hover, focus, pressed, handlers } = useInteractive();
@@ -2424,6 +2452,15 @@ function WorkerModelRow({
         {model.premium ? (
           <span className="spark-badge" style={workerModelTierStyle}>
             Premium
+          </span>
+        ) : null}
+        {signedOut ? (
+          <span
+            className="spark-badge"
+            style={{ ...workerModelTierStyle, color: "var(--warn)" }}
+            title="No account for this provider is signed in, so Cora will not use this model. Sign in under Settings > Agents."
+          >
+            Not signed in
           </span>
         ) : null}
         <span style={workerModelIdStyle}>{modelId}</span>

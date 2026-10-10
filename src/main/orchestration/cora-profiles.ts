@@ -7,6 +7,7 @@ import { writeFileAtomic } from "../fs-atomic";
 import type { CoraProfile, CoraProfileCreateInput } from "@shared/types";
 
 export const DEFAULT_CORA_PROFILE_ID = "default";
+const BUILT_IN_PROFILE_NAME = "Cora";
 const PROFILE_INSTRUCTIONS_MAX_CHARS = 4_000;
 
 interface StoredProfile {
@@ -160,7 +161,7 @@ export function listCoraProfiles(): CoraProfile[] {
   const registry = readRegistry();
   const builtIn: StoredProfile = {
     id: DEFAULT_CORA_PROFILE_ID,
-    name: "Cora",
+    name: BUILT_IN_PROFILE_NAME,
     description: "The standard Cora profile.",
     createdAt: new Date(0).toISOString(),
   };
@@ -169,13 +170,26 @@ export function listCoraProfiles(): CoraProfile[] {
   );
 }
 
+// A reference that slugs to nothing (a non-ASCII name) must not fall back to
+// the built-in id, or it would select or protect the wrong profile.
+function referenceId(needle: string): string | null {
+  const id = normalizeCoraProfileId(needle);
+  return id === DEFAULT_CORA_PROFILE_ID && needle !== DEFAULT_CORA_PROFILE_ID ? null : id;
+}
+
+function matchesReference(profile: { id: string; name: string }, needle: string): boolean {
+  return profile.id === referenceId(needle) || profile.name.toLowerCase() === needle;
+}
+
+function isBuiltInReference(needle: string): boolean {
+  return referenceId(needle) === DEFAULT_CORA_PROFILE_ID || needle === BUILT_IN_PROFILE_NAME.toLowerCase();
+}
+
 export function resolveCoraProfile(reference?: string | null): CoraProfile {
   const profiles = listCoraProfiles();
   if (!reference?.trim()) return profiles.find((profile) => profile.isDefault) ?? profiles[0];
   const needle = reference.trim().toLowerCase();
-  const match = profiles.find(
-    (profile) => profile.id === normalizeCoraProfileId(needle) || profile.name.toLowerCase() === needle,
-  );
+  const match = profiles.find((profile) => matchesReference(profile, needle));
   if (!match) throw new Error(`Unknown Cora profile: ${reference}`);
   return match;
 }
@@ -186,11 +200,20 @@ function profileTemplate(name: string, description: string, instructions: string
   return `# ${name}\n\n${description ? `${description}\n\n` : ""}## Instructions\n\n${body}\n`;
 }
 
+// A name with no ASCII letter or digit (all CJK, emoji, ...) has no slug of its
+// own; a short hash keeps it one safe path segment instead of collapsing onto
+// the built-in id.
+function profileIdForName(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (slug) return normalizeCoraProfileId(slug);
+  return `p-${createHash("sha1").update(name).digest("hex").slice(0, 8)}`;
+}
+
 export async function createCoraProfile(input: CoraProfileCreateInput): Promise<CoraProfile> {
   const name = input.name.trim().slice(0, 80);
   if (!name) throw new Error("Profile name is required.");
-  const id = normalizeCoraProfileId(name);
-  if (id === DEFAULT_CORA_PROFILE_ID) throw new Error('The profile id "default" is reserved.');
+  const id = profileIdForName(name);
+  if (id === DEFAULT_CORA_PROFILE_ID) throw new Error('The name "Default" is reserved for the built-in profile. Choose another name.');
   if (id === "cora") throw new Error('The name "Cora" is reserved for the built-in profile. Choose another name.');
   const instructions = input.instructions?.trim().slice(0, PROFILE_INSTRUCTIONS_MAX_CHARS) ?? "";
   return mutateRegistry(async (registry) => {
@@ -216,13 +239,13 @@ export async function createCoraProfile(input: CoraProfileCreateInput): Promise<
 export async function setDefaultCoraProfile(reference: string): Promise<CoraProfile> {
   return mutateRegistry((registry) => {
     const needle = reference.trim().toLowerCase();
-    const stored = registry.profiles.find(
-      (profile) => profile.id === normalizeCoraProfileId(needle) || profile.name.toLowerCase() === needle,
-    );
-    const profile = stored ?? (normalizeCoraProfileId(needle) === DEFAULT_CORA_PROFILE_ID
+    const stored = registry.profiles.find((profile) => matchesReference(profile, needle));
+    // `cora profile list` prints the built-in as "Cora", so its name selects
+    // it just like its id (a stored profile can never be named Cora).
+    const profile = stored ?? (isBuiltInReference(needle)
       ? {
           id: DEFAULT_CORA_PROFILE_ID,
-          name: "Cora",
+          name: BUILT_IN_PROFILE_NAME,
           description: "The standard Cora profile.",
           createdAt: new Date(0).toISOString(),
         }
@@ -247,14 +270,10 @@ export async function deleteCoraProfile(reference: string, expectedCreatedAt?: s
   try {
     return await mutateRegistry(async (registry) => {
       const needle = reference.trim().toLowerCase();
-      if (!needle || normalizeCoraProfileId(needle) === DEFAULT_CORA_PROFILE_ID) {
+      if (!needle || isBuiltInReference(needle)) {
         throw new Error("The built-in Cora profile cannot be deleted.");
       }
-      const index = registry.profiles.findIndex(
-        (profile) =>
-          profile.id === normalizeCoraProfileId(needle) ||
-          profile.name.toLowerCase() === needle,
-      );
+      const index = registry.profiles.findIndex((profile) => matchesReference(profile, needle));
       if (index < 0) throw new Error(`Unknown Cora profile: ${reference}`);
       if (expectedCreatedAt !== undefined && registry.profiles[index].createdAt !== expectedCreatedAt) {
         throw new Error("This profile changed. Refresh before deleting it.");

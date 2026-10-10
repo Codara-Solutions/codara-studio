@@ -93,6 +93,7 @@ interface ActiveFlow {
   label?: string;
   makeDefault?: boolean;
   ownerId: string;
+  owner: PiSubscriptionAuthOwner;
   abort: AbortController;
   releaseLoginGate: () => void;
   pendingPrompt: {
@@ -101,6 +102,22 @@ interface ActiveFlow {
     reject(error: Error): void;
     removeAbortListener(): void;
   } | null;
+  /** The started event and the newest browser/code/prompt step, replayed to a
+   * Settings panel that lost the flow (tab switch, dialog closed). */
+  startedEvent: PiSubscriptionAuthEvent;
+  lastInteraction: PiSubscriptionAuthEvent | null;
+  /** Set only by an explicit cancel, so a provider's own "aborted" timeout
+   * text is never mistaken for one. */
+  userCancelled: boolean;
+  /** Why the app stopped the flow itself (stall, overall timeout, a browser
+   * that would not open). Wins over whatever the aborted login throws. */
+  failureReason?: string;
+  /** A newer sign-in from the same owner replaced this one; it ends silently. */
+  superseded: boolean;
+  finalized: boolean;
+  finished: Promise<void>;
+  markFinished: () => void;
+  timers: ReturnType<typeof setTimeout>[];
 }
 
 /**
@@ -162,6 +179,24 @@ const REFRESH_TIMEOUT_MS = 15_000;
 const activeFlows = new Map<string, ActiveFlow>();
 const oauthLoginGate = new PiOAuthLoginGate();
 
+const loginTiming = {
+  /** No sign-in URL or prompt by now means Pi is wedged (a held port). */
+  stallMs: 45_000,
+  /** A browser sign-in the user walked away from must not hold the
+   * process-wide gate forever; Pi's Anthropic flow has no deadline of its own. */
+  flowMs: 10 * 60 * 1000,
+  /** How long a stopped flow may take to unwind before it is released anyway,
+   * for a provider module that ignores its abort signal. */
+  graceMs: 5_000,
+};
+
+export function setPiLoginTimingForTests(timing: Partial<typeof loginTiming>): void {
+  Object.assign(loginTiming, timing);
+}
+
+const LOGIN_GATE_BUSY_MESSAGE =
+  "Another sign-in is already in progress in another Codara Studio window or in the cora CLI. Finish it in your browser or cancel it there, then try again.";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -181,6 +216,33 @@ function safeAuthError(error: unknown): string {
     .replace(/([?&#](?:code|state|access_token|refresh_token)=)[^&#\s]+/gi, "$1[redacted]")
     .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9._-]{20,})\b/g, "[redacted]")
     .slice(0, 600);
+}
+
+/**
+ * What a failed sign-in tells the user. Pi's errors carry request details and
+ * stack frames that mean nothing to them, so known causes get a plain next
+ * step and anything else is cut before its diagnostic tail. The console keeps
+ * the raw text.
+ */
+export function friendlyPiSignInError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (/EADDRINUSE/i.test(raw)) {
+    return "Another app is using the sign-in port. Close other Codara Studio windows or builds and try again.";
+  }
+  if (/token exchange/i.test(raw) && /status=4\d\d\b/i.test(raw)) {
+    return "The sign-in code expired or was already used. Start the sign-in again.";
+  }
+  if (/TimeoutError|ETIMEDOUT|timed out/i.test(raw)) {
+    return "The provider took too long to answer. Check your connection and try again.";
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ECONNRESET|EAI_AGAIN|fetch failed/i.test(raw)) {
+    return "Codara Studio could not reach the provider. Check your connection and try again.";
+  }
+  const head = raw
+    .split(/\n\s+at\s/)[0]
+    .split(/;?\s*\b(?:url|redirect_uri|response_type|body|details|cause|stack)=/i)[0]
+    .trim();
+  return safeAuthError(head) || "The sign-in failed. Try again.";
 }
 
 function publicPrompt(prompt: OAuthInteractionPrompt): PiSubscriptionPrompt {
@@ -456,6 +518,78 @@ function settlePendingPrompt(flow: ActiveFlow, error: Error): void {
   pending.reject(error);
 }
 
+function flowTimer(flow: ActiveFlow, ms: number, fn: () => void): void {
+  const timer = setTimeout(fn, ms);
+  timer.unref?.();
+  flow.timers.push(timer);
+}
+
+/**
+ * Release everything a flow holds, exactly once: its timers, its prompt, its
+ * entry in activeFlows and the process-wide login gate. The closing event goes
+ * out after the gate is free, so an owner reacting to it can start again.
+ */
+function finalizeFlow(flow: ActiveFlow, event: PiSubscriptionAuthEvent | null): void {
+  if (flow.finalized) return;
+  flow.finalized = true;
+  for (const timer of flow.timers) clearTimeout(timer);
+  settlePendingPrompt(flow, new Error("Login finished"));
+  if (activeFlows.get(flow.requestId) === flow) activeFlows.delete(flow.requestId);
+  flow.releaseLoginGate();
+  flow.markFinished();
+  if (event && !flow.superseded) send(flow.owner, event);
+}
+
+function stoppedFlowEvent(flow: ActiveFlow, error: unknown): PiSubscriptionAuthEvent {
+  const { requestId, provider } = flow;
+  if (flow.userCancelled) {
+    return { type: "cancelled", requestId, provider, message: "Sign-in cancelled." };
+  }
+  return {
+    type: "failed",
+    requestId,
+    provider,
+    message: flow.failureReason ?? friendlyPiSignInError(error),
+  };
+}
+
+/**
+ * Stop a flow from outside its login call: a cancel, a stall, the overall
+ * deadline, a superseding sign-in. The abort normally makes the login reject
+ * and runLogin finalizes with the right event; the grace timer covers a
+ * provider module that ignores the abort and would otherwise hold the gate
+ * until the app restarts.
+ */
+function stopFlow(
+  flow: ActiveFlow,
+  reason: { userCancelled: true } | { failureReason: string } | { superseded: true },
+): void {
+  if (flow.finalized) return;
+  if ("userCancelled" in reason) flow.userCancelled = true;
+  else if ("failureReason" in reason) flow.failureReason ??= reason.failureReason;
+  else flow.superseded = true;
+  flow.abort.abort();
+  settlePendingPrompt(flow, new Error("Login cancelled"));
+  flowTimer(flow, loginTiming.graceMs, () => {
+    finalizeFlow(flow, stoppedFlowEvent(flow, new Error("Login cancelled")));
+  });
+}
+
+function rememberInteraction(flow: ActiveFlow, event: PiSubscriptionAuthEvent): void {
+  flow.lastInteraction = event;
+  send(flow.owner, event);
+}
+
+/** Re-send what a freshly mounted panel needs to show this flow again. */
+function replayFlow(flow: ActiveFlow): void {
+  send(flow.owner, flow.startedEvent);
+  const last = flow.lastInteraction;
+  if (!last) return;
+  // A prompt that was answered or withdrawn is not shown again.
+  if (last.type === "prompt" && flow.pendingPrompt?.promptId !== last.promptId) return;
+  send(flow.owner, last);
+}
+
 /**
  * The anonymous account digest and the account's email address to record for a
  * credential that has just been issued. Codex carries both inside the
@@ -544,8 +678,8 @@ function oauthStateFromAuthUrl(url: string): string | null {
   }
 }
 
-async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promise<void> {
-  const { provider, requestId } = flow;
+async function runLogin(flow: ActiveFlow): Promise<void> {
+  const { provider, requestId, owner } = flow;
   let callback: PiOAuthCallbackServer | null = null;
   // Stall watchdog: a login that produces neither a sign-in URL nor a prompt
   // is stuck (a held callback port, a silently wedged Pi runtime) and used to
@@ -556,17 +690,18 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
   const markLoginSignal = (): void => {
     sawLoginSignal = true;
   };
-  const stallWatchdog = setTimeout(() => {
+  flowTimer(flow, loginTiming.stallMs, () => {
     if (sawLoginSignal || flow.abort.signal.aborted) return;
-    send(owner, {
-      type: "failed",
-      requestId,
-      provider,
-      message:
+    stopFlow(flow, {
+      failureReason:
         "The sign-in stalled before producing a login URL. Another app (or a second Codara Studio) may be holding the sign-in port. Close other instances and try again.",
     });
-    flow.abort.abort();
-  }, 45_000);
+  });
+  flowTimer(flow, loginTiming.flowMs, () => {
+    stopFlow(flow, {
+      failureReason: `The sign-in was not finished within ${Math.round(loginTiming.flowMs / 60_000)} minutes. Start it again when you are ready.`,
+    });
+  });
   try {
     const oauth = await loadOAuth(provider);
     // Own the loopback callback so the browser's last page is Codara's, not
@@ -595,13 +730,6 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
           }
         }
         const promptId = randomUUID();
-        send(owner, {
-          type: "prompt",
-          requestId,
-          promptId,
-          provider,
-          prompt: publicPrompt(prompt),
-        });
         const typed = new Promise<string>((resolve, reject) => {
           const abort = () => {
             if (flow.pendingPrompt?.promptId !== promptId) return;
@@ -623,6 +751,13 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
               flow.abort.signal.removeEventListener("abort", abort);
             },
           };
+        });
+        rememberInteraction(flow, {
+          type: "prompt",
+          requestId,
+          promptId,
+          provider,
+          prompt: publicPrompt(prompt),
         });
         if (!callback || prompt.type !== "manual_code") return typed;
         // Pi asks for a pasted code because it believes it has no listener of
@@ -654,6 +789,10 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
         throw settled.error;
       },
       notify: (event) => {
+        // A stopped flow whose module ignores the abort may still report a
+        // URL; it must neither open a browser nor take over the owner's panel,
+        // which may already show the sign-in that replaced it.
+        if (flow.abort.signal.aborted) return;
         markLoginSignal();
         if (event.type === "auth_url" && event.url) {
           // Pi's authorize URL carries the state its callback expects. Learning
@@ -661,7 +800,7 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
           // anything that is not this sign-in, exactly as Pi's own would.
           const state = oauthStateFromAuthUrl(event.url);
           if (state) callback?.expectState(state);
-          send(owner, {
+          rememberInteraction(flow, {
             type: "auth_url",
             requestId,
             provider,
@@ -669,13 +808,12 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
             ...(event.instructions ? { instructions: event.instructions } : {}),
           });
           void openOAuthUrl(event.url).catch((error) => {
-            send(owner, { type: "failed", requestId, provider, message: safeAuthError(error) });
-            flow.abort.abort();
+            stopFlow(flow, { failureReason: friendlyPiSignInError(error) });
           });
           return;
         }
         if (event.type === "device_code" && event.userCode && event.verificationUri) {
-          send(owner, {
+          rememberInteraction(flow, {
             type: "device_code",
             requestId,
             provider,
@@ -696,7 +834,8 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     // One sign-in wrote both halves, and the picker promised as much; the
     // completion line says the same thing.
     const completedMessage = `${familyForSubscription(provider).displayName} is signed in to Cora and ${unifiedAccountsFor(provider).adapter.labels.cliLabel}.`;
-    send(owner, {
+    callback?.close();
+    finalizeFlow(flow, {
       type: "completed",
       requestId,
       provider,
@@ -707,22 +846,18 @@ async function runLogin(flow: ActiveFlow, owner: PiSubscriptionAuthOwner): Promi
     // that started this instead of leaving them to find Studio themselves.
     owner.focus?.();
   } catch (error) {
-    const cancelled = flow.abort.signal.aborted || /cancelled|canceled|aborted/i.test(safeAuthError(error));
-    send(owner, {
-      type: cancelled ? "cancelled" : "failed",
-      requestId,
-      provider,
-      message: cancelled ? "Sign-in cancelled." : safeAuthError(error),
-    });
+    callback?.close();
+    if (!flow.userCancelled && !flow.superseded) {
+      console.warn(`[pi-subscription-auth] ${provider} sign-in failed: ${safeAuthError(error)}`);
+    }
+    const alreadyClosed = flow.finalized;
+    finalizeFlow(flow, stoppedFlowEvent(flow, error));
     // A cancel came from Studio, so the user is already here; a real failure
     // happened out in the browser and needs the window pulled back.
-    if (!cancelled) owner.focus?.();
+    if (!alreadyClosed && !flow.userCancelled && !flow.superseded) owner.focus?.();
   } finally {
-    clearTimeout(stallWatchdog);
     callback?.close();
-    settlePendingPrompt(flow, new Error("Login finished"));
-    activeFlows.delete(requestId);
-    flow.releaseLoginGate();
+    finalizeFlow(flow, null);
   }
 }
 
@@ -742,27 +877,45 @@ export async function startPiSubscriptionProfileLoginForOwner(
     targetProfileId = profile.id;
   }
 
-  for (const flow of activeFlows.values()) {
-    if (
-      flow.provider === provider &&
-      flow.ownerId === owner.id &&
-      flow.targetProfileId === targetProfileId
-    ) {
+  // One owner shows one sign-in at a time. Asking again for the same account
+  // re-shows the open flow (a remounted Settings panel lost its view of it);
+  // asking for another one replaces the owner's own abandoned flow rather
+  // than failing on the gate it still holds.
+  for (const flow of [...activeFlows.values()]) {
+    if (flow.ownerId !== owner.id) continue;
+    if (flow.provider === provider && flow.targetProfileId === targetProfileId && !flow.abort.signal.aborted) {
+      replayFlow(flow);
       return {
         requestId: flow.requestId,
         provider,
         ...(targetProfileId ? { targetProfileId } : {}),
       };
     }
-    break;
+    stopFlow(flow, { superseded: true });
+    await flow.finished;
   }
 
   const requestId = randomUUID();
   // Pi's OAuth implementations bind fixed loopback callback ports. One
   // process-wide flow at a time prevents windows from racing those ports or
   // delivering one account's callback into another account's request.
-  const releaseLoginGate = oauthLoginGate.acquire(requestId);
+  let releaseLoginGate: () => void;
   try {
+    releaseLoginGate = oauthLoginGate.acquire(requestId);
+  } catch {
+    throw new Error(LOGIN_GATE_BUSY_MESSAGE);
+  }
+  try {
+    let markFinished: () => void = () => undefined;
+    const finished = new Promise<void>((resolve) => {
+      markFinished = resolve;
+    });
+    const startedEvent: PiSubscriptionAuthEvent = {
+      type: "started",
+      requestId,
+      provider,
+      message: `Signing in to ${PROVIDER_META[provider].label}…`,
+    };
     const flow: ActiveFlow = {
       requestId,
       provider,
@@ -770,18 +923,22 @@ export async function startPiSubscriptionProfileLoginForOwner(
       ...(input.label?.trim() ? { label: input.label.trim() } : {}),
       ...(input.makeDefault ? { makeDefault: true } : {}),
       ownerId: owner.id,
+      owner,
       abort: new AbortController(),
       releaseLoginGate,
       pendingPrompt: null,
+      startedEvent,
+      lastInteraction: null,
+      userCancelled: false,
+      superseded: false,
+      finalized: false,
+      finished,
+      markFinished,
+      timers: [],
     };
     activeFlows.set(requestId, flow);
-    send(owner, {
-      type: "started",
-      requestId,
-      provider,
-      message: `Signing in to ${PROVIDER_META[provider].label}…`,
-    });
-    void runLogin(flow, owner);
+    send(owner, startedEvent);
+    void runLogin(flow);
     return {
       requestId,
       provider,
@@ -799,6 +956,30 @@ export async function startPiSubscriptionProfileLogin(
   owner: WebContents,
 ): Promise<PiSubscriptionProfileLoginRequest> {
   return startPiSubscriptionProfileLoginForOwner(input, webContentsAuthOwner(owner));
+}
+
+/**
+ * Re-send the owner's open sign-in, if any, so a Settings panel mounted after
+ * the one that started it (tab switch, dialog reopened) can show it again
+ * and cancel it.
+ */
+export function resumePiSubscriptionLoginForOwner(
+  owner: PiSubscriptionAuthOwner,
+): PiSubscriptionProfileLoginRequest | null {
+  for (const flow of activeFlows.values()) {
+    if (flow.ownerId !== owner.id || flow.abort.signal.aborted) continue;
+    replayFlow(flow);
+    return {
+      requestId: flow.requestId,
+      provider: flow.provider,
+      ...(flow.targetProfileId ? { targetProfileId: flow.targetProfileId } : {}),
+    };
+  }
+  return null;
+}
+
+export function resumePiSubscriptionLogin(owner: WebContents): PiSubscriptionProfileLoginRequest | null {
+  return resumePiSubscriptionLoginForOwner(webContentsAuthOwner(owner));
 }
 
 export function answerPiSubscriptionPrompt(
@@ -829,15 +1010,21 @@ export function cancelPiSubscriptionLogin(rawRequestId: unknown, owner: WebConte
   cancelPiSubscriptionLoginForOwner(rawRequestId, webContentsAuthOwner(owner));
 }
 
+/**
+ * Cancel one of the owner's sign-ins, or every one it has open when no request
+ * id is given: a panel that has not learned its request id yet can still
+ * cancel what it started.
+ */
 export function cancelPiSubscriptionLoginForOwner(
   rawRequestId: unknown,
   owner: PiSubscriptionAuthOwner,
 ): void {
   const requestId = typeof rawRequestId === "string" ? rawRequestId : "";
-  const flow = activeFlows.get(requestId);
-  if (!flow || flow.ownerId !== owner.id) return;
-  flow.abort.abort();
-  settlePendingPrompt(flow, new Error("Login cancelled"));
+  for (const flow of [...activeFlows.values()]) {
+    if (flow.ownerId !== owner.id) continue;
+    if (requestId && flow.requestId !== requestId) continue;
+    stopFlow(flow, { userCancelled: true });
+  }
 }
 
 /**

@@ -2672,11 +2672,16 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
 // row — see buildChatTimeline's adjacent-duplicate collapse.
 function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpoint }) {
   const [open, setOpen] = useState(false);
+  const [confirmCode, setConfirmCode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) setConfirmCode(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -2806,14 +2811,26 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
             disabled={busy}
           />
           <UndoMenuRow
-            label="Undo message and code"
+            label={confirmCode ? "Click again to restore files" : "Undo message and code"}
             sub={
-              hasCodeSnapshot
-                ? "Rewind chat + restore workspace files"
-                : "No workspace snapshot available"
+              !hasCodeSnapshot
+                ? checkpoint.snapshotError
+                  ? `No workspace snapshot: ${checkpoint.snapshotError}`
+                  : "No workspace snapshot available"
+                : confirmCode
+                  ? "Every file changed since this message goes back, yours included. Your current files are saved first."
+                  : "Rewind chat + restore workspace files"
             }
             danger
-            onClick={() => void undo("chat+code")}
+            onClick={() => {
+              // Restoring files is destructive across the whole workspace, so
+              // it takes a second, explicit click.
+              if (!confirmCode) {
+                setConfirmCode(true);
+                return;
+              }
+              void undo("chat+code");
+            }}
             disabled={busy || !hasCodeSnapshot}
           />
           {error && (

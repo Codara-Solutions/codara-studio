@@ -32,6 +32,12 @@ terminal. Providers are `anthropic` (Claude), `openai-codex` (ChatGPT, for
 Codex) and `xai` (Grok); `claude`, `codex`, `chatgpt` and `grok` work as
 aliases.
 
+Only one sign-in runs at a time. If you leave the Agents tab or close Settings
+while a sign-in is open, it keeps waiting for your browser; open **Agents**
+again to see it and finish or cancel it. Starting a sign-in for another
+provider from the same window replaces the open one, and a sign-in left
+unfinished for 10 minutes is cancelled on its own.
+
 The first account of each CLI, "Account 1", is simply your own login in that
 CLI's usual home. If you were already signed in to Claude Code or Codex before
 installing Codara, that login is Account 1.

@@ -31,6 +31,7 @@ import {
 import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { PiTurnAccumulator } from "./pi-turn";
 import { PiManagerCompaction } from "./pi-manager-compaction";
+import { resetCoraMemoryInjection } from "./cora-memory";
 import {
   buildTalkReplyDecision,
   type ChatStreamHandler,
@@ -813,6 +814,9 @@ async function requestPiDecision(
       }
       accumulator.consume(event);
       if (event.type === "agent_settled") agentSettledSeen = true;
+      // A finished compaction (host-requested or Pi's native one) summarized
+      // the turn that carried the memory sections, so the next turn re-sends them.
+      if (event.type === "compaction_end" && event.result) resetCoraMemoryInjection(runId);
       if (compaction?.consume(event)) return;
       if (event.type === "agent_settled") settle();
     });
