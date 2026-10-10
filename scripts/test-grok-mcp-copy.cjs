@@ -17,6 +17,10 @@
 //      and the config file is left byte-for-byte unchanged.
 //   4. Discovery reads ~/.grok/config.toml back, so a server already in the
 //      Grok config shows as installed for Grok the way Claude/Codex do.
+//   5. A second copy of the same server is refused instead of duplicating or
+//      overwriting the user's section.
+//   6. Codex does carry headers: the same http server copies into
+//      ~/.codex/config.toml as http_headers and reads back intact.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -112,20 +116,10 @@ function grokId(name, configPath) {
   });
 }
 
-// A Capability Center copy lands inside the SPARK_AGENT_MCP_SYNC managed block,
-// which the in-place reader strips on purpose so an edit never rewrites synced
-// output (Codex behaves identically). To prove the rendered TOML really parses,
-// hand the block's body to the app's own reader with the markers taken off.
+// A Capability Center copy is an ordinary user-owned table, so the app's own
+// reader must parse it straight out of the real file.
 function readCopiedServer(name) {
-  const scratch = path.join(FAKE_HOME, `parse-check-${name}.toml`);
-  const body = fs
-    .readFileSync(GROK_CONFIG, "utf8")
-    .split(/\r?\n/)
-    .filter((line) => !line.startsWith("# >>> SPARK_AGENT_MCP_SYNC"))
-    .filter((line) => !line.startsWith("# <<< SPARK_AGENT_MCP_SYNC"))
-    .join("\n");
-  fs.writeFileSync(scratch, body);
-  return readMcpServerDetail({ id: grokId(name, scratch) });
+  return readMcpServerDetail({ id: grokId(name) });
 }
 
 fs.writeFileSync(
@@ -261,7 +255,7 @@ async function main() {
     assert.deepEqual(result.installed, []);
     assert.match(
       result.error ?? "",
-      /sends request headers, which Grok Build config\.toml cannot carry\. Keep it in a JSON config\./,
+      /sends request headers, which Grok Build config\.toml cannot carry\. Keep it in a Claude or Codex config\./,
       `unexpected refusal wording: ${result.error}`,
     );
     assert.equal(
@@ -272,15 +266,34 @@ async function main() {
     assert.doesNotMatch(fs.readFileSync(GROK_CONFIG, "utf8"), /needs-headers/);
   });
 
-  // ── 6. Repeating a copy rewrites the block, it does not duplicate sections ─
-  await check("copying the same server twice does not duplicate its section", async () => {
+  // ── 6. Repeating a copy is refused, it does not duplicate sections ────────
+  await check("copying the same server twice is refused and changes nothing", async () => {
+    const before = fs.readFileSync(GROK_CONFIG);
     const result = await installAgentAssetToRuntime({ id: sourceId("second-tool"), target: "grok" });
-    assert.equal(result.ok, true, `re-copy failed: ${result.error ?? "no error reported"}`);
+    assert.equal(result.ok, false, "a second copy must not overwrite the existing section");
+    assert.match(result.error ?? "", /Grok Build already has MCP server 'second-tool'/);
+    assert.equal(fs.readFileSync(GROK_CONFIG).equals(before), true, "a refused re-copy changed the file");
     const text = fs.readFileSync(GROK_CONFIG, "utf8");
     const sections = text.match(/^\[mcp_servers\.second-tool\]$/gm) ?? [];
     assert.equal(sections.length, 1, `expected one [mcp_servers.second-tool] section, got ${sections.length}`);
     assert.match(text, /^\[mcp_servers\.hand-written\]$/m, "the re-copy dropped a hand-written section");
     assert.match(text, /# >>> SPARK_AGENT_BUILTIN_MCP/, "the re-copy dropped the Codara built-in block");
+  });
+
+  // ── 7. Codex carries headers as http_headers ──────────────────────────────
+  await check("an http server with headers copies into Codex as http_headers", async () => {
+    const codexConfig = path.join(FAKE_HOME, ".codex", "config.toml");
+    const result = await installAgentAssetToRuntime({ id: sourceId("needs-headers"), target: "codex" });
+    assert.deepEqual(result, { ok: true, installed: ["needs-headers"] }, `copy into Codex failed: ${result.error}`);
+    const text = fs.readFileSync(codexConfig, "utf8");
+    assert.match(text, /^\[mcp_servers\.needs-headers\]$/m);
+    assert.match(text, /^url = "https:\/\/mcp\.example\.com\/v1"$/m);
+    const detail = readMcpServerDetail({
+      id: JSON.stringify({ kind: "mcp", runtime: "codex", scope: "user", name: "needs-headers", path: codexConfig }),
+    });
+    assert.ok(detail, "the Codex copy does not parse back");
+    assert.equal(detail.url, "https://mcp.example.com/v1");
+    assert.deepEqual(detail.headers, { Authorization: "Bearer secret" });
   });
 
   console.log(results.map((name) => `  ok  ${name}`).join("\n"));

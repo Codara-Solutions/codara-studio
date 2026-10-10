@@ -75,7 +75,13 @@ async function main() {
   assert.ok(editor.targets.some((target) => target.runtime === "grok"));
   assert.ok(editor.targets.every((target) => /^[a-f0-9]{64}$/.test(target.id) && !("path" in target)));
   const targetId = editor.targets.find((target) => target.runtime === "shared" && target.scope === "workspace").id;
-  const server = { name: "exact", transport: "stdio", command: "node", args: ["", "  spaced  ", "line\nbreak"], env: { TOKEN: "  exact value  ", EMPTY: "" } };
+  const server = { name: "exact", transport: "stdio", command: "node", args: ["", "  spaced  ", "line\nbreak"], env: { LABEL: "  exact value  ", EMPTY: "" } };
+  // A literal credential must not land in a file that is usually committed.
+  await assert.rejects(
+    remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId, server: { ...server, name: "leaky", env: { API_TOKEN: "sk-literal" } } }),
+    /looks like a secret/,
+  );
+  assert.ok(!fs.existsSync(configPath));
   await remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId, server });
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
   assert.deepEqual(config().mcpServers.exact.args, server.args);
@@ -107,7 +113,7 @@ async function main() {
   assert.throws(() => remote.readRemoteMcpEditor(context, "f".repeat(64)), /available/);
   await assert.rejects(remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId, server: { ...server, name: "codara-studio" } }), /built-in/);
   await assert.rejects(remote.updateRemoteAgentAsset(context, { action: "remove", assetId: "f".repeat(64) }), /available/);
-  const http = { name: "web", transport: "http", url: "https://example.test/mcp", headers: { Authorization: "Bearer fixture" } };
+  const http = { name: "web", transport: "http", url: "https://example.test/mcp", headers: { Authorization: "Bearer ${WEB_TOKEN}" } };
   const grokTarget = editor.targets.find((target) => target.runtime === "grok").id;
   await assert.rejects(remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId: grokTarget, server: http }), /cannot carry request headers/);
   await remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId, server: http });

@@ -1681,6 +1681,8 @@ export interface AgentSyncResult {
   mcp: {
     toClaude: string[];
     toCodex: string[];
+    // Built-in entries the sync repaired in Grok Build's config.
+    toGrok?: string[];
     skipped: string[];
     errors: string[];
   };
@@ -1720,6 +1722,20 @@ export interface AgentAssetInventoryItem {
   // discovered by name but its definition could not be parsed.
   mcpTransport?: AgentMcpTransport;
   mcpSummary?: string;
+  // MCP only: the agent CLIs that actually load this entry's config file, and
+  // a caveat when that differs from what the file's location suggests (a
+  // .claude/settings.json entry reaches no CLI; a project .mcp.json needs
+  // Claude's approval). Cora and Pi workers read every listed file.
+  readBy?: AgentFamilyRuntime[];
+  readByNote?: string;
+  // MCP only: the entry lives in Claude's private per-project map in
+  // ~/.claude.json (Claude's "local" scope) for the active workspace.
+  claudeLocalScope?: boolean;
+  // Skills only: the skill's own folder, its SKILL.md frontmatter
+  // description, and whether Cora's and Pi workers' sessions load it.
+  skillDir?: string;
+  skillDescription?: string;
+  piLoads?: boolean;
 }
 
 // stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
@@ -1737,6 +1753,10 @@ export interface AgentMcpTarget {
   path: string;
   label: string;
   format: "json" | "toml";
+  // The CLIs that load this file, and a short caveat for the location picker
+  // (for example that a project file is usually committed to git).
+  readBy?: AgentFamilyRuntime[];
+  hint?: string;
 }
 
 export interface AgentMcpServerDraft {
@@ -1764,6 +1784,65 @@ export interface AgentMcpSaveResult {
 export interface AgentAssetInventory {
   mcp: AgentAssetInventoryItem[];
   skills: AgentAssetInventoryItem[];
+  // A skill root held more skill folders than the scan reads.
+  skillsTruncated?: boolean;
+}
+
+// How one MCP server assigned to Cora or Pi workers reaches a Pi session for
+// the active workspace. "needs-oauth" is delivered but will fail: the server
+// signs in through Claude's OAuth store, which Pi cannot use.
+export type AgentPiMcpDeliveryState =
+  | "delivered"
+  | "needs-oauth"
+  | "turned-off"
+  | "no-definition"
+  | "reserved"
+  | "duplicate"
+  | "unsupported"
+  | "over-cap";
+
+export interface AgentPiMcpLiveStatus {
+  status: "pending" | "connected" | "failed" | "disconnected";
+  tools: number;
+  error?: string;
+  updatedAt: string;
+}
+
+export interface AgentPiMcpDelivery {
+  sessionKey: string;
+  name: string;
+  state: AgentPiMcpDeliveryState;
+  reason?: string;
+  // Connection state reported by an open Cora chat, when one is running.
+  live?: AgentPiMcpLiveStatus;
+}
+
+export interface AgentPiMcpPreview {
+  cora: AgentPiMcpDelivery[];
+  worker: AgentPiMcpDelivery[];
+  maxServers: number;
+  errors: string[];
+}
+
+// Connection test for one MCP server: either a discovered entry (`id`) or an
+// unsaved add/edit form draft. It starts the server, so it runs only on an
+// explicit click.
+export interface AgentMcpProbeRequest {
+  cwd?: string | null;
+  id?: string;
+  draft?: AgentMcpServerDraft;
+}
+
+export interface AgentMcpProbeResult {
+  ok: boolean;
+  transport?: AgentMcpTransport;
+  tools: Array<{ name: string; description?: string }>;
+  serverName?: string;
+  serverVersion?: string;
+  durationMs: number;
+  error?: string;
+  // Last stderr lines of a stdio server, with env and header values redacted.
+  stderrTail?: string[];
 }
 
 export interface AgentAssetDeleteResult {
