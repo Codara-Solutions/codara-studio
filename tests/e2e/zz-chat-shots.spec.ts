@@ -137,6 +137,9 @@ test("capture the Cora chat in each visual state at narrow and wide sizes", asyn
       await expect(page.getByText("Split run-store persistence").first()).toBeVisible({ timeout: 15_000 });
       await scrollConversation(page, "bottom");
       await shoot(page, "running", size.name);
+      // The copy-id control is a bare glyph at rest and names itself on hover.
+      await page.getByRole("button", { name: "Copy run id" }).locator("visible=true").last().hover();
+      await shoot(page, "running-header-hover", size.name);
 
       await openChat(page, "Long design review");
       await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Final answer 18", {
