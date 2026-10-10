@@ -173,6 +173,39 @@ async function main() {
   assert.equal(monoRead("a.txt"), "root a staged by the user\n");
   console.log("PASS restored paths reset the index literally, never as globs");
 
+  // A snapshot git refuses (no committer identity) says why in git's words,
+  // not as the "Command failed: git -C <path> ..." line execFile prepends.
+  const NOBODY = path.join(TMP, "nobody");
+  fs.mkdirSync(NOBODY, { recursive: true });
+  execFileSync("git", ["-C", NOBODY, "init", "-q"]);
+  execFileSync("git", ["-C", NOBODY, "config", "user.useConfigOnly", "true"]);
+  fs.writeFileSync(path.join(NOBODY, "f.txt"), "x\n");
+  const savedEnv = { ...process.env };
+  process.env.GIT_CONFIG_GLOBAL = path.join(TMP, "empty-gitconfig");
+  process.env.GIT_CONFIG_NOSYSTEM = "1";
+  for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) {
+    delete process.env[key];
+  }
+  fs.writeFileSync(process.env.GIT_CONFIG_GLOBAL, "");
+  let refused;
+  try {
+    refused = await checkpoints.createCheckpoint({
+      runId: "run-nobody",
+      cwd: NOBODY,
+      kind: "run-start",
+      messagePointer: 0,
+      label: "start",
+    });
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
+    Object.assign(process.env, savedEnv);
+  }
+  assert.equal(refused.sha, null);
+  assert.ok(refused.snapshotError, "a refused snapshot records a reason");
+  assert.doesNotMatch(refused.snapshotError, /Command failed|git -C/, refused.snapshotError);
+  assert.match(refused.snapshotError, /identity|email|who you are/i, refused.snapshotError);
+  console.log("PASS a refused snapshot explains itself in git's own words");
+
   const plain = fs.mkdtempSync(path.join(TMP, "plain-"));
   const noGit = await checkpoints.createCheckpoint({
     runId: "run-plain",

@@ -322,13 +322,20 @@ function undoRefFor(runId: string): string {
   return `refs/spark/undo/${runId}`;
 }
 
+// The text shown in the undo menu. execFile's message starts with "Command
+// failed: git -C <path> ...", which names the command rather than the cause,
+// so git's own stderr wins when there is one.
 function gitErrorText(error: unknown): string {
-  const err = error as { killed?: boolean; signal?: string; message?: string };
+  const err = error as { killed?: boolean; signal?: string; message?: string; stderr?: unknown };
   if (err?.killed || err?.signal === "SIGTERM") {
     return `Git did not finish within ${TIMEOUT_MS / 1000} seconds.`;
   }
-  const message = err?.message ?? String(error);
-  return message.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+  const firstLine = (text: string): string =>
+    text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+  const stderr = firstLine(String(err?.stderr ?? "")).replace(/^(?:fatal|error):\s*/i, "");
+  if (stderr) return stderr;
+  const message = firstLine(err?.message ?? String(error));
+  return /^Command failed:/.test(message) ? "Git reported an error." : message;
 }
 
 // Drop the run's shadow ref when the run is deleted. Best-effort — a missing
