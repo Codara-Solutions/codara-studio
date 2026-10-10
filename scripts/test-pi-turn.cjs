@@ -50,19 +50,30 @@ const { PiTurnAccumulator } = piTurnModule;
 // The frontier policy (and its required-completion gate) was removed 2026-08.
 assert.equal(piTurnModule.frontierTurnHasRequiredCompletion, undefined);
 
+// Pi 0.84+ (the bundled 0.85.1 included) sends message_update as
+// { type, usage, assistantMessageEvent } with no `message`; the delta belongs
+// to the assistant message that message_start opened.
 const stream = [];
 const turn = new PiTurnAccumulator((event) => stream.push(event));
 turn.consume({ type: "message_start", message: { role: "assistant", timestamp: 10, content: [] } });
 turn.consume({
   type: "message_update",
-  message: { role: "assistant", timestamp: 10, content: [] },
-  assistantMessageEvent: { type: "text_delta", delta: "Hello " },
+  usage: { input: 0, output: 1 },
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello " },
 });
 turn.consume({
   type: "message_update",
-  message: { role: "assistant", timestamp: 10, content: [] },
-  assistantMessageEvent: { type: "text_delta", delta: "world" },
+  usage: { input: 0, output: 2 },
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "world" },
 });
+assert.deepEqual(
+  stream.filter((event) => event.kind === "assistant_block"),
+  [
+    { kind: "assistant_block", messageId: "pi-assistant-10", text: "Hello " },
+    { kind: "assistant_block", messageId: "pi-assistant-10", text: "world" },
+  ],
+  "deltas stream live under the message_start id, before message_end",
+);
 turn.consume({
   type: "tool_execution_start",
   toolCallId: "call-1",
@@ -104,6 +115,7 @@ assert.deepEqual(turn.result(), {
   contextTokens: 180,
   contextWindowTokens: null,
   failure: null,
+  providerRetried: false,
   settled: true,
 });
 
@@ -223,9 +235,61 @@ assert.equal(recovered.result().failure, null);
 assert.deepEqual(recovered.result().providerResponseIds, ["resp_failed", "resp_recovered"]);
 
 const extensionFailed = new PiTurnAccumulator();
-extensionFailed.consume({ type: "extension_error", error: "bridge unavailable" });
+extensionFailed.consume({ type: "extension_error", event: "session_start", error: "bridge unavailable" });
 extensionFailed.consume({ type: "auto_retry_end", success: true, attempt: 1 });
 assert.equal(extensionFailed.result().failure, "bridge unavailable");
+
+// A hook that shapes the prompt or enforces policy stays fatal even when the
+// model still answers: the turn ran without Cora's contract.
+{
+  const contractMissing = new PiTurnAccumulator();
+  contractMissing.consume({ type: "extension_error", event: "before_agent_start", error: "prompt hook threw" });
+  contractMissing.consume({ type: "message_end", message: { role: "assistant", id: "a", content: [{ type: "text", text: "answer" }] } });
+  assert.equal(contractMissing.result().failure, "prompt hook threw");
+  const unnamed = new PiTurnAccumulator();
+  unnamed.consume({ type: "extension_error", error: "unknown hook" });
+  assert.equal(unnamed.result().failure, "unknown hook", "an unnamed hook is treated as fatal");
+}
+
+// Pi catches a throwing observer hook and carries on; the answer stands and
+// the failure is reported as a note rather than failing the turn.
+{
+  const notes = [];
+  const observer = new PiTurnAccumulator((event) => notes.push(event));
+  observer.consume({ type: "message_end", message: { role: "assistant", id: "a", content: [{ type: "text", text: "Done." }] } });
+  observer.consume({ type: "extension_error", extensionPath: "/x/pi-web-search/index.ts", event: "agent_end", error: "observer threw" });
+  assert.equal(observer.result().failure, null);
+  assert.equal(observer.result().finalText, "Done.");
+  assert.ok(notes.some((event) => event.kind === "system_note" && /agent_end/.test(event.message)));
+  assert.equal(notes.some((event) => event.kind === "error"), false);
+}
+
+// Pi's own provider retry loop is visible and recorded, so the manager-turn
+// policy can tell a turn Pi already retried from one it never did.
+{
+  const notes = [];
+  const retrying = new PiTurnAccumulator((event) => notes.push(event));
+  assert.equal(retrying.result().providerRetried, false);
+  retrying.consume({ type: "auto_retry_start", attempt: 2, maxAttempts: 6, delayMs: 4000, errorMessage: "overloaded" });
+  assert.equal(retrying.result().providerRetried, true);
+  assert.ok(notes.some((event) => event.kind === "system_note" && /retrying \(2\/6\) in 4s/.test(event.message)));
+}
+
+// Compaction holds the reply back; say so instead of going silent.
+{
+  const notes = [];
+  const compacting = new PiTurnAccumulator((event) => notes.push(event));
+  compacting.consume({ type: "compaction_start", reason: "manual" });
+  assert.ok(notes.some((event) => event.kind === "system_note" && /Compacting the conversation/.test(event.message)));
+}
+
+// A delta with no message_start has no id that message_end will agree with,
+// so it is skipped rather than counted as a phantom assistant message.
+{
+  const orphan = new PiTurnAccumulator();
+  orphan.consume({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "stray" } });
+  assert.equal(orphan.result().assistantMessageCount, 0);
+}
 
 const rejectedTool = new PiTurnAccumulator();
 rejectedTool.consume({
@@ -249,5 +313,23 @@ idless.consume({ type: "message_start", message: { role: "assistant", content: [
 idless.consume({ type: "message_update", message: { role: "assistant", content: [] }, assistantMessageEvent: { type: "text_delta", delta: "same " } });
 idless.consume({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "same message" }] } });
 assert.equal(idless.result().finalText, "same message");
+
+// Pre-0.84 builds put the message on every update; that shape still streams.
+{
+  const legacyStream = [];
+  const legacy = new PiTurnAccumulator((event) => legacyStream.push(event));
+  legacy.consume({ type: "message_start", message: { role: "assistant", timestamp: 5, content: [] } });
+  legacy.consume({
+    type: "message_update",
+    message: { role: "assistant", timestamp: 5, content: [] },
+    assistantMessageEvent: { type: "text_delta", delta: "legacy" },
+  });
+  legacy.consume({ type: "message_end", message: { role: "assistant", timestamp: 5, content: [{ type: "text", text: "legacy" }] } });
+  assert.deepEqual(
+    legacyStream.filter((event) => event.kind === "assistant_block").map((event) => event.messageId),
+    ["pi-assistant-5"],
+  );
+  assert.equal(legacy.result().assistantMessageCount, 1);
+}
 
 console.log("pi-turn: ok");

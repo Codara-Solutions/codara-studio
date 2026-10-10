@@ -27,6 +27,13 @@ export interface PiRpcDiagnostics {
   stderr: string;
   droppedStderrBytes: number;
   listenerErrors: string[];
+  /** agent_end records skipped because they exceeded the line limit. */
+  droppedOversizedEvents: number;
+}
+
+export interface PiRpcFailure {
+  code: string;
+  message: string;
 }
 
 export interface PiRpcClientOptions {
@@ -62,6 +69,10 @@ const DEFAULT_MAX_STDERR_BYTES = 64 * 1024;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_TOMBSTONES = 4_096;
 const MAX_LISTENER_ERRORS = 100;
+// agent_end repeats every message of the run (tool results, screenshots), so
+// it is the one record that legitimately outgrows the line limit. Nothing in
+// Codara reads it; Pi serializes `type` first, so the prefix identifies it.
+const DROPPABLE_OVERSIZED_PREFIX = Buffer.from('{"type":"agent_end"', "utf8");
 
 function codedError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
@@ -166,6 +177,10 @@ function snapshotRequestOptions(value: unknown): PiRpcRequestOptions {
   return result;
 }
 
+function isDroppableOversizedRecord(record: Buffer): boolean {
+  return record.subarray(0, DROPPABLE_OVERSIZED_PREFIX.length).equals(DROPPABLE_OVERSIZED_PREFIX);
+}
+
 function completeUtf8Text(value: Buffer): string {
   let start = 0;
   while (start < value.length && (value[start] & 0xc0) === 0x80) start += 1;
@@ -205,7 +220,10 @@ export class PiRpcClient {
   private readonly tombstones = new Set<string>();
   private readonly tombstoneOrder: string[] = [];
   private readonly listeners = new Set<(event: PiRpcEvent) => void>();
+  private readonly failureListeners = new Set<(failure: PiRpcFailure) => void>();
   private readonly listenerErrors: string[] = [];
+  private skippingOversizedRecord = false;
+  private droppedOversizedEvents = 0;
   private writes: QueuedWrite[] = [];
   private waitingForDrain = false;
   private exitCode: number | null = null;
@@ -265,6 +283,7 @@ export class PiRpcClient {
       stderr: completeUtf8Text(this.stderrBytes),
       droppedStderrBytes: this.totalStderrBytes - this.stderrBytes.length,
       listenerErrors: [...this.listenerErrors],
+      droppedOversizedEvents: this.droppedOversizedEvents,
     };
   }
 
@@ -276,6 +295,24 @@ export class PiRpcClient {
       if (!subscribed) return;
       subscribed = false;
       this.listeners.delete(listener);
+    };
+  }
+
+  /**
+   * Called once when the process fails (exit, stdin error, protocol error)
+   * after start. A turn that already got its prompt accepted has no pending
+   * request left to reject, so this is how it learns the runtime is gone.
+   * Never called for stop(); check state() after subscribing for a failure
+   * that already happened.
+   */
+  onFailure(listener: (failure: PiRpcFailure) => void): () => void {
+    if (typeof listener !== "function") throw new TypeError("Pi RPC failure listener must be a function");
+    this.failureListeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.failureListeners.delete(listener);
     };
   }
 
@@ -403,6 +440,7 @@ export class PiRpcClient {
       return this.stopPromise;
     }
     this.phase = "stopping";
+    this.failureListeners.clear();
     this.rejectPending(codedError("STOPPED", "Pi RPC client stopped"));
     this.writes = [];
     const child = this.child;
@@ -482,6 +520,12 @@ export class PiRpcClient {
 
   private consumeStdout(chunk: Buffer): void {
     if (this.phase === "failed" || this.phase === "stopped") return;
+    if (this.skippingOversizedRecord) {
+      const end = chunk.indexOf(0x0a);
+      if (end < 0) return;
+      this.skippingOversizedRecord = false;
+      chunk = chunk.subarray(end + 1);
+    }
     this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
     for (;;) {
       const newline = this.stdoutBuffer.indexOf(0x0a);
@@ -490,6 +534,10 @@ export class PiRpcClient {
       this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       if (record.length > 0 && record[record.length - 1] === 0x0d) record = record.subarray(0, -1);
       if (record.length > this.maxLineBytes) {
+        if (isDroppableOversizedRecord(record)) {
+          this.droppedOversizedEvents += 1;
+          continue;
+        }
         this.fail("PROTOCOL_ERROR", "Pi RPC output exceeded the line limit");
         return;
       }
@@ -498,16 +546,31 @@ export class PiRpcClient {
     }
     if (this.stdoutBuffer.length > this.maxLineBytes + 1 ||
         (this.stdoutBuffer.length > this.maxLineBytes && this.stdoutBuffer.at(-1) !== 0x0d)) {
+      if (isDroppableOversizedRecord(this.stdoutBuffer)) {
+        this.droppedOversizedEvents += 1;
+        this.stdoutBuffer = Buffer.alloc(0);
+        this.skippingOversizedRecord = true;
+        return;
+      }
       this.fail("PROTOCOL_ERROR", "Pi RPC output exceeded the line limit");
     }
   }
 
   private finishStdout(): void {
+    if (this.skippingOversizedRecord) {
+      this.skippingOversizedRecord = false;
+      this.stdoutBuffer = Buffer.alloc(0);
+      return;
+    }
     if (this.stdoutBuffer.length === 0 || this.phase === "failed" || this.phase === "stopping" || this.phase === "stopped") return;
     let record = this.stdoutBuffer;
     this.stdoutBuffer = Buffer.alloc(0);
     if (record.at(-1) === 0x0d) record = record.subarray(0, -1);
     if (record.length > this.maxLineBytes) {
+      if (isDroppableOversizedRecord(record)) {
+        this.droppedOversizedEvents += 1;
+        return;
+      }
       this.fail("PROTOCOL_ERROR", "Pi RPC output exceeded the line limit");
       return;
     }
@@ -649,13 +712,23 @@ export class PiRpcClient {
     this.rejectPending(codedError(code, message));
     this.writes = [];
     const child = this.child;
-    if (!child) return;
-    const signaled = signalOwnedProcessTree(
-      captureOwnedProcessTree(child.pid ?? 0),
-      "SIGKILL",
-    );
-    if (signaled === 0) {
-      try { child.kill("SIGKILL"); } catch {}
+    if (child) {
+      const signaled = signalOwnedProcessTree(
+        captureOwnedProcessTree(child.pid ?? 0),
+        "SIGKILL",
+      );
+      if (signaled === 0) {
+        try { child.kill("SIGKILL"); } catch {}
+      }
+    }
+    const listeners = [...this.failureListeners];
+    this.failureListeners.clear();
+    for (const listener of listeners) {
+      try { listener({ code, message }); }
+      catch {
+        this.listenerErrors.push(`Pi RPC failure listener threw while handling ${code}`);
+        if (this.listenerErrors.length > MAX_LISTENER_ERRORS) this.listenerErrors.shift();
+      }
     }
   }
 }
