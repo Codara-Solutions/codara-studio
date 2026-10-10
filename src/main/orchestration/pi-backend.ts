@@ -69,6 +69,8 @@ interface PiBackendSession extends PiProcessOwner {
   /** Set by interruptChat: resolves true once Pi confirmed the aborted turn
    *  went idle, which makes the process safe to reuse. */
   interruptSettling: Promise<boolean> | null;
+  /** Prompt requests Pi has not answered yet. */
+  promptsInFlight: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   lastUsedAt: number;
 }
@@ -235,7 +237,7 @@ function evictIdleSessions(keepRunId: string): void {
   if (excess <= 0) return;
   const idle = [...SESSIONS.entries()]
     .filter(([runId, session]) =>
-      runId !== keepRunId && session.activeTurns.size === 0 && !session.interruptSettling)
+      runId !== keepRunId && session.activeTurns.size === 0)
     .sort(([, left], [, right]) => left.lastUsedAt - right.lastUsedAt)
     .slice(0, excess);
   for (const [runId, session] of idle) void stopSession(runId, session);
@@ -342,8 +344,14 @@ function supersededStartupError(): Error {
   return new Error("Cora's Pi session startup was superseded by disposal or a newer launch");
 }
 
+/**
+ * The session `turn` runs on. The turn's settler is registered before the
+ * session is handed back, in the same synchronous step that picked it, so no
+ * other run's launch can evict the process in between.
+ */
 async function ensureSession(
   input: ManagerRequestInput,
+  turn: () => void,
   onStream?: ChatStreamHandler,
 ): Promise<PiBackendSession> {
   const runId = input.run.id;
@@ -393,6 +401,7 @@ async function ensureSession(
   ) {
     clearIdleTimer(current);
     current.lastUsedAt = Date.now();
+    current.activeTurns.add(turn);
     return current;
   }
   const generation = observedGeneration + 1;
@@ -530,8 +539,9 @@ async function ensureSession(
     fastMode,
     generation,
     interrupted: false,
-    activeTurns: new Set(),
+    activeTurns: new Set([turn]),
     interruptSettling: null,
+    promptsInFlight: 0,
     idleTimer: null,
     lastUsedAt: Date.now(),
     cleanupPromise: pending.cleanupPromise,
@@ -628,15 +638,12 @@ async function requestPiDecision(
   // the run on an accurate question). Throw instead: askManagerBackend's catch
   // records the spark_call failure and returns null, and the caller degrades.
   try {
-    session = await ensureSession(input, onStream);
+    session = await ensureSession(input, releaseTurn, onStream);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     onStream?.({ kind: "error", message });
     throw error instanceof Error ? error : new Error(message);
   }
-  // Owned before the first await, so idle eviction can never stop a process
-  // this turn is about to prompt.
-  session.activeTurns.add(releaseTurn);
   // Report the session id the moment it exists, so run-store can persist it
   // durably BEFORE the turn settles. Best-effort: a persistence hiccup must
   // not fail an otherwise healthy turn.
@@ -726,7 +733,16 @@ async function requestPiDecision(
       failRuntime(startState.failure ?? { code: "PROCESS_EXIT", message: "Pi RPC process exited" });
     }
 
-    await session.client.prompt(input.prompt);
+    const prompt = async (text: string): Promise<void> => {
+      activeSession.promptsInFlight += 1;
+      try {
+        await activeSession.client.prompt(text);
+      } finally {
+        activeSession.promptsInFlight -= 1;
+      }
+    };
+
+    await prompt(input.prompt);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
       return interruptedResult();
     }
@@ -743,7 +759,7 @@ async function requestPiDecision(
     // users should have received.
     if (!compactionFailure && !accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
       settled = armSettlement();
-      await session.client.prompt(EMPTY_FINAL_REPROMPT);
+      await prompt(EMPTY_FINAL_REPROMPT);
       await waitForSettled(settled, liveness, runtimeFailed);
       if (session.interrupted || GENERATIONS.get(runId) !== generation) {
         return interruptedResult();
@@ -943,6 +959,13 @@ export const piBackend = {
     if (!session) return;
     session.interrupted = true;
     for (const settle of [...session.activeTurns]) settle();
-    session.interruptSettling = abortWithin(session.client, PI_INTERRUPT_SETTLE_MS);
+    const aborted = abortWithin(session.client, PI_INTERRUPT_SETTLE_MS);
+    // A prompt still in preflight (before_agent_start, a pre-prompt
+    // compaction) has no agent run to abort: Pi answers abort at once and
+    // then starts that prompt's run anyway, so the process cannot be trusted
+    // idle and the next turn replaces it.
+    session.interruptSettling = session.promptsInFlight > 0
+      ? aborted.then(() => false)
+      : aborted;
   },
 } satisfies AgentBackend;

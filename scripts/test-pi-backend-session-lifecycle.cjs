@@ -34,6 +34,9 @@ function createHarness() {
     nextStop: null,
     nextPromptError: null,
     nextPromptHang: false,
+    // A deferred the next prompt request waits on before Pi answers it, the
+    // window in which Pi is still in prompt preflight.
+    nextPromptGate: null,
     nextAbortHang: false,
     nextStartStderr: "",
     nextCompaction: null,
@@ -179,6 +182,9 @@ async function loadBackend() {
             const error = h().nextPromptError;
             h().nextPromptError = null;
             if (error) throw error;
+            const gate = h().nextPromptGate;
+            h().nextPromptGate = null;
+            if (gate) await gate.promise;
             if (h().nextPromptHang) {
               h().nextPromptHang = false;
               return;
@@ -769,6 +775,35 @@ async function testInterruptRestartsWhenAbortNeverSettles(backend, harness) {
   await backend.disposeChat("run-interrupt-restart");
 }
 
+// Pi answers abort at once while a prompt is still in preflight and then starts
+// that prompt's run anyway, so such a process must never be adopted as idle.
+async function testInterruptDuringPromptPreflightRestarts(backend, harness) {
+  const before = harness.clients.length;
+  const input = requestInput("run-interrupt-preflight");
+  const gate = deferred();
+  harness.nextPromptGate = gate;
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(input);
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt request should be sent",
+  );
+  const client = harness.clients.at(-1);
+  backend.interruptChat("run-interrupt-preflight");
+  gate.resolve();
+  const interrupted = await settlesWithin(outcome, 2_000, "interrupt must release the turn");
+  assert.equal(interrupted.turnAborted, true);
+  const notes = [];
+  await backend.requestManagerDecision(input, (event) => notes.push(event));
+  assert.notEqual(harness.clients.at(-1), client, "a process interrupted in preflight is replaced");
+  assert.equal(client.stopCalls, 1);
+  assert.ok(
+    notes.some((event) => event.kind === "system_note" && event.message === "Restarting Cora's runtime after the interrupted turn."),
+    JSON.stringify(notes),
+  );
+  await backend.disposeChat("run-interrupt-preflight");
+}
+
 async function testRestartNoteNamesWhatChanged(backend, harness) {
   const input = requestInput("run-restart-note");
   await backend.requestManagerDecision(input);
@@ -855,6 +890,26 @@ async function testIdleSessionsAreCapped(backend, harness) {
   for (const runId of runIds) await backend.disposeChat(runId);
 }
 
+// An interrupted process nobody resumed is idle like any other and must not
+// hold a slot past the cap.
+async function testInterruptedIdleSessionCountsTowardTheCap(backend, harness) {
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const interruptedRun = "run-cap-interrupted";
+  const outcome = backend.requestManagerDecision(requestInput(interruptedRun));
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt should be accepted",
+  );
+  const interruptedClient = harness.clients.at(-1);
+  backend.interruptChat(interruptedRun);
+  await outcome;
+  const runIds = ["run-cap-b", "run-cap-c", "run-cap-d", "run-cap-e"];
+  for (const runId of runIds) await backend.requestManagerDecision(requestInput(runId));
+  assert.equal(interruptedClient.stopCalls, 1, "the interrupted idle process is evicted first");
+  for (const runId of [interruptedRun, ...runIds]) await backend.disposeChat(runId);
+}
+
 async function main() {
   const harness = createHarness();
   globalThis[HARNESS_KEY] = harness;
@@ -875,11 +930,13 @@ async function main() {
   await testDisposeMidTurnIsAnAbortNotAFailure(backend, harness);
   await testInterruptReusesAnIdleProcess(backend, harness);
   await testInterruptRestartsWhenAbortNeverSettles(backend, harness);
+  await testInterruptDuringPromptPreflightRestarts(backend, harness);
   await testRestartNoteNamesWhatChanged(backend, harness);
   await testEmptyFinalAfterLiveSpawnKeepsTheWorkers(backend, harness);
   await testStartupFailureExplainsItself(backend, harness);
   await testUserRuntimeFallsBackToBundled(backend, harness);
   await testIdleSessionsAreCapped(backend, harness);
+  await testInterruptedIdleSessionCountsTowardTheCap(backend, harness);
   console.log(
     "PASS Pi ownership, lease rotation, fast-mode identity, empty-final recovery, crash detection, interrupt reuse, startup diagnostics, and idle caps",
   );
