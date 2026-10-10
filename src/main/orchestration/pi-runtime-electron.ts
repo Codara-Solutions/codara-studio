@@ -1,5 +1,6 @@
 import { app } from "electron";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -282,7 +283,10 @@ async function writePiMcpBridgeConfig(input: {
   if (!input.live && (!servers || servers.length === 0)) return null;
   await mkdir(input.mcpConfigDir, { recursive: true, mode: 0o700 });
   void sweepStalePiMcpConfigs(input.mcpConfigDir);
-  const mcpConfigPath = join(input.mcpConfigDir, `${input.sessionId}.json`);
+  // One file per launch, never per session: a chat relaunched under the same
+  // session id must not share a roster with the process still shutting down,
+  // whose cleanup deletes its own roster file and live entry.
+  const mcpConfigPath = join(input.mcpConfigDir, `${input.sessionId}-${randomUUID().slice(0, 8)}.json`);
   const content = JSON.stringify(buildPiMcpBridgeConfig(servers ?? [], { audience: input.audience, live: input.live }));
   await writeRosterFile(mcpConfigPath, content);
   if (input.live) {

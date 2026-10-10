@@ -471,6 +471,19 @@ async function main() {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 
+  // A chat relaunched under its persisted session id while its old process is
+  // still shutting down must not share that process's roster: the old cleanup
+  // deletes its own file and live entry by path.
+  const electronPlans = fs.readFileSync(
+    path.join(__dirname, "..", "src/main/orchestration/pi-runtime-electron.ts"),
+    "utf8",
+  );
+  assert.match(
+    electronPlans,
+    /const mcpConfigPath = join\(input\.mcpConfigDir, `\$\{input\.sessionId\}-\$\{randomUUID\(\)\.slice\(0, 8\)\}\.json`\);/,
+    "every launch writes its own roster file",
+  );
+
   console.log("pi MCP config + bridge: ok");
 }
 
