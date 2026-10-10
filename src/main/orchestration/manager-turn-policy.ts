@@ -273,7 +273,9 @@ export function planManagerTurnFailure(input: {
  * the parked state surfaces: the run header detail, the composer placeholder,
  * and the Retry button, including a recovery re-parked after a restart.
  */
-export function managerTurnParkReason(kind: ManagerTurnRecoveryFailureKind): string {
+export function managerTurnParkReason(
+  kind: ManagerTurnRecoveryFailureKind | WorkerFailureKind | undefined,
+): string {
   switch (kind) {
     case "timeout":
       return "Cora's turn ran out of time. Its saved request is ready to retry.";

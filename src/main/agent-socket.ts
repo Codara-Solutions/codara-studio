@@ -3846,13 +3846,16 @@ async function handleOrchestratorWaitForWorkers(
           // An accepted implementation whose declared verifier has not been
           // minted yet is NOT settled: the auto-spawn is imminent, and
           // returning "all_terminal" in that gap would hand the manager a
-          // wait result missing the verdict its brief paid for. A no-files
-          // report never spawns one, so it stays terminal.
+          // wait result missing the verdict its brief paid for. The harness
+          // spawns one only for a complete report that changed files; a
+          // partial or blocked report accepted by the execute-mode cycle
+          // never gets one, and holding for it froze the wait to its timeout.
           !(
             task != null &&
             task.taskClass !== "verifier" &&
             typeof task.verifierBrief === "string" &&
             task.status === "accepted" &&
+            report?.status === "complete" &&
             (report?.filesChanged.length ?? 0) > 0 &&
             !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
           ) &&
@@ -3877,10 +3880,10 @@ async function handleOrchestratorWaitForWorkers(
       `unknown worker_task_ids: ${unknownIds.join(", ")}`,
     );
   }
-  // User messages typed during this wait are NEVER delivered into the live
-  // turn: they stay queued and the steering-followup scheduler starts a fresh
-  // manager turn once this one settles. The wait therefore only reports worker
-  // state and the manager inbox.
+  // A user message sent during this wait is steered into the live turn, but
+  // the runtime injects a steer only between tool calls, so a wait that keeps
+  // polling would hold it for up to the wait's whole timeout. The wait returns
+  // "user_message" instead, and Cora reads the message right after it.
   const waitResult = async (
     snapshot: Awaited<ReturnType<typeof snapshotWorkers>>,
     reason: string,
@@ -3900,6 +3903,9 @@ async function handleOrchestratorWaitForWorkers(
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
     const snapshot = await snapshotWorkers(run);
+    if (runStore.hasUndeliveredSteer(run)) {
+      return await waitResult(snapshot, "user_message");
+    }
     const requested = snapshot.filter((worker) => worker.is_requested);
     const terminalCount = requested.filter((worker) => worker.is_terminal).length;
     if (mode === "any" && terminalCount > 0) {

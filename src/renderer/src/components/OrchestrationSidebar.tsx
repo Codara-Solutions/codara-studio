@@ -4,6 +4,7 @@ import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChatComposerStartConfig } from "./chat/ChatComposer";
 import { isUnstartedChatRun, type CoraView } from "./chat/cora-view";
+import { unwrapIpcError } from "../lib/ipc-error";
 
 interface Props {
   workspace: Workspace | null;
@@ -209,7 +210,7 @@ export default function OrchestrationSidebar({
     try {
       await action();
     } catch (err) {
-      setError((err as Error).message);
+      setError(unwrapIpcError(err));
     }
   }, []);
 

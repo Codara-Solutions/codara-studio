@@ -625,7 +625,13 @@ export interface AppSettings {
   // Anthropic sessions are unaffected and can never run a fast/priority tier;
   // resources/pi-cora/service-tier.ts strips one structurally.
   openAiFastMode: boolean;
+  // How a message sent while Cora's turn is running reaches her. "steer"
+  // hands it to the live turn (Pi steer), so she reads it at her next step;
+  // "queue" holds it until the turn ends and then starts a fresh turn.
+  coraMidTurnDelivery: CoraMidTurnDelivery;
 }
+
+export type CoraMidTurnDelivery = "steer" | "queue";
 
 export interface OpenRouterValidationInput {
   apiKey: string;
@@ -2408,20 +2414,25 @@ export interface PlanState {
  */
 export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
 
-export type ManagerTurnRecoveryFailureKind =
-  | "rate_limit"
-  | "provider"
-  | "transport"
-  // Cora's own turn cap, not a provider problem: the work and any workers it
-  // started are untouched, so the run parks resumable rather than failing.
-  | "timeout"
-  // Expired/revoked provider credential: only the user can re-authenticate,
-  // so the run parks with a sign-in-again prompt instead of failing.
-  | "auth"
-  // Cora's own runtime crashed, the model ended without a reply, or the turn
-  // failed for an unnamed reason while workers were still running. Parked so
-  // the workers survive.
-  | "runtime";
+/**
+ * Every failure kind a parked manager turn can record. run.json validation
+ * reads this list, so a kind the turn policy parks can never be dropped on
+ * save. "timeout" is Cora's own turn cap, not a provider problem: the work and
+ * any workers it started are untouched. "auth" is an expired or revoked
+ * provider credential that only the user can renew. "runtime" means Cora's own
+ * runtime crashed, the model ended without a reply, or the turn failed for an
+ * unnamed reason while workers were still running; it parks so they survive.
+ */
+export const MANAGER_TURN_RECOVERY_FAILURE_KINDS = [
+  "rate_limit",
+  "provider",
+  "transport",
+  "timeout",
+  "auth",
+  "runtime",
+] as const;
+
+export type ManagerTurnRecoveryFailureKind = (typeof MANAGER_TURN_RECOVERY_FAILURE_KINDS)[number];
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach
@@ -3150,6 +3161,20 @@ export interface HumanRunMessage {
    *  the synthetic resume note is backend-only context and UI surfaces fold it
    *  into this message instead of showing a second, fake user turn. */
   resumesMessageId?: string;
+  /** Manager turns that took this message as input and then failed or were
+   *  aborted, releasing it back to the queue. Past a small cap the message no
+   *  longer drives automatic turns; an explicit user action still delivers it. */
+  deliveryAttempts?: number;
+  /** A turn that had already received this message was interrupted before it
+   *  finished, so the next turn is told it is not new and not to redo work
+   *  that already started. */
+  redelivered?: true;
+  /** When the message was handed to the live manager turn as a mid-turn steer
+   *  (AppSettings.coraMidTurnDelivery "steer"). */
+  steeredAt?: string;
+  /** When the runtime actually injected the steered message into the turn.
+   *  Between steeredAt and this, a long tool wait yields so Cora can read it. */
+  steerDeliveredAt?: string;
 }
 
 export interface WorkerArtifactPaths {
