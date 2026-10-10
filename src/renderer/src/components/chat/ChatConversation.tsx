@@ -1318,14 +1318,18 @@ function LiveToolOutput({ text }: { text: string }) {
 
 // GitHub-style changed-lines preview for one manager edit/write call, shown
 // directly under the tool row (the same treatment worker rows give their
-// measured file lists). The path opens the working-tree diff tab; the line
-// rows are colored exactly like a GitHub hunk. Capped so a whole-file
-// rewrite stays a preview, not a wall.
+// measured file lists). Clicking the path expands THIS call's change; the
+// working-tree diff is a separate action, because it shows whatever the file
+// holds now (later edits, staged or committed changes) rather than what this
+// call did. Collapsed, it is capped so a whole-file rewrite stays a preview.
 const TOOL_DIFF_PREVIEW_LINES = 8;
+const TOOL_DIFF_EXPANDED_LINES = 400;
 
 function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
-  const visible = change.lines.slice(0, TOOL_DIFF_PREVIEW_LINES);
+  const [expanded, setExpanded] = useState(false);
+  const visible = change.lines.slice(0, expanded ? TOOL_DIFF_EXPANDED_LINES : TOOL_DIFF_PREVIEW_LINES);
   const remaining = change.additions + change.deletions - visible.length;
+  const expandable = change.lines.length > TOOL_DIFF_PREVIEW_LINES;
   return (
     <div
       style={{
@@ -1337,17 +1341,17 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         gap: 3,
       }}
     >
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
       <button
         type="button"
         className="cora-worker-diff-file"
-        title={`Open changes for ${change.path}`}
-        aria-label={`Open changes for ${change.path}`}
+        title={expandable ? (expanded ? "Show less of this change" : "Show all of this change") : change.path}
+        aria-label={`${expanded ? "Collapse" : "Expand"} this change to ${change.path}`}
+        aria-expanded={expandable ? expanded : undefined}
         onClick={() => {
-          window.dispatchEvent(
-            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
-          );
+          if (expandable) setExpanded((value) => !value);
         }}
-        style={WORKER_DIFF_FILE_BUTTON_STYLE}
+        style={{ ...WORKER_DIFF_FILE_BUTTON_STYLE, cursor: expandable ? "pointer" : "default" }}
       >
         <span
           style={{
@@ -1366,6 +1370,19 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{change.additions}</span>
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{change.deletions}</span>
       </button>
+      <button
+        type="button"
+        className="cora-worker-terminal"
+        title={`Open the current working-tree diff of ${change.path}`}
+        onClick={() => {
+          window.dispatchEvent(
+            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
+          );
+        }}
+      >
+        Working tree
+      </button>
+      </div>
       {visible.map((line, index) => (
         <div
           key={`${index}:${line.kind}`}
@@ -1391,7 +1408,9 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
       {remaining > 0 && (
         <span style={TOOL_INLINE_DETAIL_STYLE}>
           {remaining} more changed {remaining === 1 ? "line" : "lines"}
-          {change.truncated ? " · preview capped" : " · expand the row for the full payload"}
+          {expanded
+            ? " · expand the row for the full payload"
+            : " · click the path to show them"}
         </span>
       )}
     </div>
@@ -2750,7 +2769,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
               type="button"
               key={file.path}
               className="cora-worker-diff-file"
-              title={`Open changes for ${file.path}`}
+              title={`Open the current working-tree diff of ${file.path} (it can include changes made after this worker)`}
               aria-label={`Open changes for ${file.path}`}
               onClick={() => {
                 window.dispatchEvent(
