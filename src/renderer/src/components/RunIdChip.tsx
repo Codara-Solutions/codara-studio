@@ -24,9 +24,13 @@ export default function RunIdChip({
   compact = false,
   maxChars = 12,
   label = "run id",
+  hoverLabel,
 }: {
   runId: string;
   compact?: boolean;
+  // Compact only: words the icon grows on hover or focus, so a bare copy
+  // glyph never has to be guessed at.
+  hoverLabel?: string;
   // Display budget for the id. Headers keep the default so the chip stays
   // narrow; roomier rows raise it to show the id whole.
   maxChars?: number;
@@ -71,7 +75,7 @@ export default function RunIdChip({
     return (
       <button
         type="button"
-        className="spark-icon-btn"
+        className={hoverLabel ? "spark-icon-btn run-id-chip--labelled" : "spark-icon-btn"}
         onClick={handleClick}
         title={copied ? "Copied" : `Copy ${label}: ${runId}`}
         aria-label={`Copy ${label}`}
@@ -97,6 +101,11 @@ export default function RunIdChip({
             <path d="M10.5 5.25V4A1.75 1.75 0 0 0 8.75 2.25H4A1.75 1.75 0 0 0 2.25 4v4.75A1.75 1.75 0 0 0 4 10.5h1.25" stroke="currentColor" strokeWidth="1.25" />
           </svg>
         )}
+        {hoverLabel ? (
+          <span className="run-id-chip__label" aria-hidden>
+            {copied ? "Copied" : hoverLabel}
+          </span>
+        ) : null}
       </button>
     );
   }

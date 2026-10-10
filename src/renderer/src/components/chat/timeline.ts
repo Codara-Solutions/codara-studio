@@ -1149,9 +1149,9 @@ function managerModeCompletedDetail(call: SparkCall): string {
 
 function formatDurationShort(ms: number | undefined): string | null {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return null;
-  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const seconds = ms / 1000;
-  if (seconds < 60) return `${trimSmallNumber(seconds)} s`;
+  if (seconds < 60) return `${trimSmallNumber(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
   const remainder = Math.round(seconds % 60);
   return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;

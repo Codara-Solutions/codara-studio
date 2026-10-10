@@ -337,7 +337,12 @@ export default function ChatConversation({
       <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
       <StepWorkerRowsContext.Provider value={stepWorkerRows}>
       <MarkdownWorkspaceContext.Provider value={cwd || null}>
-      <div style={SCROLL_STYLE} data-testid="cora-conversation" data-scrolling={scrolling ? "true" : undefined}>
+      <div
+        className="cora-conversation"
+        style={SCROLL_STYLE}
+        data-testid="cora-conversation"
+        data-scrolling={scrolling ? "true" : undefined}
+      >
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
         ) : (
@@ -360,10 +365,6 @@ export default function ChatConversation({
             initialItemCount={Math.min(rowCount, 24)}
             defaultItemHeight={96}
             initialTopMostItemIndex={Math.max(0, rowCount - 1)}
-            // A short chat sits against the composer, like the end of a long
-            // one, instead of leaving a void between the last turn and the
-            // box the reader types the next one into.
-            alignToBottom
             // "auto" (instant) rather than "smooth": while a turn streams, a new
             // frame lands several times a second, and queueing an animated
             // scroll for each one is exactly the compounding jank a pinned
@@ -407,6 +408,7 @@ export default function ChatConversation({
                         showDoneMarker={doneMarkerSparkMessageId === item.id}
                         completionVerdict={completionVerdict}
                         runBlocked={run.status === "blocked"}
+                        failureCardShown={retryableCallId !== null}
                       />
                     ) : item?.kind === "tool" ? (
                       <ToolActivityRow
@@ -441,9 +443,9 @@ export default function ChatConversation({
             // would keep being offered the jump button and told there was new
             // activity while the last response sat fully in view.
             atBottomThreshold={72}
-            // Only breathing room above the composer. A taller spacer pushed a
-            // short chat up under the header and left a void above the box.
-            components={{ Footer: () => <div style={{ height: 16 }} /> }}
+            // Holds the last message's hover line (MESSAGE_META_GAP) so it
+            // never lands under the composer edge.
+            components={{ Footer: () => <div style={{ height: MESSAGE_META_GAP }} /> }}
           />
         )}
         <ConversationMinimap
@@ -508,6 +510,7 @@ export default function ChatConversation({
             </button>
           </div>
         )}
+        {rowCount > 0 && <div className="cora-conversation-topfade" aria-hidden />}
         {!readerAtBottom && rowCount > 0 && <div className="cora-conversation-fade" aria-hidden />}
         {!readerAtBottom && rowCount > 0 && (
           <button
@@ -821,17 +824,65 @@ function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
 // consecutive activity rows so they read as one list.
 const TURN_GAP = 28;
 const IN_TURN_GAP = 14;
-const ACTIVITY_GAP = 2;
+const ACTIVITY_GAP = 0;
+// A message's hover line (time, copy) is drawn in the gap under it instead of
+// reserving height at rest, so that gap must hold it: a 2px offset, the 18px
+// line, and 8px clear of whatever row comes next.
+const MESSAGE_META_GAP = 28;
 
 function isActivityRow(item: ConversationItem | undefined): boolean {
-  return item?.kind === "step" || item?.kind === "activity-group" || (item?.kind === "tool" && item.activity !== "manager");
+  return (
+    item?.kind === "step" ||
+    item?.kind === "activity-group" ||
+    (item?.kind === "tool" && item.activity !== "manager") ||
+    isManagerStageRow(item)
+  );
+}
+
+// A settled manager stage (plan analysis, worker result review) renders as a
+// one-line row between the steps it serves; failed and live ones are cards.
+function isManagerStageRow(item: ConversationItem | undefined): item is ToolItem {
+  return (
+    item?.kind === "tool" &&
+    item.activity === "manager" &&
+    item.tone !== "live" &&
+    item.status !== "failed" &&
+    item.maintenance !== "compaction" &&
+    toolMetaValue(item, "Mode") !== "chat"
+  );
 }
 
 function rowGapBelow(item: ConversationItem | undefined, next: ConversationItem | undefined): number {
   if (!item || !next) return 0;
   if (next.kind === "message" && next.author === "user") return TURN_GAP;
+  // A delivery-state row keeps the hover line inside its own flow.
+  if (item.kind === "message" && item.author === "user" && hasDeliveryStatusRow(item)) return IN_TURN_GAP;
+  if (item.kind === "message" && item.author !== "system") return MESSAGE_META_GAP;
   if (isActivityRow(item) && isActivityRow(next)) return ACTIVITY_GAP;
   return IN_TURN_GAP;
+}
+
+// Only a mid-turn message (intent "steer") genuinely WAITS: it queues behind
+// the running turn and can still be pulled back (Unqueue). An ordinary "turn"
+// message is also born deliveryState "queued" in the store, but its own turn
+// starts within moments, so flashing QUEUED on every fresh send (most visibly
+// the first message of a new chat) would be noise. A "turn" message that a
+// failed or interrupted turn handed back waits just like a mid-turn one, so it
+// shows the same chip and controls. A claimed message (backendTurnId) is being
+// delivered now.
+function isWaitingInQueue(item: MessageItem): boolean {
+  return (
+    item.deliveryState === "queued" &&
+    !item.backendTurnId &&
+    (item.intent === "steer" || (item.deliveryAttempts ?? 0) > 0)
+  );
+}
+
+function hasDeliveryStatusRow(item: MessageItem): boolean {
+  return (
+    isWaitingInQueue(item) ||
+    Boolean(item.deliveryState && item.deliveryState !== "acknowledged" && item.deliveryState !== "queued")
+  );
 }
 
 // A worker that belongs to a step is listed inside that step's card, so its
@@ -864,6 +915,7 @@ const MessageTurn = React.memo(function MessageTurn({
   showDoneMarker,
   completionVerdict,
   runBlocked,
+  failureCardShown,
 }: {
   item: MessageItem;
   runId: string;
@@ -872,6 +924,8 @@ const MessageTurn = React.memo(function MessageTurn({
   showDoneMarker: boolean;
   completionVerdict: StepVerdictKind;
   runBlocked: boolean;
+  /** The run is parked on a failed turn whose card offers Retry. */
+  failureCardShown: boolean;
 }) {
   if (item.author === "system") {
     return (
@@ -884,25 +938,8 @@ const MessageTurn = React.memo(function MessageTurn({
   }
 
   if (item.author === "user") {
-    // Only a mid-turn message (intent "steer") genuinely WAITS: it queues
-    // behind the running turn and can still be pulled back (Unqueue). An
-    // ordinary "turn" message is also born deliveryState "queued" in the
-    // store, but its own turn starts within moments, so flashing QUEUED on
-    // every fresh send (most visibly the first message of a new chat) would
-    // be noise. A "turn" message that a failed or interrupted turn handed back
-    // waits just like a mid-turn one, so it shows the same chip and controls.
-    // A claimed message (backendTurnId) is being delivered now.
-    const queued =
-      item.deliveryState === "queued" &&
-      !item.backendTurnId &&
-      (item.intent === "steer" || (item.deliveryAttempts ?? 0) > 0);
-    const hasPersistentStatus =
-      queued ||
-      Boolean(
-        item.deliveryState &&
-          item.deliveryState !== "acknowledged" &&
-          item.deliveryState !== "queued",
-      );
+    const queued = isWaitingInQueue(item);
+    const hasPersistentStatus = hasDeliveryStatusRow(item);
     return (
       <div
         className={`cora-user-turn${queued ? " cora-user-turn--queued" : ""}`}
@@ -936,7 +973,17 @@ const MessageTurn = React.memo(function MessageTurn({
             <CopyMessageControl text={item.text} />
           </span>
           {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-          {queued ? (
+          {queued && failureCardShown ? (
+            // The failure card below owns what happens next (Connect, Retry),
+            // so the message keeps only its state and the way to take it back.
+            <>
+              <span className="cora-queued-pill" title="Cora reads this once the failed turn is retried">
+                <ClockGlyph />
+                Queued
+              </span>
+              <UnqueueControl runId={runId} messageId={item.id} compact />
+            </>
+          ) : queued ? (
             <span className="cora-queued-pill" title="Cora reads this when her current turn ends">
               <ClockGlyph />
               Queued
@@ -950,11 +997,15 @@ const MessageTurn = React.memo(function MessageTurn({
           )}
           {/* A blocked run is waiting for an answer, and the answer carries
               the queue with it; Send now there would only race that answer. */}
-          {queued && !runBlocked && <SendNowControl runId={runId} />}
-          {queued && runBlocked && (
-            <span style={USER_TIME_STYLE}>Delivered with your answer</span>
+          {!failureCardShown && (
+            <>
+              {queued && !runBlocked && <SendNowControl runId={runId} />}
+              {queued && runBlocked && (
+                <span style={USER_TIME_STYLE}>Delivered with your answer</span>
+              )}
+              {queued && <UnqueueControl runId={runId} messageId={item.id} />}
+            </>
           )}
-          {queued && <UnqueueControl runId={runId} messageId={item.id} />}
           {/* Undo is a conversation rewind, meaningful only once the message
               was actually delivered. While it is still queued, Unqueue is the
               whole story: nothing has happened yet to undo. */}
@@ -1077,10 +1128,10 @@ function CopyMessageControl({ text }: { text: string }) {
 function AssistantMessageMeta({ text, at }: { text: string; at: string }) {
   return (
     <div className="cora-assistant-turn__meta">
-      <CopyMessageControl text={text} />
       <time dateTime={at} title={new Date(at).toLocaleString()} style={USER_TIME_STYLE}>
         {formatMessageTime(at)}
       </time>
+      <CopyMessageControl text={text} />
     </div>
   );
 }
@@ -1466,9 +1517,12 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
           title={failed ? "This action failed" : finished ? "This action completed" : undefined}
         />
         <span style={TOOL_TITLE_STYLE}>
-          {headline.title}
+          <ToolHeadlineTitle title={headline.title} />
         </span>
-        <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "color-mix(in oklch, var(--danger) 70%, var(--ink-dim))" : undefined }}>
+        <span
+          className={!failed && !liveWait && isCodeArgument(inlineDetail) ? "cora-tool-arg" : undefined}
+          style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "color-mix(in oklch, var(--danger) 70%, var(--ink-dim))" : undefined }}
+        >
           {inlineDetail}
         </span>
         {running && (
@@ -1515,6 +1569,24 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
   );
 }
 
+
+// A searched pattern is code: the quoted part of "Searched for “a|b”" takes
+// the mono face so its pipes and dashes read as typed.
+function ToolHeadlineTitle({ title }: { title: string }) {
+  const quoted = /^(.*?)“(.+)”$/.exec(title);
+  if (!quoted) return <>{title}</>;
+  return (
+    <>
+      {quoted[1]}
+      <span className="cora-tool-arg cora-tool-arg--inline">{quoted[2]}</span>
+    </>
+  );
+}
+
+// Commands, paths and URLs; prose details ("all results") stay in the UI face.
+function isCodeArgument(detail: string): boolean {
+  return /^\$ |^[a-z]+:\/\/|[\\/]|^[\w.-]+\.[a-z0-9]{1,6}$/i.test(detail.trim());
+}
 
 // What a running command has printed so far, shown without expanding the row
 // so a slow test run can be told from a hung one. Pinned to the newest line.
@@ -2169,9 +2241,6 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     wasLiveRef.current = live;
   }, [live]);
   const color = stepStatusColor(item.status);
-  const doneWorkers = item.workers.filter(
-    (worker) => worker.status === "accepted",
-  ).length;
   const stepDiff = item.workers.reduce(
     (total, worker) => ({
       fileCount: total.fileCount + (worker.diff?.fileCount ?? 0),
@@ -2187,6 +2256,7 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
       style={{
         ...TOOL_ROW_STYLE,
         ...TOOL_ROW_STANDALONE_STYLE,
+        margin: 0,
         borderColor: "transparent",
         background: open ? "color-mix(in oklab, var(--ink) 2.5%, transparent)" : "transparent",
       }}
@@ -2217,9 +2287,7 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
           </span>
         )}
         {item.workers.length > 0 && (
-          <span style={STEP_PROGRESS_STYLE}>
-            {doneWorkers} of {item.workers.length} {item.workers.length === 1 ? "worker" : "workers"}
-          </span>
+          <span style={STEP_PROGRESS_STYLE}>{stepProgressLabel(item.workers)}</span>
         )}
         {hasBody && <Caret open={open} />}
       </DisclosureButton>
@@ -2242,6 +2310,22 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     </div>
   );
 });
+
+// "2 running" while workers are live, "1/2 done" otherwise: a count of
+// finished workers alone ("0 of 2") reads as failure while both are working.
+function stepProgressLabel(workers: StepItem["workers"]): string {
+  const done = workers.filter((worker) => worker.status === "accepted").length;
+  const running = workers.filter(
+    (worker) =>
+      worker.runtimeState === "working" || worker.status === "running" || worker.status === "claimed",
+  ).length;
+  const failed = workers.filter((worker) => worker.status === "failed" || worker.status === "cancelled").length;
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (running === 0 || done > 0) parts.push(`${done}/${workers.length} done`);
+  return parts.join(" · ");
+}
 
 function stepIconState(status: StepItem["status"]): ActivityIconState {
   if (status === "running" || status === "planning" || status === "reviewing") return "running";
@@ -2433,6 +2517,7 @@ function ManagerActivityDisclosure({
       </div>
     );
   }
+  const stage = managerStageLabel(item);
   return (
     <div
       className="cora-manager-disclosure"
@@ -2441,10 +2526,11 @@ function ManagerActivityDisclosure({
       data-open={open ? "true" : "false"}
       style={{
         ...MANAGER_DISCLOSURE_STYLE,
+        ...TOOL_ROW_STYLE,
+        margin: 0,
         width: "100%",
-        borderBottom: open
-          ? "1px solid color-mix(in oklab, var(--rule-soft) 62%, transparent)"
-          : "1px solid transparent",
+        borderColor: "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 2.5%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -2452,12 +2538,16 @@ function ManagerActivityDisclosure({
           if (hasDetails) setOpen((value) => !value);
         }}
         baseStyle={{
-          ...MANAGER_DISCLOSURE_BUTTON_STYLE,
+          ...TOOL_ROW_BUTTON_STYLE,
+          cursor: hasDetails ? "pointer" : "default",
         }}
         title={item.detail || item.title}
       >
         <ActivityIcon state="done" />
-        <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        {stage ? <span style={STEP_INDEX_TEXT_STYLE}>{stage.label}</span> : null}
+        <span style={stage ? MANAGER_STAGE_TITLE_STYLE : MANAGER_DISCLOSURE_TITLE_STYLE}>
+          {stage?.title ?? item.title}
+        </span>
         {actionCount > 0 && (
           <span style={TOOL_INLINE_DETAIL_STYLE}>
             {actionCount === 1 ? "1 action" : `${actionCount} actions`}
@@ -2475,6 +2565,27 @@ function ManagerActivityDisclosure({
       )}
     </div>
   );
+}
+
+// A manager stage row reads like the step rows around it: a muted kind label
+// where a step shows "Step N", then what the stage did.
+function managerStageLabel(item: ToolItem): { label: string; title: string } | null {
+  switch (toolMetaValue(item, "Mode")) {
+    case "worker result review":
+      return { label: "Review", title: "Worker results" };
+    case "plan analysis":
+      return { label: "Plan", title: "Request analysis" };
+    case "step planning":
+      return { label: "Plan", title: "Next step" };
+    case "worker prompt generation":
+      return { label: "Plan", title: "Worker prompt" };
+    case "retry planning":
+      return { label: "Retry", title: "Retry plan" };
+    case "final summary":
+      return { label: "Summary", title: "Final response" };
+    default:
+      return null;
+  }
 }
 
 // The in-flight assistant turn, rendered as a first-class chat turn rather
@@ -3040,7 +3151,8 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
               if (!openWorkerTerminal(worker.taskId)) setClosedTerminalKey(terminalKey);
             }}
           >
-            {terminalClosed ? "Terminal closed" : "Open terminal"}
+            <TerminalGlyph />
+            <span>{terminalClosed ? "Terminal closed" : "Open terminal"}</span>
           </button>
         )}
       </div>
@@ -3096,6 +3208,15 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         </div>
       )}
     </div>
+  );
+}
+
+function TerminalGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.25" />
+      <path d="m4.75 6.25 2 1.75-2 1.75M8.5 10h2.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -3183,7 +3304,15 @@ function SendNowControl({ runId }: { runId: string }) {
 // (guarded there against the turn having just claimed it) and return its text
 // to the composer for editing/resending. Appears only while the message's
 // deliveryState is "queued", so it can never un-send delivered text.
-function UnqueueControl({ runId, messageId }: { runId: string; messageId: string }) {
+function UnqueueControl({
+  runId,
+  messageId,
+  compact = false,
+}: {
+  runId: string;
+  messageId: string;
+  compact?: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Losing the race to the turn that just took the message is not a failure:
@@ -3226,13 +3355,13 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
       <button
         type="button"
         onClick={() => void unqueue()}
-        title="Remove from the queue and edit it in the composer"
+        title={compact ? "Unqueue: remove it and edit it in the composer" : "Remove from the queue and edit it in the composer"}
         aria-label="Unqueue message"
         disabled={busy}
-        className="cora-chip-btn"
+        className={compact ? "cora-message-ghost-action" : "cora-chip-btn"}
       >
         <UnqueueGlyph />
-        <span>Unqueue</span>
+        {compact ? null : <span>Unqueue</span>}
       </button>
       {notice && <span style={{ color: "var(--muted)", fontSize: 11 }}>{notice}</span>}
       {error && (
@@ -3735,7 +3864,7 @@ const USER_HEADER_STYLE: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 22,
+  minHeight: 18,
 };
 
 const USER_TIME_STYLE: React.CSSProperties = {
@@ -4164,28 +4293,17 @@ const MANAGER_DISCLOSURE_STYLE: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
-const MANAGER_DISCLOSURE_BUTTON_STYLE: React.CSSProperties = {
-  appearance: "none",
-  width: "100%",
-  minHeight: 28,
-  border: "none",
-  borderRadius: "var(--radius-control, 7px)",
-  background: "transparent",
-  color: "inherit",
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "3px 8px 3px 4px",
-  cursor: "default",
-  textAlign: "left",
-};
-
 const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
   color: "var(--muted)",
   fontSize: 12,
   fontWeight: 500,
   whiteSpace: "nowrap",
-  fontVariantNumeric: "tabular-nums",
+};
+
+const MANAGER_STAGE_TITLE_STYLE: React.CSSProperties = {
+  ...STEP_TITLE_STYLE,
+  color: "var(--ink-dim)",
+  fontWeight: 500,
 };
 
 const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {

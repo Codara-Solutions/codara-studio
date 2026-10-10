@@ -1358,12 +1358,13 @@ a { color: inherit; }
   gap: 2px;
   min-width: 0;
   font-size: 12px;
-  line-height: 1.4;
-  color: var(--ink-dim);
+  line-height: 1.45;
+  color: var(--muted);
   text-align: left;
 }
 .cora-welcome__connect-copy strong {
   color: var(--ink);
+  font-size: 12.5px;
   font-weight: 600;
 }
 .cora-welcome__connect .cora-failure-action {
@@ -1411,7 +1412,7 @@ a { color: inherit; }
 }
 .cora-starter:active { transform: translateY(0); }
 .cora-starter__label {
-  color: var(--accent-text);
+  color: var(--muted);
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.12em;
@@ -2025,6 +2026,70 @@ a { color: inherit; }
   animation: spark-pulse 1.3s ease-in-out infinite;
 }
 
+/* Inter's tabular figures (the body default) also give the hyphen a fixed
+   advance, which spaced out every "run-store" in prose. Chat text sets
+   normal figures; times, durations and counters opt back in inline. */
+.cora-conversation,
+.cora-welcome,
+.cora-header-meta,
+.composer-shell {
+  font-variant-numeric: normal;
+}
+.composer-context-label {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A command, path or pattern inside an activity row. */
+.cora-tool-arg {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.cora-tool-arg--inline {
+  color: var(--ink-dim);
+}
+
+/* The header's copy-id control: a glyph at rest that names itself on hover. */
+.run-id-chip--labelled {
+  width: auto !important;
+  min-width: var(--spark-icon-btn-size);
+  gap: 0;
+  padding: 0 5px !important;
+}
+.run-id-chip__label {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: 500 11px/1 var(--font-sans);
+  opacity: 0;
+  transition:
+    max-width var(--motion) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    margin var(--motion) var(--ease-out);
+}
+.run-id-chip--labelled:hover .run-id-chip__label,
+.run-id-chip--labelled:focus-visible .run-id-chip__label {
+  max-width: 90px;
+  margin-left: 5px;
+  opacity: 1;
+}
+
+/* The chat composer is a plain raised surface. The glass rim and sheen made
+   its top edge the brightest line on screen. */
+.composer-shell.spark-glass--strong,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong {
+  background-color: var(--panel-2);
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--rule);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.10), 0 10px 28px oklch(0 0 0 / 0.16);
+}
+.composer-shell.spark-glass--strong:focus-within,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
+  border-color: var(--rule-strong);
+}
+
 /* The conversation column's side padding. Where the minimap shows, the
    padding grows just enough that text never runs under its marks; on a wide
    pane the centered column already clears it and the base padding holds. */
@@ -2064,7 +2129,17 @@ a { color: inherit; }
   z-index: 2;
   top: 100%;
   right: 0;
-  margin-top: 1px;
+  height: 18px;
+  margin-top: 2px;
+}
+.cora-user-turn__hover-meta .cora-message-ghost-action,
+.cora-assistant-turn__meta .cora-message-ghost-action {
+  width: 20px;
+  height: 18px;
+}
+.cora-user-turn__hover-meta time,
+.cora-assistant-turn__meta time {
+  padding: 0 2px;
 }
 .cora-user-turn:hover .cora-user-turn__meta,
 .cora-user-turn:focus-within .cora-user-turn__meta,
@@ -2467,7 +2542,6 @@ a { color: inherit; }
 .cora-turn-error {
   box-sizing: border-box;
   width: 100%;
-  max-width: 560px;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2561,16 +2635,24 @@ a { color: inherit; }
 .cora-worker-terminal {
   appearance: none;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: 22px;
-  padding: 0 8px;
-  border: 1px solid var(--rule-soft);
+  padding: 0 7px 0 6px;
+  border: 1px solid transparent;
   border-radius: var(--radius-control, 7px);
   background: transparent;
-  color: var(--ink-dim);
+  color: var(--muted);
   font: 500 11px/1 var(--font-sans);
   cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
 }
 .cora-worker-terminal:hover:not(:disabled) {
+  border-color: var(--rule);
   background: var(--hover);
   color: var(--ink);
 }
@@ -2602,18 +2684,17 @@ a { color: inherit; }
 .cora-turn {
   position: relative;
 }
+/* Drawn in the row gap under the turn (MESSAGE_META_GAP in
+   ChatConversation.tsx reserves it), lined up with the prose's left edge. */
 .cora-assistant-turn__meta {
   position: absolute;
   z-index: 2;
-  right: 0;
-  bottom: -20px;
-  height: 22px;
+  left: 4px;
+  top: calc(100% + 2px);
+  height: 18px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 2px 0 8px;
-  border-radius: var(--radius-control, 7px);
-  background: var(--panel);
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
@@ -2777,8 +2858,18 @@ a { color: inherit; }
   left: 0;
   right: 0;
   bottom: 0;
-  height: 56px;
-  background: linear-gradient(to bottom, transparent, var(--panel) 85%);
+  height: 72px;
+  background: linear-gradient(to bottom, transparent, var(--panel) 55%);
+  pointer-events: none;
+}
+.cora-conversation-topfade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 12px;
+  top: 0;
+  height: 14px;
+  background: linear-gradient(to bottom, var(--panel), transparent);
   pointer-events: none;
 }
 
@@ -2884,12 +2975,13 @@ a { color: inherit; }
 .composer-toolbar__hint {
   flex: 1 1 0;
   min-width: 0;
+  padding-left: 4px;
   font-size: 11px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
+  text-align: left;
 }
 /* The worker variant is a flex container, which makes the parent's
    text-overflow inert: its children would be cut mid-glyph at both edges
@@ -2903,7 +2995,7 @@ a { color: inherit; }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   column-gap: 5px;
   height: 16px;
   line-height: 16px;
@@ -3028,13 +3120,21 @@ a { color: inherit; }
 .composer-profile-trigger {
   max-width: 150px;
 }
-/* A started chat keeps its profile, so the pill is a label there, not a menu. */
-.composer-profile-trigger.is-locked,
-.composer-profile-trigger.is-locked:hover,
-.composer-profile-trigger.is-locked:active {
+/* A started chat keeps its profile, so the pill is a label there, not a menu.
+   It still opens the profile, so hover answers like any ghost control. */
+.composer-profile-trigger.is-locked {
+  border-color: transparent;
   background: transparent;
   color: var(--muted);
-  border-style: dashed;
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.composer-profile-trigger.is-locked:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+.composer-profile-trigger.is-locked .composer-profile-glyph {
+  color: inherit;
 }
 .composer-tools-trigger {
   flex: 0 0 auto;

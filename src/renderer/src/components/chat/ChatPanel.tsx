@@ -208,13 +208,20 @@ export default function ChatPanel({
         hideLabel={Boolean(activeRun?.title)}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
-          onSelectChat ? (
-            <ChatHistoryButton
-              runs={runs}
-              activeRunId={activeRun?.id ?? null}
-              onSelect={onSelectChat}
-              onDelete={onDeleteChat}
-            />
+          activeRun || onSelectChat ? (
+            <>
+              {/* Beside history, away from the title: next to the status pill
+                  a copy glyph read as "copy this title". */}
+              {activeRun ? <RunIdChip runId={activeRun.id} compact hoverLabel="Copy run id" /> : null}
+              {onSelectChat ? (
+                <ChatHistoryButton
+                  runs={runs}
+                  activeRunId={activeRun?.id ?? null}
+                  onSelect={onSelectChat}
+                  onDelete={onDeleteChat}
+                />
+              ) : null}
+            </>
           ) : null
         }
       />
@@ -373,11 +380,12 @@ export default function ChatPanel({
 
 function HeaderMeta({ run }: { run: RunState }) {
   // Title, status and cost share one row to keep the SectionHeader compact.
-  // The title is the only member that gives way: the status pill, the cost
-  // pill and the copy-id button hold their width in every run state, so the id
-  // stays reachable exactly when a user hits trouble and wants to share it
-  // (run-msa0s2t6-sz26w1). A paused run's park reason is a whole sentence; it
-  // lives in the pill's tooltip and in the conversation, never in this row.
+  // The title is the only member that gives way: the status and cost pills
+  // hold their width in every run state. The copy-id button lives with the
+  // header actions, where it stays reachable exactly when a user hits trouble
+  // and wants to share it (run-msa0s2t6-sz26w1). A paused run's park reason is
+  // a whole sentence; it lives in the pill's tooltip and in the conversation,
+  // never in this row.
   return (
     <span className="cora-header-meta">
       {run.title ? (
@@ -387,7 +395,6 @@ function HeaderMeta({ run }: { run: RunState }) {
       ) : null}
       <StatusMeta run={run} />
       <CostPill run={run} />
-      <RunIdChip runId={run.id} compact />
     </span>
   );
 }
@@ -1119,7 +1126,6 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
         <SparkMark size={20} />
       </div>
       <div className="cora-welcome__copy">
-        <div className="spark-eyebrow">New chat</div>
         <div className="cora-welcome__title">Work with Cora on this project</div>
         <div className="cora-welcome__body">
           Ask a question or describe an outcome. Cora can inspect the project,
