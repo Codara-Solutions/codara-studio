@@ -175,6 +175,9 @@ for (const command of [
   "python3 -m webbrowser https://example.com",
   "python3 -c 'import webbrowser; webbrowser.open(\"https://example.com\")'",
   "npx playwright open https://example.com",
+  "npx playwright codegen https://example.com",
+  "npx playwright test --headed",
+  "echo ready; open https://example.com",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
   assert.equal(
@@ -188,6 +191,11 @@ for (const command of [
   "git grep 'open https'",
   "printf 'open https://example.com'",
   "npm run build",
+  "npx playwright test tests/e2e/chat.spec.ts",
+  "npx playwright install chromium",
+  "pnpm exec playwright test",
+  "git commit -m 'docs: explain; open the panel first'",
+  'echo "step one; open the settings"',
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
 }
