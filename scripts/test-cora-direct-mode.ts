@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  followUpNeedsManager,
   isConversationalRequest,
   shouldUseDirectExecution,
 } from "../src/main/orchestration/direct-execution.ts";
@@ -110,6 +111,13 @@ try {
     await shouldUseDirectExecution({ cwd: root, prompt: "Fix one bug.", chatMode: "auto" }),
     true,
   );
+  // A finished direct chat hands a follow-up to the manager only when the
+  // direct worker cannot serve it; greetings and bounded fixes stay direct.
+  assert.equal(followUpNeedsManager("now draw this on the whiteboard"), true);
+  assert.equal(followUpNeedsManager("refactor the whole codebase in parallel"), true);
+  assert.equal(followUpNeedsManager("run this every night"), true);
+  assert.equal(followUpNeedsManager("thanks!"), false);
+  assert.equal(followUpNeedsManager("also fix the typo in utils.ts"), false);
 } finally {
   await fs.rm(root, { recursive: true, force: true });
 }

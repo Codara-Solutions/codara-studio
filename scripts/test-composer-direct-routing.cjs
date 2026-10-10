@@ -59,4 +59,15 @@ assert.match(startAutopilot, /availableCoraWorkerModels\(/);
 assert.match(startAutopilot, /directWorkerModels\.includes\(chipModel\)/);
 assert.doesNotMatch(startAutopilot, /"gpt-5\.6-sol"/, "no hard-coded direct model");
 
+// 3. A finished direct chat escalates to the manager for a follow-up the
+// direct worker cannot serve, and that first manager turn replays the dialogue.
+const addRunMessage = functionBody(runStore, "export async function addRunMessage(");
+assert.match(addRunMessage, /followUpNeedsManager\(input\.message\)/);
+assert.match(addRunMessage, /draft\.executionMode = "managed"/);
+assert.ok(
+  addRunMessage.indexOf("run.escalated_to_manager") < addRunMessage.indexOf("return addDirectIteration("),
+  "the escalation runs before the direct dispatch",
+);
+assert.match(runStore, /const escalatedFromDirect = draft\.sparkCalls\.length === 0 && draft\.workerTasks\.length > 0;/);
+
 console.log("composer first send reaches direct routing: ok");

@@ -109,7 +109,7 @@ import {
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { shouldUseDirectExecution } from "./direct-execution";
+import { followUpNeedsManager, shouldUseDirectExecution } from "./direct-execution";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -5767,8 +5767,13 @@ async function prepareManagerTurn(
         recovery?.state === "resuming" &&
         recovery.resumeClaimId === call.managerRecoveryClaimId &&
         recovery.conversationEpoch === epoch;
+      // A chat escalated from the direct lane has worker history and Cora
+      // replies but no manager session yet, so its first manager turn replays
+      // the dialogue the way a rebuilt session does.
+      const escalatedFromDirect = draft.sparkCalls.length === 0 && draft.workerTasks.length > 0;
       includeCanonicalReplay =
         shouldIncludeCanonicalReplay(draft, epoch) ||
+        escalatedFromDirect ||
         (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
@@ -10834,7 +10839,30 @@ function sameMessageDeliverySignature(
 }
 
 export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
-  const run = await requireRun(input.runId);
+  let run = await requireRun(input.runId);
+  // A desktop chat may start on the direct lane; a follow-up that needs
+  // parallel workers or a Studio surface the direct worker cannot write
+  // continues with the manager in the same chat instead.
+  if (
+    !input.skipDirectDispatch &&
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    input.author === "user" &&
+    input.kind === "note" &&
+    isTerminalRunStatus(run.status) &&
+    followUpNeedsManager(input.message)
+  ) {
+    run = await commitRunChange(run, {
+      type: "run.escalated_to_manager",
+      message: "Cora's manager takes over this chat for a request the direct lane cannot serve",
+      payload: {},
+      mutate: (draft, timestamp) => {
+        if (draft.executionMode !== "direct") return false;
+        draft.executionMode = "managed";
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
   if (
     !input.skipDirectDispatch &&
     run.executionMode === "direct" &&

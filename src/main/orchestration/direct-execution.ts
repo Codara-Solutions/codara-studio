@@ -12,6 +12,16 @@ const STUDIO_SURFACE_REQUEST =
 
 const SOCIAL_REQUEST = /^(?:(?:hi|hello|hey|yo|sup|what(?:'s| is) up|good (?:morning|afternoon|evening)|how are you)(?:\s+(?:cora|there))?[!?.\s]*|(?:thanks|thank you|sounds good|okay|ok|cool|nice|great)[!?.\s]*|what(?:'s| is) your (?:favorite|favourite)\b[^\n]{0,120}|who are you[!?.\s]*|tell me (?:a|another) joke[!?.\s]*)$/i;
 
+/**
+ * A follow-up in a finished direct chat that the direct worker cannot serve:
+ * broad or parallel work, or a Studio surface it has no write tools for. The
+ * chat then continues with the manager instead of another direct pass.
+ */
+export function followUpNeedsManager(prompt: string): boolean {
+  const text = prompt.trim();
+  return text.length > 4_000 || MANAGED_REQUEST.test(text) || STUDIO_SURFACE_REQUEST.test(text);
+}
+
 export function isConversationalRequest(prompt: string): boolean {
   return SOCIAL_REQUEST.test(prompt.trim());
 }
