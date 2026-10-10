@@ -1369,6 +1369,14 @@ async function main() {
     assert.equal(step.workers[0].model, "claude-sonnet-5");
   });
 
+  test("a step worker row keeps the root key but opens the surviving task's pane", () => {
+    const timeline = T.buildChatTimeline(pausedRunWithQueuedWorker());
+    const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-1");
+    assert.equal(step.workers.length, 1);
+    assert.equal(step.workers[0].id, "task-s1-dead");
+    assert.equal(step.workers[0].taskId, "task-s1-live");
+  });
+
   // ── Awaiting-answer manager turns (run-msafk7yu-zkudx6) ───────────────────
   // A live CLI manager holds its RPC turn open while suspended inside
   // ask_user, so the SparkCall stays "started" while the run is "blocked".

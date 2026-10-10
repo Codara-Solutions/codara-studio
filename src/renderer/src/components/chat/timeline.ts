@@ -28,6 +28,12 @@ import { WORKER_ATTEMPT_CAP, workerModelLabel } from "../runs/run-format";
 
 export interface ChatWorker {
   id: string;
+  /**
+   * The surviving worker task (after any runtime fallback), which is what a
+   * worker pane is keyed by. `id` is the root of the chain, kept stable for
+   * React keys, and names no pane once a fallback replaced it.
+   */
+  taskId?: string;
   title: string;
   runtime: WorkerRuntime;
   status: WorkerTaskStatus;
@@ -539,6 +545,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         // Keyed on the root of the supersedes chain so a runtime fallback
         // updates the row in place instead of swapping one out for another.
         id: logicalWorkerKey(worker),
+        taskId: worker.task.id,
         title: worker.task.title,
         runtime: worker.task.runtimePreference,
         status: worker.task.status,

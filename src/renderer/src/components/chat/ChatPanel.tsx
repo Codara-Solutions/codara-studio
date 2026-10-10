@@ -235,6 +235,7 @@ export default function ChatPanel({
                     key={`conversation:${activeRun.id}`}
                     run={activeRun}
                     cwd={workspace?.cwd ?? null}
+                    onOpenWorkerTerminal={onOpenBoardWorkerTerminal}
                   />
                 )}
               </div>

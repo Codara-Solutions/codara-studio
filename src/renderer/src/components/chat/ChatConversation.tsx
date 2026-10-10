@@ -78,13 +78,20 @@ const WorkerWaitContext = React.createContext<
   ((taskIds: string[]) => string | null) | null
 >(null);
 
+// Focuses a worker's terminal pane; false when it has no open pane. A context
+// for the same reason as WorkerWaitContext: worker rows sit inside memoized
+// step cards.
+const WorkerTerminalContext = React.createContext<((workerTaskId: string) => boolean) | null>(null);
+
 export default function ChatConversation({
   run,
   cwd = null,
+  onOpenWorkerTerminal,
 }: {
   run: RunState;
   /** Workspace that relative file links in Cora's answers resolve against. */
   cwd?: string | null;
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
 }) {
   // One durable projection owns both history hydration and live frames. Build
   // it before the timeline so completed conversational turns can omit their
@@ -254,6 +261,7 @@ export default function ChatConversation({
 
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
+      <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
       <MarkdownWorkspaceContext.Provider value={cwd || null}>
       <div style={SCROLL_STYLE} data-testid="cora-conversation">
         {rowCount === 0 ? (
@@ -372,6 +380,7 @@ export default function ChatConversation({
         )}
       </div>
       </MarkdownWorkspaceContext.Provider>
+      </WorkerTerminalContext.Provider>
     </WorkerWaitContext.Provider>
   );
 }
@@ -1736,7 +1745,15 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     item.status === "planning" ||
     item.status === "reviewing" ||
     item.status === "blocked";
-  const [open, setOpen] = useState(false);
+  // A live step shows its workers; it folds itself away once it settles,
+  // unless the user opened or closed it by hand in the meantime.
+  const [open, setOpen] = useState(live);
+  const toggledRef = useRef(false);
+  const wasLiveRef = useRef(live);
+  useEffect(() => {
+    if (wasLiveRef.current && !live && !toggledRef.current) setOpen(false);
+    wasLiveRef.current = live;
+  }, [live]);
   const color = stepStatusColor(item.status);
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
@@ -1762,7 +1779,9 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     >
       <DisclosureButton
         onClick={() => {
-          if (hasBody) setOpen((value) => !value);
+          if (!hasBody) return;
+          toggledRef.current = true;
+          setOpen((value) => !value);
         }}
         baseStyle={{
           ...TOOL_ROW_BUTTON_STYLE,
@@ -2472,6 +2491,11 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
+  const openWorkerTerminal = React.useContext(WorkerTerminalContext);
+  const [terminalClosed, setTerminalClosed] = useState(false);
+  const hasLiveAttempt =
+    worker.runtimeState !== undefined || worker.status === "claimed" || worker.status === "running";
+  const canOpenTerminal = Boolean(openWorkerTerminal && worker.taskId && hasLiveAttempt);
   return (
     <div
       style={{
@@ -2494,6 +2518,20 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         <StatusDot color={color} pulse={pulse} size={5} />
         <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+        {canOpenTerminal && (
+          <button
+            type="button"
+            className="cora-worker-terminal"
+            disabled={terminalClosed}
+            title={terminalClosed ? "This worker's terminal is closed" : "Open this worker's terminal"}
+            onClick={() => {
+              if (!worker.taskId || !openWorkerTerminal) return;
+              if (!openWorkerTerminal(worker.taskId)) setTerminalClosed(true);
+            }}
+          >
+            {terminalClosed ? "Terminal closed" : "Open terminal"}
+          </button>
+        )}
         {hasDiff && diff && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span>{diff.fileCount} {diff.fileCount === 1 ? "file" : "files"}</span>

@@ -2149,6 +2149,30 @@ a { color: inherit; }
   box-shadow: var(--focus-ring);
 }
 
+.cora-worker-terminal {
+  appearance: none;
+  flex: 0 0 auto;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 10.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-worker-terminal:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-worker-terminal:disabled {
+  color: var(--muted);
+  border-color: transparent;
+}
+.cora-worker-terminal:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 .cora-worker-diff-file {
   background: transparent;
   transition:
