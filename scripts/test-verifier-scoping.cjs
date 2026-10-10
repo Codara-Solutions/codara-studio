@@ -306,6 +306,24 @@ async function main() {
     assert.deepEqual(green.blockingVerifiers, []);
     results.push("every blocking verifier is listed for an explicit overrule");
   }
+  {
+    // A chat that escalated from the direct lane keeps the direct worker's
+    // passes (stamped with a loom node). Their edits were the direct lane's
+    // own answer, so the manager's gate must not wait on a verifier for them;
+    // a loom run keeps judging its own passes.
+    const escalated = splitRound([]);
+    escalated.executionMode = "managed";
+    escalated.workerTasks[0].loomNodeId = "w0";
+    assert.equal((await describeVerificationFreshness(escalated)).ok, true);
+    const managedEdit = splitRound([]);
+    managedEdit.executionMode = "managed";
+    assert.equal((await describeVerificationFreshness(managedEdit)).ok, false, "a managed edit still needs its verifier");
+    const loomRun = splitRound([]);
+    loomRun.executionMode = "direct";
+    loomRun.workerTasks[0].loomNodeId = "w0";
+    assert.equal((await describeVerificationFreshness(loomRun)).ok, false);
+    results.push("direct-lane passes of an escalated chat do not block the manager's completion");
+  }
 
   {
     // The verification-round ceiling scales with implementation lineages: five
@@ -362,6 +380,41 @@ async function main() {
     assert.match(landed[0].note, /one implementation area drew 8 corrective rounds/);
     results.push("the verification ceiling scales per lineage and still stops a runaway lineage");
   }
+
+  {
+    // Green claims are keyed by lineage. A verifier the manager spawned on a
+    // step of its own names no implementation; its claims must still meet a
+    // later re-verifier's, or the regression guard never fires for that shape.
+    const shim =
+      "type RunState = any; type WorkerTask = any;\n" +
+      extract(RUN_STORE, "function implementationLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function verifierLineageRoot(") + "\n" +
+      RUN_STORE.slice(
+        RUN_STORE.indexOf("const UNSCOPED_CLAIM_LINEAGE"),
+        RUN_STORE.indexOf("function greenClaimLineage("),
+      ) +
+      extract(RUN_STORE, "function greenClaimLineage(");
+    const greenClaimLineage = compile(shim, [], "greenClaimLineage")();
+    const tasks = [
+      { id: "impl-a", taskClass: "feature", stepId: "s1" },
+      { id: "ver-a", taskClass: "verifier", stepId: "s2", autoVerifierForTaskId: "impl-a" },
+      { id: "ver-own-1", taskClass: "verifier", stepId: "s3" },
+      { id: "ver-own-2", taskClass: "verifier", stepId: "s4" },
+    ];
+    const run = { workerTasks: tasks };
+    assert.equal(greenClaimLineage(run, tasks[1]), "impl-a");
+    assert.equal(greenClaimLineage(run, tasks[2]), greenClaimLineage(run, tasks[3]));
+    assert.equal(greenClaimLineage(run, tasks[2]), "unscoped");
+    results.push("unlinked verifiers share one claim scope so the regression guard still sees them");
+  }
+
+  check("a declared verifier's brief names the changed files, not [object Object]", () => {
+    const start = RUN_STORE.indexOf("async function maybeSpawnDeclaredVerifier(");
+    assert.notEqual(start, -1);
+    const body = RUN_STORE.slice(start, RUN_STORE.indexOf("\n}\n", start));
+    assert.match(body, /report\.filesChanged\.slice\(0, 20\)\.map\(\(file\) => file\.path\)/);
+    assert.doesNotMatch(body, /report\.filesChanged\.slice\(0, 20\)\.join\(/);
+  });
 
   check("codara_complete exposes the accept_unverified overrule and the socket enforces it", () => {
     const server = read("resources/codara-studio-mcp/server.js");

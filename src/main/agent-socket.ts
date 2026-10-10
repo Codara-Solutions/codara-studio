@@ -57,6 +57,7 @@ import {
   setDefaultCoraProfile,
 } from "./orchestration/cora-profiles";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { openPlanMilestones } from "./orchestration/manager-plan";
 import {
   blindApprovalAskProblem,
   parsePlanValidation,
@@ -3611,17 +3612,11 @@ async function handleOrchestratorComplete(
           : ""),
     );
   }
-  // Verification freshness invariant: an earlier green verifier does not cover
-  // a later corrective edit. One implementation (run-store), shared with the
-  // orchestrator-side terminal hops that complete a run when this tool never
-  // arrives, so a manager that skips codara_complete cannot skip the rule.
   // A recorded plan is the manager's own definition of done, so a run cannot
   // be called complete after the first green slice of a multi-area request.
   // Runs without a plan are unaffected, and deferring with a note always
   // clears the gate.
-  const openMilestones = (run.managerPlan?.milestones ?? []).filter(
-    (milestone) => milestone.status === "pending" || milestone.status === "in_progress",
-  );
+  const openMilestones = openPlanMilestones(run.managerPlan);
   if (openMilestones.length > 0) {
     return errorResponse(
       id,
@@ -3631,6 +3626,10 @@ async function handleOrchestratorComplete(
         ". Finish them, or call codara_plan_update marking each done (with evidence) or deferred (with the reason), then call codara_complete.",
     );
   }
+  // Verification freshness invariant: an earlier green verifier does not cover
+  // a later corrective edit. One implementation (run-store), shared with the
+  // orchestrator-side terminal hops that complete a run when this tool never
+  // arrives, so a manager that skips codara_complete cannot skip the rule.
   const verification = await runStore.describeVerificationFreshness(run);
   const acceptUnverified = parseAcceptUnverified(params.accept_unverified);
   if (typeof acceptUnverified === "string") {
@@ -5443,9 +5442,7 @@ async function handleOrchestratorPlanUpdate(
   try {
     const updated = await runStore.updateManagerPlan(run.id, params);
     const plan = updated.managerPlan;
-    const open = (plan?.milestones ?? []).filter(
-      (milestone) => milestone.status === "pending" || milestone.status === "in_progress",
-    );
+    const open = openPlanMilestones(plan);
     return successResponse(id, {
       ok: true,
       milestones: plan?.milestones.length ?? 0,

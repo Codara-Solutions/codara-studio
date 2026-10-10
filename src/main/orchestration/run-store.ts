@@ -4579,6 +4579,12 @@ export async function describeVerificationFreshness(
     if (!attempt.finalReportPath) continue;
     const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
     if (!task) continue;
+    // A chat that escalated from the direct lane keeps the direct worker's
+    // passes (the only tasks a chat run stamps with a loom node). Those edits
+    // were answered as the direct lane's own reply, so they must not leave the
+    // manager's first codara_complete, or a settled turn, waiting on a
+    // verifier for work it never orchestrated.
+    if (task.loomNodeId && run.executionMode !== "direct" && !run.automationId) continue;
     const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
     if (!report) continue;
     const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
@@ -5769,8 +5775,11 @@ async function prepareManagerTurn(
         recovery.conversationEpoch === epoch;
       // A chat escalated from the direct lane has worker history and Cora
       // replies but no manager session yet, so its first manager turn replays
-      // the dialogue the way a rebuilt session does.
-      const escalatedFromDirect = draft.sparkCalls.length === 0 && draft.workerTasks.length > 0;
+      // the dialogue the way a rebuilt session does. Its direct passes are the
+      // only chat tasks stamped with a loom node; a fan-out or council batch
+      // forced before the first turn has tasks too but no dialogue to replay.
+      const escalatedFromDirect =
+        draft.sparkCalls.length === 0 && draft.workerTasks.some((task) => Boolean(task.loomNodeId));
       includeCanonicalReplay =
         shouldIncludeCanonicalReplay(draft, epoch) ||
         escalatedFromDirect ||
@@ -12258,7 +12267,10 @@ export async function applyCodaraCompleteFromManagerCall(input: {
 }): Promise<CodaraCompleteApplicationOutcome> {
   const run = await requireRun(input.runId);
   const overruled = input.acceptUnverified
-    ? run.workerTasks.filter((task) => input.acceptUnverified!.overruledVerifierTaskIds.includes(task.id))
+    ? run.workerTasks.filter(
+        (task) =>
+          task.taskClass === "verifier" && input.acceptUnverified!.overruledVerifierTaskIds.includes(task.id),
+      )
     : [];
   // The overrule is disclosed in the user-visible summary, so a run that
   // landed against a verifier never reads as a verified success.
@@ -14954,7 +14966,7 @@ async function maybeSpawnDeclaredVerifier({
       : task.runtimePreference === "codex"
         ? "claude"
         : task.runtimePreference;
-  const changed = report.filesChanged.slice(0, 20).join(", ");
+  const changed = report.filesChanged.slice(0, 20).map((file) => file.path).filter(Boolean).join(", ");
   const rerun = priorAutoVerifiers.length > 0;
   const description = [
     brief,
@@ -16172,6 +16184,17 @@ function greenClaimKey(lineage: string, claim: string): string {
   return `${lineage}::${normalizeClaimKey(claim)}`;
 }
 
+// A verifier the manager spawned on a step of its own names no
+// implementation, so its claims share one run-wide scope. Per-verifier keys
+// would never match a later re-verifier's and would silently disable the
+// regression guard for that whole shape of run.
+const UNSCOPED_CLAIM_LINEAGE = "unscoped";
+
+function greenClaimLineage(run: RunState, verifier: WorkerTask): string {
+  const lineage = verifierLineageRoot(run, verifier);
+  return lineage.startsWith("verifier:") ? UNSCOPED_CLAIM_LINEAGE : lineage;
+}
+
 // Marks the report's newly-verified atomic claims green on the run (claim key ->
 // the attempt that verified it). Records green even when the same report also
 // triggers a FEEDBACK re-enqueue, so a partial pass isn't lost on the retry.
@@ -16196,7 +16219,7 @@ async function recordGreenClaims({
     mutate: (draft, timestamp) => {
       const greenClaims = (draft.greenClaims ??= {});
       const verifier = draft.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
-      const lineage = verifier ? verifierLineageRoot(draft, verifier) : attempt.workerTaskId;
+      const lineage = verifier ? greenClaimLineage(draft, verifier) : UNSCOPED_CLAIM_LINEAGE;
       for (const claim of verified) {
         greenClaims[greenClaimKey(lineage, claim.claim)] = attempt.id;
       }
@@ -16206,11 +16229,11 @@ async function recordGreenClaims({
 }
 
 // Detects regressions on previously-green claims: a verdict that marks an
-// already-green claim as `failed`. When found, restores the workspace to the
-// most recent impl pre-worker checkpoint (the latest non-null
-// preWorkerCheckpointSha) and emits a loud revert notice, then drops the now-
-// stale green entries so the next attempt re-establishes green. Returns the
-// updated run (regression restored) or null when no regression applies.
+// already-green claim of the same lineage as `failed`. When found, restores
+// the files the lineage's newest implementation attempt changed to that
+// attempt's pre-worker checkpoint and emits a loud revert notice, then drops
+// the now-stale green entries so the next attempt re-establishes green.
+// Returns the updated run, or null when no regression applies.
 async function maybeRestoreGreenClaimRegression({
   run,
   task,
@@ -16224,7 +16247,7 @@ async function maybeRestoreGreenClaimRegression({
 }): Promise<{ run: RunState; restoreFailed: boolean } | null> {
   const green = run.greenClaims;
   if (!green) return null;
-  const lineage = verifierLineageRoot(run, task);
+  const lineage = greenClaimLineage(run, task);
   const regressedKeys: string[] = [];
   const regressedClaims: string[] = [];
   for (const claim of report.verifier?.atomicClaims ?? []) {
@@ -16240,13 +16263,20 @@ async function maybeRestoreGreenClaimRegression({
   // The snapshot taken before this lineage's newest implementation attempt,
   // and only the files that attempt reported changing. A whole-tree reset to
   // the newest snapshot in the run would also wipe other areas' finished work.
+  // An unscoped verifier judged the run as a whole, so its regression is
+  // attributed to the newest implementation attempt of any lineage.
   let restoredSha: string | null = null;
   let restorePaths: string[] = [];
   for (let i = run.workerAttempts.length - 1; i >= 0; i--) {
     const candidate = run.workerAttempts[i];
     const candidateTask = run.workerTasks.find((item) => item.id === candidate.workerTaskId);
     if (!candidateTask || candidateTask.taskClass === "verifier") continue;
-    if (implementationLineageRoot(run, candidateTask.id) !== lineage) continue;
+    if (
+      lineage !== UNSCOPED_CLAIM_LINEAGE &&
+      implementationLineageRoot(run, candidateTask.id) !== lineage
+    ) {
+      continue;
+    }
     if (!candidate.preWorkerCheckpointSha) continue;
     const candidateReport = candidate.finalReportPath
       ? await readWorkerReport(candidate.finalReportPath).catch(() => null)
@@ -16265,13 +16295,9 @@ async function maybeRestoreGreenClaimRegression({
         taskWritesWorkspace(item),
     );
   const cwd = workspaceCwdFromRun(run);
-  if (!restoredSha || !cwd || restorePaths.length === 0 || otherLiveWriters) {
-    // Nothing safe to restore (non-git workspace, no snapshot or changed-file
-    // list for this lineage, or another writer is live). Still drop the stale
-    // green entries so the regression isn't silently retained.
-    const reason = otherLiveWriters
-      ? "another worker is still writing, so nothing was restored"
-      : "no pre-worker snapshot of this area is available to restore";
+  // Nothing safe to restore still drops the stale green entries, so the
+  // regression isn't silently retained.
+  const nothingRestored = async (reason: string) => {
     const unavailable = await commitRunChange(run, {
       type: "autopilot.green_claim_regression_detected",
       stepId: task.stepId,
@@ -16286,10 +16312,16 @@ async function maybeRestoreGreenClaimRegression({
       },
     });
     return { run: unavailable, restoreFailed: false };
+  };
+  if (otherLiveWriters) return nothingRestored("another worker is still writing, so nothing was restored");
+  if (!restoredSha || !cwd || restorePaths.length === 0) {
+    return nothingRestored("no pre-worker snapshot of this area is available to restore");
   }
 
+  let restoredCount = 0;
   try {
-    await restoreCheckpointPaths({ cwd, sha: restoredSha, paths: restorePaths });
+    const result = await restoreCheckpointPaths({ cwd, sha: restoredSha, paths: restorePaths });
+    restoredCount = result.restored.length + result.removed.length;
   } catch (error) {
     const restoreError = error instanceof Error ? error.message : String(error);
     const failed = await commitRunChange(run, {
@@ -16321,6 +16353,9 @@ async function maybeRestoreGreenClaimRegression({
     });
     return { run: failed, restoreFailed: true };
   }
+  if (restoredCount === 0) {
+    return nothingRestored("none of the files the regressing worker reported could be restored from the snapshot");
+  }
   for (const claim of regressedClaims) {
     await appendRegressionRevertEvent({
       workspaceId: run.workspaceId,
@@ -16338,7 +16373,7 @@ async function maybeRestoreGreenClaimRegression({
     type: "autopilot.green_claim_regression_reverted",
     stepId: task.stepId,
     workerTaskId: task.id,
-    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s): restored ${restorePaths.length} file(s) to the pre-worker snapshot`,
+    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s): restored ${restoredCount} file(s) to the pre-worker snapshot`,
     payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id, paths: restorePaths },
     mutate: (draft, timestamp) => {
       if (draft.greenClaims) {

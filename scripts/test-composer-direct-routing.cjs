@@ -68,6 +68,10 @@ assert.ok(
   addRunMessage.indexOf("run.escalated_to_manager") < addRunMessage.indexOf("return addDirectIteration("),
   "the escalation runs before the direct dispatch",
 );
-assert.match(runStore, /const escalatedFromDirect = draft\.sparkCalls\.length === 0 && draft\.workerTasks\.length > 0;/);
+assert.match(
+  runStore,
+  /const escalatedFromDirect =\s*draft\.sparkCalls\.length === 0 && draft\.workerTasks\.some\(\(task\) => Boolean\(task\.loomNodeId\)\);/,
+  "only a chat with direct passes replays on its first manager turn",
+);
 
 console.log("composer first send reaches direct routing: ok");
