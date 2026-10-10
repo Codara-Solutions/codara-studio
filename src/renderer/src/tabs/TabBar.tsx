@@ -1311,7 +1311,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
           onClose(tab.id);
         }
       }}
-      title={tab.title}
+      title={tab.tooltip ?? tab.title}
     >
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <CodaraMark size={13} />

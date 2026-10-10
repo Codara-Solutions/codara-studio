@@ -22,6 +22,8 @@ export interface BaseTab {
 
 export interface ChatTab extends BaseTab {
   kind: "chat";
+  // Hover text naming the chat; every chat tab's label is the same "Cora".
+  tooltip?: string;
 }
 
 export interface EditorTab extends BaseTab {

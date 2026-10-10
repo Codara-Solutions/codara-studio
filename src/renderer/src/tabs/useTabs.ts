@@ -1245,7 +1245,7 @@ export interface UseTabsApi {
   // chat tabs, updates titles, and removes chat tabs whose run was deleted.
   // Drafts are left alone — they live until the user closes them or sends
   // their first message (then promoteDraftToRun rekeys the tab).
-  syncChatTabsToRuns: (runs: Array<{ id: string; title: string }>) => void;
+  syncChatTabsToRuns: (runs: Array<{ id: string; title: string; tooltip?: string }>) => void;
   // Append a fresh draft chat tab and focus it. Used by the top tab strip's
   // "+" affordance for "start a new chat" — the composer then drives the
   // promote-to-run swap on first message.
@@ -3033,7 +3033,7 @@ export function useTabs(
   );
 
   const syncChatTabsToRuns = useCallback(
-    (runList: Array<{ id: string; title: string }>) => {
+    (runList: Array<{ id: string; title: string; tooltip?: string }>) => {
       const runIds = new Set(runList.map((r) => r.id));
       // Prune closed-run ids no longer in the run list so the set can't grow
       // unbounded (deleted runs will never reappear, so their marker is dead
@@ -3056,6 +3056,7 @@ export function useTabs(
       }
       setTabs((curr) => {
         const titleByRun = new Map(runList.map((r) => [r.id, r.title?.trim() || "Cora"]));
+        const tooltipByRun = new Map(runList.map((r) => [r.id, r.tooltip]));
         let changed = false;
         // Drop chat tabs whose run has been deleted; keep drafts.
         const filtered = curr.filter((tab) => {
@@ -3069,9 +3070,10 @@ export function useTabs(
         const renamed = filtered.map((tab) => {
           if (tab.kind !== "chat" || isDraftChatTabId(tab.id)) return tab;
           const nextTitle = titleByRun.get(tab.id);
-          if (!nextTitle || nextTitle === tab.title) return tab;
+          const nextTooltip = tooltipByRun.get(tab.id);
+          if (!nextTitle || (nextTitle === tab.title && nextTooltip === tab.tooltip)) return tab;
           changed = true;
-          return { ...tab, title: nextTitle };
+          return { ...tab, title: nextTitle, tooltip: nextTooltip };
         });
         // Append chat tabs for runs that aren't represented yet. New runs
         // are placed at the end so existing tab positions stay stable.
@@ -3083,7 +3085,7 @@ export function useTabs(
           // Skip runs the user explicitly closed: their tab stays gone until
           // they reopen the run (openChatTab/promoteDraftChatTab clear the id).
           if (!have.has(run.id) && !closed.has(run.id)) {
-            additions.push(createChatTabForRun(run.id, run.title));
+            additions.push({ ...createChatTabForRun(run.id, run.title), tooltip: run.tooltip });
             changed = true;
           }
         }

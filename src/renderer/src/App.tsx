@@ -202,6 +202,13 @@ let rendererReadySignaled = false;
 // history popover; only the workspace tab strip is forced to this constant so
 // short prompts ("hello") don't surface as truncated "He..." labels.
 const CHAT_TAB_LABEL = "Cora";
+
+// The label is the same for every chat, so hovering is how parallel chats are
+// told apart: the run's title and what it is doing.
+function chatTabTooltip(run: RunState): string {
+  const title = run.title?.trim() || CHAT_TAB_LABEL;
+  return `${title} · ${describeRunStatus(run).label}`;
+}
 const EXACT_GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -1338,7 +1345,7 @@ export default function App() {
     tabsRef.current.syncChatTabsToRuns(
       runs
         .filter((run) => run.chatMode !== "automation" || openChatTabIds.has(run.id))
-        .map((run) => ({ id: run.id, title: CHAT_TAB_LABEL })),
+        .map((run) => ({ id: run.id, title: CHAT_TAB_LABEL, tooltip: chatTabTooltip(run) })),
     );
   }, [runs]);
 
