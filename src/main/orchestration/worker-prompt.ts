@@ -496,8 +496,8 @@ function managerInboxIsRead(run: RunState): boolean {
   );
 }
 
-function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
-  const text = [
+function uiSignalText(step: StepState | undefined, task: WorkerTask): string {
+  return [
     task.title,
     task.description,
     step?.title ?? "",
@@ -505,21 +505,21 @@ function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): 
     ...(step?.acceptanceCriteria ?? []),
     ...(task.expectedOutputs ?? []),
   ].join(" ");
-  return /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|design|calculator|dashboard|professional\s+ui|polished)\b/i.test(
-    text,
-  );
 }
 
-function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask): boolean {
-  const text = [
-    task.title,
-    task.description,
-    step?.title ?? "",
-    step?.goal ?? "",
-    ...(step?.acceptanceCriteria ?? []),
-    ...(task.expectedOutputs ?? []),
-  ].join(" ");
-  return /\b(calculator|calculate|arithmetic|keypad|numeric input)\b/i.test(text);
+// Generic words (page, form, view, design, button, screen) also describe
+// backend work ("page 2 of the API", "form validation endpoint", "database
+// design"), and a false match tells the verifier to call a correct backend
+// fix unsure without a browser snapshot. Only unambiguous UI vocabulary counts.
+const VISIBLE_UI_SIGNAL =
+  /\b(?:ui|ux|frontend|front-end|html|css|scss|tailwind|component|layout|modal|dialog|dashboard|visual(?:ly)?|styling|stylesheet|responsive|polished|webpage|(?:landing|web|home|settings|login|sign-?up|checkout)\s+(?:page|screen|form)|(?:professional|nice)\s+(?:ui|interface|look))\b/i;
+
+export function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
+  return VISIBLE_UI_SIGNAL.test(uiSignalText(step, task));
+}
+
+export function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask): boolean {
+  return /\bcalculator\b/i.test(uiSignalText(step, task)) && taskLooksLikeVisibleUi(step, task);
 }
 
 function renderCodexImageGenerationGuidance(
