@@ -16,7 +16,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 |---|---|
 | `spark-state.json`, `spark-settings.json`, `spark-preferences.json` | Workspaces and tabs, settings, and UI preferences. The OpenRouter key in the settings file is encrypted by the operating system (Keychain on macOS, DPAPI on Windows, libsecret or KWallet on Linux). Where no encryption is available, as on Linux without a keyring, it stays in plain text and the file is readable only by you. |
 | `runs/<id>/run.json`, `runs/<id>/events.jsonl` | Every Cora run: transcript, workers, board, whiteboard, and an event journal. |
-| `memory/` | Cora's memory, global and per workspace, as plain markdown you can edit. |
+| `memory/` | Cora's memory, global and per workspace, as plain markdown you can edit. Lines Cora saves with `codara_remember` (tagged `[cora ...]`) stay until you or Cora remove them; lessons it records on its own (tagged `[auto ...]`) expire after 30 days. |
 | `scheduler.json` | Armed automation triggers. They fire only while the app is open. |
 | `notifications.json` | The notification center's history. |
 | `onboarding.json` | Where you are in the first-run guide. |

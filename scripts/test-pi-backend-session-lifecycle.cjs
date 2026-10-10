@@ -221,6 +221,11 @@ async function loadBackend() {
       module.exports = {
         buildTalkReplyDecision: (reply) => ({ status: "reply", reply }),
       };`,
+    "./cora-memory": `
+      const h = () => globalThis.${HARNESS_KEY};
+      module.exports = {
+        resetCoraMemoryInjection: (runId) => h().events.push("memory-reset:" + runId),
+      };`,
     "./project-policy": `
       module.exports = {
         renderRunProjectPolicy: () => "",
@@ -588,6 +593,10 @@ async function testCompactionWaitsWithoutRepeatingAnswer(backend, harness) {
   assert.equal(result.decision.reply, "Completed once.");
   assert.equal(result.turnFailed, undefined);
   assert.equal(client.prompts.length, 1);
+  assert.ok(
+    harness.events.includes("memory-reset:run-manager-compaction"),
+    "a finished compaction must make the next turn re-send Cora's memory and profile",
+  );
   await backend.disposeChat("run-manager-compaction");
 }
 
@@ -605,6 +614,10 @@ async function testFailedCompactionPreservesAnswerAndStopsRuntime(backend, harne
   assert.equal(result.decision.reply, "The completed answer survives.");
   assert.equal(result.turnFailed, undefined);
   assert.equal(client.stopCalls, 1, "unconfirmed compaction must not survive after its turn returns");
+  assert.ok(
+    !harness.events.includes("memory-reset:run-manager-compaction-failure"),
+    "a failed compaction left the context intact, so the memory gate stays",
+  );
   assert.ok(notes.some(event => event.kind === "system_note" && /compaction failed/.test(event.message)));
   await backend.requestManagerDecision(requestInput("run-manager-compaction-failure"));
   assert.notEqual(harness.clients.at(-1), client, "next turn must use a fresh process");

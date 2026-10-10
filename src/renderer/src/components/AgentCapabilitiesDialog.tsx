@@ -1025,7 +1025,7 @@ export default function AgentCapabilitiesDialog({
                     <MemoryRow
                       scope="global"
                       title="Global memory"
-                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+                      detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository. Turning this off also turns off workspace memory; profile instructions still apply."
                       status={memory?.global ?? null}
                       busy={memoryBusy === "global"}
                       unavailable={null}
@@ -1632,7 +1632,7 @@ function MemoryRow({
             <span style={memoryNoteStyle}>{unavailable}</span>
           ) : status === null ? (
             <span style={memoryNoteStyle}>Reading the file</span>
-          ) : status.bytesUsed === 0 ? (
+          ) : status.bytesUsed === 0 || lines === 0 ? (
             <span style={memoryNoteStyle}>Nothing remembered yet.</span>
           ) : (
             <MemoryMeter status={status} lines={lines} />
@@ -1662,7 +1662,7 @@ function MemoryRow({
         </button>
         <MemoryClearControl
           busy={busy}
-          disabled={blocked || (status?.bytesUsed ?? 0) === 0}
+          disabled={blocked || lines === 0}
           userLineCount={status?.counts.user ?? 0}
           onClear={(includeUserLines) => onClear(scope, includeUserLines)}
         />
