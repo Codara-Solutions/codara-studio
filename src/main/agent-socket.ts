@@ -2603,10 +2603,12 @@ function verifierRoundCapForRun(run: RunState): number {
 // worker_batch step, and a runaway manager can chain them without limit -
 // chat autopilot has no automation-loop hardCap. Generous on purpose: it
 // bounds pathological loops, not normal runs. Scoped to the current user
-// turn (batches minted since the latest user-authored message) because chat
-// runs are long-lived - legitimate batches spread across many turns must
-// never accumulate into a force-land.
-const SYNTHETIC_STEP_CEILING = 20;
+// turn (batches minted since the latest user-authored message or Resume)
+// because chat runs are long-lived - legitimate batches spread across many
+// turns must never accumulate into a stop. Tripping it asks the user instead
+// of landing the run.
+const SYNTHETIC_STEP_CEILING = 60;
+const NO_PROGRESS_BATCH_LIMIT = 8;
 const UNTRUSTED_PR_MAX_WORKERS_PER_BATCH = 4;
 
 function untrustedPullRequestWorkerPathError(
@@ -3030,32 +3032,49 @@ async function handleOrchestratorSpawnWorkers(
   // ceiling: a fresh user message resets the budget, so the brake catches a
   // runaway single-turn spawn loop without ever tripping on a multi-turn
   // chat run's accumulated history.
-  const latestUserTurnAt = run.humanMessages.reduce((max, message) => {
-    if (message.author !== "user") return max;
-    const at = Date.parse(message.createdAt);
-    return Number.isFinite(at) && at > max ? at : max;
-  }, Number.NEGATIVE_INFINITY);
-  const syntheticStepCount = run.steps.filter(
-    (step) =>
-      (step.kind ?? "worker_batch") === "worker_batch" &&
-      Date.parse(step.createdAt) >= latestUserTurnAt,
-  ).length;
-  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING) {
-    await runStore
-      .forceLandRunUnverified(runId, {
-        trigger: "synthetic_step_ceiling",
-        note:
-          `This run reached the ceiling of ${SYNTHETIC_STEP_CEILING} manager-spawned worker batches in one turn. ` +
-          "Codara accepted the remaining reviewed work and landed the run as unverified rather than keep spawning.",
-      })
-      .catch(() => undefined);
+  // An explicit Resume grants a fresh budget too.
+  const latestUserTurnAt = Math.max(
+    run.humanMessages.reduce((max, message) => {
+      if (message.author !== "user") return max;
+      const at = Date.parse(message.createdAt);
+      return Number.isFinite(at) && at > max ? at : max;
+    }, Number.NEGATIVE_INFINITY),
+    Date.parse(run.autopilot?.resumedAt ?? "") || Number.NEGATIVE_INFINITY,
+  );
+  const turnBatches = run.steps
+    .filter(
+      (step) =>
+        (step.kind ?? "worker_batch") === "worker_batch" &&
+        Date.parse(step.createdAt) >= latestUserTurnAt,
+    )
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const syntheticStepCount = turnBatches.length;
+  // A long single request legitimately spawns dozens of batches, so the brake
+  // is lack of progress: the newest batches all ended with every task failed
+  // or cancelled. The raw count stays as a runaway backstop only.
+  let failedBatchStreak = 0;
+  for (let index = turnBatches.length - 1; index >= 0; index -= 1) {
+    const batchTasks = run.workerTasks.filter((task) => task.stepId === turnBatches[index].id);
+    const noProgress =
+      batchTasks.length > 0 &&
+      batchTasks.every((task) => task.status === "failed" || task.status === "cancelled");
+    if (!noProgress) break;
+    failedBatchStreak += 1;
+  }
+  const noProgressBrake = failedBatchStreak >= NO_PROGRESS_BATCH_LIMIT;
+  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING || noProgressBrake) {
+    // Never force-land here: the work may be half done and only the user can
+    // say whether more batches are worth it. Their reply opens a fresh budget.
     return successResponse(id, {
       worker_task_ids: [],
       step_ceiling_reached: true,
-      note:
-        `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
-        `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
-        "Summarize the outcome for the user and end the turn. Do not spawn more workers.",
+      note: noProgressBrake
+        ? `Step brake: the last ${failedBatchStreak} worker batches all failed or were cancelled. ` +
+          "Do not spawn more workers on the same approach. Tell the user what keeps failing and ask with " +
+          "codara_ask_user whether to continue (and with what change) or stop here."
+        : `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
+          `(cap ${SYNTHETIC_STEP_CEILING}). Do not spawn more workers now. Summarize progress (update ` +
+          "codara_plan_update if you keep a plan) and ask with codara_ask_user whether to continue for more batches.",
     });
   }
   const workerTitles = workersToCreate

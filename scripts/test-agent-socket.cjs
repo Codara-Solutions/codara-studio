@@ -1634,6 +1634,53 @@ async function main() {
       JSON.stringify({ overruled, steps: overruledSnapshot.steps }).slice(0, 500),
     );
 
+    // The step brake is lack of progress, not a raw batch count, and it asks
+    // the user instead of force-landing the run.
+    const brakeSteps = Array.from({ length: 8 }, (_, index) => ({
+      id: `step-brake-${index}`,
+      title: `batch ${index}`,
+      kind: "worker_batch",
+      status: "failed",
+      createdAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+    }));
+    fabricateRun("run-step-brake", {
+      chatMode: "execute",
+      status: "running",
+      humanMessages: [{
+        id: "msg-brake",
+        runId: "run-step-brake",
+        author: "user",
+        kind: "note",
+        message: "migrate everything",
+        attachments: [],
+        createdAt: "2026-07-18T10:00:00.000Z",
+      }],
+      steps: brakeSteps,
+      workerTasks: brakeSteps.map((step, index) => ({
+        id: `wt-brake-${index}`,
+        stepId: step.id,
+        title: `attempt ${index}`,
+        status: index % 2 === 0 ? "failed" : "cancelled",
+        taskClass: "feature",
+      })),
+      workerAttempts: [],
+    });
+    const braked = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-step-brake",
+      workers: [{ title: "try again", description: "same approach", taskClass: "feature", runtimePreference: "claude" }],
+    });
+    const brakedSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-step-brake", "run.json"), "utf8"));
+    check(
+      "eight failed batches in a row trip the no-progress brake without landing the run",
+      braked.result?.step_ceiling_reached === true &&
+        /last 8 worker batches all failed/.test(braked.result?.note ?? "") &&
+        /codara_ask_user/.test(braked.result?.note ?? "") &&
+        brakedSnapshot.status === "running" &&
+        brakedSnapshot.steps.length === 8,
+      JSON.stringify({ braked, status: brakedSnapshot.status }).slice(0, 400),
+    );
+
     // codara_plan_update stores the manager's plan, and an open milestone
     // holds codara_complete until it is done or deferred with a reason.
     fabricateRun("run-plan", {
