@@ -181,7 +181,7 @@ Imported pull-request security contract:
     return {
       systemPrompt: `${event.systemPrompt}
 
-${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy(), { alwaysVerifyEdits: alwaysVerifyEdits() })}${workerModelContract()}
+${buildCoraPiSystemPrompt(activeMode(), activeExecutionPolicy(), { alwaysVerifyEdits: alwaysVerifyEdits(), untrusted: untrustedPullRequest })}${workerModelContract()}
 ${untrustedContract}
 ${mcp?.promptSuffix() ?? ""}`,
     };
@@ -233,6 +233,9 @@ ${mcp?.promptSuffix() ?? ""}`,
   const deferredFamilies = STUDIO_TOOL_FAMILIES.filter(
     (family) => familyTools.has(family) && !alwaysActiveFamilies.has(family),
   );
+  // The shared prompt names every family, so the loader accepts one that is
+  // already active in this mode and only returns its guidance.
+  const loadableFamilies = STUDIO_TOOL_FAMILIES.filter((family) => familyTools.has(family));
   // Judged against the live active set, not a record of earlier loads: a
   // session switch hides families again, and a stale "already loaded" record
   // would let codara_tools report tools that the next request does not carry.
@@ -279,11 +282,11 @@ ${mcp?.promptSuffix() ?? ""}`,
       name: STUDIO_TOOL_LOADER_NAME,
       label: "Codara · tools",
       description:
-        `Load Codara Studio tool families for this chat before their first use. Families: ${deferredFamilies.join(", ")}. ` +
+        `Load Codara Studio tool families for this chat before their first use. Families: ${loadableFamilies.join(", ")}. ` +
         "browser drives the built-in Browser tab (codara_preview_*); terminal opens terminal tabs for servers and commands the user watches (codara_terminal_*); " +
         "whiteboard builds visual explanations (codara_whiteboard_*); board manages this chat's task cards (codara_board_*); " +
         "automations creates, runs, and manages recurring automations. Returns the activated tools and how to use them.",
-      promptSnippet: "Load Studio tool families: browser, terminal, whiteboard, board, automations",
+      promptSnippet: `Load Studio tool families: ${loadableFamilies.join(", ")}`,
       parameters: {
         type: "object",
         required: ["families"],
@@ -291,7 +294,7 @@ ${mcp?.promptSuffix() ?? ""}`,
           families: {
             type: "array",
             minItems: 1,
-            items: { type: "string", enum: deferredFamilies },
+            items: { type: "string", enum: loadableFamilies },
             description: "Families to load.",
           },
         },
@@ -302,11 +305,11 @@ ${mcp?.promptSuffix() ?? ""}`,
           ? params.families.filter(isStudioToolFamily)
           : [];
         if (requested.length === 0) {
-          throw new Error(`Name at least one family to load: ${deferredFamilies.join(", ")}.`);
+          throw new Error(`Name at least one family to load: ${loadableFamilies.join(", ")}.`);
         }
         activateFamilies(requested);
         const sections = requested
-          .filter((family) => deferredFamilies.includes(family))
+          .filter((family) => loadableFamilies.includes(family))
           .map((family) => {
             const tools = (familyTools.get(family) ?? [])
               .map((tool) => `- ${tool.name}: ${toolPromptSnippet(tool.description, 140)}`)

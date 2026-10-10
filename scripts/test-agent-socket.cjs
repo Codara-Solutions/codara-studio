@@ -888,7 +888,9 @@ async function main() {
     });
     check(
       "codara_complete rejected before any execute worker exists",
-      Boolean(emptyComplete.error) && /before any worker task exists/i.test(emptyComplete.error?.message ?? ""),
+      Boolean(emptyComplete.error) &&
+        /before any worker task exists/i.test(emptyComplete.error?.message ?? "") &&
+        /reply in natural language/i.test(emptyComplete.error?.message ?? ""),
       JSON.stringify(emptyComplete).slice(0, 200),
     );
 

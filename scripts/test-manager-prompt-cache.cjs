@@ -358,6 +358,12 @@ async function main() {
     "a run with neither plan nor tasks gets no digest",
     managerPlan.renderRunStateDigest({ workerTasks: [] }) === null,
   );
+  const tasksOnly = { workerTasks: [{ id: "wt-1", title: "task", status: "accepted", taskClass: "feature" }] };
+  check(
+    "the digest suggests codara_plan_update only where the manager has it",
+    /codara_plan_update/.test(managerPlan.renderRunStateDigest(tasksOnly)) &&
+      !/codara_plan_update/.test(managerPlan.renderRunStateDigest(tasksOnly, { planToolAvailable: false })),
+  );
   const promptWithState = assembleManagerPrompt({
     guidance,
     cwd,

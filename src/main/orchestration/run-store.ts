@@ -6468,7 +6468,9 @@ async function prepareManagerTurn(
       // cannot paraphrase the goal or the open milestones away.
       runState:
         prepared.managerPlan || includeCanonicalReplay || inputMessages.length === 0
-          ? renderRunStateDigest(prepared)
+          ? renderRunStateDigest(prepared, {
+              planToolAvailable: runProjectPolicyMode(prepared) !== "untrusted-pull-request",
+            })
           : null,
     }),
     inputMessages,

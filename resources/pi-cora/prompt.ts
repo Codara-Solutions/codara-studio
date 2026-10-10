@@ -15,6 +15,9 @@ export interface CoraPiPromptOptions {
   /** AppSettings.coraAlwaysVerifyEdits: every project change goes through a
    *  worker and its cross-provider verifier, however small. */
   alwaysVerifyEdits?: boolean;
+  /** An imported untrusted pull request: the manager has only the bridge's
+   *  orchestration tools, so no plan, tool loader, web, or memory tools. */
+  untrusted?: boolean;
 }
 
 // ── how Cora talks to the user ──────────────────────────────────────────────
@@ -115,8 +118,9 @@ const ORCHESTRATION = `How you orchestrate:
   accept_unverified (your reason plus the overruled verifier task ids); the
   run lands as completed_unverified with that note.
 - When the wait returns reports and verdicts, adjudicate and complete in that
-  turn. Do not add a ceremonial final round.
-- For work with several phases or areas, record the plan with
+  turn. Do not add a ceremonial final round.`;
+
+const PLAN_RECORD = `- For work with several phases or areas, record the plan with
   codara_plan_update before the first spawn (the goal in the user's words,
   then milestones) and update milestone status after every wait. The plan
   survives compaction and restarts and is shown back to you each turn.`;
@@ -409,9 +413,12 @@ export function buildCoraPiSystemPrompt(
   policy: CoraPiExecutionPolicy = "fast",
   options: CoraPiPromptOptions = {},
 ): string {
-  // The automation roster has no codara_remember.
-  const surfaces = mode === "automation" ? SURFACES : `${SURFACES}\n${MEMORY}`;
-  const shared = [SHARED_INTRO, VOICE, EVIDENCE, SAFETY, surfaces].join("\n\n");
+  // The automation roster has no codara_remember, and an untrusted pull
+  // request's manager has none of the studio, web, or memory tools.
+  const surfaces = options.untrusted
+    ? []
+    : [mode === "automation" ? SURFACES : `${SURFACES}\n${MEMORY}`];
+  const shared = [SHARED_INTRO, VOICE, EVIDENCE, SAFETY, ...surfaces].join("\n\n");
 
   if (mode === "talk") {
     return `${shared}
@@ -448,7 +455,7 @@ This is Automation mode:
 
   const orchestrating = [
     shared,
-    ORCHESTRATION,
+    options.untrusted ? ORCHESTRATION : `${ORCHESTRATION}\n${PLAN_RECORD}`,
     effortContract(mode, options),
     WORKER_TASK_CLASS_CONTRACT,
     TASK_COMPLEXITY_CONTRACT,

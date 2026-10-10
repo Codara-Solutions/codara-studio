@@ -3581,8 +3581,9 @@ async function handleOrchestratorComplete(
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "Cannot complete a run before any worker task exists. " +
-        "Call codara_spawn_workers for the active user request, wait for the workers, verify their reports, then call codara_complete.",
+      "Cannot complete a run before any worker task exists: codara_complete is only for managed worker runs. " +
+        "If you answered the user or made a small change yourself, do not call any tool: reply in natural language, which finishes the turn. " +
+        "Only for substantial work: call codara_spawn_workers, wait for the workers, verify their reports, then call codara_complete.",
     );
   }
   // Guard: never complete the run while a worker task the coordinator spawned is

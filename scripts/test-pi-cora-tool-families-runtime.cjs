@@ -135,6 +135,33 @@ async function main() {
 
   await assert.rejects(registered.get("codara_tools").execute("empty", { families: [] }), /Name at least one family/);
 
+  // 7. Automation mode keeps its automations family active, but the shared
+  // prompt still says to load it, so the loader accepts it as a no-op.
+  globalThis.toolFamilyTestBridge = {
+    listTools: () =>
+      ["codara_create_automation", ...BROWSER].map((name) => ({
+        name,
+        description: `${name}. Longer detail that the snippet drops.`,
+        inputSchema: {},
+      })),
+    callToolByName: async () => ({ content: [{ type: "text", text: "{}" }] }),
+  };
+  process.env.CODARA_PI_CHAT_MODE = "automation";
+  const automationTools = new Map();
+  extension({
+    on() {},
+    registerTool(tool) { automationTools.set(tool.name, tool); },
+    getActiveTools: () => [...automationTools.keys()],
+    setActiveTools() {},
+    getAllTools: () => [...automationTools.values()].map((tool) => ({ name: tool.name })),
+    sendMessage() {},
+  });
+  const loader = automationTools.get("codara_tools");
+  assert.ok(loader.parameters.properties.families.items.enum.includes("automations"));
+  const automations = await loader.execute("automations", { families: ["automations"] });
+  assert.match(automations.content[0].text, /## automations/);
+  process.env.CODARA_PI_CHAT_MODE = "auto";
+
   delete globalThis.toolFamilyTestBridge;
   console.log("pi-cora tool families (session start, first request, loader, session switch): ok");
 }

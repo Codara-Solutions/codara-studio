@@ -83,6 +83,16 @@ assert.match(autoAlwaysVerify, /Trivial work is two moves/);
 assert.match(execute, /Trivial work is two moves/);
 assert.doesNotMatch(execute, /make the small change yourself/);
 assert.doesNotMatch(automation, /you have codara_remember/, "the automation roster has no codara_remember");
+// An untrusted pull request's manager has only the orchestration bridge tools,
+// so the prompt must not send it to tools it does not have.
+assert.match(auto, /codara_plan_update/);
+assert.match(auto, /call codara_tools/);
+for (const mode of ["auto", "execute"]) {
+  const untrusted = extension.buildCoraPiSystemPrompt(mode, "fast", { untrusted: true });
+  for (const tool of ["codara_plan_update", "codara_tools", "web_search", "deep_search", "fetch_url", "codara_remember"]) {
+    assert.doesNotMatch(untrusted, new RegExp(`\\b${tool}\\b`), `untrusted ${mode} prompt names ${tool}`);
+  }
+}
 assert.match(auto, /you have codara_remember/);
 assert.match(auto, /direct-work exception remains binding here/);
 assert.match(auto, /do not spawn a plan verifier/);

@@ -120,6 +120,7 @@ function renderPlan(plan: RunManagerPlan): string[] {
  */
 export function renderRunStateDigest(
   run: Pick<RunState, "managerPlan" | "workerTasks">,
+  options: { planToolAvailable?: boolean } = {},
 ): string | null {
   const plan = run.managerPlan;
   const tasks = run.workerTasks ?? [];
@@ -127,7 +128,11 @@ export function renderRunStateDigest(
   const shownTasks = tasks.slice(-DIGEST_TASK_LIMIT);
   const lines = [
     "[CORA RUN STATE: Codara's record of this run. It is authoritative where your memory of the conversation disagrees.]",
-    ...(plan ? renderPlan(plan) : ["No plan recorded. For multi-phase work, record one with codara_plan_update."]),
+    ...(plan
+      ? renderPlan(plan)
+      : options.planToolAvailable === false
+        ? []
+        : ["No plan recorded. For multi-phase work, record one with codara_plan_update."]),
     ...(shownTasks.length > 0
       ? [
           tasks.length > shownTasks.length
