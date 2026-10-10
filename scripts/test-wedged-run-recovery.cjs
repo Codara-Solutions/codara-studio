@@ -39,7 +39,7 @@ const INDEX_TS = path.join(ROOT, "src", "main", "index.ts");
 const CACHE = path.join(ROOT, "node_modules", ".cache", "cora-wedged-run-test");
 
 const ELECTRON_STUB = `const noop = () => {};
-export const app = { getPath: () => "/tmp", getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
+export const app = { getPath: () => "/tmp", getAppPath: () => process.cwd(), getVersion: () => "0.0.0", getName: () => "codara", isPackaged: false, on: noop, whenReady: () => Promise.resolve(), setName: noop };
 export class BrowserWindow { static getAllWindows() { return []; } }
 export class Notification { static isSupported() { return false; } show() {} on() {} }
 export const ipcMain = { on: noop, handle: noop, removeHandler: noop };
@@ -604,6 +604,49 @@ async function main() {
     "'Use it as is' leaves no manager turn pending",
     !acceptedAsIs.pendingManagerResume &&
       (acceptedAsIs.humanMessages || []).every((m) => m.kind !== "answer" || m.deliveryState === "acknowledged"),
+  );
+
+  // "Check it now" launches one verifier over the final state on the other
+  // provider, with no manager turn, and the run goes back to work.
+  const checkReport = path.join(HOME, "runs", "run-ask-check", "final-report.json");
+  const checkId = writeRun(
+    wedgedRun("run-ask-check", {
+      settingsSnapshot: { workspaceCwd: HOME },
+      workerTasks: [{ ...task("task-1", "accepted"), runtimePreference: "claude" }],
+      workerAttempts: [
+        { ...attempt("att-1", "succeeded", "task-1"), finishedAt: NOW, finalReportPath: checkReport },
+      ],
+    }),
+  );
+  fs.writeFileSync(
+    checkReport,
+    JSON.stringify({
+      status: "complete",
+      summary: "wrote the script",
+      filesChanged: [{ path: "script.py", reason: "new" }],
+    }),
+  );
+  await runStore.startAutopilot({ workspaceId: WS, workspaceName: "ask", cwd: HOME, runId: checkId });
+  const checkQuestion = (readRun(checkId).humanMessages || []).filter((m) => m.kind === "question").at(-1);
+  const checkNow = checkQuestion?.questionOptions?.find((option) => option.id === "check_changes_now");
+  const checking = await runStore
+    .answerRunQuestion({ runId: checkId, questionMessageId: checkQuestion.id, message: checkNow.answer })
+    .catch((error) => error);
+  check("'Check it now' is applied without an error", !(checking instanceof Error), checking?.message);
+  const verifiers = checking instanceof Error
+    ? []
+    : checking.workerTasks.filter((item) => item.taskClass === "verifier");
+  check(
+    "'Check it now' adds exactly one verifier, on the provider that did not write the changes",
+    verifiers.length === 1 && verifiers[0].runtimePreference === "codex",
+    JSON.stringify(verifiers.map((item) => item.runtimePreference)),
+  );
+  check(
+    "'Check it now' puts the run back to work with no manager turn pending",
+    !(checking instanceof Error) &&
+      checking.autopilot?.lastAction === "user_requested_verification" &&
+      !checking.pendingManagerResume,
+    checking instanceof Error ? checking.message : JSON.stringify(checking.autopilot),
   );
 
   // ── 4. wiring the fixes cannot be silently unhooked ─────────────────────
