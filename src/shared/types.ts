@@ -2414,16 +2414,22 @@ export interface PlanState {
  */
 export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
 
-export type ManagerTurnRecoveryFailureKind =
-  | "rate_limit"
-  | "provider"
-  | "transport"
-  // Cora's own turn cap, not a provider problem: the work and any workers it
-  // started are untouched, so the run parks resumable rather than failing.
-  | "timeout"
-  // Expired/revoked provider credential: only the user can re-authenticate,
-  // so the run parks with a sign-in-again prompt instead of failing.
-  | "auth";
+/**
+ * Every failure kind a parked manager turn can record. run.json validation
+ * reads this list, so a kind the turn policy parks can never be dropped on
+ * save. "timeout" is Cora's own turn cap, not a provider problem: the work and
+ * any workers it started are untouched. "auth" is an expired or revoked
+ * provider credential that only the user can renew.
+ */
+export const MANAGER_TURN_RECOVERY_FAILURE_KINDS = [
+  "rate_limit",
+  "provider",
+  "transport",
+  "timeout",
+  "auth",
+] as const;
+
+export type ManagerTurnRecoveryFailureKind = (typeof MANAGER_TURN_RECOVERY_FAILURE_KINDS)[number];
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach

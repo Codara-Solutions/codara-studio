@@ -75,7 +75,11 @@ import type {
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
-import { FAN_OUT_DIRECTIVE_MARKER, normalizeGitHubOrigin } from "@shared/types";
+import {
+  FAN_OUT_DIRECTIVE_MARKER,
+  MANAGER_TURN_RECOVERY_FAILURE_KINDS,
+  normalizeGitHubOrigin,
+} from "@shared/types";
 import {
   isBackendFailureQuestion,
   MANAGER_TURN_FAILURE_REASON,
@@ -172,6 +176,7 @@ import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonom
 import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
+  managerTurnParkReason,
   managerTurnRetryDelayMs,
   MAX_MANAGER_TRANSIENT_RETRIES,
   planManagerTurnFailure,
@@ -10531,12 +10536,7 @@ async function returnUnfinishedManagerRecoveryToParked(
           recovery.managerMode === "chat"
             ? "chat_turn_parked"
             : "manager_turn_parked",
-        stopReason:
-          recovery.failureKind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : recovery.failureKind === "transport"
-              ? "Cora lost its provider connection. Retry when the connection is stable."
-              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        stopReason: managerTurnParkReason(recovery.failureKind),
         pausedAt: timestamp,
         updatedAt: timestamp,
       };
@@ -16933,9 +16933,7 @@ function normalizeRun(run: RunState): RunState {
       typeof recovery.id === "string" &&
       recovery.id.startsWith("recovery-") &&
       (recovery.state === "parked" || recovery.state === "resuming") &&
-      (recovery.failureKind === "rate_limit" ||
-        recovery.failureKind === "provider" ||
-        recovery.failureKind === "transport") &&
+      (MANAGER_TURN_RECOVERY_FAILURE_KINDS as readonly string[]).includes(recovery.failureKind) &&
       // A recovery parked by a retired claude/codex manager backend cannot
       // be replayed on Pi; dropping it leaves the run paused and answerable.
       recovery.backend === "pi" &&

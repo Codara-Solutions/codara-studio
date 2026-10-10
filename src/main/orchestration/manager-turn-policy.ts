@@ -116,6 +116,23 @@ function parksInsteadOfFailing(kind: WorkerFailureKind | undefined): boolean {
 }
 
 /**
+ * The user-facing reason a parked turn shows in the run header, the composer
+ * placeholder and the Retry banner, for the park itself and for a recovery
+ * relaunch that fails the same way.
+ */
+export function managerTurnParkReason(kind: WorkerFailureKind | undefined): string {
+  return kind === "timeout"
+    ? "Cora's turn ran out of time. Its saved request is ready to retry."
+    : kind === "rate_limit"
+      ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
+      : kind === "auth"
+        ? "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn."
+        : kind === "transport"
+          ? "Cora lost its connection to the provider. Retry when the connection is stable."
+          : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.";
+}
+
+/**
  * Decide what a failed manager turn earns. `transientRetryCount` counts the
  * automatic retries this turn lineage has already consumed (0 on the first
  * failure).
@@ -169,16 +186,7 @@ export function planManagerTurnFailure(input: {
       // One voice everywhere the parked state surfaces: the run header detail,
       // the composer placeholder, and the Retry button all speak this exact
       // sentence pair, naming the control that actually exists.
-      parkReason:
-        kind === "timeout"
-          ? "Cora's turn ran out of time. Its saved request is ready to retry."
-          : kind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : kind === "auth"
-              ? "Cora's provider credential expired or was revoked. Sign in again in Settings → Accounts, then retry the saved turn."
-              : kind === "transport"
-                ? "Cora lost its connection to the provider. Retry when the connection is stable."
-                : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+      parkReason: managerTurnParkReason(kind),
       lastAction: input.mode === "chat" ? "chat_turn_parked" : "manager_turn_parked",
     };
   }

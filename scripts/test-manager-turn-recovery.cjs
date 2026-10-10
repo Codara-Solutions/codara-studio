@@ -346,6 +346,18 @@ async function main() {
   assert.equal(malformed.managerTurnRecovery, undefined);
   console.log("PASS malformed persisted recovery metadata fails closed");
 
+  // The turn policy parks timeouts and expired logins too. Validation used to
+  // accept only the three provider kinds, so those parks lost their recovery
+  // record on the first save and Resume could no longer replay the stage.
+  for (const failureKind of ["timeout", "auth"]) {
+    const runId = `run-park-${failureKind}`;
+    writeRun(run(runId, { managerTurnRecovery: recovery({ failureKind }) }));
+    const parked = await store.getRun(runId);
+    assert.equal(parked.managerTurnRecovery?.failureKind, failureKind, `${failureKind} park survives load`);
+    assert.equal(parked.managerTurnRecovery?.managerMode, "worker_result_review");
+  }
+  console.log("PASS timeout and auth parks keep their recovery record");
+
   const source = fs.readFileSync(RUN_STORE, "utf8");
   assert.match(source, /if \(run\.managerTurnRecovery\)/);
   assert.match(source, /resumeManagerTurnRecovery\(\{/);
