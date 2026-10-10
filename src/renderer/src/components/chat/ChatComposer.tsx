@@ -707,6 +707,10 @@ export default function ChatComposer({
     if (inFlight.current || disabled || pastingImages) return;
     const clientMessageId = makeId("client-msg");
     const sendScope = run_ ? chatBackendMutationScope(run_) : null;
+    // The attachments this send carries. The composer stays editable while it
+    // is in flight, so anything attached meanwhile belongs to the next message.
+    const sentImages = images;
+    const sentFileReferences = fileReferences;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -789,8 +793,10 @@ export default function ChatComposer({
       setDraft((current) =>
         current.startsWith(sentDraft) ? current.slice(sentDraft.length).trimStart() : current,
       );
-      setImages([]);
-      setFileReferences([]);
+      setImages((current) => current.filter((image) => !sentImages.includes(image)));
+      setFileReferences((current) =>
+        current.filter((reference) => !sentFileReferences.includes(reference)),
+      );
       setMentionQuery(null);
     } catch (err) {
       if (mountedRef.current) setError(unwrapIpcError(err));

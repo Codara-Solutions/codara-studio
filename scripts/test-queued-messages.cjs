@@ -1181,6 +1181,14 @@ async function main() {
     "the composer stays editable while a send or Resume is in flight",
     composerSource.includes("disabled={disabled}") && !composerSource.includes("disabled={disabled || busy}"),
   );
+  // Editable means a paste can land mid-send: clearing every attachment once
+  // the send returned silently dropped an image meant for the next message.
+  check(
+    "a finished send clears only the attachments it carried",
+    composerSource.includes("current.filter((image) => !sentImages.includes(image))") &&
+      composerSource.includes("!sentFileReferences.includes(reference)") &&
+      !/setImages\(\[\]\);\s*setFileReferences\(\[\]\);\s*setMentionQuery\(null\);/.test(composerSource),
+  );
   check(
     "a reply to a question that closed is sent as a message",
     /isQuestionInactiveError\([\s\S]{0,400}addRunMessage\(/.test(composerSource),
