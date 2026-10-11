@@ -223,14 +223,18 @@ check("sync previews what it would copy before it writes", () => {
   assert.match(behaviorSection, /These apply to all workspaces\./);
 });
 
-check("Behavior offers Cora's edit verification and mid-turn delivery in plain words", () => {
+check("Behavior offers Cora's edit verification in plain words", () => {
   assert.match(behaviorSection, /title="Always verify edits with a worker"/);
   assert.match(behaviorSection, /checked=\{view\.coraAlwaysVerifyEdits === true\}/);
   assert.match(behaviorSection, /onChange\(\s*\{ coraAlwaysVerifyEdits \}/);
-  assert.match(behaviorSection, /\{ value: "steer", label: "Cora reads new messages right away" \}/);
-  assert.match(behaviorSection, /\{ value: "queue", label: "Wait until Cora finishes" \}/);
-  assert.match(behaviorSection, /role="radiogroup"/);
-  assert.match(behaviorSection, /view\.coraMidTurnDelivery === "queue" \? "queue" : "steer"/);
+});
+
+// Messages sent while Cora works always queue for her next turn; Send now on
+// the queued message is the way to deliver it early, so there is no setting.
+check("Behavior has no mid-turn delivery choice", () => {
+  assert.doesNotMatch(behaviorSection, /coraMidTurnDelivery|MidTurnDelivery/);
+  assert.doesNotMatch(behaviorSection, /Cora reads new messages right away/);
+  assert.doesNotMatch(behaviorSection, /Wait until Cora finishes/);
 });
 
 check("retired vocabulary does not come back", () => {

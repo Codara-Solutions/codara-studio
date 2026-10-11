@@ -118,6 +118,13 @@ The two picker chords always open the pickers of a Cora chat.
 chat: it ends the current turn and stops its live workers, keeping the
 conversation and finished work. It does nothing when that chat is idle.
 
+A message you send while Cora is working is queued (the send button reads
+**Queue**) and goes to her when her next turn starts. Its bubble shows
+**Queued** with two controls: **Send now** stops the current turn, keeping
+what it already did and leaving workers running, and starts a new turn with
+every queued message in the order you sent them; **Unqueue** takes the
+message back into the composer. There is no setting for this.
+
 Mod+F with focus in the Cora panel opens find for that conversation (Enter
 and Shift+Enter step through matches, Escape closes it). It is not a
 rebindable command; editors and terminals keep their own Mod+F.
@@ -161,7 +168,7 @@ by default; bind it in Keybindings). It has six sections:
 | Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat (including a board chat with no messages yet) picks its profile from the composer's profile menu; a started chat shows its profile as a chip that opens it here, and keeps it. |
 | Memory | What Cora remembers for the profile you pick, globally and for this workspace. Global memory is the master switch: while it is off, workspace memory is off too and says so. **Open in editor** creates the file if nothing was remembered yet. |
 | Worker models | Which models Cora may pick for its workers. Cora only uses a model whose provider has a signed-in account; the others are marked **Not signed in**. The last usable model cannot be switched off; an OpenRouter model only counts once its key is verified. |
-| Behavior | Settings that apply to all workspaces. **Always verify edits with a worker** (`coraAlwaysVerifyEdits`, off by default): off, Cora makes small, low-risk edits (one to three files) herself and replies directly; on, every project change goes through a worker and a verifier on another provider. It applies the next time Cora starts in a chat. **Messages you send while Cora works** (`coraMidTurnDelivery`): **Cora reads new messages right away** (the default) hands a message to the live turn, so she sees it at her next step; **Wait until Cora finishes** queues it for a new turn. Then three worker and CLI switches: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
+| Behavior | Settings that apply to all workspaces. **Always verify edits with a worker** (`coraAlwaysVerifyEdits`, off by default): off, Cora makes small, low-risk edits (one to three files) herself and replies directly; on, every project change goes through a worker and a verifier on another provider. It applies the next time Cora starts in a chat. Then three worker and CLI switches: mention MCP servers in worker prompts (`agentMcpSyncEnabled`), mention skills in worker prompts (`agentSkillSyncEnabled`), and keep Codara Studio tools installed in each CLI at launch (`playwrightMcpAutoInstall`). |
 
 Every switch applies as soon as you flip it; there is no Save step and
 nothing to lose by closing. Forms you type into (a server you are adding or

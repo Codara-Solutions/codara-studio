@@ -152,7 +152,7 @@ export interface ManagerCallResult {
    *  effect. Absent means unknown. */
   replaySafe?: boolean;
   /**
-   * The turn ended because the USER interrupted it (Stop button →
+   * The turn ended because the USER interrupted it (Stop or Send now →
    * interruptChat), not because anything went wrong. run-store treats this
    * as a quiet no-op: no manager decision applied (no "Cora answered the
    * chat turn"), no run.failed, run status untouched — the Stop path
@@ -164,14 +164,6 @@ export interface ManagerCallResult {
    *  prompt never reached the provider. Nobody stopped it; its input still
    *  needs a turn of its own once the other one ends. */
   sessionBusy?: boolean;
-}
-
-/** One user message handed to the manager turn that is already running. */
-export interface ManagerSteerInput {
-  messageId: string;
-  text: string;
-  /** Called once the runtime injects the message into the live turn. */
-  onDelivered?: () => void;
 }
 
 /**
@@ -333,20 +325,11 @@ export interface AgentBackend {
    * Interrupt the in-flight turn for this chat without tearing the session
    * down. Sends ESC (or the runtime's equivalent) to the live CLI so the
    * model stops calling tools mid-turn. Called from forcePauseRun so the
-   * user's "stop" doesn't have to wait for the 90s turn timeout. No-op if
-   * the backend has no active session for this run.
+   * user's "stop" doesn't have to wait for the 90s turn timeout, and by Send
+   * now to start the next turn with the queued messages. No-op if the
+   * backend has no active session for this run.
    */
   interruptChat?(runId: string): void;
-
-  /**
-   * Hand a user message to the manager turn that is live right now, so the
-   * model reads it at its next step instead of after the turn. Resolves true
-   * once the runtime queued it, false when no turn is live or the runtime
-   * refused it (the message then stays in run-store's queue). A message the
-   * turn ends without injecting is withdrawn from the runtime before
-   * requestManagerDecision resolves, and onDelivered never fires for it.
-   */
-  steerChat?(runId: string, steer: ManagerSteerInput): Promise<boolean>;
 }
 
 /**
@@ -435,6 +418,9 @@ function renderMessageAttachments(message: HumanRunMessage): string[] {
  * renders every turn-start input (fresh sends and messages queued during the
  * previous turn) through buildManagerTurnPrompt with these section labels.
  */
+const SEND_NOW_NOTE =
+  "[The user stopped your previous reply to send this now. What that reply already did stands, and workers it started keep running.]";
+
 const REDELIVERED_INPUT_LABEL =
   "Already received; your previous reply was interrupted. Do not redo work already started";
 
@@ -462,21 +448,6 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
         "",
       ];
     }),
-  ].join("\n").trim();
-}
-
-/**
- * Render one user message for delivery into the manager turn that is already
- * running (Pi steer). The bracketed header keeps the text from ever starting
- * with "/", which Pi would expand as a command or template, and tells Cora the
- * message arrived mid-turn rather than as a fresh request.
- */
-export function renderSteeredManagerInput(message: HumanRunMessage): string {
-  const attachments = renderMessageAttachments(message);
-  return [
-    "[New message from the user, sent while you were working. Read it before your next step; it can change what you should do.]",
-    message.message.trim(),
-    ...(attachments.length === 0 ? [] : ["", ...attachments]),
   ].join("\n").trim();
 }
 
@@ -509,6 +480,9 @@ export function buildManagerTurnPrompt(
 }
 
 export interface ManagerTurnPromptOptions {
+  /** The user stopped Cora's previous reply with Send now to deliver this
+   *  turn's input. */
+  followsSendNow?: boolean;
   includeCanonicalReplay?: boolean;
   /**
    * The stored auto-compaction summary, when the fresh session this turn is
@@ -602,7 +576,9 @@ function buildManagerTurnInput(
   inputMessages: HumanRunMessage[],
   opts?: ManagerTurnPromptOptions,
 ): string {
-  const bundledInput = renderBundledManagerInput(inputMessages);
+  const bundledInput = opts?.followsSendNow && inputMessages.length > 0
+    ? [SEND_NOW_NOTE, renderBundledManagerInput(inputMessages)].join("\n")
+    : renderBundledManagerInput(inputMessages);
   const recentAssumptions = (run.assumptions ?? []).slice(-8);
   const promptInput =
     recentAssumptions.length === 0

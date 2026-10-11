@@ -197,13 +197,16 @@ queued-message follow-ups and planning all go through it, because a second
 prompt on a Pi session that is still streaming fails, and that failure used
 to stop the live turn's process. Resume and Send now return once the run is
 "running" and schedule their turn behind the lock. A message sent during a
-turn is steered into it: run-store claims the message for the live call and
-`pi-backend.ts` hands it to Pi's `steer` command, which injects it between
-tool calls (`codara_wait_for_workers` returns early with reason
-`user_message` so a long wait does not hold it). A steer the turn never read
-is withdrawn from Pi (`clear_queue`) and goes back to the queue when the turn
-ends. `AppSettings.coraMidTurnDelivery` set to `"queue"` (Capability Center >
-Behavior, **Wait until Cora finishes**) turns steering off.
+turn is queued: the live turn never sees it, and the follow-up scheduler
+starts the next turn with every queued message once the turn ends. **Send
+now** on a queued message (`deliverQueuedMessagesNow`) interrupts the live
+turn through `interruptChat` as soon as Pi has accepted its prompt, keeps
+that turn's input delivered (its prompt and partial reply are already in
+Cora's transcript), and starts the next turn with the queue and a note that
+the user stopped the previous reply. Workers keep running, and Pi's process
+is reused once it confirms it is idle. Waiting for Pi to accept the prompt
+matters: a turn stopped in its preflight can still record that prompt after
+the next turn sent it again.
 
 **Automations and looms.** `scheduler.ts` arms triggers (cron, interval,
 folder, git, manual, and others). `automation-loop.ts` starts iterations.

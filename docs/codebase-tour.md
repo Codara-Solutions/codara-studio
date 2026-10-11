@@ -132,11 +132,12 @@ by that check, by `worker-sessions.ts` and by `run-store.ts`.
    record the message, then schedule a manager turn. A run has at most one
    manager turn at a time: every path that starts one goes through the
    per-run turn lock in `askManagerBackend`. A message sent while a turn is
-   running is steered into that turn (`steerQueuedInputIntoLiveTurn`, Pi's
-   `steer` command), so Cora reads it at her next step; whatever the turn
-   does not read goes back to the queue for the next turn. The
-   `coraMidTurnDelivery` setting set to `"queue"` keeps every such message
-   queued until the turn ends.
+   running is queued, and `scheduleQueuedSteeringFollowup` starts the next
+   turn with it once the current one ends. **Send now** on a queued bubble
+   calls `deliverQueuedMessagesNow`, which interrupts the live turn and
+   starts the next one with every queued message; **Unqueue** calls
+   `cancelQueuedMessage`. The bubbles and both controls are in
+   `components/chat/ChatConversation.tsx`.
 4. **The manager turn.** `askManagerBackend` picks the account
    (`pi-account-router.ts`) and builds the turn prompt
    (`agent-backend.ts`). It then calls the only backend in

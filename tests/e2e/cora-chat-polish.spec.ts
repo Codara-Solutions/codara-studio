@@ -363,10 +363,17 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
     await expect(normal).toContainText("Normal user turn");
     await expect(steering).toContainText("Queued");
     await expect(steering).toContainText("Steering queued while Cora works");
+    // A queued message offers both ways out of the queue.
+    await expect(steering.getByRole("button", { name: "Send queued messages now" })).toBeVisible();
+    await expect(steering.getByRole("button", { name: "Unqueue message" })).toBeVisible();
     await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Cora answer");
     // With nothing to queue, Stop holds the send slot alone; a draft brings
     // Queue back beside it.
     const composer = page.getByRole("textbox", { name: "Message Cora" }).last();
+    await expect(composer).toHaveAttribute(
+      "placeholder",
+      "Message Cora. It waits for her next turn, or press Send now on it to interrupt her.",
+    );
     await expect(page.getByRole("button", { name: "Queue", exact: true })).toHaveCount(0);
     await composer.fill("Draft follow-up");
     await expect(page.getByRole("button", { name: "Queue", exact: true })).toBeVisible();
