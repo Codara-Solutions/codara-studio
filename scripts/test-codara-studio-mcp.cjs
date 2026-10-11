@@ -26,7 +26,6 @@ fs.writeFileSync(
 
 const PREVIEW_TOOLS = [
   "codara_preview_list",
-  "codara_preview_url",
   "codara_preview_navigate",
   "codara_preview_snapshot",
   "codara_preview_click",
@@ -47,14 +46,23 @@ const PREVIEW_TOOLS = [
   "codara_preview_run",
 ];
 const TERMINAL_TOOLS = [
+  "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_list",
   "codara_terminal_close",
 ];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
+// A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
+// own terminal agent gets the explicit notification instead.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
+const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user"];
+const RUN = { SPARK_RUN_ID: "run-roster" };
+// tools/list budgets in JSON characters. The studio list is what every Claude
+// Code, Codex and Grok session pays for on every request.
+const LIST_BUDGET = { studio: 20_000, run: 30_000, worker: 26_000, execute: 85_000, automation: 60_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -86,15 +94,19 @@ const AUTOMATION_TOOLS = [
 ];
 
 // Drive one server process: send initialize + tools/list, resolve the tool
-// names it reports plus the serverInfo.name from initialize.
-function listTools(mode, extraEnv = {}) {
+// names it reports plus the initialize result.
+function listTools(mode, extraEnv = {}, initParams = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, SPARK_HOME_DIR: HOME, ...extraEnv };
+    const env = { ...process.env, SPARK_HOME_DIR: HOME };
+    delete env.SPARK_RUN_ID;
+    delete env.CODARA_HOME_DIR;
+    Object.assign(env, extraEnv);
     if (mode) env.SPARK_MCP_MODE = mode;
     else delete env.SPARK_MCP_MODE;
     const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
     let out = "";
     let serverName = null;
+    let init = null;
     let tools = null;
     const timer = setTimeout(() => {
       child.kill();
@@ -114,21 +126,80 @@ function listTools(mode, extraEnv = {}) {
         } catch {
           continue;
         }
-        if (msg.id === 1 && msg.result) serverName = msg.result.serverInfo && msg.result.serverInfo.name;
+        if (msg.id === 1 && msg.result) {
+          init = msg.result;
+          serverName = msg.result.serverInfo && msg.result.serverInfo.name;
+        }
         if (msg.id === 2 && msg.result) {
           const definitions = msg.result.tools;
           tools = definitions.map((t) => t.name);
           clearTimeout(timer);
           child.stdin.end();
           child.kill();
-          resolve({ serverName, tools, definitions });
+          resolve({ serverName, init, tools, definitions, listChars: JSON.stringify(msg.result).length });
         }
       }
     });
     child.on("error", reject);
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n");
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: initParams }) + "\n");
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
   });
+}
+
+// One stdio session for protocol-level checks: send lines, collect replies.
+function stdioSession(extraEnv = {}) {
+  const env = { ...process.env, SPARK_HOME_DIR: HOME };
+  delete env.SPARK_RUN_ID;
+  delete env.SPARK_MCP_MODE;
+  delete env.CODARA_HOME_DIR;
+  Object.assign(env, extraEnv);
+  const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
+  const messages = [];
+  const waiters = [];
+  let out = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    out += chunk;
+    let idx;
+    while ((idx = out.indexOf("\n")) >= 0) {
+      const line = out.slice(0, idx).trim();
+      out = out.slice(idx + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      messages.push(msg);
+      for (const waiter of [...waiters]) {
+        if (waiter.match(msg)) {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          waiter.resolve(msg);
+        }
+      }
+    }
+  });
+  return {
+    messages,
+    send(msg) {
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+    },
+    next(match, timeoutMs = 10_000) {
+      const found = messages.find(match);
+      if (found) return Promise.resolve(found);
+      return new Promise((resolve, reject) => {
+        const waiter = { match, resolve };
+        waiters.push(waiter);
+        setTimeout(() => {
+          const index = waiters.indexOf(waiter);
+          if (index >= 0) {
+            waiters.splice(index, 1);
+            reject(new Error("timed out waiting for a stdio message"));
+          }
+        }, timeoutMs);
+      });
+    },
+    close() {
+      child.stdin.end();
+      child.kill();
+    },
+  };
 }
 
 function sortedEqual(actual, expected, label) {
@@ -148,20 +219,35 @@ function sortedEqual(actual, expected, label) {
     delete process.env.SPARK_AGENT_SOCKET;
     delete process.env.SPARK_AGENT_TOKEN;
     delete process.env.SPARK_AGENT_CAPABILITY;
-    // Studio mode (unset).
-    const studio = await listTools(undefined);
+    // Studio mode (unset): a terminal the user opened has no Cora chat, so
+    // the whiteboard and board, which can only fail there, are not listed.
+    const studio = await listTools(undefined, {}, { protocolVersion: "2025-06-18" });
     assert.strictEqual(studio.serverName, "codara-studio", "serverInfo.name must be codara-studio");
-    sortedEqual(studio.tools, STUDIO_TOOLS, "studio (unset SPARK_MCP_MODE) roster mismatch");
+    sortedEqual(studio.tools, TERMINAL_STUDIO_TOOLS, "studio (unset SPARK_MCP_MODE) roster mismatch");
+    assert.strictEqual(studio.init.protocolVersion, "2025-06-18", "initialize echoes a supported client version");
+    assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
+    assert.match(studio.init.instructions, /codara_notify_user/);
+    assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
+    assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
+    const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
+    assert.strictEqual(legacyClient.init.protocolVersion, "2024-11-05");
+    const futureClient = await listTools(undefined, {}, { protocolVersion: "2099-01-01" });
+    assert.strictEqual(futureClient.init.protocolVersion, "2025-06-18", "an unknown version gets the newest supported one");
 
     // Studio mode (explicit "studio").
     const studio2 = await listTools("studio");
-    sortedEqual(studio2.tools, STUDIO_TOOLS, "studio ('studio') roster mismatch");
+    sortedEqual(studio2.tools, TERMINAL_STUDIO_TOOLS, "studio ('studio') roster mismatch");
+
+    // Studio tools inside a Cora chat.
+    const runStudio = await listTools(undefined, RUN);
+    sortedEqual(runStudio.tools, STUDIO_TOOLS, "studio roster inside a Cora chat mismatch");
+    assert.match(runStudio.init.instructions, /baseRevision/);
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
     // codara_name_chat, which the execute roster already owns and maps to
     // orchestrator.name_chat.
-    const execute = await listTools("execute");
+    const execute = await listTools("execute", RUN);
     sortedEqual(
       execute.tools,
       [
@@ -295,17 +381,17 @@ function sortedEqual(actual, expected, label) {
       assert.doesNotMatch(tool.description, /Call this EARLY/, `${name} must not demand its own early round trip`);
     }
 
-    const directMemory = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1" });
+    const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
     sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
-    const untrustedDirect = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
+    const untrustedDirect = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
     assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
 
     // Automation mode: memory is a manager-of-a-coding-run concept, an
     // automation loop has no user conversation to learn a durable fact from.
-    const automation = await listTools("automation");
+    const automation = await listTools("automation", RUN);
     sortedEqual(automation.tools, [...STUDIO_TOOLS, ...AUTOMATION_TOOLS], "automation roster mismatch");
 
     // Looms on Pi: the worker schema is model + effort only. No engine choice
@@ -349,7 +435,7 @@ function sortedEqual(actual, expected, label) {
     // Worker mode: workers must NOT be able to write memory. The manager is the
     // only writer, which is what makes "copy the line into the description"
     // load-bearing rather than a convenience.
-    const worker = await listTools("worker");
+    const worker = await listTools("worker", RUN);
     assert.ok(
       !worker.tools.includes("codara_remember"),
       "worker roster must not expose codara_remember",
@@ -368,6 +454,48 @@ function sortedEqual(actual, expected, label) {
       "codara_request_next_iteration must keep nextModel steering",
     );
 
+    // Every roster stays inside its tools/list budget, every tool carries MCP
+    // annotations, and no schema lets the model pick the chat.
+    const rosters = { studio, run: runStudio, worker, execute, automation };
+    for (const [label, roster] of Object.entries(rosters)) {
+      assert.ok(
+        roster.listChars <= LIST_BUDGET[label],
+        `${label} tools/list is ${roster.listChars} chars, over its ${LIST_BUDGET[label]} budget`,
+      );
+      for (const tool of roster.definitions) {
+        assert.ok(tool.annotations && typeof tool.annotations.title === "string", `${tool.name} has an annotation title`);
+        assert.strictEqual(typeof tool.annotations.openWorldHint, "boolean", `${tool.name} declares openWorldHint`);
+        assert.ok(
+          tool.annotations.readOnlyHint === true || typeof tool.annotations.destructiveHint === "boolean",
+          `${tool.name} is either read-only or declares destructiveHint`,
+        );
+        assert.ok(!("runId" in (tool.inputSchema.properties || {})), `${tool.name} must not expose runId`);
+      }
+    }
+    const byName = (roster, name) => roster.definitions.find((tool) => tool.name === name);
+    assert.strictEqual(byName(studio, "codara_terminal_read").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
+    assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
+    assert.deepStrictEqual(byName(studio, "codara_terminal_read").inputSchema.properties.mode.enum, ["text", "screen"]);
+    assert.match(byName(studio, "codara_terminal_read").inputSchema.properties.lines.description, /default 200/);
+    assert.ok(
+      byName(studio, "codara_preview_wait_for").inputSchema.properties.timeoutMs.maximum < 60_000,
+      "a browser wait must end before the 60 s client timeout",
+    );
+    // codara_update_automation refers to the create schema instead of repeating it.
+    assert.ok(JSON.stringify(byName(execute, "codara_update_automation")).length < 2_500);
+
+    // Protocol errors carry the request id and the JSON-RPC code.
+    const session = stdioSession();
+    session.send({ id: 7, method: "resources/list", params: {} });
+    const unknownMethod = await session.next((msg) => msg.id === 7);
+    assert.strictEqual(unknownMethod.error.code, -32601, "unknown method is -32601");
+    session.send({ id: "t1", method: "tools/call", params: { name: "codara_nope", arguments: {} } });
+    const unknownTool = await session.next((msg) => msg.id === "t1");
+    assert.strictEqual(unknownTool.error.code, -32602, "unknown tool is -32602");
+    session.close();
+
     // The JSON schema hides runId, but the bridge must also treat the
     // launch-time env stamp as authoritative. callToolByName is used by Pi and
     // can be invoked directly, so discard a spoofed argument before it reaches
@@ -375,15 +503,32 @@ function sortedEqual(actual, expected, label) {
     const received = [];
     const receivedAuthorization = [];
     let mockResult = { ok: true };
+    let mockError = null;
+    let mockStatus = 200;
+    const heldRequests = [];
     mockAgentSocket = http.createServer((req, res) => {
       receivedAuthorization.push(req.headers.authorization);
       let body = "";
       req.setEncoding("utf8");
       req.on("data", (chunk) => { body += chunk; });
       req.on("end", () => {
-        received.push(JSON.parse(body));
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: mockResult }));
+        const parsed = JSON.parse(body);
+        received.push(parsed);
+        // A long poll the test cancels: never answered, closed by the client.
+        if (parsed.method === "orchestrator.wait_for_workers") {
+          const held = { closed: false };
+          res.on("close", () => { held.closed = true; });
+          heldRequests.push(held);
+          return;
+        }
+        res.writeHead(mockStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(
+          mockStatus !== 200
+            ? { error: "unauthorized" }
+            : mockError
+              ? { jsonrpc: "2.0", id: 1, error: mockError }
+              : { jsonrpc: "2.0", id: 1, result: mockResult },
+        ));
       });
     });
     await new Promise((resolve, reject) => {
@@ -528,23 +673,41 @@ function sortedEqual(actual, expected, label) {
     process.env.CODARA_PI_DIRECT_TASK = "1";
     delete require.cache[require.resolve(SERVER)];
     const directMemoryBridge = require(SERVER);
-    await directMemoryBridge.callToolByName("codara_preview_snapshot", { runId: "run-spoofed", workspaceId: "unrelated" });
+    // A runId the model supplies is refused before anything reaches the
+    // socket: the launch-time stamp is the only route to a chat.
+    const callsBeforeSpoof = received.length;
+    for (const [tool, args] of [
+      ["codara_preview_snapshot", { runId: "run-spoofed" }],
+      ["codara_remember", { scope: "workspace", action: "add", bullets: ["x"], runId: "run-spoofed" }],
+      ["codara_terminal_close", { paneId: "pane-owned", runId: "run-spoofed" }],
+      ["codara_terminal_write", { paneId: "pane-owned", text: "pwd", runId: "run-spoofed" }],
+      ["codara_whiteboard_get", { runId: "run-spoofed" }],
+    ]) {
+      const refused = await directMemoryBridge.callToolByName(tool, args);
+      assert.strictEqual(refused.isError, true, `${tool} refuses a foreign runId`);
+      assert.match(refused.content[0].text, /does not accept runId/);
+    }
+    const spoofedBatch = await directMemoryBridge.callToolByName("codara_preview_run", {
+      steps: [{ action: "navigate", url: "https://example.test", runId: "run-spoofed" }],
+    });
+    assert.strictEqual(spoofedBatch.isError, true);
+    assert.strictEqual(received.length, callsBeforeSpoof, "a refused runId never reaches the socket");
+    // Repeating the session's own run id is harmless.
+    await directMemoryBridge.callToolByName("codara_preview_snapshot", { runId: "run-trusted", workspaceId: "unrelated" });
     assert.equal(received.at(-1).params.runId, "run-trusted", "browser observations use the calling run");
     assert.equal(received.at(-1).params.workspaceId, undefined, "browser workspace is resolved from the run");
+    assert.equal(received.at(-1).params.callerPid, undefined, "a run's browser is scoped by the run, not a pane");
     await directMemoryBridge.callToolByName("codara_preview_run", { steps: [
-      { action: "navigate", url: "https://example.test", runId: "run-spoofed", workspaceId: "unrelated" },
+      { action: "navigate", url: "https://example.test", workspaceId: "unrelated" },
     ] });
     assert.equal(received.at(-1).params.runId, "run-trusted", "batched browser actions use the same owner");
     assert.equal(received.at(-1).params.workspaceId, undefined);
-    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"], runId: "run-spoofed" });
+    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"] });
     assert.strictEqual(received.at(-1).method, "orchestrator.remember");
     assert.strictEqual(received.at(-1).params.runId, "run-trusted", "direct memory stays in the calling workspace/profile");
     delete process.env.CODARA_PI_DIRECT_TASK;
 
-    await directBridge.callToolByName("codara_terminal_close", {
-      paneId: "pane-owned",
-      runId: "run-spoofed",
-    });
+    await directBridge.callToolByName("codara_terminal_close", { paneId: "pane-owned" });
     assert.strictEqual(received.at(-1).method, "terminal.close");
     assert.strictEqual(
       received.at(-1).params.runId,
@@ -554,7 +717,6 @@ function sortedEqual(actual, expected, label) {
     await directBridge.callToolByName("codara_terminal_create", {
       cwd: HOME,
       retention: "service",
-      runId: "run-spoofed",
     });
     assert.strictEqual(
       received.at(-1).params.runId,
@@ -586,12 +748,9 @@ function sortedEqual(actual, expected, label) {
       "a CLI that cleared the environment sends only its pid",
     );
     assert.strictEqual(received.at(-1).params.callerPid, process.pid);
-    if (previousPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPaneId;
-    if (previousLegacyPaneId !== undefined) process.env.SPARK_PANE_ID = previousLegacyPaneId;
     await directBridge.callToolByName("codara_terminal_write", {
       paneId: "pane-owned",
       text: "npm test",
-      runId: "run-spoofed",
     });
     assert.strictEqual(received.at(-1).method, "terminal.write");
     assert.strictEqual(
@@ -599,26 +758,55 @@ function sortedEqual(actual, expected, label) {
       "run-trusted",
       "terminal.write must use the trusted launch-time run identity",
     );
+    await directBridge.callToolByName("codara_terminal_run", { command: "npm test", timeoutMs: 5_000 });
+    assert.strictEqual(received.at(-1).method, "terminal.run");
+    assert.strictEqual(received.at(-1).params.runId, "run-trusted");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid, "a new run terminal opens beside the caller");
     delete process.env.SPARK_RUN_ID;
-    await directBridge.callToolByName("codara_terminal_close", {
-      paneId: "pane-null-scoped",
-      runId: "run-spoofed",
-    });
+    await directBridge.callToolByName("codara_terminal_close", { paneId: "pane-null-scoped" });
     assert.strictEqual(
       Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
       false,
-      "a null-scoped terminal caller must not be able to supply another run id",
+      "a null-scoped terminal caller carries no run id",
     );
-    await directBridge.callToolByName("codara_terminal_write", {
+    const nullScopedSpoof = await directBridge.callToolByName("codara_terminal_write", {
       paneId: "pane-null-scoped",
       text: "pwd",
       runId: "run-spoofed",
     });
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
-      false,
-      "a null-scoped terminal write must not be able to supply another run id",
+    assert.strictEqual(nullScopedSpoof.isError, true, "a null-scoped caller cannot name a run");
+    assert.match(nullScopedSpoof.content[0].text, /not part of a Cora chat/);
+    // Outside a chat the browser, the terminal list and notifications follow
+    // the pane the agent runs in, never the workspace on screen.
+    process.env.SPARK_AGENT_PANE_ID = "pane-caller";
+    for (const [tool, rpc, args] of [
+      ["codara_preview_snapshot", "preview.snapshot", {}],
+      ["codara_terminal_list", "terminal.list", {}],
+    ]) {
+      await directBridge.callToolByName(tool, args);
+      assert.strictEqual(received.at(-1).method, rpc);
+      assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller", `${tool} names the caller's pane`);
+      assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    }
+    const noChat = await directBridge.callToolByName("codara_whiteboard_get", {});
+    assert.strictEqual(noChat.isError, true);
+    assert.match(noChat.content[0].text, /only works inside a Cora chat/);
+    delete require.cache[require.resolve(SERVER)];
+    const terminalAgentBridge = require(SERVER);
+    assert.ok(
+      terminalAgentBridge.listTools().some((tool) => tool.name === "codara_notify_user"),
+      "a terminal agent can notify the user",
     );
+    await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done", message: "Tests pass." });
+    assert.strictEqual(received.at(-1).method, "agent.notify");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.kind, "done");
+    // The retired codara_preview_url stays callable for agents that know it.
+    await terminalAgentBridge.callToolByName("codara_preview_url", {});
+    assert.strictEqual(received.at(-1).method, "preview.url");
+    delete process.env.SPARK_AGENT_PANE_ID;
+    if (previousPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPaneId;
+    if (previousLegacyPaneId !== undefined) process.env.SPARK_PANE_ID = previousLegacyPaneId;
     // Implicit preview tab picking in the renderer is scoped to the calling
     // run, so EVERY preview op must carry the run stamp — not just navigate.
     process.env.SPARK_RUN_ID = "run-trusted";
@@ -658,8 +846,11 @@ function sortedEqual(actual, expected, label) {
     assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
 
     mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
-    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { runId: "run-map", baseRevision: 4 });
+    process.env.SPARK_RUN_ID = "run-map";
+    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { baseRevision: 4 });
+    delete process.env.SPARK_RUN_ID;
     assert.strictEqual(received.at(-1).method, "orchestrator.whiteboard_inspect");
+    assert.strictEqual(received.at(-1).params.runId, "run-map");
     assert.strictEqual(whiteboardImage.content[0].type, "image");
     assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
     assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
@@ -681,6 +872,106 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(continuedBatch.isError, true);
     assert.strictEqual(JSON.parse(continuedBatch.content[0].text).ran, 2);
     mockResult = { ok: true };
+
+    // Socket error codes reach the agent with a readable label.
+    mockError = { code: -32003, message: "this capability is unavailable to the calling agent process" };
+    const forbidden = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(forbidden.isError, true);
+    assert.match(forbidden.content[0].text, /Codara error -32003: not allowed for this agent/);
+    mockError = null;
+
+    // Results are compact JSON.
+    mockResult = { ok: true, nested: { a: 1 } };
+    const compact = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(compact.content[0].text, JSON.stringify(mockResult), "results are not pretty-printed");
+    mockResult = { ok: true };
+
+    // An oversized payload is refused with a reason before it is sent; the
+    // board and whiteboard writes get the larger cap the socket allows them.
+    const beforeOversize = received.length;
+    const oversized = await directBridge.callToolByName("codara_preview_evaluate", { code: "x".repeat(70 * 1024) });
+    assert.strictEqual(oversized.isError, true);
+    assert.match(oversized.content[0].text, /Request too large: \d+ KB is over the 64 KB limit/);
+    assert.strictEqual(received.length, beforeOversize, "an oversized request never reaches the socket");
+    process.env.SPARK_RUN_ID = "run-trusted";
+    const bigBoard = await directBridge.callToolByName("codara_board_update", {
+      baseRevision: 1,
+      cards: Array.from({ length: 200 }, (_, index) => ({
+        id: `card-${index}`, title: "Card", status: "idea", order: index, description: "d".repeat(400),
+      })),
+    });
+    delete process.env.SPARK_RUN_ID;
+    assert.notStrictEqual(bigBoard.isError, true, "a board write over 64 KB is still delivered");
+    assert.strictEqual(received.at(-1).method, "orchestrator.board_update");
+
+    // A stale token reads as Codara having restarted, not as a raw 401.
+    mockStatus = 401;
+    const staleToken = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    mockStatus = 200;
+    assert.strictEqual(staleToken.isError, true);
+    assert.match(staleToken.content[0].text, /rejected this session's credentials/);
+
+    // A crashed app leaves its handshake behind: a dead pid or a refused
+    // connection is reported as offline, and once Codara is known to be
+    // closed, calls stop waiting for it to start.
+    const liveHandshake = fs.readFileSync(handshakePath, "utf8");
+    const deadPid = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+      child.on("exit", () => resolve(child.pid));
+    });
+    fs.writeFileSync(handshakePath, JSON.stringify({ ...JSON.parse(liveHandshake), pid: deadPid }));
+    const staleStartedAt = Date.now();
+    const stalePid = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(stalePid.isError, true);
+    assert.match(stalePid.content[0].text, new RegExp(`appears to be offline.*stale handshake from pid ${deadPid}`));
+    assert.ok(Date.now() - staleStartedAt < 10_000);
+    const fastStartedAt = Date.now();
+    const fastOffline = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(fastOffline.isError, true);
+    assert.ok(Date.now() - fastStartedAt < 1_000, "a repeat call while Codara is closed fails at once");
+    fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
+    const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);
+    fs.writeFileSync(handshakePath, liveHandshake);
+    const backOnline = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.notStrictEqual(backOnline.isError, true, "an app that came back is used at once");
+
+    // Over stdio: a cancelled long poll aborts its HTTP request and gets no
+    // reply, and a batch with a progressToken reports each step.
+    const executeSession = stdioSession({ SPARK_MCP_MODE: "execute", SPARK_RUN_ID: "run-stdio" });
+    executeSession.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+    await executeSession.next((msg) => msg.id === 1);
+    const heldBefore = heldRequests.length;
+    executeSession.send({
+      id: 9,
+      method: "tools/call",
+      params: { name: "codara_wait_for_workers", arguments: { worker_task_ids: ["task-1"] } },
+    });
+    for (let attempt = 0; attempt < 100 && heldRequests.length === heldBefore; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(heldRequests.length, heldBefore + 1, "the long poll reached the socket");
+    executeSession.send({ method: "notifications/cancelled", params: { requestId: 9, reason: "user pressed Esc" } });
+    for (let attempt = 0; attempt < 100 && !heldRequests.at(-1).closed; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(heldRequests.at(-1).closed, true, "cancelling closes the HTTP request behind the wait");
+    executeSession.send({
+      id: 10,
+      method: "tools/call",
+      params: {
+        name: "codara_preview_run",
+        arguments: { steps: [{ action: "snapshot" }, { action: "snapshot" }] },
+        _meta: { progressToken: "batch-1" },
+      },
+    });
+    await executeSession.next((msg) => msg.id === 10);
+    const progress = executeSession.messages.filter(
+      (msg) => msg.method === "notifications/progress" && msg.params.progressToken === "batch-1",
+    );
+    assert.deepStrictEqual(progress.map((msg) => [msg.params.progress, msg.params.total]), [[1, 2], [2, 2]]);
+    assert.ok(!executeSession.messages.some((msg) => msg.id === 9), "a cancelled request is never answered");
+    executeSession.close();
 
     // The batched step schema is additionalProperties:false, so every field the
     // single-shot tool accepts must also be spelled out on the step items or a

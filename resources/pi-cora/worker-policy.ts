@@ -82,9 +82,11 @@ const FENCE_READONLY_EXTRA = ["edit"];
 // command and the preview's JS evaluator; codara_preview_run is included
 // because its step batch can embed evaluate steps).
 const FENCE_BRIDGE_SHELL = [
+  "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_list",
   "codara_terminal_close",
   "codara_preview_evaluate",
   "codara_preview_run",

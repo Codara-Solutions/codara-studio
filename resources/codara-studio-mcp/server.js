@@ -87,32 +87,29 @@ const ORCHESTRATION_LONG_POLL_CEILING_MS = 20 * 60_000;
 const ORCHESTRATION_RESPONSE_MARGIN_MS = 60_000;
 const ORCHESTRATION_TIMEOUT_MS =
   ORCHESTRATION_LONG_POLL_CEILING_MS + ORCHESTRATION_RESPONSE_MARGIN_MS;
+// codara_terminal_run waits up to TERMINAL_RUN_MAX_WAIT_MS on the Codara side
+// (TERMINAL_RUN_MAX_TIMEOUT_MS in agent-socket.ts), plus the time to open a new
+// terminal; the client deadline sits above both.
+const TERMINAL_RUN_MAX_WAIT_MS = 10 * 60_000;
+const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
+// A browser wait must end before the client gives up on the call.
+const PREVIEW_WAIT_MAX_MS = 50_000;
 
 // ===========================================================================
-// Preview tool set (drive the live <preview> tab). Byte-for-byte the roster
-// the old cora-preview server exposed.
+// Preview tool set (drive the live <preview> tab). Shared flow guidance lives
+// in buildInstructions() so each description can stay short.
 // ===========================================================================
 const PREVIEW_TOOLS = [
   {
     name: "codara_preview_list",
     description:
-      "List browser tabs in the calling workspace, including id, live title, URL, isActive, and isLastViewed. When the user refers to an existing tab, match it here and pass its tabId to subsequent tools. isLastViewed identifies the browser most recently viewed before returning to chat. Ask if the reference is ambiguous.",
+      "List the browser tabs in your workspace: id, title, URL, isActive, and isLastViewed (the tab the user looked at last). When the user refers to an existing tab, match it here and pass its tabId to the other browser tools; ask if the reference is ambiguous.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "codara_preview_url",
-    description:
-      "Return the current URL and title of a browser tab. Pass an existing tabId from codara_preview_list; without it, target this run's browser.",
-    inputSchema: {
-      type: "object",
-      properties: { tabId: { type: "string", description: "Optional tab id from codara_preview_list." } },
-      additionalProperties: false,
-    },
   },
   {
     name: "codara_preview_navigate",
     description:
-      "Navigate a browser workspace tab to a URL (http://, https://, or file://). With tabId, reuse that existing tab; without it, reuse or create a tab for this run. Tabs remain open after completion. Waits briefly for dom-ready before returning.",
+      "Load an http, https, or file URL in a browser tab. With tabId, reuse that tab; without it, reuse or open this session's tab. Waits briefly for dom-ready. Tabs stay open afterwards.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -126,13 +123,13 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_snapshot",
     description:
-      "Read the page as a compact semantic outline with actionable @references, labels, values, and states. Pass @references as selectors to click/type/press_key/mouse/hover/wait_for. Hidden content and inactive modal backgrounds are omitted. selector scopes a section; since=previous snapshotId returns a diff when smaller, otherwise a full snapshot. Re-read after a stale reference; use screenshots for visual content.",
+      "Read the page as a compact outline with @references, labels, values, and states. Pass an @reference as the selector of other browser tools. Hidden content is omitted. selector scopes to a section; since=<previous snapshotId> returns only the diff when smaller. Re-read after a stale reference; use a screenshot for visual content.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "string" },
-        mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
-        maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
+        mode: { type: "string", enum: ["outline"] },
+        maxBytes: { type: "number", description: "Default 12000." },
         selector: { type: "string" },
         since: { type: "string" },
       },
@@ -142,13 +139,13 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_click",
     description:
-      "Click one element by snapshot @reference or unique CSS selector. Waits briefly for visibility and actionability; ambiguous, stale, disabled, or covered targets fail. Uses DOM events; use mouse when trusted native input is required.",
+      "Click one element by @reference or unique CSS selector with DOM events, after waiting briefly for it to be visible and enabled. Ambiguous, stale, disabled, or covered targets fail. Use codara_preview_mouse when the page needs trusted native input.",
     inputSchema: {
       type: "object",
       required: ["selector"],
       properties: {
         tabId: { type: "string" },
-        selector: { type: "string", description: "Snapshot @reference or unique CSS selector." },
+        selector: { type: "string", description: "@reference or unique CSS selector." },
       },
       additionalProperties: false,
     },
@@ -156,7 +153,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_type",
     description:
-      "Type text into an input/textarea/contentEditable by snapshot @reference or unique CSS selector, or select a native dropdown option by its exact value. clearFirst clears text fields before typing; dropdown selection always replaces the current value.",
+      "Type text into an input, textarea, or contentEditable (by @reference or unique CSS selector), or pick a native dropdown option by its exact value. clearFirst empties a text field first.",
     inputSchema: {
       type: "object",
       required: ["selector", "text"],
@@ -164,7 +161,7 @@ const PREVIEW_TOOLS = [
         tabId: { type: "string" },
         selector: { type: "string" },
         text: { type: "string" },
-        clearFirst: { type: "boolean", description: "Clear current value before typing (default false)." },
+        clearFirst: { type: "boolean" },
       },
       additionalProperties: false,
     },
@@ -172,7 +169,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_press_key",
     description:
-      "Dispatch a keyboard event on the focused element (or a selector if provided). Use named keys like Enter, Escape, Tab, ArrowUp, Backspace, or a single character like 'a'.",
+      "Send one key (Enter, Escape, Tab, ArrowUp, Backspace, or a single character) to the focused element or to selector. Uses trusted input when available; codara_preview_key adds modifiers.",
     inputSchema: {
       type: "object",
       required: ["key"],
@@ -187,7 +184,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_evaluate",
     description:
-      "Run a JavaScript snippet inside the preview tab. Last expression's value is returned (JSON-serialized). Set awaitPromise=true to await an async expression.",
+      "Run JavaScript in the page and return the last expression's value as JSON. Set awaitPromise to await an async expression.",
     inputSchema: {
       type: "object",
       required: ["code"],
@@ -202,15 +199,15 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_wait_for",
     description:
-      "Wait for a CSS selector to be attached / visible / hidden, up to timeoutMs. Returns when the condition is met or times out.",
+      "Wait until a selector is attached, visible (default), or hidden, or until timeoutMs passes.",
     inputSchema: {
       type: "object",
       required: ["selector"],
       properties: {
         tabId: { type: "string" },
         selector: { type: "string" },
-        state: { type: "string", enum: ["attached", "visible", "hidden"], description: "Default 'visible'." },
-        timeoutMs: { type: "number", description: "Default 5000." },
+        state: { type: "string", enum: ["attached", "visible", "hidden"] },
+        timeoutMs: { type: "number", maximum: PREVIEW_WAIT_MAX_MS, description: `Default 5000, max ${PREVIEW_WAIT_MAX_MS}.` },
       },
       additionalProperties: false,
     },
@@ -218,7 +215,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_screenshot",
     description:
-      "Capture the current preview tab as a PNG image. Returns viewport size in CSS pixels, imageSize in image pixels, and scale. For coordinate input, divide screenshot X by scale.x and Y by scale.y.",
+      "Capture the tab as a PNG. Also returns viewport (CSS pixels), imageSize, and scale: divide screenshot coordinates by scale before passing them to mouse tools.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string" } },
@@ -228,16 +225,16 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_mouse",
     description:
-      "Trusted mouse input at a CSS selector's center or explicit coordinates, indistinguishable from a real user's click (event.isTrusted=true), unlike codara_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a codara_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
+      "Trusted mouse input (event.isTrusted=true) at a selector's center or at viewport CSS-pixel coordinates: click, dblclick, rightclick, down, or up.",
     inputSchema: {
       type: "object",
       properties: {
         tabId: { type: "string" },
-        action: { type: "string", enum: ["click", "dblclick", "rightclick", "down", "up"], description: "Default 'click'." },
-        selector: { type: "string", description: "Click the element's center (scrolled into view first)." },
-        x: { type: "number", description: "CSS-pixel viewport X (alternative to selector)." },
-        y: { type: "number", description: "CSS-pixel viewport Y (alternative to selector)." },
-        modifiers: { type: "array", items: { type: "string" }, description: "e.g. ['shift','meta','control','alt']" },
+        action: { type: "string", enum: ["click", "dblclick", "rightclick", "down", "up"], description: "Default click." },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+        modifiers: { type: "array", items: { type: "string" }, description: "shift, meta, control, alt." },
       },
       additionalProperties: false,
     },
@@ -245,7 +242,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_scroll",
     description:
-      "Scroll the page with a trusted mouse-wheel event at a selector's center or explicit CSS-pixel coordinates. Positive deltaY scrolls down, negative up.",
+      "Trusted mouse-wheel scroll at a selector's center or at CSS-pixel coordinates. Positive deltaY scrolls down.",
     inputSchema: {
       type: "object",
       properties: {
@@ -262,7 +259,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_hover",
     description:
-      "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove, triggers real :hover styles, tooltips, and mouseenter handlers.",
+      "Trusted mouse move over a selector's center or CSS-pixel coordinates, triggering real :hover styles, tooltips, and mouseenter handlers.",
     inputSchema: {
       type: "object",
       properties: {
@@ -277,7 +274,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_drag",
     description:
-      "Trusted drag: mouseDown at 'from', interpolated mouseMove steps, mouseUp at 'to'. Each endpoint is { selector } or { x, y } in CSS pixels.",
+      "Trusted drag from one point to another. Each endpoint is { selector } or { x, y } in CSS pixels.",
     inputSchema: {
       type: "object",
       required: ["from", "to"],
@@ -293,7 +290,7 @@ const PREVIEW_TOOLS = [
           properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
           additionalProperties: false,
         },
-        steps: { type: "number", description: "Interpolated move events between endpoints (default 12, max 100)." },
+        steps: { type: "number", description: "Intermediate moves (default 12, max 100)." },
       },
       additionalProperties: false,
     },
@@ -301,14 +298,14 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_key",
     description:
-      "Trusted keyboard input to the focused element: named keys (Enter, Escape, Tab, Backspace, ArrowDown, …) or a single character, with optional modifiers. For typing whole strings into a field prefer codara_preview_type.",
+      "Trusted keyboard input to the focused element: a named key or single character, with optional modifiers. To type a whole string into a field use codara_preview_type.",
     inputSchema: {
       type: "object",
       required: ["key"],
       properties: {
         tabId: { type: "string" },
         key: { type: "string" },
-        text: { type: "string", description: "Printable text for the char event when it differs from 'key'." },
+        text: { type: "string", description: "Printable text when it differs from key." },
         modifiers: { type: "array", items: { type: "string" } },
       },
       additionalProperties: false,
@@ -317,7 +314,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_upload",
     description:
-      "Set the files of an <input type=file> via the DevTools protocol (the only reliable way to script a file upload). 'paths' are absolute paths on this machine.",
+      "Set the files of an <input type=file>. paths are absolute paths on this machine; the page receives their contents, so only upload files the task needs.",
     inputSchema: {
       type: "object",
       required: ["selector", "paths"],
@@ -332,7 +329,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_console",
     description:
-      "Read the preview tab's captured console messages (ring buffer, newest last, cap 500). Filter with level=debug|info|warning|error, trim with limit, or clear=true to reset. Capture starts when the tab loads, so messages from before this build opened the tab may be missing.",
+      "Read the tab's captured console messages, newest last (up to 500). Filter by level, trim with limit, or clear=true to reset. Messages from before the tab loaded may be missing.",
     inputSchema: {
       type: "object",
       properties: {
@@ -347,7 +344,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_network",
     description:
-      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call, issue one codara_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
+      "Read the tab's captured requests (url, method, status, mimeType, failure; up to 500). Capture starts on the first call, so call it once before the interaction you want to observe. filter matches a URL substring; clear=true resets.",
     inputSchema: {
       type: "object",
       properties: {
@@ -362,7 +359,7 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_resize",
     description:
-      "Resize the preview viewport to explicit CSS-pixel dimensions (e.g. 375×667 to test a mobile layout). Returns the applied size.",
+      "Resize the viewport to CSS-pixel dimensions, for example 375x667 for a phone layout. Returns the applied size.",
     inputSchema: {
       type: "object",
       required: ["width", "height"],
@@ -377,21 +374,18 @@ const PREVIEW_TOOLS = [
   {
     name: "codara_preview_run",
     description:
-      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical, you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Every step must obey the task's tool restrictions, including read-only evaluate calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+      "Run an ordered batch of browser steps in ONE call instead of one call per click or key. Each step fires the same real input as its single tool, so prefer this for any multi-step flow, for example typing `7 / 2 =` and reading the display. Every step must obey the task's tool restrictions. Stops at the first failing step unless continueOnError. Returns one result per step; screenshot steps also come back as images.",
     inputSchema: {
       type: "object",
       required: ["steps"],
       properties: {
-        tabId: { type: "string", description: "Default tab for steps that omit their own tabId." },
-        continueOnError: {
-          type: "boolean",
-          description: "Keep running after a failing step (default false).",
-        },
+        tabId: { type: "string", description: "Default tab for steps without their own." },
+        continueOnError: { type: "boolean" },
         steps: {
           type: "array",
           minItems: 1,
           description:
-            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching codara_preview_* tool, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+            "Each step is { action, ...the fields of the matching codara_preview_* tool }, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
           items: {
             type: "object",
             required: ["action"],
@@ -413,7 +407,7 @@ const PREVIEW_TOOLS = [
                   "resize",
                 ],
               },
-              label: { type: "string", description: "Optional note echoed back in the step result." },
+              label: { type: "string", description: "Echoed back in the step result." },
               tabId: { type: "string" },
               url: { type: "string" },
               selector: { type: "string" },
@@ -424,8 +418,8 @@ const PREVIEW_TOOLS = [
               awaitPromise: { type: "boolean" },
               state: { type: "string" },
               timeoutMs: { type: "number" },
-              mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
-              maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
+              mode: { type: "string", enum: ["outline"] },
+              maxBytes: { type: "number", description: "Default 12000." },
               since: { type: "string" },
               x: { type: "number" },
               y: { type: "number" },
@@ -446,7 +440,6 @@ const PREVIEW_TOOLS = [
 
 const PREVIEW_TOOL_TO_RPC = {
   codara_preview_list: "preview.list",
-  codara_preview_url: "preview.url",
   codara_preview_navigate: "preview.navigate",
   codara_preview_snapshot: "preview.snapshot",
   codara_preview_click: "preview.click",
@@ -464,6 +457,12 @@ const PREVIEW_TOOL_TO_RPC = {
   codara_preview_console: "preview.console",
   codara_preview_network: "preview.network",
   codara_preview_resize: "preview.resize",
+};
+
+// Callable for agents and prompts that already use them, but no longer listed:
+// codara_preview_list returns every tab's URL and title.
+const HIDDEN_PREVIEW_ALIASES = {
+  codara_preview_url: "preview.url",
 };
 
 // Step action -> RPC for the batched codara_preview_run tool. Mirrors the
@@ -486,24 +485,41 @@ const STEP_ACTION_TO_RPC = {
 };
 
 // ===========================================================================
-// Terminal tool set (open and drive agent-owned terminal tabs). New with the
-// codara-studio merge; the socket RPCs live in agent-socket.ts.
+// Terminal tool set (open, run in, and read terminal tabs). The socket RPCs
+// live in agent-socket.ts.
 // ===========================================================================
 const TERMINAL_TOOLS = [
   {
+    name: "codara_terminal_run",
+    description:
+      "Run one shell command in a terminal tab and wait for it to finish. Returns status (exited, timeout, quiet), exitCode, and only the output the command printed, plus a cursor for codara_terminal_read. Without paneId it opens a new temporary terminal (in cwd) and returns its paneId for the next run; with paneId it reuses an idle terminal you created. On timeout the command keeps running. Use codara_terminal_create for servers and watchers that never exit.",
+    inputSchema: {
+      type: "object",
+      required: ["command"],
+      properties: {
+        command: { type: "string", description: "One line; join steps with && or ;." },
+        paneId: { type: "string", description: "A terminal you created. Omit to open a new one." },
+        cwd: { type: "string", description: "Directory for a new terminal. Defaults to the workspace root." },
+        timeoutMs: { type: "number", description: "Default 30000, max 600000." },
+        lines: { type: "number", description: "Trailing output lines to return (default 200)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "codara_terminal_create",
     description:
-      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Temporary terminals are closed automatically when their Cora run finishes. Use retention='service' only for a dev server or watcher the user explicitly needs after completion; it remains run-owned and is closed when the run is deleted. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. The tab opens in the workspace you run in, next to your own terminal when you run in one. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to that workspace's root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd }, the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
+      "Open a new agent-owned terminal tab, tinted so the user can see an agent drives it, next to your own pane. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Optionally pass a shell command to start immediately and a title. Pass an absolute cwd that exists; when omitted it defaults to the workspace root, and a missing directory makes the terminal fail to start. Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
-        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the calling run's workspace root, else the root of the workspace whose terminal you run in, else the active workspace root." },
-        command: { type: "string", description: "Optional shell command to run immediately after the terminal opens." },
-        title: { type: "string", description: "Optional tab title." },
+        cwd: { type: "string", description: "Absolute directory that exists. Defaults to the workspace root." },
+        command: { type: "string", description: "Shell command to run right after the terminal opens." },
+        title: { type: "string" },
         retention: {
           type: "string",
           enum: ["temporary", "service"],
-          description: "Lifecycle policy. temporary (default) is automatically closed when the run settles. service survives completion only when the user explicitly needs it, and is still closed with the run.",
+          description: "temporary (default) closes when the run settles. service survives completion only when the user needs it, and still closes with the run.",
         },
       },
       additionalProperties: false,
@@ -512,14 +528,14 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_write",
     description:
-      "Write text to an agent-owned terminal pane (identified by the paneId returned from codara_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with codara_terminal_read. Ownership is enforced: you can only write to a paneId your OWN codara_terminal_create returned in this session, a paneId you discovered another way (e.g. a sibling worker's pane sampled via codara_terminal_read) is rejected, so call codara_terminal_create to get a pane you own rather than writing to someone else's.",
+      "Type text into a terminal you created with codara_terminal_create or codara_terminal_run, pressing Enter unless submit=false (use submit=false for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected. To run a command and get its result, prefer codara_terminal_run.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
       properties: {
-        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
-        text: { type: "string", description: "Text to write into the terminal." },
-        submit: { type: "boolean", description: "Press Enter after writing (default true)." },
+        paneId: { type: "string" },
+        text: { type: "string" },
+        submit: { type: "boolean", description: "Press Enter after the text (default true)." },
       },
       additionalProperties: false,
     },
@@ -527,31 +543,65 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_read",
     description:
-      "Read the recent visible output of a terminal pane (identified by paneId). Returns the tail of the pane's buffer with ANSI/VT control sequences stripped, so you can inspect command output. Use after codara_terminal_write to see what a command produced.",
+      "Read a terminal pane's recent output as plain text. Any pane from codara_terminal_list can be read. Every result carries a cursor: pass it back as since to get only the output printed after that read. mode \"screen\" renders what is on screen instead, which is the readable form for full-screen programs such as Claude Code, Codex, vim, or top.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
       properties: {
-        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
-        lines: { type: "number", description: "How many trailing lines to return (default 100)." },
+        paneId: { type: "string" },
+        lines: { type: "number", description: "Trailing lines to return (default 200, max 2000)." },
+        mode: { type: "string", enum: ["text", "screen"], description: "Default text." },
+        since: { type: "number", description: "cursor from an earlier read or run of this pane." },
       },
       additionalProperties: false,
     },
   },
   {
+    name: "codara_terminal_list",
+    description:
+      "List the terminal panes in your workspace: paneId, title, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to. Use it to find the pane the user means, then codara_terminal_read it.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "codara_terminal_close",
     description:
-      "Stop and close an agent-owned terminal returned by codara_terminal_create. Ownership is scoped to the calling Cora run, so this cannot close a user's terminal or another run's terminal. The operation is idempotent: retrying the same close after a lost response succeeds with alreadyClosed=true. Close temporary dev servers, watchers, and helper CLIs before final verification; leave one open only when the user explicitly needs the live service.",
+      "Stop and close a terminal returned by codara_terminal_create or codara_terminal_run. Ownership is scoped to the calling Cora run, so this cannot close a user's terminal or another run's terminal. The call is idempotent: retrying after a lost response succeeds with alreadyClosed=true. Close temporary servers and watchers when done; leave one open only when the user needs the live service.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
       properties: {
-        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
+        paneId: { type: "string" },
       },
       additionalProperties: false,
     },
   },
 ];
+
+const TERMINAL_TOOL_TO_RPC = {
+  codara_terminal_run: "terminal.run",
+  codara_terminal_create: "terminal.create",
+  codara_terminal_write: "terminal.write",
+  codara_terminal_read: "terminal.read",
+  codara_terminal_list: "terminal.list",
+  codara_terminal_close: "terminal.close",
+};
+
+// An agent the user runs in a plain Studio terminal can say "finished" or
+// "needs you" itself, which is the one completion signal that is never a guess.
+const NOTIFY_TOOL = {
+  name: "codara_notify_user",
+  description:
+    "Send the user a Codara notification from your terminal pane: kind done when you finished a task that took more than a minute, needs_input when you are blocked on them. message is one short line. Clicking it jumps to your pane; nothing is shown while the user is already looking at it.",
+  inputSchema: {
+    type: "object",
+    required: ["kind"],
+    properties: {
+      kind: { type: "string", enum: ["done", "needs_input"] },
+      message: { type: "string", maxLength: 300 },
+    },
+    additionalProperties: false,
+  },
+};
 
 // A run-owned visual explanation surface available in every Cora mode. It is
 // part of the studio roster (rather than Execute-only orchestration) because a
@@ -561,16 +611,7 @@ const WHITEBOARD_TOOLS = [
     name: "codara_whiteboard_get",
     description:
       "Read this Cora chat's current editable whiteboard, including its revision and the user's latest manual edits. Returns null when no board exists. Always call this immediately before changing a board: the human can move, rewrite, connect, add, or delete items at any time.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        runId: {
-          type: "string",
-          description: "Codara run id. Defaults to SPARK_RUN_ID when omitted.",
-        },
-      },
-      additionalProperties: false,
-    },
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_whiteboard_update",
@@ -580,10 +621,6 @@ const WHITEBOARD_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        runId: {
-          type: "string",
-          description: "Codara run id. Defaults to SPARK_RUN_ID when omitted.",
-        },
         action: {
           type: "string",
           enum: ["replace", "merge", "clear"],
@@ -660,14 +697,14 @@ const WHITEBOARD_TOOLS = [
     name: "codara_whiteboard_arrange",
     description: "Arrange the current board with a directed graph layout engine. Keeps card text and connections, lays out modules separately, and preserves existing geometric group membership. Moves cards, so use only for a new draft or when the user asks for layout improvements; preserve intentional manual placement. Inspect the new revision afterward.",
     inputSchema: { type: "object", required: ["baseRevision"], properties: {
-      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      baseRevision: { type: "integer", minimum: 0 },
     }, additionalProperties: false },
   },
   {
     name: "codara_whiteboard_inspect",
     description: "Render this chat's current whiteboard with the real canvas and return a PNG image plus overlap, text clipping, connection, and source-reference diagnostics. Works while the board is closed or in a background workspace. Pass nodeIds for readable detail crops when detailNeeded is true. Read the image, verify semantic connections against source code, fix problems, and inspect again. File existence alone does not prove a claim.",
     inputSchema: { type: "object", required: ["baseRevision"], properties: {
-      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      baseRevision: { type: "integer", minimum: 0 },
       nodeIds: { type: "array", maxItems: 50, items: { type: "string" }, description: "Optional card/group IDs to frame a detail crop. Omit for an overview." },
     }, additionalProperties: false },
   },
@@ -675,7 +712,7 @@ const WHITEBOARD_TOOLS = [
     name: "codara_whiteboard_review",
     description: "Record Cora's review of the exact inspected revision. Requires a recent readable image inspection covering all cards, no overlap/clipping errors, and a summary of the source and visual checks actually performed. Record unresolved warnings or uncertain connections in limitations. Any later edit invalidates the review. This is your assessment, not automatic proof of correctness.",
     inputSchema: { type: "object", required: ["baseRevision", "summary"], properties: {
-      runId: { type: "string" }, baseRevision: { type: "integer", minimum: 0 },
+      baseRevision: { type: "integer", minimum: 0 },
       summary: { type: "string", maxLength: 700 }, limitations: { type: "array", maxItems: 20, items: { type: "string", maxLength: 400 } },
     }, additionalProperties: false },
   },
@@ -746,13 +783,6 @@ const BOARD_TOOLS = [
     },
   },
 ];
-
-const TERMINAL_TOOL_TO_RPC = {
-  codara_terminal_create: "terminal.create",
-  codara_terminal_write: "terminal.write",
-  codara_terminal_read: "terminal.read",
-  codara_terminal_close: "terminal.close",
-};
 
 // ===========================================================================
 // Automation-architect tool set. The whole set (including codara_name_chat)
@@ -964,19 +994,22 @@ const GRAPH_SCHEMA = {
   additionalProperties: false,
 };
 
-const runIdProp = {
-  runId: {
-    type: "string",
-    description: "Codara run id. Defaults to process.env.SPARK_RUN_ID (the chat this session was spawned for) when omitted.",
-  },
-};
+// codara_update_automation always ships next to codara_create_automation, so
+// its fields point at the create schema instead of repeating 16k characters
+// of it; the socket validates both against the same rules.
+function sameShapeAsCreate(field) {
+  return {
+    type: "object",
+    description: `Complete replacement ${field}, in exactly the shape of codara_create_automation's ${field}. Read the current value with codara_get_automation first.`,
+  };
+}
 
 const AUTOMATION_TOOLS = [
   {
     name: "codara_list_automations",
     description:
       "List all Cora automations (\"looms\"): id, name, enabled, a trigger/loop summary, worker config, node/edge counts, current state.status, lastRunAt, and the last 3 history records (status/stopReason/costUsd). Call this FIRST when the user asks about automations so you can reference what already exists.",
-    inputSchema: { type: "object", properties: { ...runIdProp }, additionalProperties: false },
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_get_automation",
@@ -985,7 +1018,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string", description: "The automation id from codara_list_automations." } },
+      properties: { automation_id: { type: "string", description: "The automation id from codara_list_automations." } },
       additionalProperties: false,
     },
   },
@@ -997,7 +1030,6 @@ const AUTOMATION_TOOLS = [
       type: "object",
       required: ["name", "trigger", "loop", "worker"],
       properties: {
-        ...runIdProp,
         name: { type: "string", description: "Human-readable automation name." },
         trigger: TRIGGER_SCHEMA,
         loop: LOOP_SCHEMA,
@@ -1021,14 +1053,13 @@ const AUTOMATION_TOOLS = [
       type: "object",
       required: ["automation_id"],
       properties: {
-        ...runIdProp,
         automation_id: { type: "string" },
         name: { type: "string" },
-        trigger: TRIGGER_SCHEMA,
-        loop: LOOP_SCHEMA,
+        trigger: sameShapeAsCreate("trigger"),
+        loop: sameShapeAsCreate("loop"),
         prompt_template: { type: "string", description: "Replacement prompt for a single-worker loom. Supports the same tokens as codara_create_automation, including {{lastOutput}}." },
-        worker: WORKER_SCHEMA,
-        graph: GRAPH_SCHEMA,
+        worker: sameShapeAsCreate("worker"),
+        graph: sameShapeAsCreate("graph"),
       },
       additionalProperties: false,
     },
@@ -1040,7 +1071,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string" } },
+      properties: { automation_id: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -1052,7 +1083,6 @@ const AUTOMATION_TOOLS = [
       type: "object",
       required: ["automation_id"],
       properties: {
-        ...runIdProp,
         automation_id: { type: "string" },
         timeout_ms: {
           type: "number",
@@ -1069,7 +1099,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id", "enabled"],
-      properties: { ...runIdProp, automation_id: { type: "string" }, enabled: { type: "boolean" } },
+      properties: { automation_id: { type: "string" }, enabled: { type: "boolean" } },
       additionalProperties: false,
     },
   },
@@ -1079,7 +1109,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string" } },
+      properties: { automation_id: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -1089,7 +1119,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string" } },
+      properties: { automation_id: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -1099,7 +1129,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string" } },
+      properties: { automation_id: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -1111,7 +1141,7 @@ const AUTOMATION_TOOLS = [
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string" } },
+      properties: { automation_id: { type: "string" } },
       additionalProperties: false,
     },
   },
@@ -1123,7 +1153,6 @@ const AUTOMATION_TOOLS = [
       type: "object",
       required: ["title"],
       properties: {
-        ...runIdProp,
         title: {
           type: "string",
           description: "Short chat title (3-6 words). Must be non-empty; capped at ~60 characters server-side.",
@@ -1147,11 +1176,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["terminals"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         terminals: {
           type: "array",
           minItems: 1,
@@ -1198,11 +1222,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["workers"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         taskComplexity: {
           type: "string",
           enum: ["trivial", "standard", "complex"],
@@ -1296,11 +1315,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["question", "category", "reason"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         question: {
           type: "string",
           description:
@@ -1381,11 +1395,6 @@ const EXECUTE_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         summary: {
           type: "string",
           description: "Optional human-readable summary to attach as a system note.",
@@ -1421,11 +1430,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["goal", "milestones"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         goal: { type: "string", description: "The user's request in their own words." },
         milestones: {
           type: "array",
@@ -1458,11 +1462,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["title"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         title: {
           type: "string",
           description: "Short chat title (3-6 words). Must be non-empty; capped at ~60 characters server-side.",
@@ -1482,7 +1481,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["scope", "action"],
       properties: {
-        ...runIdProp,
         scope: {
           type: "string",
           enum: ["workspace", "global"],
@@ -1524,11 +1522,6 @@ const EXECUTE_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         done: {
           type: "boolean",
           description: "true = stop the loop now; false = run another iteration. Defaults to false (continue).",
@@ -1560,11 +1553,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["worker_task_id"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         worker_task_id: {
           type: "string",
           description: "Worker task id returned from codara_spawn_workers.",
@@ -1581,11 +1569,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["to", "body"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         to: {
           type: "string",
           description:
@@ -1610,11 +1593,6 @@ const EXECUTE_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
       },
       additionalProperties: false,
     },
@@ -1627,11 +1605,6 @@ const EXECUTE_TOOLS = [
       type: "object",
       required: ["worker_task_ids"],
       properties: {
-        runId: {
-          type: "string",
-          description:
-            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
-        },
         worker_task_ids: {
           type: "array",
           minItems: 1,
@@ -1704,11 +1677,19 @@ const AUTOMATION_TOOL_TO_RPC = {
 };
 
 // ===========================================================================
-// Roster + RPC-map selection. Done ONCE at startup by SPARK_MCP_MODE. The
-// studio (preview + terminal) tools are always present; the mode only adds the
-// orchestration layer on top.
+// Roster + RPC-map selection. Done ONCE at startup by SPARK_MCP_MODE and
+// SPARK_RUN_ID. The preview + terminal tools are always present; the mode only
+// adds the orchestration layer on top.
 // ===========================================================================
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
+// The whiteboard and board belong to a Cora chat. A terminal the user opened
+// has no SPARK_RUN_ID, so there they could only ever fail with "runId is
+// required"; their RPCs stay mapped so a stale call gets a clear answer.
+const STARTUP_RUN_ID = (process.env.SPARK_RUN_ID || "").trim();
+const STUDIO_TOOLS = [
+  ...PREVIEW_TOOLS,
+  ...TERMINAL_TOOLS,
+  ...(STARTUP_RUN_ID ? [...WHITEBOARD_TOOLS, ...BOARD_TOOLS] : []),
+];
 const STUDIO_TOOL_TO_RPC = {
   ...PREVIEW_TOOL_TO_RPC,
   ...TERMINAL_TOOL_TO_RPC,
@@ -1789,9 +1770,14 @@ if (IS_AUTOMATION_MODE) {
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
   TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL];
   TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_remember: "orchestrator.remember" };
-} else {
+} else if (STARTUP_RUN_ID) {
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
+} else {
+  // A user's own terminal agent. A Cora run already announces its outcome, so
+  // only this roster carries the explicit notification.
+  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL];
+  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_notify_user: "agent.notify" };
 }
 if (IS_UNTRUSTED_PULL_REQUEST) {
   // Defense in depth for both the MCP CLI path and Pi's in-process bridge:
@@ -1801,6 +1787,109 @@ if (IS_UNTRUSTED_PULL_REQUEST) {
   TOOL_TO_RPC = Object.fromEntries(
     Object.entries(TOOL_TO_RPC).filter(([name]) => UNTRUSTED_PULL_REQUEST_TOOL_NAMES.has(name)),
   );
+} else if (TOOL_TO_RPC.codara_preview_list) {
+  TOOL_TO_RPC = { ...TOOL_TO_RPC, ...HIDDEN_PREVIEW_ALIASES };
+}
+
+// MCP tool annotations. Clients use them to auto-approve and parallelize
+// read-only calls and to warn before destructive ones.
+const READ_ONLY_TOOL_NAMES = new Set([
+  "codara_preview_list",
+  "codara_preview_snapshot",
+  "codara_preview_screenshot",
+  "codara_preview_console",
+  "codara_preview_network",
+  "codara_preview_wait_for",
+  "codara_terminal_read",
+  "codara_terminal_list",
+  "codara_whiteboard_get",
+  "codara_whiteboard_inspect",
+  "codara_board_get",
+  "codara_get_worker_status",
+  "codara_wait_for_workers",
+  "codara_check_messages",
+  "codara_list_automations",
+  "codara_get_automation",
+  "codara_wait_for_automation",
+]);
+const DESTRUCTIVE_TOOL_NAMES = new Set([
+  "codara_terminal_close",
+  "codara_whiteboard_update",
+  "codara_board_update",
+  "codara_delete_automation",
+  "codara_remember",
+]);
+const IDEMPOTENT_TOOL_NAMES = new Set([
+  "codara_terminal_close",
+  "codara_preview_resize",
+  "codara_set_automation_enabled",
+  "codara_plan_update",
+  "codara_name_chat",
+]);
+const OPEN_WORLD_TOOL_NAMES = new Set([
+  "codara_preview_navigate",
+  "codara_preview_evaluate",
+  "codara_preview_upload",
+  "codara_preview_run",
+  "codara_terminal_run",
+  "codara_terminal_create",
+  "codara_terminal_write",
+]);
+
+function toolTitle(name) {
+  const words = name
+    .replace(/^codara_/, "")
+    .replace(/^preview_/, "browser_")
+    .split("_")
+    .join(" ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function annotated(tool) {
+  const annotations = { title: toolTitle(tool.name) };
+  if (READ_ONLY_TOOL_NAMES.has(tool.name)) {
+    annotations.readOnlyHint = true;
+  } else {
+    annotations.destructiveHint = DESTRUCTIVE_TOOL_NAMES.has(tool.name);
+    if (IDEMPOTENT_TOOL_NAMES.has(tool.name)) annotations.idempotentHint = true;
+  }
+  annotations.openWorldHint = OPEN_WORLD_TOOL_NAMES.has(tool.name);
+  return { ...tool, annotations };
+}
+
+TOOLS = TOOLS.map(annotated);
+
+// Guidance every tool shares, sent once in the initialize result instead of
+// being repeated across descriptions.
+function buildInstructions() {
+  const listed = new Set(TOOLS.map((tool) => tool.name));
+  const parts = [
+    "Codara Studio tools act inside the running Codara desktop app. Every call is routed to this session's own workspace and chat; never pass ids for them.",
+  ];
+  if (listed.has("codara_preview_navigate")) {
+    parts.push(
+      "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events.",
+    );
+  }
+  if (listed.has("codara_terminal_run")) {
+    parts.push(
+      "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start servers and watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_whiteboard_get") || listed.has("codara_board_get")) {
+    parts.push(
+      "Whiteboard and board belong to this chat and the user edits them too: call the get tool right before an update, pass its revision as baseRevision, and after a revision conflict read again and re-apply instead of resending the same payload.",
+    );
+  }
+  if (listed.has("codara_notify_user")) {
+    parts.push(
+      "When you finish a task that took more than a minute, or you are blocked waiting for the user, call codara_notify_user once with a one-line summary.",
+    );
+  }
+  parts.push(
+    "When Codara is closed every call fails at once with an offline error. Ask the user to open Codara, then retry; do not loop.",
+  );
+  return parts.join("\n\n");
 }
 
 // Orchestration RPCs (orchestrator.* / automation.*) get the long HTTP timeout
@@ -1823,6 +1912,23 @@ function isLongPollRpc(rpc) {
   return LONG_POLL_RPCS.has(rpc);
 }
 
+// Calls that can legitimately run for minutes: a client that passed a
+// progressToken gets a heartbeat so its own request timeout keeps resetting.
+const PROGRESS_RPCS = new Set([
+  ...LONG_POLL_RPCS,
+  "terminal.run",
+  "automation.update",
+  "automation.delete",
+  "automation.set_enabled",
+]);
+const PROGRESS_INTERVAL_MS = 10_000;
+
+function rpcTimeoutMs(rpc) {
+  if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
+  if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
+  return PREVIEW_TERMINAL_TIMEOUT_MS;
+}
+
 // req.destroy(new Error("Codara agent socket timeout")) surfaces through the
 // 'error' handler as `Codara agent socket unreachable: Codara agent socket
 // timeout`, so match the inner text rather than the wrapped prefix.
@@ -1831,22 +1937,53 @@ function isTransportTimeout(err) {
 }
 
 // Browser and terminal routing belongs to the launching process, not tool JSON.
+const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "agent.notify"]);
 function injectRunIdForStudioOwnership(rpc, args) {
-  if (!rpc.startsWith("preview.") && !["terminal.read", "terminal.create", "terminal.write", "terminal.close"].includes(rpc)) return;
+  if (
+    !rpc.startsWith("preview.") &&
+    !rpc.startsWith("terminal.") &&
+    rpc !== "agent.notify"
+  ) return;
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
   else delete args.runId;
   if (rpc.startsWith("preview.")) delete args.workspaceId;
-  if (rpc === "terminal.create") {
-    // Codara opens the new tab beside the pane this agent runs in. The pane id
-    // only arrives when the CLI passed its environment through (Codex starts
-    // MCP servers with a cleared one), so the pid lets Codara find the pane by
-    // walking up the process tree instead.
+  delete args.callerPaneId;
+  delete args.callerPid;
+  // Codara places a new terminal beside, and scopes the browser, the terminal
+  // list and notifications to, the pane this agent runs in. The pane id only
+  // arrives when the CLI passed its environment through (Codex starts MCP
+  // servers with a cleared one), so the pid lets Codara find the pane by
+  // walking up the process tree instead. A run is scoped by its run id.
+  if (CALLER_LOCATED_RPCS.has(rpc) || (rpc.startsWith("preview.") && !envRunId)) {
     const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
     if (envPaneId) args.callerPaneId = envPaneId;
-    else delete args.callerPaneId;
     args.callerPid = process.pid;
   }
+}
+
+// Tool JSON never chooses the chat: the launch-time SPARK_RUN_ID does. A
+// model-supplied runId that disagrees (a prompt-injected manager aiming at a
+// sibling chat) is refused rather than silently rewritten, so the model
+// learns the parameter does not exist. Returns the refusal text, or null.
+function applyRunIdentity(name, rpc, args) {
+  const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+  if (Object.prototype.hasOwnProperty.call(args, "runId")) {
+    const supplied = typeof args.runId === "string" ? args.runId.trim() : "";
+    delete args.runId;
+    if (supplied && supplied !== envRunId) {
+      return `${name} does not accept runId: Codara routes every call to ${
+        envRunId ? "the chat this session belongs to" : "this session, which is not part of a Cora chat"
+      }. Retry without runId.`;
+    }
+  }
+  if (isOrchestrationRpc(rpc)) {
+    if (envRunId) args.runId = envRunId;
+    else if (rpc !== "orchestrator.spawn_terminals") {
+      return `${name} only works inside a Cora chat, and this session is not part of one.`;
+    }
+  }
+  return null;
 }
 
 function resolveSparkHome() {
@@ -1910,46 +2047,99 @@ function readScopedConnection() {
   }
 }
 
+function handshakePath() {
+  return path.join(resolveSparkHome(), HANDSHAKE_FILE);
+}
+
 function readHandshakeFile() {
-  const raw = fs.readFileSync(path.join(resolveSparkHome(), HANDSHAKE_FILE), "utf8");
+  const raw = fs.readFileSync(handshakePath(), "utf8");
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed.url !== "string" || typeof parsed.token !== "string") {
     throw new Error("handshake file is malformed");
   }
-  return validatedAgentSocketConnection(parsed.url, parsed.token, "handshake");
+  const connection = validatedAgentSocketConnection(parsed.url, parsed.token, "handshake");
+  if (Number.isSafeInteger(parsed.pid) && parsed.pid > 0) connection.pid = parsed.pid;
+  return connection;
+}
+
+// A crashed app leaves its handshake behind. Its pid tells a dead app from a
+// live one without waiting for a connection to be refused.
+function handshakeProcessAlive(handshake) {
+  if (!handshake.pid) return true;
+  try {
+    process.kill(handshake.pid, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === "EPERM";
+  }
 }
 
 // Trusted callers read the mode-600 handshake on every call, so they follow
 // an app restart to its new socket and token. Codara does not export its root
 // token into terminals, so the file is the only source: while Codara starts,
 // it is written just after the socket listens, and a call in that moment
-// waits briefly for it instead of failing.
+// waits briefly for it instead of failing. Once a call has found Codara
+// closed, later calls skip that wait for a while: an agent retrying in a loop
+// should hear "offline" at once, not three seconds per attempt.
 const HANDSHAKE_WAIT_MS = 3_000;
 const HANDSHAKE_POLL_MS = 100;
+const OFFLINE_FAST_FAIL_MS = 30_000;
+let lastOfflineAt = 0;
 
 async function readHandshake() {
   const scoped = readScopedConnection();
   if (scoped) return scoped;
-  const deadline = Date.now() + HANDSHAKE_WAIT_MS;
+  const waitMs = Date.now() - lastOfflineAt < OFFLINE_FAST_FAIL_MS ? 0 : HANDSHAKE_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   for (;;) {
+    let cause;
     try {
-      return readHandshakeFile();
-    } catch (err) {
-      if (Date.now() >= deadline) {
-        const file = path.join(resolveSparkHome(), HANDSHAKE_FILE);
-        throw offlineError(
-          `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${err.message}`,
-        );
+      const handshake = readHandshakeFile();
+      if (handshakeProcessAlive(handshake)) {
+        lastOfflineAt = 0;
+        return handshake;
       }
-      await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_POLL_MS));
+      cause = `Codara is not running (stale handshake from pid ${handshake.pid})`;
+    } catch (err) {
+      cause = `could not read ${handshakePath()}: ${err.message}`;
     }
+    if (Date.now() >= deadline) {
+      lastOfflineAt = Date.now();
+      throw offlineError(`Codara appears to be offline: ${cause}. Ask the user to open Codara, then retry.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_POLL_MS));
   }
 }
 
-async function postJsonRpc(method, params, timeoutMs) {
+// Mirrors MAX_REQUEST_BYTES / MAX_LARGE_REQUEST_BYTES in agent-socket.ts, so an
+// oversized payload is refused here with a reason instead of being sent.
+const MAX_RPC_BODY_BYTES = 64 * 1024;
+const MAX_LARGE_RPC_BODY_BYTES = 1024 * 1024;
+const LARGE_BODY_RPCS = new Set(["orchestrator.whiteboard_update", "orchestrator.board_update"]);
+
+const SOCKET_ERROR_LABELS = {
+  [-32601]: "this Codara version does not support the call; update Codara",
+  [-32003]: "not allowed for this agent",
+  [-32000]: "the terminal failed to start",
+};
+
+function socketError(message, code) {
+  const e = new Error(message);
+  if (Number.isInteger(code)) e.rpcCode = code;
+  return e;
+}
+
+async function postJsonRpc(method, params, timeoutMs, signal) {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params: params || {} });
+  const bytes = Buffer.byteLength(body, "utf8");
+  const limit = LARGE_BODY_RPCS.has(method) ? MAX_LARGE_RPC_BODY_BYTES : MAX_RPC_BODY_BYTES;
+  if (bytes > limit) {
+    throw new Error(
+      `Request too large: ${Math.ceil(bytes / 1024)} KB is over the ${limit / 1024} KB limit for this tool. Send fewer or shorter items.`,
+    );
+  }
   const handshake = await readHandshake();
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params: params || {} });
     let target;
     try {
       target = new URL(handshake.url + "/rpc");
@@ -1965,15 +2155,22 @@ async function postJsonRpc(method, params, timeoutMs) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body, "utf8"),
+          "Content-Length": bytes,
           Authorization: `Bearer ${handshake.token}`,
         },
+        ...(signal ? { signal } : {}),
       },
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
+          if (res.statusCode === 401) {
+            reject(offlineError(
+              "Codara rejected this session's credentials, which usually means Codara restarted or another copy is running. Retry once; if it persists, ask the user to restart Codara.",
+            ));
+            return;
+          }
           if (res.statusCode !== 200) {
             reject(new Error(`Codara agent socket returned ${res.statusCode}: ${text.slice(0, 200)}`));
             return;
@@ -1981,8 +2178,7 @@ async function postJsonRpc(method, params, timeoutMs) {
           try {
             const parsed = JSON.parse(text);
             if (parsed && parsed.error) {
-              const errMsg = parsed.error.message || "agent socket op failed";
-              reject(new Error(errMsg));
+              reject(socketError(parsed.error.message || "agent socket op failed", parsed.error.code));
               return;
             }
             resolve(parsed && Object.prototype.hasOwnProperty.call(parsed, "result") ? parsed.result : null);
@@ -1992,13 +2188,59 @@ async function postJsonRpc(method, params, timeoutMs) {
         });
       },
     );
-    req.on("error", (err) => reject(new Error(`Codara agent socket unreachable: ${err.message}`)));
+    req.on("error", (err) => {
+      if (signal && signal.aborted) {
+        const cancelled = new Error("Cancelled by the client.");
+        cancelled.code = "CANCELLED";
+        reject(cancelled);
+        return;
+      }
+      if (err && err.code === "ECONNREFUSED") {
+        lastOfflineAt = Date.now();
+        reject(offlineError(
+          `Codara appears to be offline: nothing is listening at ${handshake.url}${
+            handshake.pid ? ` (stale handshake from pid ${handshake.pid})` : ""
+          }. Ask the user to open Codara, then retry.`,
+        ));
+        return;
+      }
+      reject(new Error(`Codara agent socket unreachable: ${err.message}`));
+    });
     req.setTimeout(timeoutMs || PREVIEW_TERMINAL_TIMEOUT_MS, () => {
       req.destroy(new Error("Codara agent socket timeout"));
     });
     req.write(body);
     req.end();
   });
+}
+
+function errorText(err) {
+  const message = err && err.message ? err.message : String(err);
+  if (!err || !Number.isInteger(err.rpcCode)) return message;
+  const label = SOCKET_ERROR_LABELS[err.rpcCode];
+  return `${message} (Codara error ${err.rpcCode}${label ? `: ${label}` : ""})`;
+}
+
+function toolError(text) {
+  return { isError: true, content: [{ type: "text", text }] };
+}
+
+// The version of the Codara app this server talks to. The handshake carries
+// it; a development checkout falls back to its package.json.
+function codaraVersion() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(handshakePath(), "utf8"));
+    if (parsed && typeof parsed.appVersion === "string" && parsed.appVersion) return parsed.appVersion;
+  } catch {
+    /* Codara may not be running yet */
+  }
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
+    if (pkg && typeof pkg.version === "string") return pkg.version;
+  } catch {
+    /* packaged resources carry no package.json */
+  }
+  return "unknown";
 }
 
 // MCP stdio framing: each message is a JSON-RPC object on its own line.
@@ -2012,14 +2254,7 @@ function startStdioServer() {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (!line) continue;
-      handleLine(line).catch((err) => {
-        const message = err && err.message ? err.message : String(err);
-        writeLine({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32603, message },
-        });
-      });
+      handleLine(line).catch(() => undefined);
     }
   });
 
@@ -2030,6 +2265,27 @@ function startStdioServer() {
 
 function writeLine(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");
+}
+
+// In-flight tools/call requests by JSON-RPC id, so notifications/cancelled
+// (the user pressing Esc) can abort the HTTP call behind a long wait.
+const inFlight = new Map();
+
+function progressReporter(params) {
+  const token = params && params._meta ? params._meta.progressToken : undefined;
+  if (typeof token !== "string" && typeof token !== "number") return null;
+  return (progress, message, total) => {
+    writeLine({
+      jsonrpc: "2.0",
+      method: "notifications/progress",
+      params: {
+        progressToken: token,
+        progress,
+        ...(total ? { total } : {}),
+        ...(message ? { message } : {}),
+      },
+    });
+  };
 }
 
 async function handleLine(line) {
@@ -2044,35 +2300,56 @@ async function handleLine(line) {
     writeLine({ jsonrpc: "2.0", id: req && "id" in req ? req.id : null, error: { code: -32600, message: "invalid envelope" } });
     return;
   }
+  if (req.method === "notifications/cancelled") {
+    const controller = inFlight.get(req.params && req.params.requestId);
+    if (controller) controller.abort();
+    return;
+  }
   const id = "id" in req ? req.id : null;
+  const hasId = id !== undefined && id !== null;
+  const controller = new AbortController();
+  if (hasId) inFlight.set(id, controller);
   try {
-    const result = await dispatch(req.method, req.params || {});
-    // Notifications (no id) get no response.
-    if (id !== undefined && id !== null) {
-      writeLine({ jsonrpc: "2.0", id, result });
-    }
+    const params = req.params || {};
+    const result = await dispatch(req.method, params, {
+      signal: controller.signal,
+      progress: progressReporter(params),
+    });
+    // Notifications (no id) get no response, and a cancelled request is not
+    // answered at all.
+    if (hasId && !controller.signal.aborted) writeLine({ jsonrpc: "2.0", id, result });
   } catch (err) {
-    if (id !== undefined && id !== null) {
-      writeLine({ jsonrpc: "2.0", id, error: { code: -32603, message: err.message } });
+    if (hasId && !controller.signal.aborted) {
+      const code = err && Number.isInteger(err.code) ? err.code : -32603;
+      writeLine({ jsonrpc: "2.0", id, error: { code, message: err && err.message ? err.message : String(err) } });
     }
+  } finally {
+    if (hasId) inFlight.delete(id);
   }
 }
 
-async function dispatch(method, params) {
+// Newest first. The 2025-06-18 and 2025-03-26 revisions add tool annotations
+// and progress messages; 2024-11-05 clients ignore both.
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+async function dispatch(method, params, ctx) {
   switch (method) {
-    case "initialize":
+    case "initialize": {
+      const requested = params && typeof params.protocolVersion === "string" ? params.protocolVersion : "";
       return {
-        protocolVersion: "2024-11-05",
+        protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "codara-studio", version: "0.1.0" },
+        serverInfo: { name: "codara-studio", title: "Codara Studio", version: codaraVersion() },
+        instructions: buildInstructions(),
       };
+    }
     case "notifications/initialized":
     case "initialized":
       return null;
     case "tools/list":
       return { tools: TOOLS };
     case "tools/call":
-      return await callTool(params);
+      return await callTool(params, ctx);
     case "ping":
       return {};
     default:
@@ -2080,7 +2357,7 @@ async function dispatch(method, params) {
   }
 }
 
-async function callTool(params) {
+async function callTool(params, ctx = {}) {
   const name = params && typeof params.name === "string" ? params.name : null;
   if (
     IS_UNTRUSTED_PULL_REQUEST &&
@@ -2089,59 +2366,48 @@ async function callTool(params) {
     throw mkErr(-32602, `tool is unavailable for an imported pull-request run: ${name || "(missing)"}`);
   }
   // The batched preview runner is handled locally (it fans out to many RPCs).
-  if (name === "codara_preview_run") {
-    const args = params && params.arguments && typeof params.arguments === "object" ? params.arguments : {};
-    return await callRunBatch(args);
+  if (name === "codara_preview_run" && TOOL_TO_RPC.codara_preview_list) {
+    const args = params && params.arguments && typeof params.arguments === "object" ? { ...params.arguments } : {};
+    const refusal = applyRunIdentity(name, "preview.run", args);
+    if (refusal) return toolError(refusal);
+    return await callRunBatch(args, ctx);
   }
   const rpc = name ? TOOL_TO_RPC[name] : null;
   if (!rpc) throw mkErr(-32602, `unknown tool: ${name}`);
   const args = params && params.arguments && typeof params.arguments === "object" ? { ...params.arguments } : {};
 
-  if (isOrchestrationRpc(rpc)) {
-    // The board belongs to the CALLING chat, and the model must not be able
-    // to address another run's board (a prompt-injected manager rewriting a
-    // sibling chat's kanban). The run identity comes exclusively from the env
-    // stamp: any model-supplied runId is discarded, and the schemas expose no
-    // runId field. Direct socket callers holding the bearer token can still
-    // pass any runId; that is a pre-existing trust class shared by every
-    // orchestrator RPC. Direct memory uses the same stamp so a task cannot
-    // write another workspace or profile by supplying a different run id.
-    if (rpc === "orchestrator.board_get" || rpc === "orchestrator.board_update" ||
-        (rpc === "orchestrator.remember" && process.env.CODARA_PI_DIRECT_TASK === "1")) {
-      const envRunId = (process.env.SPARK_RUN_ID || "").trim();
-      if (envRunId) args.runId = envRunId;
-      else delete args.runId;
-    }
-    // Auto-inject runId from the env var pty-manager injected when the CLI was
-    // spawned for this run, so the orchestrator prompt doesn't have to know its
-    // own run id. Caller-supplied runId always wins.
-    if (typeof args.runId !== "string" || args.runId.trim().length === 0) {
-      const envRunId = process.env.SPARK_RUN_ID;
-      if (envRunId && envRunId.trim().length > 0) {
-        args.runId = envRunId.trim();
-      }
-    }
-    // Stamp the calling worker's loom node id (SPARK_NODE_ID, exported by
-    // direct-worker's headless spawn) onto the continuation signal so the
-    // pass-level "agent" loop can read ONLY the SINK node's decision in a
-    // multi-node wave. Auto-injected for request_next_iteration only; harmless
-    // (ignored) for single-node looms where the env var is absent. Caller-
-    // supplied nodeId always wins.
-    if (
-      name === "codara_request_next_iteration" &&
-      (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
-    ) {
-      const envNodeId = process.env.SPARK_NODE_ID;
-      if (envNodeId && envNodeId.trim().length > 0) {
-        args.nodeId = envNodeId.trim();
-      }
+  const refusal = applyRunIdentity(name, rpc, args);
+  if (refusal) return toolError(refusal);
+  // Stamp the calling worker's loom node id (SPARK_NODE_ID, exported by
+  // direct-worker's headless spawn) onto the continuation signal so the
+  // pass-level "agent" loop can read ONLY the SINK node's decision in a
+  // multi-node wave. Auto-injected for request_next_iteration only; harmless
+  // (ignored) for single-node looms where the env var is absent. Caller-
+  // supplied nodeId always wins.
+  if (
+    name === "codara_request_next_iteration" &&
+    (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
+  ) {
+    const envNodeId = process.env.SPARK_NODE_ID;
+    if (envNodeId && envNodeId.trim().length > 0) {
+      args.nodeId = envNodeId.trim();
     }
   }
   injectRunIdForStudioOwnership(rpc, args);
+  clampPreviewWait(rpc, args);
 
-  const timeoutMs = isOrchestrationRpc(rpc) ? ORCHESTRATION_TIMEOUT_MS : PREVIEW_TERMINAL_TIMEOUT_MS;
+  const timeoutMs = rpcTimeoutMs(rpc);
+  let heartbeat = null;
+  if (ctx.progress && PROGRESS_RPCS.has(rpc)) {
+    let beats = 0;
+    heartbeat = setInterval(() => {
+      beats += 1;
+      ctx.progress(beats, `still waiting after ${Math.round((beats * PROGRESS_INTERVAL_MS) / 1000)}s`);
+    }, PROGRESS_INTERVAL_MS);
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+  }
   try {
-    const result = await postJsonRpc(rpc, args, timeoutMs);
+    const result = await postJsonRpc(rpc, args, timeoutMs, ctx.signal);
     return toToolResult(result);
   } catch (err) {
     // A long poll whose transport died has NOT told us anything about the
@@ -2165,11 +2431,17 @@ async function callTool(params) {
           "Call codara_get_worker_status for the current state, then codara_wait_for_workers again.",
       });
     }
-    return {
-      isError: true,
-      content: [{ type: "text", text: err.message }],
-    };
+    return toolError(errorText(err));
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
+}
+
+// wait_for must answer before the client gives up on the call, or the agent
+// sees a transport error instead of "not visible yet".
+function clampPreviewWait(rpc, args) {
+  if (rpc !== "preview.wait_for" || typeof args.timeoutMs !== "number") return;
+  args.timeoutMs = Math.max(0, Math.min(args.timeoutMs, PREVIEW_WAIT_MAX_MS));
 }
 
 // Execute an ordered batch of preview steps in a single MCP round-trip. Each
@@ -2177,10 +2449,10 @@ async function callTool(params) {
 // later steps observe the DOM the earlier ones produced. Screenshot steps are
 // surfaced as image content blocks (and their base64 stripped from the JSON
 // echo so the per-step array stays readable).
-async function callRunBatch(args) {
+async function callRunBatch(args, ctx = {}) {
   const steps = args && Array.isArray(args.steps) ? args.steps : null;
   if (!steps || steps.length === 0) {
-    return { isError: true, content: [{ type: "text", text: "codara_preview_run requires a non-empty 'steps' array." }] };
+    return toolError("codara_preview_run requires a non-empty 'steps' array.");
   }
   const continueOnError = args.continueOnError === true;
   const defaultTabId = typeof args.tabId === "string" ? args.tabId : undefined;
@@ -2188,6 +2460,7 @@ async function callRunBatch(args) {
   const images = [];
   let sawError = false;
   for (let i = 0; i < steps.length; i++) {
+    if (ctx.signal && ctx.signal.aborted) break;
     const step = steps[i] && typeof steps[i] === "object" ? steps[i] : {};
     const action = step.action;
     const rpc = STEP_ACTION_TO_RPC[action];
@@ -2200,13 +2473,23 @@ async function callRunBatch(args) {
     const { action: _omitAction, label, ...rest } = step;
     const rpcArgs = { ...rest };
     if (defaultTabId && rpcArgs.tabId === undefined) rpcArgs.tabId = defaultTabId;
+    const entry = { index: i, action };
+    if (label) entry.label = label;
+    const refusal = applyRunIdentity("codara_preview_run", rpc, rpcArgs);
+    if (refusal) {
+      entry.ok = false;
+      entry.error = refusal;
+      results.push(entry);
+      sawError = true;
+      if (!continueOnError) break;
+      continue;
+    }
     // A batched navigate step can auto-open a preview tab exactly like the
     // single-shot tool; stamp the same run identity.
     injectRunIdForStudioOwnership(rpc, rpcArgs);
-    const entry = { index: i, action };
-    if (label) entry.label = label;
+    clampPreviewWait(rpc, rpcArgs);
     try {
-      const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS);
+      const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS, ctx.signal);
       if (result && result.ok === false) throw new Error(result.error || `${action} failed`);
       entry.ok = true;
       if (action === "screenshot" && result && typeof result.dataUrl === "string") {
@@ -2219,16 +2502,17 @@ async function callRunBatch(args) {
       results.push(entry);
     } catch (err) {
       entry.ok = false;
-      entry.error = err.message;
+      entry.error = errorText(err);
       results.push(entry);
       sawError = true;
       if (!continueOnError) break;
     }
+    if (ctx.progress) ctx.progress(i + 1, `step ${i + 1} of ${steps.length}`, steps.length);
   }
   const payload = { ok: !sawError, ran: results.length, total: steps.length, steps: results };
   return {
     isError: sawError,
-    content: [...images, { type: "text", text: JSON.stringify(payload, null, 2) }],
+    content: [...images, { type: "text", text: JSON.stringify(payload) }],
   };
 }
 
@@ -2252,9 +2536,11 @@ function toToolResult(value) {
       };
     }
   }
+  // Compact JSON: indentation made results 40 to 60 percent larger for the
+  // model to read and added nothing it uses.
   return {
     ...(value && value.ok === false ? { isError: true } : {}),
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(value) }],
   };
 }
 
