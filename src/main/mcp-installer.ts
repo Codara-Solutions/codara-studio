@@ -75,7 +75,15 @@ const LEGACY_SERVER_NAMES = [
 // v6: MCP tool names renamed from the spark_ prefix to codara_ (preview +
 // terminal + execute + automation rosters). Bumped so matchesCurrent re-renders
 // existing entries and the Capability Center card refreshes its tool-name text.
-const SPARK_VERSION = "6";
+// v7: terminal run/list and notify_user tools, codara_preview_url retired to a
+// hidden alias, and Codex entries carry tool and startup timeouts long enough
+// for codara_terminal_run.
+const SPARK_VERSION = "7";
+
+// Codex stops waiting on an MCP tool after 60s by default, which would cut off
+// codara_terminal_run (up to 10 minutes) and long preview waits mid-call.
+const CODEX_TOOL_TIMEOUT_SEC = 660;
+const CODEX_STARTUP_TIMEOUT_SEC = 20;
 
 // Instances running under an explicit home override (tests, dev harnesses,
 // side-by-side profiles) must never manage the user's global agent configs —
@@ -100,7 +108,6 @@ function isSandboxedHome(): boolean {
 const SPARK_STUDIO_TOOLS = [
   // Preview (drive the live <preview> tab).
   "codara_preview_list",
-  "codara_preview_url",
   "codara_preview_navigate",
   "codara_preview_snapshot",
   "codara_preview_click",
@@ -121,9 +128,13 @@ const SPARK_STUDIO_TOOLS = [
   "codara_preview_run",
   // Terminal (open + drive agent-owned terminal tabs).
   "codara_terminal_create",
+  "codara_terminal_run",
+  "codara_terminal_list",
   "codara_terminal_write",
   "codara_terminal_read",
   "codara_terminal_close",
+  // Terminal agents outside a Cora chat.
+  "codara_notify_user",
 ];
 
 const SPARK_ORCHESTRATION_TOOLS = [
@@ -552,7 +563,7 @@ async function installForCodex(
     // Strip our managed block, the retired orchestrator block, and any broken
     // legacy-named tables, then append one fresh block.
     const stripped = stripAllManagedBlocks(existing, { sweepBuiltinName: isCodaraOwnedSection(section) });
-    const block = renderCodexBlock();
+    const block = renderCodexBlock({ timeouts: true });
     const base = stripped.trimEnd();
     const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
     if (next === existing) return unchanged("already-current");
@@ -840,7 +851,8 @@ function stripManagedCodexRegions(
   return kept.join("\n").trimEnd() + "\n";
 }
 
-function renderCodexBlock(): string {
+// Grok shares the block format but not Codex's timeout keys.
+function renderCodexBlock(options: { timeouts?: boolean } = {}): string {
   const args = buildServerArgs();
   return [
     CODEX_BLOCK_START,
@@ -855,6 +867,9 @@ function renderCodexBlock(): string {
     `command = ${tomlString(resolveNodeCommand())}`,
     `args = [${args.map(tomlString).join(", ")}]`,
     `enabled = true`,
+    ...(options.timeouts
+      ? [`startup_timeout_sec = ${CODEX_STARTUP_TIMEOUT_SEC}`, `tool_timeout_sec = ${CODEX_TOOL_TIMEOUT_SEC}`]
+      : []),
     "",
     `[mcp_servers."${SERVER_NAME}".env]`,
     `ELECTRON_RUN_AS_NODE = "1"`,
