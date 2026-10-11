@@ -109,14 +109,45 @@ two ways:
 
 | Mode | Who gets it | Tools |
 |---|---|---|
-| unset (studio) | a CLI you run yourself, and Cora's chat workers (the worker extension narrows it further, `worker-policy.ts`) | preview, terminals, board, whiteboard |
-| `execute` | Cora's manager in a chat | the studio tools plus orchestration (spawn and wait for workers, ask the user, complete) and managing automations |
+| unset (studio) | a CLI you run yourself, and Cora's chat workers (the worker extension narrows it further, `worker-policy.ts`) | preview, terminals, board, whiteboard; a CLI outside a Cora chat also gets the worktree tools |
+| `execute` | Cora's manager in a chat | the studio tools plus orchestration (spawn and wait for workers, ask the user, complete), managing automations, and the worktree tools |
 | `automation` | Cora's manager in an automation run | the studio tools plus the automation tools |
 | `worker` | workers of automation (loom) runs | the studio tools without board and whiteboard writes, plus `codara_ask_user` and `codara_request_next_iteration` |
 
 The full list is in [mcp-tools.md](./mcp-tools.md). `cli/cora.cjs` speaks
 the same JSON-RPC (`cli/lib/rpc.cjs`). When the app is closed, it reads run
 files from disk instead (`cli/lib/store.cjs`).
+
+### Agent worktrees
+
+`codara_worktree_create`, `_list` and `_remove` map to `worktree.*` on the
+socket. The policy lives in `agent-worktrees.ts`, which imports no Electron:
+`agent-socket.ts` passes the app in (state, preferences, runs, panes, the
+renderer's terminal list, `gh`, the audit log) and the unit suite passes
+fakes, against real throwaway repositories.
+
+Who is asking comes from the launch environment only. The MCP server stamps
+`runId` (from `SPARK_RUN_ID`), the caller's pane and pid, the client name from
+`initialize`, and a role from its mode: `manager` for `execute` and a direct
+Cora chat, `worker`, `automation`, `talk` for any other process with a run id,
+and `studio` otherwise. The socket refuses workers and automation, and accepts
+a run id only from a manager whose run is active and is not an automation.
+The repository is the caller's: its run's workspace, or the workspace of the
+pane it runs in, resolved to the repository root (a caller inside an agent
+worktree acts on the same repository). Imported pull-request runs are refused
+like the other execution methods.
+
+Removal is the dangerous half, so it checks twice. A first pass outside any
+lock fetches the target, looks for a merged pull request, and collects every
+blocker. Then, under a per-repository lock that create and remove share, it
+checks again against the commits already fetched, so a commit, an edit or a
+new terminal in between is caught (`WORKTREE_CHANGED`). Only then does it
+write the recovery ref (create-only), run `git worktree remove` without
+`--force`, delete the branch with a compare-and-delete `update-ref`, and drop
+the rail row. That order means a failure leaves at worst a stale row, never a
+hidden worktree. The renderer hears about the new state through
+`state:changed`, disposes what it held for a vanished workspace, and shows a
+toast from `workspace:agentEvent`.
 
 ## Claude Code hooks
 
@@ -394,6 +425,14 @@ the operating system through Electron `safeStorage`. Runs are folders of
 files. The complete list, with the module that owns each file, is in the
 [codebase tour](./codebase-tour.md#4-where-state-lives-on-disk). The
 user-facing version is [on-your-machine.md](./on-your-machine.md).
+
+The workspace list has two writers. The renderer saves its whole state
+(`state:save`, 200 ms after a change), and the main process edits it through
+`updateState` when it adds or drops a workspace itself (an agent worktree, an
+issue workspace, `cora start`) and then broadcasts `state:changed`. A renderer
+save already in flight at that moment carries the older list, so `storage.ts`
+remembers each workspace main added or removed and, for 30 seconds or until a
+renderer save agrees, reapplies it to renderer saves that contradict it.
 
 ## Build and release
 
