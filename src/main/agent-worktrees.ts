@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { readlink } from "node:fs/promises";
 import { execFile } from "node:child_process";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
   COPY_BRANCH_CREATOR_LIMITS,
@@ -23,10 +23,12 @@ import {
   contentInTarget,
   createCheckoutWorktree,
   createCopyWorktree,
+  hiddenLocalChanges,
   ignoredEntries,
   inProgressOperation,
   isAncestor,
   listWorktreeRegistrations,
+  populatedSubmodules,
   removeCopyWorktree,
   resolveDefaultBranch,
   type WorktreeRegistration,
@@ -95,6 +97,7 @@ export type WorktreeCode =
   | "WORKTREE_OPERATION_IN_PROGRESS"
   | "WORKTREE_IGNORED_FILES"
   | "WORKTREE_SUBMODULES"
+  | "WORKTREE_NESTED_REPOSITORY"
   | "WORKTREE_NOT_MERGED"
   | "WORKTREE_TARGET_NOT_FOUND"
   | "WORKTREE_RUNNING_PANES"
@@ -244,6 +247,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_OPERATION_IN_PROGRESS: "an operation is in progress in the worktree",
   WORKTREE_IGNORED_FILES: "the worktree has ignored files that cannot be regenerated",
   WORKTREE_SUBMODULES: "initialized submodules block removal",
+  WORKTREE_NESTED_REPOSITORY: "another git checkout or worktree is nested inside this worktree",
   WORKTREE_NOT_MERGED: "the branch is not merged",
   WORKTREE_TARGET_NOT_FOUND: "the merge target was not found",
   WORKTREE_RUNNING_PANES: "terminals use the worktree",
@@ -268,8 +272,9 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_DIRTY: "commit or discard them yourself",
   WORKTREE_IGNORED_FILES: "move them, or pass discardIgnoredFiles:true",
   WORKTREE_SUBMODULES: "ask the user",
+  WORKTREE_NESTED_REPOSITORY: "move or remove the nested checkout first, or ask the user",
   WORKTREE_NOT_MERGED: "push and merge it (PR), or ask the user to delete it from the workspace rail",
-  WORKTREE_TARGET_NOT_FOUND: "pass target",
+  WORKTREE_TARGET_NOT_FOUND: "pass target: the branch it was merged into, such as main",
   WORKTREE_RUNNING_PANES:
     "close your own terminals with codara_terminal_close; otherwise wait or ask the user",
   WORKTREE_ACTIVE_RUNS: "wait for the runs to finish or ask the user",
@@ -473,6 +478,43 @@ export function isRegenerableIgnored(entry: string, extra: readonly string[] = [
     }
   }
   return false;
+}
+
+const NESTED_SCAN_MAX_DEPTH = 3;
+const NESTED_SCAN_MAX_DIRS = 2_000;
+
+// Checkouts (a .git file or directory) inside git-ignored directories, where
+// the worktree's own status never looks. The walk is bounded and visits the
+// directories that are not regenerable first, so a large node_modules/ cannot
+// use up the budget before a hand-made ignored folder is checked.
+async function checkoutsInIgnored(
+  root: string,
+  entries: readonly string[],
+  extra: readonly string[],
+): Promise<string[]> {
+  const found: string[] = [];
+  let budget = NESTED_SCAN_MAX_DIRS;
+  const visit = async (relative: string, depth: number): Promise<void> => {
+    if (budget <= 0 || found.length >= MAX_LISTED_PATHS) return;
+    budget -= 1;
+    const absolute = join(root, relative);
+    if (existsSync(join(absolute, ".git"))) {
+      found.push(resolve(absolute));
+      return;
+    }
+    if (depth >= NESTED_SCAN_MAX_DEPTH) return;
+    const children = await fsp.readdir(absolute, { withFileTypes: true }).catch(() => []);
+    for (const child of children) {
+      if (child.isDirectory()) await visit(`${relative}${child.name}/`, depth + 1);
+    }
+  };
+  const directories = entries.filter((entry) => entry.endsWith("/"));
+  const ordered = [
+    ...directories.filter((entry) => !isRegenerableIgnored(entry, extra)),
+    ...directories.filter((entry) => isRegenerableIgnored(entry, extra)),
+  ];
+  for (const entry of ordered) await visit(entry, 0);
+  return found;
 }
 
 function dateStamp(date: Date): string {
@@ -1067,6 +1109,46 @@ async function resolveTarget(
   return { name: display, commit: await revParse(repo, `${display}^{commit}`) };
 }
 
+async function refIsPresent(cwd: string, ref: string): Promise<boolean> {
+  try {
+    await runGit(cwd, ["show-ref", "--verify", "--quiet", ref]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// A caller-named merge target must be a branch, local or remote-tracking,
+// other than the worktree's own. A commit id, a revision expression or the
+// branch itself would make the ancestor proof hold for any tip, and removal
+// would then delete unmerged work.
+async function resolveExplicitTarget(
+  ctx: VerifyContext,
+  raw: string,
+  ownBranch: string,
+): Promise<{ name: string; ref: string | null; commit: string | null; problem?: string }> {
+  const repo = ctx.scope.repoCwd;
+  const name = raw.trim();
+  let resolved: { name: string; ref: string; branch: string } | null = null;
+  if (await refIsPresent(repo, `refs/remotes/origin/${name}`)) {
+    resolved = { name: `origin/${name}`, ref: `refs/remotes/origin/${name}`, branch: name };
+  } else {
+    const remote = await splitRemoteRef(repo, name);
+    if (remote && (await refIsPresent(repo, `refs/remotes/${name}`))) {
+      resolved = { name, ref: `refs/remotes/${name}`, branch: remote.branch };
+    } else if (await refIsPresent(repo, `refs/heads/${name}`)) {
+      resolved = { name, ref: `refs/heads/${name}`, branch: name };
+    }
+  }
+  if (!resolved) {
+    return { name, ref: null, commit: null, problem: "it is not a local or remote-tracking branch" };
+  }
+  if (resolved.branch === ownBranch) {
+    return { name: resolved.name, ref: null, commit: null, problem: "it is the worktree's own branch" };
+  }
+  return { name: resolved.name, ref: resolved.ref, commit: await revParse(repo, `${resolved.ref}^{commit}`) };
+}
+
 async function fetchTargetOnce(ctx: VerifyContext, target: string): Promise<string | null> {
   const known = ctx.fetchedTargets.get(target);
   if (known) return known;
@@ -1123,7 +1205,16 @@ export async function verifyRemovable(
     }
   }
 
-  const stat = await fsp.lstat(path).catch(() => null);
+  // Only a path that does not exist reads as already removed; one that cannot
+  // be read (permissions, a stalled mount) may still hold work.
+  const stat = await fsp.lstat(path).catch((err: NodeJS.ErrnoException) =>
+    err?.code === "ENOENT" || err?.code === "ENOTDIR" ? null : err,
+  );
+  if (stat instanceof Error) {
+    block("WORKTREE_NOT_MANAGED");
+    verdict.warnings.push(`cannot read the worktree: ${cleanText(stat.message, 200)}`);
+    return verdict;
+  }
   const realPath = await realpathOrResolve(path);
   const registration = await (async () => {
     for (const entry of ctx.registrations) {
@@ -1173,18 +1264,31 @@ export async function verifyRemovable(
     block("WORKTREE_DIRTY");
     verdict.warnings.push(`status failed: ${cleanText(errorText(err), 200)}`);
   }
+  try {
+    const hidden = await hiddenLocalChanges(path);
+    if (hidden.length) {
+      verdict.dirty.tracked += hidden.length;
+      block("WORKTREE_DIRTY");
+      verdict.details.hiddenChanges = hidden.slice(0, MAX_LISTED_PATHS);
+    }
+  } catch (err) {
+    block("WORKTREE_DIRTY");
+    verdict.warnings.push(`assume-unchanged scan failed: ${cleanText(errorText(err), 200)}`);
+  }
   const operation = await inProgressOperation(path);
   if (operation) {
     verdict.dirty.inProgress = operation;
     block("WORKTREE_OPERATION_IN_PROGRESS");
   }
+  const extra = [
+    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.parentWorkspace.cwd] ?? []),
+    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.repoCwd] ?? []),
+    ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[copy.repoCwd] ?? []),
+  ];
+  let ignored: string[] | null = null;
   try {
-    const extra = [
-      ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.parentWorkspace.cwd] ?? []),
-      ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[scope.repoCwd] ?? []),
-      ...(ctx.preferences.agentWorktreeRegenerableIgnoredByRepo?.[copy.repoCwd] ?? []),
-    ];
-    const blocking = (await ignoredEntries(path)).filter((entry) => !isRegenerableIgnored(entry, extra));
+    ignored = await ignoredEntries(path);
+    const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra));
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
       if (options.discardIgnoredFiles) {
@@ -1197,11 +1301,27 @@ export async function verifyRemovable(
     block("WORKTREE_IGNORED_FILES");
     verdict.warnings.push(`ignored-file scan failed: ${cleanText(errorText(err), 200)}`);
   }
-  if (existsSync(resolve(path, ".gitmodules"))) {
-    const submodules = await readGitText(path, ["submodule", "status"]);
-    if (submodules.split(/\r?\n/).some((line) => line.trim() && !line.startsWith("-"))) {
+  try {
+    const submodules = await populatedSubmodules(path);
+    if (submodules.length) {
       block("WORKTREE_SUBMODULES");
+      verdict.details.submodules = submodules.slice(0, MAX_LISTED_PATHS);
     }
+  } catch (err) {
+    block("WORKTREE_SUBMODULES");
+    verdict.warnings.push(`submodule scan failed: ${cleanText(errorText(err), 200)}`);
+  }
+  // discardIgnoredFiles never covers these: a nested checkout can hold
+  // commits and changes of its own that no status of this worktree shows.
+  const nested: string[] = [];
+  for (const entry of ctx.registrations) {
+    const real = await realpathOrResolve(entry.path);
+    if (real !== realPath && isAtOrUnder(real, realPath)) nested.push(real);
+  }
+  if (ignored) nested.push(...(await checkoutsInIgnored(realPath, ignored, extra)));
+  if (nested.length) {
+    block("WORKTREE_NESTED_REPOSITORY");
+    verdict.details.nestedRepositories = [...new Set(nested)].slice(0, MAX_LISTED_PATHS);
   }
 
   // Merge proof for the exact tip.
@@ -1275,13 +1395,24 @@ async function proveMerged(
   let targetName = explicitTarget ?? copy.baseBranch ?? null;
   if (!targetName && candidates.length) targetName = candidates[0].baseRefName;
   if (!targetName || targetName === "HEAD") targetName = await resolveDefaultBranch(repo);
-  let target = await resolveTarget(ctx, targetName);
+  let target: { name: string; ref?: string | null; commit: string | null; problem?: string } = explicitTarget
+    ? await resolveExplicitTarget(ctx, explicitTarget, copy.branch)
+    : await resolveTarget(ctx, targetName);
+  if (target.problem) {
+    verdict.target = target.name;
+    verdict.details.targetProblem = target.problem;
+    verdict.mergeStatus = "unknown";
+    block("WORKTREE_TARGET_NOT_FOUND");
+    return;
+  }
   if (options.pinned) {
     target = { name: target.name, commit: options.pinned.targetCommit };
   } else if (options.fetch && target.commit) {
     const failure = await fetchTargetOnce(ctx, target.name);
     if (failure) verdict.warnings.push(`fetch failed: ${failure}`);
-    target = await resolveTarget(ctx, target.name);
+    target = target.ref
+      ? { ...target, commit: await revParse(repo, `${target.ref}^{commit}`) }
+      : await resolveTarget(ctx, target.name);
   }
   verdict.target = target.name;
   verdict.targetCommit = target.commit;
@@ -1343,7 +1474,11 @@ function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
     case "WORKTREE_NOT_MERGED":
       return `'${verdict.branch}' has ${d.aheadOfTarget ?? "some"} commits not in ${verdict.target} and no merged PR has head ${verdict.tip}`;
     case "WORKTREE_TARGET_NOT_FOUND":
-      return `merge target '${verdict.target}' not found`;
+      return d.targetProblem
+        ? `'${verdict.target}' cannot be the merge target: ${String(d.targetProblem)}`
+        : `merge target '${verdict.target}' not found`;
+    case "WORKTREE_NESTED_REPOSITORY":
+      return `a git checkout or worktree is nested inside this worktree: ${(d.nestedRepositories as string[]).join(", ")}`;
     case "WORKTREE_RUNNING_PANES":
       return `${verdict.running.paneIds.length} terminals use the worktree`;
     case "WORKTREE_ACTIVE_RUNS":
@@ -1765,6 +1900,7 @@ async function removeLocked(
       branch,
       force: false,
       deleteBranch: false,
+      removeOrphanDir: false,
     });
     if (!removed.ok) {
       await runGit(repo, ["update-ref", "-d", recoveryRef, verdict.tip!]).catch(() => undefined);
@@ -1785,7 +1921,14 @@ async function removeLocked(
       if (verdict.alreadyRemoved) {
         // Only the branch is left: delete it only when its current tip is
         // itself merged.
-        const target = await resolveTarget(ctx, input.target ?? workspace.copyBranch!.baseBranch ?? (await resolveDefaultBranch(repo)));
+        const target = input.target?.trim()
+          ? await resolveExplicitTarget(ctx, input.target, branch)
+          : await resolveTarget(
+              ctx,
+              workspace.copyBranch!.baseBranch && workspace.copyBranch!.baseBranch !== "HEAD"
+                ? workspace.copyBranch!.baseBranch
+                : await resolveDefaultBranch(repo),
+            );
         if (target.commit) {
           const merged =
             (await isAncestor(repo, currentTip, target.commit)) ||

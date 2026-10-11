@@ -453,6 +453,53 @@ async function agentWorktreeProbes(wt) {
     writeFileSync(path.join(merged.path, "node_modules", "pkg", "index.js"), "\n");
     writeFileSync(path.join(merged.path, ".env.local"), "TOKEN=1\n");
     assert.deepStrictEqual((await wt.ignoredEntries(merged.path)).sort(), [".env.local", "node_modules/"]);
+
+    // Edits git status hides: assume-unchanged and skip-worktree files that
+    // differ from the index. An absent skip-worktree file holds no edit.
+    const hidden = await fork("agent/hidden");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), []);
+    git(hidden.path, ["update-index", "--assume-unchanged", "shared.txt"]);
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a flag alone is no edit");
+    writeFileSync(path.join(hidden.path, "shared.txt"), "edited where status cannot see\n");
+    assert.strictEqual(git(hidden.path, ["status", "--porcelain"]), "");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), ["shared.txt"]);
+    git(hidden.path, ["update-index", "--no-assume-unchanged", "shared.txt"]);
+    git(hidden.path, ["checkout", "--", "shared.txt"]);
+    git(hidden.path, ["update-index", "--skip-worktree", "shared.txt"]);
+    writeFileSync(path.join(hidden.path, "shared.txt"), "edited where status cannot see\n");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), ["shared.txt"]);
+    rmSync(path.join(hidden.path, "shared.txt"));
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a sparse, absent file is no edit");
+
+    // A nested repository committed as a bare gitlink, with no .gitmodules,
+    // is a populated submodule to git's worktree removal.
+    const vendoring = await fork("agent/vendoring");
+    const vendored = path.join(vendoring.path, "vendored");
+    execFileSync("git", ["init", "-q", "-b", "main", vendored]);
+    git(vendored, ["config", "user.name", "Test"]);
+    git(vendored, ["config", "user.email", "test@example.com"]);
+    commit(vendored, "only-copy.txt", "nowhere else\n", "only copy");
+    git(vendoring.path, ["add", "vendored"]);
+    git(vendoring.path, ["commit", "-q", "-m", "vendor"]);
+    assert.deepStrictEqual(await wt.populatedSubmodules(vendoring.path), ["vendored"]);
+    assert.deepStrictEqual(await wt.populatedSubmodules(merged.path), []);
+
+    // Reached through a symlinked root, the worktree's path does not match
+    // git's canonical listing, so it reads as unregistered. git refuses the
+    // removal over the submodule; removeOrphanDir:false must keep that a
+    // failure rather than delete the tree recursively.
+    const linkedRoot = path.join(scratch, "linked-wts");
+    symlinkSync(root, linkedRoot, "dir");
+    const viaLink = path.join(linkedRoot, path.basename(vendoring.path));
+    assert.strictEqual(await wt.isRegisteredWorktree(repo, viaLink), false);
+    const refused = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: viaLink,
+      branch: "agent/vendoring",
+      removeOrphanDir: false,
+    });
+    assert.ok(!refused.ok && /submodule/i.test(refused.error), JSON.stringify(refused));
+    assert.ok(existsSync(path.join(vendored, "only-copy.txt")), "the nested repository's only copy survives");
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

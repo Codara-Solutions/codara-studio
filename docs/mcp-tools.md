@@ -169,11 +169,17 @@ the `blockers` and a `hint`:
   are removed from the rail only;
 - its exact last commit is merged into the target (its base, or `target`):
   the target contains it, a merged pull request from the same repository has
-  it as head, or merging it into the target changes nothing (a squash merge);
-- it has no uncommitted or untracked files, no merge or rebase in progress,
-  and no ignored files beyond build output and caches (`node_modules/`,
-  `dist/`, `.venv/` and similar, plus the patterns you add for the repository
-  in Settings); `discardIgnoredFiles: true` deletes the rest;
+  it as head, or merging it into the target changes nothing (a squash merge).
+  A `target` the agent names must be another local or remote-tracking
+  branch, never the worktree's own branch, its pushed copy or a commit id;
+- it has no uncommitted or untracked files (edits hidden by
+  `assume-unchanged` or `skip-worktree` count), no merge or rebase in
+  progress, and no ignored files beyond build output and caches
+  (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
+  for the repository in Settings); `discardIgnoredFiles: true` deletes the
+  rest;
+- no submodule or nested repository is checked out in it, and no other
+  checkout or worktree sits inside it, ignored folders included;
 - no terminal, active Cora run or process uses it, and the caller is not
   inside it.
 

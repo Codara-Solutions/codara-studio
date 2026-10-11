@@ -647,7 +647,7 @@ const WORKTREE_TOOLS = [
       properties: {
         workspaceId: { type: "string", description: "Pass this or path." },
         path: { type: "string", description: "Absolute worktree path." },
-        target: { type: "string", description: "Merged into. Default its base." },
+        target: { type: "string", description: "Branch it merged into. Default its base." },
         deleteBranch: { type: "boolean", description: "Default true for a new branch." },
         discardIgnoredFiles: { type: "boolean", description: "Delete blocking ignored files such as .env.local." },
         dryRun: { type: "boolean" },

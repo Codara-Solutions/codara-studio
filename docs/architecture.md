@@ -144,7 +144,10 @@ checks again against the commits already fetched, so a commit, an edit or a
 new terminal in between is caught (`WORKTREE_CHANGED`). Only then does it
 write the recovery ref (create-only), run `git worktree remove` without
 `--force`, delete the branch with a compare-and-delete `update-ref`, and drop
-the rail row. That order means a failure leaves at worst a stale row, never a
+the rail row. If git refuses, the refusal stands: the orphan cleanup the
+rail's delete uses (a recursive delete once git no longer lists the path) is
+off here, because a worktree reached through a symlinked path never matches
+git's canonical listing. That order means a failure leaves at worst a stale row, never a
 hidden worktree. The renderer hears about the new state through
 `state:changed`, disposes what it held for a vanished workspace, and shows a
 toast from `workspace:agentEvent`.

@@ -524,6 +524,95 @@ async function main() {
       return { ...workspace, copyBranch };
     });
 
+    // ── Remove: work that git status does not show ─────────────────────────
+    // discardIgnoredFiles (passed by blocked()) acknowledges none of these.
+    const hidden = await aw.createAgentWorktree(terminalAgent, { branch: "agent/hidden" }, deps);
+    git(hidden.path, ["update-index", "--assume-unchanged", "README.md"]);
+    fs.writeFileSync(path.join(hidden.path, "README.md"), "# edited where status cannot see\n");
+    let unseen = await blocked(hidden.workspaceId, "WORKTREE_DIRTY", "an assume-unchanged edit");
+    assert.deepEqual(unseen.details.hiddenChanges, ["README.md"]);
+    git(hidden.path, ["update-index", "--no-assume-unchanged", "README.md"]);
+    git(hidden.path, ["checkout", "--", "README.md"]);
+    git(hidden.path, ["update-index", "--skip-worktree", "README.md"]);
+    fs.writeFileSync(path.join(hidden.path, "README.md"), "# edited where status cannot see\n");
+    await blocked(hidden.workspaceId, "WORKTREE_DIRTY", "a skip-worktree edit");
+    git(hidden.path, ["update-index", "--no-skip-worktree", "README.md"]);
+    git(hidden.path, ["checkout", "--", "README.md"]);
+
+    // A linked worktree inside a regenerable ignored folder, and a clone
+    // inside node_modules: git worktree remove would delete both with
+    // everything they hold.
+    const inner = path.join(hidden.path, "dist", "inner");
+    git(repo, ["worktree", "add", "-q", "-b", "agent/inner", inner]);
+    fs.writeFileSync(path.join(inner, "wip.txt"), "uncommitted\n");
+    unseen = await blocked(hidden.workspaceId, "WORKTREE_NESTED_REPOSITORY", "a worktree nested in an ignored folder");
+    assert.deepEqual(unseen.details.nestedRepositories, [inner]);
+    git(repo, ["worktree", "remove", "--force", inner]);
+    git(repo, ["branch", "-D", "agent/inner"]);
+    const clone = path.join(hidden.path, "node_modules", "patched-dep");
+    execFileSync("git", ["init", "-q", "-b", "main", clone]);
+    commitFile(clone, "fix.js", "only here\n", "local patch");
+    unseen = await blocked(hidden.workspaceId, "WORKTREE_NESTED_REPOSITORY", "a clone in node_modules");
+    assert.deepEqual(unseen.details.nestedRepositories, [clone]);
+    fs.rmSync(path.join(hidden.path, "node_modules"), { recursive: true, force: true });
+
+    // A nested repository committed as a bare gitlink: git refuses to remove
+    // the worktree, so list and dry run must not call it removable.
+    const vendored = path.join(hidden.path, "vendored");
+    execFileSync("git", ["init", "-q", "-b", "main", vendored]);
+    commitFile(vendored, "only-copy.txt", "nowhere else\n", "only copy");
+    git(hidden.path, ["add", "vendored"]);
+    git(hidden.path, ["commit", "-q", "-m", "vendor"]);
+    git(repo, ["merge", "-q", "--ff-only", "agent/hidden"]);
+    unseen = await blocked(hidden.workspaceId, "WORKTREE_SUBMODULES", "a committed nested repository");
+    assert.deepEqual(unseen.details.submodules, ["vendored"]);
+    assert.ok(fs.existsSync(path.join(vendored, "only-copy.txt")));
+    git(repo, ["reset", "-q", "--hard", "HEAD~1"]);
+
+    // A worktree that cannot be read is not "already removed".
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const managedRoot = deps.worktreesRoot(repo);
+      fs.chmodSync(managedRoot, 0o000);
+      try {
+        unseen = await aw.removeAgentWorktree(terminalAgent, { workspaceId: hidden.workspaceId }, deps);
+      } finally {
+        fs.chmodSync(managedRoot, 0o755);
+      }
+      assert.equal(unseen.code, "WORKTREE_NOT_MANAGED", JSON.stringify(unseen));
+      assert.ok(workspaceOf(hidden.workspaceId), "the row stays");
+      assert.ok(fs.existsSync(path.join(vendored, "only-copy.txt")));
+    }
+
+    // A caller-named target must be another branch: the worktree's own
+    // branch, its pushed copy, a commit id or a revision expression would
+    // prove any tip merged.
+    const own = await aw.createAgentWorktree(terminalAgent, { branch: "agent/own-target" }, deps);
+    const ownTip = commitFile(own.path, "own.txt", "unmerged\n", "unmerged work");
+    git(repo, ["push", "-q", "origin", "agent/own-target"]);
+    for (const target of ["agent/own-target", "origin/agent/own-target", ownTip, "agent/own-target~0", "refs/heads/agent/own-target"]) {
+      const result = await aw.removeAgentWorktree(terminalAgent, { workspaceId: own.workspaceId, target }, deps);
+      assert.equal(result.code, "WORKTREE_TARGET_NOT_FOUND", `${target}: ${JSON.stringify(result)}`);
+      assert.ok(result.details.targetProblem, target);
+    }
+    assert.ok(fs.existsSync(path.join(own.path, "own.txt")) && refExists(repo, "refs/heads/agent/own-target"));
+    git(repo, ["branch", "release", ownTip]);
+    const intoRelease = await aw.removeAgentWorktree(terminalAgent, { workspaceId: own.workspaceId, target: "release" }, deps);
+    assert.equal(intoRelease.ok, true, JSON.stringify(intoRelease));
+    assert.equal(intoRelease.target, "release");
+    assert.equal(git(repo, ["rev-parse", "release"]), ownTip, "the work lives on in the target");
+    git(repo, ["branch", "-D", "release"]);
+    git(repo, ["push", "-q", "origin", "--delete", "agent/own-target"]);
+    git(repo, ["fetch", "-q", "--prune", "origin"]);
+    // The same rule holds when only the branch is left to delete.
+    const gone = await aw.createAgentWorktree(terminalAgent, { branch: "agent/gone" }, deps);
+    commitFile(gone.path, "gone.txt", "unmerged\n", "unmerged work");
+    fs.rmSync(gone.path, { recursive: true, force: true });
+    const goneResult = await aw.removeAgentWorktree(terminalAgent, { workspaceId: gone.workspaceId, target: "agent/gone" }, deps);
+    assert.equal(goneResult.alreadyRemoved, true, JSON.stringify(goneResult));
+    assert.equal(goneResult.branchDeleted, false);
+    assert.ok(refExists(repo, "refs/heads/agent/gone"), "an unmerged branch outlives its deleted directory");
+    git(repo, ["branch", "-D", "agent/gone"]);
+
     // list and remove decide alike.
     fs.writeFileSync(path.join(twin.path, "scratch.txt"), "x\n");
     h.terminals = [{ paneId: "pane-twin", workspaceId: twin.workspaceId }];

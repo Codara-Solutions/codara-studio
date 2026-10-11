@@ -45,6 +45,11 @@ export interface RemoveCopyWorktreeInput {
   branch: string;
   force?: boolean;
   deleteBranch?: boolean;
+  // False keeps a failed removal a failure even when git no longer lists the
+  // path as a worktree. That listing compares path spellings, so a worktree
+  // reached through a symlink reads as orphaned and would be deleted
+  // recursively right after git refused to remove it.
+  removeOrphanDir?: boolean;
 }
 
 const MANAGED_REPO_HASH_HEX_LENGTH = 12;
@@ -512,6 +517,9 @@ async function tryRemoveWorktreeOnce(
     if (await isRegisteredWorktree(input.repoCwd, input.worktreePath)) {
       return { ok: false, error: msg, retryable: BUSY_GIT_MSG.test(msg) };
     }
+    if (input.removeOrphanDir === false) {
+      return { ok: false, error: msg, retryable: false };
+    }
     // Orphaned/broken copy: the linkage is gone (admin entry pruned or the
     // worktree's own .git pointer lost), so the path is no longer a registered
     // worktree and git fails with "is not a working tree". Clear the directory
@@ -665,6 +673,56 @@ export async function inProgressOperation(worktreePath: string): Promise<string 
     if (existsSync(join(gitDir, marker))) return name;
   }
   return null;
+}
+
+// Submodules git refuses to remove a worktree over: an absorbed modules/
+// directory in the worktree's own git dir, or a gitlink whose directory holds
+// a checkout. Neither needs a .gitmodules entry, so a nested repository
+// committed with a plain `git add` counts too.
+export async function populatedSubmodules(worktreePath: string): Promise<string[]> {
+  const found: string[] = [];
+  const gitDir = await readGitText(worktreePath, ["rev-parse", "--absolute-git-dir"]);
+  if (gitDir && existsSync(join(gitDir, "modules"))) found.push(join(gitDir, "modules"));
+  const { stdout } = await runGit(worktreePath, ["ls-files", "--stage", "-z"]);
+  for (const record of stdout.split("\0")) {
+    if (!record.startsWith("160000 ")) continue;
+    const tab = record.indexOf("\t");
+    if (tab < 0) continue;
+    const entry = record.slice(tab + 1);
+    if (existsSync(join(worktreePath, entry, ".git"))) found.push(entry);
+  }
+  return found;
+}
+
+// Tracked files whose edits `git status` hides because they are marked
+// assume-unchanged or skip-worktree. Removing the worktree would delete those
+// edits without git reporting them. An absent skip-worktree file (a sparse
+// checkout) holds no edit.
+export async function hiddenLocalChanges(worktreePath: string): Promise<string[]> {
+  const { stdout } = await runGit(worktreePath, ["ls-files", "-v", "--stage", "-z"]);
+  const flagged: Array<{ path: string; oid: string }> = [];
+  for (const record of stdout.split("\0")) {
+    const tag = record[0];
+    if (!tag || !(tag === "S" || (tag >= "a" && tag <= "z"))) continue;
+    const match = /^\S (\d{6}) ([0-9a-f]{40,64}) \d\t([\s\S]+)$/.exec(record);
+    if (!match || match[1] === "160000") continue;
+    if (!existsSync(join(worktreePath, match[3]))) continue;
+    flagged.push({ path: match[3], oid: match[2].toLowerCase() });
+  }
+  const changed: string[] = [];
+  for (let i = 0; i < flagged.length; i += 100) {
+    const batch = flagged.slice(i, i + 100);
+    const { stdout: hashes } = await runGit(worktreePath, [
+      "hash-object",
+      "--",
+      ...batch.map((entry) => entry.path),
+    ]);
+    const oids = hashes.split(/\r?\n/).map((line) => line.trim().toLowerCase()).filter(Boolean);
+    batch.forEach((entry, index) => {
+      if (oids[index] !== entry.oid) changed.push(entry.path);
+    });
+  }
+  return changed;
 }
 
 // Git-ignored entries in the worktree, a wholly ignored directory collapsed
