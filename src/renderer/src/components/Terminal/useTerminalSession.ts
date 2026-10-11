@@ -63,6 +63,7 @@ import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
+import { asciiBytes, indexOfBytes } from "./terminalByteScan";
 import {
   captureTerminalScreenModes,
   setTerminalPaneAlternateScreen,
@@ -106,7 +107,11 @@ const ALT_SCREEN_EXIT_CONFIRM_MS = 400;
 // once, a tab transition), which would otherwise stay blank.
 const REVEAL_TRAILING_REPAINT_MS = 250;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const PTY_MANAGER_RESET_SEQUENCE = "\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l";
+const PTY_MANAGER_RESET_BYTES = asciiBytes("\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l");
+// The searches jump between occurrences of their rarest byte in terminal
+// output (see terminalByteScan): the first "J", and the first "/".
+const PTY_MANAGER_RESET_ANCHOR = PTY_MANAGER_RESET_BYTES.indexOf(0x4a);
+const SCHEME_SEPARATOR_BYTES = asciiBytes("://");
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.
@@ -4048,31 +4053,14 @@ function stripTrailingPunct(url: string): string {
 }
 
 function containsPtyManagerReset(bytes: Uint8Array): boolean {
-  const sequenceLength = PTY_MANAGER_RESET_SEQUENCE.length;
-  for (let i = 0; i <= bytes.length - sequenceLength; i++) {
-    let matches = true;
-    for (let j = 0; j < sequenceLength; j++) {
-      if (bytes[i + j] !== PTY_MANAGER_RESET_SEQUENCE.charCodeAt(j)) {
-        matches = false;
-        break;
-      }
-    }
-    if (matches) return true;
-  }
-  return false;
+  return indexOfBytes(bytes, PTY_MANAGER_RESET_BYTES, PTY_MANAGER_RESET_ANCHOR) !== -1;
 }
 
 // Looks for the literal byte sequence ":" "/" "/" — the cheapest signal that
 // a chunk *might* contain a URL. Avoids per-chunk UTF-8 decode + regex scan
 // when running noisy commands (build outputs, test runs, log tails).
 function containsSchemeSeparator(bytes: Uint8Array): boolean {
-  const n = bytes.length;
-  for (let i = 0; i < n - 2; i++) {
-    if (bytes[i] === 0x3a && bytes[i + 1] === 0x2f && bytes[i + 2] === 0x2f) {
-      return true;
-    }
-  }
-  return false;
+  return indexOfBytes(bytes, SCHEME_SEPARATOR_BYTES, 1) !== -1;
 }
 
 // Read the last `maxRows` lines of an xterm Terminal buffer as plain text.
