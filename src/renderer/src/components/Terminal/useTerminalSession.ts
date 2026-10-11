@@ -1534,9 +1534,23 @@ export function useTerminalSession({
       term.open(container.current);
       loadWebgl();
       const viewportHost = container.current;
+      // A measurable host is remembered from observation rather than read
+      // from clientWidth each time: the predicate runs on parsed writes, and a
+      // layout read there forces a synchronous layout of the rows xterm just
+      // changed. An unmeasurable host is read again, since a reveal can ask
+      // before the observer has reported the new size.
+      const measureViewportHost = () =>
+        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0;
+      let viewportHostMeasurable = measureViewportHost();
+      const viewportHostObserver = new ResizeObserver((entries) => {
+        const box = entries[entries.length - 1]?.contentRect;
+        if (box) viewportHostMeasurable = box.width > 0 && box.height > 0;
+      });
+      viewportHostObserver.observe(viewportHost);
+      cleanups.push(() => viewportHostObserver.disconnect());
       const viewportRecovery = createTerminalViewportRecovery(term, () =>
         visibleRef.current && document.visibilityState === "visible" &&
-        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0,
+        (viewportHostMeasurable || (viewportHostMeasurable = measureViewportHost())),
       );
       viewportRecoveryRef.current = viewportRecovery;
       const scrollSubscription = term.onScroll(() => viewportRecovery.observe());

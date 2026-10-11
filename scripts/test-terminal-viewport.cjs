@@ -25,6 +25,7 @@ const esbuild = require("esbuild");
       callbacks.forEach((callback) => callback());
     };
     let visible = true;
+    let visibilityReads = 0;
     const active = { baseY: 1000, viewportY: 1000 };
     const terminal = {
       buffer: { active },
@@ -35,7 +36,10 @@ const esbuild = require("esbuild");
         recovery.observe();
       },
     };
-    const recovery = createTerminalViewportRecovery(terminal, () => visible);
+    const recovery = createTerminalViewportRecovery(terminal, () => {
+      visibilityReads += 1;
+      return visible;
+    });
     recovery.observe();
     visible = false;
     recovery.suspend();
@@ -59,6 +63,11 @@ const esbuild = require("esbuild");
     assert.equal(active.viewportY, 1600, "startup output arriving after the recovery timer still follows the bottom");
     terminal.scrollToLine(100);
     assert.equal(active.viewportY, 1600, "a delayed native viewport reset is not mistaken for user scrolling");
+    visibilityReads = 0;
+    active.baseY = 1700;
+    active.viewportY = 1700;
+    recovery.observe();
+    assert.equal(visibilityReads, 0, "a write that leaves a following pane at the bottom reads no layout");
     active.baseY = 1200;
     recovery.observe();
 
