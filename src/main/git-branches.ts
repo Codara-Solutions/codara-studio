@@ -1,6 +1,7 @@
 import type { GitBranch, GitBranchList, GitOpResult } from "@shared/types";
 import { errorText, isNotARepo, runGit } from "./git-exec";
 import { invalidateGitCache } from "./git-ops";
+import { branchWorktreePath } from "./git-worktrees";
 
 // Branch management for the Source Control panel: a tracking-aware listing of
 // local + remote-tracking branches, plus the create / switch / rename / delete
@@ -162,6 +163,34 @@ export function deleteBranch(
   const target = name.trim();
   if (!target) return Promise.resolve({ ok: false, error: "No branch given." });
   return run(cwd, ["branch", opts.force ? "-D" : "-d", target]);
+}
+
+export type DeleteBranchIfAtResult =
+  | { ok: true }
+  | { ok: false; reason: "BRANCH_MOVED" | "BRANCH_CHECKED_OUT"; error: string };
+
+// Compare-and-delete: removes refs/heads/<name> only while it still points at
+// `oid` and no worktree has it checked out. A branch that moved after its
+// merge was proven keeps the new commits; `branch -d/-D` would judge
+// mergedness against whatever HEAD happens to be, so it is never used here.
+export async function deleteBranchIfAt(
+  cwd: string,
+  name: string,
+  oid: string,
+): Promise<DeleteBranchIfAtResult> {
+  const target = name.trim();
+  const usedAt = await branchWorktreePath(cwd, target);
+  if (usedAt) {
+    return { ok: false, reason: "BRANCH_CHECKED_OUT", error: `branch '${target}' is checked out at ${usedAt}` };
+  }
+  try {
+    await runGit(cwd, ["update-ref", "-d", `refs/heads/${target}`, oid]);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: "BRANCH_MOVED", error: errorText(err) };
+  } finally {
+    invalidateGitCache(cwd);
+  }
 }
 
 export function mergeBranch(cwd: string, name: string): Promise<GitOpResult> {

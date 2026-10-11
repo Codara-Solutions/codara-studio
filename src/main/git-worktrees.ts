@@ -5,6 +5,9 @@ import { readdir, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
 import { errorText, readGitText, runGit } from "./git-exec";
+import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
+
+export type { WorktreeRegistration };
 
 // Worktree provisioning for the "Create copy branch" workspace action. Pure
 // git + fs — NO electron import — so the path base (codaraHome) is passed in by
@@ -21,6 +24,10 @@ export interface CreateCopyWorktreeInput {
   // Name for the NEW branch the worktree is created on. User-provided for the
   // Create copy dialog; generated ("sandbox-N") for autopilot sandboxes.
   newBranch: string;
+  // What git forks from when set; baseBranch is then only recorded. A commit
+  // SHA here sets no upstream on the new branch and can never be read as an
+  // option, which is why agent-created worktrees pass the resolved commit.
+  startPoint?: string;
 }
 
 export interface CreateCheckoutWorktreeInput {
@@ -173,7 +180,8 @@ export async function createCopyWorktree(
     // Invalid or already-taken branch names are left to git's own refusals —
     // its messages ("a branch named 'x' already exists", "not a valid branch
     // name") surface verbatim in the dialog.
-    await runGit(input.repoCwd, ["worktree", "add", path, "-b", branch, baseBranch]);
+    const startPoint = input.startPoint?.trim() || baseBranch;
+    await runGit(input.repoCwd, ["worktree", "add", path, "-b", branch, startPoint]);
     const fileCount = await countTrackedFiles(path);
     return { ok: true, path, branch, city: dirName, baseBranch, mode: "fork", fileCount };
   } catch (err) {
@@ -203,7 +211,7 @@ async function pickCheckoutDirName(worktreesRoot: string, branchName: string): P
   }
 }
 
-async function branchWorktreePath(repoCwd: string, name: string): Promise<string | null> {
+export async function branchWorktreePath(repoCwd: string, name: string): Promise<string | null> {
   const out = await readGitText(repoCwd, [
     "for-each-ref",
     "--format=%(worktreepath)",
@@ -407,14 +415,14 @@ export async function mergeBackSandboxWorktree(
 // case. git emits worktree paths with `/` (and sometimes a different drive-
 // letter case) on Windows, while Codara hands us native `\` paths — so we can't
 // compare them raw.
-function normalizePathForCompare(p: string): string {
+export function normalizePathForCompare(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 // Is `worktreePath` currently a registered worktree of `repoCwd`? We parse
 // `git worktree list --porcelain` rather than matching git's error text, which
 // is locale-dependent ("is not a working tree" only in English).
-async function isRegisteredWorktree(repoCwd: string, worktreePath: string): Promise<boolean> {
+export async function isRegisteredWorktree(repoCwd: string, worktreePath: string): Promise<boolean> {
   try {
     const out = await readGitText(repoCwd, ["worktree", "list", "--porcelain"]);
     const target = normalizePathForCompare(worktreePath);
@@ -566,4 +574,109 @@ export async function removeCopyWorktree(
     }
   }
   return { ok: true };
+}
+
+// --- Agent worktree checks --------------------------------------------------
+// Read-only probes the agent worktree tools (agent-worktrees.ts) combine into
+// a removal verdict: registrations, merge proofs, and leftover local work.
+
+export async function listWorktreeRegistrations(repoCwd: string): Promise<WorktreeRegistration[]> {
+  const { stdout } = await runGit(repoCwd, ["worktree", "list", "--porcelain", "-z"]);
+  return parseWorktreePorcelain(stdout);
+}
+
+// Any failure, including an unknown object, reads as "not an ancestor": a
+// missing proof only ever keeps a worktree.
+export async function isAncestor(repoCwd: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await runGit(repoCwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let mergeTreeWriteTreeSupport: Promise<boolean> | null = null;
+
+// `merge-tree --write-tree` arrived in git 2.38. Asked once per process.
+export function gitSupportsMergeTreeWriteTree(cwd: string): Promise<boolean> {
+  mergeTreeWriteTreeSupport ??= readGitText(cwd, ["version"]).then((text) => {
+    const match = /(\d+)\.(\d+)/.exec(text);
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = Number(match[2]);
+    return major > 2 || (major === 2 && minor >= 38);
+  });
+  return mergeTreeWriteTreeSupport;
+}
+
+// True when merging `tip` into `target` would change nothing: every change on
+// the branch is already in the target, as after a squash or rebase merge. A
+// later revert or a conflicting rewrite in the target makes it false, which is
+// the safe direction. Both arguments must be resolved commit ids.
+export async function contentInTarget(
+  repoCwd: string,
+  tip: string,
+  target: string,
+): Promise<boolean | "unsupported"> {
+  if (!(await gitSupportsMergeTreeWriteTree(repoCwd))) return "unsupported";
+  let merged: string;
+  try {
+    const { stdout } = await runGit(repoCwd, ["merge-tree", "--write-tree", target, tip]);
+    merged = stdout.split(/\r?\n/)[0]?.trim() ?? "";
+  } catch {
+    return false;
+  }
+  const targetTree = await readGitText(repoCwd, ["rev-parse", "--verify", "--quiet", `${target}^{tree}`]);
+  return Boolean(merged) && merged === targetTree;
+}
+
+export async function aheadCount(repoCwd: string, target: string, tip: string): Promise<number> {
+  const out = await readGitText(repoCwd, ["rev-list", "--count", `${target}..${tip}`]);
+  const count = Number(out);
+  return Number.isFinite(count) ? count : 0;
+}
+
+export async function commitSubjectsBetween(
+  repoCwd: string,
+  target: string,
+  tip: string,
+  limit = 10,
+): Promise<string[]> {
+  const out = await readGitText(repoCwd, ["log", `-n${limit}`, "--format=%s", `${target}..${tip}`]);
+  return out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+const IN_PROGRESS_MARKERS: ReadonlyArray<readonly [string, string]> = [
+  ["MERGE_HEAD", "merge"],
+  ["rebase-merge", "rebase"],
+  ["rebase-apply", "rebase"],
+  ["CHERRY_PICK_HEAD", "cherry-pick"],
+  ["REVERT_HEAD", "revert"],
+  ["BISECT_LOG", "bisect"],
+];
+
+// The operation left half-done in this worktree, read from its own git dir
+// (each linked worktree has one), or null.
+export async function inProgressOperation(worktreePath: string): Promise<string | null> {
+  const gitDir = await readGitText(worktreePath, ["rev-parse", "--absolute-git-dir"]);
+  if (!gitDir) return null;
+  for (const [marker, name] of IN_PROGRESS_MARKERS) {
+    if (existsSync(join(gitDir, marker))) return name;
+  }
+  return null;
+}
+
+// Git-ignored entries in the worktree, a wholly ignored directory collapsed
+// to one "dir/" entry.
+export async function ignoredEntries(worktreePath: string): Promise<string[]> {
+  const { stdout } = await runGit(worktreePath, [
+    "ls-files",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
+    "-z",
+  ]);
+  return stdout.split("\0").filter(Boolean);
 }
