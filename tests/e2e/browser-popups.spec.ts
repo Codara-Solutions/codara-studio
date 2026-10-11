@@ -211,6 +211,22 @@ test("clicked links open in the default browser unless the Codara browser is cho
       `${origin}/signin`,
       "mailto:someone@example.com",
     ]);
+
+    // A plain anchor in the app window trips the navigation guard, which
+    // listens to both the main-frame and the any-frame navigation events: one
+    // click must still open exactly one browser tab. Playwright waits forever
+    // on the cancelled navigation, so this stays the last step.
+    await page.evaluate(() => window.spark.preferences.set("linkOpenTarget", "system"));
+    await page.evaluate((url) => {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    }, `${origin}/third`);
+    await expect.poll(openedExternally).toHaveLength(4);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await openedExternally()).slice(3)).toEqual([`${origin}/third`]);
   } finally {
     await app.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));

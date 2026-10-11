@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -82,10 +82,23 @@ test("a browser that belongs to one workspace never opens or drives tabs in anot
     await p.waitForLoadState("domcontentloaded");
     await expect(p.locator('[data-workspace-id="ws-a"]')).toBeVisible();
 
-    // The terminal pane the agent runs in, in workspace A.
-    const { paneId } = await request("terminal.create", { cwd, title: "Agent pane" });
+    // The terminal pane the agent runs in, in workspace A. Its process stands
+    // in for an agent whose MCP server starts with a cleared environment
+    // (Codex), which only reports its pid.
+    const pidFile = join(root, "agent.pid");
+    const { paneId } = await request("terminal.create", {
+      cwd,
+      title: "Agent pane",
+      command: `sh -c 'echo $$ > "${pidFile}"; exec sleep 600'`,
+    });
     expect(typeof paneId).toBe("string");
     const agent = { callerPaneId: paneId };
+    await expect
+      .poll(async () => Number((await readFile(pidFile, "utf8").catch(() => "")).trim()) || 0, {
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0);
+    const pidAgent = { callerPid: Number((await readFile(pidFile, "utf8")).trim()) };
 
     const first = await request("preview.navigate", { ...agent, url: `${origin}/agent-1` });
     expect(first.opened).toBe(true);
@@ -116,6 +129,14 @@ test("a browser that belongs to one workspace never opens or drives tabs in anot
     ]);
     // An explicit tab in a workspace the agent is not in is refused.
     await expect(request("preview.url", { ...agent, tabId: userTab })).rejects.toThrow(/No browser tab/);
+    // The same agent known only by its pid resolves to its pane through the
+    // process tree and lands on the same tab in A, never on B's.
+    expect((await request("preview.url", pidAgent)).url).toBe(`${origin}/agent-2`);
+    expect(await request("preview.navigate", { ...pidAgent, url: `${origin}/agent-2` })).toMatchObject({
+      tabId: agentTab,
+      opened: false,
+    });
+    expect((await listed(pidAgent)).map((tab) => tab.id)).toEqual([agentTab]);
 
     // B is untouched: still the user's one tab, still on their page, selected.
     expect(await listed()).toEqual([

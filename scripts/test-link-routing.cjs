@@ -126,6 +126,13 @@ async function main() {
   assert.deepEqual(host.sent, [["app:open-browser-url", "file:///tmp/notes.md"]]);
   console.log("ok 3 openLinkFromApp opens the default browser and keeps file: in Codara");
 
+  // An existing user's file predates the preference: they get the machine's
+  // browser too, and their other choices survive.
+  fs.writeFileSync(
+    path.join(HOME, "spark-preferences.json"),
+    JSON.stringify({ autoOpenPreview: true, keepRunningInBackground: false }),
+  );
+  assert.equal(prefs.getPreferenceSync("autoOpenPreview"), true, "the existing file was read");
   assert.equal(prefs.getPreferenceSync("linkOpenTarget"), "system");
   fs.writeFileSync(
     path.join(HOME, "spark-preferences.json"),

@@ -62,7 +62,8 @@ Claude, Codex or other agent running in a Studio terminal uses the workspace of
 that terminal: a navigate reuses only a tab that agent opened (or opens a new
 background one), and other calls fall back to the user's tab in that workspace,
 never a run's tab or another agent's. Only a caller outside every Studio
-terminal, such as the `cora` CLI, works in the workspace on screen.
+terminal, such as an agent started from another terminal app, works in the
+workspace on screen.
 
 | Tool | What it does |
 |---|---|
