@@ -118,20 +118,22 @@ function requestTargets(cwd: string | null): Promise<AgentMcpTarget[]> {
 
 const EMPTY_PROFILE_DRAFT: ProfileDraft = { name: "", description: "", instructions: "" };
 
-// The one line under each page's title, as Settings pages have.
+// The one line under each page's title, as Settings pages have. It is the
+// page's only description: sections open straight on their toolbar or first
+// row, and finer detail lives in row descriptions.
 const TAB_DESCRIPTION: Record<CapabilityTab, string> = {
-  mcp: "Extra tools for Cora, its workers and your CLIs.",
-  skills: "Instructions an agent loads when a task needs them.",
-  profiles: "Separate Coras, each with its own instructions and memory.",
-  memory: "What Cora remembers between chats.",
-  workers: "The models Cora may hand work to.",
-  policy: "How Cora works and how workers are briefed.",
+  mcp: "Extra tools for Cora, its workers and your CLIs: a database, a browser, an issue tracker.",
+  skills: "Instructions an agent loads when a task needs them, like a release checklist.",
+  profiles: "Separate Coras, each with its own instructions and memory, picked per chat.",
+  memory: "What Cora remembers between chats, as markdown files you can edit.",
+  workers: "The models Cora may hand implementation and verification work to.",
+  policy: "How Cora works on your requests and how workers are briefed.",
 };
 
 // What the footer says while no action has reported: there is no Save step,
-// and when each kind of change takes effect.
+// and when each kind of change takes effect. One line at the smallest window.
 const STANDING_NOTE: Record<CapabilityTab, string> = {
-  mcp: "Changes apply as you make them. Cora picks up MCP changes on your next message; running workers keep what they started with.",
+  mcp: "Changes apply as you make them, from Cora's next message. Running workers keep theirs.",
   skills: "Changes apply as you make them. New Cora chats and workers load the skills switched on.",
   profiles: "Changes apply as you make them. A started chat keeps the profile it began with.",
   memory: "Memory changes apply immediately.",

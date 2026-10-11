@@ -42,18 +42,20 @@ export function VisuallyHidden({ children }: { children: React.ReactNode }) {
   return <span style={visuallyHiddenStyle}>{children}</span>;
 }
 
-// The page's intro under the dialog's title bar, which already names the
-// section, with the section's own controls beside it.
+// The toolbar over a section's list. The title bar above already names the
+// section and describes it in one line, so the lead is a filter or a short
+// fact about the list (a count, where it is read from), never a second
+// description of the page.
 export function SectionHead({
-  detail,
+  lead,
   actions,
 }: {
-  detail: React.ReactNode;
+  lead?: React.ReactNode;
   actions?: React.ReactNode;
 }) {
   return (
     <div style={sectionHeadStyle}>
-      <p style={{ ...sectionDetailStyle, flex: "1 1 360px", minWidth: 0, margin: 0 }}>{detail}</p>
+      <div style={sectionLeadStyle}>{lead}</div>
       {actions ? <div style={sectionActionsStyle}>{actions}</div> : null}
     </div>
   );
@@ -421,9 +423,20 @@ export const sectionStyle: React.CSSProperties = {
 export const sectionHeadStyle: React.CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  alignItems: "end",
+  alignItems: "center",
   justifyContent: "space-between",
   gap: 12,
+};
+
+const sectionLeadStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  flex: "1 1 200px",
+  minWidth: 0,
+  color: "var(--st-faint)",
+  fontSize: 12.5,
+  lineHeight: 1.45,
 };
 
 export const sectionTitleStyle: React.CSSProperties = {

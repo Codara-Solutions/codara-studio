@@ -54,7 +54,8 @@ const check = (name, fn) => {
 };
 
 check("sections carry plain-language names, including Profiles", () => {
-  assert.match(model, /\{ id: "mcp", label: "Tools \(MCP servers\)" \}/);
+  // Short enough that the selected label never truncates in the nav.
+  assert.match(model, /\{ id: "mcp", label: "MCP servers" \}/);
   assert.match(model, /\{ id: "profiles", label: "Profiles" \}/);
   assert.match(model, /\{ id: "workers", label: "Worker models" \}/);
   assert.match(model, /\{ id: "policy", label: "Behavior" \}/);
@@ -223,7 +224,32 @@ check("sync previews what it would copy before it writes", () => {
   assert.match(mcpSection, /Sync Claude and Codex/);
   assert.match(agentSync, /dryRun/);
   // Behavior says plainly that its switches are global.
-  assert.match(behaviorSection, /These apply to all workspaces\./);
+  assert.match(dialog, /policy: "Changes apply as you make them, for every workspace\."/);
+});
+
+check("each page is described once, in the title bar", () => {
+  // The title bar's line is the only description: no section repeats it in
+  // an intro paragraph above its first row.
+  assert.match(dialog, /const TAB_DESCRIPTION: Record<CapabilityTab, string> = \{/);
+  for (const [name, text] of [
+    ["McpSection.tsx", mcpSection],
+    ["SkillsSection.tsx", skillsSection],
+    ["ProfilesSection.tsx", profilesSection],
+    ["MemorySection.tsx", memorySection],
+    ["WorkerModelsSection.tsx", workersSection],
+    ["BehaviorSection.tsx", behaviorSection],
+  ]) {
+    assert.doesNotMatch(text, /<SectionHead\s+detail=/, `${name} repeats the page description`);
+  }
+  // Memory opens on whose memory it is, as an ordinary row.
+  assert.ok(memorySection.indexOf("Show the memory of this profile") < memorySection.indexOf('scope="global"'));
+  // Off rows keep full contrast; only "on but out of reach" dims.
+  assert.match(workersSection, /color: idle \? "var\(--st-desc\)" : "var\(--ink\)"/);
+  // The built-in server never mixes ticks with switches.
+  assert.match(mcpSection, /<span style=\{cellNoteStyle\}>Always on<\/span>/);
+  assert.match(styles, /\.agent-capability-row--mcp > \.agent-capability-cell--fixed \{\s*\n\s*display: none !important;/);
+  // Rows carry no hover tint, as Settings rows do not.
+  assert.doesNotMatch(styles, /\.agent-capability-row:hover/);
 });
 
 check("Behavior offers Cora's edit verification and mid-turn delivery in plain words", () => {

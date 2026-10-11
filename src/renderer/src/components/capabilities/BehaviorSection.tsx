@@ -1,6 +1,5 @@
 import type { AppSettings, CoraMidTurnDelivery } from "@shared/types";
 import {
-  SectionHead,
   ToggleRow,
   sectionStyle,
   toggleDetailStyle,
@@ -21,9 +20,6 @@ export default function BehaviorSection({
 }) {
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        detail="How Cora works on your requests, how Codara briefs Claude and Codex workers, and what it keeps installed. These apply to all workspaces."
-      />
       <div className="st-rows" style={toggleListStyle}>
         <ToggleRow
           title="Always verify edits with a worker"
@@ -73,7 +69,7 @@ export default function BehaviorSection({
         />
         <ToggleRow
           title="Keep Codara Studio tools installed in Claude, Codex and Grok"
-          detail="At launch, Codara refreshes its built-in server in each CLI where its switch under Tools is on. A CLI you switched it off for stays off."
+          detail="At launch, Codara refreshes its built-in server in each CLI where its switch under MCP servers is on. A CLI you switched it off for stays off."
           checked={view.playwrightMcpAutoInstall}
           onChange={(playwrightMcpAutoInstall) =>
             onChange(

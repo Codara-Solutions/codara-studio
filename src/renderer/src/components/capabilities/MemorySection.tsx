@@ -3,10 +3,8 @@ import type { CoraMemoryScope, CoraMemoryStatus, CoraProfile, MemoryTierStatus }
 import { formatMemoryBytes, memoryTone } from "./model";
 import {
   ErrorRow,
-  SectionHead,
   Switch,
   cellLabelStyle,
-  fieldLabelStyle,
   listStyle,
   microBtnStyle,
   rowMetaStyle,
@@ -48,44 +46,34 @@ export default function MemorySection({
   const globalOff = memory !== null && !memory.global.enabled;
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        detail={
-          <>
-            What Cora has learned and keeps between chats, as two plain markdown files per profile. Cora reads
-            them at the start of a chat and adds lessons as it works. You can edit them like any other file.
-          </>
-        }
-        actions={
-          <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={fieldLabelStyle} aria-hidden>
-              Profile
-            </span>
-            <CustomSelect
-              ariaLabel="Show the memory of this profile"
-              width={200}
-              value={viewedProfileId ?? memory?.profile.id ?? "default"}
-              disabled={profiles.length === 0 || busy !== null}
-              onChange={onViewProfile}
-              options={profiles.map((profile) => ({
-                value: profile.id,
-                label: profile.name,
-                ...(profile.isDefault ? { detail: "default" } : {}),
-              }))}
-            />
-          </span>
-        }
-      />
-      <p style={{ ...rowNoteStyle, margin: 0 }}>
-        Global memory is the master switch for {profileName}: while it is off, Cora neither reads nor writes
-        any memory for this profile, including workspace memory. Profile instructions still apply.
-      </p>
-
       <div className="agent-capability-list" style={listStyle}>
+        {/* Each profile keeps its own two files, so whose memory this is
+            comes first, as an ordinary row. */}
+        <div style={rowStyle}>
+          <div style={{ minWidth: 0 }}>
+            <div style={rowNameStyle}>Profile</div>
+            <div style={{ ...rowNoteStyle, marginTop: 3 }}>
+              Each profile has its own memory. Cora reads it at the start of a chat and adds lessons as it works.
+            </div>
+          </div>
+          <CustomSelect
+            ariaLabel="Show the memory of this profile"
+            width={200}
+            value={viewedProfileId ?? memory?.profile.id ?? "default"}
+            disabled={profiles.length === 0 || busy !== null}
+            onChange={onViewProfile}
+            options={profiles.map((profile) => ({
+              value: profile.id,
+              label: profile.name,
+              ...(profile.isDefault ? { detail: "default" } : {}),
+            }))}
+          />
+        </div>
         {memoryError ? <ErrorRow text={`Could not read memory: ${memoryError}`} onRetry={onRetry} /> : null}
         <MemoryRow
           scope="global"
           title={`Global memory for ${profileName}`}
-          detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+          detail={`Facts about you and this machine that outlive one repository. This is the master switch: while it is off, Cora reads and writes no memory for ${profileName}, workspace memory included. Profile instructions still apply.`}
           status={memory?.global ?? null}
           busy={busy === "global"}
           unavailable={null}
@@ -147,7 +135,9 @@ function MemoryRow({
   const switchBlocked = unavailable !== null || status === null;
   const lines = status ? status.counts.user + status.counts.cora + status.counts.auto : 0;
   return (
-    <div className="agent-capability-row" style={{ ...rowStyle, opacity: switchBlocked || !enabled ? 0.7 : 1 }}>
+    // Only a tier that cannot be switched dims; an off tier keeps full
+    // contrast and its switch says off.
+    <div className="agent-capability-row" style={{ ...rowStyle, opacity: switchBlocked ? 0.7 : 1 }}>
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle} title={title}>
           {title}

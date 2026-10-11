@@ -3,7 +3,6 @@ import type { CoraProfile } from "@shared/types";
 import {
   ConfirmRemoveButton,
   Field,
-  SectionHead,
   formErrorStyle,
   listStyle,
   optionalStyle,
@@ -74,16 +73,6 @@ export default function ProfilesSection({
   const busy = operation !== null;
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        detail={
-          <>
-            A profile is a separate Cora with its own instructions and its own memory. Pick one for each
-            new chat from the profile menu in the Cora composer; a chat keeps the profile it started with.
-            The default is what new chats and automations use when you do not pick one.
-          </>
-        }
-      />
-
       <div className="agent-capability-list" style={listStyle} aria-busy={loading}>
         {profiles.map((profile) => (
           <ProfileRow
@@ -226,7 +215,11 @@ function ProfileRow({
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={rowNameStyle}>{profile.name}</span>
           {profile.isDefault ? (
-            <span className="spark-badge is-accent" style={badgeStyle}>
+            <span
+              className="spark-badge is-accent"
+              style={badgeStyle}
+              title="New chats and automations use this profile unless you pick another in the composer"
+            >
               Default for new chats
             </span>
           ) : null}

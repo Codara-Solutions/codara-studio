@@ -4053,14 +4053,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   scrollbar-gutter: stable;
   transform: translateZ(0);
 }
+/* No hover tint: Settings rows have none, and a tinted row under a resting
+   pointer reads as selected. */
 .agent-capability-row {
   content-visibility: auto;
   contain-intrinsic-size: auto 76px;
   contain: layout paint style;
-  transition: background var(--motion-fast) var(--ease-out);
-}
-.agent-capability-row:hover {
-  background: var(--hover);
 }
 
 /* Same treatment for the worker session picker's history list. A workspace
@@ -4180,6 +4178,9 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .agent-capability-cell-label {
   display: none;
 }
+.agent-capability-compact-only {
+  display: none;
+}
 
 /* The tables stack well before the window's 720px floor (src/main/index.ts):
    at 721px the content pane is only ~435px while the MCP grid needs ~442px of
@@ -4245,6 +4246,14 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     display: none !important;
   }
   .agent-capability-row--mcp .agent-capability-cell-label {
+    display: inline;
+  }
+  /* Fixed states leave the line of switches and say themselves once under
+     the name instead. */
+  .agent-capability-row--mcp > .agent-capability-cell--fixed {
+    display: none !important;
+  }
+  .agent-capability-row--mcp .agent-capability-compact-only {
     display: inline;
   }
 }

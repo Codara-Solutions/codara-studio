@@ -7,7 +7,6 @@ import {
   workerModelSubscription,
 } from "@shared/worker-model-roster";
 import {
-  SectionHead,
   SwitchTrack,
   WarnGlyph,
   noticeStyle,
@@ -64,14 +63,6 @@ export default function WorkerModelsSection({
     usableSubscriptions !== null && runnable.length > 0 && runnable.every(signedOutModel);
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        detail={
-          <>
-            The models Cora may hand implementation and verification work to. Cora picks among the ones
-            switched on. A change applies to the next worker that starts; running workers keep their model.
-          </>
-        }
-      />
       {usable.length === 0 ? (
         <div style={noticeStyle} role="alert">
           <WarnGlyph />
@@ -217,9 +208,10 @@ function WorkerModelRow({
         <span
           style={{
             ...labelStyle,
-            // Off rows dim their label so the enabled set pops at a glance;
-            // the switch remains the authoritative state indicator.
-            color: checked && !idle ? "var(--ink)" : "var(--st-desc)",
+            // Only "on but out of reach" dims. An off row keeps full
+            // contrast, as Settings rows do, so the two states never look
+            // alike; the switch says which rows are off.
+            color: idle ? "var(--st-desc)" : "var(--ink)",
           }}
         >
           {model.label}

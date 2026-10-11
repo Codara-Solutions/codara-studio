@@ -134,17 +134,9 @@ export default function McpSection(props: McpSectionProps) {
   return (
     <section style={sectionStyle}>
       <SectionHead
-        detail={
-          <>
-            MCP servers give agents extra tools: a database, a browser, an issue tracker. The Cora and
-            Workers switches decide what agents inside Codara may use, in every workspace where the server
-            is defined. The Claude, Codex and Grok columns show which of those CLIs load it from their own
-            config.
-          </>
-        }
+        lead={<SearchField value={search} onChange={props.onSearch} placeholder="Filter servers" />}
         actions={
           <>
-            <SearchField value={search} onChange={props.onSearch} placeholder="Filter servers" />
             <button
               type="button"
               className="spark-btn"
@@ -214,20 +206,44 @@ export default function McpSection(props: McpSectionProps) {
               />
             ))}
             {filteredTotal === 0 ? (
-              <EmptyRow
-                text={
-                  totalGroups === 0
-                    ? visibleBuiltins.length > 0
-                      ? "No other MCP servers are set up yet. Add one with Add server, or paste the snippet from the server's README."
-                      : "No MCP servers are set up yet. Add one with Add server, or paste the snippet from the server's README."
-                    : "No servers match this filter."
-                }
-              />
+              totalGroups === 0 ? (
+                <EmptyRow
+                  text={
+                    visibleBuiltins.length > 0
+                      ? "No servers of your own yet. Add one from a form, or paste the config snippet from its README."
+                      : "No MCP servers yet. Add one from a form, or paste the config snippet from its README."
+                  }
+                  action={
+                    props.canAdd ? (
+                      <button type="button" className="spark-btn" onClick={props.onAdd}>
+                        Add server
+                      </button>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <EmptyRow
+                  text="No servers match this filter."
+                  action={
+                    <button type="button" className="spark-btn" onClick={() => props.onSearch("")}>
+                      Clear filter
+                    </button>
+                  }
+                />
+              )
             ) : null}
             <Pager shown={groups.length} total={filteredTotal} onMore={props.onMore} />
           </>
         )}
       </div>
+      {/* A legend rather than a second description: the title bar says what
+          the page is, this says what each column decides. */}
+      <p style={legendStyle}>
+        <span style={{ color: "var(--st-desc)" }}>Cora and Workers</span> decide what Codara's agents may use,
+        in every workspace where the server is defined.{" "}
+        <span style={{ color: "var(--st-desc)" }}>Claude, Codex and Grok</span> show which CLIs load it from
+        their own config.
+      </p>
       {props.preview && props.preview.errors.length > 0 ? (
         <p style={rowNoteStyle}>Could not check what reaches Cora: {props.preview.errors.join(" ")}</p>
       ) : null}
@@ -576,14 +592,22 @@ function formatDuration(ms: number): string {
 export function Cell({
   label,
   title,
+  fixed,
   children,
 }: {
   label: string;
   title?: string;
+  /** A state no one can change. The compact layout folds these into one
+   *  line under the name, so its row of cells holds only real controls. */
+  fixed?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div style={cellStyle} title={title} className="agent-capability-cell">
+    <div
+      style={cellStyle}
+      title={title}
+      className={fixed ? "agent-capability-cell agent-capability-cell--fixed" : "agent-capability-cell"}
+    >
       <span className="agent-capability-cell-label" style={cellLabelStyle} aria-hidden>
         {label}
       </span>
@@ -836,17 +860,20 @@ function BuiltinRow({
           <span className="spark-badge" style={badgeStyle} title={builtin.tools.join(", ")}>
             {builtin.tools.length} tools
           </span>
+          <span className="agent-capability-compact-only" style={rowScopeStyle}>
+            Always on for Cora and workers
+          </span>
         </div>
       </div>
       {/* No switch: Cora and workers reach these tools without any config, so a
-          toggle sitting on would be a control that does nothing. */}
-      <Cell label="Cora" title="Always on: loaded directly from Codara">
-        <CheckGlyph />
-        <VisuallyHidden>Cora: always on</VisuallyHidden>
+          toggle sitting on would be a control that does nothing. The words
+          are the cell's state, drawn like the CLI cells' "Set up by you", so
+          a row never mixes ticks with switches. */}
+      <Cell label="Cora" title="Always on: loaded directly from Codara" fixed>
+        <span style={cellNoteStyle}>Always on</span>
       </Cell>
-      <Cell label="Workers" title="Always on: loaded directly from Codara">
-        <CheckGlyph />
-        <VisuallyHidden>Workers: always on</VisuallyHidden>
+      <Cell label="Workers" title="Always on: loaded directly from Codara" fixed>
+        <span style={cellNoteStyle}>Always on</span>
       </Cell>
       {runtimes.map((runtime) => (
         <BuiltinCliCell
@@ -949,6 +976,14 @@ function builtinStateLabel(state: SparkBuiltinInstallState): string {
   if (state === "unavailable") return "Not detected";
   return state === "installed" ? "Added" : "Not added";
 }
+
+const legendStyle: React.CSSProperties = {
+  margin: 0,
+  maxWidth: "72ch",
+  color: "var(--st-faint)",
+  fontSize: 12,
+  lineHeight: 1.5,
+};
 
 const mcpRowStyle: React.CSSProperties = {
   ...rowStyle,
