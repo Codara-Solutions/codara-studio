@@ -365,6 +365,61 @@ async function main() {
     }
   }
 
+  // Which panes are on screen. A zoomed split hides its siblings, so a turn
+  // finishing behind the zoom is not visible.
+  const attentionOut = path.join(os.tmpdir(), "spark-notify-policy-test", "attention.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "notify", "attention.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: attentionOut,
+    logLevel: "silent",
+    plugins: [
+      sharedAliasPlugin,
+      {
+        name: "electron-stub",
+        setup(build) {
+          build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
+          build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+            contents: "export const BrowserWindow = { getFocusedWindow: () => globalThis.__focusedWindow ?? null };\n",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  });
+  delete require.cache[attentionOut];
+  const A = require(attentionOut);
+  globalThis.__focusedWindow = {};
+  const base = { focused: true, workspaceId: "w", tabId: "t", runId: null, paneId: "p1" };
+  const VISIBLE = [
+    ["split layout: a sibling is visible", { ...base, zoomedPaneId: null }, "p2", true],
+    ["split layout: the selected pane is visible", { ...base }, "p1", true],
+    ["zoomed pane: a hidden sibling is not visible", { ...base, zoomedPaneId: "p1" }, "p2", false],
+    ["zoomed pane: the zoomed pane is visible", { ...base, zoomedPaneId: "p1" }, "p1", true],
+    ["another tab: not visible", { ...base, tabId: "other" }, "p2", false],
+  ];
+  for (const [name, snapshot, paneId, want] of VISIBLE) {
+    A.setAttention(snapshot);
+    if (A.isPaneVisible("w", "t", paneId) === want) {
+      passed += 1;
+      console.log(`  PASS ${name}`);
+    } else {
+      failed += 1;
+      console.error(`  FAIL ${name}`);
+    }
+  }
+  globalThis.__focusedWindow = null;
+  A.setAttention({ ...base });
+  if (A.isPaneVisible("w", "t", "p2") === false) {
+    passed += 1;
+    console.log("  PASS an unfocused window shows nothing");
+  } else {
+    failed += 1;
+    console.error("  FAIL an unfocused window shows nothing");
+  }
+
   if (failed > 0) {
     console.error(`\n${failed} notify-policy case(s) FAILED.`);
     process.exit(1);

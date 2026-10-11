@@ -59,7 +59,7 @@ function watchingTarget(event: PublishInput): boolean {
   if (target.type === "terminal") {
     return terminalAlertWatched(event.kind, {
       selected: isWatchingPane(target.workspaceId, target.tabId, target.paneId),
-      visible: isPaneVisible(target.workspaceId, target.tabId),
+      visible: isPaneVisible(target.workspaceId, target.tabId, target.paneId),
     });
   }
   // Teammate-push alerts (workspace targets) have no exact surface either —

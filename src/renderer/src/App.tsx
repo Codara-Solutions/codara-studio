@@ -2720,6 +2720,7 @@ export default function App() {
           tabId: tabs.activeId,
           runId: visibleRunIdForTab(activeTab),
           paneId: activeTab?.kind === "terminal" ? activeTab.activePaneId : null,
+          zoomedPaneId: activeTab?.kind === "terminal" ? (activeTab.zoomedPaneId ?? null) : null,
         })
         ?.catch(() => {
           /* suppression context is best-effort */

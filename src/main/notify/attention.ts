@@ -13,6 +13,7 @@ let current: UiAttentionSnapshot = {
   tabId: null,
   runId: null,
   paneId: null,
+  zoomedPaneId: null,
 };
 
 export function setAttention(snapshot: Partial<UiAttentionSnapshot> | null | undefined): void {
@@ -23,6 +24,7 @@ export function setAttention(snapshot: Partial<UiAttentionSnapshot> | null | und
     tabId: typeof src.tabId === "string" ? src.tabId : null,
     runId: typeof src.runId === "string" ? src.runId : null,
     paneId: typeof src.paneId === "string" ? src.paneId : null,
+    zoomedPaneId: typeof src.zoomedPaneId === "string" ? src.zoomedPaneId : null,
   };
 }
 
@@ -39,10 +41,16 @@ export function isWatchingRun(runId: string): boolean {
   return windowFocused() && current.runId === runId;
 }
 
-// Every split of the selected tab is drawn, so a pane is on screen when the
-// window is focused and its workspace and tab are the selected ones.
-export function isPaneVisible(workspaceId: string, tabId: string): boolean {
-  return windowFocused() && current.workspaceId === workspaceId && current.tabId === tabId;
+// Every split of the selected tab is drawn unless one of them is zoomed, which
+// hides the others. A pane is on screen when the window is focused, its
+// workspace and tab are the selected ones, and no other split is zoomed.
+export function isPaneVisible(workspaceId: string, tabId: string, paneId: string): boolean {
+  return (
+    windowFocused() &&
+    current.workspaceId === workspaceId &&
+    current.tabId === tabId &&
+    (current.zoomedPaneId === null || current.zoomedPaneId === paneId)
+  );
 }
 
 // The user is actively operating this exact terminal pane: window focused,
