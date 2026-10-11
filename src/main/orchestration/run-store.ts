@@ -6262,6 +6262,17 @@ function conversationEpoch(run: RunState): number {
   return run.conversationEpoch ?? 0;
 }
 
+/** The newest conversational manager call of the current epoch, settled or not. */
+function newestManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch || call.purpose === "compaction") continue;
+    return call;
+  }
+  return undefined;
+}
+
 function activeManagerCall(run: RunState): SparkCall | undefined {
   const epoch = conversationEpoch(run);
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
@@ -6359,6 +6370,7 @@ async function prepareManagerTurn(
 ): Promise<PreparedManagerTurn> {
   let selectedIds: string[] = [];
   let includeCanonicalReplay = false;
+  let previousCallId: string | undefined;
   const epoch = conversationEpoch(run);
   const prepared = await commitRunChange(run, {
     type: "spark_call.started",
@@ -6390,6 +6402,7 @@ async function prepareManagerTurn(
         (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
+      previousCallId = newestManagerCall(draft)?.id;
       call.inputMessageIds = selectedIds;
       call.conversationEpoch = epoch;
       call.createdAt = timestamp;
@@ -6405,8 +6418,10 @@ async function prepareManagerTurn(
   if (!persistedCall || conversationEpoch(prepared) !== epoch) {
     throw new Error(`Manager turn ${call.id} became stale before backend startup.`);
   }
-  const followsSendNow = sendNowFollowups.get(run.id) === epoch && selectedIds.length > 0;
-  sendNowFollowups.delete(run.id);
+  const followsSendNow =
+    selectedIds.length > 0 &&
+    previousCallId !== undefined &&
+    sendNowStoppedCalls.get(run.id) === previousCallId;
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
@@ -7018,7 +7033,7 @@ async function askManagerBackendUnderTurnLock(
     let settledRun = latest;
     const keptBySendNow = turnAborted && interruptedBySendNow && promptWasAccepted;
     if (keptBySendNow) {
-      sendNowFollowups.set(run.id, preparedTurn.conversationEpoch);
+      sendNowStoppedCalls.set(run.id, callId);
     }
     if ((turnFailed || turnAborted) && (result.decisionAlreadyApplied || keptBySendNow)) {
       await updateManagerInputDelivery(
@@ -7058,6 +7073,30 @@ async function askManagerBackendUnderTurnLock(
       // will re-drive its requeued input.
       if (result.sessionBusy && !result.decisionAlreadyApplied) {
         scheduleQueuedSteeringFollowup(settledRun, { explicit: true });
+      }
+      // Send now stopped this turn so the queued messages go now. The next
+      // turn starts here, still under the turn lock, as a chat turn like any
+      // queued follow-up: handed back to its caller, a planning cycle hops to
+      // plan_analysis, which refuses a prose answer on a run with no step or
+      // worker and fails the run. With everything unqueued meanwhile, only a
+      // plain conversation continues here; a run with steps or workers goes
+      // back to its driver like any stopped turn. A stopped review or step
+      // planning turn goes back to its cycle, which owns that stage; the
+      // queued follow-up delivers the messages after it.
+      if (keptBySendNow && (mode === "chat" || mode === "plan_analysis")) {
+        const stopping = forcePauseWindowClosed(run.id);
+        if (stopping) await stopping;
+        const fresh = await getRun(run.id);
+        if (
+          fresh &&
+          conversationEpoch(fresh) === preparedTurn.conversationEpoch &&
+          (fresh.status === "planning" || fresh.status === "running" || fresh.status === "reviewing") &&
+          !activeManagerCall(fresh) &&
+          (queuedManagerInputMessages(fresh).length > 0 ||
+            (fresh.steps.length === 0 && fresh.workerTasks.length === 0))
+        ) {
+          return askManagerBackendUnderTurnLock(fresh, cwd, "chat");
+        }
       }
       return settledRun;
     }
@@ -12463,31 +12502,36 @@ export async function cancelQueuedMessage(
 // turn is cut short or the queue is delivered some other way. The interrupt
 // waits until the provider has the live turn's prompt: a turn stopped in its
 // preflight can still record that prompt after the next turn sent it again.
-const sendNowRequests = new Map<string, number>();
+// The request names the messages queued when it was made, so a turn that has
+// since taken them (an in-lock retry, a follow-up) is never stopped for a
+// message sent after the click.
+const sendNowRequests = new Map<string, { epoch: number; messageIds: ReadonlySet<string> }>();
 // Manager calls whose prompt the provider accepted, while they run.
 const promptAcceptedCalls = new Set<string>();
 // Calls Send now interrupted, until their settlement reads the mark.
 const sendNowInterruptedCalls = new Set<string>();
-// Runs whose next turn with input follows a Send now interrupt, by epoch, so
-// that turn's prompt can say why the previous reply stopped.
-const sendNowFollowups = new Map<string, number>();
+// The last manager call Send now stopped, by run, so the turn right after it
+// can say why the previous reply stopped.
+const sendNowStoppedCalls = new Map<string, string>();
 
 async function interruptForSendNow(runId: string): Promise<void> {
-  const requestedEpoch = sendNowRequests.get(runId);
-  if (requestedEpoch === undefined) return;
+  const request = sendNowRequests.get(runId);
+  if (!request) return;
+  const requestedEpoch = request.epoch;
   const run = await getRun(runId);
-  if (!run || conversationEpoch(run) !== requestedEpoch) {
+  if (sendNowRequests.get(runId) !== request) return;
+  if (
+    !run ||
+    conversationEpoch(run) !== requestedEpoch ||
+    !queuedManagerInputMessages(run).some((message) => request.messageIds.has(message.id))
+  ) {
+    // Stale, or every message it named was taken or unqueued since.
     sendNowRequests.delete(runId);
     return;
   }
   const call = activeManagerCall(run);
   if (!call || !promptAcceptedCalls.has(call.id)) return;
-  // Send now and the turn's prompt acceptance can both get here for one
-  // request; only the first may interrupt.
-  if (sendNowRequests.get(runId) !== requestedEpoch) return;
   sendNowRequests.delete(runId);
-  // The live turn already carries everything that was queued.
-  if (queuedManagerInputMessages(run).length === 0) return;
   sendNowInterruptedCalls.add(call.id);
   await appendEvent({
     workspaceId: run.workspaceId,
@@ -12532,13 +12576,17 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
     message: "User asked for queued messages to be delivered now",
     payload: { conversationEpoch: scheduledEpoch },
   }).catch(() => undefined);
-  sendNowRequests.set(run.id, scheduledEpoch);
+  const request = {
+    epoch: scheduledEpoch,
+    messageIds: new Set(queuedManagerInputMessages(run).map((message) => message.id)),
+  };
+  sendNowRequests.set(run.id, request);
   await interruptForSendNow(run.id);
   // Deliver once the interrupted turn (or any planning/review work) settles.
   // Re-read and re-decide then: another scheduler may already own the queue.
   void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
-      if (sendNowRequests.get(run.id) === scheduledEpoch) sendNowRequests.delete(run.id);
+      if (sendNowRequests.get(run.id) === request) sendNowRequests.delete(run.id);
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
       if (queuedManagerInputMessages(latest).length === 0) return;

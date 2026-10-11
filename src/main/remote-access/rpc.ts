@@ -551,7 +551,7 @@ export interface RemoteCoraMessage {
    * or was never user input at all — in both cases it is delivered history.
    */
   deliveryState?: "queued" | "submitted" | "acknowledged" | "cancelled";
-  /** Ordinary turn, mid-turn steering, or a reply to Cora's question. */
+  /** Ordinary turn, a message queued while Cora worked, or a reply to Cora's question. */
   intent?: "turn" | "steer" | "answer";
 }
 

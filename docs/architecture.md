@@ -202,13 +202,16 @@ starts the next turn with every queued message once the turn ends. **Send
 now** on a queued message (`deliverQueuedMessagesNow`) interrupts the live
 turn through `interruptChat` as soon as Pi has accepted its prompt, keeps
 that turn's input delivered (its prompt and partial reply are already in
-Cora's transcript), and starts the next turn with the queue and a note that
-the user stopped the previous reply. Workers keep running, and Pi's process
-is reused once it confirms it is idle; `resources/pi-cora/index.ts` passes
-the turn's abort to `codara_wait_for_workers` so a long wait does not keep Pi
-busy. Waiting for Pi to accept the prompt
-matters: a turn stopped in its preflight can still record that prompt after
-the next turn sent it again.
+Cora's transcript), and starts the next turn right away, still under the turn
+lock, as a chat turn with the queue and a note that the user stopped the
+previous reply. A request covers the messages queued when it was made, so a
+turn that already took them is never stopped for a later message. Workers
+keep running, and Pi's process is reused once it confirms it is idle;
+`resources/pi-cora/index.ts` passes the turn's abort to
+`codara_wait_for_workers` and `codara_wait_for_automation` so a long wait
+does not keep Pi busy. Waiting for Pi to accept the prompt matters: a turn
+stopped in its preflight can still record that prompt after the next turn
+sent it again.
 
 **Automations and looms.** `scheduler.ts` arms triggers (cron, interval,
 folder, git, manual, and others). `automation-loop.ts` starts iterations.

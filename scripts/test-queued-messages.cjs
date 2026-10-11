@@ -25,9 +25,13 @@
 //      settling is re-queued (releaseUnsubmittedManagerInput), never lost.
 //   5. send now - deliverQueuedMessagesNow stops the live turn once the
 //      provider has its prompt, keeps that turn's input delivered (never sent
-//      twice), and starts one new turn carrying every queued message in order;
-//      with no live turn it just starts the turn; it returns the run for an
-//      empty queue and refuses a run waiting on an answer.
+//      twice), and starts one new chat turn carrying every queued message in
+//      order (a prose answer completes a plain chat instead of failing it as
+//      an empty plan_analysis); a request only covers the messages queued
+//      when it was made, so a retry that took them is not stopped for a later
+//      message; Send now then Unqueue of everything leaves no busy run; with
+//      no live turn it just starts the turn; it returns the run for an empty
+//      queue and refuses a run waiting on an answer.
 //   5c. turn discipline - one manager turn per run at a time, a follow-up
 //      that keeps failing stops re-arming, Stop keeps queued messages, and an
 //      identical resend after delivery is a new message.
@@ -584,8 +588,9 @@ async function main() {
   }
   // Turn 1 takes the user's message, reports the prompt accepted only once
   // `accept` opens (the provider's preflight), and then runs until Send now
-  // interrupts it or `release` opens. Every later turn settles at once.
-  function sendNowTurn(id) {
+  // interrupts it or `release` opens. Every later turn settles at once, with
+  // `laterResult`.
+  function sendNowTurn(id, laterResult = askUserResult) {
     const entered = gate();
     const accept = gate();
     const release = gate();
@@ -602,7 +607,7 @@ async function main() {
         return interrupted ? abortedResult() : completeResult();
       }
       await input.onPromptAccepted?.();
-      return askUserResult();
+      return laterResult();
     });
     return { entered, accept, release, wasInterrupted: () => interrupted };
   }
@@ -689,6 +694,43 @@ async function main() {
     "the interrupt is journaled",
     readEvents(runE).some((event) => event.type === "run.send_now_interrupted"),
   );
+  check(
+    "the turn Send now starts is a chat turn, like any queued follow-up",
+    callsFor(runE)[1]?.mode === "chat",
+    callsFor(runE)[1]?.mode,
+  );
+
+  // A plain conversation (no step, no worker): Cora answers the queued
+  // messages in prose. In plan_analysis that answer is refused as an empty
+  // execution and fails the run.
+  const FIRST_PROSE = "What does the tokenizer do with tabs?";
+  const QUEUED_PROSE = "And with carriage returns?";
+  const runProse = writeRun(pausedRun("run-send-now-prose"));
+  const turnProse = sendNowTurn(runProse, completeResult);
+  turnProse.accept.open();
+  await runStore.addRunMessage({ runId: runProse, author: "user", kind: "note", message: FIRST_PROSE });
+  await gateOpened(turnProse.entered);
+  await waitFor(() => messageText(runProse, FIRST_PROSE)?.deliveryState === "submitted");
+  await runStore.addRunMessage({ runId: runProse, author: "user", kind: "note", message: QUEUED_PROSE });
+  await runStore.deliverQueuedMessagesNow(runProse);
+  await waitFor(() => callsFor(runProse).length === 2);
+  await runStore.settleScheduledManagerWork(runProse);
+  await sleep(100);
+  const settledProse = readRun(runProse);
+  check(
+    "a prose answer to the messages Send now delivered completes the chat",
+    settledProse.status === "complete" && callsFor(runProse).length === 2,
+    JSON.stringify({
+      status: settledProse.status,
+      lastAction: settledProse.autopilot?.lastAction,
+      modes: callsFor(runProse).map((call) => call.mode),
+    }),
+  );
+  check(
+    "the answer to the queued message is delivered once",
+    callsFor(runProse).filter((call) => call.prompt.includes(QUEUED_PROSE)).length === 1 &&
+      messageText(runProse, QUEUED_PROSE)?.deliveryState === "acknowledged",
+  );
 
   // Send now while the provider has not taken the live turn's prompt yet
   // waits for it: stopped in its preflight, that prompt could still land after
@@ -717,6 +759,78 @@ async function main() {
     JSON.stringify(callsFor(runPre).map((call) => call.prompt.slice(0, 80))),
   );
 
+  // Send now covers the messages queued when it was pressed. A turn that
+  // already carries them is not stopped later for a message sent afterwards:
+  // here the live turn fails before its prompt lands and its in-lock retry
+  // takes the queue, then the user sends one more message during the retry.
+  const FIRST_RETRY = "Port the cache layer";
+  const QUEUED_RETRY = "Keep the eviction policy as is";
+  const LATER_RETRY = "Also log cache misses";
+  const runRetry = writeRun(pausedRun("run-send-now-retry"));
+  const retryFirstEntered = gate();
+  const retryFirstFail = gate();
+  const retrySecondEntered = gate();
+  const retrySecondAccept = gate();
+  const retrySecondRelease = gate();
+  managerBehavior.set(runRetry, async (calls, input) => {
+    if (calls.length === 1) {
+      retryFirstEntered.open();
+      await retryFirstFail.opened;
+      return {
+        decision: { status: "talk", summary: "failed", chatReply: "", steps: [], tasks: [] },
+        durationMs: 1,
+        model: "stub-model",
+        notice: "fetch failed: ECONNRESET",
+        replaySafe: true,
+        turnFailed: true,
+      };
+    }
+    if (calls.length === 2) {
+      retrySecondEntered.open();
+      await retrySecondAccept.opened;
+      await input.onPromptAccepted?.();
+      await Promise.race([
+        new Promise((resolve) => interruptHandlers.set(runRetry, resolve)),
+        retrySecondRelease.opened,
+      ]);
+      return completeResult();
+    }
+    await input.onPromptAccepted?.();
+    return askUserResult();
+  });
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: FIRST_RETRY });
+  await gateOpened(retryFirstEntered);
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: QUEUED_RETRY });
+  await runStore.deliverQueuedMessagesNow(runRetry);
+  retryFirstFail.open();
+  check("the failed turn's retry starts", await gateOpened(retrySecondEntered, 8000));
+  check(
+    "the retry carries the message Send now was pressed for",
+    callsFor(runRetry)[1]?.prompt.includes(QUEUED_RETRY),
+    callsFor(runRetry)[1]?.prompt.slice(0, 200),
+  );
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: LATER_RETRY });
+  retrySecondAccept.open();
+  await sleep(200);
+  check(
+    "a message sent after Send now does not stop the turn that delivers the earlier queue",
+    interruptsFor(runRetry) === 0,
+    `interrupts=${interruptsFor(runRetry)}`,
+  );
+  retrySecondRelease.open();
+  check(
+    "the later message still gets its own turn",
+    await waitFor(() => callsFor(runRetry).some((call) => call.prompt.includes(LATER_RETRY))),
+  );
+  await runStore.settleScheduledManagerWork(runRetry);
+  check(
+    "each message of the retry scenario reaches exactly one turn",
+    [QUEUED_RETRY, LATER_RETRY].every(
+      (text) => callsFor(runRetry).filter((call) => call.prompt.includes(text)).length === 1,
+    ),
+    JSON.stringify(callsFor(runRetry).map((call) => call.prompt.slice(0, 80))),
+  );
+
   // A turn that already carries the whole queue is left alone.
   const FIRST_FULL = "Write the changelog";
   const runFull = writeRun(pausedRun("run-send-now-nothing-left"));
@@ -732,6 +846,69 @@ async function main() {
   );
   turnFull.release.open();
   await runStore.settleScheduledManagerWork(runFull);
+
+  // Send now, then Unqueue everything before the stopped turn settles: no
+  // queued message is left to start the next turn, and the run must still not
+  // be left looking busy with nothing driving it.
+  const FIRST_UNQ = "Draft the release notes";
+  const QUEUED_UNQ = "Actually, include the migration guide";
+  const LATER_UNQ = "Go ahead with the notes";
+  const runUnq = writeRun(pausedRun("run-send-now-then-unqueue"));
+  const unqEntered = gate();
+  const unqInterrupted = gate();
+  const unqSettle = gate();
+  managerBehavior.set(runUnq, async (calls, input) => {
+    if (calls.length === 1) {
+      unqEntered.open();
+      const aborted = new Promise((resolve) => interruptHandlers.set(runUnq, resolve));
+      await input.onPromptAccepted?.();
+      await aborted;
+      unqInterrupted.open();
+      await unqSettle.opened;
+      return abortedResult();
+    }
+    await input.onPromptAccepted?.();
+    return completeResult();
+  });
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: FIRST_UNQ });
+  await gateOpened(unqEntered);
+  await waitFor(() => messageText(runUnq, FIRST_UNQ)?.deliveryState === "submitted");
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: QUEUED_UNQ });
+  await runStore.deliverQueuedMessagesNow(runUnq);
+  check("Send now stops the turn before the unqueue", await gateOpened(unqInterrupted));
+  await runStore.cancelQueuedMessage({ runId: runUnq, messageId: messageText(runUnq, QUEUED_UNQ).id });
+  unqSettle.open();
+  await runStore.settleScheduledManagerWork(runUnq);
+  await sleep(100);
+  const restedUnq = readRun(runUnq);
+  check(
+    "a stopped turn with nothing left to send leaves no turn running",
+    !restedUnq.sparkCalls.some((call) => call.status === "started" && !call.completedAt),
+    JSON.stringify(restedUnq.sparkCalls.map((call) => call.status)),
+  );
+  check(
+    "a stopped turn with nothing left to send does not leave the run looking busy",
+    !["planning", "running", "reviewing"].includes(restedUnq.status),
+    restedUnq.status,
+  );
+  check(
+    "the stopped turn's input is not sent again when nothing follows it",
+    callsFor(runUnq).filter((call) => call.prompt.includes(FIRST_UNQ)).length === 1,
+    JSON.stringify(callsFor(runUnq).map((call) => call.prompt.slice(0, 80))),
+  );
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: LATER_UNQ });
+  check(
+    "the next message after that starts a turn",
+    await waitFor(() => callsFor(runUnq).some((call) => call.prompt.includes(LATER_UNQ))),
+    JSON.stringify({ status: readRun(runUnq).status, calls: callsFor(runUnq).length }),
+  );
+  await runStore.settleScheduledManagerWork(runUnq);
+  check(
+    "a later turn is not told the user stopped a reply to send it",
+    !(callsFor(runUnq).find((call) => call.prompt.includes(LATER_UNQ))?.prompt ?? "").includes(
+      "stopped your previous reply",
+    ),
+  );
 
   // No live turn: Send now just starts one. The queued message has spent its
   // automatic delivery budget, so only the explicit action delivers it.
