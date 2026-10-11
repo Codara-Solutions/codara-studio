@@ -36,12 +36,18 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/orchestration\/usage-activity-refresh)$/ },
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
         "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], writes: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+      if (args.path === "./agent-session-registry") {
+        return {
+          contents: init + "export function latestSessionStart(id){ return globalThis.__TAN.sessions?.get(id) ?? null; }\n",
+          loader: "js",
+        };
+      }
       if (args.path === "./orchestration/usage-activity-refresh") {
         return { contents: "export function nudgeUsageRefresh() {}\n", loader: "js" };
       }
@@ -897,6 +903,119 @@ async function main() {
   mod.noteTerminalUserInput("reopen", "\x1b[1;1Rwrite tests\r");
   feed("reopen", "\x1b]9;Codex: new prompt completed\x07");
   check("real input mixed with a terminal reply still arms completion", alertCount() === beforeReopen + 1);
+
+  // ── Review fixes: turn boundaries the first pass got wrong ──
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-review", panes: [
+    { paneId: "r-stale", tabId: "tr1", tabTitle: "Stale", excluded: false },
+    { paneId: "r-sub", tabId: "tr2", tabTitle: "Subagents", excluded: false },
+    { paneId: "r-esc", tabId: "tr3", tabTitle: "Codex esc", excluded: false },
+    { paneId: "r-menu", tabId: "tr4", tabTitle: "Menu esc", excluded: false },
+    { paneId: "r-appr", tabId: "tr5", tabTitle: "Approvals", excluded: false },
+  ] });
+  const beforeReview = alertCount();
+  // A submit that starts no work (an empty prompt, a local slash command)
+  // must not become the start the next real turn is timed from.
+  feed("r-stale", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-stale", "/status\r");
+  const staleTurnAt = Date.now();
+
+  // Subagents and a nested `codex exec` run the notify program with the
+  // pane's environment; only the thread the pane's Codex holds is the user's.
+  T.sessions = new Map([["r-sub", { paneId: "r-sub", runtime: "codex", active: true, sessionId: "01a12861-503e-7960-a93d-f2a3b3176eec" }]]);
+  feed("r-sub", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-sub", "split the work across agents\r");
+  mod.noteTerminalHookEvent("r-sub", "CodexNotify", {
+    type: "agent-turn-complete",
+    "thread-id": "01a1286b-bac3-7ba0-9d5b-ea5768dcc4db",
+    "turn-id": "sub-1",
+    "input-messages": ["Review the parser module"],
+    "last-assistant-message": "Subagent: parser reviewed.",
+  });
+  check("codex: a subagent thread's completion does not finish the user's turn", alertCount() === beforeReview);
+  mod.noteTerminalHookEvent("r-sub", "CodexNotify", {
+    type: "agent-turn-complete",
+    "thread-id": "01A12861-503E-7960-A93D-F2A3B3176EEC",
+    "turn-id": "lead-1",
+    "input-messages": ["split the work across agents"],
+    "last-assistant-message": "Both agents finished; the parser is fixed.",
+  });
+  check(
+    "codex: the lead thread's completion finishes the turn once",
+    alertCount() === beforeReview + 1 && /Both agents finished/.test(T.alerts.at(-1).body),
+  );
+
+  // Codex read from the screen, with no structured source: Esc during the
+  // turn stops it, and stays silent like the heuristic Claude path.
+  T.dimensions.set("r-esc", { cols: 100, rows: 20 });
+  feed("r-esc", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-esc", "rename the module\r");
+  feed("r-esc", "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  // The screen is sampled once a second; keep the footer up long enough for
+  // the samples to span a real turn.
+  await sleep(3700);
+  feed("r-esc", "\x1b[1;1H• Working (3s • esc to interrupt)");
+  mod.noteTerminalUserInput("r-esc", "\x1b");
+  feed("r-esc", "\x1b[1;1H\x1b[J■ Conversation interrupted\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("r-esc", "idle");
+  await sleep(500);
+  check("codex screen: a turn stopped with Esc is not announced", alertCount() === beforeReview + 1);
+  // The next turn starts after that Esc, so it is not an interrupted one.
+  mod.noteTerminalUserInput("r-esc", "try again\r");
+  feed("r-esc", "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  await sleep(2700);
+  feed("r-esc", "\x1b[1;1H• Working (3s • esc to interrupt)");
+  feed("r-esc", "\x1b[1;1H\x1b[J• Renamed the module.\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("r-esc", "idle");
+  await sleep(500);
+  check("codex screen: an Esc from the previous turn does not silence the next one", alertCount() === beforeReview + 2);
+
+  // Hooks: an Esc that only closed a menu is followed by a real Stop, which
+  // can land after the idle frame.
+  const menuSession = { session_id: "44444444-menu" };
+  feed("r-menu", "\x1b]633;E;claude\x07Claude Code v2.1.296\r\n");
+  mod.noteTerminalUserInput("r-menu", "summarize the diff\r");
+  mod.noteTerminalHookEvent("r-menu", "UserPromptSubmit", { ...menuSession, prompt: "summarize the diff" });
+  feed("r-menu", "✻ Pondering… (2s · ↓ 10 tokens)");
+  mod.noteTerminalUserInput("r-menu", "\x1b");
+  feed("r-menu", "\r\n✻ Worked for 4s · done 2:10 PM\r\n> ");
+  mod.noteTerminalHookEvent("r-menu", "Stop", { ...menuSession, last_assistant_message: "The diff renames two files." });
+  await sleep(1100);
+  check(
+    "hooks: a Stop after an Esc and an idle frame still finishes the turn",
+    alertCount() === beforeReview + 3 && /renames two files/.test(T.alerts.at(-1).body),
+  );
+
+  // Codex's own desktop notifications name approvals, plans and questions.
+  // Before any structured signal exists they are a prompt, never a finish.
+  const beforeApproval = alertCount();
+  feed("r-appr", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-appr", "run the tests\r");
+  feed("r-appr", "\x1b]0;[ ! ] Action Required\x07\x1b]9;Approval requested: npm test\x07");
+  check(
+    "codex: an approval notification is a prompt, alerted once",
+    alertCount() === beforeApproval + 1 && T.alerts.at(-1).kind === "blocked" && /npm test/.test(T.alerts.at(-1).body),
+  );
+  mod.noteTerminalUserInput("r-appr", "y");
+  feed("r-appr", "\x1b]0;codex\x07");
+  feed("r-appr", "\x1b]9;Codex wants to edit src/app.ts\x07");
+  check("codex: a later edit approval in the same turn alerts again", alertCount() === beforeApproval + 2 && T.alerts.at(-1).kind === "blocked");
+  mod.noteTerminalUserInput("r-appr", "y");
+  feed("r-appr", "\x1b]9;Codex: tests pass\x07");
+  check("codex: the turn then finishes", alertCount() === beforeApproval + 3 && T.alerts.at(-1).kind === "complete");
+
+  const waitLeft = staleTurnAt + 10_500 - Date.now();
+  if (waitLeft > 0) await sleep(waitLeft);
+  mod.noteTerminalUserInput("r-stale", "fix the build\r");
+  mod.noteTerminalHookEvent("r-stale", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "stale-1",
+    "input-messages": ["fix the build"],
+    "last-assistant-message": "The build is green.",
+  });
+  check(
+    "a turn is timed from the submit that started work, not an earlier no-op submit",
+    alertCount() === beforeApproval + 4 && /build is green/.test(T.alerts.at(-1).body) && !/took/.test(T.alerts.at(-1).body),
+  );
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

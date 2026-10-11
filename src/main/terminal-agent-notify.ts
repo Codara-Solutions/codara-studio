@@ -616,6 +616,10 @@ function sweepCodexScreen(w: PaneWatcher, now: number): void {
 // report it with Codex's own words.
 function codexTurnEndedOnScreen(w: PaneWatcher, now: number): void {
   if (codexHasStructuredDone(w)) return;
+  if (interruptedThisTurn(w, now)) {
+    closeTurnSilently(w, now, "interrupted by the user");
+    return;
+  }
   if (!workedLongEnough(w) || now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) return;
   requestDone(w, {
     origin: "heuristic",
@@ -657,6 +661,17 @@ function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], ses
   tanLog(`pane=${w.paneId} turn start (${source}${sessionId ? ` session=${sessionId.slice(0, 8)}` : ""})`);
   // A new turn is real new activity: the next alert of any kind may deliver.
   rearm(paneSourceKey(w.paneId));
+}
+
+// Esc or Ctrl+C reached the pane during the current turn, recently enough
+// that an idle screen now is the user stopping it. A key from before this
+// turn's submit stopped an earlier one.
+function interruptedThisTurn(w: PaneWatcher, now: number): boolean {
+  return (
+    w.turn !== null &&
+    w.lastInterruptKeyAt >= w.turn.startedAt &&
+    now - w.lastInterruptKeyAt < INTERRUPT_WINDOW_MS
+  );
 }
 
 // The turn is over without anything worth announcing (the user stopped it).
@@ -816,8 +831,10 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   if (w.state === "blocked") rearm(paneSourceKey(paneId));
   if (data !== undefined && !isSubmit(data)) return;
   // Enter while a turn runs queues a message or answers a dialog; the turn
-  // already exists.
-  if (turnActive(w)) return;
+  // already exists. A submit that started no work (an empty prompt, a local
+  // slash command, a turn the user stopped) leaves an idle turn behind, and
+  // the turn being timed is the one this submit starts.
+  if (turnActive(w) && (w.state !== "idle" || w.pendingDone !== null)) return;
   startTurn(w, now, "input", null);
 }
 
@@ -1110,6 +1127,21 @@ function codexCompleted(
 function handleCodexNotify(w: PaneWatcher, now: number, payload: Record<string, unknown> | null): void {
   if (w.runtime !== null && w.runtime !== "codex") return;
   if (!payload || payload.type !== "agent-turn-complete") return;
+  // Subagents and a nested `codex exec` inherit the pane's environment, so
+  // their turns run the notify program too. Only the thread the pane's Codex
+  // holds open is the user's.
+  const threadId = stringField(payload, "thread-id");
+  const record = latestSessionStart(w.paneId);
+  if (
+    threadId &&
+    record?.runtime === "codex" &&
+    record.active === true &&
+    record.sessionId &&
+    record.sessionId.toLowerCase() !== threadId.toLowerCase()
+  ) {
+    tanLog(`pane=${w.paneId} Codex notify for another thread (${threadId.slice(0, 8)}), ignored`);
+    return;
+  }
   if (!w.signals.codexNotify) {
     w.signals.codexNotify = true;
     tanLog(`pane=${w.paneId} Codex notify active`);
@@ -1183,8 +1215,8 @@ function workedLongEnough(w: PaneWatcher): boolean {
 // ── Per-chunk stream scanning ────────────────────────────────────────────
 
 // Explicit desktop-notification escapes, exactly the set WezTerm renders:
-//   OSC 9  — `ESC ] 9 ; message BEL`   (iTerm2/growl style)
-//   OSC 777 — `ESC ] 777 ; notify ; title ; body BEL` (rxvt extension)
+//   OSC 9:   `ESC ] 9 ; message BEL`   (iTerm2/growl style)
+//   OSC 777: `ESC ] 777 ; notify ; title ; body BEL` (rxvt extension)
 // `ESC ] 9 ; 4 ; …` is the ConEmu progress protocol, filtered below.
 const OSC9_G = /\x1b\]9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC777_G = /\x1b\]777;notify;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
@@ -1635,7 +1667,10 @@ function scanCodexTitle(w: PaneWatcher, text: string, carryLen: number, now: num
 
 // An idle frame in a pane whose turns come from hooks. The chip follows only
 // when the user just interrupted; otherwise the Stop hook decides, and the
-// sweep settles a turn that ended without one.
+// sweep settles a turn that ended without one. The turn itself is left to the
+// Stop hook even after an interrupt key: Claude sends no Stop for a turn the
+// user stopped, and an Esc that only closed a menu is followed by a real Stop
+// that may land after this frame.
 function hookScreenIdle(w: PaneWatcher, now: number): void {
   if (!turnActive(w) && !w.hookFollowUp) {
     if (w.state === "working" || w.state === "blocked") {
@@ -1644,8 +1679,8 @@ function hookScreenIdle(w: PaneWatcher, now: number): void {
     }
     return;
   }
-  if (now - w.lastInterruptKeyAt < INTERRUPT_WINDOW_MS) {
-    closeTurnSilently(w, now, "interrupted by the user");
+  if (interruptedThisTurn(w, now) && w.pendingDone === null) {
+    if (w.state !== "idle") tanLog(`pane=${w.paneId} idle after an interrupt key; the Stop hook decides the turn`);
     w.hookFollowUp = false;
     w.state = "idle";
     emitPaneState(w, "idle");
@@ -1673,7 +1708,7 @@ function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: numb
   if (!finished || hasTrustedSignals(w)) return;
   if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) return;
   if (confirmMs > 0 && !workedLongEnough(w)) return;
-  if (now - w.lastInterruptKeyAt < INTERRUPT_WINDOW_MS) {
+  if (interruptedThisTurn(w, now)) {
     closeTurnSilently(w, now, "interrupted by the user");
     return;
   }
@@ -1779,6 +1814,10 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
   return false;
 }
 
+// Codex's desktop notifications for an approval, a plan or a question
+// (tui.notifications). Everything else it sends is a finished turn.
+const CODEX_PROMPT_NOTIFY_RE = /^(?:approval requested\b|codex wants to\b|plan mode prompt\b|question:)/i;
+
 // An explicit OSC 9/777 from the foreground program. In an agent pane with a
 // trusted source the structured signal already covers the same moment.
 // "Claude is waiting for your input" is Claude Code's idle reminder, sent a
@@ -1787,8 +1826,9 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const now = Date.now();
   const kind = /waiting\s*for\s*your\s*input/i.test(message)
     ? ("done" as const)
-    : w.runtime === "claude" &&
-        /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)
+    : (w.runtime === "claude" &&
+          /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)) ||
+        (w.runtime === "codex" && CODEX_PROMPT_NOTIFY_RE.test(message))
       ? ("blocked" as const)
       : ("done" as const);
   if (w.runtime !== null && hasTrustedSignals(w)) {

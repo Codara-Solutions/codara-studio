@@ -153,7 +153,7 @@ when a turn ends or the agent needs you. The Notifications switches in
 General choose where these alerts appear (toast, system notification, sound).
 
 - **Finished**: once per prompt you submit, when the agent's turn really
-  ends. The title names the agent and the tab (`Claude Code finished · api`), and
+  ends (a subagent or background agent finishing does not count). The title names the agent and the tab (`Claude Code finished · api`), and
   the text quotes the agent's last message, how long the turn took, and how
   many background tasks are still running. When those tasks finish, one
   more alert says so.
@@ -164,8 +164,9 @@ General choose where these alerts appear (toast, system notification, sound).
   error.
 - Nothing is announced for a turn you interrupted with Esc or Ctrl+C, for
   what an agent does at launch, or while you watch the pane. A finished turn
-  in a split you can see in the focused window counts as watched; a prompt
-  there still alerts until you select that split.
+  in a split you can see in the focused window counts as watched (not one
+  hidden behind a zoomed split); a prompt there still alerts until you select
+  that split.
 - Clicking an alert opens the exact pane.
 
 The signals come from the agents themselves: Claude Code's hooks and status
