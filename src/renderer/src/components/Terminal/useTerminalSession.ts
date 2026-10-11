@@ -3427,6 +3427,12 @@ export function useTerminalSession({
             return;
           }
           measuredOnce = true;
+          // The observer skips sizes it saw while the pane was hidden, so a
+          // reveal at a new size is fitted here. Record that size as the
+          // observer's baseline, or a later return to the size it last
+          // recorded would read as no change and leave the grid stale.
+          lastW = host.clientWidth;
+          lastH = host.clientHeight;
           lastAppliedCols = term.cols;
           lastAppliedRows = term.rows;
           // Fit is local + cheap and runs every frame so xterm visually tracks a

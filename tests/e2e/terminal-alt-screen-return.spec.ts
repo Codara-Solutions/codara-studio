@@ -20,7 +20,7 @@ import { join } from "node:path";
 const FAKE_TUI = String.raw`
 const fs = require("node:fs");
 const [statsFile, mode] = process.argv.slice(2);
-const stats = { winch: 0, sizeChanges: 0, repaints: 0, conts: 0, mouseReports: 0 };
+const stats = { winch: 0, sizeChanges: 0, repaints: 0, conts: 0, mouseReports: 0, size: "" };
 const save = () => fs.writeFileSync(statsFile, JSON.stringify(stats));
 const size = () => process.stdout.getWindowSize().join("x");
 let drawn = "";
@@ -64,6 +64,12 @@ enter();
 paint();
 if (mode === "busy") {
   setInterval(() => {
+    // Read in the loop rather than in the SIGWINCH handler, where Node can
+    // still report the previous size.
+    if (stats.size !== size()) {
+      stats.size = size();
+      save();
+    }
     const until = Date.now() + 400;
     while (Date.now() < until) {}
   }, 450);
@@ -76,6 +82,7 @@ interface TuiStats {
   repaints: number;
   conts: number;
   mouseReports: number;
+  size: string;
 }
 
 test("a full-screen TUI keeps its workspace loaded and painted across workspace switches", async () => {
@@ -112,6 +119,51 @@ test("a full-screen TUI keeps its workspace loaded and painted across workspace 
       .poll(() => paneInk(app!, page, paneId), { timeout: 3_000 })
       .toBeGreaterThan(painted * 0.8);
     await expectWheelReachesTui(page, fixture, paneId);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("a pane revealed at a new size still follows the next layout change", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepareFixture();
+  let app: ElectronApplication | null = null;
+  try {
+    app = await launch(fixture);
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    const paneId = await startTui(page, fixture, "busy");
+    await expect.poll(async () => (await readStats(fixture)).size, { timeout: 5_000 }).toMatch(/^\d+x\d+$/);
+    const shown = (await readStats(fixture)).size;
+
+    // The layout narrows while the pane sits behind another terminal tab of
+    // the same size, and stays narrow on the way back, so only the reveal can
+    // re-fit the pane: its observer never sees the host change size. Widening
+    // the layout again must still reach the program.
+    const tabCount = await page.locator(".spark-tabbar-scroll [data-tab-id]").count();
+    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+    await page.getByRole("button", { name: "Terminal" }).click();
+    await expect(page.locator(".spark-tabbar-scroll [data-tab-id]")).toHaveCount(tabCount + 1);
+    await expect(page.locator(`[data-terminal-pane-id="${paneId}"] .xterm-host`)).toBeHidden();
+    await page.waitForTimeout(500);
+    await setRootWidth(page, "calc(100% - 240px)");
+    await page.waitForTimeout(500);
+    await page.getByRole("tab", { name: /terminals/i }).first().evaluate((tab) => (tab as HTMLElement).click());
+    await expect(page.locator(`[data-terminal-pane-id="${paneId}"] .xterm-host`)).toBeVisible();
+    await expect
+      .poll(async () => (await readStats(fixture)).size, {
+        timeout: 5_000,
+        message: "the reveal did not re-fit the pane",
+      })
+      .not.toBe(shown);
+
+    await setRootWidth(page, "");
+    await expect
+      .poll(async () => (await readStats(fixture)).size, {
+        timeout: 5_000,
+        message: "the pane stayed at the size its reveal fitted",
+      })
+      .toBe(shown);
   } finally {
     await app?.close();
   }
@@ -193,6 +245,13 @@ async function selectWorkspace(page: Page, workspaceId: string): Promise<void> {
   await page.locator(`[data-workspace-id="${workspaceId}"]`).evaluate((row) => (row as HTMLElement).click());
 }
 
+async function setRootWidth(page: Page, width: string): Promise<void> {
+  await page.evaluate((value) => {
+    const root = document.getElementById("root");
+    if (root) root.style.width = value;
+  }, width);
+}
+
 async function keepXtermNode(page: Page, paneId: string): Promise<void> {
   await page.locator(`[data-terminal-pane-id="${paneId}"] .xterm`).first().evaluate((node) => {
     (window as unknown as { __altScreenXterm?: Element }).__altScreenXterm = node;
@@ -264,7 +323,7 @@ async function readStats(fixture: Fixture): Promise<TuiStats> {
   try {
     return JSON.parse(await readFile(fixture.statsFile, "utf8")) as TuiStats;
   } catch {
-    return { winch: 0, sizeChanges: 0, repaints: 0, conts: 0, mouseReports: 0 };
+    return { winch: 0, sizeChanges: 0, repaints: 0, conts: 0, mouseReports: 0, size: "" };
   }
 }
 
