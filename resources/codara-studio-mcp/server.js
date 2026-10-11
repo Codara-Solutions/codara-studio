@@ -591,7 +591,7 @@ const TERMINAL_TOOL_TO_RPC = {
 const NOTIFY_TOOL = {
   name: "codara_notify_user",
   description:
-    "Send the user a Codara notification from your terminal pane: kind done when you finished a task that took more than a minute, needs_input when you are blocked on them. message is one short line. Clicking it jumps to your pane; nothing is shown while the user is already looking at it, or when you do not run in a Codara terminal.",
+    "Send the user a Codara notification from your terminal pane: kind done when you finished a task that took more than a minute, needs_input when you are blocked on them. message is one short line. Clicking it jumps to your pane; nothing is shown while the user is already looking at it, when Codara already tracks your turns from your own hooks, or when you do not run in a Codara terminal.",
   inputSchema: {
     type: "object",
     required: ["kind"],

@@ -335,6 +335,9 @@ async function main() {
   mod.noteTerminalHookEvent("h1", "Notification", { ...session, notification_type: "agent_completed", message: "agent done" });
   await sleep(1200);
   check("hooks: mid-turn idle frame, subagent stops and agent_completed do not finish the turn", alertCount() === beforeHookTurn);
+  check("hooks: a hook-signaled pane announces its own turns", mod.terminalAgentTurnsSignaled("h1") === true);
+  check("a screen-only pane leaves turn announcements to the agent", mod.terminalAgentTurnsSignaled("p1") === false);
+  check("an unknown pane is not signaled", mod.terminalAgentTurnsSignaled("nope") === false);
   check(
     "hooks: the chip stays working through a mid-turn idle frame",
     mod.terminalAgentStateSnapshot().find((c) => c.paneId === "h1")?.state === "working",

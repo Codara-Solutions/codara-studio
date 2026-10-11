@@ -21,7 +21,7 @@ import {
   shellActivity,
   type PaneIo,
 } from "./agent-terminal-io";
-import { terminalAgentStateSnapshot } from "./terminal-agent-notify";
+import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled } from "./terminal-agent-notify";
 import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
@@ -1137,6 +1137,13 @@ async function handleAgentNotify(
       published: false,
       reason: "not_in_codara_terminal",
       note: "codara_notify_user only reaches the user from an agent running in a Codara terminal pane.",
+    });
+  }
+  if (terminalAgentTurnsSignaled(placement.paneId)) {
+    return successResponse(id, {
+      published: false,
+      reason: "announced_by_codara",
+      note: "Codara already announces this agent's turn ends and prompts from the agent's own signals; no call is needed.",
     });
   }
   const rateKey = `${placement.paneId}:${kind}`;

@@ -1206,6 +1206,17 @@ export function activeTerminalAgentPaneIds(): string[] {
   return active;
 }
 
+// The agent in this pane already tells the notifier when its turns end and
+// when it waits on the user (hooks, status reports, Codex notify or its
+// session file). An agent-sent alert on top of that would arrive mid-turn,
+// before the real end, and the policy would then swallow the exact one.
+export function terminalAgentTurnsSignaled(paneId: string): boolean {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded || !w.runtime) return false;
+  const s = w.signals;
+  return s.hooks || s.programStatus || s.codexNotify || s.codexRollout;
+}
+
 // True when the current/just-ended working phase ran long enough to be a
 // real turn rather than a boot blip or pattern flap (see MIN_WORK_MS).
 function workedLongEnough(w: PaneWatcher): boolean {
