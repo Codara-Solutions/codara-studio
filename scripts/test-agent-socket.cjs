@@ -728,6 +728,9 @@ async function main() {
     for (const [method, params] of [
       ["terminal.read", { runId: "run-untrusted-pr", paneId: "foreign-pane" }],
       ["terminal.create", { runId: "run-untrusted-pr", command: "id" }],
+      ["terminal.run", { runId: "run-untrusted-pr", command: "id" }],
+      ["terminal.list", { runId: "run-untrusted-pr" }],
+      ["agent.notify", { runId: "run-untrusted-pr", kind: "done" }],
       ["orchestrator.spawn_terminals", { runId: "run-untrusted-pr", terminals: [] }],
       ["orchestrator.remember", {
         runId: "run-untrusted-pr",
@@ -745,6 +748,30 @@ async function main() {
         JSON.stringify(denied).slice(0, 180),
       );
     }
+    const listed = await rpc(handshake, "terminal.list", {});
+    check(
+      "terminal.list answers with the studio's panes",
+      Array.isArray(listed.result?.panes),
+      JSON.stringify(listed).slice(0, 180),
+    );
+    const multiline = await rpc(handshake, "terminal.run", { command: "echo one\necho two" });
+    check(
+      "terminal.run refuses a multi-line command",
+      /single line/.test(multiline.error?.message ?? ""),
+      JSON.stringify(multiline).slice(0, 180),
+    );
+    const foreignRun = await rpc(handshake, "terminal.run", { command: "id", paneId: "foreign-pane" });
+    check(
+      "terminal.run refuses a pane the caller did not create",
+      /only permitted on active panes you created/.test(foreignRun.error?.message ?? ""),
+      JSON.stringify(foreignRun).slice(0, 180),
+    );
+    const placeless = await rpc(handshake, "agent.notify", { kind: "done", callerPid: 1 });
+    check(
+      "agent.notify needs the caller to run in a Codara pane",
+      /only works for an agent running in a Codara terminal pane/.test(placeless.error?.message ?? ""),
+      JSON.stringify(placeless).slice(0, 180),
+    );
     // The remember budget stops write loops within one turn; it does not cap
     // a chat's whole life.
     fabricateRun("run-remember-budget", {
@@ -866,10 +893,12 @@ async function main() {
         { id: "delegates", from: "manager", to: "worker", label: "delegates", tone: "accent" },
       ],
     });
+    // The write answers with a summary, not the whole graph the agent sent.
     check(
       "whiteboard update reaches durable run state",
       whiteboardUpdated.result?.whiteboard?.title === "Socket architecture map" &&
-        whiteboardUpdated.result?.whiteboard?.nodes?.length === 2,
+        whiteboardUpdated.result?.whiteboard?.nodeCount === 2 &&
+        whiteboardUpdated.result?.whiteboard?.nodes === undefined,
       JSON.stringify(whiteboardUpdated).slice(0, 220),
     );
     const whiteboardRead = await rpc(handshake, "orchestrator.whiteboard_get", {
@@ -1964,16 +1993,35 @@ async function main() {
       JSON.stringify(completeStuck).slice(0, 200),
     );
 
-    // Oversized body cap (64 KB): the server tears the connection down, so
-    // either an error status or a socket reset counts as enforcement.
+    // Oversized body cap (64 KB): the caller gets a JSON-RPC error that says
+    // why, instead of a reset connection it would read as Codara being down.
     const big = await rpcRaw(
       handshake,
-      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "preview.list", params: { pad: "x".repeat(70 * 1024) } }),
+      JSON.stringify({ jsonrpc: "2.0", id: 7, method: "preview.list", params: { pad: "x".repeat(70 * 1024) } }),
     ).catch((err) => ({ status: null, reset: true, code: err.code ?? err.message }));
+    let bigBody = null;
+    try {
+      bigBody = JSON.parse(big.body);
+    } catch {
+      /* reported by the check below */
+    }
     check(
-      "64KB body cap enforced",
-      big.reset === true || big.status === 413 || big.status === 400,
-      JSON.stringify(big).slice(0, 100),
+      "64KB body cap enforced with a readable error",
+      bigBody?.id === 7 && /request too large: 71 KB is over the 64 KB limit/.test(bigBody?.error?.message ?? ""),
+      JSON.stringify(big).slice(0, 200),
+    );
+    const bigWhiteboard = await rpc(handshake, "orchestrator.whiteboard_update", {
+      runId: "run-execute-chat",
+      action: "replace",
+      title: "Large map",
+      summary: "s".repeat(70 * 1024),
+      nodes: [{ id: "only", kind: "topic", title: "Only", x: 0, y: 0 }],
+      edges: [],
+    });
+    check(
+      "a whiteboard write over 64 KB is not refused for its size",
+      !/request too large/.test(bigWhiteboard.error?.message ?? "") && !bigWhiteboard.parseError,
+      JSON.stringify(bigWhiteboard).slice(0, 200),
     );
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node
