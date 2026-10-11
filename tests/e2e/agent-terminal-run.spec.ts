@@ -63,11 +63,28 @@ test("terminal.run waits for the shell's exit marker and reads continue from its
     expect(ran.shellIntegration).toBe(true);
     expect(ran.output).toContain("run-output-42");
     expect(ran.output).not.toContain("$((40 + 2))");
+    expect(ran.next).toMatch(/Pass this paneId to your next codara_terminal_run/);
 
     const again = await request("terminal.run", { paneId: ran.paneId, command: "printf 'second\\n'" });
     expect(again.status).toBe("exited");
     expect(again.exitCode).toBe(0);
     expect(again.output.trim()).toBe("second");
+
+    // Parallel calls on one pane would type two commands into one shell and
+    // each read the other's exit marker; the second is refused instead.
+    const parallel = await Promise.allSettled([
+      request("terminal.run", { paneId: ran.paneId, command: "sleep 1; echo parallel-one" }),
+      request("terminal.run", { paneId: ran.paneId, command: "sleep 1; echo parallel-two" }),
+    ]);
+    const finished = parallel.filter((outcome) => outcome.status === "fulfilled");
+    const refused = parallel.filter((outcome) => outcome.status === "rejected");
+    expect(finished).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect(String((refused[0] as PromiseRejectedResult).reason)).toMatch(/already has a codara_terminal_run in progress/);
+    const winner = (finished[0] as PromiseFulfilledResult<{ status: string; exitCode: number; output: string }>).value;
+    expect(winner.status).toBe("exited");
+    expect(winner.exitCode).toBe(0);
+    expect(winner.output).toMatch(/^parallel-(one|two)$/m);
 
     await request("terminal.write", { paneId: ran.paneId, text: "echo after-cursor" });
     await expect

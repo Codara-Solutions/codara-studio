@@ -768,8 +768,10 @@ async function main() {
     );
     const placeless = await rpc(handshake, "agent.notify", { kind: "done", callerPid: 1 });
     check(
-      "agent.notify needs the caller to run in a Codara pane",
-      /only works for an agent running in a Codara terminal pane/.test(placeless.error?.message ?? ""),
+      "agent.notify outside a Codara pane publishes nothing and is not an error",
+      !placeless.error &&
+        placeless.result?.published === false &&
+        placeless.result?.reason === "not_in_codara_terminal",
       JSON.stringify(placeless).slice(0, 180),
     );
     // The remember budget stops write loops within one turn; it does not cap

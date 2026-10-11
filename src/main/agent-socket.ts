@@ -823,6 +823,10 @@ const paneIo: PaneIo = {
 const paneCursors = new PaneOutputCursors(paneIo);
 // The latest line terminal.write submitted per pane, for terminal.run.
 const recentSubmits = new Map<string, { at: number; cursor: number }>();
+// Panes with a terminal.run in flight. Two parallel calls would both see an
+// idle prompt and type their commands into one shell, each reading the
+// other's output and exit marker as its own.
+const runningPanes = new Set<string>();
 
 function clampNumberParam(
   params: Record<string, unknown>,
@@ -913,73 +917,96 @@ async function handleTerminalRun(
     return errorResponse(id, ERR_INVALID_PARAMS, "command must be a single line; join steps with && or ;");
   }
   const runId = stringParam(params, "runId");
-  let paneId = stringParam(params, "paneId");
-  let created: { tabId: string; paneId: string; cwd: string } | null = null;
-  if (paneId) {
-    if (!agentTerminals.isActiveOwnedBy(paneId, runId)) {
+  const requestedPaneId = stringParam(params, "paneId");
+  if (requestedPaneId) {
+    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId)) {
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
         "terminal.run is only permitted on active panes you created with codara_terminal_create or codara_terminal_run",
       );
     }
-    if (!pty.exists(paneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
-    // A line codara_terminal_write submitted just before this call may not
-    // have started yet, and its markers would be read as this command's. Wait
-    // briefly for the shell to report it finished.
-    const submitted = recentSubmits.get(paneId);
-    if (submitted) {
-      recentSubmits.delete(paneId);
-      const settleBy = submitted.at + TERMINAL_RUN_SUBMIT_SETTLE_MS;
-      while (Date.now() < settleBy) {
-        const since = paneCursors.readSince(paneId, submitted.cursor, TERMINAL_SHELL_STATE_BYTES);
-        if (!since || shellActivity(since.bytes) === "idle") break;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-    }
-    if (shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === "running") {
+    if (!pty.exists(requestedPaneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${requestedPaneId}`);
+    if (runningPanes.has(requestedPaneId)) {
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
-        `pane ${paneId} is still running a command. Read it with codara_terminal_read, interrupt it with codara_terminal_write (text "\\u0003", submit false), or omit paneId to run in a new terminal.`,
+        `pane ${requestedPaneId} already has a codara_terminal_run in progress. Wait for it, or omit paneId to run in a new terminal.`,
       );
     }
-  } else {
-    const createParams: Record<string, unknown> = {};
-    for (const key of ["cwd", "title", "runId", "callerPaneId", "callerPid"]) {
-      if (params[key] !== undefined) createParams[key] = params[key];
-    }
-    const createdResponse = await handleTerminalCreate(createParams, id);
-    if (createdResponse.error) return createdResponse;
-    created = createdResponse.result as { tabId: string; paneId: string; cwd: string };
-    paneId = created.paneId;
-    // A new shell prints its first prompt marker once it reads input; a shell
-    // without integration never does, so the wait is bounded.
-    const readyBy = Date.now() + TERMINAL_RUN_PROMPT_WAIT_MS;
-    while (Date.now() < readyBy && shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === null) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    runningPanes.add(requestedPaneId);
   }
 
+  // Registered before any wait, so a client that cancels while the pane is
+  // still opening or settling never has its command typed afterwards.
   const abort = new AbortController();
   const onClose = () => {
     if (!res.writableEnded) abort.abort();
   };
   res.once("close", onClose);
-  paneCursors.current(paneId);
+  let paneId = requestedPaneId;
   try {
+    let created: { tabId: string; paneId: string; cwd: string } | null = null;
+    if (paneId) {
+      // A line codara_terminal_write submitted just before this call may not
+      // have started yet, and its markers would be read as this command's.
+      // Wait briefly for the shell to report it finished.
+      const submitted = recentSubmits.get(paneId);
+      if (submitted) {
+        recentSubmits.delete(paneId);
+        const settleBy = submitted.at + TERMINAL_RUN_SUBMIT_SETTLE_MS;
+        while (Date.now() < settleBy && !abort.signal.aborted) {
+          const since = paneCursors.readSince(paneId, submitted.cursor, TERMINAL_SHELL_STATE_BYTES);
+          if (!since || shellActivity(since.bytes) === "idle") break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === "running") {
+        return errorResponse(
+          id,
+          ERR_INVALID_PARAMS,
+          `pane ${paneId} is still running a command. Read it with codara_terminal_read, interrupt it with codara_terminal_write (text "\\u0003", submit false), or omit paneId to run in a new terminal.`,
+        );
+      }
+    } else {
+      const createParams: Record<string, unknown> = {};
+      for (const key of ["cwd", "title", "runId", "callerPaneId", "callerPid"]) {
+        if (params[key] !== undefined) createParams[key] = params[key];
+      }
+      const createdResponse = await handleTerminalCreate(createParams, id);
+      if (createdResponse.error) return createdResponse;
+      created = createdResponse.result as { tabId: string; paneId: string; cwd: string };
+      paneId = created.paneId;
+      runningPanes.add(paneId);
+      // A new shell prints its first prompt marker once it reads input; a
+      // shell without integration never does, so the wait is bounded.
+      const readyBy = Date.now() + TERMINAL_RUN_PROMPT_WAIT_MS;
+      while (
+        Date.now() < readyBy &&
+        !abort.signal.aborted &&
+        shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === null
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+
+    paneCursors.current(paneId);
     const result = await runInPane(paneIo, paneId, command, {
       timeoutMs: clampNumberParam(params, "timeoutMs", TERMINAL_RUN_DEFAULT_TIMEOUT_MS, 1_000, TERMINAL_RUN_MAX_TIMEOUT_MS),
       quietMs: clampNumberParam(params, "quietMs", TERMINAL_RUN_DEFAULT_QUIET_MS, 300, 60_000),
       maxLines: clampNumberParam(params, "lines", TERMINAL_READ_DEFAULT_LINES, 1, TERMINAL_READ_MAX_LINES),
       signal: abort.signal,
     });
+    // Outside a Cora run nothing closes a new tab, so an agent that omits
+    // paneId on every call would fill the workspace with them.
     const next =
       result.status === "timeout"
         ? "The command is still running. Read new output with codara_terminal_read since=cursor."
         : result.status === "quiet"
           ? "Output went quiet, but this shell reports no exit marker, so the command may still be running. Check with codara_terminal_read since=cursor."
-          : undefined;
+          : created
+            ? "Pass this paneId to your next codara_terminal_run instead of opening another tab, and close it with codara_terminal_close when you are done."
+            : undefined;
     return successResponse(id, {
       paneId,
       ...(created ? { tabId: created.tabId, cwd: created.cwd } : {}),
@@ -989,6 +1016,7 @@ async function handleTerminalRun(
     });
   } finally {
     res.off("close", onClose);
+    if (paneId) runningPanes.delete(paneId);
   }
 }
 
@@ -1102,12 +1130,14 @@ async function handleAgentNotify(
   }
   const message = (stringParam(params, "message") ?? "").slice(0, AGENT_NOTIFY_MAX_CHARS);
   const placement = await resolveCallerPlacement(params);
+  // The managed MCP entry also loads in agents started outside Codara. Their
+  // notification has nowhere to go, which is an answer, not a failure.
   if (!placement) {
-    return errorResponse(
-      id,
-      ERR_INVALID_PARAMS,
-      "codara_notify_user only works for an agent running in a Codara terminal pane",
-    );
+    return successResponse(id, {
+      published: false,
+      reason: "not_in_codara_terminal",
+      note: "codara_notify_user only reaches the user from an agent running in a Codara terminal pane.",
+    });
   }
   const rateKey = `${placement.paneId}:${kind}`;
   const now = Date.now();
