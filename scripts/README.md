@@ -262,7 +262,8 @@ tricks it tries).
 
 ### Notifications
 
-`test-notify-policy`, `test-notify-center-store`, `test-toast-lifecycle`,
+`test-notify-policy`, `test-notify-deliver` (which transports fire and the
+chime burst filter), `test-notify-center-store`, `test-toast-lifecycle`,
 `test-sse-client` (the update event stream and `notify-release.cjs`).
 
 ### Renderer UI logic

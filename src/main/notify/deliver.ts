@@ -2,6 +2,7 @@ import { BrowserWindow, Notification } from "electron";
 import type {
   NavigationTarget,
   NotificationChannelsPref,
+  NotificationSoundKind,
   NotifyEvent,
   TerminalAgentAttentionPayload,
 } from "@shared/types";
@@ -91,17 +92,19 @@ export function signalTerminalAttention(event: NotifyEvent): void {
 
 // Several panes can finish in the same second (a split of agents fed one
 // prompt each). One chime says "look"; a stack of them is noise, so a chime
-// inside this window of the previous one is dropped. The toast and the native
-// notification for each event still fire.
+// inside this window of the previous one of the same kind is dropped. A
+// different kind (a prompt right after a finish) still sounds, since it asks
+// for something else. The toast and the native notification for each event
+// still fire.
 const SOUND_BURST_MS = 1_500;
-let lastSoundAt = 0;
+const lastSoundAt = new Map<NotificationSoundKind, number>();
 
 export function deliver(event: NotifyEvent, channels: NotificationChannelsPref): void {
   const win = activeWindow();
 
   const appFocused = isAppFocused(win);
   const now = Date.now();
-  const soundInBurst = now - lastSoundAt < SOUND_BURST_MS;
+  const soundInBurst = now - (lastSoundAt.get(event.soundKind) ?? 0) < SOUND_BURST_MS;
 
   // Which transports actually fire — a sound with no toast and no OS
   // notification (window unfocused + native off) is otherwise indistinguishable
@@ -158,7 +161,7 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   // event.silent suppresses only the chime — informational alerts still get
   // their toast, bell entry and OS cue.
   if (channels.sound && win && !event.silent && !soundInBurst) {
-    lastSoundAt = now;
+    lastSoundAt.set(event.soundKind, now);
     try {
       win.webContents.send("notification:sound", { kind: event.soundKind });
     } catch (err) {
