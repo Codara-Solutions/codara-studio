@@ -157,6 +157,51 @@ async function main() {
       "a throwing updater cannot mutate the durable cache by reference",
     );
 
+    // An agent worktree's creator survives a save, bounded and cleaned; a
+    // malformed creator is dropped rather than trusted.
+    const withCreators = await storage.updateState((current) => ({
+      ...current,
+      workspaces: [
+        ...current.workspaces,
+        {
+          id: "ws-agent-copy",
+          name: "Agent copy",
+          cwd: "/tmp/agent-copy",
+          color: "#2AA298",
+          workers: [],
+          copyBranch: {
+            repoCwd: "/tmp/repo",
+            branch: "agent/x",
+            city: "agent-x",
+            mode: "fork",
+            createdAt: "2026-10-12T00:00:00.000Z",
+            createdBy: { kind: "agent", client: "claude\u0007code", purpose: "p".repeat(500), extra: "dropped" },
+          },
+        },
+        {
+          id: "ws-bad-creator",
+          name: "Bad creator",
+          cwd: "/tmp/bad-creator",
+          color: "#2AA298",
+          workers: [],
+          copyBranch: {
+            repoCwd: "/tmp/repo",
+            branch: "y",
+            city: "y",
+            createdAt: "2026-10-12T00:00:00.000Z",
+            createdBy: { kind: "robot" },
+          },
+        },
+      ],
+    }));
+    const agentCopy = withCreators.workspaces.find((workspace) => workspace.id === "ws-agent-copy");
+    assert.equal(agentCopy.copyBranch.createdBy.kind, "agent");
+    assert.equal(agentCopy.copyBranch.createdBy.client, "claude code");
+    assert.equal(agentCopy.copyBranch.createdBy.purpose.length, 200);
+    assert.equal("extra" in agentCopy.copyBranch.createdBy, false);
+    const badCreator = withCreators.workspaces.find((workspace) => workspace.id === "ws-bad-creator");
+    assert.equal("createdBy" in badCreator.copyBranch, false, "an unknown creator kind is dropped");
+
     console.log("All storage state transaction checks passed.");
   } finally {
     console.error = originalConsoleError;

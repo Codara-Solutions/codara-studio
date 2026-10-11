@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   DEFAULT_COMMIT_MESSAGE_MODEL,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  normalizeCopyBranchCreator,
   normalizeGitHubOrigin,
   normalizeTerminalScrollbackLineLimit,
   type AppSettings,
@@ -254,6 +255,7 @@ function normalize(w: Workspace): Workspace {
     typeof cb.createdAt === "string"
   ) {
     const origin = normalizeGitHubOrigin(cb.origin);
+    const createdBy = normalizeCopyBranchCreator(cb.createdBy);
     normalized.copyBranch = {
       repoCwd: cb.repoCwd,
       branch: cb.branch,
@@ -263,6 +265,7 @@ function normalize(w: Workspace): Workspace {
       ...(cb.mode === "fork" || cb.mode === "checkout" ? { mode: cb.mode } : {}),
       ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
       ...(origin ? { origin } : {}),
+      ...(createdBy ? { createdBy } : {}),
     };
   }
   // SSH remote workspaces: carry the host pointer through, and never let the
@@ -516,9 +519,12 @@ function cloneAppState(state: AppState): AppState {
 function normalizeWorkspaceGitHubOrigin(workspace: Workspace): Workspace {
   if (!workspace.copyBranch) return workspace;
   const origin = normalizeGitHubOrigin(workspace.copyBranch.origin);
+  const createdBy = normalizeCopyBranchCreator(workspace.copyBranch.createdBy);
   const copyBranch: Workspace["copyBranch"] = { ...workspace.copyBranch };
   delete copyBranch.origin;
+  delete copyBranch.createdBy;
   if (origin) copyBranch.origin = origin;
+  if (createdBy) copyBranch.createdBy = createdBy;
   return { ...workspace, copyBranch };
 }
 

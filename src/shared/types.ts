@@ -511,6 +511,10 @@ export interface Workspace {
     createdAt: string; // ISO timestamp
     fileCount?: number; // tracked files copied into the worktree (chat banner)
     origin?: GitHubOrigin;
+    // Who made the worktree. Absent means the user did. Agents may remove
+    // only worktrees an agent created unless the user opts in
+    // (agentsMayRemoveUserWorktrees), so this must survive every save.
+    createdBy?: CopyBranchCreator;
   };
   // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
   // Host connection details live in the remote-hosts registry, keyed by id,
@@ -523,6 +527,50 @@ export interface Workspace {
   // (never ssh://), even when the workspace itself is remote — the folder
   // picker is always the local OS dialog.
   extraFolders?: string[];
+}
+
+export interface CopyBranchCreator {
+  kind: "user" | "agent";
+  // Label of the agent client ("claude-code", "codex", "cora"); display only.
+  client?: string;
+  runId?: string;
+  paneId?: string;
+  purpose?: string;
+}
+
+// Sent to the renderer ("workspace:agentEvent") when an agent creates or
+// removes a worktree through the Codara Studio MCP, so the user hears about
+// a rail row they did not add or remove themselves.
+export interface AgentWorktreeEvent {
+  kind: "created" | "removed";
+  workspaceId: string;
+  name: string;
+  branch: string;
+  client: string;
+  pullRequest?: { number: number; url: string };
+}
+
+export const COPY_BRANCH_CREATOR_LIMITS = {
+  client: 40,
+  runId: 120,
+  paneId: 120,
+  purpose: 200,
+} as const;
+
+// Field-level validation for a persisted creator: an unknown kind drops the
+// whole record, strings are control-stripped and bounded.
+export function normalizeCopyBranchCreator(value: unknown): CopyBranchCreator | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind !== "user" && raw.kind !== "agent") return undefined;
+  const creator: CopyBranchCreator = { kind: raw.kind };
+  for (const key of ["client", "runId", "paneId", "purpose"] as const) {
+    const field = raw[key];
+    if (typeof field !== "string") continue;
+    const text = field.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, COPY_BRANCH_CREATOR_LIMITS[key]);
+    if (text) creator[key] = text;
+  }
+  return creator;
 }
 
 export interface WorkspaceGroup {
@@ -1170,6 +1218,16 @@ export interface AppPreferences {
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
+  // Agent worktrees (codara_worktree_* MCP tools, src/main/agent-worktrees.ts).
+  // Off turns create and remove away; list keeps working. Default on.
+  agentWorktreesEnabled?: boolean;
+  // Lets agents remove merged worktrees the user created too. Default off:
+  // agents remove only worktrees an agent created.
+  agentsMayRemoveUserWorktrees?: boolean;
+  // Extra git-ignored paths, per repo, that removal may delete because a
+  // build regenerates them (on top of node_modules/, dist/, ...). Entries are
+  // a first path segment ("generated/") or a basename glob ("*.log").
+  agentWorktreeRegenerableIgnoredByRepo?: Record<string, string[]>;
   // Opt-in (default off): persist terminal agent-session pointers + scrollback
   // and resume Claude/Codex sessions after a full app relaunch (boot-once
   // restore, in-place auto-resume after an unexpected pty death, and the
@@ -1337,6 +1395,9 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
+  agentWorktreesEnabled: true,
+  agentsMayRemoveUserWorktrees: false,
+  agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
   remoteAccessEnabled: false,
   gitAutoFetchEnabled: true,

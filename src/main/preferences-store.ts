@@ -193,6 +193,23 @@ function normalizeStringMap(value: unknown): Record<string, string> {
   return out;
 }
 
+// Per-repo pattern lists: string keys to non-empty trimmed strings, bounded
+// so a hand-edited file cannot grow every removal check without limit.
+function normalizeStringListMap(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!key.trim() || !Array.isArray(entry)) continue;
+    const items = entry
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0 && item.length <= 200)
+      .slice(0, 50);
+    if (items.length > 0) out[key] = items;
+  }
+  return out;
+}
+
 function normalize(
   input: Partial<AppPreferences> | null | undefined,
   opts: { migrateLegacyInlineDefault?: boolean } = {},
@@ -259,6 +276,17 @@ function normalize(
         : DEFAULT_PREFERENCES.autoOpenPreview,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
+    ),
+    agentWorktreesEnabled:
+      typeof src.agentWorktreesEnabled === "boolean"
+        ? src.agentWorktreesEnabled
+        : DEFAULT_PREFERENCES.agentWorktreesEnabled,
+    agentsMayRemoveUserWorktrees:
+      typeof src.agentsMayRemoveUserWorktrees === "boolean"
+        ? src.agentsMayRemoveUserWorktrees
+        : DEFAULT_PREFERENCES.agentsMayRemoveUserWorktrees,
+    agentWorktreeRegenerableIgnoredByRepo: normalizeStringListMap(
+      src.agentWorktreeRegenerableIgnoredByRepo,
     ),
     // Opt-in: relaunches only resume agent sessions when the user enabled the
     // Settings toggle. Absent/invalid values fall back to the default (off),

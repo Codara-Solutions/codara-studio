@@ -2442,6 +2442,33 @@ export function disposeUnderCwd(dir: string): number {
   return killed;
 }
 
+// The sessions disposeUnderCwd would kill, without killing them.
+export function sessionsUnderCwd(dir: string): string[] {
+  const target = normalizeCwd(dir);
+  if (!target) return [];
+  const ids: string[] = [];
+  for (const [id, s] of sessions) {
+    const c = normalizeCwd(s.cwd);
+    if (c === target || c.startsWith(`${target}/`)) ids.push(id);
+  }
+  return ids;
+}
+
+// The directory a session was spawned in. The shell may have moved since.
+export function sessionCwd(id: string): string | null {
+  return sessions.get(id)?.cwd ?? null;
+}
+
+// Pids of every live local session's shell.
+export function sessionPids(): number[] {
+  const pids: number[] = [];
+  for (const session of sessions.values()) {
+    const pid = session.pty.pid;
+    if (typeof pid === "number" && pid > 0) pids.push(pid);
+  }
+  return pids;
+}
+
 export function detachForWebContents(wc: WebContents): void {
   for (const s of sessions.values()) {
     if (s.webContents !== wc) continue;
