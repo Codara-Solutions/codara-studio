@@ -477,6 +477,21 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
     assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
+    // It marks the returned messages read, so a client must not treat it as a
+    // side-effect-free call it may repeat or run in parallel.
+    assert.notStrictEqual(byName(execute, "codara_check_messages").annotations.readOnlyHint, true);
+    // Tools that run an arbitrary command or script must never tell a client
+    // they are safe to auto-approve.
+    for (const name of [
+      "codara_terminal_run",
+      "codara_terminal_create",
+      "codara_terminal_write",
+      "codara_preview_evaluate",
+      "codara_preview_run",
+    ]) {
+      assert.strictEqual(byName(studio, name).annotations.destructiveHint, true, `${name} is destructive`);
+    }
+    assert.strictEqual(byName(execute, "codara_spawn_terminals").annotations.destructiveHint, true);
     assert.deepStrictEqual(byName(studio, "codara_terminal_read").inputSchema.properties.mode.enum, ["text", "screen"]);
     assert.match(byName(studio, "codara_terminal_read").inputSchema.properties.lines.description, /default 200/);
     assert.ok(
@@ -929,6 +944,11 @@ function sortedEqual(actual, expected, label) {
     const fastOffline = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.strictEqual(fastOffline.isError, true);
     assert.ok(Date.now() - fastStartedAt < 1_000, "a repeat call while Codara is closed fails at once");
+    // The studio roster also loads in agents started outside Codara; a
+    // notification Codara cannot show is not a failure of the agent's task.
+    const offlineNotify = await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
+    assert.notStrictEqual(offlineNotify.isError, true, "an offline notification is not a tool error");
+    assert.deepStrictEqual(JSON.parse(offlineNotify.content[0].text), { published: false, reason: "codara_offline" });
     fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
     const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);

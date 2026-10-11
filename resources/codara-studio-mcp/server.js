@@ -591,7 +591,7 @@ const TERMINAL_TOOL_TO_RPC = {
 const NOTIFY_TOOL = {
   name: "codara_notify_user",
   description:
-    "Send the user a Codara notification from your terminal pane: kind done when you finished a task that took more than a minute, needs_input when you are blocked on them. message is one short line. Clicking it jumps to your pane; nothing is shown while the user is already looking at it.",
+    "Send the user a Codara notification from your terminal pane: kind done when you finished a task that took more than a minute, needs_input when you are blocked on them. message is one short line. Clicking it jumps to your pane; nothing is shown while the user is already looking at it, or when you do not run in a Codara terminal.",
   inputSchema: {
     type: "object",
     required: ["kind"],
@@ -1807,12 +1807,19 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_board_get",
   "codara_get_worker_status",
   "codara_wait_for_workers",
-  "codara_check_messages",
   "codara_list_automations",
   "codara_get_automation",
   "codara_wait_for_automation",
 ]);
+// Anything that runs a caller-chosen shell command or page script can destroy
+// data, and a client may auto-approve a tool that says it cannot.
 const DESTRUCTIVE_TOOL_NAMES = new Set([
+  "codara_terminal_run",
+  "codara_terminal_create",
+  "codara_terminal_write",
+  "codara_preview_evaluate",
+  "codara_preview_run",
+  "codara_spawn_terminals",
   "codara_terminal_close",
   "codara_whiteboard_update",
   "codara_board_update",
@@ -2430,6 +2437,12 @@ async function callTool(params, ctx = {}) {
           "which keep running. Do NOT treat this as a worker failure and do NOT respawn them. " +
           "Call codara_get_worker_status for the current state, then codara_wait_for_workers again.",
       });
+    }
+    // This roster also loads in agents the user starts outside Codara, and the
+    // agent's task is finished either way: an error would read as something to
+    // retry or report.
+    if (rpc === "agent.notify" && err && err.code === "SPARK_OFFLINE") {
+      return toToolResult({ published: false, reason: "codara_offline" });
     }
     return toolError(errorText(err));
   } finally {
