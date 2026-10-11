@@ -2477,6 +2477,83 @@ export function useTerminalSession({
       });
       cleanups.push(() => osc133Dispose.dispose());
 
+      // Fix 1 (linchpin): self-healing, LEVEL-triggered re-detection.
+      // The launch signals processAgentChunkText reacts to (launch banner,
+      // 633;E command line, alt-screen-enter) are EDGE-triggered: they only fire on a fresh
+      // launch. So if a still-running agent's chip was ever torn down (by
+      // the poller's absence-reset firing early on a transient anchor
+      // dropout, or by any pane remount that reset agentPhase to "idle"),
+      // it would never recover, leaving the chip gone and Shift+Enter
+      // sending a literal backslash. Re-detect an already-running agent
+      // from its PERSISTENT footer chrome: if the bottom tail still shows
+      // a known runtime's chrome, re-enter agent phase. setAgentRunning
+      // early-returns once agentPhase==="agent", so this only fires from
+      // idle and won't re-trigger every chunk.
+      //
+      // Guards:
+      //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
+      //    same as the poller). A stale footer sitting up in scrollback
+      //    after a REAL exit, shell prompt now at the bottom, reads as
+      //    UI-absent, so a genuinely-exited agent is NOT resurrected.
+      //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
+      //    those are exit signals, and re-detecting on the same chunk that
+      //    a real exit arrived on would immediately undo the reset.
+      //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
+      //    after a real `/exit`/`exit` the agent's footer lingers in the
+      //    bottom tail far longer than any timer: a 1-2 line shell prompt
+      //    barely pushes a 5-8 line footer up, so it stays inside the tail
+      //    (forever on an idle shell). So we stay suppressed until the
+      //    footer has left the tail at least once (liveRuntime === null),
+      //    then re-arm. Absence-poller teardowns omit the flag AND only
+      //    fire when the UI was already absent, so a FALSE teardown
+      //    self-heals immediately when the footer reappears.
+      //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
+      //    (hidden panes skip term.write), so its tail is stale and could
+      //    re-detect against an old frame.
+      //  - THROTTLED (scheduleTailRedetect): at most one read per
+      //    TAIL_REDETECT_INTERVAL_MS, with a trailing read so the last
+      //    repaint of a burst is still seen; an exit-signal chunk cancels
+      //    a pending read.
+      const redetectFromTail = () => {
+        const term = termRef.current;
+        if (!term) return;
+        const liveRuntime = liveRuntimeFromTail(readTerminalTail(term, STATE_TAIL_ROWS));
+        if (!liveRuntime) {
+          // Agent chrome is gone from the bottom tail: a real exit's
+          // stale footer has finally scrolled out (or a false teardown was
+          // already UI-absent). Re-arm: future repaints may re-detect.
+          redetectSuppressedAfterExit = false;
+        } else if (!redetectSuppressedAfterExit) {
+          setAgentRunning(liveRuntime);
+        }
+        // else: footer present but still post-exit-suppressed (lingering
+        // stale frame) → do nothing until it leaves the tail once.
+      };
+      let tailRedetectAt = 0;
+      let tailRedetectTimer: number | null = null;
+      const cancelTailRedetect = () => {
+        if (tailRedetectTimer === null) return;
+        window.clearTimeout(tailRedetectTimer);
+        tailRedetectTimer = null;
+      };
+      const scheduleTailRedetect = () => {
+        const now = Date.now();
+        if (now - tailRedetectAt >= TAIL_REDETECT_INTERVAL_MS) {
+          cancelTailRedetect();
+          tailRedetectAt = now;
+          redetectFromTail();
+          return;
+        }
+        if (tailRedetectTimer !== null) return;
+        tailRedetectTimer = window.setTimeout(() => {
+          tailRedetectTimer = null;
+          if (disposed || agentPhase !== "idle" || !visibleRef.current) return;
+          tailRedetectAt = Date.now();
+          redetectFromTail();
+        }, TAIL_REDETECT_INTERVAL_MS - (now - tailRedetectAt));
+      };
+      cleanups.push(cancelTailRedetect);
+
       const processAgentChunkText = (chunkText: string) => {
         if (!onAgentStateRef.current) return;
         if (chunkText.length > 0) {
@@ -2515,8 +2592,14 @@ export function useTerminalSession({
           clearRecentAgentInput();
         }
         if (agentPhase === "idle") {
+          // The ring is emptied whenever the pane returns to idle, so anything
+          // older than this chunk was already sniffed while idle and did not
+          // match. Scanning only the fresh text plus an overlap that bridges a
+          // marker split across chunks avoids stripping and matching the whole
+          // ring on every chunk of a busy shell.
+          const sniffWindow = agentTextRing.slice(-(chunkText.length + AGENT_SNIFF_OVERLAP));
           const runtime =
-            sniffOsc633CommandRuntime(agentTextRing) ?? sniffLiveRuntime(agentTextRing);
+            sniffOsc633CommandRuntime(sniffWindow) ?? sniffLiveRuntime(sniffWindow);
           if (runtime) {
             setAgentRunning(runtime);
           } else if (chunkText.includes("\x1b[?1049h")) {
@@ -2533,60 +2616,10 @@ export function useTerminalSession({
             // the same lifecycle as banner-based detection. setAgentRunning
             // arms the runtime-promotion bookkeeping for this null arm.
             setAgentRunning(null);
-          } else if (
-            !sawAltScreenLeave &&
-            !sawPromptMarker &&
-            visibleRef.current
-          ) {
-            // Fix 1 (linchpin) — self-healing, LEVEL-triggered re-detection.
-            // The signals above (launch banner, 633;E command line,
-            // alt-screen-enter) are EDGE-triggered: they only fire on a fresh
-            // launch. So if a still-running agent's chip was ever torn down —
-            // by the poller's absence-reset firing early on a transient anchor
-            // dropout, or by any pane remount that reset agentPhase to "idle" —
-            // it would never recover, leaving the chip gone and Shift+Enter
-            // sending a literal backslash. Re-detect an already-running agent
-            // from its PERSISTENT footer chrome: if the bottom tail still shows
-            // a known runtime's chrome, re-enter agent phase. setAgentRunning
-            // early-returns once agentPhase==="agent", so this only fires from
-            // idle and won't re-trigger every chunk.
-            //
-            // Guards:
-            //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
-            //    same as the poller). A stale footer sitting up in scrollback
-            //    after a REAL exit — shell prompt now at the bottom — reads as
-            //    UI-absent, so a genuinely-exited agent is NOT resurrected.
-            //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
-            //    those are exit signals, and re-detecting on the same chunk that
-            //    a real exit arrived on would immediately undo the reset.
-            //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
-            //    after a real `/exit`/`exit` the agent's footer lingers in the
-            //    bottom tail far longer than any timer — a 1-2 line shell prompt
-            //    barely pushes a 5-8 line footer up, so it stays inside the tail
-            //    (forever on an idle shell). So we stay suppressed until the
-            //    footer has left the tail at least once (liveRuntime === null),
-            //    then re-arm. Absence-poller teardowns omit the flag AND only
-            //    fire when the UI was already absent, so a FALSE teardown
-            //    self-heals immediately when the footer reappears.
-            //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
-            //    (hidden panes skip term.write), so its tail is stale and could
-            //    re-detect against an old frame.
-            const term = termRef.current;
-            if (term) {
-              const liveRuntime = liveRuntimeFromTail(
-                readTerminalTail(term, STATE_TAIL_ROWS),
-              );
-              if (!liveRuntime) {
-                // Agent chrome is gone from the bottom tail — a real exit's
-                // stale footer has finally scrolled out (or a false teardown was
-                // already UI-absent). Re-arm: future repaints may re-detect.
-                redetectSuppressedAfterExit = false;
-              } else if (!redetectSuppressedAfterExit) {
-                setAgentRunning(liveRuntime);
-              }
-              // else: footer present but still post-exit-suppressed (lingering
-              // stale frame) → do nothing until it leaves the tail once.
-            }
+          } else if (sawAltScreenLeave || sawPromptMarker) {
+            cancelTailRedetect();
+          } else if (visibleRef.current) {
+            scheduleTailRedetect();
           }
           return;
         }
@@ -4098,6 +4131,13 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
+// Fresh text sniffed together with the end of the previous chunk, so a
+// banner or command marker split across two chunks still matches. Same
+// bound as the main-process notifier's SNIFF_OVERLAP.
+const AGENT_SNIFF_OVERLAP = 512;
+// Shortest gap between two reads of an idle pane's bottom rows for agent
+// chrome on output (see scheduleTailRedetect).
+const TAIL_REDETECT_INTERVAL_MS = 250;
 // Effective cadence while the pane cannot be seen (hidden window, tab or
 // workspace). The poller keeps running (background panes must still
 // transition so turn-complete notifications fire) but at a fraction of the
