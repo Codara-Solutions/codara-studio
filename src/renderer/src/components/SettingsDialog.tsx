@@ -625,12 +625,14 @@ function TerminalSettings({
                 : "None yet"
             }
           />
+          {/* A fact, not a setting: it sits with the other read-only rows
+              so the page has no heading without a row under it. */}
+          <ValueRow
+            title="Run panes"
+            desc="Temporary worker panes close when their run settles; service panes stay until the run is deleted. A failed close is retried."
+            value="Closed automatically"
+          />
       </SettingsSection>
-
-      <SettingsSection
-        title="Run terminal lifecycle"
-        description="Temporary worker panes close when a run settles. Service panes remain until the run is deleted. Failed closes retry automatically."
-      />
     </>
   );
 }
@@ -959,13 +961,18 @@ function GeneralSettings({
             title="Glass tuning"
             desc="Strength of each part of the glass material, as a share of the default."
             control={
+              // The chevron carries open or closed, so the button itself
+              // never has to look pressed to say so.
               <button
                 type="button"
-                className="spark-btn"
+                className="spark-btn st-expand-btn"
                 aria-expanded={glassTuningOpen}
                 onClick={() => setGlassTuningOpen((open) => !open)}
               >
                 {glassTuningOpen ? "Hide" : "Adjust"}
+                <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
               </button>
             }
           >

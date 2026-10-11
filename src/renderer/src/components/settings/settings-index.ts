@@ -143,7 +143,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "terminal", title: "Default shell", desc: "The shell new terminals open with.", section: "Shell", keywords: "zsh bash fish powershell terminal" },
   { tab: "terminal", title: "Scrollback lines", desc: "Lines of output each terminal keeps.", section: "Output history", keywords: "buffer memory history" },
   { tab: "terminal", title: "Resource overview", desc: "Live terminals and the output they buffer.", keywords: "memory streams parked live" },
-  { tab: "terminal", title: "Run terminal lifecycle", desc: "When worker panes close.", keywords: "worker panes close" },
+  { tab: "terminal", title: "Run panes", desc: "When worker panes close.", section: "Resource overview", keywords: "worker panes close lifecycle run terminal" },
   { tab: "api", title: "OpenRouter API key", desc: "The key behind inline edits and OpenRouter models.", section: "OpenRouter", keywords: "key token openrouter" },
   { tab: "api", title: "Inline edit and commit model", desc: "The OpenRouter model for inline edits.", section: "OpenRouter", keywords: "model gemini" },
   { tab: "api", title: "Models for Cora", desc: "OpenRouter models offered in the Cora picker.", section: "OpenRouter", keywords: "model picker openrouter" },

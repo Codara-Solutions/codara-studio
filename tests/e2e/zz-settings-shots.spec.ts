@@ -176,6 +176,9 @@ async function captureExtras(page: Page, dialog: Locator, base: string): Promise
   const adjust = dialog.getByRole("button", { name: "Adjust" });
   if (await adjust.count()) {
     await adjust.click({ force: true });
+    // Park the pointer, or the hover state under it reads as pressed, and
+    // the Capability Center opened next would show a row hovered.
+    await page.mouse.move(4, 4);
     await dialog.getByText("Chromatic fringe", { exact: true }).scrollIntoViewIfNeeded();
     await page.waitForTimeout(150);
     await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-glass-tuning.png`) });

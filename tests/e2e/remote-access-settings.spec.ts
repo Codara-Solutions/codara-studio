@@ -61,6 +61,15 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     await expect(modal.getByText("Scan with the Codara app")).toBeVisible();
     await expect(modal.getByAltText("Pairing QR code")).toBeVisible();
 
+    // A click outside the modal never drops the QR mid-pairing: only Escape
+    // and its own buttons close it, as with Settings itself.
+    const settingsBox = await dialog.boundingBox();
+    expect(settingsBox).not.toBeNull();
+    await page.mouse.click(settingsBox!.x + 24, settingsBox!.y + settingsBox!.height - 24);
+    await page.mouse.click(6, 6);
+    await expect(modal).toBeVisible();
+    await expect(dialog).toBeVisible();
+
     // 3. The secret behind that QR must live in the image and nowhere a human
     // (or a screenshot, or a screen share) can read it as text.
     const pairing = await mintPairingPayload(page);

@@ -7841,6 +7841,16 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .st-disclosure[aria-expanded="true"] svg {
   transform: rotate(90deg);
 }
+.st-expand-btn {
+  gap: 6px;
+}
+.st-expand-btn svg {
+  color: var(--st-faint);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.st-expand-btn[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
 .st-indent {
   margin-top: 10px;
 }

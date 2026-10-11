@@ -320,12 +320,16 @@ function PairingModal({ onClose }: { onClose: () => void }) {
     return () => window.clearInterval(timer);
   }, []);
 
+  // On document, so it runs before Settings' window listener; marking the
+  // Escape handled keeps Settings open underneath and closes only this.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      onClose();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   const secondsLeft = useMemo(() => {
@@ -333,6 +337,9 @@ function PairingModal({ onClose }: { onClose: () => void }) {
     return Math.max(0, Math.ceil((phase.expiresAt - now) / 1000));
   }, [phase, now]);
 
+  // The scrim deliberately does nothing, as in Settings and the Capability
+  // Center: a stray click outside must not drop a QR code mid-pairing. Only
+  // Escape and the modal's own buttons close it.
   return (
     <div
       style={{
@@ -343,17 +350,20 @@ function PairingModal({ onClose }: { onClose: () => void }) {
         alignItems: "center",
         justifyContent: "center",
       }}
-      onMouseDown={onClose}
     >
       <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Pair a device"
-        className="spark-glass--strong"
+        // Opaque like the Settings face it opens from: a QR code and a
+        // fingerprint to compare must not sit on glass.
         style={{
           zIndex: 1,
           width: "min(400px, calc(100vw - 60px))",
+          border: "1px solid var(--rule)",
+          background: "var(--st-surface, var(--panel))",
+          boxShadow: "0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18)",
           borderRadius: 12,
           padding: 20,
           display: "grid",
