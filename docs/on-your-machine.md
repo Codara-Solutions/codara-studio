@@ -79,6 +79,13 @@ CLIs, hooks and the MCP server, and keep the legacy `SPARK_` prefix.
 | `SPARK_NO_SHELL_INTEGRATION`, `SPARK_USER_ZDOTDIR`, `SPARK_FOLLOW_ACTIVE_ACCOUNT` | Shell integration controls. |
 | `GROK_HOME` | Points Grok at the Active managed account's home. |
 
+A Studio terminal is a terminal of its own, even when you started Codara from
+another one. It does not inherit the launching terminal's name or pane
+address (`TERM_PROGRAM`, `WEZTERM_PANE`, `TMUX`, `KITTY_WINDOW_ID` and the
+like), so a tool that opens something "in the current pane", such as a script
+calling `wezterm cli split-pane`, cannot reach the window Codara was started
+from. Its `TERM` is always `xterm-256color`.
+
 Terminals do not get the agent socket's token. Tools that call the app, such
 as the Codara Studio MCP server and the `cora` CLI, read its address and
 token from `agent-socket.json`. Only Cora's processes for an imported pull

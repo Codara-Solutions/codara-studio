@@ -80,6 +80,65 @@ export function sanitizeElectronViteDevEnv(env: Record<string, string | undefine
   delete env[ELECTRON_VITE_MODE_MARKER];
 }
 
+// Host terminal identity.
+//
+// Codara started from another terminal (`npm run dev` typed into WezTerm, a
+// launcher run inside kitty or tmux) inherits that terminal's name and the
+// address of the pane it ran in. A Codara pane is not that pane. Tools that
+// act on "the current pane" through these variables reach the launcher's
+// window instead: `wezterm cli split-pane` (what a /sessions picker uses to
+// open over the current pane) splits the WezTerm pane running `npm run dev`,
+// so nothing appears in Codara. Claude Code also reads TERM_PROGRAM and
+// WEZTERM_PANE to pick its keyboard protocol and clipboard path, and would
+// configure itself for WezTerm inside xterm.js.
+const HOST_TERMINAL_ENV = [
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
+  "TERM_SESSION_ID",
+  "LC_TERMINAL",
+  "LC_TERMINAL_VERSION",
+  "WINDOWID",
+  "WEZTERM_PANE",
+  "WEZTERM_UNIX_SOCKET",
+  "WEZTERM_EXECUTABLE",
+  "WEZTERM_EXECUTABLE_DIR",
+  "KITTY_WINDOW_ID",
+  "KITTY_PID",
+  "KITTY_LISTEN_ON",
+  "KITTY_PUBLIC_KEY",
+  "TMUX",
+  "TMUX_PANE",
+  "STY",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+  "ITERM_SESSION_ID",
+  "ITERM_PROFILE",
+  "WT_SESSION",
+  "WT_PROFILE_ID",
+  "ALACRITTY_WINDOW_ID",
+  "ALACRITTY_SOCKET",
+  "GHOSTTY_RESOURCES_DIR",
+  "GHOSTTY_BIN_DIR",
+  "GHOSTTY_SHELL_FEATURES",
+  "VTE_VERSION",
+  "GNOME_TERMINAL_SCREEN",
+  "GNOME_TERMINAL_SERVICE",
+  "TILIX_ID",
+  "KONSOLE_VERSION",
+  "KONSOLE_DBUS_SERVICE",
+  "KONSOLE_DBUS_SESSION",
+  "KONSOLE_DBUS_WINDOW",
+  "TERMINATOR_UUID",
+  "TERMINATOR_DBUS_NAME",
+  "TERMINATOR_DBUS_PATH",
+];
+
+/** Delete the launching terminal's identity and pane address from `env`, in place. */
+export function sanitizeHostTerminalEnv(env: Record<string, string | undefined>): void {
+  for (const key of HOST_TERMINAL_ENV) delete env[key];
+}
+
 /**
  * A copy of process.env without electron-vite's dev wiring, for a child that
  * runs the user's own commands outside pty-manager (automation steps and
