@@ -8572,11 +8572,11 @@ button.st-list__row:hover,
   white-space: nowrap;
 }
 /* Rows sit flush with the page edges, so a row's last control ends on the
-   same line as Add account and every other page's controls. The active
-   tint and its rule bleed into the gutter instead of pushing the row in. */
+   same line as Add account and every other page's controls. The active row
+   is marked by its badge and a ring on its avatar, both inside the column:
+   a tint or a rule out in the gutter breaks the edge every other row keeps. */
 .st-acct {
   position: relative;
-  isolation: isolate;
   display: flex;
   align-items: flex-start;
   gap: 12px;
@@ -8586,22 +8586,8 @@ button.st-list__row:hover,
 .st-acct + .st-acct-empty {
   border-top: 1px solid var(--st-line);
 }
-.st-acct.is-active::after {
-  content: "";
-  position: absolute;
-  inset: 0 -12px;
-  z-index: -1;
-  background: color-mix(in oklch, var(--accent) 6%, transparent);
-}
-.st-acct.is-active::before {
-  content: "";
-  position: absolute;
-  top: 10px;
-  bottom: 10px;
-  left: -12px;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--accent);
+.st-acct.is-active .st-acct__avatar {
+  box-shadow: 0 0 0 2px var(--st-surface), 0 0 0 3.5px var(--accent);
 }
 .st-acct__avatar,
 .st-acct-empty__mark {
@@ -8685,6 +8671,12 @@ button.st-list__row:hover,
   flex: none;
   align-items: center;
   gap: 4px;
+}
+/* The overflow trigger's footprint (.st-icon-btn), held empty. */
+.st-acct__menu-slot {
+  flex: none;
+  width: 28px;
+  height: 28px;
 }
 .st-code {
   padding: 1px 5px;
@@ -8917,19 +8909,23 @@ button.st-list__row:hover,
 .st-meters.is-stale .st-meter__fill {
   opacity: 0.45;
 }
-.st-meters.is-empty .st-meter__track {
-  background: color-mix(in oklab, var(--ink) 6%, transparent);
+.st-usage-empty {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
 }
-.st-meters.is-empty .st-meter__label {
-  color: var(--st-faint);
+.st-usage-empty__labels {
+  flex: none;
+  color: var(--st-desc);
 }
-.st-meter__note {
-  grid-column: 2 / -1;
+.st-usage-empty__note {
+  min-width: 0;
   overflow: hidden;
   color: var(--st-faint);
-  font-size: 12px;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .st-usage__message {
   color: var(--st-faint);

@@ -320,6 +320,7 @@ function AccountProviderGroup({
               >
                 Sign in to {descriptor.label}
               </ActionButton>
+              <span aria-hidden className="st-acct__menu-slot" />
             </span>
           </div>
         ) : null}

@@ -173,8 +173,13 @@ assert.doesNotMatch(
 );
 // The footer applies one rule to every provider: an account is ready when
 // its row would offer Switch or show Active, so "2 of 4 ready" always agrees
-// with the rows. It is omitted when there are none.
-assert.match(settings, /return state === "active" \|\| state === "signed-in";/);
+// with the rows. A row whose Cora half reports an error offers a fix
+// instead, so it is not ready. It is omitted when there are none.
+assert.match(settings, /const ready = cards\.filter\(accountCardReady\)\.length;/);
+assert.match(
+  card,
+  /export function accountCardReady\(card: AccountCardView\): boolean \{\s*const state = accountCardState\(card\);\s*return \(state === "active" \|\| state === "signed-in"\) && !card\.cora\?\.error;/,
+);
 assert.match(settings, /const footer = cards\.length === 0 \? null : `\$\{ready\} of \$\{cards\.length\} ready`;/);
 assert.match(settings, /\.\.\.\(footer \? \{ footer \} : \{\}\)/);
 // The switching explainer says what one account is.
@@ -292,7 +297,11 @@ assert.match(card, /\{card\.active \? <ActiveBadge label="Active" \/> : null\}/)
 assert.match(card, /case "active":\s*return undefined;/);
 assert.match(card, /case "account-one-signed-out":\s*return terminalUsable\(card\) \? undefined : copyLogin;/);
 assert.match(card, /if \(status\.danger && state !== "terminal-only"\) \{\s*if \(card\.builtIn\) return copyLogin;/);
-assert.match(card, /label: `Copy \$\{descriptor\.loginHint\}`/);
+// The button names the outcome; the command is in its tooltip.
+assert.match(card, /label: "Copy sign-in command",\s*title: `Copies \$\{descriptor\.loginHint\} to run in a terminal`,/);
+assert.match(card, /title=\{action\.title\}/);
+// Every row keeps the menu's slot, so the buttons end on one edge.
+assert.match(card, /<span aria-hidden className="st-acct__menu-slot" \/>/);
 // Every row action is the same secondary button; the Active badge is the
 // only accent in the list.
 assert.doesNotMatch(card, /<ActionButton[^>]*\bprimary\b/);

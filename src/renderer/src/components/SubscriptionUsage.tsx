@@ -162,10 +162,10 @@ function UsageMeterGrid({
 }
 
 /**
- * The meter rows of an account with no reading to draw: the same labels and
- * grid as a real reading, with empty tracks and a short reason, so a signed
- * out or expired row keeps the shape of every other row. With no labels the
- * provider reports no limits at all, which one row says plainly.
+ * The limits line of an account with no reading to draw: the windows it
+ * would show, named once, and one short reason. Empty tracks repeating the
+ * same note on every window were chrome that said nothing more. With no
+ * labels the provider reports no limits at all, which the line says plainly.
  */
 export function UsagePlaceholder({
   labels,
@@ -174,27 +174,16 @@ export function UsagePlaceholder({
 }: {
   labels: ReadonlyArray<string>;
   note: string;
-  /** Why the last read failed, said once under the rows. */
+  /** Why the last read failed, said once under the line. */
   message?: string;
 }) {
   return (
     <div className="st-usage">
-      <div className="st-meters is-empty">
-        {labels.length === 0 ? (
-          <div className="st-meter">
-            <span className="st-meter__label">Limits</span>
-            <span className="st-meter__note">{note}</span>
-          </div>
-        ) : (
-          labels.map((label) => (
-            <div key={label} className="st-meter">
-              <span className="st-meter__label">{label}</span>
-              <span aria-hidden className="st-meter__track" />
-              <span aria-hidden className="st-meter__pct" />
-              <span className="st-meter__reset">{note}</span>
-            </div>
-          ))
-        )}
+      <div className="st-usage-empty">
+        <span className="st-usage-empty__labels">
+          {labels.length === 0 ? "Limits" : labels.join(" · ")}
+        </span>
+        <span className="st-usage-empty__note">{note}</span>
       </div>
       {message ? <span className="st-usage__message">{message}</span> : null}
     </div>

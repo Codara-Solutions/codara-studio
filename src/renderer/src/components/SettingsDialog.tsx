@@ -50,7 +50,7 @@ import AccountCards, {
   type AccountActions,
   type AccountProviderView,
 } from "./AccountCards";
-import { accountCardState, type AccountCardView } from "./AccountCard";
+import { accountCardReady, type AccountCardView } from "./AccountCard";
 import {
   ACCOUNT_PROVIDER_DESCRIPTORS,
   accountProviderDetail,
@@ -1987,13 +1987,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             ]
           : [];
       const cards = [...accountOneSlot, ...rows, ...terminalOnly];
-      // One rule for every provider: an account is ready when Cora and its
-      // terminal tool can both use it right now, the same test that gives a
-      // row its Switch button or its Active badge.
-      const ready = cards.filter((card) => {
-        const state = accountCardState(card);
-        return state === "active" || state === "signed-in";
-      }).length;
+      // One rule for every provider, and the row's own: ready is a row that
+      // shows Switch, or Active with nothing to fix.
+      const ready = cards.filter(accountCardReady).length;
       const footer = cards.length === 0 ? null : `${ready} of ${cards.length} ready`;
       return {
         descriptor,

@@ -120,6 +120,18 @@ export function accountCardState(card: AccountCardView): AccountCardState {
   return card.active ? "active" : "signed-in";
 }
 
+/**
+ * Ready is what the row shows, never a separate guess: an account counts
+ * when its row carries the Active badge with no problem under it, or the
+ * Switch button. A store error turns the row's button into a fix (Reconnect,
+ * or the sign-in command), so that row is not ready even while its state
+ * still reads as signed in.
+ */
+export function accountCardReady(card: AccountCardView): boolean {
+  const state = accountCardState(card);
+  return (state === "active" || state === "signed-in") && !card.cora?.error;
+}
+
 export function accountOneSignedOutHint(
   descriptor: AccountProviderDescriptor,
 ): string {
@@ -230,9 +242,11 @@ function primaryAction(
   // here: its fix is the login command, one click from the clipboard. A
   // lapsed sign-in on any other row is fixed by reconnecting it, never by
   // switching to it.
+  // The label names the outcome; the command itself is in the tooltip.
   const copyLogin: CardAction = {
     id: "copy-login",
-    label: `Copy ${descriptor.loginHint}`,
+    label: "Copy sign-in command",
+    title: `Copies ${descriptor.loginHint} to run in a terminal`,
     disabled: false,
     run: onCopyLogin,
   };
@@ -431,17 +445,25 @@ export default function AccountCard({
             ) : action ? (
               // Every row action is the same quiet button: the only accent in
               // the list is the Active badge and its rule.
-              <ActionButton disabled={action.disabled} onClick={() => void action.run()}>
+              <ActionButton
+                disabled={action.disabled}
+                title={action.title}
+                onClick={() => void action.run()}
+              >
                 {action.id === "copy-login" && copied ? "Copied" : action.label}
               </ActionButton>
             ) : null}
+            {/* A row with nothing in its menu keeps the menu's slot, so every
+                row's button ends on the same edge down the list. */}
             {menuActions.length > 0 || destructiveActions.length > 0 ? (
               <CardOverflowMenu
                 label={`More actions for ${card.label}`}
                 groups={[menuActions, destructiveActions]}
                 onClose={() => setDeleteArmed(false)}
               />
-            ) : null}
+            ) : (
+              <span aria-hidden className="st-acct__menu-slot" />
+            )}
           </div>
         </div>
 

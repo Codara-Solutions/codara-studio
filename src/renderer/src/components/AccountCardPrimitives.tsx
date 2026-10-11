@@ -21,6 +21,8 @@ export const INPUT_STYLE: React.CSSProperties = {
 export interface CardAction {
   id: string;
   label: string;
+  /** What the button does in full, when the label names only the outcome. */
+  title?: string;
   disabled: boolean;
   danger?: boolean;
   run: () => void | boolean;
@@ -37,10 +39,12 @@ export function ActionButton({
   disabled,
   primary = false,
   quiet = false,
+  title,
   onClick,
 }: {
   children: React.ReactNode;
   disabled?: boolean;
+  title?: string;
   /** The one committing action in a cluster. */
   primary?: boolean;
   /** Borderless, for secondary actions beside a primary one. */
@@ -52,6 +56,7 @@ export function ActionButton({
       type="button"
       className={`spark-btn st-acct-btn${primary ? " is-primary" : ""}${quiet ? " st-btn-quiet" : ""}`}
       disabled={disabled}
+      title={title}
       onClick={onClick}
     >
       {children}
