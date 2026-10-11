@@ -79,6 +79,24 @@ const FIT_DEBOUNCE_MS = 8;
 // renderer, so a machine that can't hold a context (GPU eviction storms, driver
 // flake) doesn't thrash a new addon on every tab switch.
 const WEBGL_MAX_RELOADS = 3;
+// Whether this renderer process can create a WebGL2 context at all. With
+// hardware acceleration off (the Wayland software fallback) it cannot, and
+// the addon then fails inside term.open where the error is swallowed, leaving
+// a handle to an addon that never started. Probed once: the answer cannot
+// change without a restart.
+let webgl2Supported: boolean | null = null;
+function canUseWebgl2(): boolean {
+  if (webgl2Supported !== null) return webgl2Supported;
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    webgl2Supported = gl !== null;
+    // Chromium caps live contexts per window; give the probe's back now.
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webgl2Supported = false;
+  }
+  return webgl2Supported;
+}
 // How long to wait after an alt-screen leave before deciding it was an exit.
 // Long enough for the agent's restored frame to reach the rows, short enough
 // that a real exit clears the chip promptly.
@@ -974,11 +992,18 @@ export function useTerminalSession({
       // default; the WebGL renderer is several × faster on agent-style output
       // (full-screen redraws, scrollback, large bursts). On context loss
       // (driver crash, lost GPU, tab move between displays) we dispose the
-      // addon and xterm transparently falls back to DOM.
+      // addon and xterm transparently falls back to DOM. Loaded after
+      // term.open below, so a renderer that cannot start throws here instead
+      // of inside open.
       let webgl: WebglAddon | null = null;
       // Consecutive reloads triggered by a lost GL context on re-show (see
       // recoverRendererOnShow). Reset once a live context is observed.
       let webglReloads = 0;
+      // Set when a context loss dropped the pane to the DOM renderer, so the
+      // next reveal can try WebGL again. Chromium caps live contexts per
+      // window and evicts the oldest, which is usually a hidden pane; the one
+      // the user is looking at should get a context back.
+      let webglLost = false;
       const attachWebglLossHandler = (addon: WebglAddon) => {
         addon.onContextLoss(() => {
           try {
@@ -986,7 +1011,10 @@ export function useTerminalSession({
           } catch {
             /* ignore */
           }
-          if (webgl === addon) webgl = null;
+          if (webgl === addon) {
+            webgl = null;
+            webglLost = true;
+          }
           // Disposing the WebGL addon makes xterm fall back to the DOM renderer.
           // The DOM renderer derives a WIDER css cell width than WebGL (it does
           // NOT floor device char width the way WebglRenderer does), and the
@@ -1002,18 +1030,19 @@ export function useTerminalSession({
         });
       };
       const loadWebgl = (): boolean => {
+        if (!canUseWebgl2()) return false;
         try {
           const addon = new WebglAddon();
           attachWebglLossHandler(addon);
           term.loadAddon(addon);
           webgl = addon;
+          webglLost = false;
           return true;
         } catch {
           webgl = null;
           return false;
         }
       };
-      loadWebgl();
 
       // Renderer recovery on pane re-activation. Two failure modes are healed
       // here, both invisible until the pane is shown again — this is the fix for
@@ -1035,7 +1064,10 @@ export function useTerminalSession({
       const recoverRendererOnShow = (resetRenderer = false) => {
         const t = termRef.current;
         if (!t) return;
-        if (webgl) {
+        if (!webgl && webglLost && webglReloads < WEBGL_MAX_RELOADS) {
+          webglReloads += 1;
+          if (loadWebgl()) refitAfterRendererSwapRef.current?.();
+        } else if (webgl) {
           // Find the WebGL renderer's OWN canvas. .xterm-screen also holds the
           // renderer's link layer — a 2D canvas (class xterm-link-layer) that is
           // appended BEFORE the WebGL canvas — so a plain ".xterm-screen canvas"
@@ -1500,6 +1532,7 @@ export function useTerminalSession({
       }
 
       term.open(container.current);
+      loadWebgl();
       const viewportHost = container.current;
       const viewportRecovery = createTerminalViewportRecovery(term, () =>
         visibleRef.current && document.visibilityState === "visible" &&

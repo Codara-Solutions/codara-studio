@@ -319,6 +319,16 @@ async function main() {
       /if \(holdHiddenSize\(\)\) return;\n\s*if \(rafHandle !== null\)/.test(source),
   );
 
+  check(
+    "WebGL loads after term.open and only where WebGL2 exists",
+    source.includes("term.open(container.current);\n      loadWebgl();") &&
+      source.includes("if (!canUseWebgl2()) return false;"),
+  );
+  check(
+    "a reveal gives WebGL back to a pane that lost its context",
+    source.includes("if (!webgl && webglLost && webglReloads < WEBGL_MAX_RELOADS) {"),
+  );
+
   await checkScreenModes(outDir);
 
   fs.rmSync(outDir, { recursive: true, force: true });
