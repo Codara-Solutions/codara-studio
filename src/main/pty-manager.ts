@@ -53,6 +53,7 @@ import {
 import { personalCliShellHomeEnvironment, resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { installClaudeHooks } from "./hook-installer";
+import { continueForegroundJob } from "./terminal-foreground";
 import {
   beginPosixPtyTreeTeardown,
   capturePosixPtyTree,
@@ -2164,6 +2165,9 @@ function requestTerminalRedraw(s: Session): void {
   if (s.disposed || s.exited || terminalRedraws.has(s)) return;
   // A raw byte tail may contain only incremental animation frames. Repainting
   // xterm cannot reconstruct the missing cells; the child must redraw them.
+  // SIGCONT covers a busy TUI that reads the size only after the pulse below
+  // has been undone; the pulse covers programs that ignore SIGCONT.
+  void continueForegroundJob(s.pty.pid);
   // A real size change triggers SIGWINCH even when the pane's size is stable.
   try {
     s.pty.resize(s.cols > 1 ? s.cols - 1 : 2, s.rows);

@@ -297,6 +297,13 @@ function stubPlugin() {
     "./hook-installer": `
       export function installClaudeHooks() { return Promise.resolve(); }
     `,
+    "./terminal-foreground": `
+      export async function continueForegroundJob(pid) {
+        const controller = globalThis.__codaraPtySpawnHarness;
+        (controller.continuedForeground ??= []).push(pid);
+        return null;
+      }
+    `,
   };
 
   return {
