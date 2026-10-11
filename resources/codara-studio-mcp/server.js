@@ -1946,7 +1946,7 @@ async function readHandshake() {
   }
 }
 
-async function postJsonRpc(method, params, timeoutMs) {
+async function postJsonRpc(method, params, timeoutMs, signal) {
   const handshake = await readHandshake();
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params: params || {} });
@@ -1996,6 +1996,16 @@ async function postJsonRpc(method, params, timeoutMs) {
     req.setTimeout(timeoutMs || PREVIEW_TERMINAL_TIMEOUT_MS, () => {
       req.destroy(new Error("Codara agent socket timeout"));
     });
+    // Hanging up is what tells the main process to stop serving a long poll
+    // whose caller (an interrupted Cora turn) is gone.
+    if (signal) {
+      const hangUp = () => req.destroy(new Error("call aborted"));
+      if (signal.aborted) hangUp();
+      else {
+        signal.addEventListener("abort", hangUp, { once: true });
+        req.on("close", () => signal.removeEventListener("abort", hangUp));
+      }
+    }
     req.write(body);
     req.end();
   });
@@ -2080,7 +2090,7 @@ async function dispatch(method, params) {
   }
 }
 
-async function callTool(params) {
+async function callTool(params, signal) {
   const name = params && typeof params.name === "string" ? params.name : null;
   if (
     IS_UNTRUSTED_PULL_REQUEST &&
@@ -2141,7 +2151,7 @@ async function callTool(params) {
 
   const timeoutMs = isOrchestrationRpc(rpc) ? ORCHESTRATION_TIMEOUT_MS : PREVIEW_TERMINAL_TIMEOUT_MS;
   try {
-    const result = await postJsonRpc(rpc, args, timeoutMs);
+    const result = await postJsonRpc(rpc, args, timeoutMs, signal);
     return toToolResult(result);
   } catch (err) {
     // A long poll whose transport died has NOT told us anything about the
@@ -2273,8 +2283,8 @@ module.exports = {
   listTools() {
     return TOOLS.map((tool) => ({ ...tool }));
   },
-  callToolByName(name, args) {
-    return callTool({ name, arguments: args });
+  callToolByName(name, args, signal) {
+    return callTool({ name, arguments: args }, signal);
   },
   // The extension's non-tool calls (the Claude login renewal) go through the
   // same authenticated socket client, with its scoped-capability rules.
