@@ -89,11 +89,13 @@ check("one save model: settings apply as they change, never through a draft", ()
   assert.match(dialog, /Memory changes apply immediately\./);
 });
 
-check("unsaved drafts are confirmed before Escape, the scrim, X or the nav drop them", () => {
+check("unsaved drafts are confirmed before Escape, X or the nav drop them", () => {
   assert.match(dialog, /const anyDirty = editorDirty \|\| profileDraftDirty \|\| documentDirty;/);
   assert.match(dialog, /if \(discards\) setConfirmLeave\(action\);/);
   assert.match(dialog, /if \(event\.key !== "Escape"\) return;[\s\S]{0,300}?current\.requestLeave\(/);
-  assert.match(dialog, /onMouseDown=\{\(\) => requestLeave\(editor \? \{ kind: "back" \} : \{ kind: "close" \}\)\}/);
+  // A click outside the dialog never leaves it: only Escape, X and Done do.
+  assert.doesNotMatch(dialog, /onMouseDown=\{\(\) => requestLeave\(/);
+  assert.match(dialog, /<div style=\{overlayStyle\}>/);
   assert.match(dialog, /<CloseButton onClick=\{\(\) => requestLeave\(\{ kind: "close" \}\)\} \/>/);
   assert.match(dialog, /requestLeave\(\{ kind: "tab", tab \}\);/);
   assert.match(dialog, /Discard them\?/);

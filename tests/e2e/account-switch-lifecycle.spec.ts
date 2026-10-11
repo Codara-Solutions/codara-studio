@@ -69,7 +69,7 @@ for (const remaining of [2, 0]) {
       await expect(dialog.getByText("Main", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Account 1", { exact: true })).toHaveCount(0);
       await expect(dialog.getByText(/Cora is linking it now/)).toHaveCount(0);
-      await dialog.getByRole("button", { name: "Use this account", exact: true }).click();
+      await dialog.getByRole("button", { name: "Switch to this account", exact: true }).click();
       await expect(dialog.getByRole("button", { name: "Close 5 sessions and switch" })).toBeVisible();
       await app.evaluate(({ BrowserWindow }, count) => {
         (globalThis as FixtureGlobal).accountFixture.count = count;
@@ -81,7 +81,7 @@ for (const remaining of [2, 0]) {
       await app.evaluate((_electron, count) => {
         (globalThis as FixtureGlobal).accountFixture.count = count;
       }, remaining);
-      const action = dialog.getByRole("button", { name: remaining ? "Close 2 sessions and switch" : "Use this account", exact: true });
+      const action = dialog.getByRole("button", { name: remaining ? "Close 2 sessions and switch" : "Switch to this account", exact: true });
       await expect(action).toBeVisible({ timeout: 10_000 });
       await action.click();
       await expect.poll(() => app.evaluate(() => (globalThis as FixtureGlobal).accountFixture.selected)).toBe("codex-next");

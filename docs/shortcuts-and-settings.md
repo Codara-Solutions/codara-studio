@@ -127,11 +127,18 @@ On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 
 ## Settings
 
-Open Settings with `Mod+,`. The tabs, top to bottom:
+Open Settings with `Mod+,`. The sidebar groups the pages under Workspace,
+Agents and models, and System, and its search box finds any setting by name
+or keyword and scrolls to it. Settings closes with Escape, the close button,
+Done, or Cancel and Save on pages with unsaved changes; a click outside the
+dialog does nothing, so a stray click never drops what you were doing. The
+Capability Center behaves the same way.
+
+The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers), Agent sessions (resume on relaunch), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees). |
+| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, the workspace switch badge), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |

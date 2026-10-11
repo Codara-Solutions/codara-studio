@@ -260,7 +260,7 @@ assert.match(card, /const brand = agentBrandColor\(descriptor\.brand\);/);
 // Provider words live in the descriptor, never in a string the card renders.
 assert.doesNotMatch(card, /agentBrandColor\("claude"\)|["`][^"`\n]*(?:Claude Code|Codex|Grok|claude login)/);
 for (const label of [
-  '"Use this account"',
+  '"Switch to this account"',
   'label: "Reconnect"',
   "label: `Share with ${descriptor.cliLabel}`",
   'label: "Share with Cora"',
@@ -285,14 +285,14 @@ for (const copy of [
   assert.ok(card.includes(copy), `${copy} must be the card's copy`);
 }
 assert.match(card, /card\.cora\?\.error && state !== "account-one-signed-out"/);
-assert.match(card, /<UsingChip label="Using" color=\{brand\} \/>/);
+assert.match(card, /\{card\.active \? <ActiveBadge label="Active" \/> : null\}/);
 // Active shows the badge and no Use button.
 assert.match(card, /case "active":\s*case "account-one-signed-out":\s*return undefined;/);
 // A Codex switch main refused arms the same button to close the sessions
 // and switch; the card never invents the count, so Anthropic and Grok
 // never show it.
 assert.match(card, /const switchCount = card\.switchCloseSessionsCount \?\? 0;/);
-assert.match(card, /\? `Close \$\{sessions\(switchCount\)\} and switch`\s*: "Use this account"/);
+assert.match(card, /\? `Close \$\{sessions\(switchCount\)\} and switch`\s*: "Switch to this account"/);
 assert.match(card, /run: \(\) => actions\.onUse\(card, \{ closeSessions: switchCount > 0 \}\)/);
 assert.match(card, /onUse: \(card: AccountCardView, options: \{ closeSessions: boolean \}\) => void;/);
 // Delete is two-step inside the menu; the second step closes the terminals
@@ -317,8 +317,11 @@ assert.match(
 );
 assert.equal((card.match(/<CardOverflowMenu/g) ?? []).length, 1);
 assert.doesNotMatch(card, /nativeCliAccounts|piSubscriptions/);
-assert.match(card, /inset 2px 0 0 \$\{brand\}/);
+// The active row is marked by the row itself as well as the badge.
+assert.match(card, /className=\{`st-acct\$\{card\.active \? " is-active" : ""\}/);
 assert.match(card, /\{card\.email\}/);
+// A row without an email still says why, instead of leaving a blank line.
+assert.match(card, /\{signedOut \? "Not signed in" : "Email not reported"\}/);
 assert.match(card, /\{card\.plan\} plan/);
 
 // The two-facet card and every piece of its machinery are gone.

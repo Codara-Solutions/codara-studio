@@ -375,8 +375,8 @@ export default function AgentCapabilitiesDialog({
     }
   };
 
-  // The form is a view inside the dialog, so Escape, the scrim and the nav
-  // back out of it first. Anything typed and not saved is confirmed before it
+  // The form is a view inside the dialog, so Escape and the nav back out
+  // of it first. Anything typed and not saved is confirmed before it
   // is thrown away, and closing asks the same about the profile drafts.
   const requestLeave = (action: LeaveAction) => {
     if (editorBusy && action.kind !== "close") return;
@@ -1045,9 +1045,9 @@ export default function AgentCapabilitiesDialog({
 
   const statusText = status?.text ?? null;
   return (
-    // Clicking outside backs out one level, matching Escape, so a half-filled
-    // server is never discarded together with the whole dialog.
-    <div style={overlayStyle} onMouseDown={() => requestLeave(editor ? { kind: "back" } : { kind: "close" })}>
+    // The scrim deliberately does nothing: only Escape, the close button and
+    // Done leave, so a click that lands outside never drops the open page.
+    <div style={overlayStyle}>
       {/* Scrim + dialog face come from the shared glass classes (frosted in
           glass mode, opaque panel look otherwise). */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />

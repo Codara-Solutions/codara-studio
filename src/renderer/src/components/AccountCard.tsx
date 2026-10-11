@@ -4,10 +4,10 @@ import { agentBrandColor } from "../lib/agent-brand";
 import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
 import {
   ActionButton,
+  ActiveBadge,
   CardOverflowMenu,
   ConnectionLine,
   RenameForm,
-  UsingChip,
   type CardAction,
   type ConnectionState,
 } from "./AccountCardPrimitives";
@@ -70,6 +70,8 @@ export interface AccountCardView {
   busy: boolean;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
+  /** Said in place of the meters when this account has none to draw. */
+  usageNote?: string;
   /**
    * Terminals still running on this account (the count main refused a delete
    * with, or the live count): the next Delete closes that many first.
@@ -220,7 +222,7 @@ function primaryAction(
         label:
           switchCount > 0
             ? `Close ${sessions(switchCount)} and switch`
-            : "Use this account",
+            : "Switch to this account",
         disabled,
         run: () => actions.onUse(card, { closeSessions: switchCount > 0 }),
       };
@@ -315,158 +317,131 @@ export default function AccountCard({
     });
   }
 
+  // The plain healthy states need no sentence: the Active badge or the
+  // Switch button already says it. Anything else (a refresh in flight, a
+  // half that is catching up, an error, a missing half) is spelled out.
+  const healthy =
+    (state === "active" || state === "signed-in") &&
+    status.ok &&
+    !card.cora?.expired &&
+    !(card.terminal && !card.terminal.connected);
+  // An error on a usable row gets its fix beside it instead of leaving the
+  // user to hunt for one. Account 1 is the user's own CLI login and is never
+  // reconnected from here, so it gets the command to run instead.
+  const inlineReconnect =
+    Boolean(status.danger && card.coraProfileId && !card.builtIn) && action?.id !== "reconnect";
+  const signedOut = state === "account-one-signed-out" && !card.email;
+  const initial = (card.label.trim().charAt(0) || "?").toUpperCase();
+
   return (
     <div
       aria-busy={card.busy || undefined}
       aria-current={card.active ? "true" : undefined}
-      style={{
-        display: "grid",
-        gap: 10,
-        padding: "12px 13px",
-        borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule)",
-        background: "var(--panel-2)",
-        boxShadow: card.active ? `inset 2px 0 0 ${brand}` : "none",
-      }}
+      className={`st-acct${card.active ? " is-active" : ""}${signedOut ? " is-signed-out" : ""}`}
     >
-      <div
+      <span
+        aria-hidden
+        className="st-acct__avatar"
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
+          color: brand,
+          background: `color-mix(in oklch, ${brand} 15%, transparent)`,
         }}
       >
-        <div
-          style={{
-            minWidth: 0,
-            display: "grid",
-            gridAutoFlow: "column",
-            gridAutoColumns: "minmax(0, max-content)",
-            justifyContent: "start",
-            alignItems: "baseline",
-            columnGap: 7,
-          }}
-        >
-          <span
-            style={{
-              minWidth: 0,
-              color: "var(--ink)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 650,
-              lineHeight: 1.3,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+        {initial}
+      </span>
+      <div className="st-acct__body">
+        <div className="st-acct__head">
+          <div className="st-acct__id">
+            <div className="st-acct__name-line">
+              <span className="st-acct__name">{card.label}</span>
+              {card.active ? <ActiveBadge label="Active" /> : null}
+            </div>
+            <div className="st-acct__meta">
+              {card.email ? (
+                <span className="st-acct__email" title={card.email}>
+                  {card.email}
+                </span>
+              ) : (
+                <span className="st-acct__email is-missing">
+                  {signedOut ? "Not signed in" : "Email not reported"}
+                </span>
+              )}
+              {card.plan ? <span className="st-acct__plan">{card.plan} plan</span> : null}
+            </div>
+          </div>
+          <div className="st-acct__actions">
+            {card.busy ? (
+              <span className="st-acct__working">
+                <span aria-hidden className="st-spinner" />
+                Working…
+              </span>
+            ) : action ? (
+              <ActionButton
+                primary={action.id !== "use"}
+                disabled={action.disabled}
+                onClick={() => void action.run()}
+              >
+                {action.label}
+              </ActionButton>
+            ) : null}
+            {menuActions.length > 0 || destructiveActions.length > 0 ? (
+              <CardOverflowMenu
+                label={`More actions for ${card.label}`}
+                groups={[menuActions, destructiveActions]}
+                onClose={() => setDeleteArmed(false)}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        {healthy ? null : (
+          <ConnectionLine
+            state={status}
+            hint={
+              status.danger && card.builtIn && state !== "account-one-signed-out"
+                ? accountOneSignedOutHint(descriptor)
+                : undefined
+            }
+            action={
+              inlineReconnect ? (
+                <ActionButton
+                  primary
+                  disabled={controlsDisabled}
+                  onClick={() => actions.onReconnect(card)}
+                >
+                  Reconnect
+                </ActionButton>
+              ) : undefined
+            }
+          />
+        )}
+
+        {card.usage ? (
+          <div className="st-acct__usage">{card.usage}</div>
+        ) : (
+          <div className="st-acct__usage-note">
+            {state === "terminal-only"
+              ? "Limits show once Cora can use this account."
+              : state === "account-one-signed-out"
+                ? "Limits show once this account is signed in."
+                : card.usageNote ?? "No limits reported yet."}
+          </div>
+        )}
+
+        {renaming ? (
+          <RenameForm
+            ariaLabel={`Rename ${card.label}`}
+            initial={card.label}
+            busy={card.busy}
+            onSave={async (label) => {
+              const saved = await actions.onRename(card, label);
+              if (saved) setRenaming(false);
+              return saved;
             }}
-          >
-            {card.label}
-          </span>
-          {card.email ? (
-            <span
-              title={card.email}
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 11,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.email}
-            </span>
-          ) : null}
-          {card.plan ? (
-            <span
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.plan} plan
-            </span>
-          ) : null}
-        </div>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 7,
-            flex: "0 0 auto",
-          }}
-        >
-          {card.active ? <UsingChip label="Using" color={brand} /> : null}
-          {card.busy ? (
-            <span
-              style={{
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Working…
-            </span>
-          ) : action ? (
-            <ActionButton
-              compact
-              primary
-              tone={brand}
-              disabled={action.disabled}
-              onClick={() => void action.run()}
-            >
-              {action.label}
-            </ActionButton>
-          ) : null}
-          {menuActions.length > 0 || destructiveActions.length > 0 ? (
-            <CardOverflowMenu
-              label={`More actions for ${card.label}`}
-              groups={[menuActions, destructiveActions]}
-              onClose={() => setDeleteArmed(false)}
-            />
-          ) : null}
-        </span>
+            onCancel={() => setRenaming(false)}
+          />
+        ) : null}
       </div>
-
-      <ConnectionLine state={status} />
-
-      {card.usage ? (
-        <div
-          style={{
-            display: "grid",
-            gap: 6,
-            paddingTop: 10,
-            borderTop: "1px solid var(--rule-soft)",
-          }}
-        >
-          {card.usage}
-        </div>
-      ) : null}
-
-      {renaming ? (
-        <RenameForm
-          ariaLabel={`Rename ${card.label}`}
-          initial={card.label}
-          busy={card.busy}
-          onSave={async (label) => {
-            const saved = await actions.onRename(card, label);
-            if (saved) setRenaming(false);
-            return saved;
-          }}
-          onCancel={() => setRenaming(false)}
-        />
-      ) : null}
     </div>
   );
 }

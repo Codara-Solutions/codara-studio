@@ -274,7 +274,9 @@ These suites bundle renderer modules without React where they can:
 `test-workspace-colors`, `test-explorer-clipboard`, `test-file-tree-marquee`,
 `test-file-preview-capabilities`, `test-csv-preview`, `test-csv-preview-ui`,
 `test-run-graph-layout`, `test-overlay-performance`,
-`test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`.
+`test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
+`test-settings-dialog` (Settings closes only through Escape, X, Done or
+Cancel; every search result is rendered; the face is opaque).
 
 ### The `cora` CLI and its benchmark
 

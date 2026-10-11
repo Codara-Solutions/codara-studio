@@ -22,10 +22,10 @@ interface KeybindingsSectionProps {
   setPreference: SetPreferenceFn;
 }
 
-// Settings tab body: lists every command, shows the current chord chips,
-// lets the user record a new chord per row. Conflict detection runs against
-// the live binding table so the user sees other commands a chord would
-// shadow before committing.
+// Settings page body: lists every command with its current chord, and lets
+// the user record a new chord per row. Conflict detection runs against the
+// live binding table so the user sees other commands a chord would shadow
+// before committing. The page title and description come from the dialog.
 export default function KeybindingsSection({
   preferences,
   setPreference,
@@ -37,6 +37,7 @@ export default function KeybindingsSection({
   );
 
   const [recordingId, setRecordingId] = useState<CommandId | null>(null);
+  const [filter, setFilter] = useState("");
 
   // Whenever a row enters/leaves recording mode, mirror that into the
   // module-level flag the global dispatcher reads. Always clear on unmount
@@ -68,41 +69,38 @@ export default function KeybindingsSection({
   };
 
   const customizedCount = Object.keys(overrides).length;
+  const query = filter.trim().toLowerCase();
+  const matches = (binding: EffectiveBinding): boolean => {
+    if (!query) return true;
+    const keys = binding.chords.flatMap((chord) => chordToDisplay(chord)).join(" ");
+    return `${binding.command.label} ${binding.command.group} ${keys}`
+      .toLowerCase()
+      .includes(query);
+  };
+  const visibleGroups = COMMAND_GROUPS.map((group) => ({
+    group,
+    items: table.filter((b) => b.command.group === group && matches(b)),
+  })).filter((entry) => entry.items.length > 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <div>
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 700,
-              color: "var(--ink)",
-            }}
-          >
-            Keybindings
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
-              lineHeight: 1.45,
-            }}
-          >
-            Choose Edit, press the new key combination, then press Enter.
-            Changes apply immediately.
-          </div>
-        </div>
+    <>
+      <div className="st-toolbar">
+        <span className="st-search st-search--inline">
+          <span className="st-search__icon">
+            <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="11" cy="11" r="6.5" />
+              <path d="M16 16l4.5 4.5" />
+            </svg>
+          </span>
+          <input
+            className="st-search__input"
+            type="text"
+            aria-label="Filter shortcuts"
+            placeholder="Filter by command or key"
+            value={filter}
+            onChange={(event) => setFilter(event.currentTarget.value)}
+          />
+        </span>
         <ResetAllButton
           disabled={customizedCount === 0}
           count={customizedCount}
@@ -110,68 +108,51 @@ export default function KeybindingsSection({
         />
       </div>
 
-      {COMMAND_GROUPS.map((group) => {
-        const items = table.filter((b) => b.command.group === group);
-        if (items.length === 0) return null;
-        return (
-          <section
-            key={group}
-            style={{
-              overflow: "hidden",
-              border: "1px solid var(--rule-soft)",
-              borderRadius: 9,
-              background: "color-mix(in oklab, var(--panel) 68%, transparent)",
-            }}
-          >
-            <h3
-              style={{
-                margin: 0,
-                fontFamily: "var(--font-sans)",
-                padding: "9px 10px",
-                borderBottom: "1px solid var(--rule-soft)",
-                fontSize: 11,
-                fontWeight: 700,
-                color: "var(--ink-dim)",
-              }}
-            >
-              {group}
-            </h3>
-            <ul
-              style={{
-                listStyle: "none",
-                margin: 0,
-                padding: 0,
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              {items.map((binding) => (
-                <Row
-                  key={binding.command.id}
-                  binding={binding}
-                  table={table}
-                  isRecording={recordingId === binding.command.id}
-                  onStartRecording={() => setRecordingId(binding.command.id)}
-                  onCancelRecording={() => setRecordingId(null)}
-                  onAssign={async (chord) => {
-                    await applyOverride(binding.command.id, overrideForChord(chord));
-                    setRecordingId(null);
-                  }}
-                  onUnbind={async () => {
-                    await applyOverride(binding.command.id, unboundOverride());
-                    setRecordingId(null);
-                  }}
-                  onReset={async () => {
-                    await resetOverride(binding.command.id);
-                    setRecordingId(null);
-                  }}
-                />
-              ))}
-            </ul>
-          </section>
-        );
-      })}
-    </div>
+      {visibleGroups.length === 0 ? (
+        <div className="st-empty">
+          <span className="st-empty__title">No shortcuts match “{filter.trim()}”.</span>
+          <span className="st-empty__action">
+            <button type="button" className="spark-btn" onClick={() => setFilter("")}>
+              Clear filter
+            </button>
+          </span>
+        </div>
+      ) : null}
+
+      {visibleGroups.map(({ group, items }) => (
+        <section key={group} className="st-section">
+          <div className="st-section__head">
+            <div className="st-section__titles">
+              <h3 className="st-section__title">{group}</h3>
+            </div>
+          </div>
+          <ul className="st-rows st-kb-list">
+            {items.map((binding) => (
+              <Row
+                key={binding.command.id}
+                binding={binding}
+                table={table}
+                isRecording={recordingId === binding.command.id}
+                onStartRecording={() => setRecordingId(binding.command.id)}
+                onCancelRecording={() => setRecordingId(null)}
+                onAssign={async (chord) => {
+                  await applyOverride(binding.command.id, overrideForChord(chord));
+                  setRecordingId(null);
+                }}
+                onUnbind={async () => {
+                  await applyOverride(binding.command.id, unboundOverride());
+                  setRecordingId(null);
+                }}
+                onReset={async () => {
+                  await resetOverride(binding.command.id);
+                  setRecordingId(null);
+                }}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+    </>
   );
 }
 
@@ -198,51 +179,13 @@ function Row({
   const fixed = command.fixed === true;
 
   return (
-    <li
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        padding: "9px 10px",
-        borderTop: "1px solid var(--rule-soft)",
-        minHeight: 38,
-      }}
-    >
-      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            color: "var(--ink)",
-          }}
-        >
+    <li className={`st-kb-row${isRecording ? " is-recording" : ""}`}>
+      <div className="st-kb-row__text">
+        <span className="st-kb-row__label">
           {command.label}
-          {customized && (
-            <span
-              style={{
-                marginLeft: 8,
-                fontSize: 10,
-                color: "var(--accent-text)",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-              }}
-            >
-              modified
-            </span>
-          )}
+          {customized ? <span className="st-kb-row__tag">Changed</span> : null}
         </span>
-        {fixed && (
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              color: "var(--muted)",
-            }}
-          >
-            Built-in chord, not rebindable
-          </span>
-        )}
+        {fixed ? <span className="st-kb-row__desc">Built-in, cannot be changed</span> : null}
       </div>
 
       {isRecording ? (
@@ -254,13 +197,24 @@ function Row({
           onUnbind={chords.length > 0 ? onUnbind : undefined}
         />
       ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ChordChips binding={binding} />
-          {!fixed && (
-            <>
-              <RowButton onClick={onStartRecording}>Edit</RowButton>
-              {customized && <RowButton onClick={onReset}>Reset</RowButton>}
-            </>
+        <div className="st-kb-row__control">
+          {customized && !fixed ? (
+            <button type="button" className="st-link-btn" onClick={() => void onReset()}>
+              Reset
+            </button>
+          ) : null}
+          {fixed ? (
+            <ChordChips binding={binding} />
+          ) : (
+            <button
+              type="button"
+              className="st-kb-chord"
+              aria-label={`Edit shortcut for ${command.label}`}
+              title="Click to record a new shortcut"
+              onClick={onStartRecording}
+            >
+              <ChordChips binding={binding} />
+            </button>
           )}
         </div>
       )}
@@ -274,25 +228,14 @@ function ChordChips({ binding }: { binding: EffectiveBinding }) {
     return <ChipRow chips={chips} />;
   }
   if (binding.chords.length === 0) {
-    return (
-      <span
-        style={{
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          color: "var(--muted)",
-          fontStyle: "italic",
-        }}
-      >
-        unbound
-      </span>
-    );
+    return <span className="st-kb-unset">Set shortcut</span>;
   }
   return <ChipRow chips={chordToDisplay(binding.chords[0])} />;
 }
 
 function ChipRow({ chips }: { chips: string[] }) {
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+    <span className="st-kb-chips">
       {chips.map((k, i) => (
         <Kbd key={i}>{k}</Kbd>
       ))}
@@ -345,98 +288,43 @@ function Recorder({
   );
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    <div className="st-kb-recorder">
       <div
         ref={inputRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
         role="textbox"
         aria-label="Press a key combination"
-        style={{
-          minWidth: 132,
-          padding: "5px 10px",
-          border: "1px dashed var(--accent)",
-          borderRadius: 6,
-          background: "color-mix(in oklch, var(--accent) 8%, transparent)",
-          color: captured ? "var(--ink)" : "var(--muted)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          outline: "none",
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-        }}
+        className="st-kb-recorder__field"
       >
         {captured ? (
           chordToDisplay(captured).map((k, i) => <Kbd key={i}>{k}</Kbd>)
         ) : (
-          <span style={{ fontFamily: "var(--font-sans)", fontStyle: "italic" }}>
-            Press a key…
-          </span>
+          <span className="st-kb-recorder__prompt">Press keys…</span>
         )}
       </div>
-      {conflicts.length > 0 && captured && (
-        <span
-          style={{
-            color: "var(--warn)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            maxWidth: 160,
-          }}
-        >
-          Shadows {conflicts.map((c) => c.command.label).join(", ")}
+      {conflicts.length > 0 && captured ? (
+        <span className="st-kb-recorder__conflict">
+          Replaces {conflicts.map((c) => c.command.label).join(", ")}
         </span>
-      )}
-      <RowButton
+      ) : null}
+      <button
+        type="button"
+        className="spark-btn is-primary"
         onClick={() => captured && void onAssign(captured)}
         disabled={!captured}
-        primary
       >
         Save
-      </RowButton>
-      <RowButton onClick={onCancel}>Cancel</RowButton>
-      {onUnbind && <RowButton onClick={() => void onUnbind()}>Unbind</RowButton>}
+      </button>
+      <button type="button" className="spark-btn st-btn-quiet" onClick={onCancel}>
+        Cancel
+      </button>
+      {onUnbind ? (
+        <button type="button" className="spark-btn st-btn-quiet" onClick={() => void onUnbind()}>
+          Remove
+        </button>
+      ) : null}
     </div>
-  );
-}
-
-function RowButton({
-  children,
-  onClick,
-  disabled,
-  primary,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  primary?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        appearance: "none",
-        border: primary
-          ? "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))"
-          : "1px solid var(--rule-strong)",
-        borderRadius: 999,
-        background: primary
-          ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-          : "transparent",
-        color: disabled ? "var(--muted)" : "var(--ink)",
-        padding: "3px 10px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.5 : 1,
-        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
   );
 }
 
@@ -468,21 +356,7 @@ function ResetAllButton({
       onBlur={() => setArmed(false)}
       disabled={disabled}
       title={disabled ? "No custom bindings" : `Reset ${count} custom binding${count === 1 ? "" : "s"}`}
-      style={{
-        appearance: "none",
-        border: armed ? "1px solid var(--danger)" : "1px solid var(--rule-strong)",
-        borderRadius: 999,
-        background: "transparent",
-        color: disabled ? "var(--muted)" : armed ? "var(--danger)" : "var(--ink)",
-        padding: "5px 12px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.55 : 1,
-        whiteSpace: "nowrap",
-        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
+      className={`spark-btn${armed ? " is-danger" : " st-btn-quiet"}`}
     >
       {armed ? "Confirm reset" : `Reset all${count > 0 ? ` (${count})` : ""}`}
     </button>
@@ -490,27 +364,5 @@ function ResetAllButton({
 }
 
 function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minWidth: 22,
-        height: 22,
-        padding: "0 6px",
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 5,
-        background: "var(--panel-3)",
-        color: "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        fontWeight: 600,
-        fontVariantNumeric: "tabular-nums",
-        boxShadow: "var(--lift-hi), var(--well)",
-      }}
-    >
-      {children}
-    </kbd>
-  );
+  return <kbd className="st-kbd">{children}</kbd>;
 }

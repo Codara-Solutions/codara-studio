@@ -5,6 +5,13 @@ import type {
   RemotePairedDevice,
   RemotePairingState,
 } from "@shared/remote-access";
+import {
+  EmptyState,
+  InlineMessage,
+  SettingRow,
+  SettingsSection,
+  SwitchTrack,
+} from "./settings/SettingsPrimitives";
 
 // Settings, "Remote access": the phone companion's listener toggle, a live
 // status line, QR pairing, and the paired-device list with revoke
@@ -105,108 +112,118 @@ export default function RemoteAccessSettings() {
 
   const enabled = status.state !== "disabled";
   const line = statusLine(status);
-  const toneColor =
-    line.tone === "ok" ? "var(--ok, #4ade80)" : line.tone === "bad" ? "var(--danger, #f87171)" : "var(--muted)";
+  const toneClass =
+    line.tone === "ok" ? "st-text-ok" : line.tone === "bad" ? "st-text-danger" : undefined;
 
   return (
-    <div style={{ display: "grid", gap: 18 }}>
-      <SectionHeading
-        title="Remote access"
-        detail="Let the Codara phone app reach this computer, on your wifi or from anywhere. Devices are paired by QR code and can be revoked at any time."
-      />
-
-      <div
-        className="spark-glass"
-        style={{ borderRadius: 10, padding: 14, display: "grid", gap: 12 }}
+    <>
+      <SettingsSection
+        title="Connection"
+        anchor="Allow remote access"
+        description="Let the Codara phone app reach this computer, on your wifi or from anywhere. Devices pair by QR code and can be revoked at any time."
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ display: "grid", gap: 4, flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>Remote access</div>
-            <div style={{ fontSize: 12, color: toneColor, lineHeight: 1.45 }}>{line.text}</div>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            aria-label="Remote access"
-            className="spark-btn"
-            disabled={busy}
-            onClick={() => void toggle(!enabled)}
-          >
-            {enabled ? "Turn off" : "Turn on"}
-          </button>
-        </div>
-
-        {status.state === "reachable" ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <SettingRow
+          title="Allow remote access"
+          desc={
+            <span className={toneClass}>
+              {status.state === "reachable" && line.tone === "ok" ? (
+                <span aria-hidden className="st-live-dot" />
+              ) : null}
+              {line.text}
+            </span>
+          }
+          control={
             <button
               type="button"
-              className="spark-btn is-primary"
+              role="switch"
+              aria-checked={enabled}
+              aria-label="Remote access"
+              className="st-switch-btn"
               disabled={busy}
-              onClick={() => setPairingOpen(true)}
+              onClick={() => void toggle(!enabled)}
             >
-              Pair a device
+              <SwitchTrack checked={enabled} />
             </button>
-            <span className="spark-mono" style={{ fontSize: 11, color: "var(--muted)" }}>
-              port {status.port}
-            </span>
-          </div>
-        ) : null}
-
-        {error ? (
-          <div style={{ fontSize: 12, color: "var(--danger, #f87171)" }}>{error}</div>
-        ) : null}
-      </div>
-
-      <SectionHeading
-        title="Paired devices"
-        detail="Every paired device can open terminals on this computer. Revoke one and its live sessions end immediately."
-      />
-
-      {devices.length === 0 ? (
-        <div className="spark-empty" style={{ minHeight: 64, padding: "16px 12px" }}>
-          No paired devices yet.
-        </div>
-      ) : (
-        <div style={{ display: "grid", gap: 8 }}>
-          {devices.map((device) => (
-            <div
-              key={device.publicKey}
-              className="spark-glass"
-              style={{
-                borderRadius: 10,
-                padding: "10px 12px",
-                display: "flex",
-                alignItems: "center",
-                gap: 12,
-              }}
-            >
-              <div style={{ display: "grid", gap: 3, flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{device.name}</div>
-                <div style={{ fontSize: 11, color: "var(--muted)" }}>
-                  <span className="spark-mono">{device.shortKey}</span>
-                  {`, paired ${formatWhen(device.addedAt)}, last seen ${formatWhen(device.lastSeenAt)}`}
-                </div>
-              </div>
+          }
+        />
+        {status.state === "reachable" ? (
+          <SettingRow
+            title="Pair a new device"
+            desc={<span className="spark-mono">port {status.port}</span>}
+            control={
               <button
                 type="button"
-                className="spark-btn"
+                className="spark-btn is-primary"
                 disabled={busy}
-                onClick={() => void revoke(device)}
+                onClick={() => setPairingOpen(true)}
               >
-                Revoke
+                Pair a device
               </button>
-            </div>
-          ))}
-        </div>
-      )}
+            }
+          />
+        ) : null}
+        {error ? (
+          <InlineMessage tone="danger" role="alert">{error}</InlineMessage>
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection
+        title="Paired devices"
+        description="Every paired device can open terminals on this computer. Revoke one and its live sessions end immediately."
+        plain
+      >
+        {devices.length === 0 ? (
+          <EmptyState
+            icon={
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="7" y="3" width="10" height="18" rx="2.5" />
+                <line x1="10.5" y1="17.5" x2="13.5" y2="17.5" />
+              </svg>
+            }
+            title="No paired devices yet."
+            body={
+              enabled
+                ? "Choose Pair a device above, then scan the code with the Codara app."
+                : "Turn on remote access above, then pair your phone by scanning a QR code."
+            }
+          />
+        ) : (
+          <div className="st-list">
+            {devices.map((device) => (
+              <div key={device.publicKey} className="st-list__row st-device">
+                <span aria-hidden className="st-device__icon">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="7" y="3" width="10" height="18" rx="2.5" />
+                    <line x1="10.5" y1="17.5" x2="13.5" y2="17.5" />
+                  </svg>
+                </span>
+                <div className="st-device__text">
+                  <div className="st-device__name">{device.name}</div>
+                  <div className="st-device__meta">
+                    <span className="spark-mono">{device.shortKey}</span>
+                    {`, paired ${formatWhen(device.addedAt)}, last seen ${formatWhen(device.lastSeenAt)}`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="spark-btn is-danger"
+                  disabled={busy}
+                  onClick={() => void revoke(device)}
+                >
+                  Revoke
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </SettingsSection>
 
       {pairingOpen ? (
         <PairingModal
           onClose={() => {
             // Cancelling the pairing window is the modal's own unmount
             // cleanup, not this callback: the whole Settings dialog can be
-            // dismissed (scrim, footer, workspace switch) without this ever
+            // dismissed (Escape, Done, a workspace switch) without this ever
             // running, and a pairing window left open would keep accepting
             // strangers for the rest of its TTL with no UI on screen.
             setPairingOpen(false);
@@ -214,7 +231,7 @@ export default function RemoteAccessSettings() {
           }}
         />
       ) : null}
-    </div>
+    </>
   );
 }
 
@@ -456,27 +473,6 @@ function PairingModal({ onClose }: { onClose: () => void }) {
           </>
         )}
       </section>
-    </div>
-  );
-}
-
-function SectionHeading({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div>
-      <div className="spark-eyebrow" style={{ fontFamily: "var(--font-sans)" }}>
-        {title}
-      </div>
-      <div
-        style={{
-          marginTop: 4,
-          color: "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          lineHeight: 1.45,
-        }}
-      >
-        {detail}
-      </div>
     </div>
   );
 }
