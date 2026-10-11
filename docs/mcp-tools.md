@@ -19,9 +19,40 @@ are the source of truth; update this page when a tool is added or renamed.
 - **Cora and its Pi workers.** They load the same tools in-process, so there
   is nothing to install.
 
+The managed entries carry a version marker; when it changes, Codara rewrites
+them on the next launch. The Codex entry also sets `tool_timeout_sec = 660`
+and `startup_timeout_sec = 20`, because Codex gives up on a tool after 60
+seconds by default and `codara_terminal_run` may wait up to ten minutes.
+
 Every call is forwarded to the running app over its loopback socket. If the
-app is closed, a tool returns a "Codara appears to be offline" error instead of
-hanging.
+app is closed, or a crash left a stale handshake behind, a tool returns a
+"Codara appears to be offline" error instead of hanging. For the next 30
+seconds a call no longer waits for the app to start, so an agent that retries
+hears the answer at once; the first call after Codara is back works. A token
+Codara no longer accepts reads as "Codara rejected this session's
+credentials" rather than a bare HTTP 401.
+
+## Protocol behavior
+
+- `initialize` negotiates the protocol version (2025-06-18, 2025-03-26 or
+  2024-11-05) and returns `instructions`: a few lines on how the tool families
+  fit together, limited to the families in the roster. `serverInfo.version`
+  is the app version.
+- Every tool carries annotations: a title, and `readOnlyHint`,
+  `destructiveHint`, `idempotentHint` and `openWorldHint` where they apply, so
+  clients can auto-approve reads and warn before destructive calls.
+- Results are compact JSON. Errors are tool results with `isError: true` and a
+  message saying what to do next; socket errors keep their code, for example
+  `(Codara error -32003: not allowed for this agent)`.
+- `notifications/cancelled` aborts the HTTP request behind a call (a long
+  wait, a terminal run) and the call gets no reply. Long calls with a
+  `progressToken` send a progress heartbeat every 10 seconds;
+  `codara_preview_run` reports each step.
+- A request body is limited to 64 KB, or 1 MB for whiteboard and board
+  updates. The server refuses a larger call before sending it, and the socket
+  answers an oversized one with a JSON-RPC error rather than a reset.
+- Tools never take a `runId`. The chat comes from the environment Codara
+  launched the agent with, and a call that names another run is refused.
 
 ## Tool sets
 
@@ -30,7 +61,7 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, whiteboard, board |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration and automation management |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
@@ -39,7 +70,10 @@ A Cora chat that answers directly, without workers, gets `studio` plus
 `codara_remember`, with the whiteboard and board read-only. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
-those tools. When Cora works on an imported pull request from an
+those tools. The whiteboard and board belong to a chat, so they are only
+listed when Codara started the agent for one (`SPARK_RUN_ID` is set); an
+agent you run yourself does not see them, and a call without a chat fails
+with "only works inside a Cora chat". When Cora works on an imported pull request from an
 untrusted source, it only gets the orchestration tools that spawn, wait for,
 and message workers, ask you, name the chat and complete the run: no browser,
 terminal, memory or automation tools.
@@ -59,7 +93,6 @@ In every set.
 | Tool | What it does |
 |---|---|
 | `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL and which one is active. |
-| `codara_preview_url` | Returns a tab's current URL and title. |
 | `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. |
 | `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors. Can return only what changed since a previous snapshot. |
 | `codara_preview_click` | Clicks one element by `@reference` or unique CSS selector. |
@@ -79,6 +112,10 @@ In every set.
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
 
+`codara_preview_url` is no longer listed (`codara_preview_list` returns every
+tab's URL and title) but stays callable for agents that still use it. Outside
+a Cora chat, browser calls act on the workspace of the terminal the agent runs
+in, not on whichever workspace is on screen.
 Tips for agents: call `codara_preview_navigate` first, read the page with
 `codara_preview_snapshot` and act on its `@references`, and prefer
 `codara_preview_run` for multi-step flows. The trusted tools (`mouse`,
@@ -92,10 +129,20 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 | Tool | What it does |
 |---|---|
 | `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. |
+| `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. |
+| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. |
 | `codara_terminal_write` | Types into a terminal the agent created, submitting with Enter by default. |
-| `codara_terminal_read` | Reads the recent output of a terminal pane, without escape codes. |
+| `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
 | `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
+
+## Notifications
+
+Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
+
+| Tool | What it does |
+|---|---|
+| `codara_notify_user` | Sends a Codara notification from the agent's own pane: `done` when it finished a long task, `needs_input` when it is blocked on you. Clicking it opens the pane, and nothing shows while you are already looking at that pane. It shares the pane's notification key with Codara's own detection of agent turns, so its `done` and Codara's own end-of-turn alert arrive as one. At most one per kind every 5 seconds. An agent outside a Codara terminal, or with Codara closed, gets `published: false` back rather than an error. |
 
 ## Whiteboard and board
 
@@ -113,6 +160,9 @@ the review workflow.
 | `codara_whiteboard_review` | Records Cora's review of the exact revision it inspected. | not `worker` |
 | `codara_board_get` | Reads the chat's board: cards, lanes and revision. | all |
 | `codara_board_update` | Creates, moves and edits cards. Cards you wrote can only be deleted by you. | not `worker` |
+
+Updates answer with the new revision and counts, not the whole graph or
+board; call the get tool to read it back.
 
 ## Orchestration
 

@@ -38,7 +38,7 @@ test("the Capability Center switches the built-in server off for one CLI", async
           args: ["/Applications/Codara.app/Contents/Resources/codara-studio-mcp/server.js"],
           env: { ELECTRON_RUN_AS_NODE: "1" },
           _sparkManaged: true,
-          _sparkVersion: "6",
+          _sparkVersion: "7",
         },
       },
     }),

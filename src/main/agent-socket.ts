@@ -14,6 +14,15 @@ import { processChain } from "./owned-process-tree";
 import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
+  cleanTerminalText,
+  PaneOutputCursors,
+  renderTerminalScreen,
+  runInPane,
+  shellActivity,
+  type PaneIo,
+} from "./agent-terminal-io";
+import { terminalAgentStateSnapshot } from "./terminal-agent-notify";
+import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
 } from "./agent-terminal-registry";
@@ -32,7 +41,7 @@ import {
   isWorkerAssignable,
 } from "./orchestration/pi-worker-providers";
 import { broadcastPreferencesChanged } from "./ipc";
-import { publish } from "./notify";
+import { paneSourceKey, publish } from "./notify";
 import {
   appendEvent,
   listEvents,
@@ -116,6 +125,7 @@ import type {
   AgentEffortLevel,
   BoardCard,
   BoardCardStatus,
+  CoraWhiteboard,
   ChatBackendKind,
   ChatMode,
   CoraExecutionStrategy,
@@ -170,9 +180,30 @@ const ERR_FORBIDDEN = -32003;
 const ERR_TERMINAL_SPAWN = -32000;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+// The board and whiteboard writes resend the whole card or node list, which
+// passes 64 KB at about 150 described cards. Only those methods get the larger
+// cap; anything over it is still drained and answered rather than reset, so
+// the caller sees why instead of "socket hang up".
+const MAX_LARGE_REQUEST_BYTES = 1024 * 1024;
+const LARGE_REQUEST_METHODS: ReadonlySet<string> = new Set([
+  "orchestrator.whiteboard_update",
+  "orchestrator.board_update",
+]);
+const MAX_DRAINED_REQUEST_BYTES = 8 * 1024 * 1024;
 const TERMINAL_READ_MAX_BYTES = 32 * 1024;
 const TERMINAL_READ_DEFAULT_LINES = 200;
 const TERMINAL_READ_MAX_LINES = 2000;
+// Enough recent bytes for a full-screen program's last complete repaint.
+const TERMINAL_READ_SCREEN_BYTES = 512 * 1024;
+// Recent bytes scanned for the shell's last prompt or command marker.
+const TERMINAL_SHELL_STATE_BYTES = 64 * 1024;
+const TERMINAL_RUN_DEFAULT_TIMEOUT_MS = 30_000;
+// Stays under the MCP client's terminal.run HTTP deadline so a timeout is
+// reported by this side, with the output so far, not as a dead socket.
+const TERMINAL_RUN_MAX_TIMEOUT_MS = 10 * 60_000;
+const TERMINAL_RUN_DEFAULT_QUIET_MS = 2_500;
+const TERMINAL_RUN_PROMPT_WAIT_MS = 3_000;
+const TERMINAL_RUN_SUBMIT_SETTLE_MS = 2_000;
 // How long terminal.create waits for the renderer-spawned PTY to come online
 // before returning, so the paneId it hands back is immediately writable.
 const TERMINAL_SPAWN_WAIT_MS = 10_000;
@@ -326,6 +357,7 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
     url: input.url,
     token: input.token,
     pid: process.pid,
+    appVersion: app.getVersion(),
     writtenAt: new Date().toISOString(),
   }, null, 2);
   await writeFileAtomic(handshakeFilePath(), payload, { mode: 0o600 });
@@ -348,7 +380,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
 
   const body = await readBody(req);
   if (body === null) {
-    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, "request body too large or unreadable"));
+    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, "request body is unreadable"));
+    return;
+  }
+  if (typeof body !== "string") {
+    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, requestTooLargeMessage(body.tooLarge, MAX_LARGE_REQUEST_BYTES)));
     return;
   }
 
@@ -375,6 +411,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
 
   if (!reqObj || reqObj.jsonrpc !== "2.0" || typeof reqObj.method !== "string") {
     writeJsonRpc(res, errorResponse(id, ERR_INVALID_REQUEST, "invalid JSON-RPC envelope"));
+    return;
+  }
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  if (bodyBytes > MAX_REQUEST_BYTES && !LARGE_REQUEST_METHODS.has(reqObj.method)) {
+    writeJsonRpc(res, errorResponse(id, ERR_INVALID_REQUEST, requestTooLargeMessage(bodyBytes, MAX_REQUEST_BYTES)));
     return;
   }
 
@@ -418,12 +459,22 @@ function authenticateRequest(
   return claim ? { kind: "scoped", claim } : null;
 }
 
-function readBody(req: IncomingMessage): Promise<string | null> {
+function requestTooLargeMessage(bytes: number, limit: number): string {
+  const kb = (value: number) => `${Math.ceil(value / 1024)} KB`;
+  return `request too large: ${kb(bytes)} is over the ${kb(limit)} limit. Send a smaller payload (fewer or shorter items).`;
+}
+
+// Resolves the body text, { tooLarge } once the body passes the large-request
+// cap (the rest is drained so the error reaches the caller), or null when the
+// stream fails or exceeds even the drain cap.
+function readBody(req: IncomingMessage): Promise<string | { tooLarge: number } | null> {
   return new Promise((resolve) => {
     let total = 0;
     const chunks: Buffer[] = [];
+    let kept = 0;
+    let overflow = false;
     let done = false;
-    const finish = (value: string | null) => {
+    const finish = (value: string | { tooLarge: number } | null) => {
       if (done) return;
       done = true;
       resolve(value);
@@ -431,7 +482,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
     req.on("data", (chunk: Buffer) => {
       if (done) return;
       total += chunk.length;
-      if (total > MAX_REQUEST_BYTES) {
+      if (total > MAX_DRAINED_REQUEST_BYTES) {
         finish(null);
         try {
           req.destroy();
@@ -440,9 +491,15 @@ function readBody(req: IncomingMessage): Promise<string | null> {
         }
         return;
       }
+      if (total > MAX_LARGE_REQUEST_BYTES) {
+        overflow = true;
+        chunks.length = 0;
+        return;
+      }
       chunks.push(chunk);
+      kept += chunk.length;
     });
-    req.on("end", () => finish(Buffer.concat(chunks, total).toString("utf8")));
+    req.on("end", () => finish(overflow ? { tooLarge: total } : Buffer.concat(chunks, kept).toString("utf8")));
     req.on("error", () => finish(null));
   });
 }
@@ -495,6 +552,9 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "terminal.create",
   "terminal.write",
   "terminal.close",
+  "terminal.run",
+  "terminal.list",
+  "agent.notify",
   "orchestrator.spawn_terminals",
   "orchestrator.remember",
 ]);
@@ -561,6 +621,12 @@ async function dispatch(
         return await handleTerminalWrite(params, id);
       case "terminal.close":
         return await handleTerminalClose(params, id);
+      case "terminal.run":
+        return await handleTerminalRun(params, id, res);
+      case "terminal.list":
+        return await handleTerminalList(params, id);
+      case "agent.notify":
+        return await handleAgentNotify(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
       case "chat.create":
@@ -747,41 +813,360 @@ async function dispatch(
   }
 }
 
+const paneIo: PaneIo = {
+  exists: (paneId) => pty.exists(paneId),
+  readTail: (paneId, maxBytes) => pty.readTail(paneId, maxBytes),
+  tap: (paneId, handler) => pty.tap(paneId, handler),
+  onExit: (paneId, handler) => pty.onExit(paneId, () => handler()),
+  inject: (paneId, text, opts) => pty.inject(paneId, text, opts),
+};
+const paneCursors = new PaneOutputCursors(paneIo);
+// The latest line terminal.write submitted per pane, for terminal.run.
+const recentSubmits = new Map<string, { at: number; cursor: number }>();
+// Panes with a terminal.run in flight. Two parallel calls would both see an
+// idle prompt and type their commands into one shell, each reading the
+// other's output and exit marker as its own.
+const runningPanes = new Set<string>();
+
+function clampNumberParam(
+  params: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = optionalNumberParam(params, key);
+  return value === null ? fallback : Math.max(min, Math.min(Math.floor(value), max));
+}
+
 async function handleTerminalRead(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   const paneId = stringParam(params, "paneId");
   if (!paneId) return errorResponse(id, ERR_INVALID_PARAMS, "paneId is required");
+  const rawMode = params.mode;
+  if (rawMode !== undefined && rawMode !== "text" && rawMode !== "screen") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be text or screen");
+  }
+  const lines = clampNumberParam(params, "lines", TERMINAL_READ_DEFAULT_LINES, 1, TERMINAL_READ_MAX_LINES);
+  if (!pty.hasSession(paneId)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+  }
 
-  const requestedLines = optionalNumberParam(params, "lines");
-  const lines =
-    requestedLines === null
-      ? TERMINAL_READ_DEFAULT_LINES
-      : Math.max(1, Math.min(requestedLines | 0, TERMINAL_READ_MAX_LINES));
+  const since = optionalNumberParam(params, "since");
+  if (since !== null && rawMode !== "screen") {
+    const read = paneCursors.readSince(paneId, Math.floor(since), TERMINAL_READ_MAX_BYTES);
+    if (!read) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+    const all = cleanTerminalText(read.bytes);
+    const slice = all.slice(-lines);
+    return successResponse(id, {
+      paneId,
+      mode: "text",
+      cursor: read.cursor,
+      lines: slice.length,
+      truncated: read.truncated || all.length > slice.length,
+      ...(read.missedBytes > 0 ? { missedBytes: read.missedBytes } : {}),
+      text: slice.join("\n"),
+    });
+  }
+
+  // Taken before the tail so a follow-up `since` read never skips bytes.
+  const cursor = paneCursors.current(paneId);
+  if (rawMode === "screen") {
+    const tail = pty.readTail(paneId, TERMINAL_READ_SCREEN_BYTES);
+    if (tail === null) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+    const size = pty.sessionDimensions(paneId) ?? { cols: 120, rows: 40 };
+    const screen = await renderTerminalScreen(tail, size.cols, size.rows, lines);
+    return successResponse(id, {
+      paneId,
+      mode: "screen",
+      cursor,
+      altScreen: screen.altScreen,
+      lines: screen.lines.length,
+      text: screen.lines.join("\n"),
+    });
+  }
 
   const tail = pty.readTail(paneId, TERMINAL_READ_MAX_BYTES);
   if (tail === null) {
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   }
-
-  // Decode raw bytes as UTF-8 (lossy on partial code points at the head -
-  // acceptable for a tail read), then strip ANSI/VT control sequences so a
-  // grader sub-agent gets clean text instead of escape codes.
-  const text = stripVTControlCharacters(tail.toString("utf8"));
-  const allLines = text.split(/\r\n|\r|\n/);
-  // Drop a trailing empty line that comes from a final newline so callers
-  // don't get a phantom blank row when n=lines.
-  if (allLines.length > 0 && allLines[allLines.length - 1] === "") allLines.pop();
+  const allLines = cleanTerminalText(tail);
   const slice = allLines.slice(-lines);
-  const output = slice.join("\n");
-
   return successResponse(id, {
     paneId,
+    mode: "text",
+    cursor,
     lines: slice.length,
     truncatedBytes: tail.length >= TERMINAL_READ_MAX_BYTES,
-    text: output,
+    text: slice.join("\n"),
   });
+}
+
+// Runs a command in an agent-owned pane (or a new one) and waits for the
+// shell to report it finished, so an agent does not poll write/read/read.
+async function handleTerminalRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const command = typeof params.command === "string" ? params.command.trim() : "";
+  if (!command) return errorResponse(id, ERR_INVALID_PARAMS, "command is required");
+  if (/[\r\n]/.test(command)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "command must be a single line; join steps with && or ;");
+  }
+  const runId = stringParam(params, "runId");
+  const requestedPaneId = stringParam(params, "paneId");
+  if (requestedPaneId) {
+    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId)) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "terminal.run is only permitted on active panes you created with codara_terminal_create or codara_terminal_run",
+      );
+    }
+    if (!pty.exists(requestedPaneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${requestedPaneId}`);
+    if (runningPanes.has(requestedPaneId)) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `pane ${requestedPaneId} already has a codara_terminal_run in progress. Wait for it, or omit paneId to run in a new terminal.`,
+      );
+    }
+    runningPanes.add(requestedPaneId);
+  }
+
+  // Registered before any wait, so a client that cancels while the pane is
+  // still opening or settling never has its command typed afterwards.
+  const abort = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) abort.abort();
+  };
+  res.once("close", onClose);
+  let paneId = requestedPaneId;
+  try {
+    let created: { tabId: string; paneId: string; cwd: string } | null = null;
+    if (paneId) {
+      // A line codara_terminal_write submitted just before this call may not
+      // have started yet, and its markers would be read as this command's.
+      // Wait briefly for the shell to report it finished.
+      const submitted = recentSubmits.get(paneId);
+      if (submitted) {
+        recentSubmits.delete(paneId);
+        const settleBy = submitted.at + TERMINAL_RUN_SUBMIT_SETTLE_MS;
+        while (Date.now() < settleBy && !abort.signal.aborted) {
+          const since = paneCursors.readSince(paneId, submitted.cursor, TERMINAL_SHELL_STATE_BYTES);
+          if (!since || shellActivity(since.bytes) === "idle") break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === "running") {
+        return errorResponse(
+          id,
+          ERR_INVALID_PARAMS,
+          `pane ${paneId} is still running a command. Read it with codara_terminal_read, interrupt it with codara_terminal_write (text "\\u0003", submit false), or omit paneId to run in a new terminal.`,
+        );
+      }
+    } else {
+      const createParams: Record<string, unknown> = {};
+      for (const key of ["cwd", "title", "runId", "callerPaneId", "callerPid"]) {
+        if (params[key] !== undefined) createParams[key] = params[key];
+      }
+      const createdResponse = await handleTerminalCreate(createParams, id);
+      if (createdResponse.error) return createdResponse;
+      created = createdResponse.result as { tabId: string; paneId: string; cwd: string };
+      paneId = created.paneId;
+      runningPanes.add(paneId);
+      // A new shell prints its first prompt marker once it reads input; a
+      // shell without integration never does, so the wait is bounded.
+      const readyBy = Date.now() + TERMINAL_RUN_PROMPT_WAIT_MS;
+      while (
+        Date.now() < readyBy &&
+        !abort.signal.aborted &&
+        shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === null
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+
+    paneCursors.current(paneId);
+    const result = await runInPane(paneIo, paneId, command, {
+      timeoutMs: clampNumberParam(params, "timeoutMs", TERMINAL_RUN_DEFAULT_TIMEOUT_MS, 1_000, TERMINAL_RUN_MAX_TIMEOUT_MS),
+      quietMs: clampNumberParam(params, "quietMs", TERMINAL_RUN_DEFAULT_QUIET_MS, 300, 60_000),
+      maxLines: clampNumberParam(params, "lines", TERMINAL_READ_DEFAULT_LINES, 1, TERMINAL_READ_MAX_LINES),
+      signal: abort.signal,
+    });
+    // Outside a Cora run nothing closes a new tab, so an agent that omits
+    // paneId on every call would fill the workspace with them.
+    const next =
+      result.status === "timeout"
+        ? "The command is still running. Read new output with codara_terminal_read since=cursor."
+        : result.status === "quiet"
+          ? "Output went quiet, but this shell reports no exit marker, so the command may still be running. Check with codara_terminal_read since=cursor."
+          : created
+            ? "Pass this paneId to your next codara_terminal_run instead of opening another tab, and close it with codara_terminal_close when you are done."
+            : undefined;
+    return successResponse(id, {
+      paneId,
+      ...(created ? { tabId: created.tabId, cwd: created.cwd } : {}),
+      ...result,
+      cursor: paneCursors.current(paneId),
+      ...(next ? { next } : {}),
+    });
+  } finally {
+    res.off("close", onClose);
+    if (paneId) runningPanes.delete(paneId);
+  }
+}
+
+interface CallerPlacement {
+  paneId: string;
+  workspaceId: string;
+  tabId: string;
+}
+
+interface StudioTerminalListing {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  title?: string;
+  cwd?: string;
+  profile?: string;
+}
+
+const CALLER_PLACEMENT_CACHE_MS = 5_000;
+const callerPlacementCache = new Map<string, { at: number; placement: CallerPlacement | null }>();
+
+async function listStudioTerminals(): Promise<StudioTerminalListing[]> {
+  const inventory = await requestTerminalOp<StudioTerminalListing[]>("list", {}, { timeoutMs: 5_000 });
+  return Array.isArray(inventory) ? inventory : [];
+}
+
+// Where the calling agent's own pane sits, so browser, list and notify calls
+// act on the agent's workspace rather than whichever one is on screen.
+async function resolveCallerPlacement(params: Record<string, unknown>): Promise<CallerPlacement | null> {
+  const hinted = stringParam(params, "callerPaneId") ?? "";
+  const pid = typeof params.callerPid === "number" ? String(params.callerPid) : "";
+  if (!hinted && !pid) return null;
+  const key = `${hinted}|${pid}`;
+  const cached = callerPlacementCache.get(key);
+  if (cached && Date.now() - cached.at < CALLER_PLACEMENT_CACHE_MS) return cached.placement;
+  let placement: CallerPlacement | null = null;
+  const paneId = await resolveCallerPaneId(params);
+  if (paneId) {
+    const watched = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId);
+    if (watched) {
+      placement = { paneId, workspaceId: watched.workspaceId, tabId: watched.tabId };
+    } else {
+      const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+      if (listed) placement = { paneId, workspaceId: listed.workspaceId, tabId: listed.tabId };
+    }
+  }
+  if (callerPlacementCache.size > 64) callerPlacementCache.clear();
+  callerPlacementCache.set(key, { at: Date.now(), placement });
+  return placement;
+}
+
+async function handleTerminalList(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  let workspaceId: string | null = null;
+  if (runId) {
+    const run = await (await getRunStore()).getRun(runId);
+    workspaceId = run?.workspaceId ?? null;
+  }
+  const caller = await resolveCallerPlacement(params);
+  workspaceId ??= caller?.workspaceId ?? null;
+  let inventory: StudioTerminalListing[];
+  try {
+    inventory = await listStudioTerminals();
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+  const states = new Map(terminalAgentStateSnapshot().map((entry) => [entry.paneId, entry]));
+  const panes = inventory
+    .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
+    .map((entry) => {
+      const agent = states.get(entry.paneId);
+      return {
+        paneId: entry.paneId,
+        tabId: entry.tabId,
+        ...(workspaceId ? {} : { workspaceId: entry.workspaceId }),
+        ...(entry.title ? { title: entry.title } : {}),
+        ...(entry.cwd ? { cwd: entry.cwd } : {}),
+        agent: agent?.runtime ?? (entry.profile && entry.profile !== "shell" ? entry.profile : null),
+        ...(agent ? { agentState: agent.state } : {}),
+        shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
+        ...(caller?.paneId === entry.paneId ? { isCaller: true } : {}),
+        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId) ? { writable: true } : {}),
+      };
+    });
+  return successResponse(id, { workspaceId, panes });
+}
+
+const AGENT_NOTIFY_MIN_INTERVAL_MS = 5_000;
+const AGENT_NOTIFY_MAX_CHARS = 300;
+const agentNotifyLastAt = new Map<string, number>();
+const AGENT_NOTIFY_LABELS: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  grok: "Grok",
+  pi: "Pi",
+};
+
+// An agent's own "I finished" or "I need you". It shares the pane's sourceKey
+// with the terminal notifier, so the notify policy treats this and the
+// notifier's turn-end guess as one alert instead of two.
+async function handleAgentNotify(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const kind = params.kind;
+  if (kind !== "done" && kind !== "needs_input") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "kind must be done or needs_input");
+  }
+  const message = (stringParam(params, "message") ?? "").slice(0, AGENT_NOTIFY_MAX_CHARS);
+  const placement = await resolveCallerPlacement(params);
+  // The managed MCP entry also loads in agents started outside Codara. Their
+  // notification has nowhere to go, which is an answer, not a failure.
+  if (!placement) {
+    return successResponse(id, {
+      published: false,
+      reason: "not_in_codara_terminal",
+      note: "codara_notify_user only reaches the user from an agent running in a Codara terminal pane.",
+    });
+  }
+  const rateKey = `${placement.paneId}:${kind}`;
+  const now = Date.now();
+  const last = agentNotifyLastAt.get(rateKey);
+  if (last !== undefined && now - last < AGENT_NOTIFY_MIN_INTERVAL_MS) {
+    return successResponse(id, { published: false, reason: "rate_limited" });
+  }
+  if (agentNotifyLastAt.size > 256) agentNotifyLastAt.clear();
+  agentNotifyLastAt.set(rateKey, now);
+  const runtime = terminalAgentStateSnapshot().find((entry) => entry.paneId === placement.paneId)?.runtime;
+  const label = (runtime && AGENT_NOTIFY_LABELS[runtime]) || "Agent";
+  const done = kind === "done";
+  publish({
+    kind: done ? "terminal.agent.done" : "terminal.agent.needs-input",
+    sourceKey: paneSourceKey(placement.paneId),
+    tone: done ? "success" : "warning",
+    title: done ? `${label} finished` : `${label} needs you`,
+    body:
+      message ||
+      (done ? "Finished. Click to jump to the terminal." : "Waiting for your input. Click to jump to the terminal."),
+    soundKind: done ? "done" : "needs-you",
+    target: {
+      type: "terminal",
+      workspaceId: placement.workspaceId,
+      tabId: placement.tabId,
+      paneId: placement.paneId,
+    },
+  });
+  return successResponse(id, { published: true });
 }
 
 // The pane the calling agent runs in, so its new terminal opens beside it
@@ -999,6 +1384,10 @@ async function handleTerminalWrite(
   }
   if (!pty.exists(paneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   const submit = typeof params.submit === "boolean" ? params.submit : true;
+  if (submit) {
+    if (recentSubmits.size > 64) recentSubmits.clear();
+    recentSubmits.set(paneId, { at: Date.now(), cursor: paneCursors.current(paneId) });
+  }
   pty.inject(paneId, text, { submit });
   return successResponse(id, { ok: true });
 }
@@ -1037,6 +1426,18 @@ async function handleTerminalClose(
   }
 }
 
+// An agent outside any run (Claude Code in a plain Studio terminal) drives the
+// browser of the workspace its pane belongs to, not the one on screen. A run
+// keeps resolving through scopePreviewWorkspace.
+async function scopePreviewToCaller(params: Record<string, unknown>): Promise<void> {
+  if (!stringParam(params, "runId") && !stringParam(params, "workspaceId")) {
+    const placement = await resolveCallerPlacement(params);
+    if (placement) params.workspaceId = placement.workspaceId;
+  }
+  delete params.callerPaneId;
+  delete params.callerPid;
+}
+
 async function handlePreviewOp(
   method: string,
   params: Record<string, unknown>,
@@ -1045,6 +1446,7 @@ async function handlePreviewOp(
   const op = method.replace(/^preview\./, "") as PreviewOpName;
   const previewParams: PreviewOpParams = { ...params };
   try {
+    await scopePreviewToCaller(previewParams);
     await scopePreviewWorkspace(previewParams, async (runId) => (await getRunStore()).getRun(runId));
     if (op === "navigate" && typeof previewParams.url === "string") {
       const reachable = await waitForLoopbackPreviewServer(previewParams.url);
@@ -1070,6 +1472,7 @@ async function handlePreviewInputRpc(
 ): Promise<JsonRpcResponse> {
   const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
+    await scopePreviewToCaller(params);
     await scopePreviewWorkspace(params, async (runId) => (await getRunStore()).getRun(runId));
     const result = await handlePreviewInputOp(op, params);
     return successResponse(id, result);
@@ -5546,6 +5949,21 @@ async function handleOrchestratorWhiteboardGet(
   });
 }
 
+// Write results echo what changed, not the whole canvas the caller just sent:
+// a 40-card board is several thousand tokens per round trip. The revision and
+// review fields keep the shape Cora's draft guard reads
+// (resources/pi-cora/whiteboard-review-policy.ts).
+function whiteboardWriteSummary(board: CoraWhiteboard | undefined): Record<string, unknown> | null {
+  if (!board) return null;
+  return {
+    revision: board.revision ?? 0,
+    title: board.title,
+    nodeCount: board.nodes.length,
+    edgeCount: board.edges.length,
+    review: board.review ? { revision: board.review.revision } : null,
+  };
+}
+
 async function handleOrchestratorWhiteboardUpdate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -5585,7 +6003,7 @@ async function handleOrchestratorWhiteboardUpdate(
     return successResponse(id, {
       ok: true,
       run_id: updated.id,
-      whiteboard: updated.whiteboard ?? null,
+      whiteboard: whiteboardWriteSummary(updated.whiteboard),
       issues: updated.whiteboard ? whiteboardIssues(updated.whiteboard) : [],
       next: updated.whiteboard ? "Draft saved. Inspect the rendered board, fix issues, and review the final revision before finishing." : undefined,
     });
@@ -5610,7 +6028,7 @@ async function handleOrchestratorWhiteboardQuality(
       const { arrangeWhiteboard } = await import("@shared/whiteboard-layout");
       const nodes = arrangeWhiteboard(board.nodes, board.edges);
       const updated = await store.updateCoraWhiteboard({ runId, action: "merge", editor: "cora", baseRevision: revision, nodes });
-      return successResponse(id, { ok: true, whiteboard: updated.whiteboard, issues: whiteboardIssues(updated.whiteboard!), next: "Inspect the arranged revision before reviewing it." });
+      return successResponse(id, { ok: true, whiteboard: whiteboardWriteSummary(updated.whiteboard), issues: whiteboardIssues(updated.whiteboard!), next: "Inspect the arranged revision before reviewing it." });
     }
     if (method === "orchestrator.whiteboard_review") {
       const issues = requireWhiteboardInspection(runId, board);
@@ -5619,7 +6037,7 @@ async function handleOrchestratorWhiteboardQuality(
       const limitations = Array.isArray(params.limitations) ? params.limitations.filter((value): value is string => typeof value === "string" && Boolean(value.trim())) : [];
       if (issues.some((issue) => issue.severity === "warning") && !limitations.length) throw new Error("Record unresolved inspection warnings as limitations, or fix them and inspect again.");
       const updated = await store.reviewCoraWhiteboard({ runId, baseRevision: revision, summary, limitations });
-      return successResponse(id, { ok: true, whiteboard: updated.whiteboard });
+      return successResponse(id, { ok: true, whiteboard: whiteboardWriteSummary(updated.whiteboard) });
     }
     const nodeIds = Array.isArray(params.nodeIds) ? params.nodeIds.filter((value): value is string => typeof value === "string").slice(0, 50) : [];
     const result = await requestPreviewOp<{
@@ -5851,10 +6269,20 @@ async function handleOrchestratorBoardUpdate(
       baseRevision: Math.max(0, Math.floor(params.baseRevision)),
       cards: authorized.cards,
     });
+    // The caller sent the full list; echo only the new revision and which
+    // cards it created, changed or deleted.
+    const before = new Map(current.cards.map((card) => [card.id, JSON.stringify(card)]));
+    const after = new Set(board.cards.map((card) => card.id));
     return successResponse(id, {
       ok: true,
       run_id: run.id,
-      board,
+      revision: board.revision,
+      cardCount: board.cards.length,
+      created: board.cards.filter((card) => !before.has(card.id)).map((card) => card.id),
+      updated: board.cards
+        .filter((card) => before.has(card.id) && before.get(card.id) !== JSON.stringify(card))
+        .map((card) => card.id),
+      deleted: current.cards.filter((card) => !after.has(card.id)).map((card) => card.id),
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);

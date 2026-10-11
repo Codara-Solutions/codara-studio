@@ -41,6 +41,9 @@ const managerExtensionSource = fs.readFileSync(
 );
 assert.match(managerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 process.env.SPARK_MCP_MODE = "talk";
+// Pi always launches with its run id; without one the bridge drops the
+// chat-owned whiteboard and board tools.
+process.env.SPARK_RUN_ID = "run-pi-extension-test";
 const studioBridge = require(path.join(
   __dirname,
   "..",
@@ -404,6 +407,7 @@ const noInput = {};
     "a bare WebFetch block also covers fetch_url",
   );
   assert.equal(blocked("codara_terminal_create")?.block, true, "edits blocks terminal create");
+  assert.equal(blocked("codara_terminal_run")?.block, true, "edits blocks terminal run, which executes a command");
   assert.equal(blocked("codara_terminal_close")?.block, true, "edits blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "edits blocks preview evaluate");
   assert.equal(blocked("codara_preview_click"), undefined, "edits keeps preview click");

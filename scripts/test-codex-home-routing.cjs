@@ -97,6 +97,11 @@ async function main() {
 
   await mcp.installSparkPreviewMcpForCodex(true, { codexHome: homeA });
   assert.match(read(configA), /SPARK_AGENT_BUILTIN_MCP/);
+  assert.match(
+    read(configA),
+    /tool_timeout_sec = 660/,
+    "Codex must not cut codara_terminal_run off at its 60s default",
+  );
   assert.doesNotMatch(read(configA), /PERSONAL_CONFIG_MUST_NOT_BE_COPIED/);
   assert.doesNotMatch(read(configB), /SPARK_AGENT_BUILTIN_MCP/);
   assert.match(

@@ -208,7 +208,10 @@ its first send (`run-store.ts`).
 ### Claude hooks, the MCP server and the agent socket
 
 `test-hook-installer`, `test-hook-watcher-lifecycle`, `test-codara-studio-mcp`
-(the tool list for each `SPARK_MCP_MODE`), `test-standing-terminals` (what
+(the tool list for each `SPARK_MCP_MODE`, protocol negotiation, offline and
+error handling, cancellation), `test-agent-terminal-io` (terminal reads with a
+cursor, screen rendering and `terminal.run` completion in
+`agent-terminal-io.ts`), `test-standing-terminals` (what
 `codara_spawn_terminals` opens), `test-builtin-mcp-opt-out`,
 `test-builtin-mcp-ownership`, `test-grok-mcp-copy`, `test-agent-sync-toml`
 (Capability Center config reads and edits, sync scope, skills, the MCP
