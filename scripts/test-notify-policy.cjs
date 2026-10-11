@@ -238,6 +238,49 @@ const CASES = [
     ],
   },
   {
+    // Audit 2026-10-11: a false mid-turn "finished" armed the completion
+    // guard, and the real permission prompt later in that turn was swallowed.
+    // The notifier now rearms only when a new turn starts or a prompt is
+    // answered; this pins down the policy half of that contract.
+    name: "terminal: a second prompt in one turn needs the answer to rearm",
+    steps: [
+      { kind: "terminal.agent.needs-input", sourceKey: "pane:a", expect: { deliver: true } },
+      {
+        kind: "terminal.agent.needs-input",
+        sourceKey: "pane:a",
+        expect: { deliver: false, reason: "duplicate" },
+      },
+      { rearm: "pane:a" },
+      { kind: "terminal.agent.needs-input", sourceKey: "pane:a", expect: { deliver: true } },
+    ],
+  },
+  {
+    name: "terminal: one finished alert per turn until the next turn rearms",
+    steps: [
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: true } },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: false, reason: "duplicate" } },
+      {
+        kind: "terminal.agent.needs-input",
+        sourceKey: "pane:a",
+        expect: { deliver: false, reason: "completion-guard" },
+      },
+      { rearm: "pane:a" },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: true } },
+    ],
+  },
+  {
+    name: "terminal: a finished turn seen in the pane is not recorded as history",
+    steps: [
+      {
+        kind: "terminal.agent.done",
+        sourceKey: "pane:a",
+        watching: true,
+        expect: { deliver: false, record: false, reason: "watching" },
+      },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: false, reason: "duplicate" } },
+    ],
+  },
+  {
     name: "status change (complete → failed) is not a duplicate",
     steps: [
       { kind: "run.complete", expect: { deliver: true } },
@@ -296,6 +339,29 @@ async function main() {
       console.log(`  PASS ${testCase.name}`);
     } else {
       failed += 1;
+    }
+  }
+
+  // Which terminal alerts count as watched. A finished turn in any pane of
+  // the tab on screen is already visible; a prompt only counts as watched in
+  // the selected pane, because a sibling split cannot take the answer.
+  const WATCHED = [
+    ["terminal.agent.done", { selected: true, visible: true }, true],
+    ["terminal.agent.done", { selected: false, visible: true }, true],
+    ["terminal.agent.done", { selected: false, visible: false }, false],
+    ["terminal.agent.needs-input", { selected: true, visible: true }, true],
+    ["terminal.agent.needs-input", { selected: false, visible: true }, false],
+    ["terminal.agent.failed", { selected: false, visible: true }, false],
+    ["terminal.agent.failed", { selected: true, visible: true }, true],
+  ];
+  for (const [kind, pane, want] of WATCHED) {
+    const name = `${kind} watched=${want} for selected=${pane.selected} visible=${pane.visible}`;
+    if (P.terminalAlertWatched(kind, pane) === want) {
+      passed += 1;
+      console.log(`  PASS ${name}`);
+    } else {
+      failed += 1;
+      console.error(`  FAIL ${name}`);
     }
   }
 

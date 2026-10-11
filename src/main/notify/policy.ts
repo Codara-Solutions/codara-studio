@@ -112,6 +112,19 @@ export function decide(
   return { deliver: true, record: true, read: false, reason: "deliver" };
 }
 
+// What "watching" means for a terminal-agent alert. A finished turn in a pane
+// that is on screen in the focused window is already visible, so it needs no
+// toast even when a sibling split holds keyboard focus. A prompt or a failure
+// still alerts unless its pane is the selected one: a visible sibling cannot
+// take the answer until the user selects it.
+export function terminalAlertWatched(
+  kind: NotifyKind,
+  pane: { selected: boolean; visible: boolean },
+): boolean {
+  if (kind === "terminal.agent.done") return pane.selected || pane.visible;
+  return pane.selected;
+}
+
 // Real new activity began on this source (run re-entered running/planning/
 // reviewing, terminal agent entered a working phase, automation started an
 // iteration): clear both the no-change memory and the completion guard so

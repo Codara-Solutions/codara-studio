@@ -11,7 +11,7 @@ import { logMain } from "../file-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { cachedState } from "../storage";
-import { isWatchingPane, isWatchingRun } from "./attention";
+import { isPaneVisible, isWatchingPane, isWatchingRun } from "./attention";
 import {
   activeWindow,
   deliver,
@@ -24,6 +24,7 @@ import {
   createPolicyState,
   decide,
   rearm as policyRearm,
+  terminalAlertWatched,
 } from "./policy";
 import type { PublishInput } from "./types";
 import { publishDeliveredNotification } from "./subscribers";
@@ -56,7 +57,10 @@ function watchingTarget(event: PublishInput): boolean {
   const target = event.target;
   if (target.type === "run") return isWatchingRun(target.runId);
   if (target.type === "terminal") {
-    return isWatchingPane(target.workspaceId, target.tabId, target.paneId);
+    return terminalAlertWatched(event.kind, {
+      selected: isWatchingPane(target.workspaceId, target.tabId, target.paneId),
+      visible: isPaneVisible(target.workspaceId, target.tabId),
+    });
   }
   // Teammate-push alerts (workspace targets) have no exact surface either —
   // being in the workspace doesn't mean the Source Control graph is on

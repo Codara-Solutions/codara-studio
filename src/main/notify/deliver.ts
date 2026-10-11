@@ -89,17 +89,26 @@ export function signalTerminalAttention(event: NotifyEvent): void {
   }
 }
 
+// Several panes can finish in the same second (a split of agents fed one
+// prompt each). One chime says "look"; a stack of them is noise, so a chime
+// inside this window of the previous one is dropped. The toast and the native
+// notification for each event still fire.
+const SOUND_BURST_MS = 1_500;
+let lastSoundAt = 0;
+
 export function deliver(event: NotifyEvent, channels: NotificationChannelsPref): void {
   const win = activeWindow();
 
   const appFocused = isAppFocused(win);
+  const now = Date.now();
+  const soundInBurst = now - lastSoundAt < SOUND_BURST_MS;
 
   // Which transports actually fire — a sound with no toast and no OS
   // notification (window unfocused + native off) is otherwise indistinguishable
   // from a phantom chime after the fact.
   logMain(
     "notify",
-    `channels id=${event.id} focused=${appFocused} toast=${channels.inApp && !!win && appFocused} native=${channels.native && (!appFocused || !channels.inApp)} sound=${channels.sound && !!win && !event.silent} osCues=${channels.osCues}`,
+    `channels id=${event.id} focused=${appFocused} toast=${channels.inApp && !!win && appFocused} native=${channels.native && (!appFocused || !channels.inApp)} sound=${channels.sound && !!win && !event.silent && !soundInBurst} osCues=${channels.osCues}`,
   );
 
   // In-app toast: only when the window is focused, so it can actually be seen.
@@ -148,7 +157,8 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
 
   // event.silent suppresses only the chime — informational alerts still get
   // their toast, bell entry and OS cue.
-  if (channels.sound && win && !event.silent) {
+  if (channels.sound && win && !event.silent && !soundInBurst) {
+    lastSoundAt = now;
     try {
       win.webContents.send("notification:sound", { kind: event.soundKind });
     } catch (err) {

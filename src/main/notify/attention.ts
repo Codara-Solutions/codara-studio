@@ -39,6 +39,12 @@ export function isWatchingRun(runId: string): boolean {
   return windowFocused() && current.runId === runId;
 }
 
+// Every split of the selected tab is drawn, so a pane is on screen when the
+// window is focused and its workspace and tab are the selected ones.
+export function isPaneVisible(workspaceId: string, tabId: string): boolean {
+  return windowFocused() && current.workspaceId === workspaceId && current.tabId === tabId;
+}
+
 // The user is actively operating this exact terminal pane: window focused,
 // workspace + tab selected, and the split's active pane matches. A sibling
 // split may be visible, but it cannot receive input; permission prompts there
