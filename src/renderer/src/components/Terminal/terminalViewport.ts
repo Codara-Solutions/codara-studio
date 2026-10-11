@@ -76,8 +76,18 @@ export function createTerminalViewportRecovery(
   };
   const observe = () => {
     if (restoring) return;
-    if (recovering || following) restore();
-    else remember();
+    if (recovering) {
+      restore();
+    } else if (following) {
+      // Runs on every parsed write. Outside a recovery window xterm keeps its
+      // own scrollbar in step while it follows the bottom, so the buffer
+      // position is the only thing to check; restore() reads layout, and
+      // doing that per write forced a synchronous layout per write.
+      const buffer = terminal.buffer.active;
+      if (buffer.viewportY < buffer.baseY) restore();
+    } else {
+      remember();
+    }
   };
   // Native scrolling suppresses xterm's public onScroll event. Register after
   // xterm's handler so wheel/scrollbar positions are captured from its buffer.

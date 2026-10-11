@@ -63,6 +63,13 @@ import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
+import { asciiBytes, indexOfBytes } from "./terminalByteScan";
+import {
+  captureTerminalScreenModes,
+  setTerminalPaneAlternateScreen,
+  terminalScreenModesSequence,
+  type TerminalScreenModes,
+} from "./terminalScreenModes";
 
 export type { SparkOpenInput };
 
@@ -73,6 +80,24 @@ const FIT_DEBOUNCE_MS = 8;
 // renderer, so a machine that can't hold a context (GPU eviction storms, driver
 // flake) doesn't thrash a new addon on every tab switch.
 const WEBGL_MAX_RELOADS = 3;
+// Whether this renderer process can create a WebGL2 context at all. With
+// hardware acceleration off (the Wayland software fallback) it cannot, and
+// the addon then fails inside term.open where the error is swallowed, leaving
+// a handle to an addon that never started. Probed once: the answer cannot
+// change without a restart.
+let webgl2Supported: boolean | null = null;
+function canUseWebgl2(): boolean {
+  if (webgl2Supported !== null) return webgl2Supported;
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    webgl2Supported = gl !== null;
+    // Chromium caps live contexts per window; give the probe's back now.
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webgl2Supported = false;
+  }
+  return webgl2Supported;
+}
 // How long to wait after an alt-screen leave before deciding it was an exit.
 // Long enough for the agent's restored frame to reach the rows, short enough
 // that a real exit clears the chip promptly.
@@ -82,7 +107,11 @@ const ALT_SCREEN_EXIT_CONFIRM_MS = 400;
 // once, a tab transition), which would otherwise stay blank.
 const REVEAL_TRAILING_REPAINT_MS = 250;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const PTY_MANAGER_RESET_SEQUENCE = "\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l";
+const PTY_MANAGER_RESET_BYTES = asciiBytes("\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l");
+// The searches jump between occurrences of their rarest byte in terminal
+// output (see terminalByteScan): the first "J", and the first "/".
+const PTY_MANAGER_RESET_ANCHOR = PTY_MANAGER_RESET_BYTES.indexOf(0x4a);
+const SCHEME_SEPARATOR_BYTES = asciiBytes("://");
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.
@@ -145,24 +174,24 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
-// Bracketed-paste mode (DECSET 2004) per live session. A TUI enables it ONCE
-// at startup, but a pane's xterm is disposed and recreated on every workspace
-// switch while its PTY keeps running, and the replay that rebuilds the fresh
-// instance is flattened TEXT: it carries no escape sequences, so the new
-// Terminal starts with the mode off while the still-running TUI believes it is
-// on. Anything that frames input for a paste-aware TUI then stops framing it,
-// which is why a dropped image path arrived in Claude Code as literal text
-// instead of an attachment after a few hours of switching around. One boolean
-// per session, remembered across the dispose so the fresh instance can be told
-// what the remote terminal is still doing.
-const bracketedPasteModes = new Map<string, boolean>();
+// Screen modes per live session (alternate screen, bracketed paste, mouse
+// reporting, ...). A TUI enables them ONCE at startup, but a pane's xterm is
+// disposed and recreated while its PTY keeps running, and the replay that
+// rebuilds the fresh instance is flattened TEXT: it carries no escape
+// sequences, so the new Terminal starts with every mode off while the
+// still-running TUI believes they are on. A lost bracketed paste is why a
+// dropped image path arrived in Claude Code as literal text; a lost alternate
+// screen is why its repaint landed in the scrollback with the mouse wheel no
+// longer reaching it. Remembered across the dispose so the fresh instance can
+// be told what the remote terminal is still doing.
+const rememberedScreenModes = new Map<string, TerminalScreenModes>();
 
 // These registries are remount guards, not durable terminal state. App calls
 // this only after a pane disappears from every active/inactive workspace
 // layout. Exact lifecycle cleanup keeps them bounded without an arbitrary cap
 // that could evict a still-live terminal in an unusually large workspace.
 export function forgetTerminalSessionMemory(sessionId: string): void {
-  bracketedPasteModes.delete(sessionId);
+  rememberedScreenModes.delete(sessionId);
   autorunFiredSessions.delete(sessionId);
   autoResumeAttempts.delete(sessionId);
   resumeHintShown.delete(sessionId);
@@ -968,11 +997,18 @@ export function useTerminalSession({
       // default; the WebGL renderer is several × faster on agent-style output
       // (full-screen redraws, scrollback, large bursts). On context loss
       // (driver crash, lost GPU, tab move between displays) we dispose the
-      // addon and xterm transparently falls back to DOM.
+      // addon and xterm transparently falls back to DOM. Loaded after
+      // term.open below, so a renderer that cannot start throws here instead
+      // of inside open.
       let webgl: WebglAddon | null = null;
       // Consecutive reloads triggered by a lost GL context on re-show (see
       // recoverRendererOnShow). Reset once a live context is observed.
       let webglReloads = 0;
+      // Set when a context loss dropped the pane to the DOM renderer, so the
+      // next reveal can try WebGL again. Chromium caps live contexts per
+      // window and evicts the oldest, which is usually a hidden pane; the one
+      // the user is looking at should get a context back.
+      let webglLost = false;
       const attachWebglLossHandler = (addon: WebglAddon) => {
         addon.onContextLoss(() => {
           try {
@@ -980,7 +1016,10 @@ export function useTerminalSession({
           } catch {
             /* ignore */
           }
-          if (webgl === addon) webgl = null;
+          if (webgl === addon) {
+            webgl = null;
+            webglLost = true;
+          }
           // Disposing the WebGL addon makes xterm fall back to the DOM renderer.
           // The DOM renderer derives a WIDER css cell width than WebGL (it does
           // NOT floor device char width the way WebglRenderer does), and the
@@ -996,18 +1035,19 @@ export function useTerminalSession({
         });
       };
       const loadWebgl = (): boolean => {
+        if (!canUseWebgl2()) return false;
         try {
           const addon = new WebglAddon();
           attachWebglLossHandler(addon);
           term.loadAddon(addon);
           webgl = addon;
+          webglLost = false;
           return true;
         } catch {
           webgl = null;
           return false;
         }
       };
-      loadWebgl();
 
       // Renderer recovery on pane re-activation. Two failure modes are healed
       // here, both invisible until the pane is shown again — this is the fix for
@@ -1029,7 +1069,10 @@ export function useTerminalSession({
       const recoverRendererOnShow = (resetRenderer = false) => {
         const t = termRef.current;
         if (!t) return;
-        if (webgl) {
+        if (!webgl && webglLost && webglReloads < WEBGL_MAX_RELOADS) {
+          webglReloads += 1;
+          if (loadWebgl()) refitAfterRendererSwapRef.current?.();
+        } else if (webgl) {
           // Find the WebGL renderer's OWN canvas. .xterm-screen also holds the
           // renderer's link layer — a 2D canvas (class xterm-link-layer) that is
           // appended BEFORE the WebGL canvas — so a plain ".xterm-screen canvas"
@@ -1494,10 +1537,25 @@ export function useTerminalSession({
       }
 
       term.open(container.current);
+      loadWebgl();
       const viewportHost = container.current;
+      // A measurable host is remembered from observation rather than read
+      // from clientWidth each time: the predicate runs on parsed writes, and a
+      // layout read there forces a synchronous layout of the rows xterm just
+      // changed. An unmeasurable host is read again, since a reveal can ask
+      // before the observer has reported the new size.
+      const measureViewportHost = () =>
+        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0;
+      let viewportHostMeasurable = measureViewportHost();
+      const viewportHostObserver = new ResizeObserver((entries) => {
+        const box = entries[entries.length - 1]?.contentRect;
+        if (box) viewportHostMeasurable = box.width > 0 && box.height > 0;
+      });
+      viewportHostObserver.observe(viewportHost);
+      cleanups.push(() => viewportHostObserver.disconnect());
       const viewportRecovery = createTerminalViewportRecovery(term, () =>
         visibleRef.current && document.visibilityState === "visible" &&
-        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0,
+        (viewportHostMeasurable || (viewportHostMeasurable = measureViewportHost())),
       );
       viewportRecoveryRef.current = viewportRecovery;
       const scrollSubscription = term.onScroll(() => viewportRecovery.observe());
@@ -1517,17 +1575,30 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      // Re-arm the mode the still-running TUI enabled before this pane's
-      // previous xterm was disposed. Written to the LOCAL terminal only: it
-      // teaches this instance what the remote side is doing and sends nothing
-      // to the PTY. A session whose TUI has since exited re-learns the mode
-      // from its own output, so a stale `true` costs at most one framed paste.
-      if (bracketedPasteModes.get(sessionId) === true) {
+      // Re-arm the modes the still-running TUI enabled before this pane's
+      // previous xterm was disposed, once the normal-screen snapshot below has
+      // been written. Local terminal only: it teaches this instance what the
+      // remote side is doing and sends nothing to the PTY. A TUI that has since
+      // exited leaves the alternate screen and its modes in its own output, and
+      // the redraw requested on attach repaints the rest.
+      const screenModes = readOnlyRef.current ? undefined : rememberedScreenModes.get(sessionId);
+      const restoreScreenModes = () => {
+        if (!screenModes) return;
         try {
-          term.write("\u001b[?2004h");
+          const sequence = terminalScreenModesSequence(screenModes);
+          if (sequence) term.write(sequence);
         } catch {
-          /* a terminal disposed mid-mount just starts without the mode */
+          /* a terminal disposed mid-mount just starts without the modes */
         }
+      };
+      if (!readOnlyRef.current) {
+        const screenSubscription = term.buffer.onBufferChange((buffer) => {
+          setTerminalPaneAlternateScreen(sessionId, buffer.type === "alternate");
+        });
+        cleanups.push(() => {
+          screenSubscription.dispose();
+          setTerminalPaneAlternateScreen(sessionId, false);
+        });
       }
       if (externalSizeOwnerRef.current) {
         const unsubscribeExternalSize = subscribeExternalTerminalSize(
@@ -1594,22 +1665,19 @@ export function useTerminalSession({
           viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
         if (replay) {
-          term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
-            // Write the hidden-era bytes verbatim after the text replay has
-            // parsed, then clear the pending flag in the final callback so the
-            // ordering (text → hidden bytes) is preserved even under chunked
-            // parsing.
-            if (pendingBytes && pendingBytes.length > 0) {
-              term.write(pendingBytes, finishReplay);
-            } else {
-              finishReplay();
-            }
-          });
-        } else if (pendingBytes && pendingBytes.length > 0) {
+          term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
+        }
+        restoreScreenModes();
+        // Write the hidden-era bytes verbatim after the text replay and the
+        // modes, then clear the pending flag in the final callback so the
+        // ordering (text, modes, hidden bytes) holds even under chunked parsing.
+        if (pendingBytes && pendingBytes.length > 0) {
           term.write(pendingBytes, finishReplay);
         } else {
-          finishReplay();
+          term.write("", finishReplay);
         }
+      } else {
+        restoreScreenModes();
       }
 
       const prompt = registerPromptTracker(term);
@@ -1927,8 +1995,13 @@ export function useTerminalSession({
         const t = termRef.current;
         if (!t || !activeRuntime) return;
         const now = Date.now();
+        // A pane nobody can see (a hidden window, tab or workspace) only
+        // needs its state for notifications and the tab badge, and main
+        // watches the same output for those. Every loaded workspace with a
+        // live agent keeps its panes mounted, so polling them all at the
+        // visible rate added up.
         if (
-          document.visibilityState !== "visible" &&
+          (document.visibilityState !== "visible" || !visibleRef.current) &&
           now - lastProcessedTickMs < HIDDEN_STATE_POLL_MS
         ) {
           return;
@@ -2404,6 +2477,83 @@ export function useTerminalSession({
       });
       cleanups.push(() => osc133Dispose.dispose());
 
+      // Fix 1 (linchpin): self-healing, LEVEL-triggered re-detection.
+      // The launch signals processAgentChunkText reacts to (launch banner,
+      // 633;E command line, alt-screen-enter) are EDGE-triggered: they only fire on a fresh
+      // launch. So if a still-running agent's chip was ever torn down (by
+      // the poller's absence-reset firing early on a transient anchor
+      // dropout, or by any pane remount that reset agentPhase to "idle"),
+      // it would never recover, leaving the chip gone and Shift+Enter
+      // sending a literal backslash. Re-detect an already-running agent
+      // from its PERSISTENT footer chrome: if the bottom tail still shows
+      // a known runtime's chrome, re-enter agent phase. setAgentRunning
+      // early-returns once agentPhase==="agent", so this only fires from
+      // idle and won't re-trigger every chunk.
+      //
+      // Guards:
+      //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
+      //    same as the poller). A stale footer sitting up in scrollback
+      //    after a REAL exit, shell prompt now at the bottom, reads as
+      //    UI-absent, so a genuinely-exited agent is NOT resurrected.
+      //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
+      //    those are exit signals, and re-detecting on the same chunk that
+      //    a real exit arrived on would immediately undo the reset.
+      //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
+      //    after a real `/exit`/`exit` the agent's footer lingers in the
+      //    bottom tail far longer than any timer: a 1-2 line shell prompt
+      //    barely pushes a 5-8 line footer up, so it stays inside the tail
+      //    (forever on an idle shell). So we stay suppressed until the
+      //    footer has left the tail at least once (liveRuntime === null),
+      //    then re-arm. Absence-poller teardowns omit the flag AND only
+      //    fire when the UI was already absent, so a FALSE teardown
+      //    self-heals immediately when the footer reappears.
+      //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
+      //    (hidden panes skip term.write), so its tail is stale and could
+      //    re-detect against an old frame.
+      //  - THROTTLED (scheduleTailRedetect): at most one read per
+      //    TAIL_REDETECT_INTERVAL_MS, with a trailing read so the last
+      //    repaint of a burst is still seen; an exit-signal chunk cancels
+      //    a pending read.
+      const redetectFromTail = () => {
+        const term = termRef.current;
+        if (!term) return;
+        const liveRuntime = liveRuntimeFromTail(readTerminalTail(term, STATE_TAIL_ROWS));
+        if (!liveRuntime) {
+          // Agent chrome is gone from the bottom tail: a real exit's
+          // stale footer has finally scrolled out (or a false teardown was
+          // already UI-absent). Re-arm: future repaints may re-detect.
+          redetectSuppressedAfterExit = false;
+        } else if (!redetectSuppressedAfterExit) {
+          setAgentRunning(liveRuntime);
+        }
+        // else: footer present but still post-exit-suppressed (lingering
+        // stale frame) → do nothing until it leaves the tail once.
+      };
+      let tailRedetectAt = 0;
+      let tailRedetectTimer: number | null = null;
+      const cancelTailRedetect = () => {
+        if (tailRedetectTimer === null) return;
+        window.clearTimeout(tailRedetectTimer);
+        tailRedetectTimer = null;
+      };
+      const scheduleTailRedetect = () => {
+        const now = Date.now();
+        if (now - tailRedetectAt >= TAIL_REDETECT_INTERVAL_MS) {
+          cancelTailRedetect();
+          tailRedetectAt = now;
+          redetectFromTail();
+          return;
+        }
+        if (tailRedetectTimer !== null) return;
+        tailRedetectTimer = window.setTimeout(() => {
+          tailRedetectTimer = null;
+          if (disposed || agentPhase !== "idle" || !visibleRef.current) return;
+          tailRedetectAt = Date.now();
+          redetectFromTail();
+        }, TAIL_REDETECT_INTERVAL_MS - (now - tailRedetectAt));
+      };
+      cleanups.push(cancelTailRedetect);
+
       const processAgentChunkText = (chunkText: string) => {
         if (!onAgentStateRef.current) return;
         if (chunkText.length > 0) {
@@ -2442,8 +2592,14 @@ export function useTerminalSession({
           clearRecentAgentInput();
         }
         if (agentPhase === "idle") {
+          // The ring is emptied whenever the pane returns to idle, so anything
+          // older than this chunk was already sniffed while idle and did not
+          // match. Scanning only the fresh text plus an overlap that bridges a
+          // marker split across chunks avoids stripping and matching the whole
+          // ring on every chunk of a busy shell.
+          const sniffWindow = agentTextRing.slice(-(chunkText.length + AGENT_SNIFF_OVERLAP));
           const runtime =
-            sniffOsc633CommandRuntime(agentTextRing) ?? sniffLiveRuntime(agentTextRing);
+            sniffOsc633CommandRuntime(sniffWindow) ?? sniffLiveRuntime(sniffWindow);
           if (runtime) {
             setAgentRunning(runtime);
           } else if (chunkText.includes("\x1b[?1049h")) {
@@ -2460,60 +2616,10 @@ export function useTerminalSession({
             // the same lifecycle as banner-based detection. setAgentRunning
             // arms the runtime-promotion bookkeeping for this null arm.
             setAgentRunning(null);
-          } else if (
-            !sawAltScreenLeave &&
-            !sawPromptMarker &&
-            visibleRef.current
-          ) {
-            // Fix 1 (linchpin) — self-healing, LEVEL-triggered re-detection.
-            // The signals above (launch banner, 633;E command line,
-            // alt-screen-enter) are EDGE-triggered: they only fire on a fresh
-            // launch. So if a still-running agent's chip was ever torn down —
-            // by the poller's absence-reset firing early on a transient anchor
-            // dropout, or by any pane remount that reset agentPhase to "idle" —
-            // it would never recover, leaving the chip gone and Shift+Enter
-            // sending a literal backslash. Re-detect an already-running agent
-            // from its PERSISTENT footer chrome: if the bottom tail still shows
-            // a known runtime's chrome, re-enter agent phase. setAgentRunning
-            // early-returns once agentPhase==="agent", so this only fires from
-            // idle and won't re-trigger every chunk.
-            //
-            // Guards:
-            //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
-            //    same as the poller). A stale footer sitting up in scrollback
-            //    after a REAL exit — shell prompt now at the bottom — reads as
-            //    UI-absent, so a genuinely-exited agent is NOT resurrected.
-            //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
-            //    those are exit signals, and re-detecting on the same chunk that
-            //    a real exit arrived on would immediately undo the reset.
-            //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
-            //    after a real `/exit`/`exit` the agent's footer lingers in the
-            //    bottom tail far longer than any timer — a 1-2 line shell prompt
-            //    barely pushes a 5-8 line footer up, so it stays inside the tail
-            //    (forever on an idle shell). So we stay suppressed until the
-            //    footer has left the tail at least once (liveRuntime === null),
-            //    then re-arm. Absence-poller teardowns omit the flag AND only
-            //    fire when the UI was already absent, so a FALSE teardown
-            //    self-heals immediately when the footer reappears.
-            //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
-            //    (hidden panes skip term.write), so its tail is stale and could
-            //    re-detect against an old frame.
-            const term = termRef.current;
-            if (term) {
-              const liveRuntime = liveRuntimeFromTail(
-                readTerminalTail(term, STATE_TAIL_ROWS),
-              );
-              if (!liveRuntime) {
-                // Agent chrome is gone from the bottom tail — a real exit's
-                // stale footer has finally scrolled out (or a false teardown was
-                // already UI-absent). Re-arm: future repaints may re-detect.
-                redetectSuppressedAfterExit = false;
-              } else if (!redetectSuppressedAfterExit) {
-                setAgentRunning(liveRuntime);
-              }
-              // else: footer present but still post-exit-suppressed (lingering
-              // stale frame) → do nothing until it leaves the tail once.
-            }
+          } else if (sawAltScreenLeave || sawPromptMarker) {
+            cancelTailRedetect();
+          } else if (visibleRef.current) {
+            scheduleTailRedetect();
           }
           return;
         }
@@ -3275,6 +3381,15 @@ export function useTerminalSession({
       let ptyTimer: number | null = null;
       let rafFits = 0;
       let rafHandle: number | null = null;
+      // A hidden pane keeps the size it was last shown at. Layout around the
+      // hidden layers still moves (a workspace whose active tab is a chat adds
+      // a tab strip above every layer), and resizing a hidden agent TUI makes it
+      // repaint in full twice per round trip: at the hidden size, then at the
+      // restored one a PTY_RESIZE_DEBOUNCE_MS after the reveal, with its rows
+      // blank in between. The reveal path re-fits once the pane is shown. A pane
+      // first mounted hidden still takes its first real measurement.
+      let measuredOnce = lastW > 0 && lastH > 0;
+      const holdHiddenSize = () => measuredOnce && !visibleRef.current;
 
       const scheduleFitRetry = () => {
         if (disposed || !spawned) return;
@@ -3282,6 +3397,7 @@ export function useTerminalSession({
           resizeXtermForOwner();
           return;
         }
+        if (holdHiddenSize()) return;
         if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
         rafFits = 0;
         const tick = () => {
@@ -3304,11 +3420,19 @@ export function useTerminalSession({
             if (rafFits < 3) rafHandle = window.requestAnimationFrame(tick);
             return;
           }
+          if (holdHiddenSize()) return;
           try {
             resizeXtermForOwner();
           } catch {
             return;
           }
+          measuredOnce = true;
+          // The observer skips sizes it saw while the pane was hidden, so a
+          // reveal at a new size is fitted here. Record that size as the
+          // observer's baseline, or a later return to the size it last
+          // recorded would read as no change and leave the grid stale.
+          lastW = host.clientWidth;
+          lastH = host.clientHeight;
           lastAppliedCols = term.cols;
           lastAppliedRows = term.rows;
           // Fit is local + cheap and runs every frame so xterm visually tracks a
@@ -3386,6 +3510,9 @@ export function useTerminalSession({
             // fire on the display:none→block transition still sees a size
             // change and lands the real fit.
             if (w === 0 || h === 0) return;
+            // Not recorded while hidden: the host usually returns to its shown
+            // size on reveal, and that must read as no change at all.
+            if (holdHiddenSize()) return;
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
@@ -3407,6 +3534,7 @@ export function useTerminalSession({
             } catch {
               return;
             }
+            measuredOnce = true;
             lastAppliedCols = term.cols;
             lastAppliedRows = term.rows;
             if (!externalSizeOwnerRef.current) {
@@ -3591,8 +3719,8 @@ export function useTerminalSession({
           // limit on the stashed combination too, reusing the same trim helper
           // the hot path uses.
           // Remembered unconditionally: a pane with nothing worth snapshotting
-          // still has a mode the running TUI expects to survive the remount.
-          bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true);
+          // still has modes the running TUI expects to survive the remount.
+          rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm));
           const pendingBytes = mergeHiddenBuffer(
             hiddenBufferRef.current,
             hiddenBytesRef.current,
@@ -3794,6 +3922,8 @@ export function useTerminalSession({
         const host = container.current;
         // Unlock can briefly expose zero-size geometry before the next frame.
         if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
+        // A hidden pane keeps its size until the reveal path re-fits it.
+        if (!visibleRef.current && !externalSizeOwnerRef.current) return;
         try {
           resizeXtermForOwner();
         } catch {
@@ -3967,31 +4097,14 @@ function stripTrailingPunct(url: string): string {
 }
 
 function containsPtyManagerReset(bytes: Uint8Array): boolean {
-  const sequenceLength = PTY_MANAGER_RESET_SEQUENCE.length;
-  for (let i = 0; i <= bytes.length - sequenceLength; i++) {
-    let matches = true;
-    for (let j = 0; j < sequenceLength; j++) {
-      if (bytes[i + j] !== PTY_MANAGER_RESET_SEQUENCE.charCodeAt(j)) {
-        matches = false;
-        break;
-      }
-    }
-    if (matches) return true;
-  }
-  return false;
+  return indexOfBytes(bytes, PTY_MANAGER_RESET_BYTES, PTY_MANAGER_RESET_ANCHOR) !== -1;
 }
 
 // Looks for the literal byte sequence ":" "/" "/" — the cheapest signal that
 // a chunk *might* contain a URL. Avoids per-chunk UTF-8 decode + regex scan
 // when running noisy commands (build outputs, test runs, log tails).
 function containsSchemeSeparator(bytes: Uint8Array): boolean {
-  const n = bytes.length;
-  for (let i = 0; i < n - 2; i++) {
-    if (bytes[i] === 0x3a && bytes[i + 1] === 0x2f && bytes[i + 2] === 0x2f) {
-      return true;
-    }
-  }
-  return false;
+  return indexOfBytes(bytes, SCHEME_SEPARATOR_BYTES, 1) !== -1;
 }
 
 // Read the last `maxRows` lines of an xterm Terminal buffer as plain text.
@@ -4024,10 +4137,18 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
-// Effective cadence while the app window is hidden. The poller keeps running
-// (background panes must still transition so turn-complete notifications fire)
-// but at a fraction of the cost — nobody is watching the chip, and the tick-
-// count backstops below only get more conservative when ticks are rarer.
+// Fresh text sniffed together with the end of the previous chunk, so a
+// banner or command marker split across two chunks still matches. Same
+// bound as the main-process notifier's SNIFF_OVERLAP.
+const AGENT_SNIFF_OVERLAP = 512;
+// Shortest gap between two reads of an idle pane's bottom rows for agent
+// chrome on output (see scheduleTailRedetect).
+const TAIL_REDETECT_INTERVAL_MS = 250;
+// Effective cadence while the pane cannot be seen (hidden window, tab or
+// workspace). The poller keeps running (background panes must still
+// transition so turn-complete notifications fire) but at a fraction of the
+// cost: nobody is watching the chip, and the tick-count backstops below only
+// get more conservative when ticks are rarer.
 const HIDDEN_STATE_POLL_MS = 2_000;
 // How many post-arm bytes the runtime-promotion sniff will scan before giving
 // up on a generic/non-public arm. A first-party launch banner appears within
