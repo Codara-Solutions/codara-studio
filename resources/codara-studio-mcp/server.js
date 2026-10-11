@@ -1837,11 +1837,12 @@ function injectRunIdForStudioOwnership(rpc, args) {
   if (envRunId) args.runId = envRunId;
   else delete args.runId;
   if (rpc.startsWith("preview.")) delete args.workspaceId;
-  if (rpc === "terminal.create") {
-    // Codara opens the new tab beside the pane this agent runs in. The pane id
-    // only arrives when the CLI passed its environment through (Codex starts
-    // MCP servers with a cleared one), so the pid lets Codara find the pane by
-    // walking up the process tree instead.
+  if (rpc === "terminal.create" || rpc.startsWith("preview.")) {
+    // Codara opens the new tab beside the pane this agent runs in, and an
+    // agent with no run drives only browser tabs in that pane's workspace. The
+    // pane id only arrives when the CLI passed its environment through (Codex
+    // starts MCP servers with a cleared one), so the pid lets Codara find the
+    // pane by walking up the process tree instead.
     const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
     if (envPaneId) args.callerPaneId = envPaneId;
     else delete args.callerPaneId;

@@ -1037,6 +1037,18 @@ async function handleTerminalClose(
   }
 }
 
+// An agent with no run drives browser tabs in the workspace of the pane it
+// runs in, not whichever workspace is on screen, and never another agent's or
+// a run's tab. Only a pane that resolves to a live session reaches the
+// renderer; a caller outside any pane keeps the on-screen workspace.
+async function scopePreviewCaller(params: Record<string, unknown>): Promise<void> {
+  const hasRun = typeof params.runId === "string" && params.runId.length > 0;
+  const callerPaneId = hasRun ? null : await resolveCallerPaneId(params);
+  delete params.callerPid;
+  if (callerPaneId) params.callerPaneId = callerPaneId;
+  else delete params.callerPaneId;
+}
+
 async function handlePreviewOp(
   method: string,
   params: Record<string, unknown>,
@@ -1046,6 +1058,7 @@ async function handlePreviewOp(
   const previewParams: PreviewOpParams = { ...params };
   try {
     await scopePreviewWorkspace(previewParams, async (runId) => (await getRunStore()).getRun(runId));
+    await scopePreviewCaller(previewParams);
     if (op === "navigate" && typeof previewParams.url === "string") {
       const reachable = await waitForLoopbackPreviewServer(previewParams.url);
       if (!reachable) {
@@ -1071,6 +1084,7 @@ async function handlePreviewInputRpc(
   const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
     await scopePreviewWorkspace(params, async (runId) => (await getRunStore()).getRun(runId));
+    await scopePreviewCaller(params);
     const result = await handlePreviewInputOp(op, params);
     return successResponse(id, result);
   } catch (err) {

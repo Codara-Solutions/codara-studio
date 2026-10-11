@@ -9,7 +9,7 @@ async function main() {
   new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, require);
   const r = mod.exports;
   const activity = [];
-  const handle = { getURL: () => "https://example.test/live", getTitle: () => "Live title", showAgentCursor: (value) => activity.push(value) };
+  const handle = { getURL: () => "https://example.test/live", getTitle: () => "Live title", getWebContentsId: () => null, showAgentCursor: (value) => activity.push(value) };
   r.registerPreviewTab({ id: "user-a", workspaceId: "a", url: "old", handle });
   r.registerPreviewTab({ id: "run-a", workspaceId: "a", runId: "run-1", url: "old", handle });
   r.registerPreviewTab({ id: "user-b", workspaceId: "b", url: "old", handle });
@@ -41,5 +41,44 @@ async function main() {
   r.unregisterPreviewTab("user-b");
   assert.equal(r.listPreviewTabs().length, 0);
   console.log("preview workspace routing and control tests passed");
+
+  // An agent with no run, in a terminal pane of workspace "pa", while the user
+  // looks at workspace "pb".
+  const panes = { "pane-a": "pa", "pane-a2": "pa" };
+  r.setLocatePaneWorkspaceFn((paneId) => panes[paneId] ?? null);
+  const guestHandle = (id) => ({ ...handle, getWebContentsId: () => id });
+  r.registerPreviewTab({ id: "user-pa", workspaceId: "pa", url: "u", handle: guestHandle(11) });
+  r.registerPreviewTab({ id: "run-pa", workspaceId: "pa", runId: "run-9", url: "u", handle: guestHandle(12) });
+  r.registerPreviewTab({ id: "user-pb", workspaceId: "pb", url: "u", handle: guestHandle(13) });
+  r.setActivePreviewTab("user-pb", "pb");
+  assert.equal(r.pickPreviewTab(null, null, null, "pane-a").id, "user-pa", "the pane's workspace, not the one on screen");
+  assert.equal(r.pickPreviewTab("user-pb", null, null, "pane-a"), null, "an explicit tab in another workspace is refused");
+  assert.deepEqual(r.listPreviewTabs(null, "pane-a").map((tab) => tab.id).sort(), ["run-pa", "user-pa"]);
+  assert.equal(r.findReusablePreviewTab(null, null, "pane-a"), null, "navigate never takes over the user's tab");
+  let paneOpened;
+  r.setOpenPreviewTabFn((url, runId, workspaceId) => {
+    paneOpened = { url, runId, workspaceId };
+    r.registerPreviewTab({ id: "agent-pa", url, runId, workspaceId, handle: guestHandle(14) });
+    return "agent-pa";
+  });
+  assert.equal((await r.ensurePreviewTab("https://agent.test", null, null, "pane-a")).id, "agent-pa");
+  assert.deepEqual(paneOpened, { url: "https://agent.test", runId: null, workspaceId: "pa" });
+  assert.equal((await r.ensurePreviewTab("https://agent.test/2", null, null, "pane-a")).id, "agent-pa", "the agent reuses its own tab");
+  assert.equal(r.pickPreviewTab(null, null, null, "pane-a").id, "agent-pa");
+  assert.equal(r.pickPreviewTab(null, null, null, "pane-a2").id, "user-pa", "another agent never takes this agent's tab");
+  assert.equal(r.findReusablePreviewTab(null, null, "pane-a2"), null);
+  assert.equal(r.pickPreviewTab(null, "run-9", "pa", "pane-a").id, "run-pa", "a run caller is scoped by its run");
+  assert.equal(r.pickPreviewTab(null, null, null, "pane-elsewhere").id, "user-pb", "a caller outside every pane keeps the screen's workspace");
+  assert.equal(r.pickPreviewTab(null, null, null, null).id, "user-pb");
+  console.log("an agent with no run stays in its pane's workspace and on its own tabs");
+
+  assert.equal(r.findPreviewTabByWebContentsId(14).id, "agent-pa");
+  assert.equal(r.findPreviewTabByWebContentsId(99), null);
+  r.registerPreviewTab({ id: "popup-pa", workspaceId: "pa", url: "u", handle: guestHandle(15) });
+  r.inheritPreviewTabOwner("popup-pa", "agent-pa");
+  r.unregisterPreviewTab("agent-pa");
+  assert.equal(r.findReusablePreviewTab(null, null, "pane-a").id, "popup-pa", "a tab the agent's page opened stays the agent's");
+  assert.equal(r.pickPreviewTab(null, null, null, "pane-a2").id, "user-pa");
+  console.log("tabs a page opens map back to their source tab and owner");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

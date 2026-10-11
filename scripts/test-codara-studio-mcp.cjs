@@ -641,6 +641,29 @@ function sortedEqual(actual, expected, label) {
       );
     }
     delete process.env.SPARK_RUN_ID;
+    // An agent with no run is scoped by the pane it runs in, so its browser
+    // calls name that pane (from the environment, never tool JSON) and its pid.
+    const previousPreviewPaneId = process.env.SPARK_AGENT_PANE_ID;
+    process.env.SPARK_AGENT_PANE_ID = "pane-browser-caller";
+    for (const [tool, rpc] of [
+      ["codara_preview_navigate", "preview.navigate"],
+      ["codara_preview_snapshot", "preview.snapshot"],
+      ["codara_preview_scroll", "preview.scroll"],
+    ]) {
+      await directBridge.callToolByName(tool, {
+        url: "http://127.0.0.1:4173/",
+        callerPaneId: "pane-spoofed",
+        callerPid: 1,
+        workspaceId: "ws-spoofed",
+      });
+      assert.strictEqual(received.at(-1).method, rpc);
+      assert.strictEqual(received.at(-1).params.callerPaneId, "pane-browser-caller", `${tool} names the agent's pane`);
+      assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+      assert.strictEqual(received.at(-1).params.workspaceId, undefined);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"), false);
+    }
+    if (previousPreviewPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPreviewPaneId;
+    else delete process.env.SPARK_AGENT_PANE_ID;
 
     const batch = await directBridge.callToolByName("codara_preview_run", {
       steps: [{ action: "navigate", url: "http://127.0.0.1:4173/" }],

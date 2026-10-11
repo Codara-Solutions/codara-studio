@@ -57,7 +57,13 @@ import TerminalStack from "./tabs/TerminalStack";
 import { buildDockIndex, isDockLeaf } from "./tabs/dock";
 import SplitDropOverlay from "./tabs/SplitDropOverlay";
 import PreviewStack from "./tabs/PreviewStack";
-import { clearPreviewControl, setOpenPreviewTabFn } from "./components/Preview/registry";
+import {
+  clearPreviewControl,
+  findPreviewTabByWebContentsId,
+  inheritPreviewTabOwner,
+  setLocatePaneWorkspaceFn,
+  setOpenPreviewTabFn,
+} from "./components/Preview/registry";
 import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
@@ -4622,14 +4628,36 @@ export default function App() {
   );
 
   const openInSparkBrowser = useCallback(
-    (url: string, options?: { forceNew?: boolean; background?: boolean }) => {
+    (
+      url: string,
+      options?: { forceNew?: boolean; background?: boolean; sourceWebContentsId?: number },
+    ) => {
       if (!isBrowserUrl(url)) return;
+      // A page in a Codara browser tab opened a link in a new tab. The new tab
+      // belongs where that page lives, which need not be the workspace on
+      // screen: an agent or a run can drive a page in a background workspace.
+      const source =
+        typeof options?.sourceWebContentsId === "number"
+          ? findPreviewTabByWebContentsId(options.sourceWebContentsId)
+          : null;
+      if (source?.workspaceId) {
+        const onScreen = source.workspaceId === tabs.tabsWorkspaceId;
+        const id = newPreviewTab(url, {
+          workspaceId: source.workspaceId,
+          runId: source.runId,
+          focus: onScreen && !options?.background,
+        });
+        inheritPreviewTabOwner(id, source.id);
+        return;
+      }
       if (options?.forceNew) {
         newPreviewTab(url, options.background ? { focus: false } : undefined);
         return;
       }
+      // A run's browser tab is the run's to drive; a link click never takes
+      // it over.
       const existing = tabs.tabs.find(
-        (t) => t.kind === "preview" && (t.url === url || sameOrigin(t.url, url)),
+        (t) => t.kind === "preview" && !t.runId && (t.url === url || sameOrigin(t.url, url)),
       );
       if (existing) {
         setPreviewUrl(existing.id, url);
@@ -4639,7 +4667,7 @@ export default function App() {
       newPreviewTab(url);
     },
     // tabs.tabs is data (existing-preview dedupe); the methods are stable.
-    [newPreviewTab, setPreviewUrl, setActiveTabStable, tabs.tabs],
+    [newPreviewTab, setPreviewUrl, setActiveTabStable, tabs.tabs, tabs.tabsWorkspaceId],
   );
 
   const exploreOnboardingFeature = useCallback((feature: StudioTourFeature) => {
@@ -4660,12 +4688,21 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ url?: unknown; forceNew?: unknown; background?: unknown }>)
-        .detail;
+      const detail = (
+        event as CustomEvent<{
+          url?: unknown;
+          forceNew?: unknown;
+          background?: unknown;
+          sourceWebContentsId?: unknown;
+        }>
+      ).detail;
       if (typeof detail?.url === "string") {
         openInSparkBrowser(detail.url, {
           forceNew: detail.forceNew === true,
           background: detail.background === true,
+          ...(typeof detail.sourceWebContentsId === "number"
+            ? { sourceWebContentsId: detail.sourceWebContentsId }
+            : {}),
         });
       }
     };
@@ -4684,7 +4721,22 @@ export default function App() {
     setOpenPreviewTabFn((url, runId, workspaceId) =>
       newPreviewTab(url, { runId, workspaceId, focus: false }),
     );
-    return () => setOpenPreviewTabFn(null);
+    // An agent with no run works in the workspace of the pane it runs in.
+    setLocatePaneWorkspaceFn((paneId) => {
+      const current = tabsRef.current;
+      const layouts: WorkspaceTabs[] = [];
+      if (current.tabsWorkspaceId) {
+        layouts.push({ workspaceId: current.tabsWorkspaceId, tabs: current.tabs });
+      }
+      for (const layout of current.inactiveWorkspaceLayouts) {
+        layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
+      }
+      return locateTerminalPane(layouts, paneId)?.workspaceId ?? null;
+    });
+    return () => {
+      setOpenPreviewTabFn(null);
+      setLocatePaneWorkspaceFn(null);
+    };
   }, [newPreviewTab]);
 
   // Shared terminal bridge: an MCP client or the Remote Access service asks

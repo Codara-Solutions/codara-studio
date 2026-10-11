@@ -58,6 +58,15 @@ test("Cora browsers persist as workspace tabs with scoped discovery, cursor feed
     expect(shot.title).toBe("Browser tab fixture");
     expect(shot.imageSize.width).toBeGreaterThan(400);
     expect(shot.scale.x).toBeGreaterThan(0);
+    // A link to the page a run's browser shows opens its own tab: a click
+    // never takes over the run's tab.
+    await page.evaluate((url) => window.spark.openExternal(url), pathToFileURL(file).href);
+    await expect.poll(async () => (await request("preview.list")).tabs.length).toBe(2);
+    expect((await request("preview.url", { runId, tabId })).title).toBe("Browser tab fixture");
+    const linkTab = (await request("preview.list")).tabs.find((entry: { id: string }) => entry.id !== tabId);
+    await expect(page.locator(`[data-tab-id="${linkTab.id}"]`)).toHaveAttribute("aria-selected", "true");
+    await page.locator(`[data-tab-id="${linkTab.id}"]`).click({ button: "middle" });
+    await expect.poll(async () => (await request("preview.list")).tabs.length).toBe(1);
     await page.locator('[data-workspace-id="ws-b"]').click();
     await expect.poll(async () => (await request("preview.list")).tabs.length).toBe(0);
     const ownTabs = await request("preview.list", { runId });

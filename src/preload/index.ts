@@ -1604,10 +1604,13 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-function dispatchOpenInSparkBrowser(
-  url: string,
-  options?: { forceNew?: boolean; background?: boolean },
-): void {
+interface OpenInSparkBrowserOptions {
+  forceNew?: boolean;
+  background?: boolean;
+  sourceWebContentsId?: number;
+}
+
+function dispatchOpenInSparkBrowser(url: string, options?: OpenInSparkBrowserOptions): void {
   const rendererWindow = globalThis as unknown as {
     dispatchEvent: (event: CustomEvent) => boolean;
   };
@@ -1617,6 +1620,9 @@ function dispatchOpenInSparkBrowser(
         url,
         forceNew: options?.forceNew === true,
         background: options?.background === true,
+        ...(typeof options?.sourceWebContentsId === "number"
+          ? { sourceWebContentsId: options.sourceWebContentsId }
+          : {}),
       },
     }),
   );
@@ -1624,11 +1630,14 @@ function dispatchOpenInSparkBrowser(
 
 ipcRenderer.on(
   "app:open-browser-url",
-  (_event, url: string, options?: { forceNew?: boolean; background?: boolean }) => {
+  (_event, url: string, options?: OpenInSparkBrowserOptions) => {
     if (typeof url === "string" && isBrowserUrl(url)) {
       dispatchOpenInSparkBrowser(url, {
         forceNew: options?.forceNew === true,
         background: options?.background === true,
+        ...(typeof options?.sourceWebContentsId === "number"
+          ? { sourceWebContentsId: options.sourceWebContentsId }
+          : {}),
       });
     }
   },

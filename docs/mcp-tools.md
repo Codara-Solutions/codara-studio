@@ -56,6 +56,14 @@ as text, next to `web_search` and the free `deep_search`.
 Tools for the built-in Chromium browser tabs (called "preview" in tool names).
 In every set.
 
+Browser tools work in the caller's workspace, even when you are looking at
+another one. A Cora run uses its run's workspace and only the tabs it opened. A
+Claude, Codex or other agent running in a Studio terminal uses the workspace of
+that terminal: a navigate reuses only a tab that agent opened (or opens a new
+background one), and other calls fall back to the user's tab in that workspace,
+never a run's tab or another agent's. Only a caller outside every Studio
+terminal, such as the `cora` CLI, works in the workspace on screen.
+
 | Tool | What it does |
 |---|---|
 | `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL and which one is active. |
