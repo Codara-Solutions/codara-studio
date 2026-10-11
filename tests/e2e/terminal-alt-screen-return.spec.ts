@@ -90,6 +90,7 @@ test("a full-screen TUI keeps its workspace loaded and painted across workspace 
     const painted = await paneInk(app, page, paneId);
     expect(painted, "the TUI's frame should fill the pane").toBeGreaterThan(0.05);
     await keepXtermNode(page, paneId);
+    const before = await readStats(fixture);
 
     // A -> B -> C -> A. B is the one warm workspace the app keeps besides the
     // active one, so A survives only because its pane is in the alternate
@@ -100,6 +101,13 @@ test("a full-screen TUI keeps its workspace loaded and painted across workspace 
     }
 
     expect(await sameXtermNode(page, paneId), "the alternate-screen pane was unloaded").toBe(true);
+    // B and C open on a chat tab, whose tab strip shortens every terminal
+    // layer, hidden ones included. A hidden pane must not pass that on to its
+    // program: each resize is a full repaint, and another one follows on the
+    // way back.
+    await page.waitForTimeout(800);
+    const after = await readStats(fixture);
+    expect(after.winch - before.winch, "the hidden TUI was resized").toBe(0);
     await expect
       .poll(() => paneInk(app!, page, paneId), { timeout: 3_000 })
       .toBeGreaterThan(painted * 0.8);

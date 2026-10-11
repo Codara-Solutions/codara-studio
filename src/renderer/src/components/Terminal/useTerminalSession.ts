@@ -3291,6 +3291,15 @@ export function useTerminalSession({
       let ptyTimer: number | null = null;
       let rafFits = 0;
       let rafHandle: number | null = null;
+      // A hidden pane keeps the size it was last shown at. Layout around the
+      // hidden layers still moves (a workspace whose active tab is a chat adds
+      // a tab strip above every layer), and resizing a hidden agent TUI makes it
+      // repaint in full twice per round trip: at the hidden size, then at the
+      // restored one a PTY_RESIZE_DEBOUNCE_MS after the reveal, with its rows
+      // blank in between. The reveal path re-fits once the pane is shown. A pane
+      // first mounted hidden still takes its first real measurement.
+      let measuredOnce = lastW > 0 && lastH > 0;
+      const holdHiddenSize = () => measuredOnce && !visibleRef.current;
 
       const scheduleFitRetry = () => {
         if (disposed || !spawned) return;
@@ -3298,6 +3307,7 @@ export function useTerminalSession({
           resizeXtermForOwner();
           return;
         }
+        if (holdHiddenSize()) return;
         if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
         rafFits = 0;
         const tick = () => {
@@ -3320,11 +3330,13 @@ export function useTerminalSession({
             if (rafFits < 3) rafHandle = window.requestAnimationFrame(tick);
             return;
           }
+          if (holdHiddenSize()) return;
           try {
             resizeXtermForOwner();
           } catch {
             return;
           }
+          measuredOnce = true;
           lastAppliedCols = term.cols;
           lastAppliedRows = term.rows;
           // Fit is local + cheap and runs every frame so xterm visually tracks a
@@ -3402,6 +3414,9 @@ export function useTerminalSession({
             // fire on the display:none→block transition still sees a size
             // change and lands the real fit.
             if (w === 0 || h === 0) return;
+            // Not recorded while hidden: the host usually returns to its shown
+            // size on reveal, and that must read as no change at all.
+            if (holdHiddenSize()) return;
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
@@ -3423,6 +3438,7 @@ export function useTerminalSession({
             } catch {
               return;
             }
+            measuredOnce = true;
             lastAppliedCols = term.cols;
             lastAppliedRows = term.rows;
             if (!externalSizeOwnerRef.current) {
@@ -3810,6 +3826,8 @@ export function useTerminalSession({
         const host = container.current;
         // Unlock can briefly expose zero-size geometry before the next frame.
         if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
+        // A hidden pane keeps its size until the reveal path re-fits it.
+        if (!visibleRef.current && !externalSizeOwnerRef.current) return;
         try {
           resizeXtermForOwner();
         } catch {

@@ -312,6 +312,13 @@ async function main() {
       appSource.includes("subscribeAlternateScreenPanes"),
   );
 
+  check(
+    "a hidden pane keeps its size until it is revealed",
+    source.includes("const holdHiddenSize = () => measuredOnce && !visibleRef.current;") &&
+      /if \(holdHiddenSize\(\)\) return;\n\s*if \(w === lastW && h === lastH\) return;/.test(source) &&
+      /if \(holdHiddenSize\(\)\) return;\n\s*if \(rafHandle !== null\)/.test(source),
+  );
+
   await checkScreenModes(outDir);
 
   fs.rmSync(outDir, { recursive: true, force: true });
