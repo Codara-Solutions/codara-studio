@@ -1995,8 +1995,13 @@ export function useTerminalSession({
         const t = termRef.current;
         if (!t || !activeRuntime) return;
         const now = Date.now();
+        // A pane nobody can see (a hidden window, tab or workspace) only
+        // needs its state for notifications and the tab badge, and main
+        // watches the same output for those. Every loaded workspace with a
+        // live agent keeps its panes mounted, so polling them all at the
+        // visible rate added up.
         if (
-          document.visibilityState !== "visible" &&
+          (document.visibilityState !== "visible" || !visibleRef.current) &&
           now - lastProcessedTickMs < HIDDEN_STATE_POLL_MS
         ) {
           return;
@@ -4093,10 +4098,11 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
-// Effective cadence while the app window is hidden. The poller keeps running
-// (background panes must still transition so turn-complete notifications fire)
-// but at a fraction of the cost — nobody is watching the chip, and the tick-
-// count backstops below only get more conservative when ticks are rarer.
+// Effective cadence while the pane cannot be seen (hidden window, tab or
+// workspace). The poller keeps running (background panes must still
+// transition so turn-complete notifications fire) but at a fraction of the
+// cost: nobody is watching the chip, and the tick-count backstops below only
+// get more conservative when ticks are rarer.
 const HIDDEN_STATE_POLL_MS = 2_000;
 // How many post-arm bytes the runtime-promotion sniff will scan before giving
 // up on a generic/non-public arm. A first-party launch banner appears within
