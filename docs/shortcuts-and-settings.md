@@ -146,6 +146,33 @@ The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
 
+### Terminal agent notifications
+
+When Claude Code, Codex, Grok or Pi runs in a terminal pane, Codara tells you
+when a turn ends or the agent needs you. The Notifications switches in
+General choose where these alerts appear (toast, system notification, sound).
+
+- **Finished**: once per prompt you submit, when the agent's turn really
+  ends. The title names the agent and the tab (`Claude Code finished · api`), and
+  the text quotes the agent's last message, how long the turn took, and how
+  many background tasks are still running. When those tasks finish, one
+  more alert says so.
+- **Needs you**: a permission prompt, a question or a plan to review, with
+  the tool or question named. It is separate from "finished" and appears
+  again for each new prompt in the same turn.
+- **Stopped**: the turn ended with an API error, or the agent exited with an
+  error.
+- Nothing is announced for a turn you interrupted with Esc or Ctrl+C, for
+  what an agent does at launch, or while you watch the pane. A finished turn
+  in a split you can see in the focused window counts as watched; a prompt
+  there still alerts until you select that split.
+- Clicking an alert opens the exact pane.
+
+The signals come from the agents themselves: Claude Code's hooks and status
+reports, and Codex's notify program and session file (see
+[on-your-machine.md](./on-your-machine.md) for what Codara adds to your
+config). Agents without those fall back to reading the screen.
+
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your

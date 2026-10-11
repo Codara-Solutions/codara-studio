@@ -21,8 +21,9 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `notifications.json` | The notification center's history. |
 | `onboarding.json` | Where you are in the first-run guide. |
 | `agent-socket.json` | The loopback address and token of the running app (mode 0600), rewritten on every start. |
-| `hooks/`, `hooks/processed/` | Claude Code hook events, one JSON file each. Processed files are kept for a week. |
+| `hooks/`, `hooks/processed/` | Claude Code hook events and Codex turn-complete events, one JSON file each. Processed files are kept for a week. |
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |
+| `codex-hooks/` | A durable copy of the Codex notify script (`codara-codex-notify.py`), for the same reason. |
 | `builtin-mcp.json` | The CLIs you switched the Codara Studio MCP server off for. |
 | `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, the MCP bridge config of each running session and its `.status.json` connection report (no secrets), `skills/` for skills only Cora should load, and a `settings.json` holding Cora's provider retry budget (mode 0600; other keys you add there are kept). Cora never reads your own `~/.pi`. |
 | `claude-cli/`, `codex-cli/` | The saved logins of every Claude Code and Codex account that is not the Active one (mode 0600), and a record of which account's login is live in your `~/.claude` or `~/.codex`. |
@@ -39,6 +40,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `~/.claude/settings.json` | Adds a `hooks` block that runs `codara-hook.py` for session, tool, subagent and notification events. Every Claude Code session reads it, but the hook exits at once unless it runs in a Codara pane. Dead entries from older versions are pruned. | No setting yet. Removing the entries whose command mentions `codara-hook.py` lasts until the next app start. |
 | `~/.claude.json` | Adds the `codara-studio` MCP server entry. | The Claude switch for the Codara Studio server in the Capability Center, MCP servers. |
 | `~/.codex/config.toml`, and Grok's `config.toml` | Adds a `[mcp_servers.codara-studio]` section. | The Codex or Grok switch in the same place. |
+| `~/.codex/config.toml`, the top-level `notify` key | Sets `notify` to run `codara-codex-notify.py`, followed by your previous `notify` command after a `--`. Codex runs it after every turn: inside a Codara pane it records the turn end for notifications, and in every case it then runs your previous command with the same payload, even if the script is deleted. Only that key changes, and a file that does not parse or a `notify` that is not a list is left alone. | Start Codara once with `SPARK_CODEX_NOTIFY=0`: it puts your previous `notify` back, or removes the key if there was none. |
 | The MCP configs above and a project's `.mcp.json` or `.codex/config.toml` | Only when you add, edit, copy, sync or remove a server in the Capability Center. Writes are atomic, keep the file's permissions and the keys Codara does not edit. | Do not use those actions. |
 | Your Claude Code login (the `Claude Code-credentials` Keychain item on macOS, `~/.claude/.credentials.json` elsewhere) and `oauthAccount` in `~/.claude.json` | Switching the Active Claude account replaces only these sign-in keys and the account identity, the way `/login` as another account does. MCP sign-ins, settings, history and project trust are never touched. While Studio runs, Codara also renews this login before it expires. | Keep a single Claude account; the Active one is then your own login. |
 | `~/.codex/auth.json` | Switching the Active Codex account swaps this file. | Keep a single Codex account. |
@@ -54,6 +56,11 @@ session files of that folder in `~/.pi/agent/sessions/` (names and
 modification times, never their contents), so the pane can come back in the
 same Pi session when Codara reopens. It records the session id in
 `agent-session-starts.json`. Cora itself never reads `~/.pi`.
+
+For Codex panes, Codara also reads the session file Codex is writing
+(`~/.codex/sessions/.../rollout-*.jsonl`) from its end, looking only for the
+turn started, turn complete and turn aborted records, so a finished turn is
+announced with Codex's own last message even without the notify program.
 
 Everything about accounts is explained in [accounts.md](./accounts.md).
 
