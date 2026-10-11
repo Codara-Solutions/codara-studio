@@ -284,6 +284,10 @@ export default function AnchoredMenu({
     // chords) would otherwise dead-end with focus left on the trigger.
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // Marked handled so a dialog that hosts this menu (Settings, the
+        // Capability Center) leaves its own Escape alone: one press closes
+        // the menu, the next one the dialog.
+        event.preventDefault();
         onClose();
         return;
       }

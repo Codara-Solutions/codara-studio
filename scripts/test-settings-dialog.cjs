@@ -44,7 +44,8 @@ check("a click on the Settings backdrop never closes it", () => {
 });
 
 check("Escape, the close button and Done still close Settings", () => {
-  assert.match(dialog, /if \(event\.key === "Escape"\) onClose\(\);/);
+  assert.match(dialog, /if \(event\.key !== "Escape" \|\| event\.defaultPrevented\) return;\s*onClose\(\);/);
+  assert.match(dialog, /window\.addEventListener\("keydown", onKey\);/);
   assert.match(dialog, /className="st-close" aria-label="Close"[^>]*onClick=\{onClose\}/);
   assert.match(dialog, /<FooterButton onClick=\{onClose\}>Done<\/FooterButton>/);
   assert.match(dialog, /<FooterButton onClick=\{onClose\}>Cancel<\/FooterButton>/);
@@ -53,6 +54,13 @@ check("Escape, the close button and Done still close Settings", () => {
 check("a search keeps Escape for itself while it has text", () => {
   const nav = settingsParts.find((part) => part.name === "SettingsNav.tsx").source;
   assert.match(nav, /if \(event\.key === "Escape" && query\) \{\s*event\.stopPropagation\(\);\s*onQueryChange\(""\);/);
+});
+
+check("an Escape a menu already took never closes the dialog behind it", () => {
+  const menu = read(...components, "chat", "composer", "AnchoredMenu.tsx");
+  assert.match(menu, /if \(event\.key === "Escape"\) \{\s*(?:\/\/[^\n]*\n\s*)*event\.preventDefault\(\);\s*onClose\(\);/);
+  assert.match(capabilities, /if \(event\.defaultPrevented\) return;/);
+  assert.match(capabilities, /window\.addEventListener\("keydown", onKey\);/);
 });
 
 check("a click on the Capability Center backdrop never closes it either", () => {

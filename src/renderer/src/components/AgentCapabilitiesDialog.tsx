@@ -401,9 +401,12 @@ export default function AgentCapabilitiesDialog({
 
   const latestLeave = useRef({ requestLeave, confirmLeave, editor });
   latestLeave.current = { requestLeave, confirmLeave, editor };
+  // On window, after the document-level listeners of menus opened from
+  // here: a menu that took the Escape marks it handled and the dialog stays.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (event.defaultPrevented) return;
       const current = latestLeave.current;
       if (current.confirmLeave) {
         setConfirmLeave(null);
@@ -411,8 +414,8 @@ export default function AgentCapabilitiesDialog({
       }
       current.requestLeave(current.editor ? { kind: "back" } : { kind: "close" });
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // ── Inventory ──────────────────────────────────────────────────────────────

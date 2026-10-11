@@ -207,13 +207,17 @@ export default function SettingsDialog({
 
   // Escape, the close button and Done are the only ways out: the scrim
   // deliberately does nothing, so a click that lands outside the dialog
-  // never throws away the page the user was working on.
+  // never throws away the page the user was working on. The listener sits on
+  // window so it runs after the document-level listeners of menus opened
+  // from here: a menu that took the Escape marks it handled, and Settings
+  // stays open.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      onClose();
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   useEffect(() => {

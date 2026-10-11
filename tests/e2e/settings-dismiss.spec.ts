@@ -6,7 +6,8 @@ import { join } from "node:path";
 
 // Settings and the Capability Center are long-lived dialogs: a click that
 // lands outside them must never close them. Only Escape, the close button and
-// Done (or Cancel on a page with a draft) leave. This drives the real renderer
+// Done (or Cancel on a page with a draft) leave, and an Escape that closes a
+// menu inside them closes only that menu. This drives the real renderer
 // and clicks the real scrim, in a temp HOME and Codara home.
 
 test("a click outside Settings or the Capability Center never closes them", async () => {
@@ -37,6 +38,18 @@ test("a click outside Settings or the Capability Center never closes them", asyn
     await page.getByRole("dialog", { name: "Settings" }).getByRole("button", { name: "Done", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
 
+    // Escape with an account menu open closes the menu and nothing else.
+    await stubOneAccount(app);
+    const withMenu = await openSettings(page);
+    await withMenu.locator("nav").getByRole("button", { name: "Agents", exact: true }).click();
+    await withMenu.getByRole("button", { name: "More actions for Main" }).click({ timeout: 15_000 });
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(withMenu).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(withMenu).toHaveCount(0);
+
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("spark:open-capabilities")));
     const capabilities = page.getByRole("dialog", { name: "Capability Center" });
     await expect(capabilities).toBeVisible();
@@ -55,6 +68,48 @@ async function openSettings(page: Page) {
   const dialog = page.getByRole("dialog", { name: "Settings" });
   await expect(dialog).toBeVisible();
   return dialog;
+}
+
+// One signed-in Anthropic account, so the Accounts page has a row menu to
+// open without any real sign-in.
+async function stubOneAccount(app: ElectronApplication) {
+  await app.evaluate(({ ipcMain }) => {
+    const profile = {
+      id: "22222222-2222-4222-8222-222222222222", provider: "anthropic", label: "Main",
+      email: "main@example.com", cliProfileId: "33333333-3333-4333-8333-333333333333",
+      isDefault: true, connected: true, expired: false, canRefresh: true, expiresAt: null,
+      terminal: { connected: true, expired: false, canRefresh: true, liveSessions: 0 },
+    };
+    const overview = () => ({
+      runtimeInstalled: true,
+      runtimeVersion: "0.85.1",
+      runtimeExpectedVersion: "0.85.1",
+      runtimeTestedVersion: "0.85.1",
+      runtimeSource: "user",
+      connections: [],
+      switchSessionCounts: {},
+      profiles: [profile],
+    });
+    const usage = () => ({ checkedAt: new Date().toISOString(), providers: [], profiles: [] });
+    const inspection = () => ({
+      runtimes: [
+        {
+          runtime: "claude", defaultProfileId: profile.cliProfileId,
+          profiles: [
+            { runtime: "claude", id: profile.cliProfileId, label: "Main", managed: true, isDefault: true, connected: true, inUse: true, status: "connected", email: profile.email },
+          ],
+        },
+        { runtime: "codex", defaultProfileId: "personal", profiles: [] },
+        { runtime: "grok", defaultProfileId: "personal", profiles: [] },
+      ],
+    });
+    for (const channel of ["pi-subscriptions:status", "pi-subscriptions:usage", "native-cli-accounts:inspect"]) {
+      ipcMain.removeHandler(channel);
+    }
+    ipcMain.handle("pi-subscriptions:status", overview);
+    ipcMain.handle("pi-subscriptions:usage", usage);
+    ipcMain.handle("native-cli-accounts:inspect", inspection);
+  });
 }
 
 // Clicks the scrim beside the dialog, where a backdrop-dismiss would fire.
