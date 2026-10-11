@@ -247,6 +247,14 @@ async function resolveStableScriptPath(configPath: string): Promise<string | nul
   return null;
 }
 
+// A Codara home in a temp directory or a worktree is an e2e run or a
+// throwaway launch. It must neither install into nor uninstall from a Codex
+// config that outlives it (the user's own ~/.codex when the launch did not
+// redirect CODEX_HOME).
+async function sandboxedLaunchOnPersonalConfig(configPath: string): Promise<boolean> {
+  return (await isTransientPath(codaraHome())) && !(await isTransientPath(configPath));
+}
+
 async function syncScript(source: string, destination: string): Promise<boolean> {
   try {
     const desired = await fs.readFile(source, "utf8");
@@ -296,6 +304,9 @@ export async function installCodexNotify(overrides: CodexNotifyOverrides = {}): 
   if (!configPath) return { installed: false, changed: false, reason: "no Codex home" };
   // A machine without Codex gets no ~/.codex created for it.
   if (!(await exists(dirname(configPath)))) return { installed: false, changed: false, reason: "Codex home does not exist" };
+  if (await sandboxedLaunchOnPersonalConfig(configPath)) {
+    return { installed: false, changed: false, reason: "temporary Codara home; the Codex config is left alone" };
+  }
   const stablePath =
     overrides.stableScriptPath !== undefined ? overrides.stableScriptPath : await resolveStableScriptPath(configPath);
   if (!stablePath) return { installed: false, changed: false, reason: "no durable place for the notify script" };
@@ -317,6 +328,7 @@ export async function installCodexNotify(overrides: CodexNotifyOverrides = {}): 
 export async function uninstallCodexNotify(overrides: CodexNotifyOverrides = {}): Promise<CodexNotifyResult> {
   const configPath = overrides.configPath ?? personalConfigPath();
   if (!configPath || !(await exists(configPath))) return { installed: false, changed: false };
+  if (await sandboxedLaunchOnPersonalConfig(configPath)) return { installed: false, changed: false };
   return editNotify(configPath, (current) => {
     if (!current || !isOurs(current)) return current;
     const previous = previousArgv(current);

@@ -164,6 +164,46 @@ async function main() {
   result = await installCodexNotify({ ...opts, configPath: path.join(TMP, "no-codex", "config.toml") });
   check("no Codex home means no install", !result.installed && !fs.existsSync(path.join(TMP, "no-codex")));
 
+  // An e2e launch redirects the Codara home into a temp dir but often leaves
+  // CODEX_HOME alone. Its boot must not edit a Codex config that outlives it.
+  // /dev/shm stands in for a durable home: outside every temp root and not a
+  // worktree, yet still disposable.
+  if (fs.existsSync("/dev/shm")) {
+    const durableDir = fs.mkdtempSync(path.join("/dev/shm", "codara-codex-notify-"));
+    const savedHome = process.env.HOME;
+    // The user's home is durable too, so the default Codara home is a
+    // candidate for the script copy.
+    process.env.HOME = durableDir;
+    try {
+      fs.mkdirSync(path.join(durableDir, ".codex"));
+      const durableConfig = path.join(durableDir, ".codex", "config.toml");
+      const before = 'model = "gpt-6"\n';
+      fs.writeFileSync(durableConfig, before);
+      const sandboxOpts = { configPath: durableConfig, sourceScriptPath: SHIPPED_SCRIPT, python: "python3", pythonAvailable: true };
+      result = await installCodexNotify(sandboxOpts);
+      check(
+        "a temporary Codara home never installs into a durable Codex config",
+        !result.installed &&
+          !result.changed &&
+          fs.readFileSync(durableConfig, "utf8") === before &&
+          !fs.existsSync(path.join(durableDir, ".codarastudio")),
+        JSON.stringify(result),
+      );
+      const ours = `notify = ${JSON.stringify(installer.__test.buildArgv("python3", stable, ["notify-send"]))}\n`;
+      fs.writeFileSync(durableConfig, ours);
+      result = await uninstallCodexNotify(sandboxOpts);
+      check(
+        "a temporary Codara home never uninstalls from a durable Codex config",
+        !result.changed && fs.readFileSync(durableConfig, "utf8") === ours,
+      );
+    } finally {
+      process.env.HOME = savedHome;
+      fs.rmSync(durableDir, { recursive: true, force: true });
+    }
+  } else {
+    console.log("SKIP durable-config sandbox checks: /dev/shm not found");
+  }
+
   // ── The notify program end to end ──
   if (python3Available()) {
     fs.writeFileSync(configPath, "");
