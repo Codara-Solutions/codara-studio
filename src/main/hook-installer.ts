@@ -192,7 +192,7 @@ function temporaryRoots(): string[] {
 // True when the path lives somewhere that can vanish while Claude's settings
 // still reference it: a temp directory, or a git worktree checkout (worktrees
 // are created and destroyed routinely by agents and by Codara itself).
-async function isTransientPath(target: string): Promise<boolean> {
+export async function isTransientPath(target: string): Promise<boolean> {
   const real = await realpathBestEffort(target);
   for (const root of temporaryRoots()) {
     const realRoot = await realpathBestEffort(root);

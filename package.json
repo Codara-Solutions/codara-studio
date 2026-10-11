@@ -287,6 +287,10 @@
         "to": "claude-hooks"
       },
       {
+        "from": "resources/codex-hooks",
+        "to": "codex-hooks"
+      },
+      {
         "from": "resources/codara-studio-mcp",
         "to": "codara-studio-mcp"
       },
