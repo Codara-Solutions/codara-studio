@@ -16,257 +16,234 @@ import {
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
 import { CodexTerminalScreen } from "./codex-terminal-screen";
-import {
-  aliveProcesses,
-  descendantProcessesWithCommands,
-  descendantsStartedAfter,
-  type OwnedProcessIdentity,
-} from "./owned-process-tree";
+import { CodexRolloutTail, type CodexRolloutEvent } from "./codex-rollout-tail";
+import { latestSessionStart } from "./agent-session-registry";
+import { descendantProcessesWithCommands } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
-// or Pi CLI they ran in a NORMAL terminal pane stops working (finished a
-// turn, or stopped to ask for permission) while they are looking elsewhere.
-// Orchestration runs already alert through run-store events; this module
-// covers the "I just typed `claude` in a shell" workflow that previously had
-// no completion signal at all.
+// or Pi CLI they ran in a NORMAL terminal pane finished a turn, or stopped to
+// ask them something, while they are looking elsewhere. Orchestration runs
+// alert through run-store events; this module covers the "I typed `claude`
+// in a shell" workflow.
 //
-// Why main-process, on the raw pty stream: the renderer's visible-buffer
-// state poller (useTerminalSession) freezes the moment a pane is hidden
-// (hidden panes skip xterm.write), and gets NO bytes at all when the
-// workspace is switched away (pty.pause diverts the stream into main's
-// detached backlog). The cases where a notification is useful are exactly
-// the cases where the renderer can't see the stream — so detection lives
-// here, on pty-manager's tap() fan-out, which observes every chunk
-// regardless of renderer attachment.
+// Why main-process: the renderer's visible-buffer poller freezes when a pane
+// is hidden and gets no bytes at all while its workspace is switched away.
+// The cases where a notification is useful are exactly those, so detection
+// lives on pty-manager's tap() fan-out, which sees every chunk.
 //
-// Detection model (mirrors how WezTerm + cmux-style multiplexers do it):
-//   1. Explicit notification escapes — OSC 9 (iTerm2/ConEmu style) and
-//      OSC 777;notify (rxvt style). Codex emits OSC 9 natively when
-//      `tui.notifications` is enabled; any other CLI tool that emits these
-//      gets surfaced too, same as a real terminal emulator would.
-//   2. Stream heuristic for the agent CLIs a pane can launch. While an
-//      agent works, its footer ("esc to interrupt" + a ticking timer, or
-//      Pi's spinning "Working" border) repaints at least once a second,
-//      so the byte stream continuously re-matches the `working` patterns.
-//      When the matches stop for TURN_QUIET_MS the turn is over → "done".
-//      A `blocked` pattern match
-//      (permission prompt) while working → "needs you". Pattern tables are
-//      shared with the renderer poller (src/shared/agent-patterns.ts).
+// A notification is about a TURN: the user submitted something, the agent
+// worked, and the agent stopped. A turn starts on a submit (Enter in the pane,
+// or Claude's UserPromptSubmit hook) and is announced at most once. Startup
+// screens, background follow-ups and repaints never start one.
 //
-// Suppression policy (the WezTerm `SuppressFromFocusedTab` model, per the
-// user's ask): an alert is dropped iff the app window is focused AND the
-// pane itself is the active split in the workspace + tab the renderer last
-// reported. Visible sibling splits still alert because they cannot accept
-// keyboard input until selected.
-// That rule — plus the same-kind dedup and terminal-completion guard — now
-// lives in the unified notify policy (src/main/notify); this module only
-// detects turn boundaries and calls publish()/rearm().
+// Signals, most trusted first. A pane that has produced a trusted signal for
+// its current agent session never announces "finished" from screen output:
+//   1. OSC 7501 program status. The pane answers the support query, and
+//      Claude Code (2.1.295+) then reports working / blocked (with a kind) /
+//      done / idle (the user stopped the turn) / error itself. Codex 0.163+
+//      reports working / blocked / idle unasked.
+//   2. Agent hooks. Claude's Stop ends the lead turn (carrying its last
+//      message and the background tasks still running), UserPromptSubmit
+//      starts one, PreToolUse for AskUserQuestion / ExitPlanMode and the
+//      Notification hook's permission types mean "needs you". Subagent
+//      events never end a turn. For Codex, the notify program (installed by
+//      codex-notify-installer.ts) reports agent-turn-complete with the last
+//      agent message, and the session file (codex-rollout-tail.ts) records
+//      task_complete / turn_aborted.
+//   3. Screen and stream heuristics (src/shared/agent-patterns.ts): the
+//      working footer repainting, an idle frame, a permission dialog. Used
+//      for Grok and Pi, and for Claude or Codex when nothing above exists. An
+//      idle frame must hold before it counts, and silence after a working
+//      footer is a stall, not a finish.
+//
+// Who is watching is the notify policy's call (src/main/notify): a finished
+// turn in a pane on screen is not announced; a prompt is announced unless its
+// pane is the selected one.
 
 const RING_MAX = 8_192;
 // Banner-sniff window: while a pane has no detected runtime (every plain
 // shell, forever), each chunk is sniffed as fresh-decoded-text + this much
-// prior ring — NOT the whole 8 KB ring, whose per-chunk stripAnsi + 14-regex
-// scan was a dominant hot-path cost. A banner is detected the moment its
-// bytes arrive (attach() replays history through onChunk chunk-by-chunk, so
-// pre-attach banners are covered too); the overlap only needs to bridge a
-// banner split across a chunk boundary. Longest banner pattern source is 42
-// visible chars; 512 covers it even with Ink positioning every character via
-// cursor-move escapes (~5 raw bytes per visible char).
+// prior ring, not the whole 8 KB ring. attach() replays history through
+// onChunk chunk by chunk, so pre-attach banners are covered too; the overlap
+// only bridges a banner split across a chunk boundary (Ink can spend ~5 raw
+// bytes per visible character on cursor moves).
 const SNIFF_OVERLAP = 512;
 // Raw-text carry bridging escape sequences / footer phrases split across
-// chunk boundaries. Ink positions characters with cursor moves between
-// bytes, so a 16-char phrase can span several hundred raw bytes; 1 KB of
-// carry covers that while keeping the per-chunk regex window small.
+// chunk boundaries.
 const CARRY_MAX = 1_024;
-// How long the working-pattern repaints must stay silent before we call the
-// turn finished. Claude/Codex repaint their status footer (elapsed-seconds
-// tick) at least once per second while generating or running tools, so three
-// missed repaints is a confident "stopped", while keeping the notification
-// within a beat of the actual finish.
+// Heuristic turn end: how long the working-pattern repaints must stay silent.
+// Claude/Codex repaint their status footer at least once per second while a
+// turn runs.
 const TURN_QUIET_MS = 3_000;
-// Stall-aware quiet window. The 3s window above assumed the footer repaints
-// at least once per second for the WHOLE turn, but on ConPTY the byte stream
-// goes genuinely silent mid-turn whenever nothing visible changes (hidden
-// thinking, a long tool run with no output, API backoff) — and each such
-// stall used to fire a ghost "finished" (live-observed 2026-07-06: 13 ghost
-// dones for one pane in 10 minutes). Discriminator: on a REAL turn end the
-// last chunk before silence is the idle repaint (footer erased, input box
-// painted — no working pattern), while a stall goes silent with the working
-// footer as the last thing painted. Footer-then-silence therefore waits this
-// much longer before calling the turn done; idle-frame-then-silence keeps
-// the fast 3s window.
+// Silence that began with the working footer still painted is a mid-turn
+// stall (hidden thinking, a silent tool, API backoff; ConPTY goes fully quiet
+// then) until it lasts this long.
 const TURN_QUIET_STALL_MS = 15_000;
+// Heuristic idle frames must hold this long with no working frame before the
+// turn counts as finished. Claude repaints an older turn's "done" footer
+// while it redraws after a tool result, a moment before the spinner returns
+// (audit 2026-10-11: 51 of 68 false "finished" alerts came from that frame,
+// each followed by a working frame 1 to 3 ms later).
+const HEURISTIC_IDLE_CONFIRM_MS = 1_500;
+// A Stop hook is followed by nothing when the turn is really over. A Stop
+// hook that blocks makes Claude continue, which shows up as a new tool call
+// or prompt within this window and cancels the pending announcement.
+const HOOK_DONE_CONFIRM_MS = 800;
+const PROGRAM_DONE_CONFIRM_MS = 600;
+// When Codex has a structured completion source (the notify program or a
+// tracked session file), an idle screen waits this long for it so the alert
+// carries Codex's own message and an interrupted turn stays silent.
+const CODEX_STRUCTURED_GRACE_MS = 3_000;
+// Esc / Ctrl+C followed by an idle screen within this window is the user
+// stopping the turn. Claude sends no hook for it.
+const INTERRUPT_WINDOW_MS = 10_000;
+// With hooks, a turn whose screen has shown only idle frames and whose hooks
+// have been silent this long ended without a Stop (a denied permission). The
+// chip goes idle; a late Stop still announces.
+const HOOK_IDLE_SETTLE_MS = 20_000;
 const SWEEP_MS = 1_000;
 // Minimum working-phase duration before heuristic alerts fire. Codex paints
-// its full working footer ("(0s • esc to interrupt)") for ~half a second
-// while BOOTING (live-captured v0.138.0, 2026-06-10) — without this gate the
-// boot blip fires a spurious "finished" whose cooldown then swallows the
-// real turn's alert. Real turns comfortably clear it: even a bare "hello"
-// to Claude sustains working for ~2.3s. Explicit OSC 9/777 notifications
-// are NOT gated — the program announced the stop itself.
+// its working footer for ~half a second while booting; a real turn clears it.
 const MIN_WORK_MS = 1_500;
-// After an explicit OSC 9/777 notification (Codex announces its own turn
-// completion), mute the stream heuristic for a while so the same turn end
-// can't alert twice.
+// After an explicit OSC 9/777 notification, mute the stream heuristic so the
+// same turn end can't alert twice.
 const OSC_NOTIFY_MUTE_MS = 10_000;
-// Self-heal window for a desynced teammate counter (a "finished" line that
-// scrolled past unseen, or a full-screen redraw double-counting a stale
-// "1 teammate started" from scrollback). A RUNNING teammate repaints its
-// strip row at least once a second (live v2.1.201 capture); an IDLE-but-alive
-// teammate can go 20s+ between paints — but an idle teammate's turn IS over,
-// so clearing the counter on total byte-silence is correct in both cases.
+// Self-heal window for the stream-counted teammate counter (heuristic panes).
 const TEAMMATE_SILENCE_MS = 15_000;
-// Safety net for the hook-fed subagent counter: SubagentStop normally drains
-// it, but an interrupted session (Ctrl+C, crash) can lose that event. Any hook
-// event refreshes the stamp; a counter untouched this long is treated as
-// stale and cleared so the pane can resolve through the normal quiet window.
-const HOOK_SUBAGENT_STALE_MS = 30 * 60_000;
-// Process-tree hold for background tasks: re-list at most this often while a
-// launch is pending, and give up on it after this long so a stray process
-// (an MCP server the CLI started lazily mid-turn, a daemonized command) can
-// never keep a pane busy forever.
-const BACKGROUND_PROC_RECHECK_MS = 2_000;
-const BACKGROUND_PROC_START_GRACE_MS = 5_000;
-const BACKGROUND_PROC_MAX_HOLD_MS = 60 * 60_000;
-// Agent exit by process tree. Prompt markers and alt-screen leave only exist
-// when shell integration is loaded and the TUI uses the alt screen; a pane
-// that auto-launched its agent has neither, and an inline Codex that quits
-// left the chip on "ready" until the pane was closed. The sweep instead looks
-// for the agent's own process under the pane's shell: seen once, then gone,
-// is the exit. Checks share one `ps` listing per tick across every pane.
 const AGENT_PROC_RECHECK_MS = 2_000;
 const PROCESS_LIST_MAX_AGE_MS = 900;
-// Late registration is most visible during cold restore: the shell can print
-// the resume banner + first busy frame before the renderer has hydrated its
-// terminal registry. Replaying a bounded recent tail closes that gap without
-// scanning the full 4 MB PTY history on every workspace switch.
+// Late registration is most visible during cold restore. Replaying a bounded
+// recent tail closes that gap without scanning the full 4 MB PTY history.
 const BOOTSTRAP_TAIL_BYTES = 256 * 1024;
+const SUMMARY_MAX_CHARS = 180;
+const DETAIL_MAX_CHARS = 120;
+
+interface AgentTurn {
+  startedAt: number;
+  // "prompt": Claude's UserPromptSubmit or a Codex completion that names the
+  // user's input. "input": an Enter keypress in the pane.
+  source: "prompt" | "input";
+  sessionId: string | null;
+  announced: boolean;
+  announcedAt: number;
+}
+
+type DoneOrigin = "heuristic" | "explicit" | "program" | "hook" | "codex";
+
+const DONE_RANK: Record<DoneOrigin, number> = {
+  heuristic: 0,
+  explicit: 1,
+  program: 2,
+  hook: 3,
+  codex: 3,
+};
+
+interface PendingDone {
+  timer: NodeJS.Timeout | null;
+  origin: DoneOrigin;
+  body: string | null;
+  bodyRank: number;
+  backgroundRunning: number;
+  // Claude's background work drained after the turn was already announced.
+  followUp: boolean;
+}
+
+interface PaneSignals {
+  hooks: boolean;
+  programStatus: boolean;
+  codexNotify: boolean;
+  codexRollout: boolean;
+}
 
 interface PaneWatcher {
   paneId: string;
   workspaceId: string;
-  // Display name of the owning workspace, for alert copy ("…in workspace
-  // X"). Shipped by the renderer with each registry sync; may be empty.
+  // Display name of the owning workspace. Shipped by the renderer with each
+  // registry sync; may be empty.
   workspaceName: string;
   tabId: string;
   tabTitle: string;
-  // Cora-orchestrated worker panes register excluded — their lifecycle
-  // already alerts through run-store status events, and double-notifying
-  // every worker turn would be pure noise.
+  // Cora-orchestrated worker panes register excluded: their lifecycle alerts
+  // through run-store status events.
   excluded: boolean;
   attached: boolean;
   // True only while rebuilding state from output that predates this watcher.
-  // Historic bytes may contain old completion/permission frames; they are
-  // useful for reconstructing the current chip but must never create toasts.
+  // Historic bytes may contain old completion/permission frames; they rebuild
+  // the chip but must never create toasts or answer queries.
   replayingTail: boolean;
   untap: (() => void) | null;
   offExit: (() => void) | null;
   decoder: TextDecoder;
-  // Rolling decoded text used for banner sniffing while no runtime is known.
   ring: string;
-  // Tail of the previous chunk's raw text (see CARRY_MAX).
   carry: string;
   runtime: PublicAgentRuntime | null;
   runtimeHint: PublicAgentRuntime | null;
   state: "idle" | "working" | "blocked" | "failed";
-  // Set by a real user/injected write or an OSC shell command marker. This
-  // lets a launch-time trust/login/permission dialog alert even when the CLI
-  // never painted a working footer first. Consumed by the first terminal
-  // outcome so startup chrome alone cannot repeatedly notify.
-  userTurnArmed: boolean;
+  turn: AgentTurn | null;
+  pendingDone: PendingDone | null;
+  signals: PaneSignals;
   // Renderer-owned close/dispose in progress. A killed PTY can report a
-  // non-zero exit even though the user intentionally closed the pane; never
-  // mislabel that as an agent crash.
+  // non-zero exit even though the user intentionally closed the pane.
   disposing: boolean;
-  // When the current working phase began (state transition into "working").
+  // Heuristic working phase (screen evidence), distinct from the turn.
   workingSince: number;
   lastWorkingAt: number;
   lastOscNotifyAt: number;
-  // Whether the most recent chunk positively asserted "working" (footer
-  // pattern / structured OSC busy signal), as opposed to merely sustaining
-  // the phase with unclassified bytes. Drives the stall-aware quiet window:
-  // silence that began with the working footer still painting reads as a
-  // mid-turn stall, not a finish (see TURN_QUIET_STALL_MS).
+  // Whether the most recent chunk positively asserted "working". Silence
+  // that began with the working footer painted is a stall (see
+  // TURN_QUIET_STALL_MS).
   lastChunkAssertedWorking: boolean;
   completedTurnPending: boolean;
+  // When the screen last started showing an idle frame with no working frame
+  // since; null otherwise.
+  screenIdleSince: number | null;
+  lastUserInputAt: number;
+  lastInterruptKeyAt: number;
+  lastHookEventAt: number;
+  // Claude tool calls announced by PreToolUse and not yet answered by
+  // PostToolUse. A permission dialog can only be on screen while one is
+  // pending, which is what filters screen text that merely looks like one.
+  pendingToolCalls: number;
+  lastToolDetail: string | null;
+  // The UserPromptSubmit that started the current Claude activity was a
+  // background task reporting back, not the user.
+  hookFollowUp: boolean;
+  backgroundRunningAtLastStop: number;
+  lastProgramState: string | null;
   codexScreen: CodexTerminalScreen | null;
   codexIdleSince: number | null;
   // Explicit outcomes outrank an old busy frame until Codex paints its composer idle.
   codexAwaitingIdle: boolean;
-  // Net count of live background teammates (Task-tool / background agents),
-  // fed by countTeammateEvents on the transcript stream. While > 0, the main
-  // REPL's turn-stopped signals (progress clear, idle status, quiet window)
-  // are held — the pane is still busy even though the main turn ended.
+  codexTitleBlocked: boolean;
+  codexAnnouncedTurnIds: string[];
+  codexRollout: CodexRolloutTail | null;
+  codexRolloutSince: number;
+  // Net count of live background teammates counted from the transcript
+  // stream. Heuristic panes only: with hooks the Stop payload is exact.
   teammatesActive: number;
-  // Net count of live Claude Code subagents reported by the CLI hooks
-  // (SubagentStart / SubagentStop, routed here by hook-watcher for panes the
-  // user opened themselves). The Agent tool can run subagents in the
-  // background: the main turn ends, the REPL paints its idle prompt, and the
-  // Stop hook fires while those agents keep working. The byte stream cannot
-  // tell that apart from a real finish, so this counter holds the "done"
-  // alert exactly like teammatesActive does, and drains through SubagentStop
-  // instead of a byte-silence heuristic (a background agent can be silent in
-  // the parent pane for minutes).
-  hookSubagentsActive: number;
-  // When the last hook event for this pane arrived; backs the stale-counter
-  // safety net (a SubagentStop lost to an interrupt must not hold the pane
-  // forever).
-  lastHookEventAt: number;
-  // Background tasks the CLI launched this turn and has not yet reacted to:
-  // a Bash tool call with run_in_background, or a Monitor. PreToolUse
-  // increments; a Stop that no UserPromptSubmit preceded is the follow-up
-  // turn Claude runs when a task completes, and drains one. Held like the
-  // subagent counter: the main turn ending is not "finished" while > 0.
-  hookBackgroundTasks: number;
-  // A UserPromptSubmit arrived since the last Stop, so the next Stop ends a
-  // user turn rather than a task follow-up.
-  hookPromptSinceStop: boolean;
-  // When the earliest still-pending background launch happened (ms epoch),
-  // 0 when none. Anchors the process-tree check below.
-  backgroundLaunchAt: number;
-  lastBackgroundLaunchAt: number;
-  // Descendants of the pane's shell that started after backgroundLaunchAt and
-  // were alive at the last check. A long-lived monitor keeps firing follow-up
-  // turns (each draining the counter above) while it is still running; the
-  // live process is the signal that survives that, so the pane stays busy
-  // while any of these are alive.
-  backgroundProcs: OwnedProcessIdentity[];
-  lastBackgroundProcCheckAt: number;
-  // Process-tree exit detection: the agent process was observed under the
-  // pane's shell at least once since the runtime was identified.
   agentProcSeen: boolean;
   lastAgentProcCheckAt: number;
-  // Set by the async listing when the agent process was seen and is now gone;
-  // the next sweep consumes it.
   agentProcGone: boolean;
   agentProcCheckInflight: boolean;
-  // When the last non-empty decoded chunk arrived, any content. Backs the
-  // teammate counter's silence self-heal in the sweep.
   lastOutputAt: number;
-  // Last RuntimeState pushed to the renderer chip via emitPaneState. Distinct
-  // from `state` (the 3-value notifier vocabulary idle/working/blocked) — this
-  // is the translated chip RuntimeState and exists purely to dedup the chip
-  // channel so identical states aren't re-sent every chunk. null = nothing
-  // emitted yet.
+  // Last RuntimeState pushed to the renderer chip; dedups the chip channel.
   lastEmittedState: RuntimeState | null;
 }
 
 const watchers = new Map<string, PaneWatcher>();
 let sweepTimer: NodeJS.Timeout | null = null;
+let codexNotifyInstalled = false;
 
-// Diagnostic trail (state transitions only, never raw bytes). The notifier's
-// whole job happens while nobody is looking at the pane, so when an expected
-// alert doesn't fire there is no UI evidence to inspect — this file is the
-// flight recorder. Best-effort: truncated when oversized, errors swallowed.
+// Diagnostic trail (state transitions only, never raw bytes). The notifier
+// works while nobody is looking at the pane, so this file is the flight
+// recorder. Best-effort: truncated when oversized, errors swallowed.
 const LOG_PATH = path.join(os.tmpdir(), "spark-terminal-notify.log");
 let logChecked = false;
 function tanLog(msg: string): void {
-  // On by default (a few lines per agent turn, self-truncating at 2 MB) so a
-  // surprise "finished"/"needs you" chime can be traced to the exact state
-  // transition that raised it. SPARK_TERMINAL_NOTIFY_LOG=0 switches it off.
+  // SPARK_TERMINAL_NOTIFY_LOG=0 switches it off.
   if (process.env.SPARK_TERMINAL_NOTIFY_LOG === "0") return;
   try {
     if (!logChecked) {
@@ -291,8 +268,7 @@ export interface TerminalNotifyPaneEntry {
   tabTitle: string;
   excluded: boolean;
   // Restore already knows which CLI owns this pane from its durable session
-  // pointer. Supplying that fact avoids depending on a banner that may have
-  // been printed before the watcher attached (or omitted by a resume redraw).
+  // pointer, which avoids depending on a banner printed before attach.
   runtimeHint?: PublicAgentRuntime | null;
 }
 
@@ -302,12 +278,22 @@ function knownRuntimeHint(value: unknown): PublicAgentRuntime | null {
     : null;
 }
 
+function emptySignals(): PaneSignals {
+  return { hooks: false, programStatus: false, codexNotify: false, codexRollout: false };
+}
+
+// Called once the Codex notify program is (or is not) in the user's Codex
+// config. Codex reads that config at launch, so a pane may still run a Codex
+// started before the install; the grace window below only delays the
+// heuristic, it never suppresses it.
+export function noteCodexNotifyInstalled(installed: boolean): void {
+  codexNotifyInstalled = installed;
+}
+
 // Renderer-driven registry sync, one call per workspace layout change. The
 // renderer is the only side that knows which pty sessions are user-facing
-// terminal panes (vs chat backends / headless eval ptys) and which tab each
-// pane lives in, so it ships the full desired set for the workspace and we
-// reconcile: upsert routing metadata for live panes, drop watchers for panes
-// that no longer exist in that workspace's tabs.
+// terminal panes and which tab each lives in, so it ships the full desired set
+// for the workspace and we reconcile.
 export function syncTerminalNotifyPanes(input: {
   workspaceId: string;
   workspaceName?: string;
@@ -316,6 +302,7 @@ export function syncTerminalNotifyPanes(input: {
   if (!input || typeof input.workspaceId !== "string" || !Array.isArray(input.panes)) return [];
   const workspaceName = typeof input.workspaceName === "string" ? input.workspaceName : "";
   const seen = new Set<string>();
+  let added = 0;
   for (const entry of input.panes) {
     if (!entry || typeof entry.paneId !== "string" || entry.paneId.length === 0) continue;
     seen.add(entry.paneId);
@@ -331,6 +318,7 @@ export function syncTerminalNotifyPanes(input: {
       if (!existing.attached) attach(existing);
       continue;
     }
+    added += 1;
     const watcher: PaneWatcher = {
       paneId: entry.paneId,
       workspaceId: input.workspaceId,
@@ -348,25 +336,32 @@ export function syncTerminalNotifyPanes(input: {
       runtime: knownRuntimeHint(entry.runtimeHint),
       runtimeHint: knownRuntimeHint(entry.runtimeHint),
       state: "idle",
-      userTurnArmed: false,
+      turn: null,
+      pendingDone: null,
+      signals: emptySignals(),
       disposing: false,
       workingSince: 0,
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
       lastChunkAssertedWorking: false,
       completedTurnPending: false,
+      screenIdleSince: null,
+      lastUserInputAt: 0,
+      lastInterruptKeyAt: 0,
+      lastHookEventAt: 0,
+      pendingToolCalls: 0,
+      lastToolDetail: null,
+      hookFollowUp: false,
+      backgroundRunningAtLastStop: 0,
+      lastProgramState: null,
       codexScreen: null,
       codexIdleSince: null,
       codexAwaitingIdle: false,
+      codexTitleBlocked: false,
+      codexAnnouncedTurnIds: [],
+      codexRollout: null,
+      codexRolloutSince: 0,
       teammatesActive: 0,
-      hookSubagentsActive: 0,
-      lastHookEventAt: 0,
-      hookBackgroundTasks: 0,
-      hookPromptSinceStop: false,
-      backgroundLaunchAt: 0,
-      lastBackgroundLaunchAt: 0,
-      backgroundProcs: [],
-      lastBackgroundProcCheckAt: 0,
       agentProcSeen: false,
       lastAgentProcCheckAt: 0,
       agentProcGone: false,
@@ -378,28 +373,32 @@ export function syncTerminalNotifyPanes(input: {
     attach(watcher);
   }
   // Panes that disappeared from this workspace's layout were closed (a pane
-  // that merely moved tabs is still in the list with its new tabId). Other
-  // workspaces' watchers are untouched — their layouts can't change while
-  // unmounted, so their routing metadata stays valid.
+  // that merely moved tabs is still in the list with its new tabId).
+  let removed = 0;
   for (const [paneId, watcher] of watchers) {
     if (watcher.workspaceId === input.workspaceId && !seen.has(paneId)) {
       removeWatcher(paneId);
+      removed += 1;
     }
   }
-  tanLog(
-    `sync ws=${input.workspaceId} panes=${input.panes
-      .map((p) => `${p?.paneId}(tab=${p?.tabId}${p?.excluded ? ",excluded" : ""})`)
-      .join(" ")} watchers=${watchers.size}`,
-  );
+  // The renderer re-syncs on every layout change; only membership changes
+  // are worth a log line.
+  if (added > 0 || removed > 0) {
+    tanLog(
+      `sync ws=${input.workspaceId} panes=${input.panes
+        .map((p) => `${p?.paneId}(tab=${p?.tabId}${p?.excluded ? ",excluded" : ""})`)
+        .join(" ")} watchers=${watchers.size}`,
+    );
+  }
   ensureSweep();
   return terminalAgentStateSnapshot(input.workspaceId);
 }
 
 function attach(w: PaneWatcher): void {
   if (w.attached) return;
-  // pty.tap/onExit deliberately accept ids before the underlying session
-  // exists. Register immediately so a cold-restored agent cannot print its
-  // one-shot banner between pty:spawn and a waitForSpawn continuation.
+  // pty.tap/onExit accept ids before the underlying session exists. Register
+  // immediately so a cold-restored agent cannot print its one-shot banner
+  // between pty:spawn and a waitForSpawn continuation.
   tanLog(`pane=${w.paneId} tap attached (excluded=${w.excluded})`);
   w.untap = pty.tap(w.paneId, (chunk) => {
     try {
@@ -409,35 +408,21 @@ function attach(w: PaneWatcher): void {
     }
   });
   w.offExit = pty.onExit(w.paneId, (info) => {
-    // The renderer owns the red chip because it has the authoritative PTY
-    // exit. The notifier owns off-screen attention: if a live manual agent's
-    // terminal process dies non-zero, tell the user instead of silently
-    // removing the watcher.
     // Only a real non-zero exit STATUS is a crash worth alerting on. A missing
-    // code (pty killed on teardown, host suspend, signal death) produced
-    // "exited with code undefined" alerts that told the user nothing; the
-    // renderer's own pty:exit handler still paints the red chip either way.
+    // code (pty killed on teardown, host suspend, signal death) tells the user
+    // nothing; the renderer's own pty:exit handler paints the red chip.
     const exitCode = typeof info.exitCode === "number" ? info.exitCode : null;
     if (!w.excluded && !w.disposing && w.runtime && exitCode !== null && exitCode !== 0) {
-      deliver(w, "failed", `${runtimeLabel(w.runtime)} terminal exited with code ${exitCode}.`);
+      deliver(w, "failed", { body: `The terminal exited with code ${exitCode}.` });
     }
     if (w.disposing) {
       removeWatcher(w.paneId);
       return;
     }
-
-    // Clear the rail spinner immediately. The renderer's pty:exit handler
-    // remains authoritative for the chip's clean-vs-crash presentation; this
-    // state event is also what prevents a dead pane from leaving its workspace
-    // activity ring spinning indefinitely.
     emitPaneState(w, info.exitCode === 0 ? "done" : "error");
 
-    // Keep the desired watcher registration alive across an unexpected
-    // same-id respawn. useTerminalSession can auto-resume a live agent after a
-    // PTY death; deleting the watcher here meant the replacement went unseen
-    // whenever no tab-state mutation happened to trigger another registry
-    // sync. pty.tap/onExit both support pre-registration, so reset the parser
-    // and attach again immediately, before the replacement process exists.
+    // Keep the watcher registration alive across a same-id respawn
+    // (useTerminalSession can auto-resume a live agent after a PTY death).
     try {
       w.untap?.();
     } catch {
@@ -450,29 +435,16 @@ function attach(w: PaneWatcher): void {
     w.ring = "";
     w.carry = "";
     w.runtime = w.runtimeHint;
-    w.state = "idle";
-    w.userTurnArmed = false;
-    w.workingSince = 0;
-    w.lastWorkingAt = 0;
-    w.lastOscNotifyAt = 0;
-    w.lastChunkAssertedWorking = false;
-    w.completedTurnPending = false;
-    clearCodexScreen(w);
-    w.teammatesActive = 0;
-    w.hookSubagentsActive = 0;
-    w.lastHookEventAt = 0;
-    clearBackgroundWork(w);
+    resetAgentSession(w);
     w.lastOutputAt = 0;
     w.lastEmittedState = null;
     attach(w);
   });
   w.attached = true;
 
-  // The tap is installed first. Node's event loop cannot interleave another
-  // pty onData callback while the synchronous snapshot below is replayed, so
-  // bytes are observed exactly once with no read→subscribe race. Preserve the
-  // original chunks: onChunk's carry/fresh-boundary logic then reconstructs
-  // the same state transitions it would have seen live.
+  // The tap is installed first. Node cannot interleave another pty onData
+  // callback while the synchronous snapshot below is replayed, so bytes are
+  // observed exactly once with no read/subscribe race.
   const recent = pty.readTailChunks(w.paneId, BOOTSTRAP_TAIL_BYTES) ?? [];
   if (recent.length > 0) {
     w.replayingTail = true;
@@ -482,10 +454,9 @@ function attach(w: PaneWatcher): void {
       console.warn("[terminal-agent-notify] tail replay failed:", err);
     } finally {
       w.replayingTail = false;
-      // Replayed user-input / command markers belong to history. They may
-      // identify the foreground runtime, but must not arm a future alert as if
-      // the user had just typed into the pane now.
-      w.userTurnArmed = false;
+      // Replayed submits and command markers belong to history.
+      w.turn = null;
+      cancelPendingDone(w, "tail replay");
       w.lastOscNotifyAt = 0;
     }
   }
@@ -497,7 +468,7 @@ function removeWatcher(paneId: string): void {
   tanLog(`pane=${paneId} watcher removed`);
   watchers.delete(paneId);
   clearCodexScreen(w);
-  // Free the notify policy's per-source dedup state for the dead pane.
+  cancelPendingDone(w, "watcher removed");
   rearm(paneSourceKey(paneId));
   try {
     w.untap?.();
@@ -515,14 +486,38 @@ function removeWatcher(paneId: string): void {
   }
 }
 
+// Everything that belongs to one agent session in the pane. A new agent
+// (or the same CLI relaunched) starts with no turn and no trusted signals.
+function resetAgentSession(w: PaneWatcher): void {
+  cancelPendingDone(w, "agent session reset");
+  clearCodexScreen(w);
+  w.state = "idle";
+  w.turn = null;
+  w.signals = emptySignals();
+  w.workingSince = 0;
+  w.lastWorkingAt = 0;
+  w.lastOscNotifyAt = 0;
+  w.lastChunkAssertedWorking = false;
+  w.completedTurnPending = false;
+  w.screenIdleSince = null;
+  w.pendingToolCalls = 0;
+  w.lastToolDetail = null;
+  w.hookFollowUp = false;
+  w.backgroundRunningAtLastStop = 0;
+  w.lastProgramState = null;
+  w.codexAnnouncedTurnIds = [];
+  w.codexRollout = null;
+  w.codexRolloutSince = 0;
+  w.teammatesActive = 0;
+}
+
 function ensureSweep(): void {
   if (sweepTimer || watchers.size === 0) return;
   sweepTimer = setInterval(() => {
     const now = Date.now();
     for (const w of watchers.values()) {
       // Self-heal a watcher whose transport was reset by an unexpected PTY
-      // exit or a transient attach failure instead of waiting for another
-      // renderer layout change.
+      // exit or a transient attach failure.
       if (!w.attached) attach(w);
       if (w.excluded || w.disposing) continue;
       if (checkAgentProcess(w, now)) {
@@ -530,155 +525,743 @@ function ensureSweep(): void {
         continue;
       }
       if (!w.runtime) continue;
+      if (w.runtime === "codex") pollCodexRollout(w);
       if (w.runtime === "codex" && w.codexScreen) {
-        const dimensions = pty.sessionDimensions(w.paneId);
-        if (dimensions) w.codexScreen.resize(dimensions.cols, dimensions.rows);
-        const state = w.codexScreen.state();
-        if (state === "working") {
-          w.codexIdleSince = null;
-          if (w.codexAwaitingIdle && w.codexScreen.hasProgressSinceCompletion()) {
-            w.codexAwaitingIdle = false;
-          }
-          if (!w.codexAwaitingIdle) enterWorking(w, now);
-        } else if (state === "idle") {
-          w.codexAwaitingIdle = false;
-          if (w.state === "failed") continue;
-          w.codexIdleSince ??= now;
-          if (now - w.codexIdleSince >= 1_200) {
-            const finished = w.state === "working";
-            w.state = "idle";
-            emitPaneState(w, "idle");
-            if (finished && w.userTurnArmed && workedLongEnough(w) && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
-              deliver(w, "done", null);
-            }
-            if (finished) w.userTurnArmed = false;
-          }
-        } else {
-          w.codexIdleSince = null;
-        }
-        // Silence and incomplete repaints cannot end a turn while the rendered
-        // busy footer is still present. Only an idle frame or explicit event can.
+        sweepCodexScreen(w, now);
         continue;
       }
-      if (w.hookSubagentsActive > 0 && now - w.lastHookEventAt >= HOOK_SUBAGENT_STALE_MS) {
-        tanLog(`pane=${w.paneId} hook subagent counter stale (no hook events) — cleared`);
-        w.hookSubagentsActive = 0;
+      // A screenless Codex with a structured source still needs the quiet
+      // window to settle its chip; codexTurnEndedOnScreen sends no done there.
+      if (w.signals.programStatus || (w.signals.hooks && w.runtime !== "codex")) {
+        if (w.runtime === "claude") sweepTrustedClaude(w, now);
+        continue;
       }
       if (w.teammatesActive > 0) {
         if (now - w.lastOutputAt >= TEAMMATE_SILENCE_MS) {
-          // A RUNNING teammate repaints its strip row at least once a second
-          // (live capture); total byte-silence this long means the counter is
-          // stale — clear it and let the normal quiet window resolve the turn.
-          tanLog(`pane=${w.paneId} teammate counter stale (silence) — cleared`);
+          // A running teammate repaints its strip row at least once a second;
+          // byte silence this long means the counter is stale.
+          tanLog(`pane=${w.paneId} teammate counter stale (silence), cleared`);
           w.teammatesActive = 0;
         } else {
           continue;
         }
       }
-      // Hook-reported subagents and background tasks are not subject to the
-      // silence heal: the parent REPL may paint nothing while they work.
-      if (w.hookSubagentsActive > 0 || backgroundTasksActive(w, now)) continue;
       if (w.state !== "working") continue;
-      // Stall-aware window: silence right after a working-footer paint is a
-      // mid-turn stall until proven otherwise; silence after an idle repaint
-      // (no working pattern in the final chunk) is a confident finish.
-      // A completion observed while background work was alive remains valid
-      // after that work exits, even if status-line repaints never go quiet.
       const quietMs = w.completedTurnPending ? 0 : w.lastChunkAssertedWorking ? TURN_QUIET_STALL_MS : TURN_QUIET_MS;
       if (now - w.lastWorkingAt < quietMs) continue;
       w.state = "idle";
       tanLog(
-        `pane=${w.paneId} turn finished (quiet ${quietMs}ms elapsed, stall-like=${w.lastChunkAssertedWorking}, worked ${w.lastWorkingAt - w.workingSince}ms)`,
+        `pane=${w.paneId} turn quiet (${quietMs}ms, stall-like=${w.lastChunkAssertedWorking}, worked ${w.lastWorkingAt - w.workingSince}ms)`,
       );
-      // The turn ended (no working repaints for the quiet window) → chip ready.
-      // Emit BEFORE the workedLongEnough/OSC-mute toast gates below: those gate
-      // the toast (a boot blip shouldn't ping the user), but the chip should
-      // still flip off "working" the instant the stream goes quiet — this is
-      // the core fix for the stuck-on-WORKING banner when the pane is hidden.
+      // The chip flips off "working" even when the toast gates below say no.
       emitPaneState(w, "idle");
-      if (!w.userTurnArmed || !workedLongEnough(w)) continue;
-      if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) continue;
-      deliver(w, "done", null);
-      w.userTurnArmed = false;
+      if (w.runtime === "codex") {
+        codexTurnEndedOnScreen(w, now);
+        continue;
+      }
+      if (!workedLongEnough(w) || now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) continue;
+      // The quiet window already waited; no further confirmation needed.
+      requestDone(w, { origin: "heuristic", delayMs: 0 });
     }
   }, SWEEP_MS);
   sweepTimer.unref();
 }
 
+function sweepTrustedClaude(w: PaneWatcher, now: number): void {
+  // Program status owns the chip outright.
+  if (w.signals.programStatus) return;
+  if (
+    w.state === "working" &&
+    turnActive(w) &&
+    w.screenIdleSince !== null &&
+    now - w.screenIdleSince >= HOOK_IDLE_SETTLE_MS &&
+    now - w.lastHookEventAt >= HOOK_IDLE_SETTLE_MS
+  ) {
+    tanLog(`pane=${w.paneId} hook turn idle on screen without a Stop; chip -> idle`);
+    w.state = "idle";
+    emitPaneState(w, "idle");
+  }
+}
+
+function sweepCodexScreen(w: PaneWatcher, now: number): void {
+  if (!w.codexScreen || w.signals.programStatus || w.codexTitleBlocked) return;
+  const dimensions = pty.sessionDimensions(w.paneId);
+  if (dimensions) w.codexScreen.resize(dimensions.cols, dimensions.rows);
+  const state = w.codexScreen.state();
+  if (state === "working") {
+    w.codexIdleSince = null;
+    if (w.codexAwaitingIdle && w.codexScreen.hasProgressSinceCompletion()) {
+      w.codexAwaitingIdle = false;
+    }
+    if (!w.codexAwaitingIdle) enterWorking(w, now);
+  } else if (state === "idle") {
+    w.codexAwaitingIdle = false;
+    if (w.state === "failed") return;
+    w.codexIdleSince ??= now;
+    if (now - w.codexIdleSince >= 1_200) {
+      const finished = w.state === "working";
+      w.state = "idle";
+      emitPaneState(w, "idle");
+      if (finished) codexTurnEndedOnScreen(w, now);
+    }
+  } else {
+    w.codexIdleSince = null;
+  }
+  // Silence and incomplete repaints cannot end a turn while the rendered
+  // busy footer is still present. Only an idle frame or explicit event can.
+}
+
+// The Codex composer came back. With a structured source this is chip-only;
+// otherwise it is the turn end, delayed while a structured source may still
+// report it with Codex's own words.
+function codexTurnEndedOnScreen(w: PaneWatcher, now: number): void {
+  if (codexHasStructuredDone(w)) return;
+  if (interruptedThisTurn(w, now)) {
+    closeTurnSilently(w, now, "interrupted by the user");
+    return;
+  }
+  if (!workedLongEnough(w) || now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) return;
+  requestDone(w, {
+    origin: "heuristic",
+    delayMs: codexStructuredExpected(w) ? CODEX_STRUCTURED_GRACE_MS : 0,
+  });
+}
+
+function codexHasStructuredDone(w: PaneWatcher): boolean {
+  return w.signals.codexNotify || w.signals.codexRollout;
+}
+
+function codexStructuredExpected(w: PaneWatcher): boolean {
+  if (codexNotifyInstalled) return true;
+  const record = latestSessionStart(w.paneId);
+  return record?.runtime === "codex" && record.active === true && !!record.transcriptPath;
+}
+
+function hasTrustedSignals(w: PaneWatcher): boolean {
+  if (w.signals.programStatus || w.signals.hooks) return true;
+  return w.runtime === "codex" && codexHasStructuredDone(w);
+}
+
+// ── Turns ─────────────────────────────────────────────────────────────────
+
+function turnActive(w: PaneWatcher): boolean {
+  return w.turn !== null && !w.turn.announced;
+}
+
+function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], sessionId: string | null): void {
+  if (w.replayingTail) return;
+  cancelPendingDone(w, "new turn");
+  if (w.state !== "working") {
+    w.workingSince = 0;
+    w.lastWorkingAt = 0;
+  }
+  w.turn = { startedAt: now, source, sessionId, announced: false, announcedAt: 0 };
+  w.screenIdleSince = null;
+  w.lastOscNotifyAt = 0;
+  tanLog(`pane=${w.paneId} turn start (${source}${sessionId ? ` session=${sessionId.slice(0, 8)}` : ""})`);
+  // A new turn is real new activity: the next alert of any kind may deliver.
+  rearm(paneSourceKey(w.paneId));
+}
+
+// Esc or Ctrl+C reached the pane during the current turn, recently enough
+// that an idle screen now is the user stopping it. A key from before this
+// turn's submit stopped an earlier one.
+function interruptedThisTurn(w: PaneWatcher, now: number): boolean {
+  return (
+    w.turn !== null &&
+    w.lastInterruptKeyAt >= w.turn.startedAt &&
+    now - w.lastInterruptKeyAt < INTERRUPT_WINDOW_MS
+  );
+}
+
+// The turn is over without anything worth announcing (the user stopped it).
+function closeTurnSilently(w: PaneWatcher, now: number, reason: string): void {
+  cancelPendingDone(w, reason);
+  if (!w.turn || w.turn.announced) return;
+  w.turn.announced = true;
+  w.turn.announcedAt = now;
+  tanLog(`pane=${w.paneId} turn closed without an alert (${reason})`);
+}
+
+function requestDone(
+  w: PaneWatcher,
+  req: {
+    origin: DoneOrigin;
+    delayMs: number;
+    body?: string | null;
+    backgroundRunning?: number;
+    followUp?: boolean;
+  },
+): void {
+  if (w.replayingTail || w.excluded) return;
+  if (!req.followUp && !turnActive(w)) {
+    tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
+    return;
+  }
+  const existing = w.pendingDone;
+  // A heuristic never shortens or overrides a structured pending announcement.
+  if (existing && DONE_RANK[req.origin] < DONE_RANK[existing.origin]) return;
+  if (existing?.timer) clearTimeout(existing.timer);
+  const rank = DONE_RANK[req.origin];
+  const newBody = req.body && req.body.trim() ? req.body : null;
+  const keepOld = existing?.body && (!newBody || existing.bodyRank > rank);
+  const pending: PendingDone = {
+    timer: null,
+    origin: req.origin,
+    body: keepOld ? existing.body : newBody,
+    bodyRank: keepOld ? existing.bodyRank : newBody ? rank : -1,
+    backgroundRunning: req.backgroundRunning ?? existing?.backgroundRunning ?? 0,
+    followUp: req.followUp === true || existing?.followUp === true,
+  };
+  w.pendingDone = pending;
+  tanLog(`pane=${w.paneId} done pending (${req.origin}, ${req.delayMs}ms)`);
+  if (req.delayMs <= 0) {
+    fireDone(w, pending);
+    return;
+  }
+  pending.timer = setTimeout(() => fireDone(w, pending), req.delayMs);
+  pending.timer.unref?.();
+}
+
+function fireDone(w: PaneWatcher, pending: PendingDone): void {
+  if (w.pendingDone !== pending || watchers.get(w.paneId) !== w) return;
+  w.pendingDone = null;
+  if (pending.timer) clearTimeout(pending.timer);
+  if (!pending.followUp && !turnActive(w)) return;
+  const now = Date.now();
+  const startedAt = w.turn && !w.turn.announced ? w.turn.startedAt : null;
+  if (w.turn) {
+    w.turn.announced = true;
+    w.turn.announcedAt = now;
+  }
+  // The earlier turn alert for this source already went out; the drained
+  // background work is new information.
+  if (pending.followUp) rearm(paneSourceKey(w.paneId));
+  deliver(w, "done", {
+    body: pending.body,
+    durationMs: startedAt !== null ? now - startedAt : null,
+    backgroundRunning: pending.backgroundRunning,
+    followUp: pending.followUp,
+  });
+}
+
+function cancelPendingDone(w: PaneWatcher, reason: string, onlyBelow?: DoneOrigin): void {
+  const pending = w.pendingDone;
+  if (!pending) return;
+  if (onlyBelow && DONE_RANK[pending.origin] >= DONE_RANK[onlyBelow]) return;
+  if (pending.timer) clearTimeout(pending.timer);
+  w.pendingDone = null;
+  tanLog(`pane=${w.paneId} pending done (${pending.origin}) cancelled: ${reason}`);
+}
+
+// The agent stopped for the user. Only inside a turn: launch-time trust and
+// login screens are answered by someone who is looking at the pane.
+function needsYou(w: PaneWatcher, now: number, body: string | null, why: string): void {
+  if (!turnActive(w) && w.state !== "working") {
+    if (w.state !== "blocked") tanLog(`pane=${w.paneId} prompt outside a turn (${why}), no alert`);
+    w.state = "blocked";
+    emitPaneState(w, "blocked");
+    return;
+  }
+  const wasBlocked = w.state === "blocked";
+  w.state = "blocked";
+  w.screenIdleSince = null;
+  emitPaneState(w, "blocked");
+  cancelPendingDone(w, "agent is waiting for an answer");
+  if (wasBlocked) return;
+  if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) return;
+  tanLog(`pane=${w.paneId} needs you (${why})`);
+  // Working again after an announced turn (a background follow-up) is new
+  // activity; the finished alert must not swallow this prompt.
+  if (!turnActive(w)) rearm(paneSourceKey(w.paneId));
+  deliver(w, "blocked", { body });
+}
+
+// A prompt the agent was waiting on got its answer. A later prompt in the
+// same turn is new and must be allowed to alert.
+function promptResolved(w: PaneWatcher, now: number): void {
+  if (w.state !== "blocked") return;
+  rearm(paneSourceKey(w.paneId));
+  enterWorking(w, now);
+}
+
+// Enter (or stay in) the heuristic working state.
+//
+// Deliberately does NOT start a turn or rearm the policy: a stream re-match of
+// the working footer is not proof of a NEW turn (a mid-turn stall resumes
+// through here too). Turns start on a submit.
+function enterWorking(w: PaneWatcher, now: number): void {
+  w.completedTurnPending = false;
+  w.screenIdleSince = null;
+  cancelPendingDone(w, "working again", "program");
+  if (w.state !== "working") {
+    w.workingSince = now;
+    tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
+    emitPaneState(w, "working");
+  }
+  w.state = "working";
+  w.lastWorkingAt = now;
+}
+
+// Bracketed pastes can contain newlines without submitting anything, and
+// Alt+Enter / Shift+Enter insert a newline in agent composers.
+const PASTE_RE = /\x1b\[200~[\s\S]*?(?:\x1b\[201~|$)/g;
+const TERMINAL_REPLY_RE =
+  /^(?:\x1b\[[?>=]?[\d;:]*(?:[cnRt]|\$y)|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\|\x1b\[<[\d;]*[mM])+$/;
+
+function isSubmit(data: string): boolean {
+  return /\r/.test(data.replace(PASTE_RE, "").replace(/\x1b\r/g, ""));
+}
+
+// User keystrokes / injected input reached this pane's pty. A submit starts a
+// turn; other keys only matter as answers to a prompt or as an interrupt.
+// `data` undefined means an injected prompt that was submitted.
+export function noteTerminalUserInput(paneId: string, data?: string): void {
+  // xterm's onData also carries device replies, focus reports and mouse
+  // reports. None of them is the user acting on the agent.
+  if (data !== undefined && TERMINAL_REPLY_RE.test(data)) return;
+  const w = watchers.get(paneId);
+  if (!w || w.excluded) return;
+  const now = Date.now();
+  w.lastUserInputAt = now;
+  if (data !== undefined && (data === "\x1b" || data.includes("\x03"))) {
+    w.lastInterruptKeyAt = now;
+  }
+  // Any key while a prompt is up is the user answering it.
+  if (w.state === "blocked") rearm(paneSourceKey(paneId));
+  if (data !== undefined && !isSubmit(data)) return;
+  // Enter while a turn runs queues a message or answers a dialog; the turn
+  // already exists. A submit that started no work (an empty prompt, a local
+  // slash command, a turn the user stopped) leaves an idle turn behind, and
+  // the turn being timed is the one this submit starts.
+  if (turnActive(w) && (w.state !== "idle" || w.pendingDone !== null)) return;
+  startTurn(w, now, "input", null);
+}
+
+// The host slept: the wall-clock gap is not byte silence. Restart the quiet
+// window so the first sweep after wake doesn't read the gap as a finish.
+export function noteHostResume(): void {
+  const now = Date.now();
+  for (const w of watchers.values()) {
+    if (w.state !== "working") continue;
+    w.lastWorkingAt = now;
+    w.lastOutputAt = now;
+    if (w.screenIdleSince !== null) w.screenIdleSince = now;
+    tanLog(`pane=${w.paneId} host resume, quiet window restarted`);
+  }
+}
+
+// ── Hooks ─────────────────────────────────────────────────────────────────
+
+function stringField(payload: Record<string, unknown> | null, key: string): string | null {
+  const value = payload?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function hookToolName(payload: Record<string, unknown> | null): string {
+  const value = payload?.tool_name ?? payload?.toolName ?? payload?.tool;
+  return typeof value === "string" ? value : "";
+}
+
+function oneLine(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+}
+
+// A short, plain-text line from an agent's final message: markdown markers
+// dropped, code blocks skipped, cut at a sentence boundary when one is near.
+export function summarizeAgentMessage(text: unknown, max = SUMMARY_MAX_CHARS): string | null {
+  if (typeof text !== "string") return null;
+  const plain = text
+    .replace(/```[\s\S]*?(?:```|$)/g, " ")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*\|.*\|\s*$/gm, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/(\*\*|__|~~)(.+?)\1/g, "$2")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!plain) return null;
+  if (plain.length <= max) return plain;
+  const window = plain.slice(0, max);
+  const sentenceEnd = Math.max(window.lastIndexOf(". "), window.lastIndexOf("! "), window.lastIndexOf("? "));
+  if (sentenceEnd >= max * 0.5) return window.slice(0, sentenceEnd + 1);
+  return `${window.slice(0, max - 1).trimEnd()}…`;
+}
+
+// What a pending tool call wants to do, in words a permission alert can show.
+export function describeToolCall(toolName: string, input: unknown): string | null {
+  if (!toolName) return null;
+  const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  const text = (key: string): string | null => (typeof args[key] === "string" && args[key] ? (args[key] as string) : null);
+  const file = text("file_path") ?? text("notebook_path") ?? text("path");
+  let detail: string | null = null;
+  if (toolName === "Bash") detail = text("command");
+  else if (file) detail = path.basename(file);
+  else detail = text("url") ?? text("pattern") ?? text("description") ?? text("query");
+  const name = toolName.startsWith("mcp__") ? toolName.split("__").slice(2).join("__") || toolName : toolName;
+  return oneLine(detail ? `${name}: ${detail}` : name, DETAIL_MAX_CHARS);
+}
+
+function questionText(input: unknown): string | null {
+  if (!input || typeof input !== "object") return null;
+  const questions = (input as { questions?: unknown }).questions;
+  if (Array.isArray(questions)) {
+    for (const entry of questions) {
+      const question = entry && typeof entry === "object" ? (entry as { question?: unknown }).question : null;
+      if (typeof question === "string" && question.trim()) return oneLine(question, SUMMARY_MAX_CHARS);
+    }
+  }
+  const question = (input as { question?: unknown }).question;
+  return typeof question === "string" && question.trim() ? oneLine(question, SUMMARY_MAX_CHARS) : null;
+}
+
+function runningBackgroundTasks(value: unknown): number {
+  if (!Array.isArray(value)) return 0;
+  let running = 0;
+  for (const task of value) {
+    if (!task || typeof task !== "object") continue;
+    const status = (task as { status?: unknown }).status;
+    if (typeof status !== "string" || /^(?:running|pending|in_progress|active)$/i.test(status)) running += 1;
+  }
+  return running;
+}
+
+// Claude Code hook events (and the Codex notify program's events) for a pane
+// the user opened themselves, routed here by hook-watcher.ts.
+export function noteTerminalHookEvent(
+  paneId: string,
+  hookName: string,
+  payload: Record<string, unknown> | null = null,
+): void {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded) return;
+  const now = Date.now();
+  if (hookName === "CodexNotify") {
+    handleCodexNotify(w, now, payload);
+    return;
+  }
+  // Claude hooks only. A pane running another agent can still host a nested
+  // `claude -p` (a tool call, a script); its hooks say nothing about that agent.
+  if (w.runtime !== null && w.runtime !== "claude") return;
+  w.lastHookEventAt = now;
+  if (!w.signals.hooks) {
+    w.signals.hooks = true;
+    tanLog(`pane=${w.paneId} Claude hooks active`);
+  }
+  const agentId = stringField(payload, "agent_id");
+  const sessionId = stringField(payload, "session_id");
+  // A one-shot `claude -p` run inside the pane fires hooks with the same pane
+  // id. While the user's turn is open, only its own session counts.
+  const nested = sessionId !== null && turnActive(w) && w.turn?.sessionId != null && sessionId !== w.turn.sessionId;
+  if (nested) return;
+  switch (hookName) {
+    case "UserPromptSubmit": {
+      if (agentId) return;
+      const prompt = stringField(payload, "prompt") ?? "";
+      w.pendingToolCalls = 0;
+      if (/^\s*<task-notification>/.test(prompt)) {
+        // A background task reporting back. Claude works on it, but nobody
+        // submitted anything.
+        w.hookFollowUp = true;
+        if (!w.signals.programStatus) enterWorking(w, now);
+        return;
+      }
+      w.hookFollowUp = false;
+      if (turnActive(w) && w.turn?.source === "input" && now - w.turn.startedAt < 10_000) {
+        w.turn.source = "prompt";
+        w.turn.sessionId = sessionId;
+      } else {
+        startTurn(w, now, "prompt", sessionId);
+      }
+      if (!w.signals.programStatus) enterWorking(w, now);
+      return;
+    }
+    case "PreToolUse": {
+      const tool = hookToolName(payload);
+      const input = payload?.tool_input ?? payload?.toolInput;
+      w.pendingToolCalls += 1;
+      w.lastToolDetail = describeToolCall(tool, input);
+      if (!agentId) cancelPendingDone(w, `lead tool call ${tool}`);
+      if (tool === "AskUserQuestion") {
+        if (!w.signals.programStatus) needsYou(w, now, questionText(input) ?? "Has a question for you.", "AskUserQuestion");
+        return;
+      }
+      if (tool === "ExitPlanMode") {
+        if (!w.signals.programStatus) needsYou(w, now, "A plan is ready for your review.", "ExitPlanMode");
+        return;
+      }
+      if (w.signals.programStatus) return;
+      if (w.state === "blocked") promptResolved(w, now);
+      else if (turnActive(w) || w.hookFollowUp) enterWorking(w, now);
+      return;
+    }
+    case "PostToolUse":
+    case "PostToolUseFailure":
+      w.pendingToolCalls = Math.max(0, w.pendingToolCalls - 1);
+      if (w.signals.programStatus) return;
+      if (w.state === "blocked") promptResolved(w, now);
+      return;
+    case "Notification": {
+      const type = stringField(payload, "notification_type") ?? "";
+      // idle_prompt repeats a finished turn a minute later; agent_completed
+      // is a background agent, not the lead turn.
+      if (!/^(?:permission_prompt|elicitation_dialog|agent_needs_input)$/.test(type)) return;
+      if (w.signals.programStatus) return;
+      const message = stringField(payload, "message");
+      const body =
+        type === "permission_prompt" && w.lastToolDetail
+          ? `Permission for ${w.lastToolDetail}`
+          : message
+            ? oneLine(message, SUMMARY_MAX_CHARS)
+            : null;
+      needsYou(w, now, body, `Notification ${type}`);
+      return;
+    }
+    case "Stop":
+    case "StopFailure":
+      if (agentId) return;
+      handleClaudeStop(w, now, hookName, payload);
+      return;
+    case "SessionStart": {
+      const source = stringField(payload, "source") ?? "";
+      // compact fires inside a turn.
+      if (source === "compact") return;
+      closeTurnSilently(w, now, `session ${source || "start"}`);
+      w.turn = null;
+      w.pendingToolCalls = 0;
+      w.backgroundRunningAtLastStop = 0;
+      w.hookFollowUp = false;
+      return;
+    }
+    case "SessionEnd":
+      closeTurnSilently(w, now, "session end");
+      w.pendingToolCalls = 0;
+      return;
+    default:
+      // SubagentStart / SubagentStop / PreCompact: never a lead-turn boundary.
+      return;
+  }
+}
+
+function handleClaudeStop(
+  w: PaneWatcher,
+  now: number,
+  hookName: string,
+  payload: Record<string, unknown> | null,
+): void {
+  const running = runningBackgroundTasks(payload?.background_tasks);
+  const message = summarizeAgentMessage(payload?.last_assistant_message);
+  const followUp = w.hookFollowUp;
+  w.hookFollowUp = false;
+  w.pendingToolCalls = 0;
+  w.screenIdleSince = null;
+  if (!w.signals.programStatus) {
+    w.state = "idle";
+    emitPaneState(w, "idle");
+  }
+  const drained = w.backgroundRunningAtLastStop > 0 && running === 0;
+  w.backgroundRunningAtLastStop = running;
+  tanLog(`pane=${w.paneId} hook ${hookName} (background running=${running}, follow-up=${followUp})`);
+  if (hookName === "StopFailure") {
+    if (!turnActive(w)) return;
+    const error = stringField(payload, "error") ?? stringField(payload, "error_type");
+    closeTurnSilently(w, now, "stop failure");
+    deliver(w, "failed", { body: error ? `The turn ended with an error: ${oneLine(error, 100)}` : "The turn ended with an API error." });
+    return;
+  }
+  if (turnActive(w) && !followUp) {
+    requestDone(w, {
+      origin: "hook",
+      body: message,
+      backgroundRunning: running,
+      delayMs: HOOK_DONE_CONFIRM_MS,
+    });
+    return;
+  }
+  if (drained) {
+    requestDone(w, { origin: "hook", body: message, followUp: true, delayMs: HOOK_DONE_CONFIRM_MS });
+  }
+}
+
+// ── Codex structured completion ───────────────────────────────────────────
+
+function rememberCodexTurn(w: PaneWatcher, turnId: string | null): boolean {
+  if (!turnId) return true;
+  if (w.codexAnnouncedTurnIds.includes(turnId)) return false;
+  w.codexAnnouncedTurnIds.push(turnId);
+  if (w.codexAnnouncedTurnIds.length > 16) w.codexAnnouncedTurnIds.shift();
+  return true;
+}
+
+function codexCompleted(
+  w: PaneWatcher,
+  now: number,
+  turnId: string | null,
+  message: unknown,
+  userInput: boolean | null,
+  why: string,
+): void {
+  if (!rememberCodexTurn(w, turnId)) return;
+  w.state = "idle";
+  w.codexIdleSince = null;
+  w.codexAwaitingIdle = true;
+  w.codexScreen?.markCompleted();
+  if (!w.signals.programStatus) emitPaneState(w, "idle");
+  if (userInput === false) {
+    tanLog(`pane=${w.paneId} Codex turn without user input (${why}), no alert`);
+    closeTurnSilently(w, now, "turn without user input");
+    return;
+  }
+  if (!turnActive(w)) {
+    // A just-announced turn is the same completion reported by the other source.
+    if (w.turn?.announced && now - w.turn.announcedAt < 5_000) return;
+    if (userInput !== true) return;
+    startTurn(w, now, "prompt", null);
+  }
+  requestDone(w, { origin: "codex", body: summarizeAgentMessage(message), delayMs: 0 });
+}
+
+function handleCodexNotify(w: PaneWatcher, now: number, payload: Record<string, unknown> | null): void {
+  if (w.runtime !== null && w.runtime !== "codex") return;
+  if (!payload || payload.type !== "agent-turn-complete") return;
+  // Subagents and a nested `codex exec` inherit the pane's environment, so
+  // their turns run the notify program too. Only the thread the pane's Codex
+  // holds open is the user's.
+  const threadId = stringField(payload, "thread-id");
+  const record = latestSessionStart(w.paneId);
+  if (
+    threadId &&
+    record?.runtime === "codex" &&
+    record.active === true &&
+    record.sessionId &&
+    record.sessionId.toLowerCase() !== threadId.toLowerCase()
+  ) {
+    tanLog(`pane=${w.paneId} Codex notify for another thread (${threadId.slice(0, 8)}), ignored`);
+    return;
+  }
+  if (!w.signals.codexNotify) {
+    w.signals.codexNotify = true;
+    tanLog(`pane=${w.paneId} Codex notify active`);
+  }
+  const inputs = payload["input-messages"];
+  const userInput = Array.isArray(inputs) ? inputs.some((m) => typeof m === "string" && m.trim().length > 0) : null;
+  codexCompleted(w, now, stringField(payload, "turn-id"), payload["last-assistant-message"], userInput, "notify");
+}
+
+function pollCodexRollout(w: PaneWatcher): void {
+  const record = latestSessionStart(w.paneId);
+  if (record?.runtime !== "codex" || record.active !== true || !record.transcriptPath) return;
+  if (w.codexRollout?.path !== record.transcriptPath) {
+    w.codexRollout = new CodexRolloutTail(record.transcriptPath);
+    w.codexRolloutSince = Date.now();
+  }
+  const tail = w.codexRollout;
+  void tail.poll().then((events) => {
+    if (watchers.get(w.paneId) !== w || w.codexRollout !== tail) return;
+    for (const event of events) handleCodexRolloutEvent(w, event);
+  });
+}
+
+function handleCodexRolloutEvent(w: PaneWatcher, event: CodexRolloutEvent): void {
+  if (w.runtime !== "codex") return;
+  // The first read looks back a little; only events from this pane's watch
+  // (or from the turn the user just started) are news.
+  const cutoff = Math.min(w.codexRolloutSince, w.turn?.startedAt ?? Infinity) - 2_000;
+  if (event.at < cutoff) return;
+  const now = Date.now();
+  if (!w.signals.codexRollout) {
+    w.signals.codexRollout = true;
+    tanLog(`pane=${w.paneId} Codex session file active`);
+  }
+  if (event.type === "task_started") {
+    w.codexAwaitingIdle = false;
+    if (!w.signals.programStatus && !w.codexTitleBlocked) enterWorking(w, now);
+    return;
+  }
+  if (event.type === "turn_aborted") {
+    closeTurnSilently(w, now, "Codex turn interrupted");
+    w.state = "idle";
+    if (!w.signals.programStatus) emitPaneState(w, "idle");
+    return;
+  }
+  codexCompleted(w, now, event.turnId, event.lastAgentMessage, null, "session file");
+}
+
+export function noteTerminalWillDispose(paneId: string): void {
+  const w = watchers.get(paneId);
+  if (w) w.disposing = true;
+}
+
+// Snapshot foreground agent panes before app-level PTY teardown begins.
+export function activeTerminalAgentPaneIds(): string[] {
+  const active: string[] = [];
+  for (const watcher of watchers.values()) {
+    if (!watcher.disposing && watcher.runtime && pty.hasSession(watcher.paneId)) {
+      active.push(watcher.paneId);
+    }
+  }
+  return active;
+}
+
+// True when the current/just-ended working phase ran long enough to be a
+// real turn rather than a boot blip or pattern flap (see MIN_WORK_MS).
+function workedLongEnough(w: PaneWatcher): boolean {
+  return w.lastWorkingAt - w.workingSince >= MIN_WORK_MS;
+}
+
 // ── Per-chunk stream scanning ────────────────────────────────────────────
 
 // Explicit desktop-notification escapes, exactly the set WezTerm renders:
-//   OSC 9  — `ESC ] 9 ; message BEL`   (iTerm2/growl style; Codex emits this)
-//   OSC 777 — `ESC ] 777 ; notify ; title ; body BEL` (rxvt extension)
-// `ESC ] 9 ; 4 ; …` is the ConEmu taskbar-progress protocol, not a
-// notification — filtered below.
+//   OSC 9:   `ESC ] 9 ; message BEL`   (iTerm2/growl style)
+//   OSC 777: `ESC ] 777 ; notify ; title ; body BEL` (rxvt extension)
+// `ESC ] 9 ; 4 ; …` is the ConEmu progress protocol, filtered below.
 const OSC9_G = /\x1b\]9;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC777_G = /\x1b\]777;notify;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC633E_G = /\x1b\]633;E;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-// ConEmu/Windows-Terminal progress protocol — `ESC ] 9 ; 4 ; state ; pct BEL`
-// with state 0=clear 1=set 2=error 3=indeterminate. Claude Code emits this
-// when `terminalProgressBarEnabled` is on: indeterminate/set while a turn
-// runs, clear when it stops — a machine-readable busy/idle signal that beats
-// the footer heuristic when present.
+// ConEmu/Windows-Terminal progress protocol (Claude Code with
+// `terminalProgressBarEnabled`): state 0 = clear, otherwise busy.
 const OSC9_PROGRESS_G = /\x1b\]9;4(?:;(\d*))?(?:;\d*)?(?:\x07|\x1b\\)/g;
-// iTerm2 tab-status extension (OSC 21337). Claude Code emits it when
-// `showStatusInTerminalTab` is on, with exactly three statuses: "Working…",
-// "Idle", "Waiting" (waiting = permission prompt). Another free upgrade over
-// the heuristic when the user has it enabled.
+// iTerm2 tab-status extension (Claude Code with `showStatusInTerminalTab`).
 const OSC21337_G = /\x1b\]21337;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-// Same prompt-back markers the renderer keys off (OSC 633 A/B/D/P + OSC
-// 133;A / 133;D), made global so matches can be position-checked against the
-// carry. Kept byte-for-byte in sync with the shared PROMPT_MARKER_RE: accepts
-// the ST (`\x1b\\`) terminator after 633 markers and treats 133;D (command
-// finished) as a prompt-return signal alongside 133;A. The carry-aware scan
-// (`text = w.carry + decoded`, CARRY_MAX=1024) already bridges a marker split
-// across PTY chunk boundaries, so no further carry change is needed here.
+// OSC 7501 program status. `?` alone is the support query; anything else is a
+// report of `key=value` fields separated by `:`.
+const OSC7501_G = /\x1b\]7501;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+const PROGRAM_STATUS_REPLY =
+  "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\";
+// Window title (OSC 0 / 2). Codex titles the window "[ ! ] Action Required"
+// while an approval waits.
+const OSC_TITLE_G = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+const CODEX_ACTION_REQUIRED_RE = /Action Required/i;
+// Prompt-back markers (OSC 633 A/B/D/P + OSC 133;A / 133;D). Kept in sync
+// with the shared PROMPT_MARKER_RE.
 const PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD](?:\x07|\x1b\\)/g;
-// Pi paints BEL-terminated OSC 133 zones around every chat message while it
-// runs; in a Pi pane only the shell's ST-terminated 133 (and any 633) marker
-// means the prompt is back. Kept in sync with the shared PI_PROMPT_MARKER_RE.
+// Pi paints BEL-terminated OSC 133 zones around every chat message; in a Pi
+// pane only the shell's ST-terminated 133 (and any 633) marker means the
+// prompt is back. Kept in sync with the shared PI_PROMPT_MARKER_RE.
 const PI_PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD]\x1b\\/g;
 const PI_EXIT_LINE_G = new RegExp(PI_EXIT_LINE_RE.source, "g");
 const ALT_SCREEN_LEAVE = "\x1b[?1049l";
 
-// High-confidence terminal problems that deserve a richer outcome than the
-// generic working→idle heuristic. Keep these deliberately narrow: agent
-// transcripts regularly contain words such as "error" and "authentication"
-// in ordinary prose, so only recognizable CLI failure/login copy qualifies.
-// These two tables used to be substring scans over the whole decoded stream,
-// which meant the agent WRITING code about authentication alerted the user
-// about authentication: `throw new Error("Unauthorized")`, a regex literal
-// containing "Authentication failed", or `console.log("fatal error")` each
-// fired a "needs you" (live-measured 2026-08-29: 45 of 195 delivered alerts in
-// 32h were this one false positive). The stream carries the agent's file
-// reads, diffs and tool output, so a substring test can never distinguish the
-// CLI's own status banner from the text it is editing.
-//
-// The fix is shape, not vocabulary: a banner OWNS its line. Each candidate
+// High-confidence terminal problems. A banner OWNS its line: each candidate
 // line is normalized (TUI glyphs and box drawing stripped), rejected if it
-// carries code punctuation, and then matched ANCHORED at the start. Bare
-// "unauthorized" and the generic "fatal error" are gone entirely — the former
-// is a stock HTTP status string and the latter is what every compiler prints.
+// carries code punctuation, and matched anchored at the start. Substring scans
+// used to alert on the agent's own code about authentication (2026-08-29: 45
+// of 195 delivered alerts in 32h).
 const CREDENTIAL_LINE_RE =
   /^(?:not\s+(?:logged|signed)\s+in|authentication\s+(?:is\s+)?(?:required|failed)|oauth\s+token\s+(?:expired|invalid)|unauthorized\s+(?:request|account)|invalid\s+api\s+key)\b/i;
 const HARD_FAILURE_LINE_RE =
   /^(?:you(?:'|’)ve\s+hit\s+your\s+(?:usage|rate)\s+limit|(?:usage|rate)\s+limit\s+(?:reached|exceeded|exhausted)|credit\s+balance\s+(?:is\s+)?too\s+low|(?:credit|quota)\s+(?:balance\s+)?(?:is\s+)?(?:exhausted|exceeded)|(?:request|connection)\s+failed\s+after\s+\d+\s+retr(?:y|ies))\b/i;
 
-// Leading TUI decoration a banner can carry: Ink bullets, box drawing, list
-// markers, quote bars.
 const LINE_DECORATION_RE = /^[\s>│┃|*•●○◆◇⏺⎿└├─┌┐┘╭╮╰╯═║✗✘×✖!⚠]+/u;
 // Punctuation that effectively never appears in a CLI status banner but is
-// everywhere in source code, diffs and log lines. One hit disqualifies the
-// line, which is what keeps the agent's own edits from alerting the user.
-// The apostrophe is deliberately NOT here — real copy says "You've hit your
-// usage limit" — and quoted code that uses it ("throw new Error('…')") is
-// already disqualified by its brackets and semicolon.
+// everywhere in source code, diffs and log lines. The apostrophe is
+// deliberately absent ("You've hit your usage limit").
 const CODE_PUNCTUATION_RE = /[{}();=<>[\]"`\\]|\/\/|\/\*|::|=>/;
-// A banner is a sentence, not a paragraph or a minified blob.
 const MAX_BANNER_LINE_LENGTH = 160;
 
-// Normalize one stream line to the text a human would read as the message,
-// or null when the line cannot be a banner at all.
 function bannerLine(rawLine: string): string | null {
   const line = rawLine.replace(LINE_DECORATION_RE, "").trim();
   if (!line || line.length > MAX_BANNER_LINE_LENGTH) return null;
@@ -697,25 +1280,16 @@ export function classifyBannerLine(rawLine: string): "blocked" | "failed" | null
   return null;
 }
 
-// `plain` is the ALREADY-STRIPPED carry+chunk text (onChunk strips once and
-// shares it across every detector); `freshFrom` is an offset into it.
+// `plain` is the already-stripped carry+chunk text; `freshFrom` is an offset
+// into it. Segments break on CR as well as LF (TUIs rewrite a row with \r).
 function detectTerminalProblem(
   plain: string,
   freshFrom: number,
 ): { kind: "blocked" | "failed"; body: string } | null {
-  // Walk the stream line by line, judging only lines that reach into the
-  // freshly arrived bytes (a banner sitting in the carry was already judged on
-  // an earlier chunk). The body quotes the banner verbatim instead of a
-  // generic guess, so the alert is self-evidencing: if a line ever matches
-  // that shouldn't, the notification itself shows what it was.
-  // Segments break on CR as well as LF: TUIs rewrite a row with a bare \r,
-  // so LF-only splitting would run several visual lines together and hide a
-  // banner behind whatever was printed before it.
   let segmentStart = 0;
   for (let i = 0; i <= plain.length; i++) {
     const ch = i < plain.length ? plain[i] : "\n";
     if (ch !== "\n" && ch !== "\r") continue;
-    // Judge the segment only if it reaches into the freshly arrived bytes.
     if (i > freshFrom) {
       const kind = classifyBannerLine(plain.slice(segmentStart, i));
       if (kind) return { kind, body: bannerLine(plain.slice(segmentStart, i)) as string };
@@ -726,9 +1300,7 @@ function detectTerminalProblem(
 }
 
 // Collect regex matches that END inside the newly arrived text (index >=
-// minEnd). Matches fully contained in the carry were already processed on a
-// previous chunk; without this guard a notification escape sitting in the
-// carry window would fire once per chunk until it scrolled out.
+// minEnd). Matches fully contained in the carry were processed already.
 function newMatches(re: RegExp, text: string, minEnd: number): RegExpExecArray[] {
   const out: RegExpExecArray[] = [];
   re.lastIndex = 0;
@@ -740,230 +1312,136 @@ function newMatches(re: RegExp, text: string, minEnd: number): RegExpExecArray[]
   return out;
 }
 
-// Enter (or stay in) the working state, stamping the phase start on the
-// idle/blocked → working transition.
-//
-// Deliberately does NOT rearm the notify policy: a stream re-match of the
-// working footer is not proof of a NEW turn — a mid-turn output stall (>
-// quiet window of byte silence, common on ConPTY during hidden thinking or
-// silent tool runs) resumes through here too, and rearming on it let one
-// long turn fire a "finished" ghost per stall (the 2026-07-06 spam loop).
-// A new turn in a manual pane always starts with user input, so the rearm
-// lives in noteTerminalUserInput() instead; the policy's same-kind dedup
-// then caps heuristic dones at one per user interaction.
-function enterWorking(w: PaneWatcher, now: number): void {
-  w.completedTurnPending = false;
-  if (w.state !== "working") {
-    w.workingSince = now;
-    tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
-    // Push the working chip state on the transition only (emitPaneState dedups
-    // repeats anyway, so the per-chunk lastWorkingAt sustain below is cheap).
-    emitPaneState(w, "working");
-  }
-  w.state = "working";
-  w.lastWorkingAt = now;
+export interface ProgramStatusReport {
+  state: string;
+  app: string | null;
+  id: string | null;
+  kind: string | null;
+  msg: string | null;
 }
 
-// User keystrokes / injected input reached this pane's pty. This is the one
-// signal that genuinely means "a fresh turn may start" for a manual terminal
-// pane, so it (not the stream heuristic) clears the notify policy's dedup +
-// completion guard. Excluded (Cora worker) panes are driven programmatically
-// and alert through run-store instead, so they're skipped. Unknown panes
-// (chat backends, orchestration ptys) are a cheap Map-miss no-op.
-export function noteTerminalUserInput(paneId: string, data?: string): void {
-  // xterm's onData also carries device/cursor/color replies and focus reports.
-  // Restoring a TUI requests these without a user starting a new turn.
-  if (data !== undefined && /^(?:\x1b\[[?>=]?[\d;:]*(?:[cnRt]|\$y)|\x1b\[[IO]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\)+$/.test(data)) return;
-  const w = watchers.get(paneId);
-  if (!w || w.excluded) return;
-  if (w.state !== "working") {
-    w.workingSince = 0;
-    w.lastWorkingAt = 0;
-  }
-  w.userTurnArmed = true;
-  rearm(paneSourceKey(paneId));
-}
-
-// The host slept: the wall-clock gap is not byte silence. Without this the
-// sweep's first tick after wake sees `now - lastWorkingAt` far past the quiet
-// window and fires "finished" for every pane that was mid-turn at suspend,
-// before the agent has had a chance to repaint. Restart the quiet window.
-export function noteHostResume(): void {
-  const now = Date.now();
-  for (const w of watchers.values()) {
-    if (w.state !== "working") continue;
-    w.lastWorkingAt = now;
-    w.lastOutputAt = now;
-    tanLog(`pane=${w.paneId} host resume — quiet window restarted`);
+function decodeStatusText(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const text = Buffer.from(value, "base64").toString("utf8");
+    // The protocol rejects decoded text with control characters.
+    if (!text || /[\x00-\x1f\x7f]/.test(text)) return null;
+    return text;
+  } catch {
+    return null;
   }
 }
 
-// Background work the pane still owns even though the main REPL turn ended:
-// stream-counted teammates or hook-reported subagents. While held, every
-// "turn stopped" signal (progress clear, idle status, quiet window, explicit
-// done) is deferred; the alert fires when the last one drains.
-function backgroundHeld(w: PaneWatcher): boolean {
-  return (
-    w.teammatesActive > 0 ||
-    w.hookSubagentsActive > 0 ||
-    backgroundTasksActive(w, Date.now())
-  );
-}
-
-function backgroundLabel(w: PaneWatcher): string {
-  return `${w.teammatesActive} teammate(s), ${w.hookSubagentsActive} hook subagent(s), ${w.hookBackgroundTasks} background task(s), ${w.backgroundProcs.length} live process(es)`;
-}
-
-function clearBackgroundWork(w: PaneWatcher): void {
-  w.hookBackgroundTasks = 0;
-  w.hookPromptSinceStop = false;
-  w.backgroundLaunchAt = 0;
-  w.lastBackgroundLaunchAt = 0;
-  w.backgroundProcs = [];
-  w.lastBackgroundProcCheckAt = 0;
-}
-
-// Whether background tasks still hold this pane: the hook counter, or a
-// process launched after the pending launch that is still alive. The
-// process list is consulted only while a launch is pending and at most every
-// BACKGROUND_PROC_RECHECK_MS; on platforms without `ps` the counter alone
-// decides.
-function backgroundTasksActive(w: PaneWatcher, now: number): boolean {
-  if (w.backgroundLaunchAt === 0) return false;
-  if (now - w.backgroundLaunchAt > BACKGROUND_PROC_MAX_HOLD_MS) {
-    tanLog(`pane=${w.paneId} background hold expired after ${BACKGROUND_PROC_MAX_HOLD_MS}ms`);
-    clearBackgroundWork(w);
-    return false;
+// Parse the body of one OSC 7501 report; null for the query and for bodies
+// without a state.
+export function parseProgramStatus(body: string): ProgramStatusReport | null {
+  if (body.trim().startsWith("?")) return null;
+  const fields = new Map<string, string>();
+  for (const part of body.split(":")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) continue;
+    fields.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
   }
-  if (now - w.lastBackgroundProcCheckAt >= BACKGROUND_PROC_RECHECK_MS) {
-    w.lastBackgroundProcCheckAt = now;
-    const rootPid = pty.sessionPid(w.paneId);
-    if (rootPid !== null) {
-      // The hook process that reported the launch, and the CLI's own tool
-      // shell, start in the same window; a fresh listing on every check keeps
-      // only what is still running right now.
-      const listed = descendantsStartedAfter(rootPid, w.backgroundLaunchAt - 2_000);
-      if (listed !== null) {
-        const alive = w.backgroundProcs.length > 0 ? aliveProcesses(w.backgroundProcs) : listed;
-        w.backgroundProcs = alive.length > 0 ? alive : listed;
-        // A background command can finish inside a subagent without a
-        // separate parent Stop. An empty process tree drains its stale
-        // counter, but a failed inspection or a pending spawn cannot.
-        if (listed.length === 0 && w.backgroundProcs.length === 0 &&
-            now - w.lastBackgroundLaunchAt >= BACKGROUND_PROC_START_GRACE_MS) {
-          clearBackgroundWork(w);
-          return false;
-        }
+  const state = fields.get("state");
+  if (!state) return null;
+  return {
+    state,
+    app: fields.get("app") ?? null,
+    id: fields.get("id") ?? null,
+    kind: fields.get("kind") ?? null,
+    msg: decodeStatusText(fields.get("msg")),
+  };
+}
+
+function blockedBody(kind: string | null, msg: string | null): string {
+  if (msg) return oneLine(msg, SUMMARY_MAX_CHARS);
+  if (kind === "permission") return "Wants your permission to continue.";
+  if (kind === "question") return "Has a question for you.";
+  if (kind === "auth") return "Needs you to sign in.";
+  return "Waiting for your answer.";
+}
+
+function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: number): void {
+  // Child records describe background tasks. The parent's own state decides
+  // whether the turn is done.
+  if (report.id) return;
+  const app = report.app ?? "";
+  const reported: PublicAgentRuntime | null = app === "codex" ? "codex" : app.startsWith("claude") ? "claude" : null;
+  if (!w.runtime && reported) identifyRuntime(w, reported, "program status");
+  if (reported && w.runtime && reported !== w.runtime) return;
+  if (!w.signals.programStatus) {
+    w.signals.programStatus = true;
+    tanLog(`pane=${w.paneId} program status active (${app || "unknown app"})`);
+  }
+  const previous = w.lastProgramState;
+  w.lastProgramState = report.state;
+  switch (report.state) {
+    case "working":
+      if (w.state === "blocked") promptResolved(w, now);
+      // Only a transition into working is new activity (a queued message
+      // started); repeated working reports carry progress.
+      else if (previous !== "working") {
+        cancelPendingDone(w, "program working again");
+        enterWorking(w, now);
+      } else {
+        w.lastWorkingAt = now;
       }
+      return;
+    case "blocked":
+      needsYou(w, now, blockedBody(report.kind, report.msg), `program status blocked${report.kind ? ` ${report.kind}` : ""}`);
+      return;
+    case "done":
+      w.state = "idle";
+      emitPaneState(w, "idle");
+      if (w.runtime === "codex") return;
+      requestDone(w, { origin: "program", body: report.msg, delayMs: PROGRAM_DONE_CONFIRM_MS });
+      return;
+    case "idle": {
+      const wasActive = previous === "working" || previous === "blocked";
+      w.state = "idle";
+      emitPaneState(w, "idle");
+      if (!wasActive) return;
+      if (w.runtime === "codex") {
+        // Codex has no `done`: idle after working is the turn end, and an
+        // interrupt looks the same, so a structured source is preferred.
+        w.codexAwaitingIdle = true;
+        w.codexScreen?.markCompleted();
+        codexTurnEndedOnScreen(w, now);
+        return;
+      }
+      // Claude reports a turn the user stopped as idle.
+      closeTurnSilently(w, now, "program status idle (stopped)");
+      return;
     }
-  }
-  if (w.hookBackgroundTasks > 0) return true;
-  if (w.backgroundProcs.length > 0) return true;
-  // Counter drained and nothing alive: the launch is over.
-  clearBackgroundWork(w);
-  return false;
-}
-
-function hookToolName(payload: Record<string, unknown> | null): string {
-  const value = payload?.tool_name ?? payload?.toolName ?? payload?.tool;
-  return typeof value === "string" ? value : "";
-}
-
-function hookLaunchesBackgroundWork(payload: Record<string, unknown> | null): boolean {
-  const tool = hookToolName(payload);
-  if (tool === "Monitor") return true;
-  if (tool !== "Bash") return false;
-  const input = payload?.tool_input ?? payload?.toolInput;
-  return (
-    typeof input === "object" &&
-    input !== null &&
-    (input as Record<string, unknown>).run_in_background === true
-  );
-}
-
-// Claude Code hook events for a pane the user opened themselves (orchestrated
-// worker panes are excluded and alert through run-store instead). Only the
-// subagent lifecycle is consumed here: Stop is deliberately NOT treated as
-// "finished", because Claude fires it at the end of the main turn even while
-// background agents and background tasks it launched are still running.
-export function noteTerminalHookEvent(
-  paneId: string,
-  hookName: string,
-  payload: Record<string, unknown> | null = null,
-): void {
-  const w = watchers.get(paneId);
-  if (!w || w.excluded) return;
-  const now = Date.now();
-  w.lastHookEventAt = now;
-  switch (hookName) {
-    case "PreToolUse":
-      if (hookLaunchesBackgroundWork(payload)) {
-        w.hookBackgroundTasks += 1;
-        if (w.backgroundLaunchAt === 0) w.backgroundLaunchAt = now;
-        w.lastBackgroundLaunchAt = now;
-        tanLog(
-          `pane=${w.paneId} hook PreToolUse ${hookToolName(payload)} in background -> ${w.hookBackgroundTasks}`,
-        );
-      }
-      return;
-    case "UserPromptSubmit":
-      w.completedTurnPending = false;
-      w.hookPromptSinceStop = true;
-      return;
-    case "Stop":
-      // A Stop with no user prompt since the previous Stop is the follow-up
-      // turn the CLI runs when a background task reports back.
-      if (!w.hookPromptSinceStop && w.hookBackgroundTasks > 0) {
-        w.hookBackgroundTasks -= 1;
-        tanLog(`pane=${w.paneId} hook Stop after task follow-up -> ${w.hookBackgroundTasks}`);
-      }
-      w.hookPromptSinceStop = false;
-      return;
-    case "SubagentStart":
-      w.hookSubagentsActive += 1;
-      tanLog(`pane=${w.paneId} hook SubagentStart -> ${w.hookSubagentsActive}`);
-      return;
-    case "SubagentStop":
-      w.hookSubagentsActive = Math.max(0, w.hookSubagentsActive - 1);
-      tanLog(`pane=${w.paneId} hook SubagentStop -> ${w.hookSubagentsActive}`);
-      return;
-    case "SessionStart":
-    case "SessionEnd":
-      w.completedTurnPending = false;
-      // A new or ended CLI session owns no subagents from the previous one.
-      if (w.hookSubagentsActive > 0) {
-        tanLog(`pane=${w.paneId} hook ${hookName} — subagent counter reset`);
-      }
-      w.hookSubagentsActive = 0;
-      clearBackgroundWork(w);
+    case "error":
+      w.state = "failed";
+      emitPaneState(w, "error");
+      if (!turnActive(w)) return;
+      closeTurnSilently(w, now, "program status error");
+      deliver(w, "failed", { body: report.msg ? oneLine(report.msg, SUMMARY_MAX_CHARS) : "The turn ended with an error." });
       return;
     default:
       return;
   }
 }
 
-export function noteTerminalWillDispose(paneId: string): void {
-  const w = watchers.get(paneId);
-  if (w) w.disposing = true;
-}
-
-// Snapshot foreground agent panes before app-level PTY teardown begins. The
-// main watcher reads raw PTY bytes even for hidden panes, so it is a stronger
-// quit-time liveness signal than the renderer's visibility-gated xterm poller.
-export function activeTerminalAgentPaneIds(): string[] {
-  const active: string[] = [];
-  for (const watcher of watchers.values()) {
-    if (!watcher.disposing && watcher.runtime && pty.hasSession(watcher.paneId)) {
-      active.push(watcher.paneId);
-    }
-  }
-  return active;
-}
-
-// True when the current/just-ended working phase ran long enough to be a
-// real turn rather than a boot blip or pattern flap (see MIN_WORK_MS).
-function workedLongEnough(w: PaneWatcher): boolean {
-  return w.lastWorkingAt - w.workingSince >= MIN_WORK_MS;
+function identifyRuntime(w: PaneWatcher, runtime: PublicAgentRuntime, why: string): void {
+  // A banner repainted by the same agent (or a restored runtime hint) keeps
+  // the session's trusted signals; a launched command is a new session.
+  const sameSession = w.runtime === runtime && why !== "command marker";
+  w.runtime = runtime;
+  w.agentProcSeen = false;
+  w.agentProcGone = false;
+  w.lastAgentProcCheckAt = 0;
+  if (!sameSession) resetAgentSession(w);
+  // Launching an agent is not a turn. The Enter that started the CLI must not
+  // arm a "finished" for whatever the CLI does at startup (Codex can run a
+  // startup task with no user message).
+  cancelPendingDone(w, "agent identified");
+  w.turn = null;
+  tanLog(`pane=${w.paneId} runtime identified: ${runtime} (${why})`);
+  // Show "starting" until the first real signal classifies the state.
+  emitPaneState(w, "launching");
 }
 
 function onChunk(w: PaneWatcher, chunk: Buffer): void {
@@ -974,28 +1452,40 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   const carryLen = w.carry.length;
   const text = w.carry + decoded;
 
-  // 1) Explicit notification escapes — honored for ANY foreground program,
-  // agent or not, mirroring a real terminal emulator.
+  // 0) OSC 7501. The query is answered here rather than in the renderer: this
+  // tap sees the stream when the pane's workspace is hidden, and the reply
+  // must reach the program before its end-of-query marker is answered.
+  if (text.includes("\x1b]7501;")) {
+    for (const m of newMatches(OSC7501_G, text, carryLen)) {
+      const body = m[1] ?? "";
+      if (body.trim() === "?") {
+        if (!w.replayingTail) {
+          tanLog(`pane=${w.paneId} answered OSC 7501 query`);
+          pty.write(w.paneId, PROGRAM_STATUS_REPLY);
+        }
+        continue;
+      }
+      const report = parseProgramStatus(body);
+      if (report) handleProgramStatus(w, report, Date.now());
+    }
+  }
+
+  // 1) Explicit notification escapes, honored for ANY foreground program.
   for (const m of newMatches(OSC9_G, text, carryLen)) {
     const message = m[1] ?? "";
-    // ConEmu overloaded OSC 9 with numeric subcommands (1..12): `9;4` is the
-    // progress protocol, `9;9;<cwd>` is cwd reporting (emitted per prompt by
-    // Windows Terminal shell-integration snippets and oh-my-posh), etc. None
-    // of them are toasts. A real iTerm2/growl notification is free text, so
-    // a bare 1–2 digit first param marks the ConEmu family; a message that
-    // merely STARTS with digits ("3 tests failed") doesn't match.
+    // ConEmu overloaded OSC 9 with numeric subcommands (`9;4` progress,
+    // `9;9;<cwd>`); none of them are toasts.
     if (/^\d{1,2}(?:;|$)/.test(message)) continue;
     handleExplicitNotify(w, message.trim());
   }
   for (const m of newMatches(OSC777_G, text, carryLen)) {
     const parts = (m[1] ?? "").split(";");
-    const message = parts.filter((p) => p.trim().length > 0).join(" — ");
+    const message = parts.filter((p) => p.trim().length > 0).join(": ");
     handleExplicitNotify(w, message.trim());
   }
 
   // 2) Agent lifecycle. Runtime identification first (shell-integration
-  // command marker beats banner sniffing), then live-state classification
-  // while a first-party runtime is in the foreground.
+  // command marker beats banner sniffing), then live-state classification.
   w.ring = (w.ring + decoded).slice(-RING_MAX);
   let launchedRuntime: PublicAgentRuntime | null = null;
   for (const m of newMatches(OSC633E_G, text, carryLen)) {
@@ -1004,43 +1494,16 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     if (publicRuntime) launchedRuntime = publicRuntime;
   }
   if (launchedRuntime) {
-    // A shell command marker is stronger than heuristic output: the user has
-    // launched an agent in this pane. It identifies the runtime, but launching
-    // a TUI is not an agent turn and must not produce a ready/trust toast. Real
-    // prompt submission is armed by noteTerminalUserInput().
-    w.userTurnArmed = false;
-    if (w.state !== "working") {
-      w.workingSince = 0;
-      w.lastWorkingAt = 0;
-    }
+    // A shell command marker means the user launched an agent. Launching a
+    // TUI is not an agent turn.
+    identifyRuntime(w, launchedRuntime, "command marker");
     rearm(paneSourceKey(w.paneId));
-  }
-  if (!w.runtime || w.lastEmittedState === null) {
-    let sniffed: PublicAgentRuntime | null = launchedRuntime;
-    if (!sniffed) {
-      // The ring was just updated above, so its tail is exactly the fresh
-      // decoded text plus the bounded overlap (see SNIFF_OVERLAP).
-      const window = w.ring.slice(-(decoded.length + SNIFF_OVERLAP));
-      const banner = sniffRuntime(window);
-      if (banner) sniffed = coercePublicRuntime(banner);
-      if (!sniffed) sniffed = sniffLiveRuntime(w.ring.slice(-2048));
-    }
-    if (sniffed) {
-      w.runtime = sniffed;
-      w.agentProcSeen = false;
-      w.agentProcGone = false;
-      w.lastAgentProcCheckAt = 0;
-      w.state = "idle";
-      w.workingSince = 0;
-      w.lastWorkingAt = 0;
-      w.lastChunkAssertedWorking = false;
-      w.completedTurnPending = false;
-      tanLog(`pane=${w.paneId} runtime sniffed: ${sniffed}`);
-      // An agent was just detected but no working/idle pattern has classified
-      // yet — show the chip as "starting" until the first real signal. The
-      // first enterWorking / blocked / idle below promotes it within a beat.
-      emitPaneState(w, "launching");
-    }
+  } else if (!w.runtime || w.lastEmittedState === null) {
+    const window = w.ring.slice(-(decoded.length + SNIFF_OVERLAP));
+    const banner = sniffRuntime(window);
+    let sniffed = banner ? coercePublicRuntime(banner) : null;
+    if (!sniffed) sniffed = sniffLiveRuntime(w.ring.slice(-2048));
+    if (sniffed) identifyRuntime(w, sniffed, "banner");
   }
 
   if (w.runtime) {
@@ -1058,25 +1521,18 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           w.codexScreen.write(chunk);
         }
       }
+      if (text.includes("\x1b]")) scanCodexTitle(w, text, carryLen, now);
     }
-    // Set true below when THIS chunk positively asserts working (footer
-    // pattern / structured busy signal); the per-chunk value feeds the
-    // stall-aware quiet window in the sweep.
     let chunkAssertedWorking = false;
-    // Offset into the STRIPPED text where the fresh bytes begin — shared by
-    // classifyTail and countTeammateEvents below so only matches that end in
-    // the newly arrived bytes count (see the classifyTail comment further
-    // down).
+    // Offset into the STRIPPED text where the fresh bytes begin.
     const fresh = carryLen === 0 ? 0 : stripAnsi(w.carry).length;
-    // Strip carry+chunk ONCE and share it: countTeammateEvents,
-    // detectTerminalProblem and classifyTail below all consume the same
-    // stripped text, and each used to re-run stripAnsi over it per chunk.
     const plain = stripAnsi(text);
+    const programOwned = w.signals.programStatus;
+    const hookOwned = !programOwned && w.signals.hooks && w.runtime === "claude";
 
     // Codex shimmers "Working" between full footer repaints. Sustain an
-    // existing turn on those frames, but not on arbitrary output: editing
-    // the composer also emits PTY bytes and can prolong a stale busy state.
-    // A shimmer alone must never start a new turn.
+    // existing turn on those frames, but not on arbitrary output (editing the
+    // composer also emits bytes).
     if (
       w.state === "working" &&
       (w.runtime !== "codex" || /^(?:\s*[•●]?\s*Working\s*)+$/i.test(stripAnsi(decoded)))
@@ -1084,32 +1540,12 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.lastWorkingAt = now;
     }
 
-    // Teammate lifecycle bookkeeping (Claude only). Must run BEFORE the
-    // turn-stopped handlers below: a "1 teammate started" transcript line and
-    // the main turn's progress-clear can land in the same chunk, and the
-    // clear must see the incremented counter to know the pane is still busy.
-    //
-    // Fresh-offset slack: stripAnsi leaves a PARTIAL escape at the carry's end
-    // unstripped, so stripAnsi(carry).length can overshoot the carry content's
-    // true offset within the stripped combined text — and unlike classifyTail's
-    // patterns (repainted every second), a teammate event is ONE-SHOT: a match
-    // rejected as "stale" by the overshoot is lost forever, and a lost
-    // "started" resurrects the false done. The slack biases the error the safe
-    // way — an event near the boundary may be counted twice (a spurious
-    // started only DELAYS the alert and the silence self-heal clears it) but
-    // is never dropped.
-    // KNOWN LIMITATION (accepted): the counter reads a lossy visual stream, so
-    // it can desync — a full-screen redraw (resize, /clear) can re-count a
-    // stale started/finished line still on screen, printing this repo's own
-    // test fixtures in a transcript counts their literal phrases, and the
-    // boundary slack above can double-count. Every desync is bounded:
-    //   counter too HIGH → the done alert is HELD, until the sweep's
-    //     15s-total-silence self-heal or Claude's own OSC 9 "waiting for your
-    //     input" (arrives within ~60s of true idle, live-captured) clears it —
-    //     worst case a delayed notification, never a lost one;
-    //   counter too LOW → the hold releases early and that one turn reverts to
-    //     exactly the pre-fix behavior (a premature "finished"), never worse.
-    if (w.runtime === "claude") {
+    // Teammate lifecycle bookkeeping (heuristic Claude panes). Must run
+    // BEFORE the turn-stopped handlers: a "1 teammate started" line and the
+    // main turn's progress-clear can land in the same chunk. The 16-char
+    // slack biases boundary errors toward double counting (a delayed alert)
+    // instead of a lost "started" (a false finish).
+    if (w.runtime === "claude" && !programOwned && !hookOwned) {
       const tm = countTeammateEvents(plain, Math.max(0, fresh - 16), { preStripped: true });
       if (tm.started || tm.finished) {
         w.teammatesActive = Math.max(0, w.teammatesActive + tm.started - tm.finished);
@@ -1117,95 +1553,29 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       }
     }
 
-    // Structured busy/idle signals (both opt-in Claude Code settings; both
-    // strictly more reliable than the footer heuristic when present).
-    for (const m of newMatches(OSC9_PROGRESS_G, text, carryLen)) {
-      const state = m[1] ?? "";
-      if (state === "" || state === "0") {
-        // Progress cleared — the MAIN turn stopped. A live background
-        // teammate keeps the pane busy, though: hold the alert AND the chip
-        // until the teammate count drains (or the sweep's silence self-heal
-        // clears a stale counter). Keeping w.state on "working" is
-        // load-bearing — the any-output sustain above then rides the teammate
-        // strip's per-second ticks, so the quiet-window sweep stays quiet
-        // while a teammate genuinely runs.
-        if (backgroundHeld(w)) {
-          tanLog(
-            `pane=${w.paneId} progress-clear held — ${backgroundLabel(w)}`,
-          );
-          // A blocked chip stays blocked — a pending permission prompt is the
-          // actionable cue and must not be repainted as mere busyness.
-          if (w.state !== "blocked") emitPaneState(w, "working");
-          continue;
+    if (!programOwned) {
+      // Structured busy/idle signals (opt-in Claude Code settings).
+      for (const m of newMatches(OSC9_PROGRESS_G, text, carryLen)) {
+        const state = m[1] ?? "";
+        if (state === "" || state === "0") {
+          heuristicIdle(w, now, "progress cleared", 0);
+        } else {
+          w.codexAwaitingIdle = false;
+          enterWorking(w, now);
+          chunkAssertedWorking = true;
         }
-        if (
-          w.state === "working" &&
-          w.userTurnArmed &&
-          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-        ) {
-          deliver(w, "done", null);
-        }
-        if (w.state === "working") w.state = "idle";
-        if (w.runtime === "codex") {
-          w.codexAwaitingIdle = true;
-          w.codexScreen?.markCompleted();
-        }
-        w.userTurnArmed = false;
-        // Turn done = ready for input → chip "idle". Emit regardless of the
-        // toast gate; the chip is focus-independent.
-        emitPaneState(w, "idle");
-      } else {
-        w.codexAwaitingIdle = false;
-        enterWorking(w, now);
-        chunkAssertedWorking = true;
       }
-    }
-    for (const m of newMatches(OSC21337_G, text, carryLen)) {
-      const status = /(?:^|;)status=([^;]*)/.exec(m[1] ?? "")?.[1] ?? "";
-      if (/working/i.test(status)) {
-        w.codexAwaitingIdle = false;
-        enterWorking(w, now);
-        chunkAssertedWorking = true;
-      } else if (/waiting/i.test(status) && w.runtime === "claude") {
-        if (
-          w.state !== "blocked" &&
-          (w.state === "working" || w.userTurnArmed) &&
-          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-        ) {
-          // A positive "waiting on the user" signal is never the previous
-          // turn's tail — stand the completion guard down (a prior done on
-          // this source would otherwise swallow it) so the alert delivers.
-          rearm(paneSourceKey(w.paneId));
-          deliver(w, "blocked", null);
-          w.userTurnArmed = false;
+      for (const m of newMatches(OSC21337_G, text, carryLen)) {
+        const status = /(?:^|;)status=([^;]*)/.exec(m[1] ?? "")?.[1] ?? "";
+        if (/working/i.test(status)) {
+          w.codexAwaitingIdle = false;
+          enterWorking(w, now);
+          chunkAssertedWorking = true;
+        } else if (/waiting/i.test(status) && w.runtime === "claude") {
+          if (!hookOwned || w.pendingToolCalls > 0) needsYou(w, now, w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "tab status waiting");
+        } else if (/idle/i.test(status)) {
+          heuristicIdle(w, now, "tab status idle", 0);
         }
-        w.state = "blocked";
-        emitPaneState(w, "blocked");
-      } else if (/idle/i.test(status)) {
-        // Same teammate hold as the progress-clear path: "Idle" describes the
-        // main REPL, not a background teammate still running.
-        if (backgroundHeld(w)) {
-          tanLog(
-            `pane=${w.paneId} idle status held — ${backgroundLabel(w)}`,
-          );
-          // Same blocked-chip precedence as the progress-clear hold above.
-          if (w.state !== "blocked") emitPaneState(w, "working");
-          continue;
-        }
-        if (
-          w.state === "working" &&
-          w.userTurnArmed &&
-          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-        ) {
-          deliver(w, "done", null);
-        }
-        w.state = "idle";
-        w.userTurnArmed = false;
-        if (w.runtime === "codex") {
-          w.codexAwaitingIdle = true;
-          w.codexScreen?.markCompleted();
-        }
-        emitPaneState(w, "idle");
       }
     }
 
@@ -1214,98 +1584,60 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       problem !== null && !(problem.kind === "blocked" && w.runtime !== "claude");
     if (applyProblem && problem) {
       const priorState = w.state;
-      const shouldAlert =
-        priorState !== problem.kind &&
-        (priorState === "working" || w.userTurnArmed);
+      const shouldAlert = priorState !== problem.kind && (priorState === "working" || turnActive(w));
       if (w.runtime === "codex") {
         w.codexAwaitingIdle = true;
         w.codexScreen?.markCompleted();
       }
       w.state = problem.kind;
       emitPaneState(w, problem.kind === "failed" ? "error" : "blocked");
-      if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
-        // This is a positive new terminal outcome, not the tail of a prior
-        // completion. Let it replace that state in policy + center history.
+      if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS && !w.replayingTail) {
+        // A positive new outcome, not the tail of a prior completion.
         rearm(paneSourceKey(w.paneId));
-        deliver(w, problem.kind, problem.body);
-        w.userTurnArmed = false;
+        if (problem.kind === "failed") closeTurnSilently(w, now, "hard failure banner");
+        else cancelPendingDone(w, "credential banner");
+        deliver(w, problem.kind, { body: problem.body });
       }
     }
 
-    // Only pattern matches that END in the freshly arrived bytes count —
-    // the carry exists to bridge phrases split across chunk boundaries, but
-    // a footer merely sitting in it (painted seconds ago) must not keep
-    // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = applyProblem || w.codexScreen ? null : classifyTail(w.runtime, plain, fresh, { preStripped: true });
+    // Only pattern matches that END in the freshly arrived bytes count.
+    const cls =
+      applyProblem || w.codexScreen || programOwned
+        ? null
+        : classifyTail(w.runtime, plain, fresh, { preStripped: true });
     if (cls === "blocked" && (w.runtime === "claude" || w.runtime === "pi")) {
-      if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
-      // Deliberately NOT gated on workedLongEnough: a permission prompt can
-      // appear within the first second of a turn, and missing a real
-      // "needs you" is worse than an occasional boot-menu alert (which the
-      // suppress-while-watching rule already swallows in the common case).
-      if (
-        w.state !== "blocked" &&
-        (w.state === "working" || w.userTurnArmed) &&
-        now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-      ) {
-        // Same reasoning as the OSC 21337 waiting path: a blocked prompt in
-        // a live working phase means the agent genuinely stopped for the
-        // user, even if an earlier (possibly stall-ghost) done armed the
-        // completion guard on this source. Missing a real "needs you" is
-        // worse than an occasional duplicate, so rearm before delivering.
-        rearm(paneSourceKey(w.paneId));
-        deliver(w, "blocked", null);
-        w.userTurnArmed = false;
+      // With hooks, a permission dialog exists only while a tool call waits;
+      // anything else that matches is transcript text that looks like one.
+      if (!hookOwned || w.pendingToolCalls > 0) {
+        if (w.state !== "blocked") tanLog(`pane=${w.paneId} screen shows a prompt (was ${w.state})`);
+        needsYou(w, now, hookOwned && w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "screen prompt");
       }
-      w.state = "blocked";
-      emitPaneState(w, "blocked");
     } else if (cls === "working") {
       enterWorking(w, now);
       chunkAssertedWorking = true;
     } else if (cls === "idle") {
-      w.completedTurnPending = true;
-      if (!backgroundHeld(w)) {
-        const finished = w.state === "working";
-        w.state = "idle";
-        emitPaneState(w, "idle");
-        if (finished && w.userTurnArmed && workedLongEnough(w) && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
-          deliver(w, "done", null);
-        }
-        w.userTurnArmed = false;
+      if (hookOwned) {
+        hookScreenIdle(w, now);
+      } else {
+        w.completedTurnPending = true;
+        heuristicIdle(w, now, "idle frame", HEURISTIC_IDLE_CONFIRM_MS);
       }
     } else if (cls === "done") {
-      // Positive completion line (e.g. "Session ended.") — alert without
-      // waiting out the quiet window. Unlike the progress-clear / idle-status
-      // holds above, this is a REAL session end: any teammate bookkeeping
-      // dies with the session, so reset it and deliver as usual.
+      // Positive session end line ("Session ended."). Any teammate
+      // bookkeeping dies with the session.
       w.teammatesActive = 0;
-      w.hookSubagentsActive = 0;
-      clearBackgroundWork(w);
-      if (
-        w.state === "working" &&
-        w.userTurnArmed &&
-        workedLongEnough(w) &&
-        now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
-      ) {
-        deliver(w, "done", null);
-      }
+      const wasWorking = w.state === "working";
       w.state = "idle";
-      w.userTurnArmed = false;
-      // Turn complete (positive done line) → chip ready, not exited. The TUI is
-      // still up; the real "done" (TUI gone) is the exited block below.
       emitPaneState(w, "idle");
+      if (wasWorking && !hasTrustedSignals(w) && workedLongEnough(w) && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        requestDone(w, { origin: "heuristic", delayMs: 0 });
+      }
     }
 
-    // Remember whether this chunk's bytes positively asserted working — the
-    // sweep reads it to pick the normal vs stall quiet window.
     w.lastChunkAssertedWorking = chunkAssertedWorking;
 
-    // Agent exit: the shell prompt is back (spark.ps1's OSC 633/133 markers),
-    // the TUI left the alt screen, or Pi printed the resume line it writes on
-    // an interactive quit. A turn that was still mid-work when the
-    // TUI vanished ended *somehow* — surface it; the suppression policy
-    // swallows the alert when the user themselves quit the agent (they're
-    // looking at that tab, by definition).
+    // Agent exit: the shell prompt is back, the TUI left the alt screen, or
+    // Pi printed the resume line it writes on an interactive quit.
     const promptReturned =
       newMatches(w.runtime === "pi" ? PI_PROMPT_MARKER_G : PROMPT_MARKER_G, text, carryLen).length > 0;
     const leftAltScreen = text.indexOf(ALT_SCREEN_LEAVE, Math.max(0, carryLen - ALT_SCREEN_LEAVE.length + 1)) !== -1;
@@ -1313,46 +1645,100 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     if (promptReturned || (leftAltScreen && !w.codexScreen) || piQuit) {
       markAgentExited(w, now, piQuit ? "pi exit line" : "prompt marker / alt-screen leave");
     }
-    // Codex also leaves the alternate screen when closing transcript views.
-    // Its process exit or a shell prompt marker confirms when the agent left.
+    // Codex also leaves the alternate screen when closing transcript views;
+    // its process exit or a shell prompt marker confirms when the agent left.
   }
 
   w.carry = text.slice(-CARRY_MAX);
 }
 
+function scanCodexTitle(w: PaneWatcher, text: string, carryLen: number, now: number): void {
+  for (const m of newMatches(OSC_TITLE_G, text, carryLen)) {
+    const blocked = CODEX_ACTION_REQUIRED_RE.test(m[1] ?? "");
+    if (blocked === w.codexTitleBlocked) continue;
+    w.codexTitleBlocked = blocked;
+    if (blocked) {
+      if (!w.signals.programStatus) needsYou(w, now, "Wants your approval to continue.", "title Action Required");
+    } else if (!w.signals.programStatus) {
+      promptResolved(w, now);
+    }
+  }
+}
+
+// An idle frame in a pane whose turns come from hooks. The chip follows only
+// when the user just interrupted; otherwise the Stop hook decides, and the
+// sweep settles a turn that ended without one. The turn itself is left to the
+// Stop hook even after an interrupt key: Claude sends no Stop for a turn the
+// user stopped, and an Esc that only closed a menu is followed by a real Stop
+// that may land after this frame.
+function hookScreenIdle(w: PaneWatcher, now: number): void {
+  if (!turnActive(w) && !w.hookFollowUp) {
+    if (w.state === "working" || w.state === "blocked") {
+      w.state = "idle";
+      emitPaneState(w, "idle");
+    }
+    return;
+  }
+  if (interruptedThisTurn(w, now) && w.pendingDone === null) {
+    if (w.state !== "idle") tanLog(`pane=${w.paneId} idle after an interrupt key; the Stop hook decides the turn`);
+    w.hookFollowUp = false;
+    w.state = "idle";
+    emitPaneState(w, "idle");
+    return;
+  }
+  w.screenIdleSince ??= now;
+}
+
+// A screen or stream signal that the turn is over, in a pane with no trusted
+// source. The idle state must hold for `confirmMs` without a working frame.
+function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: number): void {
+  if (w.teammatesActive > 0) {
+    tanLog(`pane=${w.paneId} ${why} held: ${w.teammatesActive} teammate(s) running`);
+    // A blocked chip stays blocked; a pending prompt is the actionable cue.
+    if (w.state !== "blocked") emitPaneState(w, "working");
+    return;
+  }
+  const finished = w.state === "working";
+  if (w.state !== "failed") w.state = "idle";
+  if (w.runtime === "codex") {
+    w.codexAwaitingIdle = true;
+    w.codexScreen?.markCompleted();
+  }
+  emitPaneState(w, "idle");
+  if (!finished || hasTrustedSignals(w)) return;
+  if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) return;
+  if (confirmMs > 0 && !workedLongEnough(w)) return;
+  if (interruptedThisTurn(w, now)) {
+    closeTurnSilently(w, now, "interrupted by the user");
+    return;
+  }
+  requestDone(w, { origin: "heuristic", delayMs: confirmMs });
+}
+
 // The foreground agent handed control back to the shell, seen either in the
 // stream (prompt marker, alt-screen leave) or in the process tree.
 function markAgentExited(w: PaneWatcher, now: number, reason: string): void {
-  clearCodexScreen(w);
   tanLog(`pane=${w.paneId} agent exited (${reason}); state was ${w.state}`);
+  // A turn that was still mid-work when the TUI vanished ended somehow;
+  // surface it. The user quitting the agent themselves is watching the pane.
   if (
     w.state === "working" &&
-    w.userTurnArmed &&
+    turnActive(w) &&
     workedLongEnough(w) &&
     now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
   ) {
-    deliver(w, "done", null);
+    requestDone(w, { origin: "explicit", body: "The agent exited.", delayMs: 0 });
   }
-  // Chip "done". Emit while w.runtime is still set so the payload names the
-  // agent, then reset lastEmittedState so a fresh agent re-launched in this
-  // same pane re-emits "launching"/"working" rather than being deduped
-  // against the stale value.
+  // Emit while w.runtime is still set so the payload names the agent, then
+  // reset lastEmittedState so a relaunch re-emits "launching".
   emitPaneState(w, "done");
   w.lastEmittedState = null;
   w.runtime = null;
-  w.state = "idle";
-  w.workingSince = 0;
-  w.lastWorkingAt = 0;
-  w.lastChunkAssertedWorking = false;
-  w.completedTurnPending = false;
-  w.teammatesActive = 0;
-  w.hookSubagentsActive = 0;
-  clearBackgroundWork(w);
+  resetAgentSession(w);
   w.agentProcSeen = false;
   w.agentProcGone = false;
   w.lastAgentProcCheckAt = 0;
   w.ring = "";
-  w.userTurnArmed = false;
 }
 
 function clearCodexScreen(w: PaneWatcher): void {
@@ -1360,12 +1746,12 @@ function clearCodexScreen(w: PaneWatcher): void {
   w.codexScreen = null;
   w.codexIdleSince = null;
   w.codexAwaitingIdle = false;
+  w.codexTitleBlocked = false;
 }
 
 // Recover missed launches even when an idle agent emits no more output, and
-// return true once a previously seen agent is gone. Listings are shared across
-// panes and read asynchronously. A process proves presence, never busy state;
-// unavailable listings leave both detection and exit to the output signals.
+// return true once a previously seen agent is gone. A process proves
+// presence, never busy state.
 function checkAgentProcess(w: PaneWatcher, now: number): boolean {
   if (w.agentProcGone) {
     w.agentProcGone = false;
@@ -1380,7 +1766,6 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
   w.agentProcCheckInflight = true;
   void descendantProcessesWithCommands(rootPid, PROCESS_LIST_MAX_AGE_MS)
     .then((below) => {
-      // The pane may have changed hands while the listing ran.
       if (
         below === null ||
         watchers.get(w.paneId) !== w ||
@@ -1393,15 +1778,8 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
         for (const proc of [...below].sort((a, b) => a.depth - b.depth)) {
           const detected = runtimeFromProcessCommand(proc.command);
           if (!detected) continue;
-          w.runtime = detected;
+          identifyRuntime(w, detected, "process tree");
           w.agentProcSeen = true;
-          w.agentProcGone = false;
-          w.state = "idle";
-          w.workingSince = 0;
-          w.lastWorkingAt = 0;
-          w.lastChunkAssertedWorking = false;
-          w.completedTurnPending = false;
-          tanLog(`pane=${w.paneId} runtime recovered from process tree: ${detected}`);
           emitPaneState(w, "idle");
           if (detected === "codex") {
             const dimensions = pty.sessionDimensions(w.paneId);
@@ -1421,8 +1799,7 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
       if (present) {
         if (!w.agentProcSeen) tanLog(`pane=${w.paneId} ${runtime} process seen under pid ${rootPid}`);
         w.agentProcSeen = true;
-        // A restored runtime hint can bypass banner discovery entirely. The
-        // process confirms presence even when the CLI never repaints a footer.
+        // A restored runtime hint can bypass banner discovery entirely.
         if (w.lastEmittedState === null) {
           emitPaneState(w, w.state === "failed" ? "error" : w.state);
         }
@@ -1437,104 +1814,68 @@ function checkAgentProcess(w: PaneWatcher, now: number): boolean {
   return false;
 }
 
-// An explicit OSC 9/777 from the foreground program. Codex's own copy says
-// what happened ("Codex: turn completed", "approval requested"), so prefer it
-// as the body. Classify needs-you vs done from the message text, in order:
-// "Claude is waiting for your input" is Claude Code's TURN-COMPLETE
-// notification (live-captured v2.1.201), NOT a permission prompt — real
-// permission prompts read "Claude needs your permission to use X" — so the
-// waiting-for-your-input shape must be recognised as "done" BEFORE the
-// blocked-keyword scan (whose "waiting"/"input" terms would otherwise
-// misread it). Default to done since turn-complete is the overwhelmingly
-// common emission.
+// Codex's desktop notifications for an approval, a plan or a question
+// (tui.notifications). Everything else it sends is a finished turn.
+const CODEX_PROMPT_NOTIFY_RE = /^(?:approval requested\b|codex wants to\b|plan mode prompt\b|question:)/i;
+
+// An explicit OSC 9/777 from the foreground program. In an agent pane with a
+// trusted source the structured signal already covers the same moment.
+// "Claude is waiting for your input" is Claude Code's idle reminder, sent a
+// minute after the turn ended, not a permission prompt.
 function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const now = Date.now();
   const kind = /waiting\s*for\s*your\s*input/i.test(message)
     ? ("done" as const)
-    : w.runtime === "claude" &&
-        /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)
+    : (w.runtime === "claude" &&
+          /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)) ||
+        (w.runtime === "codex" && CODEX_PROMPT_NOTIFY_RE.test(message))
       ? ("blocked" as const)
       : ("done" as const);
-  // A DONE announcement while background teammates run is held like the
-  // progress-clear: Claude Code fires "waiting for your input" off the MAIN
-  // REPL's idleness ~60s after the turn ends and IGNORES running teammates
-  // (live-captured 2026-07-06: emitted at T+60 while a teammate's sleep-100
-  // turn was mid-flight) — honoring it would just move the false "finished"
-  // from turn-end to turn-end+60s. No state change, no lastOscNotifyAt stamp
-  // (nothing was delivered, so there is nothing to mute), chip stays on
-  // working unless a permission prompt owns it. The real done arrives when
-  // the teammate count drains (progress-clear / quiet window), and a STALE
-  // counter still resolves through the sweep's 15s-silence self-heal — a user
-  // actively typing in the pane defers that heal, but someone typing there is
-  // watching it, which is exactly the case the suppress-while-watching policy
-  // mutes anyway.
-  if (kind === "done" && backgroundHeld(w)) {
-    tanLog(`pane=${w.paneId} explicit done held — ${backgroundLabel(w)}`);
+  if (w.runtime !== null && hasTrustedSignals(w)) {
+    tanLog(`pane=${w.paneId} explicit notification left to the structured source`);
+    return;
+  }
+  if (kind === "done" && w.teammatesActive > 0) {
+    tanLog(`pane=${w.paneId} explicit done held: ${w.teammatesActive} teammate(s) running`);
     if (w.state !== "blocked") emitPaneState(w, "working");
     return;
   }
-  // The program announced the stop itself; stand the heuristic down so the
-  // quiet-window sweep doesn't re-alert the same turn end.
   if (kind === "blocked") {
-    // A permission/approval announcement says NOTHING about background
-    // teammates — leaving the counter alone is load-bearing: wiping it here
-    // let the post-approval turn's progress-clear fire the false "done" the
-    // teammate hold exists to prevent (approve → resume → turn end → alert
-    // while the teammate still runs).
     w.state = "blocked";
   } else {
-    // A DONE announcement with no live teammates is the program declaring the
-    // whole pane idle — any residual teammate bookkeeping is stale beside it.
     w.state = "idle";
     if (w.runtime === "codex") {
       w.codexAwaitingIdle = true;
       w.codexScreen?.markCompleted();
     }
     w.teammatesActive = 0;
-    w.hookSubagentsActive = 0;
-    clearBackgroundWork(w);
   }
-  // Chip state mirrors the announced state, focus-independent: an explicit
-  // "done" notification means the turn finished and the agent is ready for
-  // input → "idle"; an "approval/permission" announcement → "blocked". The TUI
-  // is still up (this is not a process exit), so we never emit "done" here.
   emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
-  // Agent CLIs may emit a ready/waiting OSC notification while their opening
-  // screen is still painting. A launch is not completed work: keep the chip
-  // accurate but stay quiet until an actual prompt has been submitted.
-  if (
-    !w.userTurnArmed &&
-    (w.runtime !== null || /\b(?:claude|codex|grok)\b/i.test(message))
-  ) {
-    tanLog(`pane=${w.paneId} startup notification suppressed`);
+  if (w.replayingTail) return;
+  if (w.runtime === null && !/\b(?:claude|codex|grok)\b/i.test(message)) {
+    // A plain program's notification is shown the way a terminal would.
+    w.lastOscNotifyAt = now;
+    rearm(paneSourceKey(w.paneId));
+    deliver(w, kind === "blocked" ? "blocked" : "done", { body: message || null, plain: true });
+    return;
+  }
+  // Agent CLIs can emit a ready/waiting notification while their opening
+  // screen paints. Without a submitted turn there is nothing to announce.
+  if (!turnActive(w)) {
+    tanLog(`pane=${w.paneId} explicit notification outside a turn, no alert`);
+    return;
+  }
+  const isAgentIdleEcho = kind === "done" && /waiting\s*for\s*your\s*input/i.test(message);
+  if (isAgentIdleEcho && !workedLongEnough(w)) {
+    tanLog(`pane=${w.paneId} idle echo without a turn since last input, no alert`);
     return;
   }
   w.lastOscNotifyAt = now;
-  // An explicit OSC notification is the program authoritatively announcing its
-  // current state — it is never the previous turn's heuristic footer tail — so
-  // it stands the policy's completion guard down and always toasts, exactly
-  // like a real terminal renders every OSC 9. The ONE exception: an agent's
-  // "waiting for your input" is Claude Code's idle ECHO — it re-announces the
-  // same turn end long after the progress-clear already alerted (60s later in
-  // the live v2.1.201 capture) — so it keeps the guard armed and lets the
-  // policy's same-kind dedup fold the repeat. A genuinely new turn's echo
-  // still passes because the user input that started the turn rearmed via
-  // noteTerminalUserInput.
-  const isAgentIdleEcho =
-    kind === "done" && w.runtime !== null && /waiting\s*for\s*your\s*input/i.test(message);
-  // The idle echo only means something if a turn actually ran since the last
-  // user input. Any keystroke (Esc, an arrow, a scroll report) arms the pane
-  // AND clears the policy's dedup via noteTerminalUserInput, so without this
-  // gate poking an idle prompt and walking away produced a "finished" chime
-  // a minute later with nothing to show for it. workedLongEnough() reads the
-  // working-phase stamps, which every non-working keystroke resets to 0.
-  if (isAgentIdleEcho && !workedLongEnough(w)) {
-    tanLog(`pane=${w.paneId} idle echo without a turn since last input — suppressed`);
+  if (kind === "blocked") {
+    deliver(w, "blocked", { body: message || null });
     return;
   }
-  if (!isAgentIdleEcho) rearm(paneSourceKey(w.paneId));
-  deliver(w, kind, message.length > 0 ? message : null);
-  w.userTurnArmed = false;
+  requestDone(w, { origin: "explicit", body: isAgentIdleEcho ? null : message, delayMs: 0 });
 }
 
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
@@ -1545,15 +1886,9 @@ function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   return "Terminal";
 }
 
-// Push a translated chip RuntimeState to the renderer, focus-independent. This
-// is the SEPARATE-from-alert path the chip needs: deliver() (the toast/rail dot)
-// is gated by isUserWatchingPane, but the chip must update even while the user
-// is looking elsewhere — that hidden case is exactly when the renderer's own
-// visible-buffer poller is frozen and the banner gets stuck on "working". We
-// dedup on lastEmittedState so a repeated state (e.g. "working" re-asserted by
-// every footer repaint) doesn't spam IPC. Excluded panes (Cora workers) carry
-// their own run-store-driven chip and are skipped. Note we deliberately do NOT
-// emit for the worker-pane case; manual panes are the audience.
+// Push a translated chip RuntimeState to the renderer, focus-independent. The
+// chip must update even while the user is looking elsewhere (the case where
+// the renderer's own poller is frozen). Dedup on lastEmittedState.
 function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   if (w.excluded) return;
   if (w.lastEmittedState === chipState) return;
@@ -1568,10 +1903,8 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   });
 }
 
-// Level-triggered companion to the live terminal-agent:state event. Renderer
-// reloads and cold hydration can subscribe after a transition already fired;
-// querying this snapshot lets them reconcile to the daemon's current truth
-// instead of waiting for a future edge that may never come.
+// Level-triggered companion to the live terminal-agent:state event, for
+// renderer reloads and cold hydration.
 export function manualTerminalPaneIds(): Set<string> {
   return new Set([...watchers.values()].filter((w) => !w.excluded && !w.disposing).map((w) => w.paneId));
 }
@@ -1592,12 +1925,8 @@ export function terminalAgentStateSnapshot(workspaceId?: string): TerminalAgentS
   return out;
 }
 
-// Publish a turn-boundary alert into the unified pipeline. Suppression
-// (user operating this exact pane, same-kind re-emits, the terminal-completion
-// guard) is the notify policy's job; enterWorking()/handleExplicitNotify()
-// rearm the pane's sourceKey where real new activity begins.
-function compactDuration(ms: number): string | null {
-  if (!Number.isFinite(ms) || ms < 10_000) return null;
+function compactDuration(ms: number | null | undefined): string | null {
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 10_000) return null;
   const seconds = Math.round(ms / 1_000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.round(seconds / 60);
@@ -1605,10 +1934,18 @@ function compactDuration(ms: number): string | null {
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
+// Publish a turn-boundary alert into the unified pipeline. Suppression (the
+// user looking at the pane, same-kind repeats) is the notify policy's job.
 function deliver(
   w: PaneWatcher,
   kind: "done" | "blocked" | "failed",
-  body: string | null,
+  detail: {
+    body?: string | null;
+    durationMs?: number | null;
+    backgroundRunning?: number;
+    followUp?: boolean;
+    plain?: boolean;
+  } = {},
 ): void {
   if (w.excluded) return;
   if (w.replayingTail) {
@@ -1616,38 +1953,40 @@ function deliver(
     return;
   }
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
-  const label = runtimeLabel(w.runtime);
-  const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";
-  // The workspace rides on the event itself (subtitle / chip), not in prose.
-  const inWorkspace = "";
-  const duration = compactDuration(w.lastWorkingAt - w.workingSince);
-  const kindName =
+  const label = detail.plain ? "Terminal" : runtimeLabel(w.runtime);
+  const where = w.tabTitle ? ` · ${w.tabTitle}` : "";
+  const status =
     kind === "done"
-      ? "terminal.agent.done"
+      ? detail.followUp
+        ? "finished background work"
+        : "finished"
       : kind === "failed"
-        ? "terminal.agent.failed"
-        : "terminal.agent.needs-input";
+        ? "stopped"
+        : "needs you";
+  const parts: string[] = [];
+  if (detail.body) parts.push(detail.body);
+  else if (kind === "done") parts.push(detail.followUp ? "Its background tasks are done." : "Finished its turn.");
+  else if (kind === "blocked") parts.push("Waiting for your answer.");
+  else parts.push("Stopped unexpectedly.");
+  if (kind === "done") {
+    const duration = compactDuration(detail.durationMs);
+    if (duration) parts.push(`took ${duration}`);
+    const running = detail.backgroundRunning ?? 0;
+    if (running > 0) parts.push(`${running} background task${running === 1 ? "" : "s"} still running`);
+  }
   publish({
-    kind: kindName,
-    sourceKey: paneSourceKey(w.paneId),
-    // A prompt/question reads amber, a successful turn reads green, and a
-    // high-confidence limit/crash reads red. Generic heuristic silence never
-    // becomes failure; only explicit terminal evidence does.
-    tone: kind === "done" ? "success" : kind === "failed" ? "danger" : "warning",
-    title:
+    kind:
       kind === "done"
-        ? `${label} — finished`
+        ? "terminal.agent.done"
         : kind === "failed"
-          ? `${label} — stopped`
-          : `${label} — needs you`,
+          ? "terminal.agent.failed"
+          : "terminal.agent.needs-input",
+    sourceKey: paneSourceKey(w.paneId),
+    // A prompt reads amber, a finished turn green, an explicit failure red.
+    tone: kind === "done" ? "success" : kind === "failed" ? "danger" : "warning",
+    title: `${label} ${status}${where}`,
     ...(w.workspaceName ? { workspaceName: w.workspaceName } : {}),
-    body: body
-      ? `${body}${duration ? ` · worked ${duration}` : ""}`
-      : kind === "done"
-        ? `Finished${duration ? ` after ${duration}` : ""} in ${where}${inWorkspace}. Click to jump to the terminal.`
-        : kind === "failed"
-          ? `Stopped unexpectedly in ${where}${inWorkspace}. Click to inspect the terminal.`
-          : `Waiting for your input in ${where}${inWorkspace}. Click to jump to the terminal.`,
+    body: parts.join(" · "),
     soundKind: kind === "done" ? "done" : "needs-you",
     target: { type: "terminal", workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
   });
@@ -1655,8 +1994,7 @@ function deliver(
   nudgeUsageRefresh();
 }
 
-// Test/maintenance escape hatch: drop every watcher (e.g. before a full
-// pty disposeAll on quit). Safe to call repeatedly.
+// Test/maintenance escape hatch: drop every watcher. Safe to call repeatedly.
 export function disposeAllTerminalAgentWatchers(): void {
   for (const paneId of [...watchers.keys()]) removeWatcher(paneId);
 }

@@ -52,7 +52,26 @@ ends. The shell files come from the app and are started with it. Your own
 Claude Code, Codex, Grok and Pi from their banners and footers
 (`src/shared/agent-patterns.ts`), tracks working, blocked and idle, and
 raises "finished" and "needs you" notifications. This runs in main rather
-than in the renderer because the renderer cannot see hidden panes. An agent's
+than in the renderer because the renderer cannot see hidden panes.
+
+A turn starts when a prompt is submitted (Enter outside a paste, an injected
+prompt, or Claude's UserPromptSubmit hook) and is announced at most once.
+The end comes from the most trusted signal the pane has. For Claude Code that
+is the Stop hook of the lead session (subagent stops, tool calls and
+background-task follow-ups are not turn ends) and Claude's OSC 7501 program
+status, which Codara asks for by answering Claude's `?` query from main. For
+Codex it is the notify program (`codex-notify-installer.ts`,
+`resources/codex-hooks/`) and the `task_complete` record in Codex's session
+file (`codex-rollout-tail.ts`), deduplicated by turn id. Subagents and a
+nested `codex exec` run the notify program too, so a notify whose thread is
+not the one the pane's Codex holds open is ignored. Permission prompts
+come from the Notification hook, AskUserQuestion, OSC 7501 `blocked`,
+Codex's "Action Required" window title and its approval notifications. Only agents without any of these
+fall back to the screen, and an idle frame must then hold for 1.5 s, because
+Claude redraws its "done" footer in the middle of a turn. An Esc or Ctrl+C
+pressed during the turn closes it without an alert when the screen is the
+only signal; with hooks a Stop still decides, since Claude sends none for a
+turn the user stopped. An agent's
 exit comes from the shell's prompt markers or from leaving the alternate
 screen when those exist. Otherwise it comes from the process tree: once the
 agent's process has been seen under the pane's shell, its disappearance is
@@ -112,7 +131,9 @@ JSON file per event under `~/.codarastudio/hooks/`. `hook-watcher.ts` watches
 that folder and passes each event to three places: the terminal notifier
 (for panes you opened), the session registry (so a pane can resume its
 session after a restart), and the run store (for panes that belong to a
-run). Then it moves the file to `processed/`.
+run). Then it moves the file to `processed/`. Codex's notify program writes into the same
+folder with the hook name `CodexNotify`; those events go to the terminal
+notifier only.
 
 ## Orchestration (Cora)
 
@@ -320,10 +341,14 @@ That account's slot takes the live login and the marker, and both defaults
 automations:
 
 - `policy.ts` decides whether to deliver. Nothing is shown while you watch
-  the exact source. Alerts are deduplicated per source. A completion guard
-  drops the "needs input" that trails a finished turn.
+  the exact source; for a finished terminal turn, a split that is on screen
+  in the focused window counts as watched too (a zoomed split hides the
+  others). Alerts are deduplicated per
+  source. A completion guard drops the "needs input" that trails a finished
+  turn.
 - `deliver.ts` sends to the toast, sound, system notification and the
-  notification center.
+  notification center. A chime within 1.5 s of the previous one of the same
+  kind is dropped.
 - `attention.ts` tracks what you are looking at.
 
 Phone delivery goes through `remote-access/phone-notify.ts`.

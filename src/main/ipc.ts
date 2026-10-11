@@ -2737,8 +2737,8 @@ export function registerIpc(): void {
   handle("pty:write", async (_e, args: { id: string; data: string }) => {
     await awaitPendingSpawn(args.id);
     pty.write(args.id, args.data);
-    // User keystrokes are the notifier's "a fresh turn may start" signal —
-    // they re-arm the pane's alert dedup (see noteTerminalUserInput).
+    // A submit starts the pane's next agent turn; other keys can answer a
+    // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
   });
 
@@ -2750,9 +2750,9 @@ export function registerIpc(): void {
         submit: args.submit ?? true,
         stashDraft: args.stashDraft === true,
       });
-      // Injected prompts (slash commands, drag-drop paths) start turns the
-      // same way keystrokes do.
-      noteTerminalUserInput(args.id);
+      // A submitted injection (slash command, Cora handing a prompt over)
+      // starts a turn the way Enter does; an unsubmitted one is only text.
+      noteTerminalUserInput(args.id, (args.submit ?? true) ? undefined : "");
     },
   );
 

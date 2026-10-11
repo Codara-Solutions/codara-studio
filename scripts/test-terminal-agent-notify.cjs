@@ -36,12 +36,18 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/orchestration\/usage-activity-refresh)$/ },
+      { filter: /^(electron|\.\/pty-manager|\.\/notify|\.\/owned-process-tree|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh)$/ },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], writes: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+      if (args.path === "./agent-session-registry") {
+        return {
+          contents: init + "export function latestSessionStart(id){ return globalThis.__TAN.sessions?.get(id) ?? null; }\n",
+          loader: "js",
+        };
+      }
       if (args.path === "./orchestration/usage-activity-refresh") {
         return { contents: "export function nudgeUsageRefresh() {}\n", loader: "js" };
       }
@@ -75,7 +81,8 @@ const harnessPlugin = {
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
             "export function sessionPid(id){ return globalThis.__TAN.pids?.get(id) ?? null; }\n" +
             "export function sessionDimensions(id){ return globalThis.__TAN.dimensions?.get(id) ?? null; }\n" +
-            "export function waitForSpawn(){ return Promise.resolve(true); }\n",
+            "export function waitForSpawn(){ return Promise.resolve(true); }\n" +
+            "export function write(id, data){ globalThis.__TAN.writes.push({ id, data }); }\n",
           loader: "js",
         };
       }
@@ -85,7 +92,7 @@ const harnessPlugin = {
       return {
         contents:
           init +
-          'import { createPolicyState, decide, rearm as policyRearm } from "./policy";\n' +
+          'import { createPolicyState, decide, rearm as policyRearm, terminalAlertWatched } from "./policy";\n' +
           "const state = createPolicyState();\n" +
           "export const paneSourceKey = (paneId) => `pane:${paneId}`;\n" +
           "export function rearm(sourceKey){ policyRearm(state, sourceKey); }\n" +
@@ -93,8 +100,9 @@ const harnessPlugin = {
           "export function publish(event){\n" +
           "  const T = globalThis.__TAN;\n" +
           "  const t = event.target;\n" +
-          "  const watching = T.focusedWindow !== null && t.type === 'terminal' &&\n" +
-          "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId && T.activeContext.paneId === t.paneId;\n" +
+          "  const visible = T.focusedWindow !== null && t.type === 'terminal' &&\n" +
+          "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId;\n" +
+          "  const watching = terminalAlertWatched(event.kind, { selected: visible && T.activeContext.paneId === t.paneId, visible });\n" +
           "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
           "  if (!d.deliver) return;\n" +
           "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, workspaceName: event.workspaceName, target: t });\n" +
@@ -296,59 +304,206 @@ async function main() {
   await sleep(4500);
   check("user input re-armed the done alert", alertCount() === beforeLoop + 1);
 
-  // ── Hook-fed background subagents hold the finish ──
-  // The Agent tool can run subagents in the background: the main turn ends
-  // (idle prompt painted, Stop hook fired) while SubagentStart has fired with
-  // no matching SubagentStop yet. The idle frame + quiet window must NOT
-  // alert; the alert lands once the last subagent stops.
-  mod.noteTerminalUserInput("p4");
-  feed("p4", "✻ Delegating… (2s · ↓ 9 tokens)");
-  await sleep(1700);
-  feed("p4", "✻ Delegating… (4s · ↓ 22 tokens)");
-  mod.noteTerminalHookEvent("p4", "SubagentStart");
-  mod.noteTerminalHookEvent("p4", "SubagentStart");
-  mod.noteTerminalHookEvent("p4", "Stop");
-  feed("p4", "\x1b[2K\x1b[GLaunched two agents; I will report when they finish.\r\n> \r\n? for shortcuts");
-  const beforeHook = alertCount();
-  await sleep(4500);
-  check("hook subagents hold the quiet-window finish", alertCount() === beforeHook);
-  mod.noteTerminalHookEvent("p4", "SubagentStop");
-  await sleep(4500);
-  check("one remaining hook subagent still holds the finish", alertCount() === beforeHook);
-  mod.noteTerminalHookEvent("p4", "SubagentStop");
-  await sleep(4500);
+  // ── Claude hooks drive the turn (audit 2026-10-11) ──
+  // With hooks, "finished" comes from the lead Stop only: subagent stops,
+  // tool results, mid-turn idle frames and background launches never end the
+  // turn, and the alert carries Claude's last message.
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-hooks",
+    workspaceName: "Hooks",
+    panes: [
+      { paneId: "h1", tabId: "th1", tabTitle: "Claude hooks", excluded: false },
+      { paneId: "h2", tabId: "th2", tabTitle: "Claude hooks 2", excluded: false },
+    ],
+  });
+  T.activeContext = { workspaceId: "elsewhere", tabId: "elsewhere", paneId: null };
+  const session = { session_id: "11111111-aaaa" };
+  feed("h1", "\x1b]633;E;claude\x07Claude Code v2.1.296\r\n");
+  mod.noteTerminalHookEvent("h1", "SessionStart", { ...session, source: "startup" });
+  const beforeHookTurn = alertCount();
+  mod.noteTerminalUserInput("h1", "refactor the parser\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "refactor the parser" });
+  feed("h1", "✻ Pondering… (2s · ↓ 10 tokens)");
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Bash", tool_input: { command: "npm test" } });
+  // The audit's dominant false "finished": a redrawn older turn's completion
+  // footer lands right after a tool result, a moment before the spinner.
+  feed("h1", "\r\n✻ Baked for 14s · done 1:23 PM\r\n> ");
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Bash" });
+  mod.noteTerminalHookEvent("h1", "SubagentStart", { ...session, agent_id: "a1" });
+  mod.noteTerminalHookEvent("h1", "SubagentStop", { ...session, agent_id: "a1", last_assistant_message: "subagent result" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, agent_id: "a2", last_assistant_message: "child stop" });
+  mod.noteTerminalHookEvent("h1", "Notification", { ...session, notification_type: "agent_completed", message: "agent done" });
+  await sleep(1200);
+  check("hooks: mid-turn idle frame, subagent stops and agent_completed do not finish the turn", alertCount() === beforeHookTurn);
   check(
-    "finish delivers once the last hook subagent stops",
-    alertCount() === beforeHook + 1 && T.alerts[T.alerts.length - 1].kind === "complete",
+    "hooks: the chip stays working through a mid-turn idle frame",
+    mod.terminalAgentStateSnapshot().find((c) => c.paneId === "h1")?.state === "working",
+  );
+  feed("h1", "✻ Pondering… (9s · ↓ 90 tokens)");
+  // A nested `claude -p` run inside the pane shares the pane id; its Stop
+  // belongs to another session.
+  mod.noteTerminalHookEvent("h1", "Stop", { session_id: "22222222-bbbb", last_assistant_message: "one-shot output" });
+  await sleep(1000);
+  check("hooks: a nested claude -p session's Stop is not the user's turn", alertCount() === beforeHookTurn);
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    stop_hook_active: false,
+    last_assistant_message: "**Done.** I refactored the parser and all 42 tests pass.\n\n```ts\nconst x = 1;\n```",
+    background_tasks: [],
+  });
+  check("hooks: Stop waits out the confirmation window", alertCount() === beforeHookTurn);
+  await sleep(1100);
+  check("hooks: the lead Stop finishes the turn exactly once", alertCount() === beforeHookTurn + 1);
+  const hookDone = T.alerts.at(-1);
+  check("hooks: finished alert is kind complete", hookDone.kind === "complete");
+  check("hooks: title names the agent and the tab", hookDone.title === "Claude Code finished · Claude hooks");
+  check(
+    "hooks: body is Claude's last message, plain text",
+    hookDone.body.startsWith("Done. I refactored the parser and all 42 tests pass.") && !/\*\*|```/.test(hookDone.body),
+  );
+  // An idle reminder a minute later, a repeated Stop and stray keys must not
+  // announce the same turn again.
+  mod.noteTerminalHookEvent("h1", "Notification", { ...session, notification_type: "idle_prompt", message: "Claude is waiting for your input" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "again" });
+  mod.noteTerminalUserInput("h1", "abc");
+  mod.noteTerminalUserInput("h1", "\x1b[<64;10;5M");
+  mod.noteTerminalUserInput("h1", "\x1b[A");
+  await sleep(1100);
+  check("hooks: idle reminder, repeated Stop and non-submit keys add no alert", alertCount() === beforeHookTurn + 1);
+
+  // ── Hooks: permission prompts need a pending tool call ──
+  const beforePrompt = alertCount();
+  mod.noteTerminalUserInput("h1", "deploy it\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "deploy it" });
+  feed("h1", "✻ Pondering… (1s · ↓ 3 tokens)");
+  // Transcript text that looks like a menu, with no tool call waiting.
+  feed("h1", "\r\nThe options were:\r\n❯ 1. keep it\r\n  2. drop it\r\n");
+  check("hooks: menu-looking transcript text without a pending tool is not a prompt", alertCount() === beforePrompt);
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Bash", tool_input: { command: "./deploy.sh --prod" } });
+  feed("h1", "\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n");
+  check("hooks: a permission dialog during a pending tool call alerts at once", alertCount() === beforePrompt + 1);
+  check("hooks: needs-you alert is kind blocked", T.alerts.at(-1).kind === "blocked");
+  check("hooks: needs-you names the command waiting for permission", /Bash: \.\/deploy\.sh --prod/.test(T.alerts.at(-1).body));
+  mod.noteTerminalHookEvent("h1", "Notification", { ...session, notification_type: "permission_prompt", message: "Claude needs your permission" });
+  check("hooks: the delayed permission Notification does not alert twice", alertCount() === beforePrompt + 1);
+  mod.noteTerminalUserInput("h1", "1");
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Bash" });
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "AskUserQuestion", tool_input: { questions: [{ question: "Which region should I deploy to?", header: "Region" }] } });
+  check("hooks: a second prompt in the same turn alerts once the first was answered", alertCount() === beforePrompt + 2);
+  check("hooks: a question alert carries the question", /Which region should I deploy to\?/.test(T.alerts.at(-1).body));
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "AskUserQuestion" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "Deployed to eu-west." });
+  await sleep(1100);
+  check("hooks: the turn still finishes after its prompts", alertCount() === beforePrompt + 3 && T.alerts.at(-1).kind === "complete");
+
+  // ── Hooks: background work is reported, never held for an hour ──
+  const beforeBackground = alertCount();
+  mod.noteTerminalUserInput("h1", "run the suite in the background\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "run the suite in the background" });
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Bash", tool_input: { command: "npm test", run_in_background: true } });
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Bash" });
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    last_assistant_message: "The suite is running in the background.",
+    background_tasks: [{ id: "b1", type: "shell", status: "running" }],
+  });
+  await sleep(1100);
+  check("hooks: the turn with a background task finishes at its Stop", alertCount() === beforeBackground + 1);
+  check("hooks: the alert says what is still running", /1 background task still running/.test(T.alerts.at(-1).body));
+  // The task reports back: Claude runs a follow-up turn nobody submitted.
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>b1</task-id>" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "All 42 tests passed.", background_tasks: [] });
+  await sleep(1100);
+  check("hooks: drained background work is announced once", alertCount() === beforeBackground + 2);
+  check(
+    "hooks: the follow-up alert says the background work finished",
+    /finished background work/.test(T.alerts.at(-1).title) && /All 42 tests passed/.test(T.alerts.at(-1).body),
+  );
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>b2</task-id>" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "Noted.", background_tasks: [] });
+  await sleep(1100);
+  check("hooks: a later follow-up with nothing draining stays quiet", alertCount() === beforeBackground + 2);
+
+  // ── Hooks: Esc stops the turn without a Stop hook ──
+  const beforeEsc = alertCount();
+  mod.noteTerminalUserInput("h1", "write the docs\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "write the docs" });
+  feed("h1", "✻ Writing… (3s · ↓ 30 tokens)");
+  mod.noteTerminalUserInput("h1", "\x1b");
+  feed("h1", "\r\n⎿  Interrupted · What should Claude do instead?\r\n✻ Worked for 3s · done 1:40 PM\r\n> ");
+  await sleep(1100);
+  check("hooks: an interrupted turn is not announced", alertCount() === beforeEsc);
+  check(
+    "hooks: the chip leaves working after an interrupt",
+    mod.terminalAgentStateSnapshot().find((c) => c.paneId === "h1")?.state === "idle",
   );
 
-  // ── Hook-fed background tasks hold the finish ──
-  // A Bash call with run_in_background (or a Monitor) ends the main turn
-  // while the command keeps running; Claude reacts to its completion with a
-  // follow-up turn that ends in a Stop no UserPromptSubmit preceded. The pane
-  // stays busy until that follow-up turn ends. (The process-tree half of the
-  // hold is inert here: the pty stub reports no pid.)
-  mod.noteTerminalUserInput("p4");
-  mod.noteTerminalHookEvent("p4", "UserPromptSubmit");
-  feed("p4", "✻ Launching… (2s · ↓ 9 tokens)");
-  await sleep(1700);
-  feed("p4", "✻ Launching… (4s · ↓ 22 tokens)");
-  mod.noteTerminalHookEvent("p4", "PreToolUse", { tool_name: "Bash", tool_input: { command: "npm test", run_in_background: true } });
-  mod.noteTerminalHookEvent("p4", "Stop");
-  feed("p4", "\x1b[2K\x1b[GRunning the tests in the background.\r\n> \r\n? for shortcuts");
-  const beforeTask = alertCount();
-  await sleep(4500);
-  check("a background task holds the quiet-window finish", alertCount() === beforeTask);
-  // Task completes: Claude runs a follow-up turn and stops again.
-  feed("p4", "✻ Reading… (1s · ↓ 3 tokens)");
-  await sleep(1200);
-  mod.noteTerminalHookEvent("p4", "Stop");
-  feed("p4", "\x1b[2K\x1b[GTests passed.\r\n> \r\n? for shortcuts");
-  await sleep(4500);
+  // ── Hooks: duration comes from the prompt, not from a stuck phase ──
+  feed("h2", "\x1b]633;E;claude\x07Claude Code v2.1.296\r\n");
+  mod.noteTerminalHookEvent("h2", "UserPromptSubmit", { session_id: "33333333", prompt: "quick one" });
+  mod.noteTerminalHookEvent("h2", "Stop", { session_id: "33333333", last_assistant_message: "Quick answer." });
+  await sleep(1100);
+  check("hooks: a short turn's alert has no inflated duration", !/took/.test(T.alerts.at(-1).body) && T.alerts.at(-1).target.paneId === "h2");
+
+  // ── OSC 7501 program status ──
+  // The pane answers the support query; Claude then reports its own state.
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-7501",
+    panes: [{ paneId: "s1", tabId: "ts1", tabTitle: "Status", excluded: false }],
+  });
+  const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
+  T.writes.length = 0;
+  feed("s1", "\x1b[>0q\x1b]7501;?\x1b\\\x1b[c");
   check(
-    "finish delivers after the task's follow-up turn",
-    alertCount() === beforeTask + 1 && T.alerts[T.alerts.length - 1].kind === "complete",
+    "7501: the support query is answered once, in the pane",
+    T.writes.length === 1 && T.writes[0].id === "s1" && /^\x1b\]7501;\?:states=idle,working,done,blocked,error/.test(T.writes[0].data),
   );
+  feed("s1", "\x1b]7501;state=idle:app=claude-code\x1b\\Claude Code v2.1.296\r\n");
+  check("7501: a report identifies Claude", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s1")?.runtime === "claude");
+  const before7501 = alertCount();
+  mod.noteTerminalUserInput("s1", "add a test\r");
+  feed("s1", "\x1b]7501;state=working:app=claude-code:progress=10\x1b\\");
+  // Screen text that the heuristic would read as a finished turn.
+  feed("s1", "\r\n✻ Baked for 14s · done 1:23 PM\r\n> ");
+  await sleep(1700);
+  check("7501: screen idle frames cannot finish a program-status turn", alertCount() === before7501);
+  feed("s1", `\x1b]7501;state=blocked:app=claude-code:kind=permission:msg=${b64("Run npm test?")}\x1b\\`);
+  check("7501: blocked alerts with the program's own text", alertCount() === before7501 + 1 && /Run npm test\?/.test(T.alerts.at(-1).body));
+  feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s1", `\x1b]7501;state=done:app=claude-code:msg=${b64("Added the parser test.")}\x1b\\`);
+  await sleep(900);
+  check("7501: done finishes the turn with its summary", alertCount() === before7501 + 2 && /Added the parser test\./.test(T.alerts.at(-1).body));
+  // A turn the user stops reads idle, never done.
+  mod.noteTerminalUserInput("s1", "now the docs\r");
+  feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s1", "\x1b]7501;state=idle:app=claude-code\x1b\\");
+  await sleep(900);
+  check("7501: a stopped turn (working -> idle) is not announced", alertCount() === before7501 + 2);
+  // Child records (background tasks) never decide the parent's turn.
+  mod.noteTerminalUserInput("s1", "start the watcher\r");
+  feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s1", "\x1b]7501;state=working:app=claude-code:id=task1\x1b\\");
+  feed("s1", "\x1b]7501;state=done:app=claude-code\x1b\\");
+  await sleep(900);
+  check("7501: a parent done stands while a child record still works", alertCount() === before7501 + 3);
+  T.writes.length = 0;
+  T.tails.set("s2", [Buffer.from("\x1b]7501;?\x1b\\", "utf8")]);
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-7501",
+    panes: [
+      { paneId: "s1", tabId: "ts1", tabTitle: "Status", excluded: false },
+      { paneId: "s2", tabId: "ts2", tabTitle: "Replayed", excluded: false },
+    ],
+  });
+  check("7501: a query in replayed history is never answered", T.writes.length === 0);
+  check("7501: report fields decode", mod.parseProgramStatus(`state=blocked:app=codex:kind=question:msg=${b64("Pick one")}`)?.msg === "Pick one");
+  check("7501: control characters in msg are rejected", mod.parseProgramStatus(`state=done:msg=${b64("a\x1b]0;x")}`)?.msg === null);
+
+  // ── Message summaries ──
+  check("summary: markdown and code are dropped", mod.summarizeAgentMessage("## Result\n- **Fixed** the `parser`\n```js\nx()\n```") === "Result Fixed the parser");
+  check("summary: long text is cut at a sentence", mod.summarizeAgentMessage(`${"A".repeat(120)}. ${"B".repeat(200)}`) === `${"A".repeat(120)}.`);
+  check("tool detail: a Bash command", mod.describeToolCall("Bash", { command: "rm -rf build" }) === "Bash: rm -rf build");
+  check("tool detail: a file edit shows the file name", mod.describeToolCall("Edit", { file_path: "/repo/src/parser.ts" }) === "Edit: parser.ts");
 
   // ── Scenario 5: agent exits mid-work (prompt marker) → immediate done ──
   feed("p2", "\x1b]633;E;claude --continue\x07");
@@ -419,15 +574,24 @@ async function main() {
     !T.chips.some((chip) => chip.paneId === "p9" && chip.state === "blocked"),
   );
 
-  // ── Scenario 8: a visible sibling split is not the selected input pane ──
+  // ── Scenario 8: a visible sibling split ──
+  // A finished turn in a split that is on screen is already visible. A
+  // prompt there still alerts: the sibling cannot take the answer until the
+  // user selects it.
   const beforeSibling = alertCount();
   T.activeContext = { workspaceId: "ws1", tabId: "t2", paneId: "p4" };
   mod.noteTerminalUserInput("p2");
   feed("p2", "\x1b]9;Codex: turn completed in sibling pane\x07");
+  check("a finished turn in a visible sibling split is not announced", alertCount() === beforeSibling);
+  mod.noteTerminalUserInput("p2", "deploy\r");
+  feed("p2", "\x1b]0;[ ! ] Action Required\x07");
   check(
-    "same-tab sibling pane still alerts because it is not selected",
-    alertCount() === beforeSibling + 1 && T.alerts.at(-1).target.paneId === "p2",
+    "a Codex approval in a visible sibling split still alerts",
+    alertCount() === beforeSibling + 1 && T.alerts.at(-1).kind === "blocked" && T.alerts.at(-1).target.paneId === "p2",
   );
+  feed("p2", "\x1b]0;[ . ] Action Required\x07");
+  check("the blinking Action Required title alerts once", alertCount() === beforeSibling + 1);
+  feed("p2", "\x1b]0;codex\x07");
 
   // ── Scenario 9: startup prompts and hard failures are classified ──
   T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
@@ -641,42 +805,88 @@ async function main() {
   await sleep(2200);
   check("a failure is not overwritten by the retained busy frame", mod.terminalAgentStateSnapshot().find((chip) => chip.paneId === "p13")?.state === "error");
 
-  mod.syncTerminalNotifyPanes({ workspaceId: "ws-completion", panes: [
-    { paneId: "p-completion", tabId: "tc", excluded: false, runtimeHint: "claude" },
+  // ── Heuristic panes: a redrawn "done" footer is not a finish ──
+  // No hooks and no program status: the screen decides, and an idle frame
+  // must hold before it counts (audit 2026-10-11: false "finished" alerts
+  // came 1 to 3 ms before the spinner returned).
+  T.activeContext = { workspaceId: "elsewhere", tabId: "elsewhere", paneId: null };
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-heur", panes: [
+    { paneId: "q1", tabId: "tq1", tabTitle: "No hooks", excluded: false },
   ] });
-  T.pids.set("p-completion", 990099);
-  T.background = new Map([[990099, null]]);
-  mod.noteTerminalUserInput("p-completion");
-  feed("p-completion", "Claude Code\r\n✻ Working… (3s · ↓ 4 tokens)");
-  mod.noteTerminalHookEvent("p-completion", "PreToolUse", { tool_name: "Bash", tool_input: { run_in_background: true } });
-  const completeFooter = "\r\n✻ Baked for 11m 32s · done 12:00 PM\r\n> ";
-  feed("p-completion", completeFooter);
-  await sleep(5500);
-  check("failed process inspection preserves background work", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "working");
-  T.background.set(990099, [{ pid: 990100, startedAt: "fixture" }]);
-  T.backgroundAlive = T.background.get(990099);
-  feed("p-completion", completeFooter);
-  await sleep(2500);
-  check("completion cannot end a live background command", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "working");
-  T.background.set(990099, []);
-  T.backgroundAlive = [];
-  const repaint = setInterval(() => feed("p-completion", "\r\nFable 5.1 · bypass permissions on"), 100);
-  try {
-    await waitForState("p-completion", "idle");
-  } finally {
-    clearInterval(repaint);
+  feed("q1", "\x1b]633;E;claude\x07Claude Code v2.1.170\r\n");
+  const beforeRedraw = alertCount();
+  mod.noteTerminalUserInput("q1", "go\r");
+  feed("q1", "✻ Pondering… (1s · ↓ 4 tokens)");
+  await sleep(1700);
+  for (let i = 0; i < 3; i++) {
+    feed("q1", "\r\n✻ Baked for 11m 32s · done 12:00 PM\r\n> ");
+    await sleep(40);
+    feed("q1", `✻ Pondering… (${3 + i}s · ↓ 9 tokens)`);
+    await sleep(600);
   }
-  check("an exited background command drains without a parent Stop hook", true);
-  mod.noteTerminalUserInput("p-completion");
-  feed("p-completion", "\r\n✻ Thinking… (1s · ↓ 4 tokens)");
-  await waitForState("p-completion", "working");
-  feed("p-completion", completeFooter);
-  await waitForState("p-completion", "idle");
-  for (let i = 0; i < 4; i++) {
-    feed("p-completion", "\r\nFable 5.1 · main · 5h: 35% · bypass permissions on");
-    await sleep(250);
-  }
-  check("idle status repaints do not resurrect completed work", mod.terminalAgentStateSnapshot().find(c => c.paneId === "p-completion")?.state === "idle");
+  await sleep(1000);
+  check("heuristic: a redrawn completion footer followed by the spinner is not a finish", alertCount() === beforeRedraw);
+  feed("q1", "\r\n✻ Baked for 9s · done 12:01 PM\r\n> ");
+  await sleep(1800);
+  check("heuristic: an idle frame that holds finishes the turn once", alertCount() === beforeRedraw + 1);
+  mod.noteTerminalUserInput("q1", "next question");
+  mod.noteTerminalUserInput("q1", "\x1b[<65;3;4M");
+  feed("q1", "✻ Pondering… (1s · ↓ 4 tokens)");
+  await sleep(1700);
+  feed("q1", "✻ Pondering… (3s · ↓ 4 tokens)");
+  feed("q1", "\r\n✻ Baked for 3s · done 12:02 PM\r\n> ");
+  await sleep(1800);
+  check("heuristic: typing and scrolling without Enter arm no second alert", alertCount() === beforeRedraw + 1);
+  mod.noteTerminalUserInput("q1", "go on\r");
+  feed("q1", "✻ Pondering… (1s · ↓ 4 tokens)");
+  await sleep(1700);
+  feed("q1", "✻ Pondering… (3s · ↓ 4 tokens)");
+  mod.noteTerminalUserInput("q1", "\x1b");
+  feed("q1", "\r\n⎿  Interrupted · What should Claude do instead?\r\n✻ Worked for 3s · done 12:03 PM\r\n> ");
+  await sleep(1800);
+  check("heuristic: a turn the user interrupted is not announced", alertCount() === beforeRedraw + 1);
+
+  // ── Codex: launching is not a turn; notify carries the answer ──
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-codex", panes: [
+    { paneId: "c1", tabId: "tc1", tabTitle: "Codex", excluded: false },
+  ] });
+  const beforeCodex = alertCount();
+  mod.noteTerminalUserInput("c1", "codex\r");
+  feed("c1", "│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  // A startup task runs with no user message (audit: "finished" 2s after launch).
+  mod.noteTerminalHookEvent("c1", "CodexNotify", { type: "agent-turn-complete", "turn-id": "t0", "input-messages": [], "last-assistant-message": "Ready." });
+  feed("c1", "\x1b]9;Codex: turn completed\x07");
+  check("codex: the Enter that launched Codex arms nothing", alertCount() === beforeCodex);
+  mod.noteTerminalUserInput("c1", "fix the flaky test\r");
+  mod.noteTerminalHookEvent("c1", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "t1",
+    "input-messages": ["fix the flaky test"],
+    "last-assistant-message": "Fixed the race in **retry.ts**. All tests pass.",
+  });
+  check(
+    "codex: notify finishes the turn with Codex's own message",
+    alertCount() === beforeCodex + 1 &&
+      T.alerts.at(-1).title === "Codex finished · Codex" &&
+      T.alerts.at(-1).body.startsWith("Fixed the race in retry.ts. All tests pass."),
+  );
+  mod.noteTerminalHookEvent("c1", "CodexNotify", { type: "agent-turn-complete", "turn-id": "t1", "input-messages": ["fix the flaky test"], "last-assistant-message": "dup" });
+  check("codex: the same turn id never alerts twice", alertCount() === beforeCodex + 1);
+  // Once notify is known, an interrupted turn (working, then the composer
+  // back with no completion) stays silent and the chip still settles.
+  mod.noteTerminalUserInput("c1", "now refactor\r");
+  feed("c1", "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  await sleep(1700);
+  feed("c1", "\x1b[1;1H• Working (3s • esc to interrupt)");
+  mod.noteTerminalUserInput("c1", "\x1b");
+  feed("c1", "\x1b[1;1H\x1b[J■ Conversation interrupted\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("c1", "idle");
+  await sleep(500);
+  check("codex: an interrupted turn with notify active is not announced", alertCount() === beforeCodex + 1);
+  // A notify for a turn Studio did not see start (typed from the phone)
+  // still names the user's input, so it is announced.
+  mod.noteTerminalHookEvent("c1", "CodexNotify", { type: "agent-turn-complete", "turn-id": "t3", "input-messages": ["from the phone"], "last-assistant-message": "Done from afar." });
+  check("codex: a completion that names user input is announced without a local Enter", alertCount() === beforeCodex + 2);
 
   mod.syncTerminalNotifyPanes({ workspaceId: "ws-reopen", panes: [
     { paneId: "reopen", tabId: "reopen-tab", excluded: false, runtimeHint: "codex" },
@@ -693,6 +903,119 @@ async function main() {
   mod.noteTerminalUserInput("reopen", "\x1b[1;1Rwrite tests\r");
   feed("reopen", "\x1b]9;Codex: new prompt completed\x07");
   check("real input mixed with a terminal reply still arms completion", alertCount() === beforeReopen + 1);
+
+  // ── Review fixes: turn boundaries the first pass got wrong ──
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-review", panes: [
+    { paneId: "r-stale", tabId: "tr1", tabTitle: "Stale", excluded: false },
+    { paneId: "r-sub", tabId: "tr2", tabTitle: "Subagents", excluded: false },
+    { paneId: "r-esc", tabId: "tr3", tabTitle: "Codex esc", excluded: false },
+    { paneId: "r-menu", tabId: "tr4", tabTitle: "Menu esc", excluded: false },
+    { paneId: "r-appr", tabId: "tr5", tabTitle: "Approvals", excluded: false },
+  ] });
+  const beforeReview = alertCount();
+  // A submit that starts no work (an empty prompt, a local slash command)
+  // must not become the start the next real turn is timed from.
+  feed("r-stale", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-stale", "/status\r");
+  const staleTurnAt = Date.now();
+
+  // Subagents and a nested `codex exec` run the notify program with the
+  // pane's environment; only the thread the pane's Codex holds is the user's.
+  T.sessions = new Map([["r-sub", { paneId: "r-sub", runtime: "codex", active: true, sessionId: "01a12861-503e-7960-a93d-f2a3b3176eec" }]]);
+  feed("r-sub", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-sub", "split the work across agents\r");
+  mod.noteTerminalHookEvent("r-sub", "CodexNotify", {
+    type: "agent-turn-complete",
+    "thread-id": "01a1286b-bac3-7ba0-9d5b-ea5768dcc4db",
+    "turn-id": "sub-1",
+    "input-messages": ["Review the parser module"],
+    "last-assistant-message": "Subagent: parser reviewed.",
+  });
+  check("codex: a subagent thread's completion does not finish the user's turn", alertCount() === beforeReview);
+  mod.noteTerminalHookEvent("r-sub", "CodexNotify", {
+    type: "agent-turn-complete",
+    "thread-id": "01A12861-503E-7960-A93D-F2A3B3176EEC",
+    "turn-id": "lead-1",
+    "input-messages": ["split the work across agents"],
+    "last-assistant-message": "Both agents finished; the parser is fixed.",
+  });
+  check(
+    "codex: the lead thread's completion finishes the turn once",
+    alertCount() === beforeReview + 1 && /Both agents finished/.test(T.alerts.at(-1).body),
+  );
+
+  // Codex read from the screen, with no structured source: Esc during the
+  // turn stops it, and stays silent like the heuristic Claude path.
+  T.dimensions.set("r-esc", { cols: 100, rows: 20 });
+  feed("r-esc", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-esc", "rename the module\r");
+  feed("r-esc", "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  // The screen is sampled once a second; keep the footer up long enough for
+  // the samples to span a real turn.
+  await sleep(3700);
+  feed("r-esc", "\x1b[1;1H• Working (3s • esc to interrupt)");
+  mod.noteTerminalUserInput("r-esc", "\x1b");
+  feed("r-esc", "\x1b[1;1H\x1b[J■ Conversation interrupted\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("r-esc", "idle");
+  await sleep(500);
+  check("codex screen: a turn stopped with Esc is not announced", alertCount() === beforeReview + 1);
+  // The next turn starts after that Esc, so it is not an interrupted one.
+  mod.noteTerminalUserInput("r-esc", "try again\r");
+  feed("r-esc", "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  await sleep(2700);
+  feed("r-esc", "\x1b[1;1H• Working (3s • esc to interrupt)");
+  feed("r-esc", "\x1b[1;1H\x1b[J• Renamed the module.\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  await waitForState("r-esc", "idle");
+  await sleep(500);
+  check("codex screen: an Esc from the previous turn does not silence the next one", alertCount() === beforeReview + 2);
+
+  // Hooks: an Esc that only closed a menu is followed by a real Stop, which
+  // can land after the idle frame.
+  const menuSession = { session_id: "44444444-menu" };
+  feed("r-menu", "\x1b]633;E;claude\x07Claude Code v2.1.296\r\n");
+  mod.noteTerminalUserInput("r-menu", "summarize the diff\r");
+  mod.noteTerminalHookEvent("r-menu", "UserPromptSubmit", { ...menuSession, prompt: "summarize the diff" });
+  feed("r-menu", "✻ Pondering… (2s · ↓ 10 tokens)");
+  mod.noteTerminalUserInput("r-menu", "\x1b");
+  feed("r-menu", "\r\n✻ Worked for 4s · done 2:10 PM\r\n> ");
+  mod.noteTerminalHookEvent("r-menu", "Stop", { ...menuSession, last_assistant_message: "The diff renames two files." });
+  await sleep(1100);
+  check(
+    "hooks: a Stop after an Esc and an idle frame still finishes the turn",
+    alertCount() === beforeReview + 3 && /renames two files/.test(T.alerts.at(-1).body),
+  );
+
+  // Codex's own desktop notifications name approvals, plans and questions.
+  // Before any structured signal exists they are a prompt, never a finish.
+  const beforeApproval = alertCount();
+  feed("r-appr", "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+  mod.noteTerminalUserInput("r-appr", "run the tests\r");
+  feed("r-appr", "\x1b]0;[ ! ] Action Required\x07\x1b]9;Approval requested: npm test\x07");
+  check(
+    "codex: an approval notification is a prompt, alerted once",
+    alertCount() === beforeApproval + 1 && T.alerts.at(-1).kind === "blocked" && /npm test/.test(T.alerts.at(-1).body),
+  );
+  mod.noteTerminalUserInput("r-appr", "y");
+  feed("r-appr", "\x1b]0;codex\x07");
+  feed("r-appr", "\x1b]9;Codex wants to edit src/app.ts\x07");
+  check("codex: a later edit approval in the same turn alerts again", alertCount() === beforeApproval + 2 && T.alerts.at(-1).kind === "blocked");
+  mod.noteTerminalUserInput("r-appr", "y");
+  feed("r-appr", "\x1b]9;Codex: tests pass\x07");
+  check("codex: the turn then finishes", alertCount() === beforeApproval + 3 && T.alerts.at(-1).kind === "complete");
+
+  const waitLeft = staleTurnAt + 10_500 - Date.now();
+  if (waitLeft > 0) await sleep(waitLeft);
+  mod.noteTerminalUserInput("r-stale", "fix the build\r");
+  mod.noteTerminalHookEvent("r-stale", "CodexNotify", {
+    type: "agent-turn-complete",
+    "turn-id": "stale-1",
+    "input-messages": ["fix the build"],
+    "last-assistant-message": "The build is green.",
+  });
+  check(
+    "a turn is timed from the submit that started work, not an earlier no-op submit",
+    alertCount() === beforeApproval + 4 && /build is green/.test(T.alerts.at(-1).body) && !/took/.test(T.alerts.at(-1).body),
+  );
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

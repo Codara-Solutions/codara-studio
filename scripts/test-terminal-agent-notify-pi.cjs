@@ -64,14 +64,15 @@ const harnessPlugin = {
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(){ return []; }\n" +
             "export function sessionPid(id){ return globalThis.__TAN.pids.get(id) ?? null; }\n" +
-            "export function sessionDimensions(){ return null; }\n",
+            "export function sessionDimensions(){ return null; }\n" +
+            "export function write(){}\n",
           loader: "js",
         };
       }
       return {
         contents:
           init +
-          'import { createPolicyState, decide, rearm as policyRearm } from "./policy";\n' +
+          'import { createPolicyState, decide, rearm as policyRearm, terminalAlertWatched } from "./policy";\n' +
           "const state = createPolicyState();\n" +
           "export const paneSourceKey = (paneId) => `pane:${paneId}`;\n" +
           "export function rearm(sourceKey){ policyRearm(state, sourceKey); }\n" +
@@ -79,7 +80,8 @@ const harnessPlugin = {
           "export function publish(event){\n" +
           "  const T = globalThis.__TAN;\n" +
           "  const t = event.target;\n" +
-          "  const watching = T.focusedWindow !== null && T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId && T.activeContext.paneId === t.paneId;\n" +
+          "  const visible = T.focusedWindow !== null && T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId;\n" +
+          "  const watching = terminalAlertWatched(event.kind, { selected: visible && T.activeContext.paneId === t.paneId, visible });\n" +
           "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
           "  if (d.deliver) T.alerts.push(event);\n" +
           "}\n",
@@ -186,7 +188,7 @@ async function main() {
   feed("pi1", TURN_END);
   await sleep(4500);
   check("turn end after the quiet window alerts once", T.alerts.length === 1);
-  check("done alert names Pi", T.alerts[0].kind === "terminal.agent.done" && T.alerts[0].title === "Pi — finished");
+  check("done alert names Pi", T.alerts[0].kind === "terminal.agent.done" && T.alerts[0].title === "Pi finished · Pi");
   check("done alert routes to the pane", T.alerts[0].target.paneId === "pi1" && T.alerts[0].target.tabId === "t1");
   check("chip reads ready after the turn", lastChip("pi1")?.state === "idle");
 
@@ -196,7 +198,7 @@ async function main() {
   await runTurn("pi1", 500);
   feed("pi1", SELECTOR);
   check("extension selector alerts needs you", T.alerts.length === 2 && T.alerts[1].kind === "terminal.agent.needs-input");
-  check("needs-you alert names Pi", T.alerts[1].title === "Pi — needs you");
+  check("needs-you alert names Pi", T.alerts[1].title === "Pi needs you · Pi");
   check("chip reads blocked", lastChip("pi1")?.state === "blocked");
   // The hidden spinner keeps asking for renders; only cursor hides arrive.
   for (let i = 0; i < 10; i += 1) {

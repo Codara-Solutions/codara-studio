@@ -33,6 +33,7 @@ import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
+import { installCodexNotify, uninstallCodexNotify } from "./codex-notify-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
@@ -45,7 +46,12 @@ import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-
 import { createPiSessionTracker } from "./pi-session-tracker";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
-import { activeTerminalAgentPaneIds, manualTerminalPaneIds, noteHostResume } from "./terminal-agent-notify";
+import {
+  activeTerminalAgentPaneIds,
+  manualTerminalPaneIds,
+  noteCodexNotifyInstalled,
+  noteHostResume,
+} from "./terminal-agent-notify";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
@@ -1015,6 +1021,13 @@ app.whenReady().then(async () => {
   void installClaudeHooks().catch((err) =>
     console.warn("[main] hook installer failed:", err),
   );
+
+  // Codex's turn-complete notify program, chained in front of any notify
+  // entry the user already has. SPARK_CODEX_NOTIFY=0 takes it back out.
+  const codexNotifyEnabled = process.env.SPARK_CODEX_NOTIFY !== "0";
+  void (codexNotifyEnabled ? installCodexNotify() : uninstallCodexNotify())
+    .then((result) => noteCodexNotifyInstalled(codexNotifyEnabled && result.installed))
+    .catch((err) => console.warn("[main] codex notify installer failed:", err));
 
   // Auto-install the codara-studio MCP server in the user's Claude / Codex
   // configs so manually-run and orchestrated agents can drive the live

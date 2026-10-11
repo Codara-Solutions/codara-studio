@@ -78,7 +78,8 @@ failure.
   (and, where it matters, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME` or
   `HOME`) at those directories, so your `~/.codarastudio`, `~/.claude`,
   `~/.codex`, `~/.grok` and `~/.pi` are left alone. `test-hook-installer.cjs`
-  even fails if your real `~/.claude/settings.json` changed during its run.
+  even fails if your real `~/.claude/settings.json` changed during its run,
+  and `test-codex-notify.cjs` does the same for `~/.codex/config.toml`.
 - Suites that go through Claude Code's credential store set
   `CODARA_DISABLE_KEYCHAIN=1`. This is a test seam in
   `src/main/orchestration/claude-cli-credentials.ts`: with it set, the real
@@ -199,7 +200,7 @@ its first send (`run-store.ts`).
 | Suites | Covers |
 |---|---|
 | `test-pty-inherited-env`, `test-npm-run-script-env`, `test-pty-agent-socket-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane (no agent-socket token), backpressure, spawning, cleaning up child processes. |
-| `test-terminal-agent-notify`, `test-terminal-agent-notify-pi`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen` | Telling from a pane's output that an agent is running, blocked or idle (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`). |
+| `test-terminal-agent-notify`, `test-terminal-agent-notify-pi`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen`, `test-codex-notify` | Telling that an agent in a pane is running, blocked or idle, and when its turn ends (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`, the Codex notify installer and session-file tail). |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
 | `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
@@ -261,7 +262,8 @@ tricks it tries).
 
 ### Notifications
 
-`test-notify-policy`, `test-notify-center-store`, `test-toast-lifecycle`,
+`test-notify-policy`, `test-notify-deliver` (which transports fire and the
+chime burst filter), `test-notify-center-store`, `test-toast-lifecycle`,
 `test-sse-client` (the update event stream and `notify-release.cjs`).
 
 ### Renderer UI logic

@@ -1554,6 +1554,9 @@ export interface UiAttentionSnapshot {
   tabId: string | null;
   runId: string | null;
   paneId: string | null;
+  // The split shown alone in the selected terminal tab; its siblings are
+  // hidden while it is set.
+  zoomedPaneId?: string | null;
 }
 
 export type PrefKey = keyof AppPreferences;
