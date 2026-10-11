@@ -147,7 +147,10 @@ export async function requestPreviewOp<T = unknown>(
 }
 
 async function waitForRendererLoad(webContents: WebContents): Promise<void> {
-  if (!webContents.isLoading()) return;
+  // Only the app's own document matters. isLoading() is also true while a
+  // browser tab's guest page loads, and did-finish-load never follows for
+  // that, so a request sent then waited out the timeout and failed.
+  if (!webContents.isLoadingMainFrame()) return;
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer);
@@ -176,7 +179,7 @@ async function waitForRendererLoad(webContents: WebContents): Promise<void> {
     webContents.once("render-process-gone", gone);
     // Close the race where loading ended between the initial check and the
     // listener registration.
-    if (!webContents.isLoading()) ready();
+    if (!webContents.isLoadingMainFrame()) ready();
   });
 }
 
