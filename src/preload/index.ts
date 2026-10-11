@@ -1567,15 +1567,11 @@ const api = {
       };
     },
   },
-  // Browser-ish URLs should stay inside Codara by default. Non-browser
-  // schemes still route through Electron so mailto: and friends work.
-  openExternal: async (url: string): Promise<void> => {
-    if (isBrowserUrl(url)) {
-      dispatchOpenInSparkBrowser(url);
-      return;
-    }
-    await ipcRenderer.invoke("app:openExternal", url);
-  },
+  // A plain link click. Main decides the destination from the user's
+  // linkOpenTarget preference (default browser or a Codara browser tab);
+  // file: always opens in Codara and unknown schemes are dropped.
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke("app:openLink", url),
   // Explicit user action: unlike a normal link navigation, this must never
   // recycle an orchestration-owned/background preview. It creates a focused,
   // workspace-level Preview tab with the normal top-strip controls.

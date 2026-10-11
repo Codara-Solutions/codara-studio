@@ -581,7 +581,7 @@ export default function GitHubSection({
                 <button
                   type="button"
                   title="Open this repository's issues on GitHub"
-                  onClick={() => openInSystemBrowser(issuesUrl)}
+                  onClick={() => openLink(issuesUrl)}
                   style={linkButtonStyle}
                 >
                   View all issues
@@ -1316,7 +1316,7 @@ function Guidance({
               ? "Open the GitHub CLI download page to update `gh`"
               : "Open the GitHub CLI installation guide"
           }
-          onClick={() => openInSystemBrowser("https://cli.github.com/")}
+          onClick={() => openLink("https://cli.github.com/")}
         />
       )}
     </>
@@ -1422,7 +1422,7 @@ function PullRequestView({
         <ActionButton
           label="Open PR"
           title={`Open pull request #${pullRequest.number} in your browser`}
-          onClick={() => openInSystemBrowser(pullRequest.url)}
+          onClick={() => openLink(pullRequest.url)}
         />
         {pullRequest.state === "OPEN" && pullRequest.isDraft ? (
           <ActionButton
@@ -1824,9 +1824,8 @@ function checkLabel(checks: GitHubCheckSummary): string {
   return parts.join(" · ");
 }
 
-function openInSystemBrowser(url: string): void {
-  // This preload method lands in ipc.ts's allowlisted shell.openExternal
-  // handler. It is an explicit user click and never creates a PR by itself.
-  const open = window.spark.openInSystemBrowser ?? window.spark.openExternal;
-  void open(url);
+function openLink(url: string): void {
+  // A plain link click: it follows the linkOpenTarget preference like every
+  // other link, and never creates a PR by itself.
+  void window.spark.openExternal(url);
 }

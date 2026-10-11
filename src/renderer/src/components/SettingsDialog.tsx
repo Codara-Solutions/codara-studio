@@ -10,6 +10,7 @@ import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-lef
 import type {
   AppSettings,
   EditorThemeId,
+  LinkOpenTarget,
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
   PiSubscriptionProfileLoginRequest,
@@ -1367,7 +1368,7 @@ function GeneralSettings({
 
       <SectionTitle
         title="Window"
-        detail="Control what happens when you close the main window."
+        detail="Control what happens when you close the main window, and where links open."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
@@ -1382,6 +1383,22 @@ function GeneralSettings({
             desc="When an agent or terminal prints a localhost URL (e.g. a Vite/Next dev server), automatically open it in a browser tab. When off, a clickable chip appears instead."
             checked={Boolean(preferences.autoOpenPreview)}
             onChange={(v) => void setPreference("autoOpenPreview", v)}
+          />
+          <SettingRow
+            title="Open links in"
+            desc="Where links you click in terminals, Cora, markdown and GitHub open. Local files and explicit Open in Codara browser actions always stay in Codara."
+            control={
+              <div data-setting="link-open-target" style={{ minWidth: 190 }}>
+                <CustomSelect
+                  value={preferences.linkOpenTarget ?? "system"}
+                  options={[
+                    { value: "system", label: "Default browser" },
+                    { value: "studio", label: "Codara browser" },
+                  ]}
+                  onChange={(v) => void setPreference("linkOpenTarget", v as LinkOpenTarget)}
+                />
+              </div>
+            }
           />
           <div style={{ display: "grid", gap: 7, marginTop: 4 }}>
             <span className="spark-eyebrow" style={{ fontSize: 11 }}>

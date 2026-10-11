@@ -1172,6 +1172,11 @@ export interface AppPreferences {
   // so the user can click to open, but Codara never yanks a tab open on its own
   // (and agent/worker panes never auto-open a preview regardless of this flag).
   autoOpenPreview?: boolean;
+  // Where a clicked link opens: the machine's default browser ("system",
+  // the default) or a Codara browser tab ("studio"). Only plain link clicks
+  // follow it; explicit "open in Codara browser" actions, agent browser tools
+  // and sign-in flows keep their fixed destination (src/main/link-routing.ts).
+  linkOpenTarget?: LinkOpenTarget;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -1342,6 +1347,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassChroma: 100,
   keepRunningInBackground: true,
   autoOpenPreview: false,
+  linkOpenTarget: "system",
   copyBranchSetupCommandByRepo: {},
   restoreAgentSessions: false,
   remoteAccessEnabled: false,
@@ -1557,6 +1563,10 @@ export interface UiAttentionSnapshot {
 }
 
 export type PrefKey = keyof AppPreferences;
+
+export type LinkOpenTarget = "system" | "studio";
+
+export const LINK_OPEN_TARGETS: readonly LinkOpenTarget[] = ["system", "studio"];
 
 export interface PreferencesChange<K extends PrefKey = PrefKey> {
   key: K;

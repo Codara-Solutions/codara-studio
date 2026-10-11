@@ -867,10 +867,10 @@ export function useTerminalSession({
       if (disposed || !container.current) return;
 
       // Route every terminal link activation through the preload's
-      // openExternal — Electron's shell.open is the only hop that survives
-      // Chrome's external navigation block, and it keeps browser URLs inside
-      // Codara's preview tab. Shared by the WebLinksAddon (plain-text URLs)
-      // and the linkHandler below (OSC 8 hyperlinks).
+      // openExternal: main is the only hop that survives Chrome's external
+      // navigation block, and it applies the linkOpenTarget preference.
+      // Shared by the WebLinksAddon (plain-text URLs) and the linkHandler
+      // below (OSC 8 hyperlinks).
       const openTerminalUri = (uri: string) => {
         void window.spark.openExternal?.(uri);
       };
@@ -894,7 +894,7 @@ export function useTerminalSession({
         // linkHandler, xterm falls back to a window.confirm("navigate to …?")
         // whose OK branch calls window.open() with no URL — so the click just
         // shows a scary dialog and opens nothing. Handle it ourselves so these
-        // links open the in-app preview like plain-text URLs do.
+        // links open like plain-text URLs do.
         linkHandler: {
           activate: (_event, uri) => openTerminalUri(uri),
         },
