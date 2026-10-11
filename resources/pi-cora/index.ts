@@ -295,7 +295,7 @@ ${mcp?.promptSuffix() ?? ""}`,
         `Load Codara Studio tool families for this chat before their first use. Families: ${loadableFamilies.join(", ")}. ` +
         "browser drives the built-in Browser tab (codara_preview_*); terminal opens terminal tabs for servers and commands the user watches (codara_terminal_*); " +
         "whiteboard builds visual explanations (codara_whiteboard_*); board manages this chat's task cards (codara_board_*); " +
-        "automations creates, runs, and manages recurring automations. Returns the activated tools and how to use them.",
+        "automations creates, runs, and manages recurring automations; worktrees creates isolated worktrees and removes merged ones. Returns the activated tools and how to use them.",
       promptSnippet: `Load Studio tool families: ${loadableFamilies.join(", ")}`,
       parameters: {
         type: "object",

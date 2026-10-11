@@ -92,6 +92,9 @@ const ORCHESTRATION_TIMEOUT_MS =
 // terminal; the client deadline sits above both.
 const TERMINAL_RUN_MAX_WAIT_MS = 10 * 60_000;
 const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
+// A worktree call may fetch (30 s cap), wait its turn on the repository lock
+// (60 s cap) and then check out or delete a large tree.
+const WORKTREE_TIMEOUT_MS = 150_000;
 // A browser wait must end before the client gives up on the call.
 const PREVIEW_WAIT_MAX_MS = 50_000;
 
@@ -601,6 +604,63 @@ const NOTIFY_TOOL = {
     },
     additionalProperties: false,
   },
+};
+
+// Agent worktrees. The repository is always the caller's own (its run or
+// terminal pane), so no tool takes a repo; the policy is in
+// src/main/agent-worktrees.ts and a refusal comes back as {ok:false, code,
+// hint}.
+const WORKTREE_TOOLS = [
+  {
+    name: "codara_worktree_create",
+    description:
+      "Create an isolated git worktree of your repository on a new branch (or an existing one with checkout:true), shown in the user's rail. Your cwd does not change: work under the returned path. Repeating a branch returns its worktree.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        branch: { type: "string", description: "Default agent/<purpose>-<id>." },
+        base: { type: "string", description: "Default the default branch, fetched; HEAD is your commit." },
+        checkout: { type: "boolean", description: "Use the existing branch." },
+        purpose: { type: "string", description: "One line: what it is for." },
+        title: { type: "string", description: "Rail label. Default the branch." },
+        fetch: { type: "boolean", description: "Default true." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_worktree_list",
+    description:
+      "List your repository's Codara-managed worktrees: dirty, running and merge status, and whether codara_worktree_remove would accept each. checkMerge:true fetches and asks GitHub (slower).",
+    inputSchema: {
+      type: "object",
+      properties: { checkMerge: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_worktree_remove",
+    description:
+      "Remove a Codara-managed worktree whose exact tip is merged (ancestor, merged PR, or identical squash), with no local changes and nothing running in it, and delete its branch. Never forces: a refusal returns code, blockers and hint. dryRun:true only checks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: { type: "string", description: "Pass this or path." },
+        path: { type: "string", description: "Absolute worktree path." },
+        target: { type: "string", description: "Merged into. Default its base." },
+        deleteBranch: { type: "boolean", description: "Default true for a new branch." },
+        discardIgnoredFiles: { type: "boolean", description: "Delete blocking ignored files such as .env.local." },
+        dryRun: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+const WORKTREE_TOOL_TO_RPC = {
+  codara_worktree_create: "worktree.create",
+  codara_worktree_list: "worktree.list",
+  codara_worktree_remove: "worktree.remove",
 };
 
 // A run-owned visual explanation surface available in every Cora mode. It is
@@ -1758,26 +1818,37 @@ if (IS_AUTOMATION_MODE) {
 } else if (IS_EXECUTE_MODE) {
   // EXECUTE_TOOLS already contains codara_ask_user and codara_name_chat, so the
   // execute map is spread LAST and keeps orchestrator.name_chat.
-  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS, ...WORKTREE_TOOLS];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     ...MANAGER_AUTOMATION_TOOL_TO_RPC,
     ...EXECUTE_TOOL_TO_RPC,
+    ...WORKTREE_TOOL_TO_RPC,
   };
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
-  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL];
-  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_remember: "orchestrator.remember" };
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, ...WORKTREE_TOOLS];
+  TOOL_TO_RPC = {
+    ...STUDIO_TOOL_TO_RPC,
+    codara_remember: "orchestrator.remember",
+    ...WORKTREE_TOOL_TO_RPC,
+  };
 } else if (STARTUP_RUN_ID) {
+  // A chat worker or talk chat: Codara refuses worktree changes from either,
+  // so the roster leaves them out.
   TOOLS = STUDIO_TOOLS;
   TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
 } else {
   // A user's own terminal agent. A Cora run already announces its outcome, so
   // only this roster carries the explicit notification.
-  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL];
-  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, codara_notify_user: "agent.notify" };
+  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, ...WORKTREE_TOOLS];
+  TOOL_TO_RPC = {
+    ...STUDIO_TOOL_TO_RPC,
+    codara_notify_user: "agent.notify",
+    ...WORKTREE_TOOL_TO_RPC,
+  };
 }
 if (IS_UNTRUSTED_PULL_REQUEST) {
   // Defense in depth for both the MCP CLI path and Pi's in-process bridge:
@@ -1810,6 +1881,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_list_automations",
   "codara_get_automation",
   "codara_wait_for_automation",
+  "codara_worktree_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
 // data, and a client may auto-approve a tool that says it cannot.
@@ -1825,9 +1897,11 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_board_update",
   "codara_delete_automation",
   "codara_remember",
+  "codara_worktree_remove",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
   "codara_terminal_close",
+  "codara_worktree_remove",
   "codara_preview_resize",
   "codara_set_automation_enabled",
   "codara_plan_update",
@@ -1888,6 +1962,11 @@ function buildInstructions() {
       "Whiteboard and board belong to this chat and the user edits them too: call the get tool right before an update, pass its revision as baseRevision, and after a revision conflict read again and re-apply instead of resending the same payload.",
     );
   }
+  if (listed.has("codara_worktree_create")) {
+    parts.push(
+      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
+    );
+  }
   if (listed.has("codara_notify_user")) {
     parts.push(
       "When you finish a task that took more than a minute, or you are blocked waiting for the user, call codara_notify_user once with a one-line summary.",
@@ -1927,12 +2006,15 @@ const PROGRESS_RPCS = new Set([
   "automation.update",
   "automation.delete",
   "automation.set_enabled",
+  "worktree.create",
+  "worktree.remove",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 
 function rpcTimeoutMs(rpc) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
+  if (rpc.startsWith("worktree.")) return WORKTREE_TIMEOUT_MS;
   return PREVIEW_TERMINAL_TIMEOUT_MS;
 }
 
@@ -1967,6 +2049,33 @@ function injectRunIdForStudioOwnership(rpc, args) {
     if (envPaneId) args.callerPaneId = envPaneId;
     args.callerPid = process.pid;
   }
+}
+
+// Who is asking, for the worktree RPCs. Codara decides from these fields
+// alone which repository a call acts on and whether this session may change
+// it, so every one comes from the launch environment and none from tool JSON.
+// Worker and automation come first: a direct-task process launched as a loom
+// worker is still a worker.
+function worktreeCallerRole() {
+  if (IS_WORKER_MODE) return "worker";
+  if (IS_AUTOMATION_MODE) return "automation";
+  if (IS_EXECUTE_MODE || process.env.CODARA_PI_DIRECT_TASK === "1") return "manager";
+  if (STARTUP_RUN_ID) return "talk";
+  return "studio";
+}
+
+let CLIENT_NAME = "";
+
+function stampWorktreeCaller(rpc, args, ctx) {
+  if (!rpc.startsWith("worktree.")) return;
+  for (const key of ["runId", "callerPaneId", "callerPid", "callerRole", "callerClient"]) delete args[key];
+  const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+  if (envRunId) args.runId = envRunId;
+  const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
+  if (envPaneId) args.callerPaneId = envPaneId;
+  args.callerPid = process.pid;
+  args.callerRole = worktreeCallerRole();
+  args.callerClient = (ctx && ctx.client) || CLIENT_NAME || "agent";
 }
 
 // Tool JSON never chooses the chat: the launch-time SPARK_RUN_ID does. A
@@ -2346,6 +2455,10 @@ async function dispatch(method, params, ctx) {
   switch (method) {
     case "initialize": {
       const requested = params && typeof params.protocolVersion === "string" ? params.protocolVersion : "";
+      const clientName = params && params.clientInfo && typeof params.clientInfo.name === "string"
+        ? params.clientInfo.name.replace(/[^\w .@/-]+/g, "").trim().slice(0, 40)
+        : "";
+      if (clientName) CLIENT_NAME = clientName;
       return {
         protocolVersion: SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
@@ -2404,6 +2517,7 @@ async function callTool(params, ctx = {}) {
     }
   }
   injectRunIdForStudioOwnership(rpc, args);
+  stampWorktreeCaller(rpc, args, ctx);
   clampPreviewWait(rpc, args);
 
   const timeoutMs = rpcTimeoutMs(rpc);
@@ -2575,8 +2689,9 @@ module.exports = {
   listTools() {
     return TOOLS.map((tool) => ({ ...tool }));
   },
+  // Only Cora's Pi extension calls in this way; it never sends initialize.
   callToolByName(name, args, signal) {
-    return callTool({ name, arguments: args }, signal ? { signal } : {});
+    return callTool({ name, arguments: args }, signal ? { signal, client: "cora" } : { client: "cora" });
   },
   // The extension's non-tool calls (the Claude login renewal) go through the
   // same authenticated socket client, with its scoped-capability rules.

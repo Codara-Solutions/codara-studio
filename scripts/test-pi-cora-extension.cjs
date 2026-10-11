@@ -285,6 +285,15 @@ for (const automation of [false, true]) {
   assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
 }
 assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
+for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove"]) {
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, false, {}), false, `${tool} stays out of chat workers`);
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, true, { CODARA_PI_DIRECT_TASK: "1" }), false, `${tool} stays out of loom workers`);
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1" }), true, `${tool} reaches a direct task`);
+  assert.equal(
+    policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }),
+    false,
+  );
+}
 assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember"/);
 
 // Automation worker roster: lifecycle pair + board read appear; manager
@@ -981,6 +990,7 @@ const noInput = {};
   }
   assert.equal(families.studioToolFamily("codara_list_automations"), "automations");
   assert.equal(families.studioToolFamily("codara_set_automation_enabled"), "automations");
+  assert.equal(families.studioToolFamily("codara_worktree_remove"), "worktrees");
   assert.equal(
     families.toolPromptSnippet("Spawn workers now. They run in parallel and report back."),
     "Spawn workers now.",
@@ -992,6 +1002,7 @@ const noInput = {};
   assert.deepEqual(families.familiesForRequest("start the dev server and check localhost:5173"), ["browser", "terminal"]);
   assert.deepEqual(families.familiesForRequest("every monday summarize open PRs"), ["automations"]);
   assert.deepEqual(families.familiesForRequest("move the card to done on the board"), ["board"]);
+  assert.deepEqual(families.familiesForRequest("do this in separate worktrees"), ["worktrees"]);
 
   const branch = [
     { type: "message", message: { role: "user", content: "hello" } },

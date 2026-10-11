@@ -55,10 +55,12 @@ const TERMINAL_TOOLS = [
 ];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
+const WORKTREE_TOOLS = ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove"];
 // A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
-// own terminal agent gets the explicit notification instead.
+// own terminal agent gets the explicit notification and the worktree tools
+// instead.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
-const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user"];
+const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
 // Code, Codex and Grok session pays for on every request.
@@ -227,6 +229,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(studio.init.protocolVersion, "2025-06-18", "initialize echoes a supported client version");
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
+    assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
     const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
@@ -242,6 +245,7 @@ function sortedEqual(actual, expected, label) {
     const runStudio = await listTools(undefined, RUN);
     sortedEqual(runStudio.tools, STUDIO_TOOLS, "studio roster inside a Cora chat mismatch");
     assert.match(runStudio.init.instructions, /baseRevision/);
+    assert.doesNotMatch(runStudio.init.instructions, /codara_worktree/, "chat workers get no worktree guidance");
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
@@ -254,6 +258,7 @@ function sortedEqual(actual, expected, label) {
         ...STUDIO_TOOLS,
         ...EXECUTE_TOOLS,
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
+        ...WORKTREE_TOOLS,
       ],
       "execute roster mismatch",
     );
@@ -382,12 +387,16 @@ function sortedEqual(actual, expected, label) {
     }
 
     const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", ...WORKTREE_TOOLS], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
     const untrustedDirect = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
     assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
+    assert.ok(
+      !untrustedDirect.tools.some((name) => name.startsWith("codara_worktree_")),
+      "untrusted PRs cannot create or remove worktrees",
+    );
 
     // Automation mode: memory is a manager-of-a-coding-run concept, an
     // automation loop has no user conversation to learn a durable fact from.
@@ -440,6 +449,10 @@ function sortedEqual(actual, expected, label) {
       !worker.tools.includes("codara_remember"),
       "worker roster must not expose codara_remember",
     );
+    assert.ok(
+      !worker.tools.some((name) => name.startsWith("codara_worktree_")),
+      "workers never manage worktrees",
+    );
     // The agent-loop handoff steers by model only; nextEngine is gone.
     const nextIteration = worker.definitions.find(
       (tool) => tool.name === "codara_request_next_iteration",
@@ -477,6 +490,22 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
     assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_list").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, false);
+    assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
+    for (const name of WORKTREE_TOOLS) {
+      const properties = byName(studio, name).inputSchema.properties;
+      for (const field of ["repo", "repoCwd", "cwd", "callerRole", "callerClient", "callerPaneId", "force"]) {
+        assert.ok(!(field in properties), `${name} must not let the model choose ${field}`);
+      }
+    }
+    // Worktree calls may fetch and wait for the repository lock; the client
+    // deadline sits above both.
+    const serverSource = fs.readFileSync(SERVER, "utf8");
+    const worktreeTimeout = Number(/const WORKTREE_TIMEOUT_MS = ([\d_]+);/.exec(serverSource)[1].replace(/_/g, ""));
+    assert.ok(worktreeTimeout >= 120_000, "worktree calls get a long client timeout");
+    assert.match(serverSource, /rpc\.startsWith\("worktree\."\)\) return WORKTREE_TIMEOUT_MS/);
     // It marks the returned messages read, so a client must not treat it as a
     // side-effect-free call it may repeat or run in parallel.
     assert.notStrictEqual(byName(execute, "codara_check_messages").annotations.readOnlyHint, true);
@@ -845,6 +874,35 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(received.at(-1).method, "agent.notify");
     assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
     assert.strictEqual(received.at(-1).params.kind, "done");
+    // Worktree calls carry who is asking from the launch environment only:
+    // spoofed caller fields are replaced, and a refusal reaches the model as
+    // an error result that keeps its code, blockers and hint.
+    await terminalAgentBridge.callToolByName("codara_worktree_list", {
+      callerRole: "manager",
+      callerClient: "spoofed",
+      callerPaneId: "pane-spoofed",
+      callerPid: 1,
+    });
+    assert.strictEqual(received.at(-1).method, "worktree.list");
+    assert.strictEqual(received.at(-1).params.callerRole, "studio");
+    assert.strictEqual(received.at(-1).params.callerClient, "cora");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    assert.ok(!("runId" in received.at(-1).params), "a terminal agent's worktree call names no run");
+    mockResult = {
+      ok: false,
+      code: "WORKTREE_NOT_MERGED",
+      error: "'agent/x' has 2 commits not in origin/main",
+      hint: "push and merge it (PR), or ask the user to delete it from the workspace rail",
+      blockers: ["WORKTREE_NOT_MERGED"],
+    };
+    const refusedRemoval = await terminalAgentBridge.callToolByName("codara_worktree_remove", { workspaceId: "ws-1" });
+    assert.strictEqual(received.at(-1).method, "worktree.remove");
+    assert.strictEqual(refusedRemoval.isError, true, "a worktree refusal is a tool error");
+    assert.deepStrictEqual(JSON.parse(refusedRemoval.content[0].text), mockResult, "the refusal keeps every field");
+    mockResult = { ok: true };
+    const worktreeRunSpoof = await terminalAgentBridge.callToolByName("codara_worktree_create", { runId: "run-spoofed" });
+    assert.strictEqual(worktreeRunSpoof.isError, true, "a worktree call cannot name a run");
     // The retired codara_preview_url stays callable for agents that know it.
     await terminalAgentBridge.callToolByName("codara_preview_url", {});
     assert.strictEqual(received.at(-1).method, "preview.url");
@@ -1021,6 +1079,24 @@ function sortedEqual(actual, expected, label) {
     assert.deepStrictEqual(progress.map((msg) => [msg.params.progress, msg.params.total]), [[1, 2], [2, 2]]);
     assert.ok(!executeSession.messages.some((msg) => msg.id === 9), "a cancelled request is never answered");
     executeSession.close();
+
+    // A Cora manager's worktree call carries its run and role; a stdio
+    // client is named by its initialize clientInfo.
+    const managerSession = stdioSession({ SPARK_MCP_MODE: "execute", SPARK_RUN_ID: "run-stdio" });
+    managerSession.send({
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code\u0007", version: "9" } },
+    });
+    await managerSession.next((msg) => msg.id === 1);
+    managerSession.send({ id: 2, method: "tools/call", params: { name: "codara_worktree_list", arguments: {} } });
+    await managerSession.next((msg) => msg.id === 2);
+    const managerCall = received.at(-1);
+    assert.strictEqual(managerCall.method, "worktree.list");
+    assert.strictEqual(managerCall.params.runId, "run-stdio");
+    assert.strictEqual(managerCall.params.callerRole, "manager");
+    assert.strictEqual(managerCall.params.callerClient, "claude-code");
+    managerSession.close();
 
     // The batched step schema is additionalProperties:false, so every field the
     // single-shot tool accepts must also be spelled out on the step items or a
