@@ -358,6 +358,12 @@ automations:
   notification center. A chime within 1.5 s of the previous one of the same
   kind is dropped.
 - `attention.ts` tracks what you are looking at.
+- `center-store.ts` owns the notification center's history and mutes, and
+  pushes a summary (unread, needs-you, mutes) to every window after each
+  change. The list operations (folding repeats per source, eviction, age
+  limits, settling answered questions) are pure functions in
+  `center-model.ts`; the badge rule and the "is this target on screen" rule
+  live in `src/shared/notify-center.ts` so main and the renderer agree.
 
 Phone delivery goes through `remote-access/phone-notify.ts`.
 

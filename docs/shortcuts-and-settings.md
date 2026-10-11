@@ -181,6 +181,42 @@ reports, and Codex's notify program and session file (see
 [on-your-machine.md](./on-your-machine.md) for what Codara adds to your
 config). Agents without those fall back to reading the screen.
 
+### The notification center
+
+The bell in the title bar keeps every alert, including the ones you did not
+see because you were watching, Do Not Disturb was on, or the source was
+muted. Its badge counts the questions still waiting on you (a Cora run, a
+terminal agent or an automation that needs you); a dot means there are only
+other unread alerts.
+
+- **Needs you** sits on top: every open question, read or not, with a button
+  that goes straight to it (**Reply in terminal**, **Open run**, **Open
+  automation**). A question stops waiting once its source moves on, and a
+  terminal prompt from before a restart no longer counts.
+- Below it the history is grouped by day, or by workspace with the folder
+  button. Repeats from one source fold into one row with a count
+  (`52×` for a busy bot), and the same alert from several panes stacks under
+  its newest copy.
+- Filters: **All**, **Needs you** and **Unread**. The filter and grouping are
+  remembered.
+- Clicking a row opens its exact pane, run or automation and marks it read.
+  If the pane was closed or the run deleted, the row says so and opening it
+  lands on its workspace instead; rows of a removed workspace open nothing.
+  Opening the pane or run yourself also marks its alerts read.
+- Hover a row for **Mark read** or **Mark unread**, **Mute** (this source or
+  its whole workspace, for an hour or until 08:00 tomorrow) and **Dismiss**.
+  Muted sources still land in the history, silently; the footer lists active
+  mutes with **Unmute**. **Clear all** and **Dismiss** can be undone for a few
+  seconds.
+- Keys, with the list focused: Up and Down (or J and K), Home and End, Enter
+  to open, R to toggle read, M to mute, Delete to dismiss, Escape to close the
+  menu and then the panel.
+
+The history keeps 200 rows. When it is full the oldest read row goes first,
+and an open question goes last. Read rows are dropped after 7 days and any
+row after 30 days. It is saved in `notifications.json` and the mutes in
+`notification-mutes.json` (see [on-your-machine.md](./on-your-machine.md)).
+
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your

@@ -188,7 +188,7 @@ function automation(minutesAgo: number, ws: (typeof WORKSPACES)[number], kind: "
 function fewItems(): Entry[] {
   const [api, web, infra] = WORKSPACES;
   return [
-    agentDone(2, api, 1),
+    { ...agentDone(2, api, 1), count: 3, firstAt: new Date(Date.now() - 95 * MINUTE).toISOString() },
     runDone(9, web, 1),
     teammatePush(25, infra, 0),
     agentFailed(48, web, 2),
@@ -234,6 +234,7 @@ function needsYouItems(): Entry[] {
     agentDone(31, web, 0, "Codex"),
     teammatePush(44, api, 3),
     runDone(70, infra, 2, true),
+    { ...agentNeeds(150, web, 3, "Claude Code"), read: true, settled: true },
   ];
 }
 
@@ -253,12 +254,27 @@ function closedTargetItems(): Entry[] {
   ];
 }
 
-const SCENARIOS: Array<{ name: string; entries: Entry[] | null }> = [
-  { name: "empty", entries: null },
-  { name: "few", entries: fewItems() },
-  { name: "many150", entries: manyItems() },
-  { name: "needs-you", entries: needsYouItems() },
-  { name: "closed-targets", entries: closedTargetItems() },
+// Two hundred rows from distinct sources, so nothing folds: the most a
+// history can hold, for timing the panel at its largest.
+function fullHistory(): Entry[] {
+  const out: Entry[] = [];
+  for (let i = 0; i < 200; i += 1) {
+    const ws = WORKSPACES[i % WORKSPACES.length];
+    const minutes = 2 + i * 9;
+    const e = i % 2 === 0 ? pullRequest(minutes, ws, 100 + i) : agentDone(minutes, ws, 10 + i, i % 3 === 0 ? "Codex" : "Claude Code");
+    e.read = i > 20 && i % 4 !== 0;
+    out.push(e);
+  }
+  return out;
+}
+
+const SCENARIOS: Array<{ name: string; entries: Entry[] | null; seedTargets: boolean }> = [
+  { name: "empty", entries: null, seedTargets: true },
+  { name: "few", entries: fewItems(), seedTargets: true },
+  { name: "many150", entries: manyItems(), seedTargets: true },
+  { name: "needs-you", entries: needsYouItems(), seedTargets: true },
+  { name: "closed-targets", entries: closedTargetItems(), seedTargets: false },
+  { name: "full200", entries: fullHistory(), seedTargets: true },
 ];
 
 const SIZES = [
@@ -271,7 +287,81 @@ const THEMES = [
   { label: "light", id: "codara-daylight" },
 ];
 
-async function launch(entries: Entry[] | null) {
+type Layouts = Record<string, { v: number; tabs: unknown[]; activeId: string }>;
+
+// The runs and terminal panes the entries point at, so a live target renders
+// live. Runs are minimal persisted run files; panes are one terminal tab each
+// in the workspace's saved layout. The active workspace also gets a plain
+// shell tab and opens on it, so no seeded pane is "on screen" and marked read.
+async function seedTargets(home: string, entries: Entry[]): Promise<Layouts> {
+  const runIds = new Set<string>();
+  const panes = new Map<string, Map<string, string>>();
+  for (const entry of entries) {
+    const target = entry.target as Record<string, string>;
+    if (!WORKSPACES.some((ws) => ws.id === target.workspaceId)) continue;
+    if (target.runId) runIds.add(target.runId);
+    if (target.type === "terminal") {
+      let tabs = panes.get(target.workspaceId);
+      if (!tabs) panes.set(target.workspaceId, (tabs = new Map()));
+      tabs.set(target.tabId, target.paneId);
+    }
+  }
+  for (const runId of runIds) {
+    const workspaceId = WORKSPACES.find((ws) => runId.includes(ws.id))?.id ?? "ws-api";
+    const runDir = join(home, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    const at = new Date(Date.now() - 3 * 60 * MINUTE).toISOString();
+    await writeFile(
+      join(runDir, "run.json"),
+      JSON.stringify({
+        id: runId,
+        workspaceId,
+        title: "Session middleware refactor",
+        status: "complete",
+        settingsSnapshot: { workspaceCwd: join(home, "..", "projects") },
+        artifactDir: runDir,
+        createdAt: at,
+        updatedAt: at,
+        completedAt: at,
+        conversationEpoch: 0,
+        plans: [], steps: [], workerTasks: [], workerAttempts: [], checkpoints: [], assumptions: [],
+        sparkCalls: [], humanMessages: [],
+        chatBackend: "pi", chatMode: "auto",
+      }),
+      "utf8",
+    );
+  }
+  const layouts: Layouts = {};
+  for (const [workspaceId, tabs] of panes) {
+    const list: unknown[] = [];
+    let index = 0;
+    for (const [tabId, paneId] of tabs) {
+      list.push({
+        id: tabId,
+        kind: "terminal",
+        title: TABS[index % TABS.length],
+        activePaneId: paneId,
+        root: { kind: "leaf", paneId, cwd: join(home, "..", "projects") },
+      });
+      index += 1;
+    }
+    let activeId = String((list[0] as { id: string }).id);
+    if (workspaceId === "ws-api") {
+      list.unshift({
+        id: "term-ws-api-home",
+        kind: "terminal",
+        title: "shell",
+        activePaneId: "pane-ws-api-home",
+        root: { kind: "leaf", paneId: "pane-ws-api-home", cwd: join(home, "..", "projects") },
+      });
+      activeId = "term-ws-api-home";
+    }
+    layouts[workspaceId] = { v: 6, tabs: list, activeId };
+  }
+  return layouts;
+}
+
+async function launch(entries: Entry[] | null, withTargets: boolean) {
   const root = await mkdtemp(join(tmpdir(), "codara-ncenter-shots-"));
   const home = join(root, "codara-home");
   const userHome = join(root, "user-home");
@@ -288,8 +378,15 @@ async function launch(entries: Entry[] | null) {
     JSON.stringify({ workspaces, activeWorkspaceId: "ws-api" }),
     "utf8",
   );
+  const layouts = entries && withTargets ? await seedTargets(home, entries) : {};
+  // A terminal prompt cannot outlive the app (its pane's process ends at
+  // quit), so the store settles any it loads from disk. Open prompts are
+  // handed to the running app instead, as if they had just been raised.
+  const isOpenPrompt = (e: Entry) => e.kind === "terminal.agent.needs-input" && !e.settled;
+  const live = (entries ?? []).filter(isOpenPrompt);
   if (entries) {
-    await writeFile(join(home, "notifications.json"), JSON.stringify(entries, null, 2), "utf8");
+    const onDisk = entries.filter((e) => !isOpenPrompt(e));
+    await writeFile(join(home, "notifications.json"), JSON.stringify(onDisk, null, 2), "utf8");
   }
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -313,6 +410,24 @@ async function launch(entries: Entry[] | null) {
   await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeAttached({
     timeout: 30_000,
   });
+  if (Object.keys(layouts).length > 0) {
+    await page.addInitScript((saved) => {
+      for (const [workspaceId, layout] of Object.entries(saved)) {
+        localStorage.setItem(`spark.tabs:${workspaceId}`, JSON.stringify(layout));
+      }
+    }, layouts);
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByRole("button", { name: "New tab", exact: true })).toBeAttached({
+      timeout: 30_000,
+    });
+  }
+  if (live.length > 0) {
+    await page.evaluate((rows) => window.spark.notifications.restore(rows as never), live);
+  }
+  // The global runs list arrives after boot; a run is only judged gone once
+  // it has.
+  await page.waitForTimeout(800);
   return { app, page, root };
 }
 
@@ -322,6 +437,10 @@ function bell(page: Page) {
 
 function panel(page: Page) {
   return page.getByRole("dialog", { name: "Notifications" });
+}
+
+function rows(page: Page) {
+  return panel(page).locator(".nc-row");
 }
 
 async function setTheme(page: Page, id: string): Promise<void> {
@@ -336,15 +455,27 @@ async function openCenter(page: Page): Promise<number> {
   const started = Date.now();
   await bell(page).click();
   await expect(panel(page)).toBeVisible();
-  // The list arrives over IPC after the panel mounts.
-  await page.waitForTimeout(400);
-  return Date.now() - started;
+  await expect
+    .poll(() => page.evaluate(() => document.querySelectorAll(".nc-row, .nc-empty").length), { intervals: [10, 20, 50] })
+    .toBeGreaterThan(0);
+  const elapsed = Date.now() - started;
+  // Let fonts and the entrance animation settle before a screenshot.
+  await page.waitForTimeout(250);
+  return elapsed;
 }
 
 async function closeCenter(page: Page): Promise<void> {
   if (!(await panel(page).isVisible())) return;
   await page.keyboard.press("Escape");
   await expect(panel(page)).toBeHidden();
+}
+
+async function setFilter(page: Page, label: "All" | "Needs you" | "Unread"): Promise<void> {
+  await panel(page).getByRole("tab", { name: new RegExp(`^${label}`) }).click();
+}
+
+async function setGrouping(page: Page, by: "day" | "workspace"): Promise<void> {
+  await panel(page).getByRole("button", { name: `Group by ${by}` }).click();
 }
 
 async function shoot(page: Page, dir: string, scenario: string): Promise<void> {
@@ -358,77 +489,142 @@ async function shoot(page: Page, dir: string, scenario: string): Promise<void> {
       await page.screenshot({ path: join(dir, `${base}.png`) });
       if (size.width === 1400) {
         await panel(page).screenshot({ path: join(dir, `${base}-panel.png`) });
+        await page.screenshot({
+          path: join(dir, `${base}-bell.png`),
+          clip: { x: size.width - 140, y: 0, width: 140, height: 34 },
+        });
       }
-      const rows = await panel(page).locator('[role="button"]').count();
-      console.log(`[ncenter-shots] ${base}: ${rows} rows, open ${openMs}ms`);
+      const count = await rows(page).count();
+      console.log(`[ncenter-shots] ${base}: ${count} rows, open ${openMs}ms`);
     }
   }
+}
+
+async function darkWide(page: Page): Promise<void> {
+  await setTheme(page, "codara-classic");
+  await page.setViewportSize(SIZES[0]);
+  await closeCenter(page);
+  await openCenter(page);
 }
 
 test.describe.configure({ mode: "serial" });
 
 for (const scenario of SCENARIOS) {
   test(`notification center shots: ${scenario.name}`, async ({}, testInfo) => {
-    test.setTimeout(180_000);
+    test.setTimeout(240_000);
     const dir = process.env.SHOTS_DIR || testInfo.outputPath("shots");
     await mkdir(dir, { recursive: true });
-    const { app, page, root } = await launch(scenario.entries);
+    const { app, page, root } = await launch(scenario.entries, scenario.seedTargets);
     try {
+      if (scenario.name === "full200") {
+        await darkWide(page);
+        await closeCenter(page);
+        const times: number[] = [];
+        for (let i = 0; i < 3; i += 1) {
+          times.push(await openCenter(page));
+          await closeCenter(page);
+        }
+        console.log(`[ncenter-shots] full200 open times: ${times.join(", ")}ms`);
+        await openCenter(page);
+        console.log(`[ncenter-shots] full200 rows rendered: ${await rows(page).count()}`);
+        await panel(page).screenshot({ path: join(dir, "full200-1400x900-dark-panel.png") });
+        return;
+      }
+
       await shoot(page, dir, scenario.name);
 
       if (scenario.name === "many150") {
-        // The bottom of a long history: older days, read rows.
-        await setTheme(page, "codara-classic");
-        await page.setViewportSize(SIZES[0]);
-        await closeCenter(page);
-        await openCenter(page);
-        await panel(page)
-          .locator("div")
-          .filter({ has: page.locator('[role="button"]') })
-          .first()
-          .evaluate((el) => {
-            let node: HTMLElement | null = el as HTMLElement;
-            while (node && node.scrollHeight <= node.clientHeight) node = node.parentElement;
-            if (node) node.scrollTop = node.scrollHeight;
-          });
+        await darkWide(page);
+        await panel(page).locator(".nc-list").evaluate((el) => {
+          el.scrollTop = el.scrollHeight;
+        });
         await page.waitForTimeout(200);
         await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-scrolled-panel.png") });
+        await panel(page).locator(".nc-list").evaluate((el) => {
+          el.scrollTop = 0;
+        });
+        await setGrouping(page, "workspace");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-by-workspace-panel.png") });
+        await setTheme(page, "codara-daylight");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "many150-1400x900-light-by-workspace-panel.png") });
+        await setTheme(page, "codara-classic");
+        await setGrouping(page, "day");
+        await setFilter(page, "Unread");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-unread-panel.png") });
+        await setFilter(page, "All");
       }
 
       if (scenario.name === "needs-you" || scenario.name === "few") {
-        // A hovered row shows what actions it offers.
-        await setTheme(page, "codara-classic");
-        await page.setViewportSize(SIZES[0]);
-        await closeCenter(page);
-        await openCenter(page);
-        await panel(page).locator('[role="button"]').first().hover();
-        await page.waitForTimeout(150);
+        await darkWide(page);
+        await rows(page).nth(1).hover();
+        await page.waitForTimeout(200);
         await panel(page).screenshot({ path: join(dir, `${scenario.name}-1400x900-dark-hover-panel.png`) });
+        await rows(page).nth(1).getByRole("button", { name: "Mute" }).click();
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, `${scenario.name}-1400x900-dark-mute-menu-panel.png`) });
+        await page.keyboard.press("Escape");
+        await expect(panel(page)).toBeVisible();
+        await page.mouse.move(10, 400);
+        await panel(page).locator(".nc-list").focus();
+        await page.keyboard.press("ArrowDown");
+        await page.keyboard.press("ArrowDown");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, `${scenario.name}-1400x900-dark-keyboard-panel.png`) });
+      }
+
+      if (scenario.name === "needs-you") {
+        await darkWide(page);
+        await setFilter(page, "Needs you");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-filter-panel.png") });
+        await setFilter(page, "All");
+        // Mute the first row's workspace for an hour: its row is marked
+        // muted, the footer lists the mute, and the badge drops it.
+        await rows(page).first().hover();
+        await rows(page).first().getByRole("button", { name: "Mute" }).click();
+        await panel(page).getByRole("menuitem", { name: /^Everything in/ }).first().click();
+        await page.mouse.move(10, 400);
+        await page.waitForTimeout(250);
+        await page.screenshot({ path: join(dir, "needs-you-1400x900-dark-muted.png") });
+      }
+
+      if (scenario.name === "few") {
+        await darkWide(page);
+        await panel(page).getByRole("button", { name: "Clear all" }).click();
+        await page.waitForTimeout(200);
+        await panel(page).screenshot({ path: join(dir, "few-1400x900-dark-cleared-undo-panel.png") });
+        await panel(page).getByRole("button", { name: "Undo" }).click();
+        await expect.poll(() => rows(page).count()).toBeGreaterThan(0);
+        await page.waitForTimeout(200);
+        await panel(page).screenshot({ path: join(dir, "few-1400x900-dark-after-undo-panel.png") });
+        await setTheme(page, "codara-daylight");
+        await rows(page).nth(1).hover();
+        await page.waitForTimeout(200);
+        await panel(page).screenshot({ path: join(dir, "few-1400x900-light-hover-panel.png") });
       }
 
       if (scenario.name === "closed-targets") {
-        // Clicking an entry whose pane is gone: record what the user is left
-        // with (the row disappears and nothing opens).
-        await setTheme(page, "codara-classic");
-        await page.setViewportSize(SIZES[0]);
-        await closeCenter(page);
-        await openCenter(page);
-        const before = await panel(page).locator('[role="button"]').count();
-        await panel(page).locator('[role="button"]').first().click();
+        await darkWide(page);
+        const before = await rows(page).count();
+        // A pane that was closed: the click lands on its workspace and says so.
+        await rows(page).first().click();
         await page.waitForTimeout(500);
         await page.screenshot({ path: join(dir, "closed-targets-1400x900-dark-after-click.png") });
         await openCenter(page);
-        const after = await panel(page).locator('[role="button"]').count();
+        const after = await rows(page).count();
         await panel(page).screenshot({ path: join(dir, "closed-targets-1400x900-dark-after-click-panel.png") });
         console.log(`[ncenter-shots] closed-targets click on a gone pane: rows ${before} -> ${after}`);
 
-        // A run that lived in a deleted workspace.
-        await panel(page).locator('[role="button"]').last().click();
-        await page.waitForTimeout(800);
+        // A run in a deleted workspace: nothing to open, the panel stays.
+        // aria-disabled: there is nothing to open, so force the click through.
+        await rows(page).last().click({ force: true });
+        await page.waitForTimeout(500);
         await page.screenshot({ path: join(dir, "closed-targets-1400x900-dark-after-deleted-ws-run-click.png") });
-        await openCenter(page);
-        const remaining = await panel(page).locator('[role="button"]').count();
-        console.log(`[ncenter-shots] closed-targets click on a deleted workspace's run: rows ${after} -> ${remaining}`);
+        const remaining = await rows(page).count();
+        console.log(`[ncenter-shots] closed-targets click on a deleted workspace's run: rows ${after} -> ${remaining}, panel open ${await panel(page).isVisible()}`);
       }
     } finally {
       await app.close();

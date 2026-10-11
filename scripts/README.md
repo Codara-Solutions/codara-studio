@@ -266,8 +266,12 @@ tricks it tries).
 ### Notifications
 
 `test-notify-policy`, `test-notify-deliver` (which transports fire and the
-chime burst filter), `test-notify-center-store`, `test-toast-lifecycle`,
-`test-sse-client` (the update event stream and `notify-release.cjs`).
+chime burst filter), `test-notify-center-store` (persistence, mutes, the
+summary push), `test-notify-center-model` (folding, eviction, age limits,
+settling, the badge count), `test-notify-center-view` (the bell panel's
+sections, stacks, times and what a click on a gone target does),
+`test-toast-lifecycle`, `test-sse-client` (the update event stream and
+`notify-release.cjs`).
 
 ### Renderer UI logic
 

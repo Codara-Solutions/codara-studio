@@ -1526,17 +1526,49 @@ export interface NotifyEvent {
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.
-// `suppressed` records WHY delivery was skipped (e.g. "watching", "dnd")
-// while the entry still lands in the history.
+// `suppressed` records WHY delivery was skipped (e.g. "watching", "dnd",
+// "muted") while the entry still lands in the history.
 export interface NotificationCenterEntry extends NotifyEvent {
   read: boolean;
   suppressed?: string;
+  // Repeats from one source fold into a single row: how many events of this
+  // kind the row stands for, and when the first of them arrived. Absent on
+  // rows written by older builds, which read as a count of one.
+  count?: number;
+  firstAt?: string;
+  // The source moved on after asking (the agent resumed, the run continued,
+  // the pane closed), so a needs-you row no longer waits on the user.
+  settled?: boolean;
+}
+
+// A per-source silence the user chose from the center ("mute this workspace
+// for an hour"). `key` is "workspace:<id>" or "source:<sourceKey>"; `until`
+// is an epoch-ms deadline after which the mute lapses on its own.
+export interface NotificationMute {
+  key: string;
+  label: string;
+  until: number;
 }
 
 // Pushed on "notify:center-updated" whenever the center's contents change,
-// so the renderer bell badge tracks unread without refetching the list.
+// so the renderer bell tracks counts without refetching the list. `needsYou`
+// is what the badge shows: unread rows still waiting on the user, minus any
+// whose source is muted. `version` increases on every change so a closed
+// panel knows its cached rows are stale.
 export interface NotificationCenterSummary {
   unread: number;
+  needsYou: number;
+  mutes: NotificationMute[];
+  version: number;
+}
+
+// What the user is looking at, as far as acknowledging center rows goes: the
+// visible run and the selected terminal pane. A row whose target is exactly
+// this surface is marked read; it stays in the history.
+export interface NotificationViewSnapshot {
+  workspaceId: string | null;
+  visibleRunId: string | null;
+  terminal: { workspaceId: string; tabId: string; paneId: string } | null;
 }
 
 // The renderer's report of what the user is looking at, sent on every

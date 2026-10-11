@@ -113,6 +113,37 @@ function storageKey(workspaceId: string | null): string | null {
   return `${STORAGE_KEY_PREFIX}${workspaceId}`;
 }
 
+// The terminal pane ids in a workspace's saved layout, read without hydrating
+// it. For a workspace this renderer has not opened yet, the saved layout is
+// the whole truth about which panes it has (pane ids survive restarts). An
+// empty set when nothing is saved or the blob is unreadable.
+export function persistedTerminalPaneIds(workspaceId: string): Set<string> {
+  const ids = new Set<string>();
+  const key = storageKey(workspaceId);
+  if (!key) return ids;
+  const walk = (node: unknown, depth: number): void => {
+    if (!node || typeof node !== "object" || depth > 64) return;
+    const n = node as { kind?: unknown; paneId?: unknown; a?: unknown; b?: unknown };
+    if (n.kind === "leaf" && typeof n.paneId === "string") ids.add(n.paneId);
+    else if (n.kind === "split") {
+      walk(n.a, depth + 1);
+      walk(n.b, depth + 1);
+    }
+  };
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return ids;
+    const parsed = JSON.parse(raw) as { tabs?: unknown };
+    if (!Array.isArray(parsed.tabs)) return ids;
+    for (const tab of parsed.tabs as Array<{ kind?: unknown; root?: unknown }>) {
+      if (tab && tab.kind === "terminal") walk(tab.root, 0);
+    }
+  } catch {
+    /* an unreadable layout has no panes we can vouch for */
+  }
+  return ids;
+}
+
 function titleFromUrl(url: string): string {
   try {
     const u = new URL(url);

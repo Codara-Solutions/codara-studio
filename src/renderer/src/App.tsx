@@ -9,6 +9,7 @@ import type {
   GitFileChange,
   GitStatus,
   InAppNotificationKind,
+  NavigationTarget,
   PtyExitInfo,
   RunState,
   RuntimeState,
@@ -77,10 +78,15 @@ import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
-import { useTabs, isDraftChatTabId, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
+import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
-import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
+import {
+  createNavigateTo,
+  useNotifyFocusRouting,
+  type NotifyTargetStatus,
+} from "./notifications/routing";
+import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
 import { emitLocalToast } from "./notifications/local-toast";
 import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import {
@@ -802,22 +808,24 @@ export default function App() {
   // actually changes.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  // Keyed on the primitives that define the view, not on the active tab
+  // object (rebuilt on every tab-state publish), so consumers see a new view
+  // only when the surface on screen really changed.
+  const activeViewTab = tabs.activeTab;
+  const activeViewRunId = visibleRunIdForTab(activeViewTab);
+  const activeViewTerminalTabId = activeViewTab?.kind === "terminal" ? activeViewTab.id : null;
+  const activeViewPaneId = activeViewTab?.kind === "terminal" ? activeViewTab.activePaneId : null;
   const activeNotificationView = useMemo<ActiveNotificationView>(() => {
-    const activeTab = tabs.activeTab;
+    const workspaceId = tabs.tabsWorkspaceId;
     return {
-      workspaceId: tabs.tabsWorkspaceId,
-      visibleRunId: visibleRunIdForTab(activeTab),
+      workspaceId,
+      visibleRunId: activeViewRunId,
       terminal:
-        activeTab?.kind === "terminal" && tabs.tabsWorkspaceId
-          ? {
-              workspaceId: tabs.tabsWorkspaceId,
-              tabId: activeTab.id,
-              paneId: activeTab.activePaneId,
-            }
+        activeViewTerminalTabId && activeViewPaneId && workspaceId
+          ? { workspaceId, tabId: activeViewTerminalTabId, paneId: activeViewPaneId }
           : null,
-      automationsActive: activeTab?.kind === "automations",
     };
-  }, [tabs.activeTab, tabs.tabsWorkspaceId]);
+  }, [tabs.tabsWorkspaceId, activeViewRunId, activeViewTerminalTabId, activeViewPaneId]);
 
   // The useTabs API's methods are stable for the hook instance's lifetime
   // (only its data fields re-key the memo). Destructure the ones the hoisted
@@ -2869,7 +2877,12 @@ export default function App() {
           item.kind === "terminal" && findLeafByPaneId(item.root, target.paneId) !== null,
       );
     }
-    if (!tab) return;
+    if (!tab) {
+      // Callers check the pane exists first; this covers one closed in the
+      // render between that check and a cross-workspace switch landing.
+      emitLocalToast("That pane was closed", "Opened its workspace instead.", "warning");
+      return;
+    }
     t.setActiveTab(tab.id);
     t.setActiveTerminalPane(tab.id, target.paneId);
   }, []);
@@ -2949,6 +2962,68 @@ export default function App() {
     [handleActivateWorkspace],
   );
 
+  // Whether a notification's target still exists, so the center can show a
+  // closed pane or deleted run as gone and a click can land on its workspace
+  // instead of doing nothing. The id sets are keyed on their contents, so the
+  // callback (and the memoized chrome holding it) changes only when a
+  // workspace, run or pane actually comes or goes.
+  const notifyWorkspaceIdsKey = workspaces.map((w) => w.id).join("\n");
+  const notifyWorkspaceIds = useMemo(
+    () => new Set(notifyWorkspaceIdsKey ? notifyWorkspaceIdsKey.split("\n") : []),
+    [notifyWorkspaceIdsKey],
+  );
+  const notifyRunIdsKey = globalRuns.loaded ? globalRuns.runs.map((r) => r.id).join("\n") : null;
+  const notifyRunIds = useMemo(
+    () => (notifyRunIdsKey === null ? null : new Set(notifyRunIdsKey ? notifyRunIdsKey.split("\n") : [])),
+    [notifyRunIdsKey],
+  );
+  const notifyPaneIndexKey = useMemo(() => {
+    const parts: string[] = [];
+    const collect = (workspaceId: string, items: Tab[]) => {
+      parts.push(workspaceId);
+      for (const tab of items) {
+        if (tab.kind !== "terminal") continue;
+        forEachTerminalLeaf(tab.root, (leaf) => parts.push(`${workspaceId}\t${leaf.paneId}`));
+      }
+    };
+    if (tabs.tabsWorkspaceId) collect(tabs.tabsWorkspaceId, tabs.tabs);
+    for (const layout of tabs.inactiveWorkspaceLayouts) collect(layout.workspaceId, layout.tabs);
+    return parts.join("\n");
+  }, [tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
+  const describeNotifyTarget = useMemo(() => {
+    // A bare workspace id line marks a layout this renderer holds live; its
+    // "<workspace>\t<pane>" lines follow.
+    const live = new Map<string, Set<string>>();
+    for (const line of notifyPaneIndexKey ? notifyPaneIndexKey.split("\n") : []) {
+      const [workspaceId, paneId] = line.split("\t");
+      let set = live.get(workspaceId);
+      if (!set) live.set(workspaceId, (set = new Set()));
+      if (paneId) set.add(paneId);
+    }
+    const persisted = new Map<string, Set<string>>();
+    const paneIdsOf = (workspaceId: string): Set<string> => {
+      const held = live.get(workspaceId);
+      if (held) return held;
+      let set = persisted.get(workspaceId);
+      if (!set) persisted.set(workspaceId, (set = persistedTerminalPaneIds(workspaceId)));
+      return set;
+    };
+    return (target: NavigationTarget): NotifyTargetStatus => {
+      const workspaceId = notifyTargetWorkspaceId(target);
+      if (workspaceId && !notifyWorkspaceIds.has(workspaceId)) {
+        return { state: "gone", reason: "workspace" };
+      }
+      if (target.type === "terminal") {
+        return paneIdsOf(target.workspaceId).has(target.paneId)
+          ? { state: "live" }
+          : { state: "gone", reason: "pane" };
+      }
+      const runId = target.type === "run" || target.type === "automation" ? target.runId : undefined;
+      if (runId && notifyRunIds && !notifyRunIds.has(runId)) return { state: "gone", reason: "run" };
+      return { state: "live" };
+    };
+  }, [notifyPaneIndexKey, notifyWorkspaceIds, notifyRunIds]);
+
   // One navigation entry point for every notification surface (toast cards,
   // native-notification clicks via "notify:focus", the notification center).
   const navigateToNotifyTarget = useMemo(
@@ -2958,8 +3033,14 @@ export default function App() {
         focusTerminal: focusTerminalTarget,
         openAutomations: () => tabsRef.current.openAutomationsTab(),
         openWorkspace: openWorkspacePanel,
+        describeTarget: describeNotifyTarget,
+        explain: (title, body) => emitLocalToast(title, body, "warning"),
       }),
-    [handleSelectRunAnywhere, focusTerminalTarget, openWorkspacePanel],
+    [handleSelectRunAnywhere, focusTerminalTarget, openWorkspacePanel, describeNotifyTarget],
+  );
+  const notifyWorkspaceMeta = useMemo(
+    () => workspaces.map((w) => ({ id: w.id, name: w.name, color: w.color })),
+    [workspaces],
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
 
@@ -6015,6 +6096,8 @@ export default function App() {
         onOpenUsage={handleOpenUsage}
         notifyNavigateTo={navigateToNotifyTarget}
         notifyResolveQuestion={resolveRunQuestion}
+        notifyDescribeTarget={describeNotifyTarget}
+        notifyWorkspaces={notifyWorkspaceMeta}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>

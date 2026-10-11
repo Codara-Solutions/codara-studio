@@ -112,6 +112,7 @@ import type {
   OpenRouterValidationResult,
   NotificationCenterEntry,
   NotificationCenterSummary,
+  NotificationViewSnapshot,
   NotificationSoundKind,
   NotifyEvent,
   UpdateChatBackendInput,
@@ -551,15 +552,26 @@ const api = {
       ipcRenderer.on("notify:focus", listener);
       return () => ipcRenderer.off("notify:focus", listener);
     },
-    // Notification-center history (persisted main-side, capped at 200).
+    // Notification-center history (persisted main-side, capped at 200 rows,
+    // repeats folded per source, aged out after a week once read).
     list: (): Promise<NotificationCenterEntry[]> => ipcRenderer.invoke("notify:list"),
+    summary: (): Promise<NotificationCenterSummary> => ipcRenderer.invoke("notify:summary"),
     markRead: (id: string): Promise<void> => ipcRenderer.invoke("notify:markRead", id),
+    setRead: (ids: string[], read: boolean): Promise<void> =>
+      ipcRenderer.invoke("notify:setRead", { ids, read }),
     markAllRead: (): Promise<void> => ipcRenderer.invoke("notify:markAllRead"),
-    // Remove a single entry — fired when the user acts on a notification
-    // (toast click-through, inline answer, or opening the entry). Handled
-    // items must not linger; the main side no-ops if it's already gone.
-    remove: (id: string): Promise<void> => ipcRenderer.invoke("notify:remove", id),
+    // Dismiss rows. Only an explicit Dismiss or Clear all removes history;
+    // opening or viewing a row marks it read and keeps it.
+    remove: (id: string | string[]): Promise<void> => ipcRenderer.invoke("notify:remove", id),
     clear: (): Promise<void> => ipcRenderer.invoke("notify:clear"),
+    restore: (entries: NotificationCenterEntry[]): Promise<void> =>
+      ipcRenderer.invoke("notify:restore", entries),
+    // Mark read every row whose target is the surface now on screen.
+    markViewed: (view: NotificationViewSnapshot): Promise<void> =>
+      ipcRenderer.invoke("notify:markViewed", view),
+    mute: (key: string, label: string, durationMs: number): Promise<void> =>
+      ipcRenderer.invoke("notify:mute", { key, label, durationMs }),
+    unmute: (key: string): Promise<void> => ipcRenderer.invoke("notify:unmute", key),
     onCenterUpdated: (
       handler: (summary: NotificationCenterSummary) => void,
     ): (() => void) => {

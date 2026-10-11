@@ -16,7 +16,7 @@ async function main() {
     '../storage': 'export const cachedState = () => ({ workspaces: [] });',
     './attention': 'export const isWatchingPane = () => globalThis.__terminalPhoneNotify.watching; export const isPaneVisible = () => globalThis.__terminalPhoneNotify.watching; export const isWatchingRun = () => false; export const setAttention = () => {};',
     './deliver': 'export const deliver = () => {}; export const activeWindow = () => null; export const registerDeliveryWindow = () => {}; export const signalTerminalAttention = () => {};',
-    './center-store': ['clearCenter', 'flushNotificationCenter', 'listCenterEntries', 'markCenterAllRead', 'markCenterRead', 'removeCenterEntry', 'recordToCenter'].map(name => `export const ${name} = async () => {};`).join('\n'),
+    './center-store': ['centerSummary', 'clearCenter', 'flushNotificationCenter', 'listCenterEntries', 'loadNotificationCenter', 'markCenterAllRead', 'markCenterRead', 'markCenterViewed', 'muteCenterSource', 'noteCenterWorkspaces', 'removeCenterEntries', 'removeCenterEntry', 'recordToCenter', 'restoreCenterEntries', 'setCenterRead', 'settleCenterSource', 'unmuteCenterSource'].map(name => `export const ${name} = async () => {};`).join('\n') + '\nexport const isEventMuted = () => false;',
   };
   try {
     const outfile = path.join(dir, 'test.cjs');

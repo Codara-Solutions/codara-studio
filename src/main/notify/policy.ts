@@ -57,6 +57,9 @@ export interface PolicyContext {
   watching: boolean;
   // Do Not Disturb preference: mute delivery, still record unread.
   dnd: boolean;
+  // The user muted this source or its workspace from the center for a while:
+  // like DND, but scoped to that source.
+  muted?: boolean;
 }
 
 export interface PolicyDecision {
@@ -103,6 +106,10 @@ export function decide(
   // watching false and continue to alert.
   if (ctx.watching) {
     return { deliver: false, record: true, read: true, reason: "watching" };
+  }
+
+  if (ctx.muted) {
+    return { deliver: false, record: true, read: false, reason: "muted" };
   }
 
   if (ctx.dnd) {
