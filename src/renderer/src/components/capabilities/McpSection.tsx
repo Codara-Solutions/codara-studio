@@ -134,7 +134,6 @@ export default function McpSection(props: McpSectionProps) {
   return (
     <section style={sectionStyle}>
       <SectionHead
-        title="Tools (MCP servers)"
         detail={
           <>
             MCP servers give agents extra tools: a database, a browser, an issue tracker. The Cora and
@@ -157,7 +156,7 @@ export default function McpSection(props: McpSectionProps) {
             </button>
             <button
               type="button"
-              className="spark-btn is-primary"
+              className="spark-btn"
               onClick={props.onAdd}
               disabled={!props.canAdd}
               title={props.canAdd ? "Add a server by filling in a form or pasting its config" : "No writable MCP config location was found"}
@@ -832,7 +831,7 @@ function BuiltinRow({
         <div style={rowMetaStyle}>
           <span style={rowScopeStyle}>{builtin.name}</span>
           <span className="spark-badge is-accent" style={badgeStyle}>
-            built in
+            Built in
           </span>
           <span className="spark-badge" style={badgeStyle} title={builtin.tools.join(", ")}>
             {builtin.tools.length} tools
@@ -877,7 +876,7 @@ function BuiltinRowPlaceholder() {
         </div>
         <div style={rowMetaStyle}>
           <span className="spark-badge is-accent" style={badgeStyle}>
-            built in
+            Built in
           </span>
         </div>
       </div>

@@ -33,6 +33,14 @@ export interface AccountProviderDescriptor {
    * has to close one.
    */
   sessionsFollowLiveLogin: boolean;
+  /**
+   * The limit windows every account row draws, by the label main gives them.
+   * A row with no reading yet draws these as empty meters so every row keeps
+   * one shape.
+   */
+  usageWindows: ReadonlyArray<string>;
+  /** False when the provider publishes no client-readable limits at all. */
+  reportsUsage: boolean;
 }
 
 const CLI_WORDS: Record<
@@ -62,6 +70,16 @@ const CLI_WORDS: Record<
   },
 };
 
+// pi-subscription-usage.ts labels windows by their length. Every row draws
+// the same two so the list reads as one table; SuperGrok has no
+// client-readable quota, so xAI rows keep them empty and say why.
+const USAGE_WINDOWS: ReadonlyArray<string> = ["5-hour", "7-day"];
+const REPORTS_USAGE: Record<AgentRuntimeKind, boolean> = {
+  claude: true,
+  codex: true,
+  grok: false,
+};
+
 /** One descriptor per family, in the order the Accounts panel lists them. */
 export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescriptor> =
   AGENT_FAMILY_IDS.map((id) => ({
@@ -69,6 +87,8 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     runtime: id,
     label: AGENT_FAMILIES[id].vendorLabel,
     brand: id,
+    usageWindows: USAGE_WINDOWS,
+    reportsUsage: REPORTS_USAGE[id],
     ...CLI_WORDS[id],
   }));
 
@@ -83,13 +103,16 @@ export function accountProviderSummary(descriptor: AccountProviderDescriptor): s
   return `Switching moves Cora and ${descriptor.cliLabel} together from the next prompt.`;
 }
 
-/** The full rules behind a switch: what one account is and what it moves. */
+/**
+ * The one rule behind a switch that the summary line does not already say,
+ * shown under "How switching works".
+ */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
   if (descriptor.switchClosesSessions) {
-    return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`;
+    return `${descriptor.cliLabel} keeps one sign-in for every terminal, which is why a switch has to close its sessions.`;
   }
   if (descriptor.sessionsFollowLiveLogin) {
-    return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`;
+    return "MCP sign-ins, settings and history stay shared by every account.";
   }
-  return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`;
+  return `A ${descriptor.cliLabel} session that is already running keeps its account until it exits.`;
 }

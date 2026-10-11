@@ -55,7 +55,6 @@ export default function McpServerForm({
   return (
     <section style={sectionStyle} aria-busy={busy}>
       <SectionHead
-        title={adding ? "Add a tool server" : `Edit ${editor.originalName}`}
         detail={
           adding
             ? "Fill in the form, or paste the snippet from the server's README. Codara writes the server into the config files you pick below, the same entry the CLI would write itself."

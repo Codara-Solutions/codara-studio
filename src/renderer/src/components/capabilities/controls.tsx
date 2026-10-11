@@ -42,21 +42,18 @@ export function VisuallyHidden({ children }: { children: React.ReactNode }) {
   return <span style={visuallyHiddenStyle}>{children}</span>;
 }
 
+// The page's intro under the dialog's title bar, which already names the
+// section, with the section's own controls beside it.
 export function SectionHead({
-  title,
   detail,
   actions,
 }: {
-  title: string;
   detail: React.ReactNode;
   actions?: React.ReactNode;
 }) {
   return (
     <div style={sectionHeadStyle}>
-      <div style={{ minWidth: 0, flex: "1 1 440px" }}>
-        <h2 style={sectionTitleStyle}>{title}</h2>
-        <p style={sectionDetailStyle}>{detail}</p>
-      </div>
+      <p style={{ ...sectionDetailStyle, flex: "1 1 360px", minWidth: 0, margin: 0 }}>{detail}</p>
       {actions ? <div style={sectionActionsStyle}>{actions}</div> : null}
     </div>
   );
@@ -115,10 +112,11 @@ export function Field({
   );
 }
 
-export function EmptyRow({ text }: { text: string }) {
+export function EmptyRow({ text, action }: { text: string; action?: React.ReactNode }) {
   return (
-    <div className="spark-empty" style={{ minHeight: 84 }}>
-      <span className="spark-empty__body">{text}</span>
+    <div className="st-empty">
+      <span className="st-empty__body">{text}</span>
+      {action ? <span className="st-empty__action">{action}</span> : null}
     </div>
   );
 }
@@ -299,7 +297,7 @@ export function ToggleRow({
   onChange: (next: boolean) => void;
   children?: React.ReactNode;
 }) {
-  const { hover, focus, pressed, handlers } = useInteractive();
+  const { focus, handlers } = useInteractive();
   return (
     <button
       type="button"
@@ -311,9 +309,6 @@ export function ToggleRow({
       {...handlers}
       style={{
         ...toggleRowStyle,
-        // De-boxed full-width row: the whole strip is the hit target, revealed
-        // by an ink tint only, so there is no reflow and no panel-in-panel.
-        background: disabled ? "transparent" : pressed ? "var(--press)" : hover ? "var(--hover)" : "transparent",
         boxShadow: withFocusRing(undefined, focus),
         opacity: disabled ? 0.6 : 1,
       }}
@@ -419,7 +414,7 @@ export const visuallyHiddenStyle: React.CSSProperties = {
 
 export const sectionStyle: React.CSSProperties = {
   display: "grid",
-  gap: 12,
+  gap: 16,
   alignContent: "start",
 };
 
@@ -444,7 +439,7 @@ export const sectionDetailStyle: React.CSSProperties = {
   fontSize: 12.5,
   lineHeight: 1.5,
   margin: "3px 0 0",
-  maxWidth: 640,
+  maxWidth: "62ch",
 };
 
 export const sectionActionsStyle: React.CSSProperties = {
@@ -454,20 +449,18 @@ export const sectionActionsStyle: React.CSSProperties = {
   gap: 8,
 };
 
+// Lists and panels are drawn the way Settings draws its rows: hairlines
+// between items, no boxes around them.
 export const listStyle: React.CSSProperties = {
-  border: "1px solid var(--st-line)",
-  borderRadius: "var(--radius-surface, 10px)",
-  overflow: "hidden",
-  background: "var(--st-surface)",
+  borderTop: "1px solid var(--st-line)",
+  borderBottom: "1px solid var(--st-line)",
 };
 
 export const panelStyle: React.CSSProperties = {
   display: "grid",
   gap: 10,
-  padding: 14,
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 10,
-  background: "color-mix(in oklab, var(--panel) 72%, transparent)",
+  paddingTop: 14,
+  borderTop: "1px solid var(--st-line)",
 };
 
 export const noticeStyle: React.CSSProperties = {
@@ -488,8 +481,8 @@ export const rowStyle: React.CSSProperties = {
   gridTemplateColumns: "minmax(0, 1fr) auto",
   gap: 14,
   alignItems: "center",
-  padding: "12px 14px",
-  borderBottom: "1px solid var(--rule-soft)",
+  padding: "13px 0",
+  borderBottom: "1px solid var(--st-line)",
 };
 
 // Names wrap to a second line instead of clipping: the Server column is the
@@ -503,8 +496,8 @@ export const rowNameStyle: React.CSSProperties = {
   overflowWrap: "anywhere",
   color: "var(--ink)",
   fontSize: 13,
-  fontWeight: 600,
-  lineHeight: 1.3,
+  fontWeight: 500,
+  lineHeight: 1.35,
 };
 
 export const rowMetaStyle: React.CSSProperties = {
@@ -516,25 +509,27 @@ export const rowMetaStyle: React.CSSProperties = {
   minWidth: 0,
 };
 
+// Two lines before it gives way, so a summary is read rather than guessed.
 export const rowSummaryStyle: React.CSSProperties = {
-  color: "var(--st-desc)",
-  fontSize: 12,
+  display: "-webkit-box",
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: "vertical",
   overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
+  color: "var(--st-desc)",
+  fontSize: 12.5,
+  lineHeight: 1.45,
   maxWidth: "100%",
 };
 
 export const rowNoteStyle: React.CSSProperties = {
   color: "var(--st-desc)",
-  fontSize: 12,
+  fontSize: 12.5,
   lineHeight: 1.45,
 };
 
 export const rowScopeStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  color: "var(--st-faint)",
+  fontSize: 12,
 };
 
 export const rowActionsStyle: React.CSSProperties = {
@@ -555,8 +550,8 @@ export const cellStyle: React.CSSProperties = {
 };
 
 export const cellLabelStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10,
+  color: "var(--st-desc)",
+  fontSize: 12,
   lineHeight: 1.3,
 };
 
@@ -566,8 +561,8 @@ export const cellDashStyle: React.CSSProperties = {
 };
 
 export const cellNoteStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontSize: 10,
+  color: "var(--st-faint)",
+  fontSize: 11.5,
   lineHeight: 1.3,
   textAlign: "center",
 };
@@ -576,9 +571,8 @@ export const tableHeadStyle: React.CSSProperties = {
   display: "grid",
   gap: 10,
   alignItems: "center",
-  padding: "8px 14px",
+  padding: "8px 0",
   borderBottom: "1px solid var(--st-line)",
-  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
 };
 
 export const tableHeadCellStyle: React.CSSProperties = {
@@ -606,9 +600,9 @@ export const microBtnStyle: React.CSSProperties = {
 };
 
 export const badgeStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-sans)",
   textTransform: "none",
-  letterSpacing: "0.02em",
+  letterSpacing: 0,
 };
 
 export const fieldStyle: React.CSSProperties = {
@@ -619,14 +613,14 @@ export const fieldStyle: React.CSSProperties = {
 
 export const fieldLabelStyle: React.CSSProperties = {
   color: "var(--ink)",
-  fontSize: 12,
-  fontWeight: 600,
+  fontSize: 13,
+  fontWeight: 500,
 };
 
 export const fieldHintStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.4,
+  color: "var(--st-faint)",
+  fontSize: 12,
+  lineHeight: 1.45,
   overflowWrap: "anywhere",
 };
 
@@ -652,29 +646,28 @@ export const formErrorStyle: React.CSSProperties = {
   lineHeight: 1.45,
 };
 
+// Pair with className="st-rows" for the hairlines between rows.
 export const toggleListStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  // Negative gutters so the row hover tint bleeds past the text alignment.
-  marginInline: -8,
 };
 
 export const toggleRowStyle: React.CSSProperties = {
   appearance: "none",
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 14,
+  gap: 24,
   alignItems: "center",
   textAlign: "left",
   width: "100%",
-  padding: "10px 8px",
+  padding: "13px 0",
   border: "none",
-  borderRadius: "var(--radius-surface, 10px)",
+  borderRadius: 0,
+  background: "transparent",
   color: "inherit",
   font: "inherit",
   cursor: "default",
-  transition:
-    "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+  transition: "box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 export const toggleTitleStyle: React.CSSProperties = {
@@ -682,14 +675,16 @@ export const toggleTitleStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontSize: 13,
   fontWeight: 500,
+  lineHeight: 1.35,
 };
 
 export const toggleDetailStyle: React.CSSProperties = {
   display: "block",
+  maxWidth: "62ch",
   color: "var(--st-desc)",
-  fontSize: 12,
-  lineHeight: 1.45,
-  marginTop: 2,
+  fontSize: 12.5,
+  lineHeight: 1.5,
+  marginTop: 3,
 };
 
 const searchWrapStyle: React.CSSProperties = {
@@ -706,9 +701,8 @@ const searchGlyphStyle: React.CSSProperties = {
 };
 
 const searchInputStyle: React.CSSProperties = {
-  height: "auto",
   width: 190,
-  padding: "7px 10px 7px 30px",
+  paddingLeft: 30,
 };
 
 const pagerStyle: React.CSSProperties = {
@@ -716,23 +710,22 @@ const pagerStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   gap: 10,
-  padding: "8px 12px",
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  padding: "8px 0",
+  color: "var(--st-faint)",
+  fontSize: 12,
 };
 
 const loadingLabelStyle: React.CSSProperties = {
-  padding: "10px 14px 2px",
-  color: "var(--muted)",
-  fontSize: 11,
+  padding: "10px 0 2px",
+  color: "var(--st-faint)",
+  fontSize: 12,
 };
 
 const loadingRowStyle: React.CSSProperties = {
   display: "grid",
   gap: 7,
-  padding: "12px 14px",
-  borderBottom: "1px solid var(--rule-soft)",
+  padding: "12px 0",
+  borderBottom: "1px solid var(--st-line)",
 };
 
 const skeletonBarStyle: React.CSSProperties = {
@@ -749,7 +742,7 @@ const errorRowStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 10,
-  padding: "14px",
+  padding: "14px 0",
   color: "var(--danger)",
   fontSize: 12,
   lineHeight: 1.45,

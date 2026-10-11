@@ -179,26 +179,31 @@ export function CardOverflowMenu({
 
 /**
  * One sign-in's state as a mark and a sentence. A long state (an error)
- * wraps and stays readable at full length; the wording is what tells states
- * apart, so it is never shortened here. `action` puts the fix right beside
- * the problem instead of in the overflow menu.
+ * wraps and stays readable at full length; a caller that shortens it passes
+ * the full sentence as `title`. `action` puts the fix right beside the
+ * problem instead of in the overflow menu.
  */
 export function ConnectionLine({
   state,
+  title,
   hint,
   code,
   action,
 }: {
   state: ConnectionState;
+  /** The full sentence, as a tooltip, when the line shows a shortened one. */
+  title?: string;
   /** A second, quieter sentence that says what to do. */
   hint?: string;
   /** A command named in the sentences, drawn as code wherever it appears. */
   code?: string;
   action?: React.ReactNode;
 }) {
-  const tone = state.danger ? "danger" : state.ok ? "ok" : "muted";
+  // A problem is a warning glyph on a quiet line, not red text: the row's
+  // button is where the eye should land.
+  const tone = state.danger ? "warn" : state.ok ? "ok" : "muted";
   return (
-    <div className={`st-acct-status st-acct-status--${tone}`}>
+    <div className={`st-acct-status st-acct-status--${tone}`} title={title}>
       <svg
         aria-hidden
         width="13"

@@ -116,23 +116,21 @@ assert.match(descriptors, /grok: \{\s*cliLabel: "Grok",\s*loginHint: "grok login
 assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1, "only Codex closes sessions on a switch");
 assert.equal((descriptors.match(/sessionsFollowLiveLogin: true/g) ?? []).length, 1, "only Claude runs every session on the live login");
 assert.match(descriptors, /export function accountProviderDetail\(/);
+// The explainer says what one account is once; each provider then adds the
+// one rule that differs.
 assert.ok(
   descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`",
+    "`A ${descriptor.cliLabel} session that is already running keeps its account until it exits.`",
   ),
 );
+assert.ok(descriptors.includes('"MCP sign-ins, settings and history stay shared by every account."'));
 assert.ok(
   descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`",
+    "`${descriptor.cliLabel} keeps one sign-in for every terminal, which is why a switch has to close its sessions.`",
   ),
 );
 // A Claude card never offers to close terminals to delete an account.
 assert.match(settings, /const closeSessionsCount = descriptor\.sessionsFollowLiveLogin\s*\? 0/);
-assert.ok(
-  descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`",
-  ),
-);
 assert.match(descriptors, /if \(descriptor\.switchClosesSessions\) \{/);
 
 // ---------------------------------------------------------------------------
@@ -173,16 +171,16 @@ assert.doesNotMatch(
   /nativeCliAccounts\.(?:create|setDefault|prepareLogin|cancelLogin|logout)\(/,
   "no sign-in, switch or sign-out may go through the native CLI account store",
 );
-// The header counts signed-in accounts against the rows it lists, so a
-// signed-out Account 1 slot shows as "1 of 2 signed in" rather than making
-// the count disagree with the rows; it is omitted when there are none.
-assert.match(settings, /card\.coraProfileId \|\| card\.terminal\?\.connected/);
-assert.match(settings, /: count === cards\.length\s*\? `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}`\s*: `\$\{count\} of \$\{cards\.length\} signed in`;/);
+// The footer applies one rule to every provider: an account is ready when
+// its row would offer Switch or show Active, so "2 of 4 ready" always agrees
+// with the rows. It is omitted when there are none.
+assert.match(settings, /return state === "active" \|\| state === "signed-in";/);
+assert.match(settings, /const footer = cards\.length === 0 \? null : `\$\{ready\} of \$\{cards\.length\} ready`;/);
 assert.match(settings, /\.\.\.\(footer \? \{ footer \} : \{\}\)/);
 // The switching explainer says what one account is.
 assert.ok(
   settings.includes(
-    "The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.",
+    "Every account is one sign-in for both Cora and its terminal tool. Account 1 is your own command-line login.",
   ),
 );
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);

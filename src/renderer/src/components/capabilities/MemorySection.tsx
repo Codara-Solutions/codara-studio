@@ -13,11 +13,11 @@ import {
   rowNameStyle,
   rowNoteStyle,
   rowStyle,
-  rowSummaryStyle,
   sectionStyle,
   smallBtnStyle,
 } from "./controls";
 import { shortPath } from "./McpSection";
+import CustomSelect from "../settings/CustomSelect";
 
 export default function MemorySection({
   profiles,
@@ -49,7 +49,6 @@ export default function MemorySection({
   return (
     <section style={sectionStyle}>
       <SectionHead
-        title="Memory"
         detail={
           <>
             What Cora has learned and keeps between chats, as two plain markdown files per profile. Cora reads
@@ -57,24 +56,23 @@ export default function MemorySection({
           </>
         }
         actions={
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={fieldLabelStyle}>Profile</span>
-            <select
-              className="spark-input"
-              style={{ width: 200 }}
+          <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={fieldLabelStyle} aria-hidden>
+              Profile
+            </span>
+            <CustomSelect
+              ariaLabel="Show the memory of this profile"
+              width={200}
               value={viewedProfileId ?? memory?.profile.id ?? "default"}
               disabled={profiles.length === 0 || busy !== null}
-              onChange={(event) => onViewProfile(event.target.value)}
-              aria-label="Show the memory of this profile"
-            >
-              {profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                  {profile.isDefault ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={onViewProfile}
+              options={profiles.map((profile) => ({
+                value: profile.id,
+                label: profile.name,
+                ...(profile.isDefault ? { detail: "default" } : {}),
+              }))}
+            />
+          </span>
         }
       />
       <p style={{ ...rowNoteStyle, margin: 0 }}>
@@ -175,8 +173,7 @@ function MemoryRow({
         </div>
       </div>
       <div style={memoryControlsStyle}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={cellLabelStyle}>{enabled ? "On" : "Off"}</span>
+        <div style={{ display: "flex", alignItems: "center" }}>
           <Switch
             checked={enabled}
             disabled={switchBlocked || busy}
@@ -215,8 +212,8 @@ function MemoryPath({ path }: { path: string }) {
   const cut = Math.max(short.lastIndexOf("/"), short.lastIndexOf("\\")) + 1;
   return (
     <span style={memoryPathStyle} title={path}>
-      <span style={{ ...rowSummaryStyle, flex: "0 1 auto", minWidth: 0 }}>{short.slice(0, cut)}</span>
-      <span style={{ ...rowSummaryStyle, flex: "0 0 auto" }}>{short.slice(cut)}</span>
+      <span style={{ ...memoryPathPartStyle, flex: "0 1 auto", minWidth: 0 }}>{short.slice(0, cut)}</span>
+      <span style={{ ...memoryPathPartStyle, flex: "0 0 auto" }}>{short.slice(cut)}</span>
     </span>
   );
 }
@@ -333,6 +330,16 @@ const memoryPathStyle: React.CSSProperties = {
   maxWidth: "100%",
 };
 
+// One line: the folder ellipsizes while the file name stays whole.
+const memoryPathPartStyle: React.CSSProperties = {
+  overflow: "hidden",
+  color: "var(--st-faint)",
+  fontSize: 12,
+  lineHeight: 1.45,
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 const memoryControlsStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -379,8 +386,8 @@ const memoryFillStyle: React.CSSProperties = {
 };
 
 const memoryNoteStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10.5,
+  color: "var(--st-faint)",
+  fontSize: 12,
   lineHeight: 1.45,
 };
 

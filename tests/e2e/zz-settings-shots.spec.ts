@@ -145,6 +145,9 @@ async function capturePages(page: Page, dialog: Locator, prefix: string): Promis
 // menu, the switching explainer, the shell picker and a tuned glass row.
 async function captureExtras(page: Page, dialog: Locator, base: string): Promise<void> {
   const search = dialog.getByRole("searchbox", { name: "Search settings" });
+  // Park the pointer off the nav, or the hover tint under it reads as a
+  // selected page in the capture.
+  await page.mouse.move(4, 4);
   await search.fill("account");
   await page.waitForTimeout(250);
   await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-search-account.png`) });
@@ -269,6 +272,12 @@ async function stubAccounts(app: ElectronApplication): Promise<void> {
         isDefault: true, connected: true, expired: false, canRefresh: true, expiresAt: null,
         terminal: { connected: true, expired: false, canRefresh: true, liveSessions: 0 },
       },
+      {
+        id: "99999999-9999-4999-8999-999999999999", provider: "xai", label: "Main",
+        email: "grok@example.com", cliProfileId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        isDefault: true, connected: true, expired: false, canRefresh: true, expiresAt: null,
+        terminal: { connected: true, expired: false, canRefresh: true, liveSessions: 0 },
+      },
     ];
     const overview = () => ({
       runtimeInstalled: true,
@@ -287,6 +296,7 @@ async function stubAccounts(app: ElectronApplication): Promise<void> {
         { profileId: profiles[1].id, provider: "anthropic", label: "Main", isDefault: true, status: "ok", plan: "max", windows: windows(34, 94, 11), checkedAt: now, limitReached: false },
         { profileId: profiles[2].id, provider: "anthropic", label: "Work", isDefault: false, status: "ok", plan: "pro", windows: windows(3, 18), checkedAt: now },
         { profileId: profiles[3].id, provider: "openai-codex", label: "Main", isDefault: true, status: "ok", plan: "pro", windows: windows(12, 40), checkedAt: now },
+        { profileId: profiles[4].id, provider: "xai", label: "Main", isDefault: true, status: "ok", windows: [], checkedAt: now },
       ],
     });
     const inspection = () => ({
@@ -307,7 +317,12 @@ async function stubAccounts(app: ElectronApplication): Promise<void> {
             { runtime: "codex", id: "77777777-7777-4777-8777-777777777777", label: "Main", managed: true, isDefault: true, connected: true, inUse: true, status: "connected", email: "main@example.com" },
           ],
         },
-        { runtime: "grok", defaultProfileId: "personal", profiles: [] },
+        {
+          runtime: "grok", defaultProfileId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          profiles: [
+            { runtime: "grok", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", label: "Main", managed: true, isDefault: true, connected: true, inUse: true, status: "connected", email: "grok@example.com" },
+          ],
+        },
       ],
     });
     for (const channel of [

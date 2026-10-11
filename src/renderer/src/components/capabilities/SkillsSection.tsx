@@ -62,7 +62,6 @@ export default function SkillsSection({
   return (
     <section style={sectionStyle}>
       <SectionHead
-        title="Skills"
         detail={
           <>
             A skill is a folder of instructions an agent loads when a task needs it, like a release
@@ -84,7 +83,9 @@ export default function SkillsSection({
       ) : null}
 
       <div className="agent-capability-list" style={listStyle}>
-        <TableHeader template={SKILL_GRID} labels={["Skill", "Cora and workers", "Claude CLI", "Codex CLI", ""]} />
+        {totalGroups > 0 || loading ? (
+          <TableHeader template={SKILL_GRID} labels={["Skill", "Cora and workers", "Claude CLI", "Codex CLI", ""]} />
+        ) : null}
         {loadError ? (
           <ErrorRow text={`Could not read your skill folders: ${loadError}`} onRetry={onRetry} />
         ) : loading ? (
@@ -106,8 +107,19 @@ export default function SkillsSection({
               <EmptyRow
                 text={
                   totalGroups === 0
-                    ? "No skills were found. Put a folder with a SKILL.md in ~/.claude/skills or the workspace's .agents/skills."
+                    ? "No skills yet. A skill is a folder with a SKILL.md in ~/.claude/skills or the workspace's .agents/skills."
                     : "No skills match this filter."
+                }
+                action={
+                  totalGroups === 0 ? (
+                    <button type="button" className="spark-btn" onClick={onRetry}>
+                      Look again
+                    </button>
+                  ) : (
+                    <button type="button" className="spark-btn" onClick={() => onSearch("")}>
+                      Clear filter
+                    </button>
+                  )
                 }
               />
             ) : null}

@@ -61,6 +61,7 @@ export function SettingsSection({
   actions,
   anchor,
   plain,
+  live,
   children,
 }: {
   title?: string;
@@ -69,6 +70,8 @@ export function SettingsSection({
   anchor?: string;
   /** Children are laid out as they are, without the hairline row stack. */
   plain?: boolean;
+  /** The rows are live values that screen readers should announce. */
+  live?: boolean;
   children?: React.ReactNode;
 }) {
   return (
@@ -82,7 +85,11 @@ export function SettingsSection({
           {actions ? <div className="st-section__actions">{actions}</div> : null}
         </div>
       ) : null}
-      {children ? <div className={plain ? "st-section__body" : "st-rows"}>{children}</div> : null}
+      {children ? (
+        <div className={plain ? "st-section__body" : "st-rows"} aria-live={live ? "polite" : undefined}>
+          {children}
+        </div>
+      ) : null}
     </section>
   );
 }

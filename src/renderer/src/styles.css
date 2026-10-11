@@ -3998,11 +3998,11 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .agent-capabilities-scrim {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    background: rgb(0 0 0 / 0.5);
+    background: rgb(0 0 0 / 0.62);
   }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-scrim,
   :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-scrim {
-    background: rgb(20 18 12 / 0.34);
+    background: rgb(24 22 16 / 0.52);
   }
   /* Menus nested in either opaque face match it rather than frost it: the
      face's `contain: paint` is a backdrop root, so a frosted menu inside it
@@ -4044,9 +4044,11 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 
 /* Keep Capability Center scrolling on a single compositor layer. Rows and
-   cards below the viewport skip layout/paint until they approach view. */
+   cards below the viewport skip layout/paint until they approach view. The
+   pane is also the size container the table layouts below query. */
 .agent-capabilities-scroll {
   contain: layout paint style;
+  container: capabilities / inline-size;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   transform: translateZ(0);
@@ -4082,12 +4084,76 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
    inside the panel instead of re-rasterizing the workbench behind it. */
 .agent-capabilities-surface {
   position: relative;
+  width: min(920px, calc(100vw - 48px));
+  height: min(780px, calc(100vh - 48px));
+  display: grid;
+  grid-template-columns: 212px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "nav top"
+    "nav content"
+    "nav footer";
+  overflow: hidden;
   border: 1px solid var(--rule);
+  border-radius: 12px;
   background: var(--st-surface);
   color: var(--ink);
+  font-size: 13px;
   font-variant-numeric: normal;
   box-shadow: 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
   contain: paint;
+}
+.agent-capabilities-surface .spark-input {
+  height: 32px;
+  padding: 0 10px;
+  border-color: var(--st-line-strong);
+  border-radius: 7px;
+  background: var(--st-field);
+  font-size: 12.5px;
+  box-shadow: none;
+}
+.agent-capabilities-surface textarea.spark-input {
+  height: auto;
+  padding: 8px 10px;
+}
+.agent-capabilities-surface .spark-input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.agent-capabilities-surface .spark-input::placeholder {
+  color: var(--st-faint);
+}
+/* Capability rows set their own borders inline, so the divider between
+   Settings-style rows has to outrank them. */
+.agent-capabilities-surface .st-rows > * + * {
+  border-top: 1px solid var(--st-line) !important;
+}
+/* Chips are words, not code: sentence case in the body face. The select's
+   detail is a word here too ("default"), not a path as in Terminal. */
+.agent-capabilities-surface .st-select__detail {
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+.agent-capabilities-surface .spark-badge {
+  height: 18px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 99px;
+  background: var(--st-selected);
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.agent-capabilities-surface .spark-badge.is-accent {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.agent-capabilities-surface .spark-badge.is-warn {
+  background: color-mix(in oklch, var(--warn) 14%, transparent);
+  color: var(--warn);
 }
 :root[data-theme-mode="light"] .agent-capabilities-surface {
   border-color: color-mix(in oklab, var(--ink) 14%, transparent);
@@ -4121,7 +4187,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
    and `contain: paint` on the row would clip the trailing columns away. 860px
    is the first width where the grid genuinely fits — pane ~575px, leaving the
    Server column ~133px — so that is where the wide layout starts. */
-@media (max-width: 860px) {
+@container capabilities (max-width: 520px) {
   /* Row internals are inline-styled, so the stacked layout has to outrank them. */
   .agent-capability-row {
     grid-template-columns: minmax(0, 1fr) !important;
@@ -4131,11 +4197,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   .agent-capability-row > *:last-child {
     justify-content: flex-start !important;
     flex-wrap: wrap;
-  }
-  /* Give the content pane back what the nav can spare. The nav is inline-styled,
-     so the narrower basis has to outrank it. */
-  .agent-capabilities-nav {
-    flex: 0 0 150px !important;
   }
   /* The columns cannot fit, so rows stack and the table header stops describing
      anything. Each cell shows its own label instead. */
@@ -4155,7 +4216,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
    wrap instead of stacking every cell on its own line: the server takes the
    first line, the five switches sit side by side with their labels, and the
    actions and test result follow underneath. */
-@media (max-width: 1000px) {
+@container capabilities (max-width: 760px) {
   .agent-capability-row--mcp {
     display: flex !important;
     flex-wrap: wrap;
@@ -6969,8 +7030,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   --st-line-strong: color-mix(in oklab, var(--ink) 16%, transparent);
   --st-desc: color-mix(in oklab, var(--ink) 62%, var(--panel));
   --st-faint: color-mix(in oklab, var(--ink) 46%, var(--panel));
-  --st-hover: color-mix(in oklab, var(--ink) 5%, transparent);
-  --st-selected: color-mix(in oklab, var(--ink) 8%, transparent);
+  --st-hover: color-mix(in oklab, var(--ink) 3.5%, transparent);
+  --st-selected: color-mix(in oklab, var(--ink) 9%, transparent);
   --st-pad-x: 32px;
 }
 :root[data-theme-mode="light"] .settings-dialog-surface,
@@ -6985,7 +7046,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   --st-line-strong: color-mix(in oklab, var(--ink) 18%, transparent);
   --st-desc: color-mix(in oklab, var(--ink) 70%, var(--bg));
   --st-faint: color-mix(in oklab, var(--ink) 52%, var(--bg));
-  --st-hover: color-mix(in oklab, var(--ink) 4.5%, transparent);
+  --st-hover: color-mix(in oklab, var(--ink) 3.5%, transparent);
   --st-selected: color-mix(in oklab, var(--ink) 7%, transparent);
 }
 .settings-dialog-surface {
@@ -7020,11 +7081,11 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .settings-dialog-scrim,
 .agent-capabilities-scrim {
-  background: rgb(0 0 0 / 0.5);
+  background: rgb(0 0 0 / 0.62);
 }
 :root[data-theme-mode="light"] .settings-dialog-scrim,
 :root[data-theme-mode="light"] .agent-capabilities-scrim {
-  background: rgb(20 18 12 / 0.34);
+  background: rgb(24 22 16 / 0.52);
 }
 
 /* Sidebar */
@@ -7179,7 +7240,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   background: var(--st-surface);
   transition: border-color var(--motion-fast) var(--ease-out);
 }
-.settings-dialog-surface.is-scrolled .st-topbar {
+.settings-dialog-surface.is-scrolled .st-topbar,
+.agent-capabilities-surface.is-scrolled .st-topbar {
   border-bottom-color: var(--st-line);
 }
 .st-topbar__titles {
@@ -7758,7 +7820,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   cursor: default;
 }
 .st-disclosure:hover {
-  background: var(--st-hover);
   color: var(--ink);
 }
 .st-disclosure:focus-visible {
@@ -8283,6 +8344,24 @@ button.st-list__row:hover,
   flex-direction: column;
   gap: 24px;
 }
+.st-result__desc {
+  overflow: hidden;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-result .st-result__crumb {
+  flex: 0 1 auto;
+  max-width: 34%;
+  text-align: right;
+}
+.st-mark {
+  border-radius: 3px;
+  background: color-mix(in oklch, var(--accent) 22%, transparent);
+  color: inherit;
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent);
+}
 
 /* About */
 .st-about {
@@ -8483,18 +8562,26 @@ button.st-list__row:hover,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Rows sit flush with the page edges, so a row's last control ends on the
+   same line as Add account and every other page's controls. The active
+   tint and its rule bleed into the gutter instead of pushing the row in. */
 .st-acct {
   position: relative;
+  isolation: isolate;
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 14px 10px;
+  padding: 14px 0;
 }
 .st-acct + .st-acct,
 .st-acct + .st-acct-empty {
   border-top: 1px solid var(--st-line);
 }
-.st-acct.is-active {
+.st-acct.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0 -12px;
+  z-index: -1;
   background: color-mix(in oklch, var(--accent) 6%, transparent);
 }
 .st-acct.is-active::before {
@@ -8502,7 +8589,7 @@ button.st-list__row:hover,
   position: absolute;
   top: 10px;
   bottom: 10px;
-  left: 0;
+  left: -12px;
   width: 2px;
   border-radius: 2px;
   background: var(--accent);
@@ -8590,10 +8677,6 @@ button.st-list__row:hover,
   align-items: center;
   gap: 4px;
 }
-.st-acct__menu-slot {
-  flex: none;
-  width: 28px;
-}
 .st-code {
   padding: 1px 5px;
   border-radius: 4px;
@@ -8623,10 +8706,6 @@ button.st-list__row:hover,
   font-size: 11px;
   font-weight: 600;
 }
-.st-acct__usage-note {
-  color: var(--st-faint);
-  font-size: 12px;
-}
 .st-acct-status {
   display: flex;
   align-items: flex-start;
@@ -8638,6 +8717,8 @@ button.st-list__row:hover,
 .st-acct-status--danger { color: var(--danger); }
 .st-acct-status--ok { color: var(--ok); }
 .st-acct-status--muted { color: var(--st-desc); }
+.st-acct-status--warn { color: var(--st-desc); }
+.st-acct-status--warn .st-acct-status__glyph { color: var(--warn); }
 .st-acct-status__glyph {
   flex: none;
   margin-top: 2px;
@@ -8656,7 +8737,7 @@ button.st-list__row:hover,
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 10px;
+  padding: 14px 0;
 }
 .st-acct-empty__text {
   display: flex;
@@ -8824,6 +8905,26 @@ button.st-list__row:hover,
 }
 .st-meter.is-warn .st-meter__reset { color: var(--warn); }
 .st-meter.is-danger .st-meter__reset { color: var(--danger); }
+.st-meters.is-stale .st-meter__fill {
+  opacity: 0.45;
+}
+.st-meters.is-empty .st-meter__track {
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+}
+.st-meters.is-empty .st-meter__label {
+  color: var(--st-faint);
+}
+.st-meter__note {
+  grid-column: 2 / -1;
+  overflow: hidden;
+  color: var(--st-faint);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-usage__message {
+  color: var(--st-faint);
+}
 
 /* Keybindings */
 .st-kb-row {
@@ -8952,13 +9053,15 @@ button.st-list__row:hover,
 }
 
 @media (max-width: 1100px) {
-  .settings-dialog-surface {
+  .settings-dialog-surface,
+  .agent-capabilities-surface {
     --st-pad-x: 26px;
     grid-template-columns: 188px minmax(0, 1fr);
   }
 }
 @media (max-width: 820px) {
-  .settings-dialog-surface {
+  .settings-dialog-surface,
+  .agent-capabilities-surface {
     --st-pad-x: 20px;
     grid-template-columns: 164px minmax(0, 1fr);
   }

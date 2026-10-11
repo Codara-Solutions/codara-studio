@@ -27,7 +27,7 @@ export interface AccountProviderView {
   /** The full switching rules, shown under "How switching works". */
   detail: string;
   cards: AccountCardView[];
-  /** Muted count beside the provider name, e.g. "4 accounts" or "1 of 2 signed in". */
+  /** Muted count beside the provider name, e.g. "2 of 4 ready". */
   footer?: string;
   /** Account actions are unavailable until the Pi runtime is installed. */
   disabled: boolean;
@@ -320,7 +320,6 @@ function AccountProviderGroup({
               >
                 Sign in to {descriptor.label}
               </ActionButton>
-              <span aria-hidden className="st-acct__menu-slot" />
             </span>
           </div>
         ) : null}

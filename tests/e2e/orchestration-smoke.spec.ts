@@ -427,10 +427,10 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
       })
       .toBe("google/gemini-3.5-flash:1500:true");
 
-    // The Capability Center has Settings' height and a wider fixed width, which
-    // its MCP table needs. Its shell must also
-    // paint without the SVG lens/full-screen blur combination that made
-    // opening and typing visibly trail the pointer.
+    // The Capability Center opens at Settings' exact size; its MCP table
+    // adapts to the pane instead. Its shell must also paint without the SVG
+    // lens/full-screen blur combination that made opening and typing visibly
+    // trail the pointer.
     const capabilityOpenLatencyMs = await page.getByRole("button", { name: "Tools, skills and memory" }).evaluate((button) => new Promise<number>((resolve) => {
       const startedAt = performance.now();
       const observer = new MutationObserver(() => {
@@ -458,8 +458,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         width: surface.getBoundingClientRect().width,
         height: surface.getBoundingClientRect().height,
         borderRadius: getComputedStyle(surface).borderRadius,
-        expectedWidth: Math.min(1120, window.innerWidth - 44),
-        expectedHeight: Math.min(760, window.innerHeight - 44),
+        expectedWidth: Math.min(920, window.innerWidth - 48),
+        expectedHeight: Math.min(780, window.innerHeight - 48),
       };
     });
     expect(capabilityGlass).not.toBeNull();
@@ -475,9 +475,9 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
     }
-    // Four tabs (MCP servers, Skills, Memory, Policy) beside one content pane.
-    // MCP is the tab that opens first, so its section heading is on screen —
-    // the nav button of the same name is a button, not a heading.
+    // The tabs sit beside one content pane. MCP is the tab that opens first,
+    // so the title bar names it; the nav button of the same name is a tab,
+    // not a heading.
     await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
     const capabilitySearch = page.getByPlaceholder("Filter servers");
     await capabilitySearch.fill("playwright");

@@ -112,9 +112,16 @@ const USAGE_DANGER_AT = 95;
  * The in-card meters: every window of one account on a shared grid, so the
  * labels, bars, percentages and reset times line up down the list.
  */
-function UsageMeterGrid({ windows }: { windows: ReadonlyArray<PiUsageWindow> }) {
+function UsageMeterGrid({
+  windows,
+  stale = false,
+}: {
+  windows: ReadonlyArray<PiUsageWindow>;
+  /** The last reading of an account that cannot be read right now. */
+  stale?: boolean;
+}) {
   return (
-    <div className="st-meters">
+    <div className={`st-meters${stale ? " is-stale" : ""}`}>
       {windows.map((usageWindow) => {
         const rounded = Math.round(usageWindow.usedPercent);
         const level =
@@ -155,6 +162,46 @@ function UsageMeterGrid({ windows }: { windows: ReadonlyArray<PiUsageWindow> }) 
 }
 
 /**
+ * The meter rows of an account with no reading to draw: the same labels and
+ * grid as a real reading, with empty tracks and a short reason, so a signed
+ * out or expired row keeps the shape of every other row. With no labels the
+ * provider reports no limits at all, which one row says plainly.
+ */
+export function UsagePlaceholder({
+  labels,
+  note,
+  message,
+}: {
+  labels: ReadonlyArray<string>;
+  note: string;
+  /** Why the last read failed, said once under the rows. */
+  message?: string;
+}) {
+  return (
+    <div className="st-usage">
+      <div className="st-meters is-empty">
+        {labels.length === 0 ? (
+          <div className="st-meter">
+            <span className="st-meter__label">Limits</span>
+            <span className="st-meter__note">{note}</span>
+          </div>
+        ) : (
+          labels.map((label) => (
+            <div key={label} className="st-meter">
+              <span className="st-meter__label">{label}</span>
+              <span aria-hidden className="st-meter__track" />
+              <span aria-hidden className="st-meter__pct" />
+              <span className="st-meter__reset">{note}</span>
+            </div>
+          ))
+        )}
+      </div>
+      {message ? <span className="st-usage__message">{message}</span> : null}
+    </div>
+  );
+}
+
+/**
  * The limit report for one account, without any card chrome: the Accounts
  * section renders this inside the account's own card, so the usage block must
  * not draw a competing border or its own accent ring.
@@ -177,15 +224,18 @@ export function UsageEntryBody({
     return null;
   }
   if (compact) {
+    // A failed read that still carries the last windows keeps drawing them,
+    // faded, with the reason under them in a quiet line.
     return (
       <div className="st-usage">
-        {connected && usage.windows.length > 0 ? (
-          <UsageMeterGrid windows={usage.windows} />
-        ) : usage.status === "not_connected" ? null : (
-          <span className={temporarilyThrottled ? "st-text-warn" : "st-text-danger"}>
+        {usage.windows.length > 0 ? (
+          <UsageMeterGrid windows={usage.windows} stale={!connected} />
+        ) : null}
+        {!connected && usage.status !== "not_connected" ? (
+          <span className={temporarilyThrottled ? "st-text-warn" : "st-usage__message"}>
             {usage.message || "Could not read usage limits."}
           </span>
-        )}
+        ) : null}
         {usage.limitReached ? (
           <span className="st-text-danger st-usage__limit">
             {usage.generalLimitReached

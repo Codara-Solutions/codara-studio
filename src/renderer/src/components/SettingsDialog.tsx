@@ -50,11 +50,12 @@ import AccountCards, {
   type AccountActions,
   type AccountProviderView,
 } from "./AccountCards";
-import type { AccountCardView } from "./AccountCard";
+import { accountCardState, type AccountCardView } from "./AccountCard";
 import {
   ACCOUNT_PROVIDER_DESCRIPTORS,
   accountProviderDetail,
   accountProviderSummary,
+  type AccountProviderDescriptor,
 } from "../lib/account-provider-descriptors";
 import RemoteAccessSettings from "./RemoteAccessSettings";
 import { CardOverflowMenu } from "./AccountCardPrimitives";
@@ -65,6 +66,7 @@ import {
   workerSessionMemoryDeleteOption,
   workerSessionMemoryScope,
 } from "../lib/worker-session-memory";
+import CustomSelect from "./settings/CustomSelect";
 import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
 import {
@@ -324,7 +326,7 @@ export default function SettingsDialog({
           }}
         >
           {searching ? (
-            <SearchResults results={results} onOpen={openResult} />
+            <SearchResults query={query} results={results} onOpen={openResult} />
           ) : (
             <SettingsPage>
               {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
@@ -406,7 +408,7 @@ export default function SettingsDialog({
           {isDraftTab ? (
             <>
               <FooterButton onClick={onClose}>Cancel</FooterButton>
-              <FooterButton onClick={save} disabled={saving} primary>
+              <FooterButton onClick={save} disabled={saving || !dirty} primary={dirty}>
                 {saving ? "Saving" : "Save"}
               </FooterButton>
             </>
@@ -420,12 +422,18 @@ export default function SettingsDialog({
 }
 
 function SearchResults({
+  query,
   results,
   onOpen,
 }: {
+  query: string;
   results: SettingsSearchEntry[];
   onOpen: (entry: SettingsSearchEntry) => void;
 }) {
+  const words = useMemo(
+    () => query.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [query],
+  );
   const grouped = useMemo(() => {
     const map = new Map<SettingsTab, SettingsSearchEntry[]>();
     for (const entry of results) {
@@ -455,13 +463,16 @@ function SearchResults({
                   onClick={() => onOpen(entry)}
                 >
                   <span className="st-result__text">
-                    <span className="st-result__title">{entry.title}</span>
-                    <span className="st-result__crumb">
-                      {entry.section && entry.section !== tabMeta(entry.tab).title
-                        ? `${tabMeta(entry.tab).title} › ${entry.section}`
-                        : tabMeta(entry.tab).title}
+                    <span className="st-result__title">
+                      <Highlight text={entry.label ?? entry.title} words={words} />
+                    </span>
+                    <span className="st-result__desc">
+                      <Highlight text={entry.desc} words={words} />
                     </span>
                   </span>
+                  {/* The group heading already names the page, so a result
+                      only adds the section it sits in. */}
+                  <span className="st-result__crumb">{entry.section ?? ""}</span>
                   <ChevronRight />
                 </button>
               ))}
@@ -470,6 +481,26 @@ function SearchResults({
         ))
       )}
     </div>
+  );
+}
+
+/** Marks every place a search word appears, case-insensitively. */
+function Highlight({ text, words }: { text: string; words: ReadonlyArray<string> }) {
+  if (words.length === 0) return <>{text}</>;
+  const escaped = words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const parts = text.split(new RegExp(`(${escaped.join("|")})`, "gi"));
+  return (
+    <>
+      {parts.map((part, index) =>
+        index % 2 === 1 ? (
+          <mark key={index} className="st-mark">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
   );
 }
 
@@ -544,7 +575,7 @@ function TerminalSettings({
                 ariaLabel="Default shell"
                 width={250}
                 value={selectedShellId ?? ""}
-                options={shells.map((shell) => ({
+                options={distinctShells(shells, selectedShellId).map((shell) => ({
                   value: shell.id,
                   label: shell.label,
                   detail: shell.exe,
@@ -570,8 +601,8 @@ function TerminalSettings({
       <SettingsSection
         title="Resource overview"
         description="Observation only. A quiet terminal can still have a running child process, and Codara never stops terminal work for being quiet."
+        live
       >
-        <div aria-live="polite" style={{ display: "contents" }}>
           <ValueRow title="Live terminals" value={resourceSnapshot?.totals.live ?? "None yet"} />
           <ValueRow title="Visible streams" value={resourceSnapshot?.totals.attached ?? "None yet"} />
           <ValueRow title="Parked or headless" value={resourceSnapshot?.totals.detached ?? "None yet"} />
@@ -594,7 +625,6 @@ function TerminalSettings({
                 : "None yet"
             }
           />
-        </div>
       </SettingsSection>
 
       <SettingsSection
@@ -603,6 +633,26 @@ function TerminalSettings({
       />
     </>
   );
+}
+
+/**
+ * On merged-/usr systems /etc/shells lists every shell under both /bin and
+ * /usr/bin, which are the same file. The picker shows one of each, keeping
+ * whichever the saved setting points at so the selection never vanishes.
+ */
+function distinctShells(shells: ShellInfo[], selectedId: string | null): ShellInfo[] {
+  const keyOf = (shell: ShellInfo) => {
+    const match = /^\/(?:usr\/)?bin\/([^/]+)$/.exec(shell.exe);
+    return match ? `bin:${match[1]}` : `exe:${shell.exe}`;
+  };
+  const chosen = new Map<string, ShellInfo>();
+  for (const shell of shells) {
+    const key = keyOf(shell);
+    const kept = chosen.get(key);
+    if (!kept || shell.id === selectedId) chosen.set(key, shell);
+  }
+  const keep = new Set(chosen.values());
+  return shells.filter((shell) => keep.has(shell));
 }
 
 function formatResourceBytes(bytes: number): string {
@@ -909,9 +959,14 @@ function GeneralSettings({
             title="Glass tuning"
             desc="Strength of each part of the glass material, as a share of the default."
             control={
-              <Disclosure open={glassTuningOpen} onToggle={() => setGlassTuningOpen((open) => !open)}>
+              <button
+                type="button"
+                className="spark-btn"
+                aria-expanded={glassTuningOpen}
+                onClick={() => setGlassTuningOpen((open) => !open)}
+              >
                 {glassTuningOpen ? "Hide" : "Adjust"}
-              </Disclosure>
+              </button>
             }
           >
             {glassTuningOpen ? (
@@ -1403,7 +1458,7 @@ function EditorSettings() {
               max={2000}
               step={50}
               value={currentInlineDelayMs}
-              display={currentInlineDelayMs === 0 ? "Live" : `${currentInlineDelayMs} ms`}
+              display={`${currentInlineDelayMs.toLocaleString()} ms`}
               onChange={(next) => void setPreference("inlineAutocompleteDelayMs", next)}
             />
           }
@@ -1872,7 +1927,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           // empty report as a red "no usage windows" error on the card.
           ...(usage && accountCardShowsUsage(usage)
             ? { usage: <UsageEntryBody usage={usage} compact /> }
-            : { usageNote: accountUsageNote(usage, usageLoading) }),
+            : accountUsageNote(usage, usageLoading, descriptor)),
           coraProfileId: profile.id,
           ...(profile.cliProfileId ? { cliProfileId: profile.cliProfileId } : {}),
           builtIn: profile.builtIn === true,
@@ -1910,6 +1965,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           },
           cliDefault: profile.isDefault,
           busy: accountMutationId === profile.id,
+          ...accountUsageNote(undefined, false, descriptor),
         }));
       // Main owns identity pairing. A connected personal login without a
       // row may already belong to a managed account, so never invent a
@@ -1926,21 +1982,19 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
                 active: false,
                 terminal: { connected: false },
                 busy: false,
+                ...accountUsageNote(undefined, false, descriptor),
               },
             ]
           : [];
       const cards = [...accountOneSlot, ...rows, ...terminalOnly];
-      // A signed-out row is listed but not counted as signed in, so the
-      // header never claims fewer accounts than the rows under it.
-      const count = cards.filter(
-        (card) => card.coraProfileId || card.terminal?.connected,
-      ).length;
-      const footer =
-        cards.length === 0
-          ? null
-          : count === cards.length
-            ? `${count} ${count === 1 ? "account" : "accounts"}`
-            : `${count} of ${cards.length} signed in`;
+      // One rule for every provider: an account is ready when Cora and its
+      // terminal tool can both use it right now, the same test that gives a
+      // row its Switch button or its Active badge.
+      const ready = cards.filter((card) => {
+        const state = accountCardState(card);
+        return state === "active" || state === "signed-in";
+      }).length;
+      const footer = cards.length === 0 ? null : `${ready} of ${cards.length} ready`;
       return {
         descriptor,
         summary: accountProviderSummary(descriptor),
@@ -2118,7 +2172,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         {howSwitchingOpen ? (
           <div className="st-acct-how">
             <p>
-              The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.
+              Every account is one sign-in for both Cora and its terminal tool. Account 1 is your own command-line login.
             </p>
             <dl>
               {providerViews.map((view) => (
@@ -2212,7 +2266,14 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         ) : null}
         <SettingRow
           title="Claude Extra Usage"
-          desc="Using a Claude Pro or Max account outside Anthropic's own apps can draw on Extra Usage, billed on top of the plan. Codara never quietly switches you to a paid API key; for a hard limit, turn Extra Usage off in your Anthropic account."
+          desc="Pro and Max plans used outside Anthropic's own apps can draw on Extra Usage, billed on top of the plan. Codara never switches you to a paid API key; for a hard limit, turn Extra Usage off."
+          control={
+            <FooterButton
+              onClick={() => void window.spark.openInSystemBrowser(CLAUDE_USAGE_SETTINGS_URL)}
+            >
+              Open Claude settings
+            </FooterButton>
+          }
         />
       </SettingsSection>
     </>
@@ -2367,19 +2428,31 @@ function liveTerminalCount(message: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-/** True when the in-card usage block has something to say besides silence. */
+// Where a Claude plan's Extra Usage is switched on or off.
+const CLAUDE_USAGE_SETTINGS_URL = "https://claude.ai/settings/usage";
+
+/** True when the account has meters of its own to draw. */
 function accountCardShowsUsage(usage: UsageEntry): boolean {
-  if (usage.windows.length > 0) return true;
-  if (usage.limitReached) return true;
-  if (usage.status === "ok" || usage.status === "not_connected") return false;
-  return Boolean(usage.message);
+  return usage.windows.length > 0 || usage.limitReached === true;
 }
 
-/** What a card says in place of meters when there are none to draw. */
-function accountUsageNote(usage: UsageEntry | undefined, loading: boolean): string {
-  if (!usage) return loading ? "Checking limits…" : "No limits reported yet.";
-  if (usage.status === "not_connected") return "Reconnect this account to see its limits.";
-  return "This plan does not publish usage limits.";
+/**
+ * What a card's empty meters say when it has no reading: the row keeps its
+ * meter rows either way, so every account reads the same.
+ */
+function accountUsageNote(
+  usage: UsageEntry | undefined,
+  loading: boolean,
+  descriptor: AccountProviderDescriptor,
+): Pick<AccountCardView, "usageNote" | "usageMessage"> {
+  if (!descriptor.reportsUsage) return { usageNote: `Not reported by ${descriptor.label}` };
+  if (!usage) return { usageNote: loading ? "Checking…" : "Not available" };
+  if (usage.status === "ok") return { usageNote: "Not reported" };
+  if (usage.status === "not_connected") return { usageNote: "Not available" };
+  return {
+    usageNote: "Not available",
+    usageMessage: usage.message || "Could not read usage limits.",
+  };
 }
 
 // Accounts, plus a way into the Capability Center. The fast-mode toggle used
@@ -2442,7 +2515,7 @@ function NumberRow({
     if (!editing) setDraft(String(value));
   }, [editing, value]);
   const commit = (raw: string) => {
-    const next = Number(raw);
+    const next = Number(raw.replace(/[\s,.'\u00a0\u202f]/g, ""));
     if (raw.trim() === "" || !Number.isFinite(next)) {
       setDraft(String(value));
       return;
@@ -2458,15 +2531,17 @@ function NumberRow({
       disabled={disabled}
       control={
         <input
-          className="spark-input spark-mono st-number"
+          className="spark-input st-number"
           aria-label={title}
-          type="number"
-          min={min}
-          max={max}
-          value={draft}
+          type="text"
+          inputMode="numeric"
+          value={editing ? draft : value.toLocaleString()}
           disabled={disabled}
           onChange={(e) => setDraft(e.target.value)}
-          onFocus={() => setEditing(true)}
+          onFocus={() => {
+            setDraft(String(value));
+            setEditing(true);
+          }}
           onBlur={(e) => {
             setEditing(false);
             commit(e.target.value);
@@ -3506,169 +3581,6 @@ function AboutSettings() {
         />
       </SettingsSection>
     </>
-  );
-}
-
-interface CustomSelectOption {
-  value: string;
-  label: string;
-  /**
-   * Optional group heading. Consecutive options sharing a group render once
-   * under a header row (the Cora model-picker look); ungrouped options render
-   * flush at the top.
-   */
-  group?: string;
-  /** Secondary text beside the label, such as the path behind a shell name. */
-  detail?: string;
-}
-
-// A crisp 1.5px-stroke chevron at currentColor, never the Unicode "▾",
-// which sits on a text baseline and renders heavier than the SVG icons
-// elsewhere in the app. Flips on open.
-function ChevronIcon({ open }: { open: boolean }) {
-  return (
-    <svg
-      aria-hidden
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={`st-select__chevron${open ? " is-open" : ""}`}
-    >
-      <path d="M6 9l6 6 6-6" />
-    </svg>
-  );
-}
-
-// Replaces the native <select> dropdown: Chromium's OS-rendered popup on
-// Windows ignores our theme variables, so unselected options render with
-// near-zero contrast in dark mode. This in-app dropdown is an absolutely
-// positioned panel anchored to the trigger, themed with the dialog's
-// tokens, and dismissed on outside-click / Escape / blur.
-function CustomSelect({
-  value,
-  options,
-  onChange,
-  ariaLabel,
-  width,
-  disabled,
-}: {
-  value: string;
-  options: ReadonlyArray<CustomSelectOption>;
-  onChange: (next: string) => void;
-  ariaLabel?: string;
-  disabled?: boolean;
-  /** Fixed trigger width when the select sits in a row's control slot. */
-  width?: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const popupRef = useRef<HTMLDivElement | null>(null);
-  const current = options.find((o) => o.value === value);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (
-        event.target instanceof Node &&
-        !triggerRef.current?.contains(event.target) &&
-        !popupRef.current?.contains(event.target)
-      ) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        // Capture + stopPropagation so Escape dismisses just the dropdown
-        // instead of also closing the whole Settings dialog.
-        event.stopPropagation();
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey, { capture: true });
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey, { capture: true });
-    };
-  }, [open]);
-
-  return (
-    <div className="st-select-wrap" style={width ? { width } : undefined}>
-      <button
-        ref={triggerRef}
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        disabled={disabled}
-        className={`st-select-trigger${open ? " is-open" : ""}`}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="st-select-trigger__value">
-          {current?.label ?? value}
-          {current?.detail ? <span className="st-select__detail">{current.detail}</span> : null}
-        </span>
-        <ChevronIcon open={open} />
-      </button>
-      {open && (
-        <div ref={popupRef} role="listbox" className="spark-menu st-select-menu">
-          {options.map((opt, index) => {
-            const previous = index > 0 ? options[index - 1] : undefined;
-            const showHeader = Boolean(opt.group) && opt.group !== previous?.group;
-            return (
-              <React.Fragment key={opt.value}>
-                {showHeader && (
-                  <div role="presentation" className={`st-select-menu__group${index > 0 ? " has-rule" : ""}`}>
-                    {opt.group}
-                  </div>
-                )}
-                <SelectOption
-                  label={opt.label}
-                  detail={opt.detail}
-                  active={opt.value === value}
-                  onClick={() => {
-                    onChange(opt.value);
-                    setOpen(false);
-                    triggerRef.current?.focus();
-                  }}
-                />
-              </React.Fragment>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SelectOption({
-  label,
-  detail,
-  active,
-  onClick,
-}: {
-  label: string;
-  detail?: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={active}
-      className={active ? "spark-menu-item is-active" : "spark-menu-item"}
-      onClick={onClick}
-    >
-      <span className="st-select-option__label">{label}</span>
-      {detail ? <span className="st-select__detail">{detail}</span> : null}
-    </button>
   );
 }
 

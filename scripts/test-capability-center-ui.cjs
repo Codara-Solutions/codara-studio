@@ -134,12 +134,13 @@ check("the built-in server keeps its row, its controls and a placeholder while l
   );
   assert.match(
     mcpSection,
-    /<span style=\{rowScopeStyle\}>\{builtin\.name\}<\/span>\s*\n\s*<span className="spark-badge is-accent" style=\{badgeStyle\}>\s*\n\s*built in\s*\n\s*<\/span>\s*\n\s*<span className="spark-badge" style=\{badgeStyle\} title=\{builtin\.tools\.join\(", "\)\}>/,
+    /<span style=\{rowScopeStyle\}>\{builtin\.name\}<\/span>\s*\n\s*<span className="spark-badge is-accent" style=\{badgeStyle\}>\s*\n\s*Built in\s*\n\s*<\/span>\s*\n\s*<span className="spark-badge" style=\{badgeStyle\} title=\{builtin\.tools\.join\(", "\)\}>/,
   );
-  // The wider dialog, and the compact wrap the MCP rows switch to before the
-  // fixed columns would squeeze the name to nothing.
-  assert.match(dialog, /width: "min\(1120px, calc\(100vw - 44px\)\)"/);
-  assert.match(styles, /@media \(max-width: 1000px\) \{\s*\n\s*\.agent-capability-row--mcp \{\s*\n\s*display: flex !important;/);
+  // Settings' footprint and grid, and the compact wrap the MCP rows switch to
+  // when the pane itself, not the window, leaves the fixed columns too little.
+  assert.match(styles, /\.agent-capabilities-surface \{\s*\n\s*position: relative;\s*\n\s*width: min\(920px, calc\(100vw - 48px\)\);/);
+  assert.match(styles, /container: capabilities \/ inline-size;/);
+  assert.match(styles, /@container capabilities \(max-width: 760px\) \{\s*\n\s*\.agent-capability-row--mcp \{\s*\n\s*display: flex !important;/);
 });
 
 check("Grok Build is a real copy target through the same install path", () => {
@@ -229,8 +230,9 @@ check("Behavior offers Cora's edit verification and mid-turn delivery in plain w
   assert.match(behaviorSection, /title="Always verify edits with a worker"/);
   assert.match(behaviorSection, /checked=\{view\.coraAlwaysVerifyEdits === true\}/);
   assert.match(behaviorSection, /onChange\(\s*\{ coraAlwaysVerifyEdits \}/);
-  assert.match(behaviorSection, /\{ value: "steer", label: "Cora reads new messages right away" \}/);
-  assert.match(behaviorSection, /\{ value: "queue", label: "Wait until Cora finishes" \}/);
+  assert.match(behaviorSection, /\{ value: "steer", label: "Right away" \}/);
+  assert.match(behaviorSection, /\{ value: "queue", label: "When Cora finishes" \}/);
+  assert.match(behaviorSection, /Messages you send while Cora works/);
   assert.match(behaviorSection, /role="radiogroup"/);
   assert.match(behaviorSection, /view\.coraMidTurnDelivery === "queue" \? "queue" : "steer"/);
 });
@@ -248,7 +250,9 @@ check("retired vocabulary does not come back", () => {
 });
 
 check("memory shows whose it is and why a tier is off", () => {
-  assert.match(memorySection, /aria-label="Show the memory of this profile"/);
+  assert.match(memorySection, /ariaLabel="Show the memory of this profile"/);
+  assert.match(memorySection, /<CustomSelect/);
+  assert.doesNotMatch(memorySection, /<select/);
   assert.match(dialog, /window\.spark\.memory\.setEnabled\(scope, workspaceId, enabled, viewedProfile\)/);
   assert.match(dialog, /window\.spark\.memory\.clear\(scope, workspaceId, includeUserLines, viewedProfile\)/);
   assert.match(dialog, /window\.spark\.memory\s*\n\s*\.ensureFile\(scope, workspaceId, viewedProfile\)/);

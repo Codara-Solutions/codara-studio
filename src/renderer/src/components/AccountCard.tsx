@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import type { PiSubscriptionProvider } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
 import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
+import { UsagePlaceholder } from "./SubscriptionUsage";
 import {
   ActionButton,
   ActiveBadge,
@@ -70,8 +71,10 @@ export interface AccountCardView {
   busy: boolean;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
-  /** Said in place of the meters when this account has none to draw. */
+  /** Said on the empty meters when this account has no reading to draw. */
   usageNote?: string;
+  /** Why the last limit read failed, said once under the empty meters. */
+  usageMessage?: string;
   /**
    * Terminals still running on this account (the count main refused a delete
    * with, or the live count): the next Delete closes that many first.
@@ -129,6 +132,16 @@ function terminalUsable(card: AccountCardView): boolean {
     Boolean(card.terminal?.connected) &&
     !(card.terminal?.expired && !card.terminal.canRefresh)
   );
+}
+
+/**
+ * The state alone, without the instruction that follows it. A row whose
+ * button already carries the fix shows only this, so the sentence and the
+ * button never say the same thing twice.
+ */
+function firstSentence(text: string): string {
+  const match = /^(.+?)[.!?](?:\s|$)/.exec(text);
+  return match ? match[1] : text;
 }
 
 function sessions(count: number): string {
@@ -368,6 +381,9 @@ export default function AccountCard({
     !card.cora?.expired &&
     !(card.terminal && !card.terminal.connected);
   const signedOut = state === "account-one-signed-out" && !card.email;
+  // A signed-out Account 1 says so under its name and its button copies the
+  // login command, so a status line would only repeat the two.
+  const statusRepeatsRow = signedOut && action?.id === "copy-login" && !card.cora?.error;
   const initial = (card.label.trim().charAt(0) || "?").toUpperCase();
 
   return (
@@ -425,36 +441,35 @@ export default function AccountCard({
                 groups={[menuActions, destructiveActions]}
                 onClose={() => setDeleteArmed(false)}
               />
-            ) : (
-              // Holds the menu's place so every row's button ends on one edge.
-              <span aria-hidden className="st-acct__menu-slot" />
-            )}
+            ) : null}
           </div>
         </div>
 
-        {healthy ? null : (
+        {healthy || statusRepeatsRow ? null : (
           <ConnectionLine
-            state={status}
-            code={descriptor.loginHint}
-            hint={
-              status.danger && card.builtIn && state !== "account-one-signed-out"
-                ? accountOneSignedOutHint(descriptor)
-                : undefined
+            state={
+              action
+                ? { ...status, text: firstSentence(status.text) }
+                : status
             }
+            title={
+              status.danger && card.builtIn && state !== "account-one-signed-out"
+                ? `${status.text} ${accountOneSignedOutHint(descriptor)}`
+                : status.text
+            }
+            code={descriptor.loginHint}
           />
         )}
 
-        {card.usage ? (
-          <div className="st-acct__usage">{card.usage}</div>
-        ) : (
-          <div className="st-acct__usage-note">
-            {state === "terminal-only"
-              ? "Limits show once Cora can use this account."
-              : state === "account-one-signed-out"
-                ? "Limits show once this account is signed in."
-                : card.usageNote ?? "No limits reported yet."}
-          </div>
-        )}
+        <div className="st-acct__usage">
+          {card.usage ?? (
+            <UsagePlaceholder
+              labels={descriptor.usageWindows}
+              note={card.usageNote ?? "Not available"}
+              message={card.usageMessage}
+            />
+          )}
+        </div>
 
         {renaming ? (
           <RenameForm
