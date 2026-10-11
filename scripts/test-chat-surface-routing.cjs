@@ -167,7 +167,12 @@ async function launchChromium() {
               ["chrome-headless-shell-mac-x64", "chrome-headless-shell"],
               ["chrome-mac-arm64", "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"],
             ]
-          : [["chrome-linux", "headless_shell"], ["chrome-linux", "chrome"]];
+          : [
+              ["chrome-headless-shell-linux64", "chrome-headless-shell"],
+              ["chrome-linux64", "chrome"],
+              ["chrome-linux", "headless_shell"],
+              ["chrome-linux", "chrome"],
+            ];
       for (const [sub, bin] of suffixes) {
         const executablePath = path.join(cacheRoot, dir, sub, bin);
         if (fs.existsSync(executablePath)) candidates.push(executablePath);
