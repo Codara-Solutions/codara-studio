@@ -3958,27 +3958,9 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     -webkit-backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
     backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
   }
-  /* Settings is an opaque surface (see the Settings block below); only the
-     Capability Center keeps a glass face here. Running the three-channel SVG
-     refraction lens over a surface that large, on top of a full-window
-     blurred scrim, forces continuous GPU re-rasterization, so it gets one
-     composited blur layer and an unfiltered scrim. Small popovers retain the
-     richer lens material. */
-  /* The Capability Center scrolls a dense inventory. Chromium/Wayland
-     re-rasterizes a viewport-sized backdrop-filter whenever that inventory
-     moves, producing visible half-second wheel lag on otherwise fast PCs.
-     Preserve the liquid-glass sheen, rim, bloom, and translucent material,
-     but preblend its face instead of filtering the live workbench underneath. */
-  /* The scroll-lag the comment above warns about came from running the
-     three-channel SVG refraction lens over a viewport-sized surface. This uses
-     ONE composited blur layer and no lens, and keeps `contain: paint` so the dense inventory's scroll
-     invalidations stay inside the panel instead of re-rasterizing the window
-     behind it. */
-  html:not([data-glass="off"]) .agent-capabilities-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    contain: paint;
-  }
+  /* Settings and the Capability Center are opaque surfaces (see the Settings
+     block below): both stay open over a live workbench while the user reads
+     dense text, and glass made that text fight whatever moved behind it. */
   /* The worker session picker is the third surface with this problem: a tall
      dialog whose rows repaint under the pointer (the highlight follows hover)
      while the three-channel SVG lens re-rasterizes the whole dialog on top of
@@ -4022,31 +4004,19 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-scrim {
     background: rgb(20 18 12 / 0.34);
   }
-  /* The Capability Center's footer bar frosts the panel's OWN interior (the
-     surface above is a backdrop root), so it keeps a blur of its own — but it
-     lives in here now. It used to sit outside this gate with hardcoded values,
-     which made it the one surface that stayed frosted after the user switched
-     liquid glass off, and the one the Appearance sliders could not move. */
-  html:not([data-glass="off"]) .agent-capabilities-footer {
-    -webkit-backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-    backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-  }
-  /* .spark-menu belongs in this list too: both surfaces carry their own
-     backdrop-filter AND `contain: paint`, each of which is a backdrop root, so
-     a dropdown nested inside one frosts the panel's interior rather than the
-     workbench and paints flat. Every other nested surface here was already
-     preblended on purpose; the menus were simply missed. */
+  /* Menus nested in either opaque face match it rather than frost it: the
+     face's `contain: paint` is a backdrop root, so a frosted menu inside it
+     would blur the panel's own interior and paint flat anyway. The account
+     and session menus are portalled out of the face but open over the same
+     dense rows, so they are opaque too. */
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong,
-  html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background-color: color-mix(in oklab, var(--panel) 78%, transparent);
-  }
-  /* Menus nested in the opaque Settings face match it rather than frost it. */
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass--strong,
-  html:not([data-glass="off"]) .settings-dialog-surface .spark-menu {
+  html:not([data-glass="off"]) .settings-dialog-surface .spark-menu,
+  html:not([data-glass="off"]) .spark-menu:has(.st-acct-menu),
+  html:not([data-glass="off"]) .spark-menu:has(.st-acct-picker) {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
     background-color: var(--panel-2);
@@ -4106,33 +4076,33 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 
 /* ── Capability Center ──────────────────────────────────────────────────────
    A sidebar nav (Tools, Skills, Profiles, Memory, Worker models, Behavior)
-   over one content pane,
-   the same shape Settings uses. The outer surface stays pre-blended (see the
-   performance gate above) so scrolling never re-rasterizes the entire
-   workbench on Wayland. */
+   over one content pane, on the same opaque face, scrim, nav rows, switches
+   and buttons as Settings. Its --st-* tokens come from the Settings block
+   below. `contain: paint` keeps the dense inventory's scroll invalidations
+   inside the panel instead of re-rasterizing the workbench behind it. */
 .agent-capabilities-surface {
   position: relative;
+  border: 1px solid var(--rule);
+  background: var(--st-surface);
+  color: var(--ink);
+  font-variant-numeric: normal;
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
+  contain: paint;
 }
-.agent-capabilities-surface::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  border-radius: inherit;
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, white 15%, transparent),
-    inset 0 -1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
+:root[data-theme-mode="light"] .agent-capabilities-surface {
+  border-color: color-mix(in oklab, var(--ink) 14%, transparent);
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
 }
-.agent-capabilities-surface > * {
-  position: relative;
-  z-index: 1;
+.agent-capabilities-surface .spark-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
 }
-.agent-capabilities-header {
-  background: color-mix(in oklab, var(--panel) 42%, transparent);
-}
-.agent-capabilities-footer {
-  background: color-mix(in oklab, var(--panel) 52%, transparent);
+:root[data-theme-mode="light"] .agent-capabilities-surface .spark-btn:not(.is-primary):not(.is-danger) {
+  background: var(--bg);
+  border-color: color-mix(in oklab, var(--ink) 16%, transparent);
+  box-shadow: 0 1px 1px oklch(0 0 0 / 0.04);
 }
 /* The list draws its own outline, so the last child never doubles it up. This
    covers the pager and the empty state as well as a trailing row. */
@@ -6988,6 +6958,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   font-family: var(--font-sans);
 }
 .settings-dialog-surface,
+.agent-capabilities-surface,
 .st-acct-picker,
 .st-acct-menu {
   --st-surface: var(--panel);
@@ -7003,6 +6974,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   --st-pad-x: 32px;
 }
 :root[data-theme-mode="light"] .settings-dialog-surface,
+:root[data-theme-mode="light"] .agent-capabilities-surface,
 :root[data-theme-mode="light"] .st-acct-picker,
 :root[data-theme-mode="light"] .st-acct-menu {
   --st-surface: var(--bg);

@@ -46,12 +46,7 @@ import {
   type NameGroup,
   type StatusMessage,
 } from "./capabilities/model";
-import {
-  AccentDot,
-  CloseButton,
-  useInteractive,
-  withFocusRing,
-} from "./capabilities/controls";
+import { CloseButton } from "./capabilities/controls";
 import McpSection, { type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
 import McpServerForm from "./capabilities/McpServerForm";
 import SkillsSection from "./capabilities/SkillsSection";
@@ -1051,29 +1046,30 @@ export default function AgentCapabilitiesDialog({
     // The scrim deliberately does nothing: only Escape, the close button and
     // Done leave, so a click that lands outside never drops the open page.
     <div style={overlayStyle}>
-      {/* Scrim + dialog face come from the shared glass classes (frosted in
-          glass mode, opaque panel look otherwise). */}
+      {/* The same opaque face and dimming scrim as Settings: this dialog is
+          dense tables and long descriptions, which glass made fight the
+          workbench behind it. */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Capability Center"
-        className="spark-glass--strong agent-capabilities-surface"
+        className="agent-capabilities-surface"
         data-agent-capabilities-surface
         style={dialogStyle}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="agent-capabilities-header" style={headerStyle}>
-          <AccentDot />
-          <div
-            data-capability-tab={renderedTab}
-            aria-busy={renderedTab !== activeTab}
-            style={titleStyle}
-          >
-            Capability Center
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h2
+              data-capability-tab={renderedTab}
+              aria-busy={renderedTab !== activeTab}
+              style={titleStyle}
+            >
+              Capability Center
+            </h2>
+            <p style={subtitleStyle}>Tools, skills, profiles and memory for Cora and your CLIs.</p>
           </div>
-          <div style={subtitleStyle}>Tools, skills, profiles and memory for Cora and your CLIs</div>
-          <div style={{ flex: 1 }} />
           <CloseButton onClick={() => requestLeave({ kind: "close" })} />
         </header>
 
@@ -1263,7 +1259,7 @@ export default function AgentCapabilitiesDialog({
                 aria-live="polite"
                 style={{
                   ...statusStyle,
-                  color: status?.tone === "error" ? "var(--danger)" : status?.tone === "ok" ? "var(--ink-dim)" : "var(--muted)",
+                  color: status?.tone === "error" ? "var(--danger)" : status?.tone === "ok" ? "var(--ink-dim)" : "var(--st-faint)",
                 }}
               >
                 {editor
@@ -1282,7 +1278,7 @@ export default function AgentCapabilitiesDialog({
                   </button>
                 </>
               ) : (
-                <button type="button" className="spark-btn is-primary" onClick={() => requestLeave({ kind: "close" })}>
+                <button type="button" className="spark-btn" onClick={() => requestLeave({ kind: "close" })}>
                   Done
                 </button>
               )}
@@ -1307,11 +1303,7 @@ function TabButton({
   active: boolean;
   onClick: () => void;
 }) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  // A quiet macOS-style sidebar row: selection is a calm ink fill alone, and
-  // font-weight is held constant across states (color carries selection) so the
-  // label never reflows. Matches SettingsDialog's nav exactly.
-  const restShadow = active ? "var(--lift-hi)" : undefined;
+  // The Settings sidebar row (.st-nav__item), so both dialogs share one nav.
   return (
     <button
       type="button"
@@ -1321,46 +1313,9 @@ function TabButton({
       aria-controls="capability-panel"
       tabIndex={active ? 0 : -1}
       onClick={onClick}
-      {...handlers}
-      style={{
-        appearance: "none",
-        width: "100%",
-        border: "1px solid transparent",
-        borderRadius: "var(--radius-control, 5px)",
-        background: active
-          ? "color-mix(in oklab, var(--ink) 7%, var(--panel))"
-          : pressed
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover
-              ? "var(--hover)"
-              : "transparent",
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "8px 10px",
-        textAlign: "left",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        fontWeight: 600,
-        letterSpacing: "0.005em",
-        cursor: "default",
-        display: "flex",
-        alignItems: "center",
-        gap: 9,
-        boxShadow: withFocusRing(restShadow, focus),
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
+      className={`st-nav__item${active ? " is-active" : ""}`}
     >
-      <span
-        aria-hidden
-        style={{
-          flex: "0 0 18px",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "flex-start",
-          color: active ? "var(--ink)" : "var(--muted)",
-          transition: "color var(--motion-fast) var(--ease-out)",
-        }}
-      >
+      <span aria-hidden className="st-nav__icon">
         <NavIcon tab={tab} />
       </span>
       <span style={navLabelStyle}>{label}</span>
@@ -1456,24 +1411,27 @@ const dialogStyle: React.CSSProperties = {
 };
 
 const headerStyle: React.CSSProperties = {
-  padding: "15px 18px",
-  borderBottom: "1px solid var(--rule-soft)",
-  boxShadow: "var(--lift-hi)",
+  padding: "18px 16px 14px 26px",
+  borderBottom: "1px solid var(--st-line)",
   display: "flex",
-  alignItems: "center",
-  gap: 10,
+  alignItems: "flex-start",
+  gap: 12,
 };
 
 const titleStyle: React.CSSProperties = {
+  margin: 0,
   color: "var(--ink)",
-  fontSize: 15,
+  fontSize: 18,
   fontWeight: 600,
-  letterSpacing: "-0.005em",
+  lineHeight: 1.3,
+  letterSpacing: "-0.01em",
 };
 
 const subtitleStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 12,
+  margin: "3px 0 0",
+  color: "var(--st-desc)",
+  fontSize: 13,
+  lineHeight: 1.45,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -1487,15 +1445,13 @@ const bodyStyle: React.CSSProperties = {
 };
 
 const navStyle: React.CSSProperties = {
-  flex: "0 0 200px",
-  borderRight: "1px solid var(--rule-soft)",
-  // Translucent so the dialog's glass face shows through; over the opaque
-  // fallback face it reads like the old --bg/--panel mix.
-  background: "color-mix(in oklab, var(--bg) 45%, transparent)",
-  padding: "12px 10px",
+  flex: "0 0 212px",
+  borderRight: "1px solid var(--st-line)",
+  background: "var(--st-sidebar)",
+  padding: "14px 10px",
   display: "flex",
   flexDirection: "column",
-  gap: 3,
+  gap: 1,
 };
 
 const navLabelStyle: React.CSSProperties = {
@@ -1507,10 +1463,10 @@ const navLabelStyle: React.CSSProperties = {
 };
 
 const navCountStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 500,
+  color: "var(--st-faint)",
+  fontSize: 11.5,
+  fontWeight: 400,
+  fontVariantNumeric: "tabular-nums",
 };
 
 const mainStyle: React.CSSProperties = {
@@ -1525,8 +1481,8 @@ const mainStyle: React.CSSProperties = {
 };
 
 const footerStyle: React.CSSProperties = {
-  borderTop: "1px solid var(--rule-soft)",
-  padding: "12px 18px",
+  borderTop: "1px solid var(--st-line)",
+  padding: "12px 16px 12px 26px",
   display: "flex",
   alignItems: "center",
   gap: 8,
@@ -1534,8 +1490,8 @@ const footerStyle: React.CSSProperties = {
 
 const statusStyle: React.CSSProperties = {
   flex: 1,
-  fontSize: 11.5,
-  fontWeight: 500,
+  fontSize: 12,
+  fontWeight: 400,
   lineHeight: 1.45,
   overflowWrap: "anywhere",
 };

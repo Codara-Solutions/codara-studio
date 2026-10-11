@@ -42,24 +42,6 @@ export function VisuallyHidden({ children }: { children: React.ReactNode }) {
   return <span style={visuallyHiddenStyle}>{children}</span>;
 }
 
-// The header's brand mark. SettingsDialog keeps its own private copy of this;
-// duplicating the 7px dot is cheaper than exporting it across two dialogs.
-export function AccentDot() {
-  return (
-    <span
-      aria-hidden
-      style={{
-        flex: "0 0 7px",
-        width: 7,
-        height: 7,
-        borderRadius: "50%",
-        background: "var(--accent)",
-        boxShadow: "0 0 8px var(--accent-glow)",
-      }}
-    />
-  );
-}
-
 export function SectionHead({
   title,
   detail,
@@ -80,11 +62,10 @@ export function SectionHead({
   );
 }
 
-// A quiet glyph button for the dialog corner: a 1.5px SVG on the shared
-// .spark-icon-btn idiom (transparent at rest, ink-tint on hover, global ring).
+// The dialog corner's close button, drawn exactly like the one in Settings.
 export function CloseButton({ onClick }: { onClick: () => void }) {
   return (
-    <button type="button" className="spark-icon-btn" aria-label="Close" title="Close" onClick={onClick}>
+    <button type="button" className="st-close" aria-label="Close" title="Close" onClick={onClick}>
       <CloseGlyph />
     </button>
   );
@@ -238,50 +219,22 @@ export function ConfirmRemoveButton({
   );
 }
 
-// ── Switch: one switch metric, app-wide. 34x20 track, 16px knob, 2px inset,
-// accent fill + glow when on. SwitchTrack is the pure-visual part so the same
-// geometry can be (a) an interactive role=switch button, or (b) a decorative
-// indicator nested inside a larger clickable row (ToggleRow), where a nested
-// <button> would be invalid HTML. Matches SettingsDialog exactly.
-const SWITCH_W = 34;
-const SWITCH_H = 20;
-const SWITCH_KNOB = 16;
+// ── Switch: the Settings switch (.st-switch in styles.css), so an off switch
+// reads the same in both dialogs: a grey track with a white knob, never a
+// dark knob that looks like it is on. SwitchTrack is the pure-visual part so
+// the same geometry can be (a) an interactive role=switch button, or (b) a
+// decorative indicator nested inside a larger clickable row (ToggleRow),
+// where a nested <button> would be invalid HTML.
+const SWITCH_W = 32;
 
 export function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boolean }) {
   return (
     <span
       aria-hidden
-      style={{
-        display: "inline-block",
-        position: "relative",
-        flex: `0 0 ${SWITCH_W}px`,
-        width: SWITCH_W,
-        height: SWITCH_H,
-        borderRadius: 999,
-        boxSizing: "border-box",
-        border: checked ? "1px solid var(--accent-edge)" : "1px solid var(--rule-strong)",
-        background: checked
-          ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-          : "color-mix(in oklab, var(--ink) 5%, transparent)",
-        opacity: disabled ? 0.55 : 1,
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
+      className={`st-switch${checked ? " is-on" : ""}`}
+      style={{ opacity: disabled ? 0.45 : 1 }}
     >
-      <span
-        style={{
-          position: "absolute",
-          top: 1,
-          left: checked ? SWITCH_W - SWITCH_KNOB - 2 : 1,
-          width: SWITCH_KNOB,
-          height: SWITCH_KNOB,
-          borderRadius: "50%",
-          background: checked ? "var(--accent)" : "var(--ink-dim)",
-          boxShadow: checked ? "0 0 8px var(--accent-glow)" : "none",
-          transition:
-            "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-        }}
-      />
+      <span className="st-switch__knob" />
     </span>
   );
 }
@@ -480,16 +433,17 @@ export const sectionHeadStyle: React.CSSProperties = {
 
 export const sectionTitleStyle: React.CSSProperties = {
   color: "var(--ink)",
-  fontSize: 14,
+  fontSize: 13.5,
   fontWeight: 600,
+  lineHeight: 1.35,
   margin: 0,
 };
 
 export const sectionDetailStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11.5,
+  color: "var(--st-desc)",
+  fontSize: 12.5,
   lineHeight: 1.5,
-  margin: "4px 0 0",
+  margin: "3px 0 0",
   maxWidth: 640,
 };
 
@@ -501,11 +455,10 @@ export const sectionActionsStyle: React.CSSProperties = {
 };
 
 export const listStyle: React.CSSProperties = {
-  border: "1px solid var(--rule-soft)",
+  border: "1px solid var(--st-line)",
   borderRadius: "var(--radius-surface, 10px)",
   overflow: "hidden",
-  background: "color-mix(in oklab, var(--bg) 22%, transparent)",
-  boxShadow: "var(--well)",
+  background: "var(--st-surface)",
 };
 
 export const panelStyle: React.CSSProperties = {
@@ -564,9 +517,8 @@ export const rowMetaStyle: React.CSSProperties = {
 };
 
 export const rowSummaryStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
+  color: "var(--st-desc)",
+  fontSize: 12,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -574,8 +526,8 @@ export const rowSummaryStyle: React.CSSProperties = {
 };
 
 export const rowNoteStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
+  color: "var(--st-desc)",
+  fontSize: 12,
   lineHeight: 1.45,
 };
 
@@ -625,13 +577,13 @@ export const tableHeadStyle: React.CSSProperties = {
   gap: 10,
   alignItems: "center",
   padding: "8px 14px",
-  borderBottom: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklab, var(--ink) 4%, transparent)",
+  borderBottom: "1px solid var(--st-line)",
+  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
 };
 
 export const tableHeadCellStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10,
+  color: "var(--st-faint)",
+  fontSize: 11,
   lineHeight: 1.3,
   textAlign: "center",
 };
@@ -642,9 +594,9 @@ export const tableHeadLeadStyle: React.CSSProperties = {
 };
 
 export const smallBtnStyle: React.CSSProperties = {
-  height: "auto",
-  padding: "5px 10px",
-  fontSize: 11,
+  height: 28,
+  padding: "0 10px",
+  fontSize: 12,
 };
 
 export const microBtnStyle: React.CSSProperties = {
@@ -729,13 +681,13 @@ export const toggleTitleStyle: React.CSSProperties = {
   display: "block",
   color: "var(--ink)",
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
 };
 
 export const toggleDetailStyle: React.CSSProperties = {
   display: "block",
-  color: "var(--muted)",
-  fontSize: 11,
+  color: "var(--st-desc)",
+  fontSize: 12,
   lineHeight: 1.45,
   marginTop: 2,
 };
