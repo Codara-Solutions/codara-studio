@@ -1,30 +1,58 @@
 import React from "react";
 
 /**
- * The building blocks every Settings page is drawn with. Pages are a title
- * and a one-line description, then sections; a section is a heading over a
- * stack of rows split by hairlines; a row is a label and a short description
- * on the left with its control on the right. Spacing and dividers separate
- * things, never boxes. The look lives in styles.css under `.st-*`, scoped to
- * the dialog surface, so these components carry structure and no colours.
+ * The building blocks every Settings page is drawn with. A page is a stack of
+ * sections under the dialog's title bar, which carries the page title and its
+ * one-line description so they stay put while the page scrolls. A section
+ * is a heading over a stack of rows split by hairlines; a row is a label and
+ * a short description on the left with its control on the right. Spacing and
+ * dividers separate things, never boxes. The look lives in styles.css under
+ * `.st-*`, scoped to the dialog surface, so these components carry structure
+ * and no colours.
  *
  * `anchor` names a section or row for Settings search: a result scrolls to
  * the element carrying the same `data-setting-anchor`.
  */
 
-export function SettingsPage({
-  description,
+export function SettingsPage({ children }: { children: React.ReactNode }) {
+  return <div className="st-page">{children}</div>;
+}
+
+/**
+ * A quiet "show more" toggle with a chevron that turns when open. Details
+ * most people never need (tuning, how a mechanism works) sit behind one so
+ * the page reads as a list of settings rather than a wall of text.
+ */
+export function Disclosure({
+  open,
+  onToggle,
+  anchor,
   children,
 }: {
-  description: React.ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  anchor?: string;
   children: React.ReactNode;
 }) {
   return (
-    <div className="st-page">
-      <p className="st-page__desc">{description}</p>
+    <button
+      type="button"
+      className="st-disclosure"
+      aria-expanded={open}
+      data-setting-anchor={anchor}
+      onClick={onToggle}
+    >
+      <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 6l6 6-6 6" />
+      </svg>
       {children}
-    </div>
+    </button>
   );
+}
+
+/** A key name drawn as a small keycap inside running text. */
+export function Kbd({ children }: { children: React.ReactNode }) {
+  return <kbd className="st-kbd st-kbd--inline">{children}</kbd>;
 }
 
 export function SettingsSection({

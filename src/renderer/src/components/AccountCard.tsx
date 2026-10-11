@@ -93,6 +93,8 @@ export interface AccountCardActions {
   /** Give a half account its other half. */
   onShare: (card: AccountCardView) => void;
   onRename: (card: AccountCardView, label: string) => Promise<boolean>;
+  /** Put a terminal command on the clipboard; resolves false if that failed. */
+  onCopyCommand: (command: string) => Promise<boolean>;
   onDelete: (
     card: AccountCardView,
     options: { closeSessions: boolean },
@@ -205,14 +207,38 @@ function connectionState(
 function primaryAction(
   card: AccountCardView,
   state: AccountCardState,
+  status: ConnectionState,
   descriptor: AccountProviderDescriptor,
   actions: AccountCardActions,
   disabled: boolean,
+  onCopyLogin: () => void,
 ): CardAction | undefined {
+  // Account 1 is the user's own CLI login and is never reconnected from
+  // here: its fix is the login command, one click from the clipboard. A
+  // lapsed sign-in on any other row is fixed by reconnecting it, never by
+  // switching to it.
+  const copyLogin: CardAction = {
+    id: "copy-login",
+    label: `Copy ${descriptor.loginHint}`,
+    disabled: false,
+    run: onCopyLogin,
+  };
+  if (status.danger && state !== "terminal-only") {
+    if (card.builtIn) return copyLogin;
+    if (card.coraProfileId) {
+      return {
+        id: "reconnect",
+        label: "Reconnect",
+        disabled,
+        run: () => actions.onReconnect(card),
+      };
+    }
+  }
   switch (state) {
     case "active":
-    case "account-one-signed-out":
       return undefined;
+    case "account-one-signed-out":
+      return terminalUsable(card) ? undefined : copyLogin;
     case "signed-in": {
       // Main refused the switch with a count; the same button now closes
       // those sessions and switches. Only Codex ever reports one.
@@ -266,11 +292,27 @@ export default function AccountCard({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
+  const [copied, setCopied] = useState(false);
   const brand = agentBrandColor(descriptor.brand);
   const state = accountCardState(card);
   const controlsDisabled = disabled || card.busy;
   const status = connectionState(card, state, descriptor);
-  const action = primaryAction(card, state, descriptor, actions, controlsDisabled);
+  const copyLogin = () => {
+    void actions.onCopyCommand(descriptor.loginHint).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    });
+  };
+  const action = primaryAction(
+    card,
+    state,
+    status,
+    descriptor,
+    actions,
+    controlsDisabled,
+    copyLogin,
+  );
   const renameable = Boolean(card.coraProfileId || card.cliProfileId);
 
   const menuActions: CardAction[] = [];
@@ -325,11 +367,6 @@ export default function AccountCard({
     status.ok &&
     !card.cora?.expired &&
     !(card.terminal && !card.terminal.connected);
-  // An error on a usable row gets its fix beside it instead of leaving the
-  // user to hunt for one. Account 1 is the user's own CLI login and is never
-  // reconnected from here, so it gets the command to run instead.
-  const inlineReconnect =
-    Boolean(status.danger && card.coraProfileId && !card.builtIn) && action?.id !== "reconnect";
   const signedOut = state === "account-one-signed-out" && !card.email;
   const initial = (card.label.trim().charAt(0) || "?").toUpperCase();
 
@@ -376,12 +413,10 @@ export default function AccountCard({
                 Working…
               </span>
             ) : action ? (
-              <ActionButton
-                primary={action.id !== "use"}
-                disabled={action.disabled}
-                onClick={() => void action.run()}
-              >
-                {action.label}
+              // Every row action is the same quiet button: the only accent in
+              // the list is the Active badge and its rule.
+              <ActionButton disabled={action.disabled} onClick={() => void action.run()}>
+                {action.id === "copy-login" && copied ? "Copied" : action.label}
               </ActionButton>
             ) : null}
             {menuActions.length > 0 || destructiveActions.length > 0 ? (
@@ -390,28 +425,21 @@ export default function AccountCard({
                 groups={[menuActions, destructiveActions]}
                 onClose={() => setDeleteArmed(false)}
               />
-            ) : null}
+            ) : (
+              // Holds the menu's place so every row's button ends on one edge.
+              <span aria-hidden className="st-acct__menu-slot" />
+            )}
           </div>
         </div>
 
         {healthy ? null : (
           <ConnectionLine
             state={status}
+            code={descriptor.loginHint}
             hint={
               status.danger && card.builtIn && state !== "account-one-signed-out"
                 ? accountOneSignedOutHint(descriptor)
                 : undefined
-            }
-            action={
-              inlineReconnect ? (
-                <ActionButton
-                  primary
-                  disabled={controlsDisabled}
-                  onClick={() => actions.onReconnect(card)}
-                >
-                  Reconnect
-                </ActionButton>
-              ) : undefined
             }
           />
         )}

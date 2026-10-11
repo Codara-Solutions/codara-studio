@@ -54,9 +54,11 @@ import type { AccountCardView } from "./AccountCard";
 import {
   ACCOUNT_PROVIDER_DESCRIPTORS,
   accountProviderDetail,
+  accountProviderSummary,
 } from "../lib/account-provider-descriptors";
 import RemoteAccessSettings from "./RemoteAccessSettings";
-import { RuntimeMark } from "./BrandMarks";
+import { CardOverflowMenu } from "./AccountCardPrimitives";
+import { CodaraMark, RuntimeMark } from "./BrandMarks";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
 import {
@@ -66,8 +68,10 @@ import {
 import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
 import {
+  Disclosure,
   EmptyState,
   InlineMessage,
+  Kbd,
   Label,
   RangeControl,
   Segmented,
@@ -220,9 +224,14 @@ export default function SettingsDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // The title bar grows a hairline only once the page scrolls under it, so a
+  // line cut at the pane's top edge reads as scrolled rather than clipped.
+  const [scrolled, setScrolled] = useState(false);
+
   useEffect(() => {
     if (pendingAnchor) return;
     contentRef.current?.scrollTo({ top: 0 });
+    setScrolled(false);
   }, [renderedTab, searching, pendingAnchor]);
 
   // Rows behind async data (preferences, accounts) mount a beat after the
@@ -295,7 +304,7 @@ export default function SettingsDialog({
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="settings-dialog-surface"
+        className={`settings-dialog-surface${scrolled ? " is-scrolled" : ""}`}
         data-settings-surface
       >
         <SettingsNav
@@ -306,11 +315,18 @@ export default function SettingsDialog({
           onSelect={selectTab}
         />
 
-        <div ref={contentRef} className="st-content">
+        <div
+          ref={contentRef}
+          className="st-content"
+          onScroll={(event) => {
+            const next = event.currentTarget.scrollTop > 2;
+            if (next !== scrolled) setScrolled(next);
+          }}
+        >
           {searching ? (
-            <SearchResults query={query} results={results} onOpen={openResult} />
+            <SearchResults results={results} onOpen={openResult} />
           ) : (
-            <SettingsPage description={meta.description}>
+            <SettingsPage>
               {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
               {renderedTab === "editor" && <EditorSettings />}
               {renderedTab === "terminal" && (
@@ -340,13 +356,22 @@ export default function SettingsDialog({
         </div>
 
         <header className="st-topbar">
-          <h2
-            className="st-topbar__title"
-            data-settings-tab={renderedTab}
-            aria-busy={renderedTab !== activeTab}
-          >
-            {searching ? "Search" : meta.title}
-          </h2>
+          <div className="st-topbar__titles">
+            <h2
+              className="st-topbar__title"
+              data-settings-tab={renderedTab}
+              aria-busy={renderedTab !== activeTab}
+            >
+              {searching ? "Search" : meta.title}
+            </h2>
+            <p className="st-topbar__desc">
+              {searching
+                ? results.length === 0
+                  ? `Nothing matches “${query.trim()}”.`
+                  : `${results.length} ${results.length === 1 ? "result" : "results"} for “${query.trim()}”.`
+                : meta.description}
+            </p>
+          </div>
           <button type="button" className="st-close" aria-label="Close" title="Close" onClick={onClose}>
             <svg
               aria-hidden
@@ -395,11 +420,9 @@ export default function SettingsDialog({
 }
 
 function SearchResults({
-  query,
   results,
   onOpen,
 }: {
-  query: string;
   results: SettingsSearchEntry[];
   onOpen: (entry: SettingsSearchEntry) => void;
 }) {
@@ -414,11 +437,6 @@ function SearchResults({
   }, [results]);
   return (
     <div className="st-page">
-      <p className="st-page__desc">
-        {results.length === 0
-          ? `Nothing matches “${query.trim()}”.`
-          : `${results.length} ${results.length === 1 ? "result" : "results"} for “${query.trim()}”.`}
-      </p>
       {results.length === 0 ? (
         <EmptyState
           icon={<SearchGlyph />}
@@ -438,11 +456,11 @@ function SearchResults({
                 >
                   <span className="st-result__text">
                     <span className="st-result__title">{entry.title}</span>
-                    {entry.section ? (
-                      <span className="st-result__crumb">
-                        {tabMeta(entry.tab).title} › {entry.section}
-                      </span>
-                    ) : null}
+                    <span className="st-result__crumb">
+                      {entry.section && entry.section !== tabMeta(entry.tab).title
+                        ? `${tabMeta(entry.tab).title} › ${entry.section}`
+                        : tabMeta(entry.tab).title}
+                    </span>
                   </span>
                   <ChevronRight />
                 </button>
@@ -511,27 +529,30 @@ function TerminalSettings({
 
   return (
     <>
-      <SettingsSection
-        title="Default shell"
-        description="New manual terminals and worker panes open with this shell."
-        plain
-      >
+      <SettingsSection title="Shell">
         {shells.length === 0 ? (
           <EmptyState
             title="No terminals detected"
             body="Codara could not find a shell on this computer. Install one, then reopen Settings."
           />
         ) : (
-          <div className="st-list">
-            {shells.map((shell) => (
-              <ShellOption
-                key={shell.id}
-                shell={shell}
-                selected={shell.id === selectedShellId}
-                onSelect={() => onSelect(shell.id)}
+          <SettingRow
+            title="Default shell"
+            desc="New manual terminals and worker panes open with this shell."
+            control={
+              <CustomSelect
+                ariaLabel="Default shell"
+                width={250}
+                value={selectedShellId ?? ""}
+                options={shells.map((shell) => ({
+                  value: shell.id,
+                  label: shell.label,
+                  detail: shell.exe,
+                }))}
+                onChange={onSelect}
               />
-            ))}
-          </div>
+            }
+          />
         )}
       </SettingsSection>
 
@@ -588,33 +609,6 @@ function formatResourceBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function ShellOption({
-  shell,
-  selected,
-  onSelect,
-}: {
-  shell: ShellInfo;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={`Use ${shell.label} as default terminal`}
-      aria-pressed={selected}
-      onClick={onSelect}
-      className={`st-list__row st-choice${selected ? " is-selected" : ""}`}
-    >
-      <span aria-hidden className="st-radio" />
-      <span className="st-choice__text">
-        <span className="st-choice__title">{shell.label}</span>
-        <span className="st-choice__meta">{shell.exe}</span>
-      </span>
-      {selected ? <span className="st-choice__tag">Default</span> : null}
-    </button>
-  );
 }
 
 function ApiSettings({
@@ -878,6 +872,7 @@ function GeneralSettings({
   const toastMs = preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS;
   const fetchMinutes =
     preferences.gitAutoFetchIntervalMinutes ?? DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
+  const [glassTuningOpen, setGlassTuningOpen] = useState(false);
   return (
     <>
       <SettingsSection title="Getting started">
@@ -914,49 +909,56 @@ function GeneralSettings({
             title="Glass tuning"
             desc="Strength of each part of the glass material, as a share of the default."
             control={
-              <button
-                type="button"
-                className="spark-btn st-btn-quiet"
-                onClick={() => {
-                  void setPreference("glassVeil", 100);
-                  void setPreference("glassBlur", 100);
-                  void setPreference("glassRefraction", 100);
-                  void setPreference("glassChroma", 100);
-                }}
-              >
-                Reset
-              </button>
+              <Disclosure open={glassTuningOpen} onToggle={() => setGlassTuningOpen((open) => !open)}>
+                {glassTuningOpen ? "Hide" : "Adjust"}
+              </Disclosure>
             }
           >
-            <div className="st-subrows">
-              <GlassSliderRow
-                label="Tint"
-                hint="Surface tint strength, lower is clearer"
-                // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
-                // outlines over live content, which reads as a rendering bug.
-                floor={10}
-                value={preferences.glassVeil ?? 100}
-                onChange={(v) => void setPreference("glassVeil", v)}
-              />
-              <GlassSliderRow
-                label="Blur"
-                hint="Backdrop blur behind the surface"
-                value={preferences.glassBlur ?? 100}
-                onChange={(v) => void setPreference("glassBlur", v)}
-              />
-              <GlassSliderRow
-                label="Refraction"
-                hint="How much the edges bend what's behind"
-                value={preferences.glassRefraction ?? 100}
-                onChange={(v) => void setPreference("glassRefraction", v)}
-              />
-              <GlassSliderRow
-                label="Chromatic fringe"
-                hint="Color split along the refracting rim"
-                value={preferences.glassChroma ?? 100}
-                onChange={(v) => void setPreference("glassChroma", v)}
-              />
-            </div>
+            {glassTuningOpen ? (
+              <div className="st-subrows">
+                <GlassSliderRow
+                  label="Tint"
+                  hint="Surface tint strength, lower is clearer"
+                  // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
+                  // outlines over live content, which reads as a rendering bug.
+                  floor={10}
+                  value={preferences.glassVeil ?? 100}
+                  onChange={(v) => void setPreference("glassVeil", v)}
+                />
+                <GlassSliderRow
+                  label="Blur"
+                  hint="Backdrop blur behind the surface"
+                  value={preferences.glassBlur ?? 100}
+                  onChange={(v) => void setPreference("glassBlur", v)}
+                />
+                <GlassSliderRow
+                  label="Refraction"
+                  hint="How much the edges bend what's behind"
+                  value={preferences.glassRefraction ?? 100}
+                  onChange={(v) => void setPreference("glassRefraction", v)}
+                />
+                <GlassSliderRow
+                  label="Chromatic fringe"
+                  hint="Color split along the refracting rim"
+                  value={preferences.glassChroma ?? 100}
+                  onChange={(v) => void setPreference("glassChroma", v)}
+                />
+                <div className="st-subrows__foot">
+                  <button
+                    type="button"
+                    className="spark-btn"
+                    onClick={() => {
+                      void setPreference("glassVeil", 100);
+                      void setPreference("glassBlur", 100);
+                      void setPreference("glassRefraction", 100);
+                      void setPreference("glassChroma", 100);
+                    }}
+                  >
+                    Reset to defaults
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </SettingRow>
         ) : null}
       </SettingsSection>
@@ -1370,7 +1372,12 @@ function EditorSettings() {
       >
         <ToggleRow
           title="Inline AI autocomplete"
-          desc="Suggestions as you type. Tab accepts, Esc dismisses, Alt+\\ asks for one."
+          desc={
+            <>
+              Suggestions as you type. <Kbd>Tab</Kbd> accepts, <Kbd>Esc</Kbd> dismisses,{" "}
+              <Kbd>Alt+\</Kbd> asks for one.
+            </>
+          }
           checked={preferences.inlineAutocompleteEnabled}
           onChange={(v) => void setPreference("inlineAutocompleteEnabled", v)}
         />
@@ -1448,6 +1455,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
     return () => onBusyChange?.(false);
   }, [login?.status, onBusyChange]);
   const [promptValue, setPromptValue] = useState("");
+  const [howSwitchingOpen, setHowSwitchingOpen] = useState(false);
   const [install, setInstall] = useState<PiInstallView | null>(null);
   const [addingProvider, setAddingProvider] = useState<PiSubscriptionProvider | null>(null);
   const [addLabel, setAddLabel] = useState("");
@@ -1922,15 +1930,23 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             ]
           : [];
       const cards = [...accountOneSlot, ...rows, ...terminalOnly];
-      // The signed-out Account 1 slot is an instruction, not an account.
+      // A signed-out row is listed but not counted as signed in, so the
+      // header never claims fewer accounts than the rows under it.
       const count = cards.filter(
         (card) => card.coraProfileId || card.terminal?.connected,
       ).length;
+      const footer =
+        cards.length === 0
+          ? null
+          : count === cards.length
+            ? `${count} ${count === 1 ? "account" : "accounts"}`
+            : `${count} of ${cards.length} signed in`;
       return {
         descriptor,
+        summary: accountProviderSummary(descriptor),
         detail: accountProviderDetail(descriptor),
         cards,
-        ...(count > 0 ? { footer: `${count} ${count === 1 ? "account" : "accounts"}` } : {}),
+        ...(footer ? { footer } : {}),
         disabled,
         busy,
         cliError: cliUnavailable || Boolean(cliError && !cliInspection),
@@ -1993,6 +2009,11 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         }),
       );
     },
+    onCopyCommand: (command) =>
+      window.spark.clipboard.writeText(command).then(
+        () => true,
+        () => false,
+      ),
     onRename: (card, label) => {
       if (card.coraProfileId) return renameAccount(card.coraProfileId, label);
       if (!card.cliProfileId) return Promise.resolve(false);
@@ -2081,12 +2102,34 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
 
   return (
     <>
-      <SettingsSection
-        title="Accounts"
-        description="The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok."
-        actions={<AccountAddPicker providers={providerViews} actions={accountActions} />}
-        plain
-      >
+      <SettingsSection anchor="Accounts" plain>
+        <div className="st-acct-toolbar">
+          <Disclosure
+            open={howSwitchingOpen}
+            anchor="How switching works"
+            onToggle={() => setHowSwitchingOpen((open) => !open)}
+          >
+            How switching works
+          </Disclosure>
+          <span data-setting-anchor="Add account">
+            <AccountAddPicker providers={providerViews} actions={accountActions} />
+          </span>
+        </div>
+        {howSwitchingOpen ? (
+          <div className="st-acct-how">
+            <p>
+              The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.
+            </p>
+            <dl>
+              {providerViews.map((view) => (
+                <React.Fragment key={view.descriptor.provider}>
+                  <dt>{view.descriptor.label}</dt>
+                  <dd>{view.detail}</dd>
+                </React.Fragment>
+              ))}
+            </dl>
+          </div>
+        ) : null}
         {!accountsReady ? (
           <div className="st-loading">Loading accounts…</div>
         ) : (
@@ -2359,7 +2402,7 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
           desc="MCP servers, skills, Cora profiles and memory, and the worker models Cora may use. Also behind the Tools button in the Cora composer."
           control={
             <span className="st-button-pair">
-              <button type="button" className="spark-btn st-btn-quiet" onClick={() => openCapabilities("workers")}>
+              <button type="button" className="spark-btn" onClick={() => openCapabilities("workers")}>
                 Worker models
               </button>
               <button type="button" className="spark-btn" onClick={() => openCapabilities("mcp")}>
@@ -2698,19 +2741,18 @@ function SessionsSettings({
               placeholder="Filter by title, directory, or session id"
             />
           </span>
-          <select
-            className="spark-input st-select"
-            aria-label="Filter sessions by provider"
+          <CustomSelect
+            ariaLabel="Filter sessions by provider"
+            width={140}
             value={runtimeFilter}
             disabled={bulkBusy}
-            onChange={(event) =>
-              setRuntimeFilter(event.currentTarget.value as "all" | WorkerSessionRuntime)
-            }
-          >
-            <option value="all">All agents</option>
-            <option value="claude">Claude</option>
-            <option value="codex">Codex</option>
-          </select>
+            options={[
+              { value: "all", label: "All agents" },
+              { value: "claude", label: "Claude" },
+              { value: "codex", label: "Codex" },
+            ]}
+            onChange={(next) => setRuntimeFilter(next as "all" | WorkerSessionRuntime)}
+          />
           <button
             type="button"
             className="spark-icon-btn st-icon-btn"
@@ -2952,7 +2994,7 @@ function SessionManagerRow({
 }) {
   // Anywhere on the row toggles it. The checkbox is a 13px target in a list
   // you are meant to sweep through, so the row body carries the same action,
-  // except where the click belongs to a real control (Open, the trash, the
+  // except where the click belongs to a real control (Open, the row menu, the
   // checkbox itself), which owns it. Guarding on the event target beats
   // stopPropagation on each control: a control added later is covered too.
   const toggleFromRow = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -2996,16 +3038,33 @@ function SessionManagerRow({
       </div>
       <div className="st-row-actions">
         <FooterButton onClick={onOpen} disabled={!session.cwdExists || busy || locked}>Open</FooterButton>
-        <button
-          type="button"
-          className="spark-icon-btn st-icon-btn st-icon-btn--danger"
-          onClick={onDelete}
-          disabled={busy || locked}
-          aria-label="Delete"
-          title={`Delete “${session.title}”`}
-        >
-          <SessionTrashIcon />
-        </button>
+        {/* Delete lives in the row menu and still asks before anything goes,
+            so a stray click on a dense list never reaches a transcript. */}
+        <CardOverflowMenu
+          label={`More actions for “${session.title}”`}
+          groups={[
+            [
+              {
+                id: "copy-id",
+                label: "Copy session ID",
+                disabled: false,
+                run: () => {
+                  void window.spark.clipboard.writeText(session.sessionId).catch(() => undefined);
+                },
+              },
+            ],
+            [
+              {
+                id: "delete",
+                label: "Delete session…",
+                danger: true,
+                disabled: busy || locked,
+                run: onDelete,
+              },
+            ],
+          ]}
+          onClose={() => undefined}
+        />
       </div>
     </div>
   );
@@ -3418,9 +3477,7 @@ function AboutSettings() {
     <>
       <div className="st-about">
         <span className="st-about__mark" aria-hidden>
-          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-            <path d="M16.5 7.5a6 6 0 1 0 0 9" />
-          </svg>
+          <CodaraMark size={26} />
         </span>
         <span className="st-about__text">
           <span className="st-about__name">Codara Studio</span>
@@ -3461,6 +3518,8 @@ interface CustomSelectOption {
    * flush at the top.
    */
   group?: string;
+  /** Secondary text beside the label, such as the path behind a shell name. */
+  detail?: string;
 }
 
 // A crisp 1.5px-stroke chevron at currentColor, never the Unicode "▾",
@@ -3496,11 +3555,13 @@ function CustomSelect({
   onChange,
   ariaLabel,
   width,
+  disabled,
 }: {
   value: string;
   options: ReadonlyArray<CustomSelectOption>;
   onChange: (next: string) => void;
   ariaLabel?: string;
+  disabled?: boolean;
   /** Fixed trigger width when the select sits in a row's control slot. */
   width?: number;
 }) {
@@ -3545,10 +3606,14 @@ function CustomSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
+        disabled={disabled}
         className={`st-select-trigger${open ? " is-open" : ""}`}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="st-select-trigger__value">{current?.label ?? value}</span>
+        <span className="st-select-trigger__value">
+          {current?.label ?? value}
+          {current?.detail ? <span className="st-select__detail">{current.detail}</span> : null}
+        </span>
         <ChevronIcon open={open} />
       </button>
       {open && (
@@ -3565,6 +3630,7 @@ function CustomSelect({
                 )}
                 <SelectOption
                   label={opt.label}
+                  detail={opt.detail}
                   active={opt.value === value}
                   onClick={() => {
                     onChange(opt.value);
@@ -3583,10 +3649,12 @@ function CustomSelect({
 
 function SelectOption({
   label,
+  detail,
   active,
   onClick,
 }: {
   label: string;
+  detail?: string;
   active: boolean;
   onClick: () => void;
 }) {
@@ -3598,7 +3666,8 @@ function SelectOption({
       className={active ? "spark-menu-item is-active" : "spark-menu-item"}
       onClick={onClick}
     >
-      {label}
+      <span className="st-select-option__label">{label}</span>
+      {detail ? <span className="st-select__detail">{detail}</span> : null}
     </button>
   );
 }
@@ -3647,8 +3716,9 @@ function GlassSliderRow({
 
   return (
     <div className="st-subrow">
-      <span className="st-subrow__label" title={hint}>
-        {label}
+      <span className="st-subrow__text">
+        <span className="st-subrow__label">{label}</span>
+        <span className="st-subrow__hint">{hint}</span>
       </span>
       <RangeControl
         ariaLabel={`${label}: ${hint}`}

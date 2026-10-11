@@ -18,7 +18,7 @@ export type SettingsTab =
 
 export interface SettingsTabMeta {
   id: SettingsTab;
-  /** Nav label. Specs click these by exact name, so they stay stable. */
+  /** Nav label, the same words as the page title. Specs click these by exact name. */
   label: string;
   /** Page title shown in the dialog's top bar. */
   title: string;
@@ -41,7 +41,7 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
   },
   {
     id: "terminal",
-    label: "Default terminal",
+    label: "Terminal",
     title: "Terminal",
     description: "The shell new terminals open with, and how much output they keep.",
   },
@@ -53,8 +53,8 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
   },
   {
     id: "agents",
-    label: "Agents",
-    title: "Agents and accounts",
+    label: "Accounts",
+    title: "Accounts",
     description: "The accounts Cora and your terminal agents sign in with, and their limits.",
   },
   {
@@ -144,7 +144,11 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "api", title: "Inline edit and commit model", section: "OpenRouter", keywords: "model gemini" },
   { tab: "api", title: "Models for Cora", section: "OpenRouter", keywords: "model picker openrouter" },
   { tab: "api", title: "Commit message model", section: "Git commit messages", keywords: "commit draft model" },
-  { tab: "agents", title: "Accounts", keywords: "sign in login switch account claude codex grok anthropic openai xai email" },
+  { tab: "agents", title: "Add account", section: "Accounts", keywords: "new sign in login another account connect claude codex grok" },
+  { tab: "agents", title: "How switching works", section: "Accounts", keywords: "switch account active use change sessions" },
+  { tab: "agents", title: "Anthropic", section: "Accounts", keywords: "claude code claude login account email limits switch" },
+  { tab: "agents", title: "OpenAI", section: "Accounts", keywords: "codex chatgpt codex login account email limits switch" },
+  { tab: "agents", title: "xAI", section: "Accounts", keywords: "grok supergrok grok login account email switch" },
   { tab: "agents", title: "Usage limits", section: "Limits and runtime", keywords: "quota rate limit refresh" },
   { tab: "agents", title: "Pi runtime", section: "Limits and runtime", keywords: "pi install version" },
   { tab: "agents", title: "Capability Center", section: "Tools", keywords: "mcp servers skills memory profiles worker models" },

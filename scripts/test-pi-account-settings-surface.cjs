@@ -173,11 +173,13 @@ assert.doesNotMatch(
   /nativeCliAccounts\.(?:create|setDefault|prepareLogin|cancelLogin|logout)\(/,
   "no sign-in, switch or sign-out may go through the native CLI account store",
 );
-// The footer counts accounts, not the signed-out Account 1 instruction slot,
-// and is omitted when there are none.
+// The header counts signed-in accounts against the rows it lists, so a
+// signed-out Account 1 slot shows as "1 of 2 signed in" rather than making
+// the count disagree with the rows; it is omitted when there are none.
 assert.match(settings, /card\.coraProfileId \|\| card\.terminal\?\.connected/);
-assert.match(settings, /\.\.\.\(count > 0 \? \{ footer: `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}` \} : \{\}\)/);
-// The section copy says what one account is.
+assert.match(settings, /: count === cards\.length\s*\? `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}`\s*: `\$\{count\} of \$\{cards\.length\} signed in`;/);
+assert.match(settings, /\.\.\.\(footer \? \{ footer \} : \{\}\)/);
+// The switching explainer says what one account is.
 assert.ok(
   settings.includes(
     "The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.",
@@ -286,8 +288,16 @@ for (const copy of [
 }
 assert.match(card, /card\.cora\?\.error && state !== "account-one-signed-out"/);
 assert.match(card, /\{card\.active \? <ActiveBadge label="Active" \/> : null\}/);
-// Active shows the badge and no Use button.
-assert.match(card, /case "active":\s*case "account-one-signed-out":\s*return undefined;/);
+// Active shows the badge and no Use button. A signed-out Account 1 offers
+// its login command; an errored Account 1 does too, and any other errored
+// row offers Reconnect, never Switch.
+assert.match(card, /case "active":\s*return undefined;/);
+assert.match(card, /case "account-one-signed-out":\s*return terminalUsable\(card\) \? undefined : copyLogin;/);
+assert.match(card, /if \(status\.danger && state !== "terminal-only"\) \{\s*if \(card\.builtIn\) return copyLogin;/);
+assert.match(card, /label: `Copy \$\{descriptor\.loginHint\}`/);
+// Every row action is the same secondary button; the Active badge is the
+// only accent in the list.
+assert.doesNotMatch(card, /<ActionButton[^>]*\bprimary\b/);
 // A Codex switch main refused arms the same button to close the sessions
 // and switch; the card never invents the count, so Anthropic and Grok
 // never show it.

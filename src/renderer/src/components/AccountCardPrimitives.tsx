@@ -186,11 +186,14 @@ export function CardOverflowMenu({
 export function ConnectionLine({
   state,
   hint,
+  code,
   action,
 }: {
   state: ConnectionState;
   /** A second, quieter sentence that says what to do. */
   hint?: string;
+  /** A command named in the sentences, drawn as code wherever it appears. */
+  code?: string;
   action?: React.ReactNode;
 }) {
   const tone = state.danger ? "danger" : state.ok ? "ok" : "muted";
@@ -225,11 +228,20 @@ export function ConnectionLine({
         )}
       </svg>
       <span className="st-acct-status__text">
-        {state.text}
-        {hint ? <span className="st-acct-status__hint"> {hint}</span> : null}
+        {withCode(state.text, code)}
+        {hint ? <span className="st-acct-status__hint"> {withCode(hint, code)}</span> : null}
       </span>
       {action ? <span className="st-acct-status__action">{action}</span> : null}
     </div>
+  );
+}
+
+function withCode(text: string, code: string | undefined): React.ReactNode {
+  if (!code || !text.includes(code)) return text;
+  return text.split(code).flatMap((part, index) =>
+    index === 0
+      ? [part]
+      : [<code key={index} className="st-code">{code}</code>, part],
   );
 }
 

@@ -7171,10 +7171,22 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .st-topbar {
   grid-area: top;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 18px 16px 6px var(--st-pad-x);
+  padding: 18px 16px 14px var(--st-pad-x);
+  border-bottom: 1px solid transparent;
+  background: var(--st-surface);
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.settings-dialog-surface.is-scrolled .st-topbar {
+  border-bottom-color: var(--st-line);
+}
+.st-topbar__titles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 .st-topbar__title {
   margin: 0;
@@ -7183,6 +7195,15 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.01em;
+}
+.st-topbar__desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--st-desc);
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .st-close {
   display: inline-flex;
@@ -7215,7 +7236,13 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  padding: 0 calc(var(--st-pad-x) - 8px) 32px var(--st-pad-x);
+  padding: 10px calc(var(--st-pad-x) - 8px) 32px var(--st-pad-x);
+}
+/* Once scrolled, the first few pixels under the title bar fade out, so a
+   line half under the edge dissolves instead of reading as cut. */
+.settings-dialog-surface.is-scrolled .st-content {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
 }
 .st-footer {
   grid-area: footer;
@@ -7251,14 +7278,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .st-page {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 32px;
   max-width: 700px;
-}
-.st-page__desc {
-  margin: 0 0 -6px;
-  color: var(--st-desc);
-  font-size: 13px;
-  line-height: 1.5;
 }
 .st-section {
   display: flex;
@@ -7367,17 +7388,34 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .st-subrows {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  padding-left: 14px;
+  border-left: 2px solid var(--st-line);
 }
 .st-subrow {
-  display: grid;
-  grid-template-columns: 130px minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 7px 0;
+}
+.st-subrow__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 .st-subrow__label {
-  color: var(--st-desc);
+  color: var(--ink);
   font-size: 12.5px;
+}
+.st-subrow__hint {
+  color: var(--st-faint);
+  font-size: 12px;
+}
+.st-subrows__foot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
 }
 .st-text-danger { color: var(--danger); }
 .st-text-ok { color: var(--ok); }
@@ -7653,18 +7691,66 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   color: var(--danger);
 }
 .settings-dialog-surface input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
   flex: none;
-  width: 14px;
-  height: 14px;
+  width: 15px;
+  height: 15px;
   margin: 0;
-  accent-color: var(--accent);
+  border: 1px solid color-mix(in oklab, var(--ink) 32%, transparent);
+  border-radius: 4px;
+  background: var(--st-field);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.settings-dialog-surface input[type="checkbox"]:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ink) 50%, transparent);
+}
+.settings-dialog-surface input[type="checkbox"]:checked,
+.settings-dialog-surface input[type="checkbox"]:indeterminate {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.settings-dialog-surface input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-ink);
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+}
+.settings-dialog-surface input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: 6px;
+  height: 1.8px;
+  border-radius: 1px;
+  background: var(--accent-ink);
+}
+.settings-dialog-surface input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.settings-dialog-surface input[type="checkbox"]:disabled {
+  opacity: 0.45;
 }
 .st-disclosure {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 6px;
-  padding: 0;
+  height: 28px;
+  padding: 0 8px 0 6px;
   border: none;
+  border-radius: 7px;
   background: none;
   color: var(--st-desc);
   font-family: var(--font-sans);
@@ -7672,7 +7758,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   cursor: default;
 }
 .st-disclosure:hover {
+  background: var(--st-hover);
   color: var(--ink);
+}
+.st-disclosure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .st-disclosure svg {
   transition: transform var(--motion-fast) var(--ease-out);
@@ -7688,8 +7779,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .st-fields {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding-top: 14px;
+  border-top: 1px solid var(--st-line);
+}
+.st-fields > * {
+  padding: 14px 0;
+}
+.st-fields > * + * {
   border-top: 1px solid var(--st-line);
 }
 .st-field,
@@ -7758,6 +7853,18 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .st-select-trigger:hover {
   border-color: var(--rule-strong);
+}
+.st-select-trigger:disabled {
+  opacity: 0.5;
+}
+.st-select__detail {
+  margin-left: 8px;
+  color: var(--st-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.st-select-option__label {
+  flex: none;
 }
 .st-select-trigger.is-open,
 .st-select-trigger:focus-visible {
@@ -8190,9 +8297,10 @@ button.st-list__row:hover,
   justify-content: center;
   width: 48px;
   height: 48px;
+  border: 1px solid var(--st-line);
   border-radius: 12px;
-  background: var(--accent);
-  color: var(--accent-ink);
+  background: color-mix(in oklab, var(--ink) 4%, var(--st-surface));
+  color: var(--accent);
 }
 .st-about__text {
   display: flex;
@@ -8299,10 +8407,45 @@ button.st-list__row:hover,
 }
 
 /* Accounts */
+.st-acct-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-left: -6px;
+}
+.st-acct-how {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-acct-how p {
+  margin: 0;
+}
+.st-acct-how dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+}
+.st-acct-how dt {
+  color: var(--ink);
+  font-weight: 500;
+}
+.st-acct-how dd {
+  margin: 0;
+}
 .st-providers {
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  gap: 32px;
+  margin-top: 16px;
 }
 .st-provider {
   display: flex;
@@ -8333,9 +8476,12 @@ button.st-list__row:hover,
 }
 .st-provider__detail {
   margin: 0 0 8px;
+  overflow: hidden;
   color: var(--st-desc);
   font-size: 12.5px;
   line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .st-acct {
   position: relative;
@@ -8443,6 +8589,18 @@ button.st-list__row:hover,
   flex: none;
   align-items: center;
   gap: 4px;
+}
+.st-acct__menu-slot {
+  flex: none;
+  width: 28px;
+}
+.st-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 .st-acct__working {
   display: inline-flex;
@@ -8749,6 +8907,15 @@ button.st-list__row:hover,
   font-family: var(--font-sans);
   font-size: 11.5px;
   font-weight: 500;
+}
+.st-kbd--inline {
+  min-width: 0;
+  height: 18px;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  font-size: 11px;
+  vertical-align: 1px;
 }
 .st-kb-unset {
   padding: 0 6px;

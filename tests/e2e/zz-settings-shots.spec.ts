@@ -24,9 +24,9 @@ const SHOTS_DIR = process.env.SHOTS_DIR?.trim() ?? "";
 const TABS = [
   { id: "general", label: "General" },
   { id: "editor", label: "Editor" },
-  { id: "terminal", label: "Default terminal" },
+  { id: "terminal", label: "Terminal" },
   { id: "api", label: "API and model" },
-  { id: "agents", label: "Agents" },
+  { id: "agents", label: "Accounts" },
   { id: "sessions", label: "Sessions" },
   { id: "remote-access", label: "Remote access" },
   { id: "keybindings", label: "Keybindings" },
@@ -75,8 +75,11 @@ for (const { mode, theme } of THEMES) {
           const prefix = `${mode}-${size.width}x${size.height}-${String(index + 1).padStart(2, "0")}-${tab.id}`;
           await capturePages(page, dialog, prefix);
         }
+        const base = `${mode}-${size.width}x${size.height}`;
+        await captureExtras(page, dialog, base);
         await page.keyboard.press("Escape");
         await expect(dialog).toHaveCount(0);
+        await captureCapabilityCenter(page, base);
       }
     } finally {
       await app?.close();
@@ -136,6 +139,61 @@ async function capturePages(page: Page, dialog: Locator, prefix: string): Promis
     }
     await page.screenshot({ path: join(SHOTS_DIR, `${prefix}-p${index + 1}.png`) });
   }
+}
+
+// The states a page-by-page pass never reaches: a search, an open account
+// menu, the switching explainer, the shell picker and a tuned glass row.
+async function captureExtras(page: Page, dialog: Locator, base: string): Promise<void> {
+  const search = dialog.getByRole("searchbox", { name: "Search settings" });
+  await search.fill("account");
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-search-account.png`) });
+  await search.fill("");
+
+  await showTab(dialog, TABS[4]);
+  await dialog.getByRole("button", { name: "More actions for Account 1" }).first().click({ force: true });
+  await expect(page.getByRole("menu").first()).toBeVisible();
+  await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-account-menu.png`) });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "How switching works" }).click({ force: true });
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-how-switching.png`) });
+  await dialog.getByRole("button", { name: "How switching works" }).click({ force: true });
+
+  await showTab(dialog, TABS[2]);
+  await dialog.getByRole("button", { name: "Default shell" }).click({ force: true });
+  await page.waitForTimeout(150);
+  await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-shell-select.png`) });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+
+  await showTab(dialog, TABS[0]);
+  const adjust = dialog.getByRole("button", { name: "Adjust" });
+  if (await adjust.count()) {
+    await adjust.click({ force: true });
+    await dialog.getByText("Chromatic fringe", { exact: true }).scrollIntoViewIfNeeded();
+    await page.waitForTimeout(150);
+    await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-glass-tuning.png`) });
+  }
+}
+
+async function captureCapabilityCenter(page: Page, base: string): Promise<void> {
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent("spark:open-capabilities")));
+  const center = page.getByRole("dialog", { name: "Capability Center" });
+  await expect(center).toBeVisible();
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: join(SHOTS_DIR, `${base}-x-capability-tools.png`) });
+  for (const tab of ["Skills", "Profiles", "Memory", "Worker models", "Behavior"]) {
+    await center.getByRole("tab", { name: new RegExp(`^${tab}`) }).click({ force: true });
+    await page.waitForTimeout(500);
+    await page.screenshot({
+      path: join(SHOTS_DIR, `${base}-x-capability-${tab.toLowerCase().replace(/\s+/g, "-")}.png`),
+    });
+  }
+  await page.keyboard.press("Escape");
+  await expect(center).toHaveCount(0);
 }
 
 async function resizeWindow(

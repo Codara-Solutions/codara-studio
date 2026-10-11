@@ -22,10 +22,12 @@ import { RuntimeMark } from "./BrandMarks";
  */
 export interface AccountProviderView {
   descriptor: AccountProviderDescriptor;
-  /** Short plain-language summary shown under the provider name. */
+  /** One line under the provider name: what a switch moves. */
+  summary: string;
+  /** The full switching rules, shown under "How switching works". */
   detail: string;
   cards: AccountCardView[];
-  /** Muted count beside the provider name, e.g. "4 accounts". */
+  /** Muted count beside the provider name, e.g. "4 accounts" or "1 of 2 signed in". */
   footer?: string;
   /** Account actions are unavailable until the Pi runtime is installed. */
   disabled: boolean;
@@ -269,6 +271,7 @@ function AccountProviderGroup({
     <section
       aria-labelledby={`accounts-${descriptor.provider}-title`}
       className="st-provider"
+      data-setting-anchor={descriptor.label}
     >
       <div className="st-provider__head">
         <span id={`accounts-${descriptor.provider}-title`} className="st-provider__title">
@@ -279,7 +282,7 @@ function AccountProviderGroup({
         </span>
         {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
       </div>
-      <p className="st-provider__detail">{view.detail}</p>
+      <p className="st-provider__detail">{view.summary}</p>
 
       {view.cliError ? (
         <div role="alert" className="st-acct-status st-acct-status--danger">
@@ -310,12 +313,15 @@ function AccountProviderGroup({
             </span>
             {/* view.busy covers any sign-in in flight, for every provider:
                 only one browser login may run at a time. */}
-            <ActionButton
-              disabled={view.disabled || view.busy}
-              onClick={() => actions.onAdd(descriptor.provider)}
-            >
-              Sign in to {descriptor.label}
-            </ActionButton>
+            <span className="st-acct__actions">
+              <ActionButton
+                disabled={view.disabled || view.busy}
+                onClick={() => actions.onAdd(descriptor.provider)}
+              >
+                Sign in to {descriptor.label}
+              </ActionButton>
+              <span aria-hidden className="st-acct__menu-slot" />
+            </span>
           </div>
         ) : null}
       </div>

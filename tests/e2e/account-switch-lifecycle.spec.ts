@@ -65,7 +65,7 @@ for (const remaining of [2, 0]) {
       });
       await page.getByTitle("Settings").click({ force: true });
       const dialog = page.getByRole("dialog", { name: "Settings" });
-      await dialog.locator("nav").getByRole("button", { name: "Agents", exact: true }).click({ force: true });
+      await dialog.locator("nav").getByRole("button", { name: "Accounts", exact: true }).click({ force: true });
       await expect(dialog.getByText("Main", { exact: true })).toBeVisible();
       await expect(dialog.getByText("Account 1", { exact: true })).toHaveCount(0);
       await expect(dialog.getByText(/Cora is linking it now/)).toHaveCount(0);

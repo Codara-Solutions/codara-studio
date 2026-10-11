@@ -72,7 +72,18 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     ...CLI_WORDS[id],
   }));
 
-/** The line under the provider name: what one account is and what a switch does. */
+/** The one line under the provider name: what a switch moves, and its catch. */
+export function accountProviderSummary(descriptor: AccountProviderDescriptor): string {
+  if (descriptor.switchClosesSessions) {
+    return `Switching moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions.`;
+  }
+  if (descriptor.sessionsFollowLiveLogin) {
+    return `Switching moves Cora and ${descriptor.cliLabel} together, running sessions included.`;
+  }
+  return `Switching moves Cora and ${descriptor.cliLabel} together from the next prompt.`;
+}
+
+/** The full rules behind a switch: what one account is and what it moves. */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
   if (descriptor.switchClosesSessions) {
     return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`;

@@ -41,7 +41,7 @@ test("a click outside Settings or the Capability Center never closes them", asyn
     // Escape with an account menu open closes the menu and nothing else.
     await stubOneAccount(app);
     const withMenu = await openSettings(page);
-    await withMenu.locator("nav").getByRole("button", { name: "Agents", exact: true }).click();
+    await withMenu.locator("nav").getByRole("button", { name: "Accounts", exact: true }).click();
     await withMenu.getByRole("button", { name: "More actions for Main" }).click({ timeout: 15_000 });
     await expect(page.getByRole("menu")).toBeVisible();
     await page.keyboard.press("Escape");

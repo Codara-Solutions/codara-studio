@@ -72,11 +72,46 @@ check("every search result points at something the page renders", () => {
   const entries = [...index.matchAll(/\{ tab: "([a-z-]+)", title: "([^"]+)"/g)];
   assert.ok(entries.length >= 30, "the index must cover the settings");
   const rendered = [dialog, remote].join("\n");
+  const cards = read(...components, "AccountCards.tsx");
+  const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {
-    const asTitle = new RegExp(`(?:title|text|data-setting-anchor)="${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
+    const asTitle = new RegExp(`(?:title|text|anchor|data-setting-anchor)="${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
     const isTabTitle = new RegExp(`id: "${tab}",[^}]*?title: "${title}"`).test(index);
-    assert.ok(asTitle.test(rendered) || isTabTitle, `${tab} › ${title} is not rendered`);
+    // Provider groups anchor on their vendor label.
+    const isProvider =
+      tab === "agents" &&
+      /data-setting-anchor=\{descriptor\.label\}/.test(cards) &&
+      new RegExp(`vendorLabel: "${title}"`).test(families);
+    assert.ok(asTitle.test(rendered) || isTabTitle || isProvider, `${tab} › ${title} is not rendered`);
   }
+});
+
+check("nav labels are the page titles", () => {
+  for (const [, label, title] of index.matchAll(/label: "([^"]+)",\s*title: "([^"]+)"/g)) {
+    assert.equal(label, title);
+  }
+});
+
+check("every search result names where it lives", () => {
+  assert.match(dialog, /<span className="st-result__crumb">/);
+  assert.doesNotMatch(dialog, /\{entry\.section \? \(\s*<span className="st-result__crumb">/);
+});
+
+check("the Capability Center shares the opaque Settings face", () => {
+  assert.doesNotMatch(capabilities, /spark-glass/);
+  assert.match(styles, /\n\.settings-dialog-surface,\n\.agent-capabilities-surface,/);
+  const surface = /\n\.agent-capabilities-surface \{([^}]*)\}/.exec(styles);
+  assert.ok(surface, "the surface rule must exist");
+  assert.match(surface[1], /background: var\(--st-surface\);/);
+  assert.doesNotMatch(
+    styles,
+    /html:not\(\[data-glass="off"\]\) \.agent-capabilities-surface \{[^}]*backdrop-filter/,
+  );
+});
+
+check("checkboxes are drawn, so an unchecked box never reads as checked", () => {
+  assert.match(styles, /\.settings-dialog-surface input\[type="checkbox"\] \{[^}]*appearance: none;/);
+  assert.match(styles, /\.settings-dialog-surface input\[type="checkbox"\]:checked,/);
 });
 
 check("the Settings face is opaque, not glass", () => {
