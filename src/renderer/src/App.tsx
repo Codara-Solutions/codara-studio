@@ -82,6 +82,10 @@ import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import { emitLocalToast } from "./notifications/local-toast";
+import {
+  AGENT_WORKTREE_TOAST_GAP_MS,
+  agentWorktreeToast,
+} from "./notifications/agent-worktree-toast";
 import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import {
   agentTerminalAnchor,
@@ -1446,6 +1450,19 @@ export default function App() {
       const next = state.activeWorkspaceId;
       activeIdRef.current = next;
       setActiveId(next);
+    });
+    return () => off?.();
+  }, []);
+
+  useEffect(() => {
+    const lastToastAt = new Map<string, number>();
+    const off = window.spark.workspace?.onAgentEvent?.((event) => {
+      const now = Date.now();
+      const key = `${event.kind}:${event.workspaceId}`;
+      if (now - (lastToastAt.get(key) ?? 0) < AGENT_WORKTREE_TOAST_GAP_MS) return;
+      lastToastAt.set(key, now);
+      const toast = agentWorktreeToast(event);
+      emitLocalToast(toast.title, toast.body, "success", toast.target);
     });
     return () => off?.();
   }, []);
@@ -6418,6 +6435,10 @@ export default function App() {
               branch={pendingCopyDelete.copyBranch.branch}
               busy={copyDeleteBusy}
               error={copyDeleteError}
+              defaultDeleteBranch={
+                pendingCopyDelete.copyBranch.createdBy?.kind === "agent" &&
+                pendingCopyDelete.copyBranch.mode !== "checkout"
+              }
               onCancel={() => {
                 if (!copyDeleteBusy) {
                   setPendingCopyDelete(null);

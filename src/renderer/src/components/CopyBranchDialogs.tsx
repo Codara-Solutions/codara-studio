@@ -9,6 +9,7 @@ export function CopyBranchDeleteDialog({
   branch,
   busy,
   error,
+  defaultDeleteBranch = false,
   onCancel,
   onConfirm,
 }: {
@@ -16,10 +17,14 @@ export function CopyBranchDeleteDialog({
   branch: string;
   busy: boolean;
   error: string | null;
+  // An agent's fork made the branch for this worktree alone, so deleting it
+  // with the worktree is the expected outcome; a branch the user checked out
+  // or forked themselves is kept unless they tick the box.
+  defaultDeleteBranch?: boolean;
   onCancel: () => void;
   onConfirm: (opts: { deleteBranch: boolean; force: boolean }) => void;
 }) {
-  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [deleteBranch, setDeleteBranch] = useState(defaultDeleteBranch);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

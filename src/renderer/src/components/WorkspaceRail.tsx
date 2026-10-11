@@ -1,13 +1,21 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
-import type { ChatBackendKind, FsEntry, GitFileChange, Workspace, WorkspaceGroup } from "@shared/types";
+import type {
+  ChatBackendKind,
+  CopyBranchCreator,
+  FsEntry,
+  GitFileChange,
+  Workspace,
+  WorkspaceGroup,
+} from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import { WORKSPACE_COLORS } from "@shared/workspace-colors";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor, toneWantsAttention } from "./chat/timeline";
-import { PlusIcon } from "./icons";
+import { PlusIcon, SparkIcon } from "./icons";
+import { agentClientLabel } from "../notifications/agent-worktree-toast";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
@@ -1984,6 +1992,23 @@ interface RowProps {
   onRowDragEnd: () => void;
 }
 
+function agentWorktreeTitle(
+  creator: CopyBranchCreator,
+  copy: NonNullable<Workspace["copyBranch"]>,
+): string {
+  const created = new Date(copy.createdAt);
+  return [
+    `Created by ${agentClientLabel(creator.client ?? "")}`,
+    creator.purpose,
+    copy.baseBranch ? `from ${copy.baseBranch}` : null,
+    Number.isNaN(created.getTime())
+      ? null
+      : created.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function WorkspaceRow({
   ws,
   active,
@@ -2039,6 +2064,7 @@ function WorkspaceRow({
 
   // The live draft (if a pick is in progress) wins over the committed color.
   const accent = draftColor || ws.color || "var(--accent)";
+  const agentCreator = ws.copyBranch?.createdBy?.kind === "agent" ? ws.copyBranch.createdBy : null;
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
   useEffect(() => {
@@ -2137,6 +2163,7 @@ function WorkspaceRow({
     <div
       ref={rowRef}
       data-workspace-id={ws.id}
+      data-active={active ? "true" : undefined}
       draggable={!editing}
       onDragStart={onRowDragStart}
       onDragEnd={onRowDragEnd}
@@ -2368,6 +2395,21 @@ function WorkspaceRow({
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
+                {agentCreator && (
+                  <span
+                    data-testid="workspace-agent-worktree"
+                    title={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                    aria-label={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                    style={{
+                      display: "inline-flex",
+                      verticalAlign: "-1px",
+                      marginRight: 3,
+                      color: active ? "var(--ink-dim)" : "var(--muted)",
+                    }}
+                  >
+                    <SparkIcon size={9} />
+                  </span>
+                )}
                 {branch}
               </span>
             )}
