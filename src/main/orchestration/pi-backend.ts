@@ -37,7 +37,6 @@ import {
   type ChatStreamHandler,
   type ManagerCallResult,
   type ManagerRequestInput,
-  type ManagerSteerInput,
   type AgentBackend,
 } from "./agent-backend";
 import { runProjectPolicyMode } from "./project-policy";
@@ -75,20 +74,14 @@ interface PiBackendSession extends PiProcessOwner {
   promptsInFlight: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   lastUsedAt: number;
-  /** The turn currently streaming, which steered messages are injected into. */
+  /** The one turn this session is running. Prompting it while another turn
+   *  streams is rejected by Pi, and the old failure handling then stopped the
+   *  process the live turn was using. */
   activeTurn: ActivePiTurn | null;
 }
 
-/**
- * The one turn a session is running. A session serves one turn at a time:
- * prompting it while another turn streams is rejected by Pi, and the old
- * failure handling then stopped the process the live turn was using.
- */
 interface ActivePiTurn {
-  /** True between the accepted prompt and the end of the turn. */
-  acceptingSteers: boolean;
-  /** Steered messages Pi has queued but not yet injected, by message id. */
-  pendingSteers: Map<string, { text: string; onDelivered?: () => void }>;
+  startedAt: number;
 }
 
 interface PendingPiBackendSession extends PiProcessOwner {}
@@ -632,39 +625,6 @@ const EMPTY_FINAL_REPROMPT = [
   "Do not call tools unless that is required to correct a failed check.",
 ].join(" ");
 
-/**
- * A steer Pi queued but never injected (it arrived after the model's last
- * step) would otherwise open the next turn on its own, on top of run-store
- * delivering it again. Withdraw it from Pi before the turn reports back;
- * run-store returns every steer whose delivery it never heard about.
- */
-async function withdrawUndeliveredSteers(
-  runId: string,
-  session: PiBackendSession,
-  turn: ActivePiTurn,
-): Promise<void> {
-  if (turn.pendingSteers.size === 0) return;
-  turn.pendingSteers.clear();
-  if (SESSIONS.get(runId) === session && session.client.state().phase === "running") {
-    await session.client.request({ type: "clear_queue" }).catch(() => undefined);
-  }
-}
-
-function piUserMessageText(message: unknown): string {
-  const record = asRecord(message);
-  if (record?.role !== "user") return "";
-  const content = record.content;
-  if (typeof content === "string") return content.trim();
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((part) => {
-      const entry = asRecord(part);
-      return entry?.type === "text" && typeof entry.text === "string" ? entry.text : "";
-    })
-    .join("")
-    .trim();
-}
-
 async function requestPiDecision(
   input: ManagerRequestInput,
   onStream?: ChatStreamHandler,
@@ -733,7 +693,7 @@ async function requestPiDecision(
       sessionBusy: true,
     };
   }
-  const activeTurn: ActivePiTurn = { acceptingSteers: false, pendingSteers: new Map() };
+  const activeTurn: ActivePiTurn = { startedAt };
   session.activeTurn = activeTurn;
   try {
     generation = session.generation;
@@ -800,19 +760,6 @@ async function requestPiDecision(
       if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
         liveness.inFlightTools.delete(event.toolCallId);
       }
-      if (event.type === "message_start" && activeTurn.pendingSteers.size > 0) {
-        const text = piUserMessageText(event.message);
-        for (const [messageId, steer] of activeTurn.pendingSteers) {
-          if (steer.text.trim() !== text) continue;
-          activeTurn.pendingSteers.delete(messageId);
-          try {
-            steer.onDelivered?.();
-          } catch {
-            // Delivery bookkeeping is best-effort; the turn goes on.
-          }
-          break;
-        }
-      }
       accumulator.consume(event);
       if (event.type === "agent_settled") agentSettledSeen = true;
       // A finished compaction (host-requested or Pi's native one) summarized
@@ -845,7 +792,6 @@ async function requestPiDecision(
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
       return interruptedResult();
     }
-    activeTurn.acceptingSteers = true;
     await input.onPromptAccepted?.();
     await waitForSettled(settled, liveness, runtimeFailed);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
@@ -1030,9 +976,7 @@ async function requestPiDecision(
     compaction?.dispose();
     unsubscribe?.();
     unsubscribeFailure?.();
-    activeTurn.acceptingSteers = false;
     if (session.activeTurn === activeTurn) session.activeTurn = null;
-    await withdrawUndeliveredSteers(runId, session, activeTurn);
     if (session) {
       session.activeTurns.delete(releaseTurn);
       session.lastUsedAt = Date.now();
@@ -1069,28 +1013,5 @@ export const piBackend = {
     session.interruptSettling = session.promptsInFlight > 0
       ? aborted.then(() => false)
       : aborted;
-  },
-  async steerChat(runId: string, steer: ManagerSteerInput): Promise<boolean> {
-    const session = SESSIONS.get(runId);
-    const turn = session?.activeTurn;
-    if (
-      !session ||
-      !turn ||
-      !turn.acceptingSteers ||
-      session.interrupted ||
-      session.client.state().phase !== "running"
-    ) {
-      return false;
-    }
-    // Registered before the request goes out: Pi can inject the message
-    // before the steer response arrives.
-    turn.pendingSteers.set(steer.messageId, { text: steer.text, onDelivered: steer.onDelivered });
-    try {
-      await session.client.request({ type: "steer", message: steer.text });
-    } catch {
-      turn.pendingSteers.delete(steer.messageId);
-      return false;
-    }
-    return true;
   },
 } satisfies AgentBackend;

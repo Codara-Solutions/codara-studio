@@ -164,7 +164,7 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-pi-runtime`, `test-pi-backend-session-lifecycle`, `test-pi-rpc-client`, `test-pi-turn`, `test-pi-turn-cost`, `test-pi-mcp-config`, `test-pi-commit-message` | Starting Pi (`pi-runtime.ts`, `pi-runtime-electron.ts`), the RPC client, turns and their cost, the MCP bridge config. |
-| `test-pi-cora-extension`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
+| `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers. |
 | `test-pi-worker-harness-gate`, `test-pi-worker-providers` | Which providers workers may run on. |
 | `test-pi-account-*` (auth-store, execution, profiles, router, settings-surface), `test-pi-subscription-refresh`, `test-pi-subscription-usage-profiles`, `test-pi-usage-applicability`, `test-subscription-headroom`, `test-usage-windows`, `test-pi-oauth-branding`, `test-openrouter-cora` | Cora's side of each account: sign-in, token refresh, usage limits, routing across subscriptions. |

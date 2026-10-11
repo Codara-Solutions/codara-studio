@@ -982,45 +982,37 @@ async function testOverlappingTurnLeavesTheLiveTurnAlone(backend, harness) {
   await backend.disposeChat("run-overlap");
 }
 
-async function testSteerReachesTheLiveTurn(backend, harness) {
+// Send now: run-store interrupts the live turn from its onPromptAccepted
+// callback once a message is queued behind it. The turn ends as an abort, the
+// idle process carries the next turn, and nothing is ever steered into Pi.
+async function testSendNowInterruptReusesTheProcess(backend, harness) {
+  assert.equal("steerChat" in backend, false, "the backend offers no channel into a live turn");
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const input = {
+    ...requestInput("run-send-now"),
+    onPromptAccepted: async () => {
+      backend.interruptChat("run-send-now");
+    },
+  };
+  const outcome = backend.requestManagerDecision(input);
+  const interrupted = await settlesWithin(outcome, 2_000, "Send now must release the turn");
+  assert.equal(interrupted.turnAborted, true, "a turn Send now stopped reports an abort");
+  assert.equal(interrupted.turnFailed, undefined);
+  const client = harness.clients.at(-1);
+  assert.ok(harness.clients.length > before, "the turn ran on a process of its own");
+  const next = await backend.requestManagerDecision(requestInput("run-send-now"));
+  assert.equal(next.turnAborted, undefined);
+  assert.equal(next.turnFailed, undefined);
+  assert.equal(harness.clients.at(-1), client, "the next turn reuses the idle process");
+  assert.equal(client.stopCalls, 0);
+  assert.equal(client.prompts.length, 2, "the next turn's prompt goes to the same process");
   assert.equal(
-    await backend.steerChat("run-steer", { messageId: "m0", text: "too early" }),
+    harness.events.some((event) => event.startsWith("request:steer:") || event.startsWith("request:clear_queue:")),
     false,
-    "a run without a live turn refuses a steer",
+    "no message is ever steered into a live turn",
   );
-  const { client, outcome } = await startHeldTurn(backend, harness, "run-steer");
-  const delivered = [];
-  const accepted = await backend.steerChat("run-steer", {
-    messageId: "m1",
-    text: "Use the faster parser",
-    onDelivered: () => delivered.push("m1"),
-  });
-  assert.equal(accepted, true, "a live turn accepts a steer");
-  assert.ok(harness.events.includes(`request:steer:${client.id}`), "the steer goes to Pi's steer command");
-  await backend.steerChat("run-steer", {
-    messageId: "m2",
-    text: "And keep the old API",
-    onDelivered: () => delivered.push("m2"),
-  });
-  client.emit({
-    type: "message_start",
-    message: { role: "user", content: [{ type: "text", text: "Use the faster parser" }] },
-  });
-  assert.deepEqual(delivered, ["m1"], "Pi injecting the steer reports its delivery");
-  client.finishTurn();
-  const result = await outcome;
-  assert.equal(result.turnFailed, undefined);
-  assert.deepEqual(delivered, ["m1"], "a steer Pi never injected is not reported delivered");
-  assert.ok(
-    harness.events.includes(`request:clear_queue:${client.id}`),
-    "a steer left in Pi's queue is withdrawn so it cannot open a turn of its own",
-  );
-  assert.equal(
-    await backend.steerChat("run-steer", { messageId: "m3", text: "late" }),
-    false,
-    "a settled turn refuses a steer",
-  );
-  await backend.disposeChat("run-steer");
+  await backend.disposeChat("run-send-now");
 }
 
 // A crashed manager runtime says nothing about the work: the run parks for
@@ -1092,14 +1084,14 @@ async function main() {
   const keepAlive = setInterval(() => undefined, 1000);
   try {
     await testOverlappingTurnLeavesTheLiveTurnAlone(backend, harness);
-    await testSteerReachesTheLiveTurn(backend, harness);
+    await testSendNowInterruptReusesTheProcess(backend, harness);
     await testDeadProcessParksTheRun(backend, harness);
     await testStartupFailureKeepsItsRawCause(backend, harness);
   } finally {
     clearInterval(keepAlive);
   }
   console.log(
-    "PASS Pi ownership, lease rotation, fast-mode identity, empty-final recovery, crash detection, interrupt reuse, startup diagnostics, idle caps, one turn per session, and steering",
+    "PASS Pi ownership, lease rotation, fast-mode identity, empty-final recovery, crash detection, interrupt reuse, startup diagnostics, idle caps, one turn per session, and Send now's interrupt",
   );
 }
 

@@ -3256,10 +3256,10 @@ function deliveryStateLabel(
   return "Acknowledged";
 }
 
-// Force-deliver the queue: interrupt Cora's in-flight response and start a
-// fresh turn that carries every queued message. The unfinished answer is
-// abandoned (workers and the provider session survive), which is why this is
-// an explicit action and never the default.
+// Force-deliver the queue: stop Cora's live turn and start a fresh one that
+// carries every queued message, in order. What the stopped turn already did
+// stays and its workers keep running, but its unfinished answer is abandoned,
+// which is why this is an explicit action and never the default.
 function SendNowControl({ runId }: { runId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -3283,7 +3283,7 @@ function SendNowControl({ runId }: { runId: string }) {
       <button
         type="button"
         onClick={() => void sendNow()}
-        title="Interrupt Cora's current response and deliver the queue now"
+        title="Stop Cora's current turn and send every queued message now"
         aria-label="Send queued messages now"
         disabled={busy}
         className="cora-chip-btn"

@@ -1,13 +1,5 @@
-import type { AppSettings, CoraMidTurnDelivery } from "@shared/types";
-import {
-  SectionHead,
-  ToggleRow,
-  sectionStyle,
-  toggleDetailStyle,
-  toggleListStyle,
-  toggleRowStyle,
-  toggleTitleStyle,
-} from "./controls";
+import type { AppSettings } from "@shared/types";
+import { SectionHead, ToggleRow, sectionStyle, toggleListStyle } from "./controls";
 
 // Global switches about how agents are briefed and what Codara keeps
 // installed. The settings keys stay as they are (the phone reads them under
@@ -36,17 +28,6 @@ export default function BehaviorSection({
               coraAlwaysVerifyEdits
                 ? "Cora will hand every edit to a worker and have it verified."
                 : "Cora will make small edits herself.",
-            )
-          }
-        />
-        <MidTurnDeliveryRow
-          value={view.coraMidTurnDelivery === "queue" ? "queue" : "steer"}
-          onChange={(coraMidTurnDelivery) =>
-            onChange(
-              { coraMidTurnDelivery },
-              coraMidTurnDelivery === "queue"
-                ? "Messages you send while Cora works now wait until she finishes."
-                : "Cora now reads messages you send while she works right away.",
             )
           }
         />
@@ -87,55 +68,5 @@ export default function BehaviorSection({
         />
       </div>
     </section>
-  );
-}
-
-const MID_TURN_CHOICES: ReadonlyArray<{ value: CoraMidTurnDelivery; label: string }> = [
-  { value: "steer", label: "Cora reads new messages right away" },
-  { value: "queue", label: "Wait until Cora finishes" },
-];
-
-// Two named choices rather than a switch: "off" would not say what happens to
-// a message instead.
-function MidTurnDeliveryRow({
-  value,
-  onChange,
-}: {
-  value: CoraMidTurnDelivery;
-  onChange: (next: CoraMidTurnDelivery) => void;
-}) {
-  return (
-    <div style={{ ...toggleRowStyle, gridTemplateColumns: "minmax(0, 1fr)" }}>
-      <span style={{ minWidth: 0 }}>
-        <span style={toggleTitleStyle} id="cora-mid-turn-delivery-title">
-          Messages you send while Cora works
-        </span>
-        <span style={toggleDetailStyle}>
-          Right away, Cora sees your message at her next step and can change course. Waiting keeps it queued
-          and starts a new turn once she is done.
-        </span>
-        <span
-          className="spark-segmented"
-          role="radiogroup"
-          aria-labelledby="cora-mid-turn-delivery-title"
-          style={{ marginTop: 8 }}
-        >
-          {MID_TURN_CHOICES.map((choice) => (
-            <button
-              key={choice.value}
-              type="button"
-              role="radio"
-              aria-checked={value === choice.value}
-              className={value === choice.value ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-              onClick={() => {
-                if (value !== choice.value) onChange(choice.value);
-              }}
-            >
-              {choice.label}
-            </button>
-          ))}
-        </span>
-      </span>
-    </div>
   );
 }

@@ -328,12 +328,10 @@ import {
   isCheckpointJobCurrent,
   isManagerTurnCurrent,
   renderBundledManagerInput,
-  renderSteeredManagerInput,
   resolveChatBackendConfig,
   shouldIncludeCanonicalReplay,
   type ChatBackendConfig,
   type ChatStreamEvent,
-  type ManagerSteerInput,
 } from "./agent-backend";
 import {
   buildDirectTurnPrompt,
@@ -4518,8 +4516,6 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
             message.deliveryState = "queued";
             message.conversationEpoch = epoch;
             delete message.backendTurnId;
-            delete message.steeredAt;
-            delete message.steerDeliveredAt;
             if (message.targetTurnId && staleOrphanIds.has(message.targetTurnId)) {
               delete message.targetTurnId;
             }
@@ -4742,8 +4738,6 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           if (message.deliveryState === "submitted") message.redelivered = true;
           message.deliveryState = "queued";
           delete message.backendTurnId;
-          delete message.steeredAt;
-          delete message.steerDeliveredAt;
           if (message.targetTurnId && orphanedIds.has(message.targetTurnId)) {
             delete message.targetTurnId;
           }
@@ -6268,6 +6262,17 @@ function conversationEpoch(run: RunState): number {
   return run.conversationEpoch ?? 0;
 }
 
+/** The newest conversational manager call of the current epoch, settled or not. */
+function newestManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch || call.purpose === "compaction") continue;
+    return call;
+  }
+  return undefined;
+}
+
 function activeManagerCall(run: RunState): SparkCall | undefined {
   const epoch = conversationEpoch(run);
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
@@ -6365,6 +6370,7 @@ async function prepareManagerTurn(
 ): Promise<PreparedManagerTurn> {
   let selectedIds: string[] = [];
   let includeCanonicalReplay = false;
+  let previousCallId: string | undefined;
   const epoch = conversationEpoch(run);
   const prepared = await commitRunChange(run, {
     type: "spark_call.started",
@@ -6396,15 +6402,13 @@ async function prepareManagerTurn(
         (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
+      previousCallId = newestManagerCall(draft)?.id;
       call.inputMessageIds = selectedIds;
       call.conversationEpoch = epoch;
       call.createdAt = timestamp;
       for (const message of selected) {
         message.targetTurnId ??= call.id;
         message.backendTurnId = call.id;
-        // This prompt delivers it now; any earlier mid-turn steer is history.
-        delete message.steeredAt;
-        delete message.steerDeliveredAt;
       }
       draft.sparkCalls.push(call);
       draft.updatedAt = timestamp;
@@ -6414,6 +6418,10 @@ async function prepareManagerTurn(
   if (!persistedCall || conversationEpoch(prepared) !== epoch) {
     throw new Error(`Manager turn ${call.id} became stale before backend startup.`);
   }
+  const followsSendNow =
+    selectedIds.length > 0 &&
+    previousCallId !== undefined &&
+    sendNowStoppedCalls.get(run.id) === previousCallId;
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
@@ -6463,6 +6471,7 @@ async function prepareManagerTurn(
     // cacheable system prompt. Read at turn time so a memory written a minute
     // ago is already live for the next turn.
     prompt: buildManagerTurnPrompt(prepared, inputMessages, {
+      followsSendNow,
       includeCanonicalReplay,
       compactionSummary: includeCanonicalReplay ? compactionReplaySummary(prepared) : null,
       coraMemory,
@@ -6519,205 +6528,10 @@ async function releaseUnsubmittedManagerInput(
         message.deliveryAttempts = (message.deliveryAttempts ?? 0) + 1;
         message.deliveryState = "queued";
         delete message.backendTurnId;
-        delete message.steeredAt;
-        delete message.steerDeliveredAt;
         if (message.targetTurnId === callId) delete message.targetTurnId;
         changed = true;
       }
       if (!changed) return false;
-      draft.updatedAt = timestamp;
-    },
-  });
-}
-
-// Mid-turn steering (AppSettings.coraMidTurnDelivery, default "steer"): a
-// message sent while a manager turn is live is handed to that turn through
-// the backend's steer channel, so Cora reads it at her next step instead of
-// after the turn. run-store owns the message row and the backend owns the
-// runtime's queue, so every step that moves a steered message (the steer, the
-// runtime's delivery notice, the reconcile when the turn ends) runs in this
-// one per-run chain. That ordering is what keeps a steer from being both
-// acknowledged by a turn that never read it and delivered again later.
-const managerSteerQueue = createKeyedTaskQueue();
-
-async function midTurnDeliveryMode(): Promise<"steer" | "queue"> {
-  try {
-    return (await loadSettings()).coraMidTurnDelivery === "queue" ? "queue" : "steer";
-  } catch {
-    return "steer";
-  }
-}
-
-/** A steered message the live turn has not read yet. Long tool waits yield
- * while one exists, because the runtime injects it only between steps. */
-export function hasUndeliveredSteer(run: RunState): boolean {
-  const call = activeManagerCall(run);
-  if (!call) return false;
-  return run.humanMessages.some(
-    (message) =>
-      message.author === "user" &&
-      message.backendTurnId === call.id &&
-      message.deliveryState === "submitted" &&
-      typeof message.steeredAt === "string" &&
-      !message.steerDeliveredAt &&
-      message.steeredAt >= call.createdAt,
-  );
-}
-
-function isSteerableQueuedMessage(run: RunState, message: HumanRunMessage): boolean {
-  return (
-    message.author === "user" &&
-    message.intent !== "answer" &&
-    !message.boardNote &&
-    !message.resumeNote &&
-    (message.deliveryState ?? "queued") === "queued" &&
-    !message.backendTurnId &&
-    (message.conversationEpoch ?? 0) === conversationEpoch(run)
-  );
-}
-
-/** Steer queued messages into the live manager turn, oldest first. */
-function steerQueuedInputIntoLiveTurn(runId: string, onlyMessageId?: string): void {
-  void managerSteerQueue(runId, async () => {
-    if ((await midTurnDeliveryMode()) !== "steer") return;
-    const run = await getRun(runId);
-    if (!run || run.executionMode === "direct") return;
-    const call = activeManagerCall(run);
-    if (!call) return;
-    const backend = getBackend(run.chatBackend ?? "pi");
-    if (!backend.steerChat) return;
-    const steerChat = backend.steerChat.bind(backend);
-    const candidates = run.humanMessages.filter(
-      (message) =>
-        (!onlyMessageId || message.id === onlyMessageId) &&
-        isSteerableQueuedMessage(run, message),
-    );
-    for (const candidate of candidates) {
-      if (!(await steerOneMessage(run.id, call.id, candidate.id, steerChat))) return;
-    }
-  }).catch((err) => {
-    console.warn(`[run-store] steering a message into run ${runId}'s live turn failed:`, err);
-  });
-}
-
-/**
- * Claim the message for the live call first, then hand it to the runtime, and
- * undo the claim if the runtime refuses. Claiming first means a turn that ends
- * in between reconciles a row it can see; the reverse order could leave the
- * runtime holding a message run-store still shows as queued.
- */
-async function steerOneMessage(
-  runId: string,
-  callId: string,
-  messageId: string,
-  steerChat: (runId: string, steer: ManagerSteerInput) => Promise<boolean>,
-): Promise<boolean> {
-  const run = await getRun(runId);
-  if (!run) return false;
-  const epoch = conversationEpoch(run);
-  let claimed: HumanRunMessage | undefined;
-  await commitRunChange(run, {
-    type: "run.manager_input_steered",
-    message: "User message handed to Cora's live turn",
-    sparkCallId: callId,
-    payload: { callId, messageId, conversationEpoch: epoch },
-    mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== epoch) return false;
-      const call = draft.sparkCalls.find(
-        (entry) => entry.id === callId && entry.status === "started" && !entry.completedAt,
-      );
-      const message = draft.humanMessages.find((entry) => entry.id === messageId);
-      if (!call || !message || !isSteerableQueuedMessage(draft, message)) return false;
-      message.backendTurnId = callId;
-      message.targetTurnId = callId;
-      message.deliveryState = "submitted";
-      message.steeredAt = timestamp;
-      delete message.steerDeliveredAt;
-      call.inputMessageIds = [...(call.inputMessageIds ?? []), messageId];
-      claimed = structuredClone(message);
-      draft.updatedAt = timestamp;
-    },
-  });
-  if (!claimed) return false;
-  const accepted = await steerChat(runId, {
-    messageId,
-    text: renderSteeredManagerInput(claimed),
-    onDelivered: () => {
-      void managerSteerQueue(runId, () => markSteerDelivered(runId, callId, messageId, epoch)).catch(
-        () => undefined,
-      );
-    },
-  }).catch(() => false);
-  if (accepted) return true;
-  await requeueSteeredInput(runId, callId, epoch, new Set([messageId]));
-  return false;
-}
-
-async function markSteerDelivered(
-  runId: string,
-  callId: string,
-  messageId: string,
-  epoch: number,
-): Promise<void> {
-  const run = await getRun(runId);
-  if (!run) return;
-  await commitRunChange(run, {
-    type: "run.manager_input_steer_delivered",
-    message: "Cora read the message sent during her turn",
-    sparkCallId: callId,
-    payload: { callId, messageId, conversationEpoch: epoch },
-    mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== epoch) return false;
-      const message = draft.humanMessages.find((entry) => entry.id === messageId);
-      if (!message || message.backendTurnId !== callId || !message.steeredAt) return false;
-      if (message.steerDeliveredAt) return false;
-      message.steerDeliveredAt = timestamp;
-      draft.updatedAt = timestamp;
-    },
-  });
-}
-
-/**
- * Return steered messages the turn never read to the queue, unclaimed and
- * outside the call's frozen input list, so settlement does not acknowledge
- * them and the next turn delivers them as ordinary input. Without an id set,
- * every unread steer of the call returns.
- */
-async function requeueSteeredInput(
-  runId: string,
-  callId: string,
-  epoch: number,
-  messageIds?: ReadonlySet<string>,
-): Promise<void> {
-  const run = await getRun(runId);
-  if (!run) return;
-  await commitRunChange(run, {
-    type: "run.manager_input_steer_returned",
-    message: "A message sent during Cora's turn returned to the queue for her next turn",
-    sparkCallId: callId,
-    payload: {
-      callId,
-      messageIds: messageIds ? [...messageIds] : undefined,
-      conversationEpoch: epoch,
-    },
-    mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== epoch) return false;
-      const returned = new Set<string>();
-      for (const message of draft.humanMessages) {
-        if (message.backendTurnId !== callId || !message.steeredAt || message.steerDeliveredAt) continue;
-        if (messageIds && !messageIds.has(message.id)) continue;
-        if (message.deliveryState === "cancelled") continue;
-        message.deliveryState = "queued";
-        delete message.backendTurnId;
-        delete message.steeredAt;
-        if (message.targetTurnId === callId) delete message.targetTurnId;
-        returned.add(message.id);
-      }
-      if (returned.size === 0) return false;
-      const call = draft.sparkCalls.find((entry) => entry.id === callId);
-      if (call?.inputMessageIds) {
-        call.inputMessageIds = call.inputMessageIds.filter((id) => !returned.has(id));
-      }
       draft.updatedAt = timestamp;
     },
   });
@@ -7077,15 +6891,14 @@ async function askManagerBackendUnderTurnLock(
         conversationEpoch: preparedTurn.conversationEpoch,
         onPromptAccepted: async () => {
           providerTurnStarted = true;
+          promptAcceptedCalls.add(callId);
           await updateManagerInputDelivery(
             run.id,
             callId,
             preparedTurn.conversationEpoch,
             "submitted",
           );
-          // Messages sent between this turn's start and now could not be
-          // steered yet; the turn can take them from here.
-          steerQueuedInputIntoLiveTurn(run.id);
+          await interruptForSendNow(run.id);
         },
         onSessionEstablished: async (sessionUuid: string) => {
           // Persist the provider session id BEFORE the turn settles. The
@@ -7120,16 +6933,11 @@ async function askManagerBackendUnderTurnLock(
     );
     providerTurnStarted = true;
     acceptingStreamEvents = false;
+    const promptWasAccepted = promptAcceptedCalls.delete(callId);
+    const interruptedBySendNow = sendNowInterruptedCalls.delete(callId);
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
-    // Before anything reads or settles this call: steers it never read go
-    // back to the queue, so settlement cannot acknowledge them.
-    await managerSteerQueue(run.id, () =>
-      requeueSteeredInput(run.id, callId, preparedTurn.conversationEpoch),
-    ).catch((error) => {
-      console.warn(`[run-store] returning unread steers of ${callId} failed:`, error);
-    });
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -7217,10 +7025,17 @@ async function askManagerBackendUnderTurnLock(
     // delivery transition. A failed Pi turn may also have successfully applied
     // a live orchestration tool before its final provider request died; that
     // input is acknowledged, never replayed on Resume. The same holds for an
-    // interrupted turn (Send now) whose tools already spawned workers: handing
-    // its request back as new input invited Cora to spawn them again.
+    // interrupted turn whose tools already spawned workers: handing its
+    // request back as new input invited Cora to spawn them again. A turn Send
+    // now cut short keeps its input too: the provider had the prompt (Send now
+    // waits for that), so the prompt and the partial reply are in Cora's
+    // transcript, and handing it back would deliver it a second time.
     let settledRun = latest;
-    if ((turnFailed || turnAborted) && result.decisionAlreadyApplied) {
+    const keptBySendNow = turnAborted && interruptedBySendNow && promptWasAccepted;
+    if (keptBySendNow) {
+      sendNowStoppedCalls.set(run.id, callId);
+    }
+    if ((turnFailed || turnAborted) && (result.decisionAlreadyApplied || keptBySendNow)) {
       await updateManagerInputDelivery(
         run.id,
         callId,
@@ -7258,6 +7073,30 @@ async function askManagerBackendUnderTurnLock(
       // will re-drive its requeued input.
       if (result.sessionBusy && !result.decisionAlreadyApplied) {
         scheduleQueuedSteeringFollowup(settledRun, { explicit: true });
+      }
+      // Send now stopped this turn so the queued messages go now. The next
+      // turn starts here, still under the turn lock, as a chat turn like any
+      // queued follow-up: handed back to its caller, a planning cycle hops to
+      // plan_analysis, which refuses a prose answer on a run with no step or
+      // worker and fails the run. With everything unqueued meanwhile, only a
+      // plain conversation continues here; a run with steps or workers goes
+      // back to its driver like any stopped turn. A stopped review or step
+      // planning turn goes back to its cycle, which owns that stage; the
+      // queued follow-up delivers the messages after it.
+      if (keptBySendNow && (mode === "chat" || mode === "plan_analysis")) {
+        const stopping = forcePauseWindowClosed(run.id);
+        if (stopping) await stopping;
+        const fresh = await getRun(run.id);
+        if (
+          fresh &&
+          conversationEpoch(fresh) === preparedTurn.conversationEpoch &&
+          (fresh.status === "planning" || fresh.status === "running" || fresh.status === "reviewing") &&
+          !activeManagerCall(fresh) &&
+          (queuedManagerInputMessages(fresh).length > 0 ||
+            (fresh.steps.length === 0 && fresh.workerTasks.length === 0))
+        ) {
+          return askManagerBackendUnderTurnLock(fresh, cwd, "chat");
+        }
       }
       return settledRun;
     }
@@ -7599,12 +7438,11 @@ async function askManagerBackendUnderTurnLock(
     return (await getRun(run.id)) ?? finalized;
   } catch (err) {
     acceptingStreamEvents = false;
+    promptAcceptedCalls.delete(callId);
+    sendNowInterruptedCalls.delete(callId);
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
-    await managerSteerQueue(run.id, () =>
-      requeueSteeredInput(run.id, callId, preparedTurn.conversationEpoch),
-    ).catch(() => undefined);
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
@@ -12558,10 +12396,9 @@ export async function addRunMessage(
     const autopilotInput = autopilotInputFromRun(updated);
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
-  // A message sent mid-turn goes into the live manager call as a steer (unless
-  // coraMidTurnDelivery is "queue"), so Cora reads it at her next step. The
-  // follow-up scheduler stays armed behind it: whatever the live turn does
-  // not read is still queued when it settles, and gets a fresh turn then.
+  // A message sent while Cora works waits in the queue: the live turn never
+  // sees it, and the follow-up scheduler starts the next turn with it once
+  // this one settles. Send now (deliverQueuedMessagesNow) cuts the wait short.
   if (
     input.author === "user" &&
     recordedIntent === "steer" &&
@@ -12569,7 +12406,6 @@ export async function addRunMessage(
       activeAutopilotPlans.has(updated.id) ||
       activeAutopilotReviews.has(updated.id))
   ) {
-    if (activeManagerCall(updated)) steerQueuedInputIntoLiveTurn(updated.id, messageId);
     scheduleQueuedSteeringFollowup(updated);
   } else if (
     input.author === "user" &&
@@ -12662,14 +12498,64 @@ export async function cancelQueuedMessage(
   };
 }
 
+// Send now. A run's request lives here, by conversation epoch, until its live
+// turn is cut short or the queue is delivered some other way. The interrupt
+// waits until the provider has the live turn's prompt: a turn stopped in its
+// preflight can still record that prompt after the next turn sent it again.
+// The request names the messages queued when it was made, so a turn that has
+// since taken them (an in-lock retry, a follow-up) is never stopped for a
+// message sent after the click.
+const sendNowRequests = new Map<string, { epoch: number; messageIds: ReadonlySet<string> }>();
+// Manager calls whose prompt the provider accepted, while they run.
+const promptAcceptedCalls = new Set<string>();
+// Calls Send now interrupted, until their settlement reads the mark.
+const sendNowInterruptedCalls = new Set<string>();
+// The last manager call Send now stopped, by run, so the turn right after it
+// can say why the previous reply stopped.
+const sendNowStoppedCalls = new Map<string, string>();
+
+async function interruptForSendNow(runId: string): Promise<void> {
+  const request = sendNowRequests.get(runId);
+  if (!request) return;
+  const requestedEpoch = request.epoch;
+  const run = await getRun(runId);
+  if (sendNowRequests.get(runId) !== request) return;
+  if (
+    !run ||
+    conversationEpoch(run) !== requestedEpoch ||
+    !queuedManagerInputMessages(run).some((message) => request.messageIds.has(message.id))
+  ) {
+    // Stale, or every message it named was taken or unqueued since.
+    sendNowRequests.delete(runId);
+    return;
+  }
+  const call = activeManagerCall(run);
+  if (!call || !promptAcceptedCalls.has(call.id)) return;
+  sendNowRequests.delete(runId);
+  sendNowInterruptedCalls.add(call.id);
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    sparkCallId: call.id,
+    type: "run.send_now_interrupted",
+    message: "Cora's turn was stopped so the queued messages go now",
+    payload: { callId: call.id, conversationEpoch: requestedEpoch },
+  }).catch(() => undefined);
+  try {
+    getBackend(run.chatBackend ?? "pi").interruptChat?.(run.id);
+  } catch {
+    // A backend with nothing live to interrupt lets the turn end on its own;
+    // the queue is delivered when it does.
+  }
+}
+
 /**
  * Deliver the queued messages NOW instead of waiting for the current turn to
- * finish: interrupt the manager's in-flight generation (workers and the
- * provider session survive; only the current response is abandoned), then
- * once the interrupted turn settles, start the fresh turn that drains the
- * queue. The interrupted turn's own input is requeued by its failure path
- * (releaseUnsubmittedManagerInput), so nothing is lost; the fresh turn
- * carries everything in order.
+ * finish: stop the manager's live turn (workers keep running and the Pi
+ * process is reused when it goes idle cleanly), then start the next turn with
+ * every queued message, in order. The interrupted turn's prompt and partial
+ * reply stay in Cora's transcript and its input stays delivered, so nothing
+ * reaches her twice. With no live turn, the next turn simply starts.
  */
 export async function deliverQueuedMessagesNow(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
@@ -12690,23 +12576,22 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
     message: "User asked for queued messages to be delivered now",
     payload: { conversationEpoch: scheduledEpoch },
   }).catch(() => undefined);
-  try {
-    getBackend(run.chatBackend ?? "pi").interruptChat?.(run.id);
-  } catch {
-    // Interrupt is best-effort: a backend without a live turn simply has
-    // nothing to interrupt, and the settle-then-deliver below still runs.
-  }
+  const request = {
+    epoch: scheduledEpoch,
+    messageIds: new Set(queuedManagerInputMessages(run).map((message) => message.id)),
+  };
+  sendNowRequests.set(run.id, request);
+  await interruptForSendNow(run.id);
   // Deliver once the interrupted turn (or any planning/review work) settles.
   // Re-read and re-decide then: another scheduler may already own the queue.
   void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
+      if (sendNowRequests.get(run.id) === request) sendNowRequests.delete(run.id);
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
       if (queuedManagerInputMessages(latest).length === 0) return;
       if (activeManagerCall(latest)) return;
       if (latest.status === "paused") {
-        // The failure policy parked the interrupted turn; resume carries the
-        // queue into the retried turn.
         await resumeRun({ runId: latest.id });
       } else if (latest.status !== "blocked" && latest.status !== "cancelled") {
         scheduleQueuedSteeringFollowup(latest, { explicit: true });
@@ -16211,8 +16096,6 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
         message.deliveryState = "queued";
         message.conversationEpoch = oldEpoch + 1;
         delete message.backendTurnId;
-        delete message.steeredAt;
-        delete message.steerDeliveredAt;
         if (message.targetTurnId && interruptedCallIds.has(message.targetTurnId)) {
           delete message.targetTurnId;
         }

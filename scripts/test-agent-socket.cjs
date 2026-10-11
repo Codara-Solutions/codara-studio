@@ -1346,48 +1346,44 @@ async function main() {
       JSON.stringify(waitedPartial).slice(0, 280),
     );
 
-    // The runtime injects a steer only between tool calls, so a wait must not
-    // sit on a message the user sent into the live turn.
-    const steerTurn = liveManagerTurn("run-steer-wait", "spark-steer-wait");
-    const steerAt = new Date(Date.now() + 1000).toISOString();
-    steerTurn.sparkCalls[0].inputMessageIds.push("msg-steer-wait");
-    steerTurn.humanMessages.push({
-      id: "msg-steer-wait",
-      runId: "run-steer-wait",
+    // A message the user sends during the wait is queued for Cora's next
+    // turn, so it never cuts the wait short.
+    const queuedTurn = liveManagerTurn("run-queued-wait", "spark-queued-wait");
+    queuedTurn.humanMessages.push({
+      id: "msg-queued-wait",
+      runId: "run-queued-wait",
       author: "user",
       kind: "note",
       message: "Also handle empty input.",
       attachments: [],
       intent: "steer",
-      deliveryState: "submitted",
-      backendTurnId: "spark-steer-wait",
-      targetTurnId: "spark-steer-wait",
-      steeredAt: steerAt,
+      deliveryState: "queued",
+      targetTurnId: "after:spark-queued-wait",
       conversationEpoch: 0,
-      createdAt: steerAt,
+      createdAt: new Date().toISOString(),
     });
-    fabricateRun("run-steer-wait", {
+    fabricateRun("run-queued-wait", {
       chatMode: "execute",
-      ...steerTurn,
-      workerTasks: [{ id: "wt-steer-wait", title: "long build", status: "running", taskClass: "feature" }],
+      ...queuedTurn,
+      workerTasks: [{ id: "wt-queued-wait", title: "long build", status: "running", taskClass: "feature" }],
       workerAttempts: [{
-        id: "attempt-steer-wait",
-        workerTaskId: "wt-steer-wait",
+        id: "attempt-queued-wait",
+        workerTaskId: "wt-queued-wait",
         status: "running",
         runtime: "codex",
         startedAt: "2026-07-18T10:00:00.000Z",
       }],
     });
     const waitStartedAt = Date.now();
-    const waitedSteer = await rpc(handshake, "orchestrator.wait_for_workers", {
-      runId: "run-steer-wait",
-      worker_task_ids: ["wt-steer-wait"],
-      timeout_ms: 5000,
+    const waitedQueued = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-queued-wait",
+      worker_task_ids: ["wt-queued-wait"],
+      timeout_ms: 3000,
     });
     check(
-      "wait_for_workers yields at once to a steer the live turn has not read",
-      waitedSteer.result?.reason === "user_message" && Date.now() - waitStartedAt < 2500,
-      JSON.stringify(waitedSteer).slice(0, 280),
+      "wait_for_workers does not yield to a message queued for the next turn",
+      waitedQueued.result?.reason === "timeout" && Date.now() - waitStartedAt >= 900,
+      JSON.stringify(waitedQueued).slice(0, 280),
     );
 
     // Runtime fallback lineage: waiting on the cancelled predecessor must

@@ -1600,7 +1600,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_wait_for_workers",
     description:
-      "Block until the listed worker tasks reach a terminal state (accepted / blocked / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers, call it once after codara_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to codara_complete (default) or codara_spawn_workers (only for genuine regressions/corrective fixes). Only task_status 'accepted' means the worker reported its task complete: 'blocked' means its report was partial or blocked (read final_report and decide), 'failed' means it failed, and error / failure_kind say why when there is no report. activity / activity_at show what a still-running worker is doing, which is what to tell the user after a timeout. Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with codara_check_messages), answer or steer with codara_message_workers. May also return EARLY with reason='user_message' when the user sent you a message while you were waiting; the message itself arrives right after this result. Act on it (steer or restructure the in-flight work with codara_message_workers / codara_spawn_workers, or answer the user), then call codara_wait_for_workers again if workers are still running.",
+      "Block until the listed worker tasks reach a terminal state (accepted / blocked / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers, call it once after codara_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to codara_complete (default) or codara_spawn_workers (only for genuine regressions/corrective fixes). Only task_status 'accepted' means the worker reported its task complete: 'blocked' means its report was partial or blocked (read final_report and decide), 'failed' means it failed, and error / failure_kind say why when there is no report. activity / activity_at show what a still-running worker is doing, which is what to tell the user after a timeout. Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with codara_check_messages), answer or steer with codara_message_workers.",
     inputSchema: {
       type: "object",
       required: ["worker_task_ids"],
@@ -2165,6 +2165,9 @@ async function postJsonRpc(method, params, timeoutMs, signal) {
           "Content-Length": bytes,
           Authorization: `Bearer ${handshake.token}`,
         },
+        // Aborting hangs up, which is what tells the main process to stop
+        // serving a long poll whose caller (a cancelled MCP call or an
+        // interrupted Cora turn) is gone.
         ...(signal ? { signal } : {}),
       },
       (res) => {
@@ -2572,8 +2575,8 @@ module.exports = {
   listTools() {
     return TOOLS.map((tool) => ({ ...tool }));
   },
-  callToolByName(name, args) {
-    return callTool({ name, arguments: args });
+  callToolByName(name, args, signal) {
+    return callTool({ name, arguments: args }, signal ? { signal } : {});
   },
   // The extension's non-tool calls (the Claude login renewal) go through the
   // same authenticated socket client, with its scoped-capability rules.

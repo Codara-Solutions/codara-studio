@@ -521,6 +521,8 @@ function sortedEqual(actual, expected, label) {
     let mockError = null;
     let mockStatus = 200;
     const heldRequests = [];
+    let mockHangs = false;
+    let hungUpRequests = 0;
     mockAgentSocket = http.createServer((req, res) => {
       receivedAuthorization.push(req.headers.authorization);
       let body = "";
@@ -529,6 +531,10 @@ function sortedEqual(actual, expected, label) {
       req.on("end", () => {
         const parsed = JSON.parse(body);
         received.push(parsed);
+        if (mockHangs) {
+          res.on("close", () => { hungUpRequests += 1; });
+          return;
+        }
         // A long poll the test cancels: never answered, closed by the client.
         if (parsed.method === "orchestrator.wait_for_workers") {
           const held = { closed: false };
@@ -642,6 +648,29 @@ function sortedEqual(actual, expected, label) {
       `Bearer ${"b".repeat(64)}`,
       "an unmarked trusted caller must adopt a rewritten handshake on its next call",
     );
+
+    // An interrupted Cora turn aborts its waits: the call returns at once and
+    // hangs up, so the main process stops polling for a caller that is gone.
+    mockHangs = true;
+    const waitAbort = new AbortController();
+    const receivedBeforeAbort = received.length;
+    const abortedWait = directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+      waitAbort.signal,
+    );
+    for (let tries = 0; received.length === receivedBeforeAbort && tries < 200; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    waitAbort.abort();
+    const abortedWaitResult = await abortedWait;
+    assert.strictEqual(abortedWaitResult.isError, true, "an aborted wait reports a failed call");
+    assert.match(abortedWaitResult.content[0].text, /Cancelled/);
+    for (let tries = 0; hungUpRequests === 0 && tries < 200; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.strictEqual(hungUpRequests, 1, "an aborted wait hangs up its socket request");
+    mockHangs = false;
 
     // Panes no longer carry the root token, so the handshake file is a
     // trusted caller's only source. While Codara starts, the file lands just

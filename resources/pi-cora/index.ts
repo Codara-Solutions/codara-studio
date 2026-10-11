@@ -45,11 +45,17 @@ interface BridgeToolResult {
 
 interface CodaraBridge {
   listTools(): BridgeTool[];
-  callToolByName(name: string, args: unknown): Promise<BridgeToolResult>;
+  callToolByName(name: string, args: unknown, signal?: AbortSignal): Promise<BridgeToolResult>;
   requestCodara?: CodaraSocketRequest;
 }
 
 const requireFromExtension = createRequire(import.meta.url);
+// Pi waits for a running tool before an aborted turn goes idle. A wait changes
+// nothing, so it is safe to walk away from: handing it the turn's abort lets
+// Stop and Send now leave Pi idle at once, and the next turn keeps the process
+// instead of replacing one stuck in a long wait. Every other Studio call may
+// already be changing the run, so it finishes.
+const ABANDONABLE_BRIDGE_TOOLS = new Set(["codara_wait_for_workers", "codara_wait_for_automation"]);
 const UNTRUSTED_PULL_REQUEST_POLICY = "untrusted-pull-request";
 const UNTRUSTED_MANAGER_BRIDGE_TOOLS = new Set([
   "codara_spawn_workers",
@@ -207,12 +213,16 @@ ${mcp?.promptSuffix() ?? ""}`,
         ? {}
         : { promptSnippet: toolPromptSnippet(tool.description) }),
       parameters: tool.inputSchema as never,
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, signal) {
         if (tool.name === "codara_complete") {
           const reason = whiteboardReview.completionBlock();
           if (reason) throw new Error(reason);
         }
-        const result = await bridge.callToolByName(tool.name, params);
+        const result = await bridge.callToolByName(
+          tool.name,
+          params,
+          ABANDONABLE_BRIDGE_TOOLS.has(tool.name) ? signal : undefined,
+        );
         // Pi's extension contract represents a failed tool by rejecting the
         // execute promise; an `isError` property on the returned result is not
         // consumed by Pi. Translate MCP failures explicitly so the model and

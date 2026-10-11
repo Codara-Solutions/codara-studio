@@ -58,7 +58,6 @@ const EMPTY_SETTINGS: AppSettings = {
   playwrightMcpAutoInstall: true,
   autopilotSandbox: false,
   openAiFastMode: false,
-  coraMidTurnDelivery: "steer",
   coraAlwaysVerifyEdits: false,
 };
 
@@ -380,7 +379,6 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
     autopilotSandbox: settings.autopilotSandbox === true,
     openAiFastMode: settings.openAiFastMode === true,
-    coraMidTurnDelivery: settings.coraMidTurnDelivery === "queue" ? "queue" : "steer",
     coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
   };
 }

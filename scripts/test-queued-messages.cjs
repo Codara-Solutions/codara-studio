@@ -1,45 +1,44 @@
 // Regression harness for user messages sent while Cora works.
 //
-// With AppSettings.coraMidTurnDelivery "steer" (the default) and a backend
-// that has a steer channel, a message sent during a live manager turn is
-// claimed by that turn and handed to the runtime, which injects it at Cora's
-// next step. Anything the turn does not read returns to the queue when it
-// ends. With "queue", or a backend without steerChat, the message stays
-// deliveryState "queued" until the turn settles, then the steering-followup
-// scheduler starts a fresh manager turn that drains it. While queued, the
-// message can be pulled back out of the outbox with cancelQueuedMessage (the
-// renderer's Unqueue control), whose race guard refuses a message a turn
-// already claimed. Every path goes through the per-run turn lock, so a run
-// never has two manager turns at once.
+// A message sent during a live manager turn is QUEUED: it stays deliveryState
+// "queued" and unowned while the turn runs, the live turn never sees it, and
+// the steering-followup scheduler starts the next manager turn with it once
+// the turn settles. While queued, the message can be pulled back out with
+// cancelQueuedMessage (the renderer's Unqueue control), whose race guard
+// refuses a message a turn already claimed, or sent at once with
+// deliverQueuedMessagesNow (Send now), which stops the live turn and starts
+// the next one with every queued message. Every path goes through the per-run
+// turn lock, so a run never has two manager turns at once.
 //
 // Pinned here, against the REAL run-store.ts (manager backend stubbed at
 // backend-registry, the one seam every provider goes through - the same
 // esbuild/stub technique as scripts/test-force-pause-resume.cjs):
 //
-//   1. queue fallback - with no steer channel, a message sent while the
-//      manager is generating stays queued for the live call (never claimed
-//      onto it), and the follow-up scheduler delivers it in a fresh turn
-//      after settlement, exactly once.
-//   2. unqueue - cancelQueuedMessage flips a still-queued message to
-//      "cancelled", returns its text for the composer, and the cancelled
-//      message never reaches any manager prompt.
+//   1. queue - a message sent while the manager is generating stays queued
+//      for the live call (never claimed onto it), and the follow-up scheduler
+//      delivers it in a fresh turn after settlement, exactly once.
+//   2. unqueue - cancelQueuedMessage removes a still-queued message, returns
+//      its text for the composer, and it never reaches any manager prompt.
 //   3. race guard - cancelQueuedMessage refuses a message that a turn start
 //      already claimed (backendTurnId set / deliveryState past "queued").
 //   4. crash window - a queued message whose delivering turn dies before
 //      settling is re-queued (releaseUnsubmittedManagerInput), never lost.
-//   5. send now - deliverQueuedMessagesNow interrupts and flushes the queue
-//      into a fresh turn exactly once, returns the run for an empty queue,
-//      and refuses a run waiting on an answer.
-//   5b. steer - a mid-turn message reaches the live turn, is acknowledged
-//      with it once read, returns to the queue when unread, and stays queued
-//      under the "queue" setting or a refused steer.
+//   5. send now - deliverQueuedMessagesNow stops the live turn once the
+//      provider has its prompt, keeps that turn's input delivered (never sent
+//      twice), and starts one new chat turn carrying every queued message in
+//      order (a prose answer completes a plain chat instead of failing it as
+//      an empty plan_analysis); a request only covers the messages queued
+//      when it was made, so a retry that took them is not stopped for a later
+//      message; Send now then Unqueue of everything leaves no busy run; with
+//      no live turn it just starts the turn; it returns the run for an empty
+//      queue and refuses a run waiting on an answer.
 //   5c. turn discipline - one manager turn per run at a time, a follow-up
 //      that keeps failing stops re-arming, Stop keeps queued messages, and an
 //      identical resend after delivery is a new message.
-//   6. source seams - the agent-socket wait handler parks/claims nothing (it
-//      only yields to an unread steer), the composer labels the send button
-//      Queue while a turn is active, and the conversation renders an Unqueue
-//      control for queued rows.
+//   6. source seams - the agent-socket wait handler parks, claims and yields
+//      nothing for user messages, the mid-turn delivery setting is gone, the
+//      composer labels the send button Queue while a turn is active, and the
+//      conversation renders Send now and Unqueue controls for queued rows.
 //
 //   node scripts/test-queued-messages.cjs
 //
@@ -100,10 +99,9 @@ const BACKEND_REGISTRY_STUB = `const backend = (kind) => ({
     return globalThis.__coraManagerStub(input, onStream);
   },
   async disposeChat() {},
-  interruptChat() {},
-  ...(globalThis.__coraSteerStub
-    ? { steerChat: (runId, steer) => globalThis.__coraSteerStub(runId, steer) }
-    : {}),
+  interruptChat(runId) {
+    globalThis.__coraInterruptStub?.(runId);
+  },
 });
 export function getBackend(kind) { return backend(kind); }
 export function listBackends() { return []; }
@@ -341,7 +339,7 @@ async function main() {
   fs.mkdirSync(CACHE, { recursive: true });
   fs.writeFileSync(
     entry,
-    `export * from ${JSON.stringify(RUN_STORE_TS)};\nexport { loadSettings, saveSettings } from ${JSON.stringify(STORAGE_TS)};\n`,
+    `export * from ${JSON.stringify(RUN_STORE_TS)};\nexport { loadSettings, normalizeSettings, saveSettings } from ${JSON.stringify(STORAGE_TS)};\n`,
   );
   const runStore = await bundle(entry, "run-store.cjs", {
     plugins: [stubPlugin],
@@ -570,27 +568,74 @@ async function main() {
     JSON.stringify(readRun(runD).humanMessages.find((entry) => entry.message === QUEUED_D)),
   );
 
-  // ── 5. send now: deliverQueuedMessagesNow flushes after the turn settles ──
-  const QUEUED_E = "Change of plans, target the beta branch";
+  // ── 5. send now: stop the live turn, then one turn with the whole queue ──
+  const interrupts = [];
+  const interruptHandlers = new Map();
+  globalThis.__coraInterruptStub = (id) => {
+    interrupts.push(id);
+    interruptHandlers.get(id)?.();
+  };
+  const interruptsFor = (id) => interrupts.filter((entry) => entry === id).length;
+  const messageText = (msgRunId, text) =>
+    readRun(msgRunId).humanMessages.find((message) => message.message === text);
+  function abortedResult() {
+    return {
+      decision: { status: "talk", summary: "interrupted", chatReply: "Cora's Pi turn was interrupted.", steps: [], tasks: [] },
+      durationMs: 1,
+      model: "stub-model",
+      turnAborted: true,
+    };
+  }
+  // Turn 1 takes the user's message, reports the prompt accepted only once
+  // `accept` opens (the provider's preflight), and then runs until Send now
+  // interrupts it or `release` opens. Every later turn settles at once, with
+  // `laterResult`.
+  function sendNowTurn(id, laterResult = askUserResult) {
+    const entered = gate();
+    const accept = gate();
+    const release = gate();
+    let interrupted = false;
+    managerBehavior.set(id, async (calls, input) => {
+      if (calls.length === 1) {
+        entered.open();
+        await accept.opened;
+        const aborted = new Promise((resolve) => interruptHandlers.set(id, resolve)).then(() => {
+          interrupted = true;
+        });
+        await input.onPromptAccepted?.();
+        await Promise.race([aborted, release.opened]);
+        return interrupted ? abortedResult() : completeResult();
+      }
+      await input.onPromptAccepted?.();
+      return laterResult();
+    });
+    return { entered, accept, release, wasInterrupted: () => interrupted };
+  }
+
+  const FIRST_E = "Build the tokenizer first";
+  const QUEUED_E1 = "Change of plans, target the beta branch";
+  const QUEUED_E2 = "and keep the public API stable";
   const runE = writeRun(pausedRun("run-queued-send-now"));
-  const turnEEntered = gate();
-  const releaseTurnE = gate();
-  managerBehavior.set(runE, async (calls) => {
-    if (calls.length === 1) {
-      turnEEntered.open();
-      await releaseTurnE.opened;
-      return completeResult();
-    }
-    return askUserResult();
-  });
-  await runStore.resumeRun({ runId: runE });
-  check("the send-now scenario's turn dispatched", await gateOpened(turnEEntered));
-  await runStore.addRunMessage({
-    runId: runE,
-    author: "user",
-    kind: "note",
-    message: QUEUED_E,
-  });
+  const turnE = sendNowTurn(runE);
+  turnE.accept.open();
+  await runStore.addRunMessage({ runId: runE, author: "user", kind: "note", message: FIRST_E });
+  check("the send-now scenario's turn dispatched", await gateOpened(turnE.entered));
+  check(
+    "the live turn owns the user's message once the provider has it",
+    await waitFor(() => messageText(runE, FIRST_E)?.deliveryState === "submitted"),
+    JSON.stringify(messageText(runE, FIRST_E)),
+  );
+  await runStore.addRunMessage({ runId: runE, author: "user", kind: "note", message: QUEUED_E1 });
+  await runStore.addRunMessage({ runId: runE, author: "user", kind: "note", message: QUEUED_E2 });
+  await sleep(150);
+  check(
+    "messages sent during the turn wait in the queue, unowned",
+    [QUEUED_E1, QUEUED_E2].every((text) => {
+      const message = messageText(runE, text);
+      return message?.deliveryState === "queued" && !message.backendTurnId;
+    }),
+  );
+  check("nothing interrupts the turn before Send now", interruptsFor(runE) === 0);
   let sendNowError = null;
   try {
     await runStore.deliverQueuedMessagesNow(runE);
@@ -598,18 +643,315 @@ async function main() {
     sendNowError = error;
   }
   check("deliverQueuedMessagesNow accepts a populated queue", !sendNowError, sendNowError?.message);
-  releaseTurnE.open();
-  const deliveredE = await waitFor(() =>
-    callsFor(runE).some((call) => call.prompt.includes(QUEUED_E)),
-  );
-  check("send-now delivers the queue in a fresh turn after settlement", deliveredE);
-  await sleep(400);
+  check("Send now stops the live turn", interruptsFor(runE) === 1 && turnE.wasInterrupted(), `interrupts=${interruptsFor(runE)}`);
   check(
-    "send-now never double-delivers the queue",
-    callsFor(runE).filter((call) => call.prompt.includes(QUEUED_E)).length === 1,
-    JSON.stringify(callsFor(runE).map((call) => call.prompt.slice(0, 60))),
+    "the next turn starts with the queued messages",
+    await waitFor(() => callsFor(runE).length === 2),
+    `calls=${callsFor(runE).length}`,
   );
   await runStore.settleScheduledManagerWork(runE);
+  const promptE = callsFor(runE)[1]?.prompt ?? "";
+  check(
+    "the queued messages go together, in the order they were sent",
+    promptE.includes(QUEUED_E1) &&
+      promptE.includes(QUEUED_E2) &&
+      promptE.indexOf(QUEUED_E1) < promptE.indexOf(QUEUED_E2),
+    promptE.slice(0, 400),
+  );
+  check(
+    "the new turn is told the user stopped the previous reply",
+    promptE.includes("stopped your previous reply to send this now"),
+  );
+  check(
+    "the interrupted turn's own message is not sent again",
+    !promptE.includes(FIRST_E) &&
+      callsFor(runE).filter((call) => call.prompt.includes(FIRST_E)).length === 1,
+  );
+  const firstE = messageText(runE, FIRST_E);
+  check(
+    "the interrupted turn keeps its input delivered",
+    firstE?.deliveryState === "acknowledged" && !firstE?.redelivered && !(firstE?.deliveryAttempts > 0),
+    JSON.stringify(firstE),
+  );
+  check(
+    "the queued messages are delivered by the new turn",
+    [QUEUED_E1, QUEUED_E2].every((text) => messageText(runE, text)?.deliveryState === "acknowledged"),
+  );
+  check(
+    "Send now leaves exactly two manager turns",
+    callsFor(runE).length === 2,
+    `calls=${callsFor(runE).length}`,
+  );
+  const interruptedCallE = readRun(runE).sparkCalls.find((call) => call.inputMessageIds?.includes(firstE?.id));
+  check(
+    "the interrupted turn settles as stopped, not failed, and the run carries on",
+    interruptedCallE?.status === "completed" &&
+      readRun(runE).status !== "failed" &&
+      readRun(runE).status !== "paused",
+    JSON.stringify({ call: interruptedCallE?.status, run: readRun(runE).status }),
+  );
+  check(
+    "the interrupt is journaled",
+    readEvents(runE).some((event) => event.type === "run.send_now_interrupted"),
+  );
+  check(
+    "the turn Send now starts is a chat turn, like any queued follow-up",
+    callsFor(runE)[1]?.mode === "chat",
+    callsFor(runE)[1]?.mode,
+  );
+
+  // A plain conversation (no step, no worker): Cora answers the queued
+  // messages in prose. In plan_analysis that answer is refused as an empty
+  // execution and fails the run.
+  const FIRST_PROSE = "What does the tokenizer do with tabs?";
+  const QUEUED_PROSE = "And with carriage returns?";
+  const runProse = writeRun(pausedRun("run-send-now-prose"));
+  const turnProse = sendNowTurn(runProse, completeResult);
+  turnProse.accept.open();
+  await runStore.addRunMessage({ runId: runProse, author: "user", kind: "note", message: FIRST_PROSE });
+  await gateOpened(turnProse.entered);
+  await waitFor(() => messageText(runProse, FIRST_PROSE)?.deliveryState === "submitted");
+  await runStore.addRunMessage({ runId: runProse, author: "user", kind: "note", message: QUEUED_PROSE });
+  await runStore.deliverQueuedMessagesNow(runProse);
+  await waitFor(() => callsFor(runProse).length === 2);
+  await runStore.settleScheduledManagerWork(runProse);
+  await sleep(100);
+  const settledProse = readRun(runProse);
+  check(
+    "a prose answer to the messages Send now delivered completes the chat",
+    settledProse.status === "complete" && callsFor(runProse).length === 2,
+    JSON.stringify({
+      status: settledProse.status,
+      lastAction: settledProse.autopilot?.lastAction,
+      modes: callsFor(runProse).map((call) => call.mode),
+    }),
+  );
+  check(
+    "the answer to the queued message is delivered once",
+    callsFor(runProse).filter((call) => call.prompt.includes(QUEUED_PROSE)).length === 1 &&
+      messageText(runProse, QUEUED_PROSE)?.deliveryState === "acknowledged",
+  );
+
+  // Send now while the provider has not taken the live turn's prompt yet
+  // waits for it: stopped in its preflight, that prompt could still land after
+  // the next turn sent it again.
+  const FIRST_PRE = "Profile the hot loop";
+  const QUEUED_PRE = "Use the release build for it";
+  const runPre = writeRun(pausedRun("run-send-now-preflight"));
+  const turnPre = sendNowTurn(runPre);
+  await runStore.addRunMessage({ runId: runPre, author: "user", kind: "note", message: FIRST_PRE });
+  await gateOpened(turnPre.entered);
+  await runStore.addRunMessage({ runId: runPre, author: "user", kind: "note", message: QUEUED_PRE });
+  await runStore.deliverQueuedMessagesNow(runPre);
+  await sleep(150);
+  check("Send now does not stop a turn still in its preflight", interruptsFor(runPre) === 0);
+  turnPre.accept.open();
+  check(
+    "the turn is stopped as soon as the provider has its prompt",
+    await waitFor(() => interruptsFor(runPre) === 1),
+  );
+  await runStore.settleScheduledManagerWork(runPre);
+  check(
+    "after a preflight Send now each message reaches exactly one turn",
+    callsFor(runPre).length === 2 &&
+      callsFor(runPre).filter((call) => call.prompt.includes(FIRST_PRE)).length === 1 &&
+      callsFor(runPre).filter((call) => call.prompt.includes(QUEUED_PRE)).length === 1,
+    JSON.stringify(callsFor(runPre).map((call) => call.prompt.slice(0, 80))),
+  );
+
+  // Send now covers the messages queued when it was pressed. A turn that
+  // already carries them is not stopped later for a message sent afterwards:
+  // here the live turn fails before its prompt lands and its in-lock retry
+  // takes the queue, then the user sends one more message during the retry.
+  const FIRST_RETRY = "Port the cache layer";
+  const QUEUED_RETRY = "Keep the eviction policy as is";
+  const LATER_RETRY = "Also log cache misses";
+  const runRetry = writeRun(pausedRun("run-send-now-retry"));
+  const retryFirstEntered = gate();
+  const retryFirstFail = gate();
+  const retrySecondEntered = gate();
+  const retrySecondAccept = gate();
+  const retrySecondRelease = gate();
+  managerBehavior.set(runRetry, async (calls, input) => {
+    if (calls.length === 1) {
+      retryFirstEntered.open();
+      await retryFirstFail.opened;
+      return {
+        decision: { status: "talk", summary: "failed", chatReply: "", steps: [], tasks: [] },
+        durationMs: 1,
+        model: "stub-model",
+        notice: "fetch failed: ECONNRESET",
+        replaySafe: true,
+        turnFailed: true,
+      };
+    }
+    if (calls.length === 2) {
+      retrySecondEntered.open();
+      await retrySecondAccept.opened;
+      await input.onPromptAccepted?.();
+      await Promise.race([
+        new Promise((resolve) => interruptHandlers.set(runRetry, resolve)),
+        retrySecondRelease.opened,
+      ]);
+      return completeResult();
+    }
+    await input.onPromptAccepted?.();
+    return askUserResult();
+  });
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: FIRST_RETRY });
+  await gateOpened(retryFirstEntered);
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: QUEUED_RETRY });
+  await runStore.deliverQueuedMessagesNow(runRetry);
+  retryFirstFail.open();
+  check("the failed turn's retry starts", await gateOpened(retrySecondEntered, 8000));
+  check(
+    "the retry carries the message Send now was pressed for",
+    callsFor(runRetry)[1]?.prompt.includes(QUEUED_RETRY),
+    callsFor(runRetry)[1]?.prompt.slice(0, 200),
+  );
+  await runStore.addRunMessage({ runId: runRetry, author: "user", kind: "note", message: LATER_RETRY });
+  retrySecondAccept.open();
+  await sleep(200);
+  check(
+    "a message sent after Send now does not stop the turn that delivers the earlier queue",
+    interruptsFor(runRetry) === 0,
+    `interrupts=${interruptsFor(runRetry)}`,
+  );
+  retrySecondRelease.open();
+  check(
+    "the later message still gets its own turn",
+    await waitFor(() => callsFor(runRetry).some((call) => call.prompt.includes(LATER_RETRY))),
+  );
+  await runStore.settleScheduledManagerWork(runRetry);
+  check(
+    "each message of the retry scenario reaches exactly one turn",
+    [QUEUED_RETRY, LATER_RETRY].every(
+      (text) => callsFor(runRetry).filter((call) => call.prompt.includes(text)).length === 1,
+    ),
+    JSON.stringify(callsFor(runRetry).map((call) => call.prompt.slice(0, 80))),
+  );
+
+  // A turn that already carries the whole queue is left alone.
+  const FIRST_FULL = "Write the changelog";
+  const runFull = writeRun(pausedRun("run-send-now-nothing-left"));
+  const turnFull = sendNowTurn(runFull);
+  await runStore.addRunMessage({ runId: runFull, author: "user", kind: "note", message: FIRST_FULL });
+  await gateOpened(turnFull.entered);
+  const sendNowFull = await runStore.deliverQueuedMessagesNow(runFull);
+  turnFull.accept.open();
+  await sleep(150);
+  check(
+    "Send now with nothing queued behind the live turn interrupts nothing",
+    sendNowFull?.id === runFull && interruptsFor(runFull) === 0,
+  );
+  turnFull.release.open();
+  await runStore.settleScheduledManagerWork(runFull);
+
+  // Send now, then Unqueue everything before the stopped turn settles: no
+  // queued message is left to start the next turn, and the run must still not
+  // be left looking busy with nothing driving it.
+  const FIRST_UNQ = "Draft the release notes";
+  const QUEUED_UNQ = "Actually, include the migration guide";
+  const LATER_UNQ = "Go ahead with the notes";
+  const runUnq = writeRun(pausedRun("run-send-now-then-unqueue"));
+  const unqEntered = gate();
+  const unqInterrupted = gate();
+  const unqSettle = gate();
+  managerBehavior.set(runUnq, async (calls, input) => {
+    if (calls.length === 1) {
+      unqEntered.open();
+      const aborted = new Promise((resolve) => interruptHandlers.set(runUnq, resolve));
+      await input.onPromptAccepted?.();
+      await aborted;
+      unqInterrupted.open();
+      await unqSettle.opened;
+      return abortedResult();
+    }
+    await input.onPromptAccepted?.();
+    return completeResult();
+  });
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: FIRST_UNQ });
+  await gateOpened(unqEntered);
+  await waitFor(() => messageText(runUnq, FIRST_UNQ)?.deliveryState === "submitted");
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: QUEUED_UNQ });
+  await runStore.deliverQueuedMessagesNow(runUnq);
+  check("Send now stops the turn before the unqueue", await gateOpened(unqInterrupted));
+  await runStore.cancelQueuedMessage({ runId: runUnq, messageId: messageText(runUnq, QUEUED_UNQ).id });
+  unqSettle.open();
+  await runStore.settleScheduledManagerWork(runUnq);
+  await sleep(100);
+  const restedUnq = readRun(runUnq);
+  check(
+    "a stopped turn with nothing left to send leaves no turn running",
+    !restedUnq.sparkCalls.some((call) => call.status === "started" && !call.completedAt),
+    JSON.stringify(restedUnq.sparkCalls.map((call) => call.status)),
+  );
+  check(
+    "a stopped turn with nothing left to send does not leave the run looking busy",
+    !["planning", "running", "reviewing"].includes(restedUnq.status),
+    restedUnq.status,
+  );
+  check(
+    "the stopped turn's input is not sent again when nothing follows it",
+    callsFor(runUnq).filter((call) => call.prompt.includes(FIRST_UNQ)).length === 1,
+    JSON.stringify(callsFor(runUnq).map((call) => call.prompt.slice(0, 80))),
+  );
+  await runStore.addRunMessage({ runId: runUnq, author: "user", kind: "note", message: LATER_UNQ });
+  check(
+    "the next message after that starts a turn",
+    await waitFor(() => callsFor(runUnq).some((call) => call.prompt.includes(LATER_UNQ))),
+    JSON.stringify({ status: readRun(runUnq).status, calls: callsFor(runUnq).length }),
+  );
+  await runStore.settleScheduledManagerWork(runUnq);
+  check(
+    "a later turn is not told the user stopped a reply to send it",
+    !(callsFor(runUnq).find((call) => call.prompt.includes(LATER_UNQ))?.prompt ?? "").includes(
+      "stopped your previous reply",
+    ),
+  );
+
+  // No live turn: Send now just starts one. The queued message has spent its
+  // automatic delivery budget, so only the explicit action delivers it.
+  const QUEUED_IDLE = "Pick the parser work back up";
+  const runIdle = writeRun(
+    pausedRun("run-send-now-idle", {
+      status: "running",
+      autopilot: { status: "running", lastAction: "workers_running", updatedAt: PAUSED_AT },
+      humanMessages: [
+        ...pausedRun("run-send-now-idle").humanMessages,
+        {
+          id: "msg-idle-queued",
+          runId: "run-send-now-idle",
+          author: "user",
+          kind: "note",
+          message: QUEUED_IDLE,
+          attachments: [],
+          createdAt: PAUSED_AT,
+          deliveryState: "queued",
+          deliveryAttempts: 2,
+          intent: "steer",
+          conversationEpoch: 1,
+        },
+      ],
+    }),
+  );
+  managerBehavior.set(runIdle, async () => completeResult());
+  await runStore.deliverQueuedMessagesNow(runIdle);
+  check(
+    "Send now with no live turn starts one with the queue",
+    await waitFor(() => callsFor(runIdle).some((call) => call.prompt.includes(QUEUED_IDLE))),
+  );
+  await runStore.settleScheduledManagerWork(runIdle);
+  check(
+    "Send now with no live turn interrupts nothing and delivers once",
+    interruptsFor(runIdle) === 0 && callsFor(runIdle).filter((call) => call.prompt.includes(QUEUED_IDLE)).length === 1,
+    `interrupts=${interruptsFor(runIdle)} calls=${callsFor(runIdle).length}`,
+  );
+  check(
+    "a turn started by Send now without an interrupt carries no interrupt note",
+    !callsFor(runIdle)[0]?.prompt.includes("stopped your previous reply"),
+  );
+
   let sendNowEmptyError = null;
   let sendNowEmptyResult = null;
   try {
@@ -659,17 +1001,13 @@ async function main() {
     /waiting for your answer/.test(sendNowBlockedError?.message ?? ""),
     sendNowBlockedError?.message,
   );
+  globalThis.__coraInterruptStub = undefined;
 
-  // ── 5b. steer: a mid-turn message goes into the live turn ───────────────
-  const steers = [];
-  let steerAccepts = true;
-  globalThis.__coraSteerStub = async (steerRunId, steer) => {
-    steers.push({ runId: steerRunId, ...steer });
-    return steerAccepts;
-  };
-  const steersFor = (steerRunId) => steers.filter((steer) => steer.runId === steerRunId);
-  const messageText = (msgRunId, text) =>
-    readRun(msgRunId).humanMessages.find((message) => message.message === text);
+  const settings = await runStore.loadSettings();
+  check(
+    "a settings file from before drops the mid-turn delivery key",
+    !("coraMidTurnDelivery" in runStore.normalizeSettings({ ...settings, coraMidTurnDelivery: "queue" })),
+  );
 
   async function gatedTurn(id, firstResult = completeResult) {
     const entered = gate();
@@ -689,109 +1027,6 @@ async function main() {
     );
     return { dispatched, liveCall, release };
   }
-
-  const STEER_F = "Use a hash map for the symbol table";
-  const runF = writeRun(pausedRun("run-steer-read"));
-  const turnF = await gatedTurn(runF);
-  check("the steer scenario's turn dispatched", turnF.dispatched && Boolean(turnF.liveCall));
-  await runStore.addRunMessage({ runId: runF, author: "user", kind: "note", message: STEER_F });
-  check("a mid-turn message is steered into the live turn", await waitFor(() => steersFor(runF).length === 1));
-  const steerF = steersFor(runF)[0];
-  check("the steer carries the user's text", Boolean(steerF?.text.includes(STEER_F)), steerF?.text);
-  const claimedF = messageText(runF, STEER_F);
-  check(
-    "the steered message is claimed by the live call",
-    claimedF?.backendTurnId === turnF.liveCall?.id &&
-      claimedF?.deliveryState === "submitted" &&
-      Boolean(claimedF?.steeredAt),
-    JSON.stringify(claimedF),
-  );
-  check(
-    "the live call's input list records the steer",
-    (
-      readRun(runF).sparkCalls.find((call) => call.id === turnF.liveCall?.id)?.inputMessageIds ?? []
-    ).includes(claimedF?.id),
-  );
-  check("an unread steer makes the wait tool yield", runStore.hasUndeliveredSteer(readRun(runF)));
-  steerF?.onDelivered();
-  check(
-    "the runtime's delivery notice is recorded",
-    await waitFor(() => Boolean(messageText(runF, STEER_F)?.steerDeliveredAt)),
-  );
-  check("a read steer no longer makes the wait tool yield", !runStore.hasUndeliveredSteer(readRun(runF)));
-  turnF.release.open();
-  await runStore.settleScheduledManagerWork(runF);
-  check(
-    "the turn that read the steer acknowledges it",
-    messageText(runF, STEER_F)?.deliveryState === "acknowledged",
-    messageText(runF, STEER_F)?.deliveryState,
-  );
-  check(
-    "a steer the live turn read never gets a turn of its own",
-    callsFor(runF).length === 1,
-    `calls=${callsFor(runF).length}`,
-  );
-
-  const STEER_G = "Skip the benchmark, it is flaky";
-  const runG = writeRun(pausedRun("run-steer-unread"));
-  const turnG = await gatedTurn(runG);
-  await runStore.addRunMessage({ runId: runG, author: "user", kind: "note", message: STEER_G });
-  await waitFor(() => steersFor(runG).length === 1);
-  turnG.release.open();
-  await runStore.settleScheduledManagerWork(runG);
-  check(
-    "a steer the turn never read is delivered by the next turn",
-    callsFor(runG).filter((call) => call.prompt.includes(STEER_G)).length === 1,
-    JSON.stringify(callsFor(runG).map((call) => call.prompt.slice(0, 60))),
-  );
-  const finalG = messageText(runG, STEER_G);
-  check(
-    "the unread steer was returned to the queue, not acknowledged by the turn that missed it",
-    finalG?.backendTurnId !== turnG.liveCall?.id &&
-      readEvents(runG).some((event) => event.type === "run.manager_input_steer_returned"),
-    JSON.stringify(finalG),
-  );
-
-  const STEER_H = "Rename the module to lexer";
-  const runH = writeRun(pausedRun("run-steer-refused"));
-  steerAccepts = false;
-  const turnH = await gatedTurn(runH);
-  await runStore.addRunMessage({ runId: runH, author: "user", kind: "note", message: STEER_H });
-  await waitFor(() => steersFor(runH).length === 1);
-  await waitFor(() => messageText(runH, STEER_H)?.deliveryState === "queued");
-  check(
-    "a steer the runtime refuses goes back to the queue unowned",
-    messageText(runH, STEER_H)?.deliveryState === "queued" && !messageText(runH, STEER_H)?.backendTurnId,
-    JSON.stringify(messageText(runH, STEER_H)),
-  );
-  steerAccepts = true;
-  turnH.release.open();
-  await runStore.settleScheduledManagerWork(runH);
-  check(
-    "a refused steer is delivered once by the next turn",
-    callsFor(runH).filter((call) => call.prompt.includes(STEER_H)).length === 1,
-  );
-
-  const settings = await runStore.loadSettings();
-  await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "queue" });
-  const STEER_I = "Keep the error messages short";
-  const runI = writeRun(pausedRun("run-steer-setting-queue"));
-  const turnI = await gatedTurn(runI);
-  await runStore.addRunMessage({ runId: runI, author: "user", kind: "note", message: STEER_I });
-  await sleep(200);
-  check(
-    'coraMidTurnDelivery "queue" keeps the message out of the live turn',
-    steersFor(runI).length === 0 && messageText(runI, STEER_I)?.deliveryState === "queued",
-    JSON.stringify(messageText(runI, STEER_I)),
-  );
-  turnI.release.open();
-  await runStore.settleScheduledManagerWork(runI);
-  check(
-    'with "queue" the next turn delivers the message once',
-    callsFor(runI).filter((call) => call.prompt.includes(STEER_I)).length === 1,
-  );
-  await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "steer" });
-  globalThis.__coraSteerStub = undefined;
 
   // ── 5c. turn discipline ─────────────────────────────────────────────────
   // One manager turn per run: Resume, Send now and the follow-up scheduler
@@ -1180,9 +1415,7 @@ async function main() {
     });
     await runStore.resumeRun({ runId: runS });
     await gateOpened(enteredS);
-    await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "queue" });
     await runStore.addRunMessage({ runId: runS, author: "user", kind: "note", message: QUEUED_S });
-    await runStore.saveSettings({ ...settings, coraMidTurnDelivery: "steer" });
     // The interrupted turn returns while the session is still being torn
     // down, which is when the queued follow-up used to slip in.
     globalThis.__coraDisposeHook = async (id) => {
@@ -1276,7 +1509,6 @@ async function main() {
           deliveryState: "submitted",
           backendTurnId: "spark-cut-by-restart",
           targetTurnId: "spark-cut-by-restart",
-          steeredAt: restartedAt,
           intent: "turn",
           conversationEpoch: 1,
         },
@@ -1300,8 +1532,7 @@ async function main() {
   check(
     "restart recovery marks a submitted message as redelivered when it requeues it",
     restartedV?.deliveryState === "queued" &&
-      restartedV?.redelivered === true &&
-      !restartedV?.steeredAt,
+      restartedV?.redelivered === true,
     JSON.stringify(restartedV),
   );
 
@@ -1396,11 +1627,8 @@ async function main() {
     "the wait handler carries no mid-turn delivery machinery",
     !waitBody.includes("enterManagerWaitPark") &&
       !waitBody.includes("claimQueuedInputForParkedManagerWait") &&
-      !waitBody.includes("user_messages"),
-  );
-  check(
-    "the wait handler yields to a steer the live turn has not read",
-    waitBody.includes("hasUndeliveredSteer(") && waitBody.includes('"user_message"'),
+      !waitBody.includes("user_message") &&
+      !waitBody.includes("Steer"),
   );
 
   const storeSource = fs.readFileSync(RUN_STORE_TS, "utf8");
@@ -1408,6 +1636,18 @@ async function main() {
     "run-store no longer owns a parked-wait registry",
     !storeSource.includes("parkedManagerWaits") &&
       !storeSource.includes("enterManagerWaitPark"),
+  );
+  check(
+    "nothing hands a queued message to the live turn",
+    !storeSource.includes("steerChat") &&
+      !storeSource.includes("steeredAt") &&
+      !storeSource.includes("coraMidTurnDelivery"),
+  );
+  check(
+    "the mid-turn delivery setting is gone from settings and types",
+    !fs.readFileSync(STORAGE_TS, "utf8").includes("coraMidTurnDelivery") &&
+      !fs.readFileSync(SHARED_TYPES_TS, "utf8").includes("coraMidTurnDelivery") &&
+      !fs.readFileSync(SHARED_TYPES_TS, "utf8").includes("CoraMidTurnDelivery"),
   );
   check(
     "addRunMessage arms the steering follow-up unconditionally for live work",
@@ -1453,6 +1693,11 @@ async function main() {
   check(
     "the send button says Queue while a turn is active",
     composerSource.includes('label={isActive ? "Queue" : "Send"}'),
+  );
+  check(
+    "the composer hint during a live turn says the message queues and how to send it now",
+    /isActive\s*\?\s*"Message Cora\. It waits for her next turn, or press Send now on it to interrupt her\."/.test(composerSource) &&
+      !composerSource.includes("useCoraMidTurnDelivery"),
   );
   check(
     "the composer stays editable while a send or Resume is in flight",
