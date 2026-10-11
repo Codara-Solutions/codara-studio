@@ -63,6 +63,12 @@ import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
+import {
+  captureTerminalScreenModes,
+  setTerminalPaneAlternateScreen,
+  terminalScreenModesSequence,
+  type TerminalScreenModes,
+} from "./terminalScreenModes";
 
 export type { SparkOpenInput };
 
@@ -145,24 +151,24 @@ const autoResumeAttempts = new Map<string, number[]>();
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
 
-// Bracketed-paste mode (DECSET 2004) per live session. A TUI enables it ONCE
-// at startup, but a pane's xterm is disposed and recreated on every workspace
-// switch while its PTY keeps running, and the replay that rebuilds the fresh
-// instance is flattened TEXT: it carries no escape sequences, so the new
-// Terminal starts with the mode off while the still-running TUI believes it is
-// on. Anything that frames input for a paste-aware TUI then stops framing it,
-// which is why a dropped image path arrived in Claude Code as literal text
-// instead of an attachment after a few hours of switching around. One boolean
-// per session, remembered across the dispose so the fresh instance can be told
-// what the remote terminal is still doing.
-const bracketedPasteModes = new Map<string, boolean>();
+// Screen modes per live session (alternate screen, bracketed paste, mouse
+// reporting, ...). A TUI enables them ONCE at startup, but a pane's xterm is
+// disposed and recreated while its PTY keeps running, and the replay that
+// rebuilds the fresh instance is flattened TEXT: it carries no escape
+// sequences, so the new Terminal starts with every mode off while the
+// still-running TUI believes they are on. A lost bracketed paste is why a
+// dropped image path arrived in Claude Code as literal text; a lost alternate
+// screen is why its repaint landed in the scrollback with the mouse wheel no
+// longer reaching it. Remembered across the dispose so the fresh instance can
+// be told what the remote terminal is still doing.
+const rememberedScreenModes = new Map<string, TerminalScreenModes>();
 
 // These registries are remount guards, not durable terminal state. App calls
 // this only after a pane disappears from every active/inactive workspace
 // layout. Exact lifecycle cleanup keeps them bounded without an arbitrary cap
 // that could evict a still-live terminal in an unusually large workspace.
 export function forgetTerminalSessionMemory(sessionId: string): void {
-  bracketedPasteModes.delete(sessionId);
+  rememberedScreenModes.delete(sessionId);
   autorunFiredSessions.delete(sessionId);
   autoResumeAttempts.delete(sessionId);
   resumeHintShown.delete(sessionId);
@@ -1517,17 +1523,30 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      // Re-arm the mode the still-running TUI enabled before this pane's
-      // previous xterm was disposed. Written to the LOCAL terminal only: it
-      // teaches this instance what the remote side is doing and sends nothing
-      // to the PTY. A session whose TUI has since exited re-learns the mode
-      // from its own output, so a stale `true` costs at most one framed paste.
-      if (bracketedPasteModes.get(sessionId) === true) {
+      // Re-arm the modes the still-running TUI enabled before this pane's
+      // previous xterm was disposed, once the normal-screen snapshot below has
+      // been written. Local terminal only: it teaches this instance what the
+      // remote side is doing and sends nothing to the PTY. A TUI that has since
+      // exited leaves the alternate screen and its modes in its own output, and
+      // the redraw requested on attach repaints the rest.
+      const screenModes = readOnlyRef.current ? undefined : rememberedScreenModes.get(sessionId);
+      const restoreScreenModes = () => {
+        if (!screenModes) return;
         try {
-          term.write("\u001b[?2004h");
+          const sequence = terminalScreenModesSequence(screenModes);
+          if (sequence) term.write(sequence);
         } catch {
-          /* a terminal disposed mid-mount just starts without the mode */
+          /* a terminal disposed mid-mount just starts without the modes */
         }
+      };
+      if (!readOnlyRef.current) {
+        const screenSubscription = term.buffer.onBufferChange((buffer) => {
+          setTerminalPaneAlternateScreen(sessionId, buffer.type === "alternate");
+        });
+        cleanups.push(() => {
+          screenSubscription.dispose();
+          setTerminalPaneAlternateScreen(sessionId, false);
+        });
       }
       if (externalSizeOwnerRef.current) {
         const unsubscribeExternalSize = subscribeExternalTerminalSize(
@@ -1594,22 +1613,19 @@ export function useTerminalSession({
           viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
         if (replay) {
-          term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
-            // Write the hidden-era bytes verbatim after the text replay has
-            // parsed, then clear the pending flag in the final callback so the
-            // ordering (text → hidden bytes) is preserved even under chunked
-            // parsing.
-            if (pendingBytes && pendingBytes.length > 0) {
-              term.write(pendingBytes, finishReplay);
-            } else {
-              finishReplay();
-            }
-          });
-        } else if (pendingBytes && pendingBytes.length > 0) {
+          term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
+        }
+        restoreScreenModes();
+        // Write the hidden-era bytes verbatim after the text replay and the
+        // modes, then clear the pending flag in the final callback so the
+        // ordering (text, modes, hidden bytes) holds even under chunked parsing.
+        if (pendingBytes && pendingBytes.length > 0) {
           term.write(pendingBytes, finishReplay);
         } else {
-          finishReplay();
+          term.write("", finishReplay);
         }
+      } else {
+        restoreScreenModes();
       }
 
       const prompt = registerPromptTracker(term);
@@ -3591,8 +3607,8 @@ export function useTerminalSession({
           // limit on the stashed combination too, reusing the same trim helper
           // the hot path uses.
           // Remembered unconditionally: a pane with nothing worth snapshotting
-          // still has a mode the running TUI expects to survive the remount.
-          bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true);
+          // still has modes the running TUI expects to survive the remount.
+          rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm));
           const pendingBytes = mergeHiddenBuffer(
             hiddenBufferRef.current,
             hiddenBytesRef.current,

@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { OnboardingProgress, StudioTourFeature } from "@shared/onboarding";
 import type {
   AppSettings,
@@ -65,6 +65,11 @@ import {
   setWorkspaceAgentCounts,
 } from "./components/Terminal/terminalRegistry";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
+import {
+  alternateScreenPanesRevision,
+  isTerminalPaneInAlternateScreen,
+  subscribeAlternateScreenPanes,
+} from "./components/Terminal/terminalScreenModes";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
@@ -411,6 +416,18 @@ function hasLiveAgentTerminal(tabs: Tab[]): boolean {
       }
     });
     if (live) return true;
+  }
+  return false;
+}
+
+function hasAlternateScreenTerminal(tabs: Tab[]): boolean {
+  for (const tab of tabs) {
+    if (tab.kind !== "terminal") continue;
+    let alternate = false;
+    forEachTerminalLeaf(tab.root, (leaf) => {
+      if (isTerminalPaneInAlternateScreen(leaf.paneId)) alternate = true;
+    });
+    if (alternate) return true;
   }
   return false;
 }
@@ -4921,22 +4938,30 @@ export default function App() {
     tabs.inactiveWorkspaceLayouts,
     validWorkspaceIds,
   ]);
+  const alternateScreenRevision = useSyncExternalStore(
+    subscribeAlternateScreenPanes,
+    alternateScreenPanesRevision,
+  );
   const liveTerminalWorkspaceIds = useMemo(() => {
     const ids = new Set<string>();
     for (const placement of agentTerminalPlacementsRef.current.values()) {
       if (placement.workspaceId) ids.add(placement.workspaceId);
     }
     for (const layout of tabs.inactiveWorkspaceLayouts) {
-      // Full-screen agent TUIs live in xterm's alternate buffer, which cannot
-      // be flattened into a lossless text snapshot. Keep those renderers alive
-      // until the foreground agent exits; idle shells remain eligible for the
+      // Full-screen TUIs live in xterm's alternate buffer, which cannot be
+      // flattened into a lossless text snapshot. Keep those renderers alive
+      // while the screen is up, read from xterm itself so a stale or missing
+      // agent badge cannot unload one; idle shells remain eligible for the
       // bounded warm-workspace policy below.
-      if (hasLiveAgentTerminal(layout.tabs)) ids.add(layout.workspaceId);
+      if (hasLiveAgentTerminal(layout.tabs) || hasAlternateScreenTerminal(layout.tabs)) {
+        ids.add(layout.workspaceId);
+      }
     }
     // Placement and foreground-state mutations accompany a layout mutation;
     // those are the render-driving values for this ref-backed registry.
     return ids;
-  }, [tabs.tabs, tabs.inactiveWorkspaceLayouts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs.tabs, tabs.inactiveWorkspaceLayouts, alternateScreenRevision]);
 
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
