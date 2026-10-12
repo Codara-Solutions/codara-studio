@@ -611,7 +611,11 @@ export interface AppSettings {
   // both Cora and Pi workers. Claude/Codex delivery ignores them entirely.
   agentMcpCoraManagerIds: string[];
   agentMcpPiWorkerIds: string[];
-  playwrightMcpAutoInstall: boolean;
+  // "Codara tools in other apps": when true, the codara-studio server is also
+  // written into the user's global Claude Code, Codex and Grok config so
+  // sessions outside Codara can use it. Off by default; sessions Codara starts
+  // get the server per launch either way.
+  studioToolsInOtherApps: boolean;
   // When true, autopilot/unattended workers launch inside a throwaway git
   // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
   // with worktree-scoped permissions instead of full skip-permissions —
@@ -1931,8 +1935,8 @@ export interface SparkBuiltinMcpStatus {
   detail: string;
   // Tool names the server exposes (for the "N tools" badge + tooltip).
   tools: string[];
-  // When true, Codara auto-installs/refreshes this server on launch (governed
-  // by the playwrightMcpAutoInstall setting). Shown as an "auto" hint.
+  // When true, Codara passes this server to the sessions it starts instead of
+  // installing it anywhere. Shown as an "auto" hint.
   autoManaged: boolean;
   claude: SparkBuiltinRuntimeStatus;
   codex: SparkBuiltinRuntimeStatus;

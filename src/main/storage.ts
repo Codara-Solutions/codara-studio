@@ -55,7 +55,7 @@ const EMPTY_SETTINGS: AppSettings = {
   agentDisabledSkillIds: [],
   agentMcpCoraManagerIds: [],
   agentMcpPiWorkerIds: [],
-  playwrightMcpAutoInstall: true,
+  studioToolsInOtherApps: false,
   autopilotSandbox: false,
   openAiFastMode: false,
   coraAlwaysVerifyEdits: false,
@@ -376,7 +376,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     // pre-existing behaviour.
     agentMcpCoraManagerIds: normalizeStringArray(settings.agentMcpCoraManagerIds),
     agentMcpPiWorkerIds: normalizeStringArray(settings.agentMcpPiWorkerIds),
-    playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
+    studioToolsInOtherApps: settings.studioToolsInOtherApps === true,
     autopilotSandbox: settings.autopilotSandbox === true,
     openAiFastMode: settings.openAiFastMode === true,
     coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,

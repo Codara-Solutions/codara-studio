@@ -1,33 +1,30 @@
-// codara-studio MCP auto-installer — registers Codara's single built-in stdio
-// MCP server in the user-scope Claude, Codex, and Grok configs so every sub-agent
-// Codara spawns (including verifier passes) can drive the actual <preview> tab
-// and open/steer agent-owned terminal tabs inside Codara. The server lives at
+// The codara-studio MCP server: Codara's single built-in stdio server that
+// lets agents drive the live <preview> tab and open/steer agent-owned
+// terminal tabs inside Codara. The server lives at
 // resources/codara-studio-mcp/server.js and proxies JSON-RPC calls back to
 // Codara's agent-socket loopback HTTP channel. See preview-bridge.ts +
 // previewRpc.ts (preview) and agent-socket.ts (terminal) for the round-trip.
 //
-// The globally-installed entry exposes the "studio" roster (preview + terminal
-// tools). The orchestration tool sets (Execute worker-spawning / Automation
-// architect) are layered on TOP of that roster only when a backend spawns the
-// server with SPARK_MCP_MODE=execute|automation — Claude via a per-run
-// --mcp-config, Codex via a `-c mcp_servers."codara-studio".env.SPARK_MCP_MODE`
-// override — and automation workers get SPARK_MCP_MODE=worker (the
-// studio surface plus the loop-lifecycle pair). The
-// single server and all its rosters live in server.js itself.
+// Sessions Codara starts get the server per launch (`claude --mcp-config`,
+// `codex -c mcp_servers.codara-studio=...`, built in
+// agent-launch-integration.ts; a managed Grok home's private config.toml), so
+// nothing is written into the user's own CLI configs. The per-CLI switch in
+// the Capability Center decides whether a CLI gets it (builtin-mcp.json keeps
+// the CLIs it is off for). The server's roster is chosen by SPARK_MCP_MODE:
+// studio for panes, execute / automation / worker for orchestration.
 //
-// Design mirrors hook-installer.ts:
+// The rest of this file is the opt-in "Codara tools in other apps"
+// (studioToolsInOtherApps): only while the user has it on does Codara add the
+// server to the user-scope Claude, Codex and Grok configs, so sessions
+// outside Codara can use it, and turning it off removes exactly that. Those
+// writes follow the old installer's rules:
 // 1. Idempotent. JSON entries are tagged `_sparkManaged: true` + version;
-//    Codex TOML insertion lives in a dedicated managed block (`SPARK_AGENT_
+//    the TOML entry lives in a dedicated managed block (`SPARK_AGENT_
 //    BUILTIN_MCP`) so it never fights the agent-sync managed block.
-// 2. Non-destructive. If the user already has a non-Codara `codara-studio`
-//    entry, we leave it alone. We never touch user-owned `playwright`
-//    entries (the user may have installed Playwright MCP separately).
-// 3. Conservative. We only touch a config file if it (or its parent dir)
-//    already exists — no foreign config gets created in clean homedirs.
-// 4. Fire-and-forget. Errors are logged; they never block startup.
-// 5. Cleanup. Any old Codara-managed entries from earlier Codara versions
-//    (the Playwright experiment, the pre-merge cora-preview / cora-orchestrator
-//    servers, the pre-Cora spark-* names) are removed on every launch.
+// 2. Non-destructive. A non-Codara `codara-studio` entry is left alone, and
+//    user-owned `playwright` entries are never touched.
+// 3. Never transient. An app running from a temp directory or a worktree
+//    does not point a long-lived config at itself.
 
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -50,13 +47,14 @@ import { resolveCodexHomePaths } from "./orchestration/codex-home";
 import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
 import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
 import { codaraHome } from "./codara-home";
+import { isTransientPath } from "./hook-installer";
 import { outsideWriteCapability } from "./outside-write-guard";
 
-/** Explicit exception to the outside-write guard: the Codara MCP server in the user's CLI configs. */
-const GLOBAL_MCP_INSTALL = outsideWriteCapability("the Codara MCP server in the user's CLI configs");
+/** Explicit exception to the outside-write guard: the opt-in "Codara tools in other apps". */
+const GLOBAL_MCP_INSTALL = outsideWriteCapability("the opt-in Codara tools in the user's CLI configs");
 
 // The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
-// before v5 — both are cleaned up as legacy on launch.
+// before v5; both are removed as legacy when the opt-in writes its entry.
 const SERVER_NAME = "codara-studio";
 // Callers that report on the built-in (sync summaries, IPC status text) use
 // this instead of re-typing the name.
@@ -279,10 +277,9 @@ function buildServerEnv(): Record<string, string> {
   return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: codaraHome() };
 }
 
-// The CLIs the user switched the built-in off for. Launch auto-install skips
-// them, so a removal outlives the restart that would otherwise write the entry
-// straight back; an explicit install clears the mark. Only the personal configs
-// are tracked: a caller naming its own Codex or Grok home manages another file.
+// The CLIs the user switched the built-in off for: their sessions started by
+// Codara get no codara-studio server, and the opt-in global install skips
+// them. An explicit install clears the mark.
 const OPT_OUT_FILE = "builtin-mcp.json";
 const BUILTIN_RUNTIMES: readonly SparkBuiltinRuntime[] = ["claude", "codex", "grok"];
 let optOutWrite: Promise<void> = Promise.resolve();
@@ -317,12 +314,11 @@ function setSparkBuiltinOptOut(runtime: SparkBuiltinRuntime, optedOut: boolean):
   return next;
 }
 
-// Repair-only pass over both runtimes: reports which config files it had to
-// rewrite. The Capability Center's "Sync Claude and Codex" action calls this so
-// a stale built-in entry (a Codara entry left pointing at an install path that
-// no longer exists) is repaired on demand, not only at the next launch. It never
-// installs from absent: a runtime the user just removed the built-in from stays
-// removed until the next launch or an explicit install.
+// Repair-only pass over the opt-in global entries: reports which config files
+// it had to rewrite. The Capability Center's "Sync Claude and Codex" action
+// calls this, only while "Codara tools in other apps" is on, so an entry left
+// pointing at an install path that no longer exists is repaired. It never
+// installs from absent.
 export async function repairSparkBuiltinEntries(
   input: CodexMcpHomeOptions = {},
 ): Promise<{ claude: boolean; codex: boolean; grok: boolean }> {
@@ -334,33 +330,89 @@ export async function repairSparkBuiltinEntries(
   return { claude: claude.changed, codex: codex.changed, grok: grok.changed };
 }
 
-// Boot-time installer. Design rule #3 (stay conservative) says the auto-
-// installer never CREATES a foreign config in a clean homedir — but that also
-// meant a user who has `claude`/`codex` on PATH yet has never launched it (so
-// ~/.claude.json / ~/.codex don't exist yet) silently got no codara-studio
-// entry, and the browser/terminal surface just didn't work for them. Split the
-// difference: probe for the actual CLI binary and, only when it resolves, allow
-// createIfMissing so the entry lands the first time. The never-overwrite-a-
-// user-entry guards inside installForClaude/installForCodex still hold.
-export async function installSparkPreviewMcpAtBoot(): Promise<void> {
+export type SparkMcpMode = "studio" | "execute" | "automation" | "worker";
+
+/** The server as a launch passes it: command, argv and environment. */
+export function codaraStudioServerSpec(mode: SparkMcpMode): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+} {
+  return {
+    command: resolveNodeCommand(),
+    args: buildServerArgs(),
+    // "studio" leaves the variable unset, as the global entry always did.
+    env: mode === "studio" ? buildServerEnv() : { ...buildServerEnv(), SPARK_MCP_MODE: mode },
+  };
+}
+
+/** Codex's per-call and startup limits for the server, for a `-c` override. */
+export const CODEX_STUDIO_TIMEOUTS = {
+  tool_timeout_sec: CODEX_TOOL_TIMEOUT_SEC,
+  startup_timeout_sec: CODEX_STARTUP_TIMEOUT_SEC,
+} as const;
+
+/**
+ * A Codara-generated Grok config (a managed GROK_HOME's private copy of the
+ * user's config.toml): any codara-studio block copied from the source is
+ * dropped and one current block is appended, unless the user's own
+ * codara-studio table is there or the server is switched off for Grok.
+ */
+export function withCodaraStudioGrokBlock(source: string, include: boolean): string {
+  const section = classifyCodexBuiltinSection(source);
+  const stripped = stripAllManagedBlocks(source, { sweepBuiltinName: isCodaraOwnedSection(section) });
+  if (!include || section === "user") return source.trim() === "" ? source : stripped;
+  const base = stripped.trimEnd();
+  const block = renderCodexBlock();
+  return base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+}
+
+// The global entries are only ever written for an app that will still be
+// there tomorrow: a temp-directory home (an e2e run) or a server script inside
+// a temp directory or worktree would leave the user's config pointing at a
+// path that disappears.
+async function globalInstallBlockedReason(): Promise<string | null> {
+  if (isSandboxedHome()) return "This Codara instance runs with a temporary home.";
+  if (await isTransientPath(resolveServerScript())) {
+    return "This Codara build runs from a temporary folder or a worktree.";
+  }
+  return null;
+}
+
+/**
+ * Turn "Codara tools in other apps" on: add the server to the user-scope
+ * config of every CLI it is not switched off for and whose binary is on this
+ * computer.
+ */
+export async function installStudioToolsInOtherApps(): Promise<SparkBuiltinActionResult> {
+  const blocked = await globalInstallBlockedReason();
+  if (blocked) return { ok: false, error: blocked };
   const optedOut = readSparkBuiltinOptOuts();
   const [claudeBin, codexBin, grokBin] = await Promise.all([
     resolveBinary("claude").catch(() => null),
     resolveBinary("codex").catch(() => null),
     resolveBinary("grok").catch(() => null),
   ]);
-  await Promise.all([
-    optedOut.has("claude") ? null : installForClaude(Boolean(claudeBin)),
-    optedOut.has("codex") ? null : installForCodex(Boolean(codexBin)),
-    optedOut.has("grok") ? null : installForGrok(Boolean(grokBin)),
+  const outcomes = await Promise.all([
+    optedOut.has("claude") || !claudeBin ? null : installForClaude(true),
+    optedOut.has("codex") || !codexBin ? null : installForCodex(true),
+    optedOut.has("grok") || !grokBin ? null : installForGrok(true),
   ]);
+  const failed = outcomes.find(
+    (outcome) =>
+      outcome && !outcome.changed && outcome.reason !== "already-current" && outcome.reason !== "user-owned",
+  );
+  return failed ? { ok: false, error: failed.error ?? "The Codara Studio tools were not added everywhere." } : { ok: true };
 }
 
-export async function installSparkPreviewMcpForCodex(
-  createIfMissing = false,
-  options: CodexMcpHomeOptions = {},
-): Promise<void> {
-  await installForCodex(createIfMissing, undefined, options.codexHome);
+/** Turn it off: remove exactly the Codara-managed entries, never a user's own. */
+export async function removeStudioToolsFromOtherApps(): Promise<SparkBuiltinActionResult> {
+  const results = await Promise.all([
+    uninstallManagedClaudeServer(SERVER_NAME),
+    uninstallCodexBuiltinBlock(),
+    uninstallGrokBuiltinBlock(),
+  ]);
+  return results.find((result) => !result.ok) ?? { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -860,11 +912,9 @@ function renderCodexBlock(options: { timeouts?: boolean } = {}): string {
   const args = buildServerArgs();
   return [
     CODEX_BLOCK_START,
-    `# Managed by Codara. Auto-installs the codara-studio MCP so agents can`,
-    `# drive the live <preview> tab and open/steer agent-owned terminal tabs`,
-    `# inside Codara. Disable via Settings > Capabilities or delete this block`,
-    `# (Codara will re-add it on next launch unless the auto-install toggle is`,
-    `# off).`,
+    `# Managed by Codara: "Codara tools in other apps" is on, so sessions`,
+    `# started outside Codara can drive its preview and terminals. Turning`,
+    `# that setting off removes this block.`,
     `# Version: ${SPARK_VERSION}`,
     "",
     `[mcp_servers."${SERVER_NAME}"]`,
@@ -890,23 +940,16 @@ function tomlString(value: string): string {
 // Availability detection
 // ---------------------------------------------------------------------------
 
-// True when sub-agent prompts should be told to USE the codara-studio MCP.
-// True if either (a) auto-install is on AND a Claude/Codex runtime the user
-// has not switched it off for is on disk (so we know we wrote an entry), or
-// (b) the user has a codara-studio entry of their own in any user/workspace
-// config.
+// True when sub-agent prompts should be told to USE the codara-studio MCP:
+// Codara passes the server to Claude and Codex sessions it starts unless the
+// user switched it off for both, and a codara-studio entry of the user's own
+// in any user/workspace config counts too.
 export function isSparkPreviewMcpAvailable(input: {
   cwd: string | null;
-  autoInstallEnabled: boolean;
   codexHome?: string | null;
 }): boolean {
-  const codexTarget = resolveCodexMcpConfigTarget(input.codexHome);
-  if (input.autoInstallEnabled) {
-    const optedOut = readSparkBuiltinOptOuts();
-    if (!optedOut.has("claude") && existsSync(CLAUDE_USER_CONFIG)) return true;
-    if ((input.codexHome || !optedOut.has("codex")) && existsSync(codexTarget.codexHome)) return true;
-    if (!optedOut.has("grok") && existsSync(resolveGrokMcpConfigTarget().grokHome)) return true;
-  }
+  const optedOut = readSparkBuiltinOptOuts();
+  if (!optedOut.has("claude") || !optedOut.has("codex")) return true;
   return detectUserSparkEntry(input.cwd, input.codexHome);
 }
 
@@ -1051,13 +1094,14 @@ export async function isSparkOrchestratorMcpInstalled(
 }
 
 // ---------------------------------------------------------------------------
-// Codara built-in status + per-runtime install/uninstall (Capability Center)
+// Codara built-in status + per-runtime switch (Capability Center)
 // ---------------------------------------------------------------------------
 //
 // The Capability Center renders codara-studio in its own branded section with
-// per-runtime install controls. These functions are the backend for that
-// surface: they report where the built-in is installed and let the user
-// add/remove it from a single runtime at a time.
+// one switch per CLI. On means the sessions Codara starts with that CLI get
+// the server; off is remembered in builtin-mcp.json. While "Codara tools in
+// other apps" is on, the switch also adds or removes the entry in that CLI's
+// own config, so off really means off everywhere.
 
 interface SparkBuiltinMeta {
   id: SparkBuiltinMcpId;
@@ -1065,73 +1109,76 @@ interface SparkBuiltinMeta {
   summary: string;
   detail: string;
   tools: string[];
-  autoManaged: boolean;
 }
 
-function builtinMeta(autoInstallEnabled: boolean): SparkBuiltinMeta[] {
+function builtinMeta(): SparkBuiltinMeta[] {
   return [
     {
       id: "codara-studio",
       serverName: SERVER_NAME,
       summary: "Drive the preview tab, open agent terminals, and orchestrate workers",
       detail:
-        "Codara's built-in MCP server. Its always-on studio tools let verifier and worker agents click, type, snapshot, screenshot, and run JS against the exact <preview> DOM the user sees, and open/drive agent-owned terminal tabs — no extra browser window. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build/run automations (looms).",
+        "Codara's built-in MCP server. Codara passes it to the Claude Code and Codex sessions it starts, so verifier and worker agents can click, type, snapshot, screenshot and run JS against the exact <preview> DOM you see, and open and drive agent-owned terminal tabs. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build and run automations (looms). Your own Claude Code and Codex configuration is not changed.",
       tools: SPARK_BUILTIN_TOOLS,
-      autoManaged: autoInstallEnabled,
     },
   ];
+}
+
+function injectionState(
+  runtime: SparkBuiltinRuntime,
+  runtimeAvailable: boolean,
+  optedOut: ReadonlySet<SparkBuiltinRuntime>,
+): SparkBuiltinRuntimeStatus {
+  const configPath = join(integrationsRoot(), runtime);
+  if (!runtimeAvailable) return { state: "unavailable", configPath };
+  return { state: optedOut.has(runtime) ? "available" : "installed", configPath };
+}
+
+function integrationsRoot(): string {
+  return join(codaraHome(), "integrations");
 }
 
 export async function getSparkBuiltinStatus(input: {
   claudeRuntimeAvailable: boolean;
   codexRuntimeAvailable: boolean;
   grokRuntimeAvailable?: boolean;
-  autoInstallEnabled: boolean;
-  codexHome?: string | null;
-  grokHome?: string | null;
 }): Promise<SparkBuiltinMcpStatus[]> {
-  const metas = builtinMeta(input.autoInstallEnabled);
-  return Promise.all(
-    metas.map(async (meta) => {
-      const [claude, codex, grok] = await Promise.all([
-        detectClaudeBuiltinState(meta.serverName, input.claudeRuntimeAvailable),
-        detectCodexBuiltinState(input.codexRuntimeAvailable, input.codexHome),
-        detectGrokBuiltinState(Boolean(input.grokRuntimeAvailable), input.grokHome),
-      ]);
-      return {
-        id: meta.id,
-        name: meta.serverName,
-        summary: meta.summary,
-        detail: meta.detail,
-        tools: meta.tools,
-        autoManaged: meta.autoManaged,
-        claude,
-        codex,
-        grok,
-      } satisfies SparkBuiltinMcpStatus;
-    }),
-  );
+  const optedOut = readSparkBuiltinOptOuts();
+  return builtinMeta().map((meta) => ({
+    id: meta.id,
+    name: meta.serverName,
+    summary: meta.summary,
+    detail: meta.detail,
+    tools: meta.tools,
+    autoManaged: true,
+    claude: injectionState("claude", input.claudeRuntimeAvailable, optedOut),
+    codex: injectionState("codex", input.codexRuntimeAvailable, optedOut),
+    grok: injectionState("grok", Boolean(input.grokRuntimeAvailable), optedOut),
+  }));
+}
+
+export interface SparkBuiltinSwitchOptions {
+  /** "Codara tools in other apps" is on: the CLI's own config follows the switch. */
+  otherApps?: boolean;
 }
 
 export async function installSparkBuiltin(
   _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
-  options: CodexMcpHomeOptions = {},
+  options: SparkBuiltinSwitchOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
+    await setSparkBuiltinOptOut(runtime, false);
+    if (!options.otherApps || (await globalInstallBlockedReason())) return { ok: true };
     const outcome =
       runtime === "claude"
         ? await installForClaude(true)
         : runtime === "grok"
-          ? await installForGrok(true, undefined, options.grokHome)
-          : await installForCodex(true, undefined, options.codexHome);
-    // The switch reports what the config file now holds: only a real write, an
-    // entry that was already current, or the user's own entry count, and only
-    // those clear the opt-out.
+          ? await installForGrok(true)
+          : await installForCodex(true);
     if (!outcome.changed && outcome.reason !== "already-current" && outcome.reason !== "user-owned") {
       return { ok: false, error: installFailureMessage(runtime, outcome) };
     }
-    if (targetsPersonalConfig(runtime, options)) await setSparkBuiltinOptOut(runtime, false);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -1141,19 +1188,16 @@ export async function installSparkBuiltin(
 export async function uninstallSparkBuiltin(
   _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
-  options: CodexMcpHomeOptions = {},
+  options: SparkBuiltinSwitchOptions = {},
 ): Promise<SparkBuiltinActionResult> {
   try {
-    const result =
-      runtime === "claude"
-        ? await uninstallManagedClaudeServer(SERVER_NAME)
-        : runtime === "grok"
-          ? await uninstallGrokBuiltinBlock(options.grokHome)
-          : await uninstallCodexBuiltinBlock(options.codexHome);
-    if (result.ok && targetsPersonalConfig(runtime, options)) {
-      await setSparkBuiltinOptOut(runtime, true);
-    }
-    return result;
+    await setSparkBuiltinOptOut(runtime, true);
+    if (!options.otherApps) return { ok: true };
+    return runtime === "claude"
+      ? await uninstallManagedClaudeServer(SERVER_NAME)
+      : runtime === "grok"
+        ? await uninstallGrokBuiltinBlock()
+        : await uninstallCodexBuiltinBlock();
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -1161,99 +1205,11 @@ export async function uninstallSparkBuiltin(
 
 function installFailureMessage(runtime: SparkBuiltinRuntime, outcome: InstallOutcome): string {
   const label = runtime === "claude" ? "Claude" : runtime === "grok" ? "Grok Build" : "Codex";
-  if (outcome.error) return `${outcome.error} The Codara Studio tools were not added to ${label}.`;
+  if (outcome.error) return `${outcome.error} The Codara Studio tools were not added to ${label}'s own config.`;
   if (outcome.reason === "sandboxed") {
     return `This Codara instance runs with a temporary home, so it does not change ${label}'s own configuration.`;
   }
-  return `The Codara Studio tools were not added to ${label}.`;
-}
-
-function targetsPersonalConfig(
-  runtime: SparkBuiltinRuntime,
-  options: CodexMcpHomeOptions,
-): boolean {
-  if (runtime === "codex") return !options.codexHome;
-  if (runtime === "grok") return !options.grokHome;
-  return true;
-}
-
-async function detectClaudeBuiltinState(
-  serverName: string,
-  runtimeAvailable: boolean,
-): Promise<SparkBuiltinRuntimeStatus> {
-  const entry = await readClaudeServerEntry(serverName);
-  if (entry !== undefined) {
-    return {
-      state: isSparkManaged(entry) ? "installed" : "user-managed",
-      configPath: CLAUDE_USER_CONFIG,
-    };
-  }
-  return { state: runtimeAvailable ? "available" : "unavailable", configPath: CLAUDE_USER_CONFIG };
-}
-
-async function detectCodexBuiltinState(
-  runtimeAvailable: boolean,
-  codexHome?: string | null,
-): Promise<SparkBuiltinRuntimeStatus> {
-  const target = resolveCodexMcpConfigTarget(codexHome);
-  let existing = "";
-  if (existsSync(target.configPath)) {
-    try {
-      existing = await fs.readFile(target.configPath, "utf8");
-    } catch {
-      existing = "";
-    }
-  }
-  const section = classifyCodexBuiltinSection(existing);
-  if (section === "user") return { state: "user-managed", configPath: target.configPath };
-  const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  // Codex rewrites its own config.toml and drops our marker comments. A live
-  // entry of our own shape is still an install, so the Capability Center shows
-  // Managed instead of "Set up by you". A stranded one keeps reporting
-  // available: the row's install action is what repairs it.
-  if (managed || section === "reclaimable") return { state: "installed", configPath: target.configPath };
-  return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
-}
-
-async function detectGrokBuiltinState(
-  runtimeAvailable: boolean,
-  grokHome?: string | null,
-): Promise<SparkBuiltinRuntimeStatus> {
-  const target = resolveGrokMcpConfigTarget(grokHome);
-  let existing = "";
-  if (existsSync(target.configPath)) {
-    try {
-      existing = await fs.readFile(target.configPath, "utf8");
-    } catch {
-      existing = "";
-    }
-  }
-  const section = classifyCodexBuiltinSection(existing);
-  if (section === "user") return { state: "user-managed", configPath: target.configPath };
-  const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
-  // Same marker loss as Codex: Grok rewrites ~/.grok/config.toml too.
-  if (managed || section === "reclaimable") return { state: "installed", configPath: target.configPath };
-  return { state: runtimeAvailable ? "available" : "unavailable", configPath: target.configPath };
-}
-
-async function readClaudeServerEntry(serverName: string): Promise<unknown | undefined> {
-  if (!existsSync(CLAUDE_USER_CONFIG)) return undefined;
-  let raw: string;
-  try {
-    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
-  } catch {
-    return undefined;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const servers = (parsed as Record<string, unknown>).mcpServers;
-  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return undefined;
-  return (servers as Record<string, unknown>)[serverName];
+  return `The Codara Studio tools were not added to ${label}'s own config.`;
 }
 
 // Remove a Codara-managed entry from ~/.claude.json. Refuses to touch a

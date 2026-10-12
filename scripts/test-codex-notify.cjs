@@ -1,11 +1,12 @@
-// Codex turn signals for the terminal-agent notifier: the notify-program
-// installer that edits config.toml, the notify script it installs, and the
+// Codex turn signals for the terminal-agent notifier: the notify argv Codara
+// passes per launch (chaining the user's own program), the one-time restore
+// of a notify older builds wrote into config.toml, the notify script, and the
 // session-file tail.
 //
 // SAFETY: this suite must never touch the real ~/.codex/config.toml or the
 // real Codara home. HOME and CODEX_HOME are redirected before the modules
-// load, every installer call passes an explicit config path, and the real
-// config is hashed before and after.
+// load, every call passes an explicit path, and the real config is hashed
+// before and after.
 
 const { spawnSync } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -87,8 +88,16 @@ async function main() {
   const installer = await bundle("src/main/codex-notify-installer.ts", "codex-notify-installer");
   const rollout = await bundle("src/main/codex-rollout-tail.ts", "codex-rollout-tail");
   const { parse: parseToml } = require("smol-toml");
-  const { setTopLevelNotify, installCodexNotify, uninstallCodexNotify } = installer;
-  const { isOurs } = installer.__test;
+  const {
+    setTopLevelNotify,
+    buildCodexNotifyArgv,
+    isCodaraNotifyArgv,
+    previousNotifyArgv,
+    restoreUserNotify,
+    readUserCodexNotify,
+    tuiNotificationsUnset,
+    ensureCodexNotifyScript,
+  } = installer;
 
   // ── The text edit ──
   const sample = [
@@ -124,95 +133,44 @@ async function main() {
   const multiLine = 'notify = [\n  "a", # first\n  "b",\n]\n[x]\ny = 1\n';
   check("a multi-line notify array is replaced whole", setTopLevelNotify(multiLine, ["c"]) === 'notify = ["c"]\n[x]\ny = 1\n');
 
-  // ── Installer ──
+  // ── Per-launch argv and the one-time restore ──
+  // Codara passes notify with `-c` on each launch; the config is only read.
   const configPath = path.join(TEMP_HOME, ".codex", "config.toml");
   const stable = path.join(TMP, "durable", "codex-hooks", "codara-codex-notify.py");
-  const opts = { configPath, sourceScriptPath: SHIPPED_SCRIPT, stableScriptPath: stable, python: "python3", pythonAvailable: true };
+  const copied = await ensureCodexNotifyScript({ source: SHIPPED_SCRIPT, destination: stable });
+  check("the notify script is copied into Codara's home", copied === stable && fs.readFileSync(stable, "utf8") === fs.readFileSync(SHIPPED_SCRIPT, "utf8"));
+
+  const ours = buildCodexNotifyArgv("python3", stable, ["notify-send", "Codex"]);
+  check("the argv runs the durable script and chains the user's program", isCodaraNotifyArgv(ours) && ours[3] === stable && ours.slice(5).join(" ") === "notify-send Codex");
+  const rebuilt = buildCodexNotifyArgv("/usr/bin/python3", stable, previousNotifyArgv(ours));
+  check("rebuilding from an old Codara argv never chains to itself", rebuilt.slice(5).join(" ") === "notify-send Codex");
+
+  const chained = 'notify = ["notify-send", "Codex"]\nmodel = "gpt-6"\n\n[tui]\nnotifications = ["agent-turn-complete"]\n';
+  fs.writeFileSync(configPath, chained, { mode: 0o640 });
+  const userNotify = await readUserCodexNotify(configPath);
+  check("the user's notify is read", userNotify.join(" ") === "notify-send Codex");
+  check("reading leaves the config byte for byte", fs.readFileSync(configPath, "utf8") === chained && (fs.statSync(configPath).mode & 0o777) === 0o640);
+  check("a user tui.notifications is respected", !tuiNotificationsUnset(chained) && tuiNotificationsUnset('model = "m"\n') && tuiNotificationsUnset("[tui]\ntheme = 1\n"));
 
   const plain = '# keep me\nmodel = "gpt-6"\n\n[projects."/x"]\ntrust_level = "trusted"\n';
-  fs.writeFileSync(configPath, plain, { mode: 0o640 });
-  let result = await installCodexNotify(opts);
-  let doc = parseToml(fs.readFileSync(configPath, "utf8"));
-  check("install adds notify when there was none", result.installed && result.changed && isOurs(doc.notify), JSON.stringify(result));
-  check("the notify argv runs the durable script copy", doc.notify[0] === "python3" && doc.notify[3] === stable && fs.existsSync(stable));
-  check("install keeps the rest of the config", doc.model === "gpt-6" && doc.projects["/x"].trust_level === "trusted" && fs.readFileSync(configPath, "utf8").startsWith("# keep me\n"));
-  check("install keeps the file mode", (fs.statSync(configPath).mode & 0o777) === 0o640);
-  result = await installCodexNotify(opts);
-  check("a second install changes nothing", result.installed && !result.changed);
-  result = await uninstallCodexNotify(opts);
-  check("uninstall restores the original bytes", !result.installed && fs.readFileSync(configPath, "utf8") === plain);
-
-  const chained = 'notify = ["notify-send", "Codex"]\nmodel = "gpt-6"\n';
-  fs.writeFileSync(configPath, chained);
-  await installCodexNotify(opts);
-  doc = parseToml(fs.readFileSync(configPath, "utf8"));
-  check("an existing notify is chained after ours", isOurs(doc.notify) && JSON.stringify(doc.notify.slice(5)) === JSON.stringify(["notify-send", "Codex"]));
-  await installCodexNotify({ ...opts, python: "/usr/bin/python3" });
-  doc = parseToml(fs.readFileSync(configPath, "utf8"));
-  check("reinstalling with another interpreter never chains to itself", doc.notify[0] === "/usr/bin/python3" && doc.notify.slice(5).join(" ") === "notify-send Codex");
-  await uninstallCodexNotify(opts);
-  check("uninstall puts the previous notify back", fs.readFileSync(configPath, "utf8") === chained);
-
-  const broken = 'model = "gpt-6"\nnotify = [\n';
-  fs.writeFileSync(configPath, broken);
-  result = await installCodexNotify(opts);
-  check("a config that does not parse is left alone", !result.installed && fs.readFileSync(configPath, "utf8") === broken);
-  const odd = 'notify = "say done"\n';
-  fs.writeFileSync(configPath, odd);
-  result = await installCodexNotify(opts);
-  check("a notify that is not a list is left alone", !result.installed && fs.readFileSync(configPath, "utf8") === odd);
-  result = await installCodexNotify({ ...opts, configPath: path.join(TMP, "no-codex", "config.toml") });
-  check("no Codex home means no install", !result.installed && !fs.existsSync(path.join(TMP, "no-codex")));
-
-  // An e2e launch redirects the Codara home into a temp dir but often leaves
-  // CODEX_HOME alone. Its boot must not edit a Codex config that outlives it.
-  // /dev/shm stands in for a durable home: outside every temp root and not a
-  // worktree, yet still disposable.
-  if (fs.existsSync("/dev/shm")) {
-    const durableDir = fs.mkdtempSync(path.join("/dev/shm", "codara-codex-notify-"));
-    const savedHome = process.env.HOME;
-    // The user's home is durable too, so the default Codara home is a
-    // candidate for the script copy.
-    process.env.HOME = durableDir;
-    try {
-      fs.mkdirSync(path.join(durableDir, ".codex"));
-      const durableConfig = path.join(durableDir, ".codex", "config.toml");
-      const before = 'model = "gpt-6"\n';
-      fs.writeFileSync(durableConfig, before);
-      const sandboxOpts = { configPath: durableConfig, sourceScriptPath: SHIPPED_SCRIPT, python: "python3", pythonAvailable: true };
-      result = await installCodexNotify(sandboxOpts);
-      check(
-        "a temporary Codara home never installs into a durable Codex config",
-        !result.installed &&
-          !result.changed &&
-          fs.readFileSync(durableConfig, "utf8") === before &&
-          !fs.existsSync(path.join(durableDir, ".codarastudio")),
-        JSON.stringify(result),
-      );
-      const ours = `notify = ${JSON.stringify(installer.__test.buildArgv("python3", stable, ["notify-send"]))}\n`;
-      fs.writeFileSync(durableConfig, ours);
-      result = await uninstallCodexNotify(sandboxOpts);
-      check(
-        "a temporary Codara home never uninstalls from a durable Codex config",
-        !result.changed && fs.readFileSync(durableConfig, "utf8") === ours,
-      );
-    } finally {
-      process.env.HOME = savedHome;
-      fs.rmSync(durableDir, { recursive: true, force: true });
-    }
-  } else {
-    console.log("SKIP durable-config sandbox checks: /dev/shm not found");
-  }
+  check("a config without Codara's notify needs no restore", restoreUserNotify(plain) === null);
+  const oldInstall = setTopLevelNotify(plain, buildCodexNotifyArgv("python3", stable, []));
+  const restored = restoreUserNotify(oldInstall);
+  check("an old Codara-only notify is removed", restored !== null && parseToml(restored.text).notify === undefined && restored.text.startsWith("# keep me\n") && parseToml(restored.text).projects["/x"].trust_level === "trusted");
+  const oldChained = setTopLevelNotify(chained, buildCodexNotifyArgv("python3", stable, ["notify-send", "Codex"]));
+  const restoredChain = restoreUserNotify(oldChained);
+  check("an old chained notify gives the user's program back", restoredChain?.text === chained && restoredChain.previous.join(" ") === "notify-send Codex");
+  check("a config that does not parse is not restored", restoreUserNotify('model = "gpt-6"\nnotify = [\n') === null);
+  check("a notify that is not a list is not restored", restoreUserNotify('notify = "say done"\n') === null);
+  check("the user's own notify is never restored away", restoreUserNotify(chained) === null);
+  check("the module has no installer left", installer.installCodexNotify === undefined && installer.uninstallCodexNotify === undefined);
 
   // ── The notify program end to end ──
   if (python3Available()) {
-    fs.writeFileSync(configPath, "");
     const marker = path.join(TMP, "previous-ran.json");
     const previous = path.join(TMP, "previous.py");
     fs.writeFileSync(previous, `import json, sys\nopen(${JSON.stringify(marker)}, "w").write(json.dumps(sys.argv[1:]))\n`);
-    fs.writeFileSync(configPath, `notify = ["python3", ${JSON.stringify(previous)}, "--flag"]\n`);
-    await installCodexNotify(opts);
-    const argv = parseToml(fs.readFileSync(configPath, "utf8")).notify;
+    const argv = buildCodexNotifyArgv("python3", stable, ["python3", previous, "--flag"]);
     const payload = JSON.stringify({
       type: "agent-turn-complete",
       "turn-id": "t-1",
@@ -239,7 +197,6 @@ async function main() {
     fs.rmSync(stable);
     proc = run({ SPARK_PANE_ID: "pane-7" });
     check("with the script deleted the previous program still runs", proc.status === 0 && fs.existsSync(marker), proc.stderr);
-    await uninstallCodexNotify(opts);
   } else {
     console.log("SKIP notify program checks: python3 not found");
   }

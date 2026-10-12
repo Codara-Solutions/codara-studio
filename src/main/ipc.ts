@@ -87,7 +87,6 @@ import {
 } from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { findPiSessionFile } from "./pi-session-tracker";
-import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import {
@@ -984,13 +983,12 @@ export function registerIpc(): void {
       const result = await syncAgentAssets({ cwd: input?.cwd ?? null, dryRun });
       // The built-in repair below writes, so a preview leaves it out.
       if (dryRun) return result;
-      // Sync is also the manual repair path for the built-in: an entry stranded
-      // by a moved install (command path gone) is rewritten to the current app
-      // path here instead of waiting for the next launch. Repair only: a runtime
-      // the user removed the built-in from must not get it back from a sync
-      // click, so nothing is reported for it either.
+      // Sync is also the manual repair path for the opt-in global entries: one
+      // stranded by a moved install (command path gone) is rewritten to the
+      // current app path. Repair only, and only while "Codara tools in other
+      // apps" is on: without the opt-in Codara keeps out of the CLIs' configs.
       const settings = await loadSettings();
-      if (settings.playwrightMcpAutoInstall !== false) {
+      if (settings.studioToolsInOtherApps === true) {
         try {
           const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = mcpInstaller;
           const repaired = await repairSparkBuiltinEntries();
@@ -1107,10 +1105,9 @@ export function registerIpc(): void {
     },
   );
   handle("agents:builtins", async () => {
-    const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
+    const [{ getSparkBuiltinStatus }, runtimes] = await Promise.all([
       mcpInstaller,
       detectAgentRuntimes(false),
-      loadSettings(),
     ]);
     const isAvailable = (kind: "claude" | "codex" | "grok") =>
       runtimes.some((r) => r.kind === kind && r.installed);
@@ -1118,7 +1115,6 @@ export function registerIpc(): void {
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
       grokRuntimeAvailable: isAvailable("grok"),
-      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
   handle(
@@ -3201,23 +3197,6 @@ export function registerIpc(): void {
     },
   );
 
-  // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
-  // pane so its TUI never stalls on the "trust this directory?" prompt.
-  handle("agentSession:ensureCodexTrust", async (
-    _e,
-    args: { cwd: string; nativeCodexProfileId?: string },
-  ): Promise<void> => {
-    const execution =
-      args.nativeCodexProfileId === undefined
-        ? await resolveNewNativeCodexProfile()
-        : await resolveFrozenNativeCodexProfile(
-            args.nativeCodexProfileId,
-          );
-    await ensureCodexProjectTrust(
-      args.cwd,
-      execution.stateHome,
-    ).catch(() => undefined);
-  });
 
   // Repair a Claude transcript whose tail was truncated by an abrupt kill
   // (sleep/crash mid-write) so `claude --resume` accepts it. Truncates the

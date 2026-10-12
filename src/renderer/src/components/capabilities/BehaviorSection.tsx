@@ -50,15 +50,15 @@ export default function BehaviorSection({
           }
         />
         <ToggleRow
-          title="Keep Codara Studio tools installed in Claude, Codex and Grok"
-          detail="At launch, Codara refreshes its built-in server in each CLI where its switch under MCP servers is on. A CLI you switched it off for stays off."
-          checked={view.playwrightMcpAutoInstall}
-          onChange={(playwrightMcpAutoInstall) =>
+          title="Codara tools in other apps"
+          detail="Add the codara-studio MCP server to your global Claude Code and Codex config so sessions outside Codara can use it. Off: only sessions Codara starts get it."
+          checked={view.studioToolsInOtherApps}
+          onChange={(studioToolsInOtherApps) =>
             onChange(
-              { playwrightMcpAutoInstall },
-              playwrightMcpAutoInstall
-                ? "Codara Studio tools will be kept current at launch."
-                : "Codara Studio tools will no longer be refreshed at launch.",
+              { studioToolsInOtherApps },
+              studioToolsInOtherApps
+                ? "Codara tools added to your Claude Code and Codex config."
+                : "Codara tools removed from your Claude Code and Codex config.",
             )
           }
         />

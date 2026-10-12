@@ -1164,15 +1164,6 @@ const api = {
       nativeGrokProfileId?: string;
     }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
-    // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
-    ensureCodexTrust: (
-      cwd: string,
-      nativeCodexProfileId?: string,
-    ): Promise<void> =>
-      ipcRenderer.invoke("agentSession:ensureCodexTrust", {
-        cwd,
-        nativeCodexProfileId,
-      }),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
     repairTranscript: (args: {

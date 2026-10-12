@@ -26,15 +26,15 @@ delete process.env.CODEX_HOME;
 delete process.env.GROK_HOME;
 
 // The only files allowed to mint an outside-write capability: the opt-in
-// global integrations, a session the user deletes, and the trust entries
-// the user grants. Adding one is a reviewable decision, not a drive-by.
+// "Codara tools in other apps", MCP and skill sync the user asks for, a file
+// the user edits or deletes, and the one-time removal of entries older
+// builds wrote. Hooks, notify and trust are per launch and write nothing
+// there. Adding one is a reviewable decision, not a drive-by.
 const CAPABILITY_CALL_SITES = [
   "src/main/agent-sync.ts",
-  "src/main/codex-notify-installer.ts",
   "src/main/fs-tree.ts",
-  "src/main/hook-installer.ts",
+  "src/main/global-config-cleanup.ts",
   "src/main/mcp-installer.ts",
-  "src/main/orchestration/codex-trust.ts",
 ];
 
 async function buildHarness() {

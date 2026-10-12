@@ -234,7 +234,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   agentDisabledSkillIds: [],
   agentMcpCoraManagerIds: [],
   agentMcpPiWorkerIds: [],
-  playwrightMcpAutoInstall: true,
+  studioToolsInOtherApps: false,
   autopilotSandbox: false,
 };
 
@@ -4467,14 +4467,6 @@ export default function App() {
       cwd: string;
       session: WorkerSessionSummary;
     }) => {
-      if (request.runtime === "codex") {
-        await window.spark.agentSession
-          .ensureCodexTrust(
-            request.cwd,
-            request.session.nativeCodexProfileId,
-          )
-          .catch(() => undefined);
-      }
       const pointer: TerminalAgentSession = {
         runtime: request.runtime,
         nativeCodexProfileId: request.session.nativeCodexProfileId,

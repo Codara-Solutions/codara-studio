@@ -334,6 +334,7 @@ export interface RemoteCapabilities {
   policy: {
     mcpAwareness: boolean;
     skillAwareness: boolean;
+    // Wire name kept for paired phones; it carries studioToolsInOtherApps.
     autoInstallStudioMcp: boolean;
   };
   mcp: RemoteCapabilityAsset[];

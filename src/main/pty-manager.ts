@@ -51,8 +51,12 @@ import {
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
 import { personalCliShellHomeEnvironment, resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
-import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
-import { installClaudeHooks } from "./hook-installer";
+import {
+  agentArgsDir,
+  claudeLaunchArgs,
+  codexLaunchArgs,
+  integrationFilesReady,
+} from "./agent-launch-integration";
 import { continueForegroundJob } from "./terminal-foreground";
 import {
   beginPosixPtyTreeTeardown,
@@ -776,6 +780,9 @@ async function spawnWithSessionLock(
     return doSpawnRemote(opts);
   }
 
+  // The first panes after boot wait (bounded) for the per-launch files, so an
+  // early `claude` still reports to Codara.
+  await integrationFilesReady();
   let preparedOpts = opts;
   let resolvedStartup = opts.startupCommand;
   if (parsedStartup) {
@@ -783,7 +790,21 @@ async function spawnWithSessionLock(
     if (!binary) {
       throw new Error(`Cannot find ${parsedStartup.runtime}. Install its CLI, restart Codara, and try again.`);
     }
-    resolvedStartup = formatManualAgentStartup(parsedStartup, binary, opts.shell.family);
+    const [argv0, ...userArgs] = parsedStartup.childArgv;
+    // Codara's hooks, MCP server and Codex notify ride on this command line
+    // only. Codex also gets per-launch trust for the pane's folder: nobody can
+    // answer its trust prompt before Codara's autorun starts.
+    const injected =
+      parsedStartup.runtime === "claude"
+        ? claudeLaunchArgs({ userArgs })
+        : parsedStartup.runtime === "codex"
+          ? codexLaunchArgs({ userArgs, trustCwd: opts.cwd })
+          : [];
+    resolvedStartup = formatManualAgentStartup(
+      { ...parsedStartup, childArgv: [argv0, ...injected, ...userArgs] },
+      binary,
+      opts.shell.family,
+    );
     const pathKey = process.platform === "win32" ? "Path" : "PATH";
     const launchEnv = { ...opts.shell.env, ...opts.env };
     const inheritedPath = Object.entries(launchEnv).find(([key]) => key.toLowerCase() === "path")?.[1];
@@ -809,9 +830,6 @@ async function spawnWithSessionLock(
       execution.profileId,
       `terminal:${opts.id}`,
     );
-    await ensureCodexProjectTrust(opts.cwd, nativeCodexHome).catch(
-      () => undefined,
-    );
     preparedOpts = {
       ...preparedOpts,
       nativeCodexProfileId: execution.profileId,
@@ -831,11 +849,6 @@ async function spawnWithSessionLock(
       execution.profileId,
       `terminal:${opts.id}`,
     );
-    const claudeStateDir =
-      execution.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-    await installClaudeHooks({
-      settingsPath: join(claudeStateDir, "settings.json"),
-    }).catch(() => undefined);
     preparedOpts = {
       ...preparedOpts,
       nativeClaudeProfileId: execution.profileId,
@@ -1365,6 +1378,11 @@ function doSpawn(
   // Lets the MCP server place the terminals an agent opens beside its own
   // pane (terminal.create callerPaneId).
   env.SPARK_AGENT_PANE_ID = opts.id;
+  // The pane's `claude` and `codex` shell functions read Codara's per-launch
+  // flags from this folder; one inherited from another Studio's pane goes.
+  const argsDir = agentArgsDir();
+  if (argsDir) env.SPARK_AGENT_ARGS_DIR = argsDir;
+  else delete env.SPARK_AGENT_ARGS_DIR;
   if (opts.nativeCodexHome) {
     const selectedEnv = buildCodexCliSharedEnvironment(env, opts.nativeCodexHome);
     for (const key of Object.keys(env)) delete env[key];

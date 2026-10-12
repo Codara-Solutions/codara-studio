@@ -346,11 +346,23 @@ export interface GrokManagedHomeInput {
   log?: ManagedHomeLog;
 }
 
+let managedGrokConfigTransform: ((source: string) => string) | null = null;
+
+/**
+ * Grok takes no per-launch flags, so the codara-studio server reaches a
+ * managed Grok account through that home's private config copy instead.
+ * Boot sets the transform; it is injected to keep this module free of the
+ * MCP installer.
+ */
+export function setManagedGrokConfigTransform(transform: ((source: string) => string) | null): void {
+  managedGrokConfigTransform = transform;
+}
+
 /**
  * Create or refresh a managed Grok home: the shared allowlist is linked when
  * the user's entries exist, and `config.toml` is a private copy of the
- * user's, regenerated when theirs changes, so Grok never writes through to
- * the user's config from a managed account.
+ * user's (plus Codara's server), regenerated when theirs changes, so Grok
+ * never writes through to the user's config from a managed account.
  */
 export async function ensureGrokManagedHome(input: GrokManagedHomeInput): Promise<void> {
   assertManagedHome(input.home, input.root);
@@ -361,10 +373,19 @@ export async function ensureGrokManagedHome(input: GrokManagedHomeInput): Promis
     }
   }
   await unlinkPrivateName(input.home, GROK_CONFIG_FILE);
-  const source = await fs
+  const userSource = await fs
     .readFile(join(input.systemHome, GROK_CONFIG_FILE), "utf8")
     .catch(() => null);
-  if (source === null) return;
+  if (userSource === null && !managedGrokConfigTransform) return;
+  let source = userSource ?? "";
+  if (managedGrokConfigTransform) {
+    try {
+      source = managedGrokConfigTransform(source);
+    } catch {
+      // A copy without Codara's server still logs the account in.
+    }
+  }
+  if (userSource === null && source.trim() === "") return;
   const target = join(input.home, GROK_CONFIG_FILE);
   const current = await fs.readFile(target, "utf8").catch(() => null);
   if (current === source) return;

@@ -105,7 +105,6 @@ import { inspectPiModelCatalog } from "../orchestration/pi-model-catalog";
 import { inspectCachedPiSubscriptionUsageProfiles } from "../orchestration/pi-subscription-usage";
 import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
-import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
 import { resolveNewNativeClaudeProfile } from "../orchestration/native-claude-profile-runtime";
 import { runsRoot, subscribeToEvents } from "../orchestration/event-log";
 import {
@@ -615,7 +614,6 @@ async function getCapabilitiesForRemote(input: {
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
       grokRuntimeAvailable: isAvailable("grok"),
-      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
     builtins = status.map((entry) => ({
       id: entry.id,
@@ -641,7 +639,7 @@ async function getCapabilitiesForRemote(input: {
     policy: {
       mcpAwareness: settings.agentMcpSyncEnabled,
       skillAwareness: settings.agentSkillSyncEnabled,
-      autoInstallStudioMcp: settings.playwrightMcpAutoInstall !== false,
+      autoInstallStudioMcp: settings.studioToolsInOtherApps === true,
     },
     ...remoteCapabilityPage(
       inventory.mcp.filter((item) => !REMOTE_BUILTIN_MCP_NAMES.has(item.name)).map(asset),
@@ -686,14 +684,14 @@ async function updateCapabilityAssetForRemote(input: RemoteAssetUpdate) {
       const available = (kind: string) => runtimes.some((runtime) => runtime.kind === kind && runtime.installed);
       const status = await getSparkBuiltinStatus({
         claudeRuntimeAvailable: available("claude"), codexRuntimeAvailable: available("codex"),
-        grokRuntimeAvailable: available("grok"), autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+        grokRuntimeAvailable: available("grok"),
       });
       const state = status.find((item) => item.id === input.builtinId)?.[input.runtime].state;
       if (state === "user-managed") throw new Error("This server entry is user-managed. Codara will not replace or remove it.");
       if (state === "unavailable" || !state) throw new Error(`Install ${input.runtime} in Studio before managing its built-in server.`);
       const result = await setSparkBuiltinInstalled(input.builtinId, input.runtime, input.installed);
       if (!result.ok) throw new Error(result.error ?? "Could not update the built-in server.");
-      message = `Codara Studio MCP was ${input.installed ? "installed" : "removed"} for ${input.runtime}.`;
+      message = `Codara Studio MCP is ${input.installed ? "on" : "off"} for ${input.runtime} sessions Codara starts.`;
     } else {
       message = await updateRemoteAgentAsset({ cwd, settings }, input);
     }
@@ -798,7 +796,7 @@ async function updateCapabilitiesForRemote(
         ? { agentSkillSyncEnabled: input.skillAwareness }
         : {}),
       ...(input.autoInstallStudioMcp !== undefined
-        ? { playwrightMcpAutoInstall: input.autoInstallStudioMcp }
+        ? { studioToolsInOtherApps: input.autoInstallStudioMcp }
         : {}),
     });
     broadcastSettingsChanged(saved);
@@ -3850,9 +3848,6 @@ async function createRemoteTerminal(
     throw new Error(
       "That worker session is no longer resumable in this workspace.",
     );
-  }
-  if (request.profile === "codex") {
-    await ensureCodexProjectTrust(cwd.path).catch(() => undefined);
   }
   const command = remoteTerminalLaunchCommand(
     request.profile,
