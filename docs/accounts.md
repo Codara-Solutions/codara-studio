@@ -176,5 +176,11 @@ all of that on the command line of the sessions it starts (see
 version it removes its old entries from your config, after saving a backup;
 Settings, About says where the backup is.
 
+A build that runs with a temporary home, from a temporary folder or from a
+git worktree leaves your own config alone, and Settings, About says so and
+why: the old entries then stay active until an installed Codara starts. A
+Linux AppImage counts as installed even though it runs from a temporary
+mount, unless the `.AppImage` file itself sits in a temporary folder.
+
 Every file an account leaves on disk is listed in
 [on-your-machine.md](./on-your-machine.md).

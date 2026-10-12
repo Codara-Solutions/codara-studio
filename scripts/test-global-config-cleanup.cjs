@@ -365,6 +365,58 @@ async function main() {
     assert.equal(report.files.filter((file) => file.result === "cleaned").length, 3, "the linked file was processed twice");
   });
 
+  await check("a packaged AppImage counts as installed for the cleanup, nothing else does", async () => {
+    // The AppImage runtime mounts the app under /tmp/.mount_*, which reads as
+    // a temporary build: the installer's gate blocks it whatever happens.
+    const mounted = async () => "This Codara build runs from a temporary folder or a worktree.";
+    // An existing file outside every temporary folder and worktree.
+    const kept = process.execPath;
+    const inTmp = path.join(TMP, "Codara.AppImage");
+    fs.writeFileSync(inTmp, "");
+    const savedHome = process.env.CODARA_HOME_DIR;
+    process.env.CODARA_HOME_DIR = path.join(path.parse(ROOT).root, "codara-persistent-home-probe");
+    try {
+      const gate = (probe) => mcp.globalCleanupBlockedReason({ installBlockedReason: mounted, ...probe });
+      assert.equal(await gate({ packaged: true, appImage: kept }), null);
+      assert.match(await gate({ packaged: false, appImage: kept }), /temporary folder or a worktree/, "a dev build is not an AppImage");
+      assert.match(await gate({ packaged: true }), /temporary folder or a worktree/, "a packaged build without APPIMAGE");
+      assert.match(await gate({ packaged: true, appImage: "relative/Codara.AppImage" }), /temporary/);
+      assert.match(await gate({ packaged: true, appImage: path.join(TMP, "missing.AppImage") }), /temporary/);
+      assert.match(await gate({ packaged: true, appImage: inTmp }), /temporary/, "an AppImage run from a temporary folder");
+      assert.equal(
+        await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept, installBlockedReason: async () => null }),
+        null,
+      );
+    } finally {
+      process.env.CODARA_HOME_DIR = savedHome;
+    }
+    // This suite's CODARA_HOME_DIR is a temp dir.
+    assert.notEqual(
+      await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept, installBlockedReason: mounted }),
+      null,
+      "a temporary home stays blocked even in an AppImage",
+    );
+    assert.match(await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept }), /temporary home/);
+  });
+
+  await check("Settings says when this launch skipped the user's configs, and why", async () => {
+    const original = JSON.stringify({ hooks: { Stop: [{ hooks: [hook("Stop")] }] } }, null, 2);
+    const target = makeCase({ claudeSettingsPath: original });
+    const reason = "This Codara build runs from a temporary folder or a worktree.";
+    await cleanup.runGlobalConfigCleanup({ ...target, blockedReason: async () => reason, isThrowawayPath: async () => false });
+    assert.equal(read(target.claudeSettingsPath), original);
+    const notice = await cleanup.globalConfigCleanupNotice(target.home);
+    assert.match(notice, /did not check your Claude Code, Codex and Grok configs/);
+    assert.ok(notice.endsWith(reason), notice);
+    const cleaned = await cleanup.runGlobalConfigCleanup(target);
+    assert.ok(cleaned.backupDir);
+    assert.equal(
+      await cleanup.globalConfigCleanupNotice(target.home),
+      `Removed Codara's old entries from your Claude Code and Codex config. Backup: ${cleaned.backupDir}`,
+      "a launch that cleaned no longer reports the earlier skip",
+    );
+  });
+
   await check("a later boot finds nothing; Settings still shows where the backup went", async () => {
     const original = JSON.stringify({ hooks: { Stop: [{ hooks: [hook("Stop")] }] } }, null, 2);
     const target = makeCase({ claudeSettingsPath: original });

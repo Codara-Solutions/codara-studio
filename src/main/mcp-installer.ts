@@ -26,6 +26,7 @@
 // 3. Never transient. An app running from a temp directory or a worktree
 //    does not point a long-lived config at itself.
 
+import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -377,6 +378,33 @@ export async function globalInstallBlockedReason(): Promise<string | null> {
     return "This Codara build runs from a temporary folder or a worktree.";
   }
   return null;
+}
+
+export interface CleanupGateProbe {
+  packaged: boolean;
+  /** The AppImage runtime's APPIMAGE: the .AppImage file this build was started from. */
+  appImage?: string;
+  /** Test seam: the installer's gate. */
+  installBlockedReason?: () => Promise<string | null>;
+}
+
+// The boot cleanup of entries earlier builds wrote is gated like the install,
+// with one exception. A packaged Linux AppImage runs from a mount it makes
+// under /tmp (/tmp/.mount_*) at every launch, so its server script always
+// looks temporary. The install stays blocked for it, since an entry would
+// point at a path gone after the next launch, but the cleanup only removes
+// and leaves no path behind, so an AppImage kept outside a temporary folder
+// counts as installed there. Otherwise the hooks, Codex notify program and
+// MCP entries an older build wrote keep firing outside Codara with nothing
+// left to remove them.
+export async function globalCleanupBlockedReason(
+  probe: CleanupGateProbe = { packaged: app.isPackaged, appImage: process.env.APPIMAGE },
+): Promise<string | null> {
+  const blocked = await (probe.installBlockedReason ?? globalInstallBlockedReason)();
+  if (!blocked || isSandboxedHome() || !probe.packaged) return blocked;
+  const appImage = probe.appImage?.trim();
+  if (!appImage || !isAbsolute(appImage) || !existsSync(appImage)) return blocked;
+  return (await isTransientPath(appImage)) ? blocked : null;
 }
 
 /**

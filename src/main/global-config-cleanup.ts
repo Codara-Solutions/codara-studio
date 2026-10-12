@@ -7,7 +7,7 @@ import { codaraHome, defaultCodaraHome, LEGACY_DIR_NAMES } from "./codara-home";
 import { restoreUserNotify } from "./codex-notify-installer";
 import { writeFileAtomic } from "./fs-atomic";
 import { isGeneratedHookCommand, isTransientPath } from "./hook-installer";
-import { globalInstallBlockedReason } from "./mcp-installer";
+import { globalCleanupBlockedReason } from "./mcp-installer";
 import { parseTomlText } from "./mcp-toml";
 import { claudeUserConfigFile, personalClaudeConfigDir } from "./orchestration/claude-paths";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
@@ -69,7 +69,7 @@ export interface GlobalConfigCleanupOptions {
   now?: () => Date;
   /** Test seam: runs between the first read and the re-read of a file. */
   beforeReread?: (path: string) => Promise<void>;
-  /** Why this instance may not touch the user's CLI configs; the installer's gate by default. */
+  /** Why this instance may not touch the user's CLI configs; globalCleanupBlockedReason by default. */
   blockedReason?: () => Promise<string | null>;
   /** A config that is itself throwaway (in a temp directory) is cleaned even then. */
   isThrowawayPath?: (path: string) => Promise<boolean>;
@@ -451,8 +451,9 @@ export async function runGlobalConfigCleanup(
   // refuses to write them for it, its default-off settings are not the
   // user's choice, and the backups and report would vanish with it. It
   // cleans only configs that are throwaway themselves (an e2e run's fake
-  // HOME) and Codara's own managed homes.
-  const blocked = await (options.blockedReason ?? globalInstallBlockedReason)();
+  // HOME) and Codara's own managed homes. A packaged AppImage is the one
+  // build from a temporary mount that counts as installed here.
+  const blocked = await (options.blockedReason ?? globalCleanupBlockedReason)();
   const throwaway = options.isThrowawayPath ?? isTransientPath;
   const mayTouch = async (path: string | null): Promise<boolean> =>
     path !== null && (blocked === null || (await throwaway(path)));
@@ -540,12 +541,23 @@ export async function readGlobalConfigCleanupReport(
   }
 }
 
-/** The one line Settings, About shows; null when nothing was ever cleaned. */
+/**
+ * What Settings, About shows: where the last cleanup's backup went, and
+ * whether this launch skipped the user's own configs and why, since entries
+ * an earlier build wrote then stay active. Null when neither applies.
+ */
 export async function globalConfigCleanupNotice(home: string = codaraHome()): Promise<string | null> {
   const report = await readGlobalConfigCleanupReport(home);
+  const lines: string[] = [];
   const dir = report?.lastCleaned?.backupDir;
-  if (!dir) return null;
-  return `Removed Codara's old entries from your Claude Code and Codex config. Backup: ${dir}`;
+  if (dir) lines.push(`Removed Codara's old entries from your Claude Code and Codex config. Backup: ${dir}`);
+  const skipped = report?.last?.skipped;
+  if (skipped) {
+    lines.push(
+      `This launch did not check your Claude Code, Codex and Grok configs for entries earlier versions wrote, so any still there stay active. ${skipped}`,
+    );
+  }
+  return lines.length > 0 ? lines.join(" ") : null;
 }
 
 export const __test = { isGeneratedTomlBlock, isGeneratedMcpEntry };
