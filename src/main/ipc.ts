@@ -477,6 +477,8 @@ import type {
 import { isPiSubscriptionProvider } from "../shared/agent-families";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
+import { registerChromeLinkIpc } from "./browser/chrome";
+import { registerServersIpc } from "./servers";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -679,6 +681,8 @@ export function broadcastGitRemoteUpdated(cwds: string[]): void {
 // `...args: any[]`), so every existing typed listener stays assignable through
 // the wrapper without widening or casting at 200 call sites.
 type InvokeListener = Parameters<typeof ipcMain.handle>[1];
+/** The gated registration, handed to the areas that keep their channels in their own module. */
+export type IpcHandle = (channel: string, listener: InvokeListener) => void;
 
 // Gate-by-default registration. Every channel registered through `handle`
 // requires the trusted main-window sender BEFORE its listener runs. This is the
@@ -3991,6 +3995,10 @@ export function registerIpc(): void {
     const { checkForUpdatesNow } = await import("./auto-updater");
     return checkForUpdatesNow();
   });
+
+  // Areas that keep their channels next to their code.
+  registerServersIpc(handle);
+  registerChromeLinkIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

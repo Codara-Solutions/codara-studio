@@ -49,6 +49,8 @@ import { registerPreviewCdpSessions } from "./browser/preview-cdp";
 import { registerPreviewTargets } from "./browser/preview-target";
 import { forwardGuestChords } from "./browser/guest-chords";
 import { registerAgentDelivery } from "./agent-delivery-live";
+import { startChromeLink } from "./browser/chrome";
+import { startServers } from "./servers";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
@@ -1235,6 +1237,8 @@ app.whenReady().then(async () => {
   await loadPreferences().catch(() => undefined);
 
   createWindow();
+  startServers();
+  startChromeLink();
 
   // System sleep/wake handling. On suspend, checkpoint renderer state (its tab
   // tree + scrollback), flush main's stores, and pause PTY delivery into a
