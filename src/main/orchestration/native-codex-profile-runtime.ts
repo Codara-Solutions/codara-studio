@@ -91,6 +91,13 @@ async function resolveCodexProfile(
       env: buildCodexCliSharedEnvironment(baseEnv, selected.homeDir),
     };
   }
+  // Provisioning links the whole System home into the account directory, so
+  // an id the store no longer lists (a deleted account a restored pane still
+  // names) must fail before it, or the purged directory comes back for good.
+  const { profiles } = await nativeCodexProfileStore.snapshot();
+  if (!profiles.some((profile) => profile.id === profileId)) {
+    throw new CodexCliAccountProfileNotFoundError(profileId);
+  }
   await ensureCodexAccountHome(profileId);
   return resolveCodexCliExecutionProfile(nativeCodexProfileStore, { profileId, baseEnv });
 }
