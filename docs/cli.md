@@ -118,6 +118,22 @@ forms are gone; `cora` points you to `auth add`, `auth login`, `auth use` or
 Automation commands work in the workspace of the newest run on disk, or of
 the run you pass with `--run`.
 
+### Workflows
+
+| Command | What it does |
+|---|---|
+| `workflow list` | Lists saved workflows (built-in, yours, and the project's). |
+| `workflow show <name>` | Prints one workflow's source. |
+| `workflow check <name \| file.js> [--args JSON]` | Checks a script without running it and prints the estimate. |
+| `workflow run <name \| file.js> [--args JSON --max-agents N --concurrency N --tokens N]` | Asks for approval in the context chat, then starts the workflow. |
+| `workflow status <workflow-run>` | Prints its progress; works offline. |
+| `workflow wait <workflow-run> [--timeout SECONDS]` | Waits until it finishes or stops. |
+| `workflow stop \| resume <workflow-run>` | Stops it, or resumes it; finished agents do not run again. |
+| `workflow save <file.js> [--scope user \| project]` | Saves a script under its `meta.name`, after approval in the chat. |
+
+Like automations, workflow commands use the newest chat run (or `--run`) for
+their workspace.
+
 ### Benchmark
 
 | Command | What it does |

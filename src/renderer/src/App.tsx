@@ -42,6 +42,7 @@ import {
   pickWorkspaceColor,
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
+import { requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -306,6 +307,13 @@ function isBrowserUrl(url: string): boolean {
 // runs ("needs you" must still reach the user).
 function isBoardCardRun(run: RunState): boolean {
   return Boolean(run.boardCardId);
+}
+
+// Loom passes and workflow runs live in the Automations hub, which shows their
+// workers and progress; neither is a chat, so neither gets a chat tab, a
+// cockpit row or a done-unseen dot unless it is blocked on the user.
+function isHubOwnedRun(run: RunState): boolean {
+  return Boolean(run.automationId || run.workflow);
 }
 
 function runHasWorkbench(run: RunState): boolean {
@@ -910,7 +918,7 @@ export default function App() {
       // Loom-owned and board-card runs never enter the lifted chat state
       // (defensive — the listRuns filter is the primary gate). Board runs the
       // user explicitly opened from their card are exempt.
-      if (run.automationId) return;
+      if (isHubOwnedRun(run)) return;
       if (isBoardCardRun(run) && !openedBoardRunIdsRef.current.has(run.id)) return;
       if (run.workspaceId === activeIdRef.current) {
         const sameWorkspace = runsWorkspaceIdRef.current === run.workspaceId;
@@ -1053,7 +1061,7 @@ export default function App() {
   const handleSelectRunAnywhere = useCallback(
     (runId: string, workspaceId?: string) => {
       const target = globalRuns.runsRef.current.find((r) => r.id === runId);
-      const route = target?.automationId ? "automation" : "run";
+      const route = target && isHubOwnedRun(target) ? "automation" : "run";
       const generation = ++runSelectionGenerationRef.current;
       pendingCrossWorkspaceRunSelectionRef.current = null;
 
@@ -1090,6 +1098,7 @@ export default function App() {
         setAwayDigest((current) =>
           current ? pruneAwayDigest(current, runId) : current,
         );
+        if (target?.workflow) requestWorkflowRunFocus(runId);
         tabsRef.current.openAutomationsTab();
         return;
       }
@@ -1120,11 +1129,14 @@ export default function App() {
       setAwayDigest((current) =>
         current ? pruneAwayDigest(current, pending.runId) : current,
       );
+      if (globalRuns.runsRef.current.find((run) => run.id === pending.runId)?.workflow) {
+        requestWorkflowRunFocus(pending.runId);
+      }
       tabsRef.current.openAutomationsTab();
       return;
     }
     handleSelectRun(pending.runId, pending.workspaceId);
-  }, [booted, tabs.tabsWorkspaceId, handleSelectRun]);
+  }, [booted, tabs.tabsWorkspaceId, handleSelectRun, globalRuns.runsRef]);
 
   // Unseen terminal-agent alerts, keyed workspace → pane. Set when main
   // fires a terminal alert (event arrives even with all notification
@@ -1223,7 +1235,7 @@ export default function App() {
       // their completions are per-iteration noise — and since no chat tab ever
       // views a loom run, an unfiltered feed would pin "done-unseen" forever.
       const wr = globalRuns.runs.filter(
-        (r) => r.workspaceId === w.id && (!r.automationId || r.status === "blocked"),
+        (r) => r.workspaceId === w.id && (!isHubOwnedRun(r) || r.status === "blocked"),
       );
       // workspaceRailTone drops settled runs (acknowledged-done, failed,
       // cancelled, idle) BEFORE ranking, so a project whose only history is a
@@ -1638,7 +1650,7 @@ export default function App() {
       setRuns((current) => {
         const filtered = next.filter(
           (run) =>
-            !run.automationId &&
+            !isHubOwnedRun(run) &&
             (!isBoardCardRun(run) || openedBoardRunIdsRef.current.has(run.id)),
         );
         return sameRunsList(current, filtered) ? current : filtered;
@@ -1971,7 +1983,7 @@ export default function App() {
 
     const managedRuns = () =>
       globalRuns.runsRef.current.filter(
-        (run) => (!run.automationId && !isBoardCardRun(run)) || run.status === "blocked",
+        (run) => (!isHubOwnedRun(run) && !isBoardCardRun(run)) || run.status === "blocked",
       );
     const onBlur = () => {
       awayAtRef.current = Date.now();
@@ -2033,7 +2045,7 @@ export default function App() {
       globalRuns.runs.filter(
         (r) =>
           r.workspaceId === activeId &&
-          !r.automationId &&
+          !isHubOwnedRun(r) &&
           r.status === "complete" &&
           r.seen !== true,
       ).length,
@@ -2048,7 +2060,7 @@ export default function App() {
       const pending = globalRuns.runsRef.current.filter(
         (r) =>
           r.workspaceId === workspaceId &&
-          !r.automationId &&
+          !isHubOwnedRun(r) &&
           r.status === "complete" &&
           r.seen !== true,
       );
@@ -2236,7 +2248,7 @@ export default function App() {
       // Payload check is synchronous; a missing stamp falls through (fail-open
       // to the visible tab rather than an invisible worker).
       const payload = event.payload as Record<string, unknown> | undefined;
-      if (payload?.automationId) return;
+      if (payload?.automationId || payload?.workflow) return;
 
       // A useTabs instance only owns the workspace currently loaded into its
       // live store. A worker event for a background workspace must not create
@@ -2469,7 +2481,7 @@ export default function App() {
           liveAttempts.map(async ({ run, attempt }) => {
             // Loom/direct automation workers have their own durable Workers
             // surface and must never materialize as chat-owned terminal tabs.
-            if (run.automationId || run.workspaceId !== workspaceId) return;
+            if (isHubOwnedRun(run) || run.workspaceId !== workspaceId) return;
             if (finishedWorkerAttemptsRef.current.has(attempt.id)) return;
             // A Pi-harness worker runs in-process over RPC; MAIN owns its
             // display pty (ensurePiWorkerDisplayPty in run-store) and the pane
@@ -6527,7 +6539,7 @@ export default function App() {
           <Suspense fallback={null}>
             <RunSwitcher
               runs={globalRuns.runs.filter(
-                (r) => !r.automationId && !isBoardCardRun(r),
+                (r) => !isHubOwnedRun(r) && !isBoardCardRun(r),
               )}
               workspaces={workspaces}
               onClose={() => setRunSwitcherOpen(false)}

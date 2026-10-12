@@ -12,6 +12,7 @@ import type {
   PlanValidation,
   WorkerHandoffArtifact,
   AgentEffortLevel,
+  AutopilotStatus,
   AgentRuntimeDiagnostic,
   Checkpoint,
   CoraWhiteboardEdge,
@@ -268,6 +269,8 @@ import {
 import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
+import type { WorkflowCallMarker, WorkflowRunInfo } from "@shared/workflow";
+import { sampleFromSchema, validateWorkflowResult } from "./workflow-schema";
 import { forgetRunMemory, formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { forgetRunLearning, learnFromCompletedRun, noteRunMessages } from "./memory-learning";
 import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
@@ -986,6 +989,7 @@ async function createRunInternal(
     // patched after) so the run.created event itself already carries them.
     automationId: input.automationId,
     executionMode: input.executionMode,
+    ...(input.workflow ? { workflow: input.workflow } : {}),
   };
   run.artifactDir = runDir(run.id);
 
@@ -1907,6 +1911,301 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   scheduleAutopilotCycles(run.id, scheduledAttemptIds);
 
   return scheduledAttemptIds.length > 0 ? await requireRun(run.id) : run;
+}
+
+// ── Workflow runs ───────────────────────────────────────────────────────────
+// A workflow run is a direct run with a `workflow` block. workflow-driver.ts
+// owns its lifecycle: it creates the run, launches one worker task per
+// agent() call through the ordinary prepare/launch path and settles each call
+// from that attempt's report. The driver registers these controls so the
+// generic Stop, Resume, Cancel and Delete entry points reach it.
+
+export interface WorkflowRunControls {
+  stop(runId: string, reason: string): Promise<void>;
+  resume(runId: string): Promise<void>;
+  cancel(runId: string, reason: string): Promise<void>;
+  /** The run is being deleted: end its script without touching run state. */
+  discard(runId: string): Promise<void>;
+}
+
+let workflowRunControls: WorkflowRunControls | null = null;
+
+export function setWorkflowRunControls(controls: WorkflowRunControls | null): void {
+  workflowRunControls = controls;
+}
+
+export async function createWorkflowRun(input: {
+  workspaceId: string;
+  workspaceName?: string;
+  cwd: string;
+  title: string;
+  workflow: WorkflowRunInfo;
+}): Promise<RunState> {
+  const run = await createRun({
+    workspaceId: input.workspaceId,
+    workspaceName: input.workspaceName ?? "workspace",
+    cwd: input.cwd,
+    title: input.title,
+    executionMode: "direct",
+    workflow: input.workflow,
+    chatBackend: "pi",
+    chatModel: input.workflow.defaults.model,
+    chatMode: "auto",
+    chatEffort: input.workflow.defaults.effort,
+  });
+  return commitRunChange(run, {
+    type: "workflow.started",
+    message: `Workflow ${input.workflow.name} started`,
+    payload: { name: input.workflow.name, ref: input.workflow.ref, caps: input.workflow.caps },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "workflow_started",
+        startedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/**
+ * Writes the driver's view of a workflow run. Progress writes (no `event`)
+ * persist run.json only, so a run with hundreds of agents does not flood
+ * events.jsonl; state changes pass an event and an optional run status.
+ */
+export async function saveWorkflowRunInfo(
+  runId: string,
+  patch: Partial<WorkflowRunInfo>,
+  options: {
+    event?: { type: string; message: string; payload?: Record<string, unknown> };
+    status?: RunStatus;
+  } = {},
+): Promise<RunState | null> {
+  const run = await getRun(runId);
+  if (!run?.workflow) return run;
+  if (!options.event && options.status === undefined) {
+    // Serialized with commitRunChange: the agents' task and attempt commits
+    // land on the same run.json, and a progress write from an older snapshot
+    // would erase them.
+    let saved: RunState | null = null;
+    const previous = runMutationQueues.get(runId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {
+        /* an earlier failed commit must not wedge progress writes */
+      })
+      .then(async () => {
+        const latest = await getRun(runId);
+        if (!latest?.workflow) return;
+        latest.workflow = { ...latest.workflow, ...patch };
+        latest.updatedAt = new Date().toISOString();
+        await saveRun(latest);
+        saved = latest;
+      });
+    runMutationQueues.set(runId, next);
+    try {
+      await next;
+    } finally {
+      if (runMutationQueues.get(runId) === next) runMutationQueues.delete(runId);
+    }
+    return saved;
+  }
+  const event = options.event ?? { type: "workflow.updated", message: "Workflow updated" };
+  return commitRunChange(run, {
+    type: event.type,
+    message: event.message,
+    payload: event.payload ?? {},
+    mutate: (draft, timestamp) => {
+      if (!draft.workflow) return false;
+      draft.workflow = { ...draft.workflow, ...patch };
+      if (options.status !== undefined) {
+        draft.status = options.status;
+        const autopilotStatus: AutopilotStatus =
+          options.status === "running"
+            ? "running"
+            : options.status === "paused"
+              ? "paused"
+              : options.status === "complete" || options.status === "failed" || options.status === "cancelled"
+                ? options.status
+                : "idle";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: autopilotStatus,
+          lastAction: event.type,
+          updatedAt: timestamp,
+        };
+        // Phases settle with the run: a phase is only "done" once the script
+        // can no longer issue calls into it.
+        for (const step of draft.steps) {
+          if (["complete", "completed_unverified", "skipped", "failed"].includes(step.status)) continue;
+          if (options.status === "paused") {
+            if (step.status === "running" || step.status === "reviewing") {
+              step.status = "ready";
+              step.updatedAt = timestamp;
+            }
+          } else if (isTerminalRunStatus(options.status)) {
+            step.status = options.status === "complete" ? "complete" : "failed";
+            step.updatedAt = timestamp;
+          }
+        }
+        if (isTerminalRunStatus(options.status)) draft.currentStepId = undefined;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export interface WorkflowAgentLaunchInput {
+  runId: string;
+  /** The attempt's working directory: the workspace or the call's worktree. */
+  cwd: string;
+  phase: string;
+  label: string;
+  prompt: string;
+  model: string;
+  effort: AgentEffortLevel;
+  access: "full" | "edits" | "readonly";
+  verifier: boolean;
+  call: WorkflowCallMarker;
+  onStarted?: (info: { workerTaskId: string; attemptId: string }) => void;
+}
+
+export interface WorkflowAgentLaunchResult {
+  workerTaskId: string;
+  attemptId: string;
+  exitCode: number | null;
+  attemptStatus: WorkerAttemptStatus;
+  error?: string;
+  /** The raw final-report.json, untrusted. */
+  report: Record<string, unknown> | null;
+  usage: { in: number; out: number; usd: number };
+}
+
+const workflowStepLocks = new Map<string, Promise<unknown>>();
+
+// Calls of one phase arrive concurrently from parallel(); the lock keeps them
+// from each creating their own step for the same phase.
+async function workflowPhaseStep(runId: string, phase: string): Promise<string> {
+  const previous = workflowStepLocks.get(runId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    const run = await requireRun(runId);
+    const existing = run.steps.find((step) => step.title === phase && !isImmutableStepStatus(step.status));
+    if (existing) return existing.id;
+    const created = await createStep({
+      runId,
+      title: phase,
+      goal: `Workflow phase: ${phase}`,
+      kind: "worker_batch",
+      riskLevel: "low",
+      plannedAgents: [],
+      acceptanceCriteria: [],
+    });
+    const step = created.steps.at(-1);
+    if (!step) throw new Error(`Workflow phase step was not created: ${phase}`);
+    return step.id;
+  });
+  workflowStepLocks.set(runId, next);
+  try {
+    return await next;
+  } finally {
+    if (workflowStepLocks.get(runId) === next) workflowStepLocks.delete(runId);
+  }
+}
+
+export async function launchWorkflowAgentTask(input: WorkflowAgentLaunchInput): Promise<WorkflowAgentLaunchResult> {
+  const stepId = await workflowPhaseStep(input.runId, input.phase);
+  const runtime = runtimeForWorkerModelId(input.model) ?? loomRuntimeForModel(input.model);
+  let run = await createWorkerTask({
+    runId: input.runId,
+    stepId,
+    title: input.label,
+    description: input.prompt,
+    runtimePreference: runtime,
+    modelHint: input.model,
+    effortHint: input.effort,
+    allowedPaths: [],
+    forbiddenPaths: [],
+    expectedOutputs: [],
+    verificationCommands: [],
+    canRunParallel: true,
+    conflictsWith: [],
+    taskClass: input.verifier ? "verifier" : "feature",
+    createdBy: "spark",
+    accessHint: input.access === "full" ? undefined : input.access,
+    workflowCall: input.call,
+  });
+  const task = [...run.workerTasks].reverse().find((item) => item.workflowCall?.key === input.call.key);
+  if (!task) throw new Error("Workflow worker task creation failed.");
+  const envelope = await prepareWorkerTask({ runId: input.runId, workerTaskId: task.id, cwd: input.cwd });
+  input.onStarted?.({ workerTaskId: task.id, attemptId: envelope.attemptId });
+  try {
+    run = await launchWorkerAttempt({ runId: input.runId, attemptId: envelope.attemptId });
+  } catch (err) {
+    run = await requireRun(input.runId);
+    const failed = run.workerAttempts.find((item) => item.id === envelope.attemptId);
+    return {
+      workerTaskId: task.id,
+      attemptId: envelope.attemptId,
+      exitCode: null,
+      attemptStatus: failed?.status ?? "failed",
+      error: err instanceof Error ? err.message : String(err),
+      report: null,
+      usage: { in: 0, out: 0, usd: 0 },
+    };
+  }
+  const attempt = run.workerAttempts.find((item) => item.id === envelope.attemptId);
+  let report: Record<string, unknown> | null = null;
+  if (attempt?.finalReportPath) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(attempt.finalReportPath, "utf8")) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) report = parsed as Record<string, unknown>;
+    } catch {
+      report = null;
+    }
+  }
+  return {
+    workerTaskId: task.id,
+    attemptId: envelope.attemptId,
+    exitCode: attempt?.exitCode ?? null,
+    attemptStatus: attempt?.status ?? "failed",
+    error: attempt?.error,
+    report,
+    usage: {
+      in: (attempt?.inputTokens ?? 0) + (attempt?.cacheReadTokens ?? 0) + (attempt?.cacheWriteTokens ?? 0),
+      out: attempt?.outputTokens ?? 0,
+      usd: attempt?.costUsd ?? 0,
+    },
+  };
+}
+
+/** Marks the attempts a restart orphaned on a workflow run; their calls rerun on resume. */
+export async function interruptWorkflowAttempts(runId: string, reason: "app_restart" | "pause"): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "workflow.attempts_interrupted",
+    message: "Workflow agents interrupted",
+    payload: { reason },
+    mutate: (draft, timestamp) => {
+      let changed = false;
+      for (const attempt of draft.workerAttempts) {
+        if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) continue;
+        attempt.status = "cancelled";
+        attempt.interruptedBy = reason;
+        attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        attempt.error = attempt.error ?? (reason === "app_restart" ? "Interrupted by an app restart." : "Stopped by the user.");
+        const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
+        if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+        }
+        changed = true;
+      }
+      if (!changed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 // ── Looms v2: direct-worker runs ────────────────────────────────────────────
@@ -3191,6 +3490,9 @@ async function loomGraphForRun(run: RunState): Promise<LoomGraph | undefined> {
 async function finalizeDirectRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   if (run.executionMode !== "direct") return;
+  // A workflow run ends when its script returns, not when its workers go
+  // idle: between two agent() calls none may be running.
+  if (run.workflow) return;
   // paused/cancelled are user decisions; blocked/terminal mean this iteration
   // was already decided (idempotency under watchdog + cycle double-fires).
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
@@ -11121,6 +11423,10 @@ export async function releaseRunQuestion(
 
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.stop(run.id, input.reason?.trim() || "Paused by user");
+    return requireRun(run.id);
+  }
   const reason = input.reason?.trim() || "Paused by user";
   const recordPauseMessage = shouldRecordPauseReasonAsUserNote(reason);
   await sendPauseSignals(run, reason);
@@ -11618,6 +11924,10 @@ function settleResumeInterruptedNotes(draft: RunState): boolean {
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.resume(run.id);
+    return requireRun(run.id);
+  }
   // A run blocked on an open question resumes by ANSWERING it, never by a plain
   // resume. Plain-resuming it wedged the run: this function drops the blocker
   // and writes "running", but nothing is scheduled to drive it (an auto Pi
@@ -11957,6 +12267,10 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") {
     return run;
+  }
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.cancel(run.id, input.reason?.trim() || "Run cancelled");
+    return requireRun(run.id);
   }
   const reason = input.reason?.trim() || "Run cancelled";
   // Tear down like Stop does. An ESC alone left the manager turn running and
@@ -14173,6 +14487,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     resumeSessionId: input.resumeSessionId,
     verifierBrief: input.verifierBrief,
     autoVerifierForTaskId: input.autoVerifierForTaskId,
+    ...(input.workflowCall ? { workflowCall: input.workflowCall } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -14486,13 +14801,15 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
+  const fakeWorkflowWorker = Boolean(task.workflowCall) && process.env.CODARA_WORKFLOW_FAKE_WORKERS === "1";
   // Direct chats keep the user's exact model selection. Managed workers use
   // the enabled roster; automation workers keep their validated model hints.
   // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
-    task.runtimePreference === "claude" ||
-    task.runtimePreference === "codex" ||
-    task.runtimePreference === "grok";
+    !fakeWorkflowWorker &&
+    (task.runtimePreference === "claude" ||
+      task.runtimePreference === "codex" ||
+      task.runtimePreference === "grok");
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
   const usableWorkerRuntimes = workerSettings
     ? await detectConfiguredAgentRuntimes()
@@ -14519,9 +14836,11 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     );
   }
   if (workerLaunchAborted(attempt.id)) return run;
-  const command = isPiWorker
-    ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
-    : "pwsh (manual)";
+  const command = fakeWorkflowWorker
+    ? "fake workflow worker"
+    : isPiWorker
+      ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+      : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
   attempt.startedAt = launchTimestamp;
@@ -14566,6 +14885,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
       // a chat terminal tab.
       automationId: run.automationId,
       executionMode: run.executionMode,
+      ...(run.workflow ? { workflow: true } : {}),
     },
   });
   await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
@@ -14576,8 +14896,12 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // claim can then auto-restore the workspace to this exact pre-mutation state.
   // Best-effort: a failed snapshot or non-git workspace yields sha=null and just
   // disables restore for this attempt; it must never block the launch.
+  // Workflow agents skip it: a fan-out of dozens would serialize on the
+  // checkpoint lock, and the script, not a verifier verdict, decides what
+  // their results mean.
   if (
     taskWritesWorkspace(task) &&
+    !task.workflowCall &&
     runProjectPolicyMode(run) === "trusted"
   ) {
     try {
@@ -14625,7 +14949,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // A checkpoint SHA gives Git workspaces their exact before/after diff. For
   // ordinary folders (for example Playground) keep a bounded copy of only the
   // paths this worker owns so those edits receive the same useful summary.
-  if (taskWritesWorkspace(task) && !attempt.preWorkerCheckpointSha) {
+  if (taskWritesWorkspace(task) && !task.workflowCall && !attempt.preWorkerCheckpointSha) {
     const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
     const declaredPaths = task.allowedPaths.length > 0
       ? task.allowedPaths
@@ -14663,7 +14987,9 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     contextWindowTokens?: number;
   };
   try {
-    result = isPiWorker
+    result = fakeWorkflowWorker
+      ? await runFakeWorkflowWorkerSession({ run, task, attemptId: attempt.id, paths, command })
+      : isPiWorker
       ? await runPiWorkerSession({
           run,
           task,
@@ -14902,6 +15228,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
 
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
+  if (run.workflow && workflowRunControls) await workflowRunControls.discard(run.id);
   const sandboxBlockers = unreconciledSandboxAttempts(run);
   if (sandboxBlockers.length > 0) {
     const labels = sandboxBlockers
@@ -16031,6 +16358,10 @@ export function workerExitInterruptedByForcePause(input: {
 // deleteRun trips the OS file-in-use prompt. Use this before deleting.
 export async function forcePauseRun(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.stop(run.id, "Stopped by the user");
+    return requireRun(run.id);
+  }
   // Opened BEFORE the first teardown step and closed only once the pause commit
   // is durable: every worker exit inside this window is the pause's doing.
   openForcePauseWindow(run.id);
@@ -16306,6 +16637,41 @@ async function chmodReadable(dir: string): Promise<void> {
   }
 }
 
+async function settleWorkflowAgentReport(
+  run: RunState,
+  task: WorkerTask,
+  attempt: WorkerAttempt,
+  paths: WorkerArtifactPaths,
+): Promise<RunState> {
+  const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
+  return commitRunChange(run, {
+    type: "worker_report.parsed",
+    message: report ? `Workflow agent report: ${report.status}` : "Workflow agent ended without a report",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    payload: { attemptId: attempt.id, reportStatus: report?.status ?? null, finalReportJson: paths.finalReportJson },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerTasks.find((item) => item.id === task.id);
+      if (!target) return false;
+      target.status =
+        report?.status === "complete" || report?.status === "partial"
+          ? "accepted"
+          : report?.status === "blocked"
+            ? "blocked"
+            : "failed";
+      target.updatedAt = timestamp;
+      const targetStep = target.stepId ? draft.steps.find((item) => item.id === target.stepId) : undefined;
+      if (targetStep && targetStep.status === "failed") {
+        // One failed agent resolves to null in the script; it does not fail
+        // the phase, which settles with the run.
+        targetStep.status = "running";
+        targetStep.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function reviewWorkerReportArtifact({
   run,
   task,
@@ -16326,6 +16692,11 @@ async function reviewWorkerReportArtifact({
   const step = task.stepId ? current.steps.find((entry) => entry.id === task.stepId) : undefined;
   if (current.status === "cancelled" || step?.status === "skipped") {
     return current;
+  }
+  // A workflow agent's report is read by the script, not reviewed: no launch
+  // fallback, verifier loop or follow-up may run behind the script's back.
+  if (current.workflow && task.workflowCall) {
+    return settleWorkflowAgentReport(current, task, attempt, paths);
   }
   const report = await readWorkerReport(paths.finalReportJson);
   if (!report) {
@@ -20873,6 +21244,143 @@ async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise
  * provider subscriptions, native tools, and extension behavior are uniform
  * with the Cora manager.
  */
+// Frozen contract with resources/pi-cora/worker.ts: CODARA_PI_WORKFLOW turns
+// the direct lane's submit_result into a workflow return value, and the
+// schema file becomes its `result` parameter. Access presets reuse the loom
+// fence, with writes contained to the workspace plus the attempt directory.
+function applyWorkflowWorkerEnv(env: NodeJS.ProcessEnv, task: WorkerTask, paths: WorkerArtifactPaths): void {
+  const call = task.workflowCall;
+  if (!call) return;
+  env.CODARA_PI_WORKFLOW = "1";
+  if (call.schemaPath) env.CODARA_PI_WORKFLOW_RESULT_SCHEMA_PATH = call.schemaPath;
+  if (task.accessHint === "edits" || task.accessHint === "readonly") {
+    env.CODARA_PI_WORKER_ACCESS = task.accessHint;
+    env.CODARA_PI_WORKER_WRITE_ALLOW = JSON.stringify([resolvePath(paths.attemptDir)]);
+  }
+  if (typeof call.compactAtTokens === "number" && call.compactAtTokens > 0) {
+    // The script's own limit for this agent outranks the owner's percentage,
+    // which the extension would otherwise prefer.
+    env.CODARA_PI_COMPACT_AT_TOKENS = String(Math.round(call.compactAtTokens));
+    delete env.CODARA_PI_COMPACT_PERCENT;
+  }
+  const heavyBin = workflowHeavyBinDir;
+  if (heavyBin) {
+    const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+    const current = env[pathKey] ?? process.env.PATH ?? "";
+    env[pathKey] = current ? `${heavyBin}${process.platform === "win32" ? ";" : ":"}${current}` : heavyBin;
+    Object.assign(env, workflowHeavyEnv);
+  }
+}
+
+let workflowHeavyBinDir: string | null = null;
+let workflowHeavyEnv: Record<string, string> = {};
+
+/** Where `codara-heavy` lives and its settings; the workflow driver sets them once at boot. */
+export function setWorkflowHeavyBinDir(dir: string | null, env: Record<string, string> = {}): void {
+  workflowHeavyBinDir = dir;
+  workflowHeavyEnv = { ...env };
+}
+
+async function workflowResultProblem(
+  task: WorkerTask,
+  paths: WorkerArtifactPaths,
+  status: string,
+): Promise<string | null> {
+  const schemaPath = task.workflowCall?.schemaPath;
+  if (!schemaPath || (status !== "complete" && status !== "partial")) return null;
+  try {
+    const schema = JSON.parse(await fs.readFile(schemaPath, "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(await fs.readFile(paths.finalReportJson, "utf8")) as Record<string, unknown>;
+    if (raw.result === undefined) return "the result is missing";
+    const checked = validateWorkflowResult(schema, raw.result);
+    return checked.ok ? null : checked.errors.join("; ");
+  } catch (err) {
+    return `the result could not be read (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+
+// Test seam for the workflow e2e (CODARA_WORKFLOW_FAKE_WORKERS=1): stands in
+// for the Pi session of a workflow agent so a spec can run whole workflows
+// without a subscription. The prompt drives it: FAKE_DELAY_MS=<n>,
+// FAKE_TOKENS=<n>, FAKE_FAIL, and a `FAKE_RESULT: <json>` line; without one a
+// schema call gets a sample of its schema. Stop kills it like a real worker.
+async function runFakeWorkflowWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  command: string;
+}): Promise<{ exitCode: number; error?: string; inputTokens?: number; outputTokens?: number }> {
+  const prompt = task.description;
+  const delay = Math.min(60_000, Number(/FAKE_DELAY_MS=(\d+)/.exec(prompt)?.[1] ?? 300));
+  const tokens = Number(/FAKE_TOKENS=(\d+)/.exec(prompt)?.[1] ?? 1000);
+  if (!(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
+    return { exitCode: 1, error: "Fake workflow worker was cancelled before it started." };
+  }
+  let killed = false;
+  let wake: () => void = () => undefined;
+  activeWorkerProcesses.set(attemptId, {
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    command,
+    processGenerationId: randomUUID(),
+    inputCapability: "none",
+    write: () => undefined,
+    kill: () => {
+      killed = true;
+      wake();
+    },
+  });
+  try {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    if (killed) return { exitCode: 1, error: "Fake workflow worker was stopped." };
+    const fail = /FAKE_FAIL/.test(prompt);
+    let result: unknown;
+    const resultLine = /^FAKE_RESULT:\s*(.+)$/m.exec(prompt)?.[1];
+    if (resultLine) {
+      try {
+        result = JSON.parse(resultLine) as unknown;
+      } catch {
+        result = undefined;
+      }
+    } else if (task.workflowCall?.schemaPath) {
+      const schema = JSON.parse(await fs.readFile(task.workflowCall.schemaPath, "utf8")) as unknown;
+      result = sampleFromSchema(schema);
+    }
+    const report = {
+      status: fail ? "failed" : "complete",
+      summary: fail ? "Fake worker failed on purpose." : `Fake result for: ${task.title}`,
+      ...(result !== undefined && !fail ? { result } : {}),
+      files_changed: [],
+      commands_run: [],
+      tests: [],
+      proof: [],
+      risks: [],
+      followups: [],
+      handoff: [],
+    };
+    await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
+    await fs.appendFile(paths.stdoutLog, `fake workflow worker: ${report.summary}\n`, "utf8").catch(() => undefined);
+    return { exitCode: 0, inputTokens: tokens, outputTokens: Math.round(tokens / 10) };
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+  }
+}
+
 async function runPiWorkerSession({
   run,
   task,
@@ -21166,6 +21674,7 @@ async function runPiWorkerSession({
         : undefined,
     });
     if (scratchpadPath) plan.env.CODARA_PI_SCRATCHPAD_PATH = scratchpadPath;
+    if (task.workflowCall) applyWorkflowWorkerEnv(plan.env, task, paths);
     // The plan creator may write a per-session MCP bridge file. Capture it
     // before the durable profile stamp so any stamp failure still reaches the
     // finally cleanup path.
@@ -21433,6 +21942,24 @@ async function runPiWorkerSession({
       throw new Error(
         `Pi worker completed without a parseable final-report.json${problem ? ` (${problem})` : ""}.`,
       );
+    }
+    // The report file is untrusted even though Pi checked the tool call, so
+    // main validates the result too and asks once, naming the exact errors.
+    const resultProblem = await workflowResultProblem(task, paths, report.status);
+    if (resultProblem) {
+      paint("\r\n  \x1b[33m↻ Fixing the workflow result…\x1b[0m\r\n");
+      await waitForPiWorkerTurn(
+        client,
+        `Your submit_result call did not return a valid \`result\`: ${resultProblem}. ` +
+          "Do not redo the work. Call submit_result again with the same status and summary and a `result` that matches the schema in the tool's parameters exactly.",
+        reportStall,
+        () => interrupted,
+        compactionProgress,
+        taskContract,
+        wrapUpRequested,
+        readScratchpad,
+      );
+      report = (await readWorkerReport(paths.finalReportJson)) ?? report;
     }
 
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });

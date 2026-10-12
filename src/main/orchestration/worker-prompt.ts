@@ -63,6 +63,7 @@ export function renderWorkerPrompt({
   /** Verifier-class tasks only: what the previous verifier round already settled. */
   priorVerifierRound?: PriorVerifierRound | null;
 }): string {
+  if (task.workflowCall) return renderWorkflowAgentPrompt({ cwd, run, task, paths });
   if (task.taskClass === "verifier") {
     return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs, priorVerifierRound });
   }
@@ -809,6 +810,57 @@ function renderImplementationWorkerPrompt({
  * managed runs. The worker extension supplies submit_result for the durable
  * report, so the model can finish in one tool call after its real checks pass.
  */
+// A workflow agent answers one agent() call inside a script. Prior handoffs
+// and run memory stay out on purpose: the call's prompt is its whole input,
+// which is what lets a resumed run trust a cached answer to the same prompt.
+function renderWorkflowAgentPrompt({
+  cwd,
+  run,
+  task,
+  paths,
+}: {
+  cwd: string;
+  run: RunState;
+  task: WorkerTask;
+  paths: WorkerArtifactPaths;
+}): string {
+  const call = task.workflowCall!;
+  const lines = [
+    `You are one agent inside the workflow "${run.workflow?.name ?? "workflow"}", phase "${call.phase}".`,
+    "Your submit_result call is the return value of a function call inside a script, not a message to a person. Return raw data: no greetings, no preamble, no markdown decoration the script would have to strip.",
+    "Do exactly the task below and nothing else. You cannot ask anyone a question: if you are blocked, submit status blocked with the reason in the summary.",
+    "Do not commit, push, install packages, or delete data unless the task explicitly asks.",
+  ];
+  if (call.isolation === "worktree") {
+    lines.push(
+      `You work in your own git worktree at ${cwd}. Edit freely there; do not commit, Codara commits your changes to its branch when you finish.`,
+    );
+  }
+  if (task.accessHint === "readonly") {
+    lines.push("Your access is read-only: inspect and report, do not edit files or run commands that change anything.");
+  } else if (task.accessHint === "edits") {
+    lines.push("You may edit files but have no shell and no web access.");
+  }
+  if (call.heavy) {
+    lines.push(
+      "Wrap builds, full test suites and end-to-end runs in `codara-heavy <command>`: it serializes heavy work across agents and caps its memory so the machine stays responsive.",
+    );
+  }
+  lines.push("", "## TASK", task.description.trim());
+  const projectPolicy = renderRunProjectPolicy(run);
+  if (projectPolicy) lines.push("", projectPolicy);
+  lines.push(
+    "",
+    "## FINISH",
+    call.schemaPath
+      ? "Call `submit_result` exactly once. Put the answer in `result`, matching the schema in the tool's parameters exactly; `summary` is one or two lines for the progress view."
+      : "Call `submit_result` exactly once. The script receives your `summary` verbatim as the answer, so put the complete answer there.",
+    `Workspace: ${cwd}`,
+    `Report destination (handled by submit_result): ${paths.finalReportJson}`,
+  );
+  return lines.join("\n");
+}
+
 function renderDirectTaskPrompt({
   cwd,
   run,

@@ -228,6 +228,13 @@ const WORKTREES = `- Worktrees: load the worktrees family for an isolated checko
   repository on its own branch (shown in the user's rail), and remove it with
   codara_worktree_remove once the branch is merged.`;
 
+const WORKFLOWS = `- Workflows: a workflow is a script that fans one job out to many agents
+  (audits, sweeps, migrations, reviews with independent verifiers). Use one
+  only when the user asks for a workflow, names a saved one, or agrees to
+  your proposal in prose; never start one on your own. Load the workflows
+  family, check the script until it is clean, then run it: the user approves
+  the estimate in the chat before any agent starts.`;
+
 const MEMORY = `- Memory: Cora remembers across chats so the user never says a thing twice.
   Follow CORA PROFILE, CORA MEMORY and CORA LEARNED MEMORY; the user's newest
   words win over any of them. When the user corrects you or states a lasting
@@ -423,8 +430,8 @@ export function buildCoraPiSystemPrompt(
 ): string {
   // The automation roster has no codara_remember, and an untrusted pull
   // request's manager has none of the studio, web, or memory tools.
-  // Only a managing chat's roster carries the worktree tools; Codara refuses
-  // them from Talk and Automation chats.
+  // Only a managing chat's roster carries the worktree and workflow tools;
+  // Codara refuses them from Talk and Automation chats.
   const surfaces = options.untrusted
     ? []
     : [
@@ -432,7 +439,7 @@ export function buildCoraPiSystemPrompt(
           ? SURFACES
           : mode === "talk"
             ? `${SURFACES}\n${MEMORY}`
-            : `${SURFACES}\n${WORKTREES}\n${MEMORY}`,
+            : `${SURFACES}\n${WORKTREES}\n${WORKFLOWS}\n${MEMORY}`,
       ];
   const shared = [SHARED_INTRO, VOICE, EVIDENCE, SAFETY, ...surfaces].join("\n\n");
 

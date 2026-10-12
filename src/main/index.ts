@@ -1444,6 +1444,15 @@ app.whenReady().then(async () => {
       console.warn("[main] direct-worker recovery failed:", err);
     }
     try {
+      // Workflow runs are direct runs that recoverDirectRuns skips: park the
+      // ones the previous session left running. Starts nothing.
+      const wf = await import("./orchestration/workflow-driver");
+      await wf.installWorkflowDriver();
+      await wf.recoverWorkflowRuns();
+    } catch (err) {
+      console.warn("[main] workflow recovery failed:", err);
+    }
+    try {
       const { startScheduler } = await import("./orchestration/scheduler");
       await startScheduler();
     } catch (err) {

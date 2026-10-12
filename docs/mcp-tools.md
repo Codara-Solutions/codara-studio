@@ -292,3 +292,21 @@ automation are shown to you for approval in the chat first.
 | `codara_resume_automation` | Resumes a paused loop. |
 | `codara_stop_automation` | Stops the current loop; the automation stays. |
 | `codara_delete_automation` | Deletes an automation (asks you first). |
+
+## Workflows
+
+Only in `execute`, and never for an imported pull request. A workflow is a
+script that fans work out to many agents; see Workflows in
+[architecture.md](architecture.md#orchestration-cora).
+
+| Tool | What it does |
+|---|---|
+| `codara_workflow_list` | Lists saved workflows. |
+| `codara_workflow_get` | Reads one saved workflow's source. |
+| `codara_workflow_check` | Checks a script without running it: syntax, `meta`, and an estimate of agents and tokens. |
+| `codara_workflow_run` | Runs a saved workflow or an inline script, with optional caps. Asks you first. |
+| `codara_workflow_status` | A workflow run's progress tree, and its result once it finished. |
+| `codara_workflow_wait` | Waits until a workflow run finishes, stops or needs you. |
+| `codara_workflow_stop` | Stops a workflow run; it can be resumed. |
+| `codara_workflow_resume` | Resumes it; agents that finished are answered from the journal. Switching the run to an edited saved script asks you first. |
+| `codara_workflow_save` | Saves a script for you or the project. Asks you first. |

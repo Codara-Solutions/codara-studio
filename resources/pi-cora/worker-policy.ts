@@ -39,13 +39,16 @@ export function isWorkerSafeBridgeTool(
   ) {
     return true;
   }
+  // A workflow agent runs on the direct lane but answers a script: it neither
+  // touches the user's memory nor manages their worktrees.
+  const chatDirectTask = env.CODARA_PI_DIRECT_TASK === "1" && env.CODARA_PI_WORKFLOW !== "1";
   if (name === "codara_remember" || name === "codara_recall") {
-    return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
+    return !automationWorker && chatDirectTask;
   }
   // A direct task is the user's own chat run as a single worker, so it
   // manages worktrees like a manager; a worker a manager spawned never does.
   if (name.startsWith("codara_worktree_")) {
-    return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
+    return !automationWorker && chatDirectTask;
   }
   if (automationWorker) {
     return (

@@ -28,7 +28,8 @@ import {
   jobWorkerSummary,
   workerSummary,
 } from "./presentation";
-import { consumePendingAutomationFocus } from "./focus-request";
+import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus } from "./focus-request";
+import WorkflowsView from "../workflows/WorkflowsView";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { graphForJob } from "./flow/model";
 import { STEP_TONE, stepActionLine, stepTitle } from "./flow/step-meta";
@@ -64,7 +65,7 @@ export interface Props {
 
 // view: rail + detail. create/edit: the node-flow editor owns the stage.
 type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
-type SubTab = "looms" | "workers";
+type SubTab = "looms" | "workers" | "workflows";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
 
@@ -93,7 +94,7 @@ export default function AutomationsPage({
       const remembered =
         window.localStorage.getItem(subTabStorageKey(workspaceId)) ??
         window.localStorage.getItem(SUBTAB_STORAGE_KEY);
-      return remembered === "workers" ? "workers" : "looms";
+      return remembered === "workers" || remembered === "workflows" ? remembered : "looms";
     } catch {
       return "looms";
     }
@@ -227,6 +228,26 @@ export default function AutomationsPage({
     window.addEventListener("spark:open-automation", handler);
     return () => window.removeEventListener("spark:open-automation", handler);
   }, []);
+
+  // "Show this workflow run" jumps, through the same two channels.
+  const [workflowFocus, setWorkflowFocus] = useState<string | null>(null);
+  useEffect(() => {
+    const pending = consumePendingWorkflowRunFocus();
+    if (pending !== null) {
+      setWorkflowFocus(pending);
+      switchSubTab("workflows");
+    }
+    const handler = (event: Event) => {
+      consumePendingWorkflowRunFocus();
+      const id = (event as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      if (typeof id !== "string") return;
+      setWorkflowFocus(id);
+      switchSubTab("workflows");
+    };
+    window.addEventListener("spark:open-workflow-run", handler);
+    return () => window.removeEventListener("spark:open-workflow-run", handler);
+  }, [switchSubTab]);
+  const clearWorkflowFocus = useCallback(() => setWorkflowFocus(null), []);
   useEffect(() => {
     if (focusRequest === null || loading) return;
     setFocusRequest(null);
@@ -440,6 +461,49 @@ export default function AutomationsPage({
         )}
       </div>
 
+      {/* Workflows: saved scripts that fan work out to many agents, and
+          their runs. */}
+      <button
+        type="button"
+        data-testid="automations-workflows-tab"
+        onClick={() => switchSubTab(subTab === "workflows" ? "looms" : "workflows")}
+        aria-pressed={subTab === "workflows"}
+        style={{
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "10px 12px",
+          border: "none",
+          borderTop: "1px solid var(--rule)",
+          background:
+            subTab === "workflows" ? "color-mix(in oklch, var(--accent) 10%, var(--panel))" : "transparent",
+          textAlign: "left",
+          cursor: "default",
+        }}
+        onMouseEnter={(e) => {
+          if (subTab !== "workflows") e.currentTarget.style.background = "var(--hover)";
+        }}
+        onMouseLeave={(e) => {
+          if (subTab !== "workflows") e.currentTarget.style.background = "transparent";
+        }}
+        title={subTab === "workflows" ? "Back to the automation detail" : "Saved workflows and their runs"}
+      >
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            fontWeight: 650,
+            color: subTab === "workflows" ? "var(--ink)" : "var(--muted)",
+          }}
+        >
+          Workflows
+        </span>
+        <span aria-hidden className="spark-mono" style={{ fontSize: 11, color: "var(--muted-2)" }}>
+          {subTab === "workflows" ? "‹" : "›"}
+        </span>
+      </button>
+
       {/* Footer: the global workers grid. Click to flip the stage there and
           back; never automatic. */}
       <button
@@ -607,6 +671,17 @@ export default function AutomationsPage({
                 onNewLoom={startCreate}
               />
             </div>
+          )}
+
+          {subTab === "workflows" && (
+            <WorkflowsView
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+              cwd={cwd}
+              visible={active}
+              focusRunId={workflowFocus}
+              onFocusConsumed={clearWorkflowFocus}
+            />
           )}
 
           {!editing && subTab === "looms" && (

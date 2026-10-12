@@ -55,7 +55,11 @@ const requireFromExtension = createRequire(import.meta.url);
 // Stop and Send now leave Pi idle at once, and the next turn keeps the process
 // instead of replacing one stuck in a long wait. Every other Studio call may
 // already be changing the run, so it finishes.
-const ABANDONABLE_BRIDGE_TOOLS = new Set(["codara_wait_for_workers", "codara_wait_for_automation"]);
+const ABANDONABLE_BRIDGE_TOOLS = new Set([
+  "codara_wait_for_workers",
+  "codara_wait_for_automation",
+  "codara_workflow_wait",
+]);
 const UNTRUSTED_PULL_REQUEST_POLICY = "untrusted-pull-request";
 const UNTRUSTED_MANAGER_BRIDGE_TOOLS = new Set([
   "codara_spawn_workers",
@@ -295,7 +299,8 @@ ${mcp?.promptSuffix() ?? ""}`,
         `Load Codara Studio tool families for this chat before their first use. Families: ${loadableFamilies.join(", ")}. ` +
         "browser drives the built-in Browser tab (codara_preview_*); terminal opens terminal tabs for servers and commands the user watches (codara_terminal_*); " +
         "whiteboard builds visual explanations (codara_whiteboard_*); board manages this chat's task cards (codara_board_*); " +
-        "automations creates, runs, and manages recurring automations; worktrees creates isolated worktrees and removes merged ones. Returns the activated tools and how to use them.",
+        "automations creates, runs, and manages recurring automations; worktrees creates isolated worktrees and removes merged ones; " +
+        "workflows checks, runs and saves scripts that fan work out to many agents. Returns the activated tools and how to use them.",
       promptSnippet: `Load Studio tool families: ${loadableFamilies.join(", ")}`,
       parameters: {
         type: "object",
