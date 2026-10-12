@@ -293,7 +293,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
     >
       {/* The card is liquid glass; the full-window scrim is a plain tint so
           search never asks Chromium to blur the live workbench. */}
-      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
+      <div className="spark-scrim spark-scrim--clear spark-scrim--palette" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"

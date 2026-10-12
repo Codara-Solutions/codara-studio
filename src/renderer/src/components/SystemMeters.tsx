@@ -340,7 +340,10 @@ export default function SystemMeters() {
             <span key={metric.kind} className="system-meter-mini">
               <MiniRing value={value} color={metric.color} />
               <span className="system-meter-mini-label">{metric.label}</span>
-              <span className="system-meter-mini-value" style={{ color: metric.color }}>
+              <span
+                className="system-meter-mini-value"
+                style={{ "--meter-tint": metric.color } as React.CSSProperties}
+              >
                 {snapshot ? metricText(snapshot, metric.kind) : "—"}
               </span>
             </span>

@@ -1418,6 +1418,9 @@ export default function ChatComposer({
 
   return (
     <div
+      // The dock's fade, and its overlap with the conversation when it
+      // floats over one, live on .cora-composer-dock.
+      className="cora-composer-dock"
       style={{
         // 0 1 auto (not 0 0 auto): when the chat dock is short the composer
         // shrinks within its slot instead of overflowing past the top, which
@@ -1429,7 +1432,6 @@ export default function ChatComposer({
         display: "flex",
         flexDirection: "column",
         padding: "8px clamp(14px, 3vw, 42px) 12px",
-        background: "linear-gradient(to bottom, transparent, color-mix(in oklab, var(--panel) 88%, transparent) 38%)",
       }}
     >
       <div style={{ width: "100%", maxWidth: 768, margin: "0 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
@@ -2335,11 +2337,13 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 28,
+        height: 28,
+        flex: "0 0 28px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        // A circle like Send, whose slot it takes: every control in the bar
+        // is a capsule.
+        borderRadius: "50%",
         background: hover ? "var(--panel-3)" : "var(--panel-2)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
@@ -2405,11 +2409,11 @@ function SendButton({
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 28,
+        height: 28,
+        flex: "0 0 28px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        borderRadius: "50%",
         background: disabled
           ? "color-mix(in oklab, var(--ink) 7%, transparent)"
           : hover

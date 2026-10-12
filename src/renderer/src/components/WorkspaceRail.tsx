@@ -745,8 +745,8 @@ function WorkspaceRail(props: RailProps) {
   // duration on, and it is dropped in the same commit that applies the new
   // order (see styles.css) so the settle is instant.
   const railListClassName = wsDragId || groupDragId
-    ? "spark-workspace-list spark-workspace-list--reordering"
-    : "spark-workspace-list";
+    ? "spark-workspace-list spark-workspace-list--reordering spark-scroll-under"
+    : "spark-workspace-list spark-scroll-under";
 
   // Shared tail of every rail dragstart. Callers set their id REF
   // synchronously (the first dragover needs it); this captures the item's
@@ -871,7 +871,9 @@ function WorkspaceRail(props: RailProps) {
                   flex: 1,
                   overflow: "auto",
                   minHeight: 0,
-                  padding: "6px 8px 10px",
+                  // --scroll-edge-inset is the height of the header the list
+                  // scrolls up under.
+                  padding: "calc(6px + var(--scroll-edge-inset, 0px)) 8px 10px",
                   // Positioning context for the reorder ghost, which is placed
                   // in content coordinates and must scroll with the list.
                   position: "relative",
@@ -1159,10 +1161,10 @@ function WorkspaceRail(props: RailProps) {
         if (next instanceof Node && event.currentTarget.contains(next)) return;
         setDropIndex(null);
       }}
+      className="spark-rail"
       style={{
         width,
         flex: `0 0 ${width}px`,
-        background: "var(--panel)",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
@@ -2189,7 +2191,9 @@ function WorkspaceRow({
         // never reflows the row (Apple inline-rename swaps only the affordance,
         // not the geometry).
         padding: "5px 6px 5px 9px",
-        background,
+        backgroundColor: background,
+        // The glass top light on the selected row; none with glass off.
+        backgroundImage: active ? "var(--capsule-sheen)" : "none",
         cursor: "default",
         opacity: dragging ? 0.4 : 1,
         // Compositor-only slide, so a row opening the landing gap never
@@ -2209,7 +2213,11 @@ function WorkspaceRow({
         // ONE soft cue, per the one-hairline elevation law: the tinted fill
         // does the work; a single faint top highlight lifts active / editing /
         // hover. No left-edge bar, no border+ring+shadow+inset halo.
-        boxShadow: active || editing || rowHover ? "var(--lift-hi)" : "none",
+        boxShadow: active
+          ? "var(--capsule-lift)"
+          : editing || rowHover
+            ? "var(--lift-hi)"
+            : "none",
         marginBottom: 4,
         // --ws-reorder-motion is 0s at rest and the reorder curve for the
         // length of a drag; the list owns it (see styles.css), because an

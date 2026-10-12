@@ -22,8 +22,6 @@ import { RuntimeMark } from "./BrandMarks";
  */
 export interface AccountProviderView {
   descriptor: AccountProviderDescriptor;
-  /** One line under the provider name: what a switch moves. */
-  summary: string;
   /** The full switching rules, shown under "How switching works". */
   detail: string;
   cards: AccountCardView[];
@@ -308,13 +306,13 @@ function AccountProviderGroup({
               title={`New sessions use the ${descriptor.cliLabel} login on this computer. Running sessions keep their account.`}
               onClick={() => actions.onUseSystemLogin(descriptor.provider)}
             >
+              <ComputerGlyph />
               Use your {descriptor.cliLabel} login
             </ActionButton>
           ) : null}
           {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
         </span>
       </div>
-      <p className="st-provider__detail">{view.summary}</p>
 
       {view.systemOffer ? (
         <div className="st-acct-system-line" role="group" aria-label={`${descriptor.cliLabel} login on this computer`}>
@@ -353,13 +351,14 @@ function AccountProviderGroup({
       ) : null}
 
       <div className="st-list st-acct-list">
-        {view.cards.map((card) => (
+        {view.cards.map((card, position) => (
           <AccountCard
             key={card.key}
             card={card}
             descriptor={descriptor}
             disabled={view.disabled || view.busy}
             actions={actions}
+            position={position}
           />
         ))}
         {view.cards.length === 0 ? (
@@ -388,6 +387,25 @@ function AccountProviderGroup({
         ) : null}
       </div>
     </section>
+  );
+}
+
+function ComputerGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <path d="M8 20h8M12 16v4" />
+    </svg>
   );
 }
 

@@ -205,8 +205,17 @@ export function ConnectionLine({
   action?: React.ReactNode;
 }) {
   // A problem is a warning glyph on a quiet line, not red text: the row's
-  // button is where the eye should land.
+  // button is where the eye should land. A healthy state is a small dot and
+  // a word or two, so a signed-in account is not a row of check marks.
   const tone = state.danger ? "warn" : state.ok ? "ok" : "muted";
+  if (state.ok && !hint && !action) {
+    return (
+      <div className="st-acct-status st-acct-status--ok" title={title}>
+        <span aria-hidden className="st-acct-status__dot" />
+        <span className="st-acct-status__text">{withCode(state.text, code)}</span>
+      </div>
+    );
+  }
   return (
     <div className={`st-acct-status st-acct-status--${tone}`} title={title}>
       <svg

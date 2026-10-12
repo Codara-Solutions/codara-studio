@@ -603,7 +603,9 @@ export default function NotificationCenter({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: open ? "var(--hover)" : undefined,
+            // Never undefined: a bare <button> falls back to the UA's grey
+            // ButtonFace fill, which painted the bell as a flat grey block.
+            background: open ? "var(--hover)" : "transparent",
             border: "none",
             borderLeft: "1px solid var(--rule-soft)",
             color: open || needsYou > 0 ? "var(--ink)" : "var(--ink-dim)",

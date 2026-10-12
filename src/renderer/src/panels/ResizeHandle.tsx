@@ -128,6 +128,9 @@ export function ResizeHandle({
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      // The resting fill belongs to .spark-resize-gutter, so the glass frame
+      // can tint the gutter like the bands on either side of it.
+      className="spark-resize-gutter"
       style={{
         flex: `0 0 ${hitSize}px`,
         position: "relative",
@@ -139,12 +142,13 @@ export function ResizeHandle({
         zIndex: 6,
         background: dragging
           ? `color-mix(in oklch, ${accentColor} 9%, transparent)`
-          : "transparent",
+          : undefined,
         transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
       {/* Hairline rule. */}
       <div
+        className="spark-resize-line"
         style={{
           background: lineColor,
           boxShadow: dragging ? `0 0 8px ${accentColor}` : "none",

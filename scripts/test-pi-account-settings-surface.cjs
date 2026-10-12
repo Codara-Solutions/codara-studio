@@ -124,13 +124,10 @@ assert.match(descriptors, /export function accountProviderDetail\(/);
 // Hot swap (accounts spec 18): Claude Code sessions switch on their next
 // request, Codex and Grok only for new sessions, and the System login only
 // ever for new sessions.
-assert.ok(
-  descriptors.includes(
-    "`The Active account is used by new Codara terminals and new Cora chats. ${running}`",
-  ),
-);
-assert.ok(descriptors.includes("`Running ${descriptor.cliLabel} sessions switch on their next request.`"));
-assert.ok(descriptors.includes("`Running ${descriptor.cliLabel} sessions keep their account.`"));
+// The rule is said once, in the switching explainer, never again under
+// each provider's name.
+assert.doesNotMatch(descriptors, /accountProviderSummary/);
+assert.ok(descriptors.includes("`Running ${cliLabel} sessions switch on their next request.`"));
 assert.ok(descriptors.includes("`New ${cliLabel} sessions use the new account. Running ones keep theirs.`"));
 assert.ok(
   descriptors.includes(
@@ -201,7 +198,8 @@ assert.ok(
     "Every account is one sign-in for Cora and its terminal tool. The Active account is used by new Codara terminals and new Cora chats.",
   ),
 );
-// The section's own detail (accounts spec 13), shown above the accounts.
+// The section's own detail (accounts spec 13). The page subtitle already
+// says what the page is, so the detail lives in the switching explainer.
 assert.ok(
   settings.includes(
     "Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.",
@@ -307,10 +305,10 @@ for (const label of [
 }
 // Accounts spec 13 copy, word for word.
 for (const copy of [
-  '"Codara uses this login as it is and never changes it."',
-  '"Cora: connected"',
+  '"Signed in"',
+  '"Cora connected"',
   '"Cora isn\'t connected."',
-  '"Signed in. Only Codara uses this account."',
+  "`${cliLabel} on this computer is signed out.`",
   '"Sign-in expired."',
   "`Remove \"${card.label}\" from Codara? Your ${cliLabel} login stays as it is. Codara stops offering it.`",
   "`Remove \"${card.label}\"? Codara deletes this sign-in from its own folder. Your ${cliLabel} login outside Codara is not affected. This can't be undone; to use it again, add it again.`",
@@ -400,7 +398,7 @@ assert.equal(
   "the Accounts UI must render one global Add account trigger",
 );
 // The provider group renders the one card for every provider.
-assert.match(cards, /\{view\.cards\.map\(\(card\) => \(\s*<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
+assert.match(cards, /\{view\.cards\.map\(\(card, position\) => \(\s*<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
 assert.match(cards, /export interface AccountActions extends AccountCardActions \{/);
 assert.match(settings, /const accountActions: AccountActions = \{/);
 assert.match(settings, /onBeginAdd: \(provider\) => \{/);

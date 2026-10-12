@@ -126,9 +126,11 @@ test("accounts switch in one click, offer the System login, and remove for good"
     await dialog.locator("nav").getByRole("button", { name: "Accounts", exact: true }).click({ force: true });
     await expect(dialog.getByText("Main", { exact: true })).toBeVisible();
     await expect(dialog.getByText("Account 1", { exact: true })).toHaveCount(0);
+    // The switching rules live under the disclosure, not on the rows.
+    await dialog.getByRole("button", { name: "How switching works" }).click();
     await expect(dialog.getByText(/Running Claude Code sessions switch on their next request\./)).toBeVisible();
-    await expect(dialog.getByText(/Running Codex sessions keep their account\./)).toBeVisible();
-    await expect(row("main@example.com").getByText("Signed in. Only Codara uses this account.")).toBeVisible();
+    await expect(dialog.getByText(/New Codex sessions use the new account\. Running ones keep theirs\./)).toBeVisible();
+    await expect(row("main@example.com").getByText("Signed in", { exact: true })).toBeVisible();
     await expect(dialog.getByText("MCP servers that need a sign-in must be connected once in each Codara account.")).toBeVisible();
 
     // One click switches; nothing asks to close sessions.
@@ -143,7 +145,7 @@ test("accounts switch in one click, offer the System login, and remove for good"
     await page.screenshot({ path: testInfo.outputPath("accounts-offer.png") });
     await offer.getByRole("button", { name: "Use in Codara", exact: true }).click();
     const system = row("Your Claude Code login");
-    await expect(system.getByText("Codara uses this login as it is and never changes it.")).toBeVisible();
+    await expect(system.getByText("Signed in", { exact: true })).toBeVisible();
     await expect(system.getByText("Cora isn't connected.")).toBeVisible();
     await expect(system.getByRole("button", { name: "Connect Cora", exact: true })).toBeVisible();
     await expect(offer).toHaveCount(0);

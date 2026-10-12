@@ -55,7 +55,6 @@ import { accountCardReady, type AccountCardView } from "./AccountCard";
 import {
   ACCOUNT_PROVIDER_DESCRIPTORS,
   accountProviderDetail,
-  accountProviderSummary,
   type AccountProviderDescriptor,
 } from "../lib/account-provider-descriptors";
 import { stableAccountCardKeys } from "../lib/account-card-keys";
@@ -952,16 +951,16 @@ function GeneralSettings({
         </SettingRow>
         {hydrated ? (
           <ToggleRow
-            title="Liquid glass surfaces"
-            desc="Frosted, translucent menus, popovers and toasts. Always off when the system reduces transparency."
+            title="Liquid glass"
+            desc="Translucent frame, tabs, buttons, composer, menus, dialogs and toasts. Off gives a solid, opaque look. Always off when the system reduces transparency."
             checked={preferences.glassEffects !== false}
             onChange={(v) => void setPreference("glassEffects", v)}
           />
         ) : null}
         {hydrated && preferences.glassEffects !== false ? (
           <SettingRow
-            title="Glass tuning"
-            desc="Strength of each part of the glass material, as a share of the default."
+            title="Fine-tune glass"
+            desc="How strong each part of the material is, as a share of the default."
             control={
               // The chevron carries open or closed, so the button itself
               // never has to look pressed to say so.
@@ -982,7 +981,7 @@ function GeneralSettings({
               <div className="st-subrows">
                 <GlassSliderRow
                   label="Tint"
-                  hint="Surface tint strength, lower is clearer"
+                  hint="Lower is clearer"
                   // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
                   // outlines over live content, which reads as a rendering bug.
                   floor={10}
@@ -991,19 +990,19 @@ function GeneralSettings({
                 />
                 <GlassSliderRow
                   label="Blur"
-                  hint="Backdrop blur behind the surface"
+                  hint="Frost behind floating surfaces"
                   value={preferences.glassBlur ?? 100}
                   onChange={(v) => void setPreference("glassBlur", v)}
                 />
                 <GlassSliderRow
                   label="Refraction"
-                  hint="How much the edges bend what's behind"
+                  hint="How much menu edges bend light"
                   value={preferences.glassRefraction ?? 100}
                   onChange={(v) => void setPreference("glassRefraction", v)}
                 />
                 <GlassSliderRow
-                  label="Chromatic fringe"
-                  hint="Color split along the refracting rim"
+                  label="Fringe"
+                  hint="Color split along the edge"
                   value={preferences.glassChroma ?? 100}
                   onChange={(v) => void setPreference("glassChroma", v)}
                 />
@@ -2006,7 +2005,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       const footer = cards.length === 0 ? null : `${ready} of ${cards.length} ready`;
       return {
         descriptor,
-        summary: accountProviderSummary(descriptor),
         detail: accountProviderDetail(descriptor),
         cards,
         ...(footer ? { footer } : {}),
@@ -2176,9 +2174,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   return (
     <>
       <SettingsSection anchor="Accounts" plain>
-        <p className="st-provider__detail">
-          Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
-        </p>
         <div className="st-acct-toolbar">
           <Disclosure
             open={howSwitchingOpen}
@@ -2195,6 +2190,12 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           <div className="st-acct-how">
             <p>
               Every account is one sign-in for Cora and its terminal tool. The Active account is used by new Codara terminals and new Cora chats.
+            </p>
+            <p>
+              Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
+            </p>
+            <p>
+              Only Codara uses an account you add here. A row marked as your own login is the login on this computer: Codara uses it as it is and never changes it.
             </p>
             <dl>
               {providerViews.map((view) => (

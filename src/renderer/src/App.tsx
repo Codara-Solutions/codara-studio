@@ -6177,12 +6177,12 @@ export default function App() {
   return (
     <SelectionRoutingProvider value={routingApi}>
     <div
+      className="spark-shell"
       style={{
         height: "100%",
         width: "100%",
         display: "flex",
         flexDirection: "column",
-        background: "var(--bg)",
       }}
     >
       {/* Auto-updater banner — position:fixed so the banner sits above
@@ -6207,15 +6207,16 @@ export default function App() {
         {leftPanelVisible && (
           <div
             data-responsive-panel="left"
+            className={compactWorkbench ? "spark-rail-float" : undefined}
             style={{
               display: "flex",
               minHeight: 0,
               flex: "0 0 auto",
+              // Its inset and shadow live on .spark-rail-float, which glass
+              // turns into a floating sheet.
               ...(compactWorkbench ? {
                 position: "absolute" as const,
-                inset: "0 auto 0 0",
                 zIndex: 30,
-                boxShadow: "var(--shadow-float)",
               } : {}),
             }}
           >
@@ -6346,15 +6347,16 @@ export default function App() {
         {rightPanelVisible && (
           <div
             data-responsive-panel="right"
+            className={compactWorkbench ? "spark-rail-float" : undefined}
             style={{
               display: "flex",
               minHeight: 0,
               flex: "0 0 auto",
+              // Its inset and shadow live on .spark-rail-float, which glass
+              // turns into a floating sheet.
               ...(compactWorkbench ? {
                 position: "absolute" as const,
-                inset: "0 0 0 auto",
                 zIndex: 30,
-                boxShadow: "var(--shadow-float)",
               } : {}),
             }}
           >

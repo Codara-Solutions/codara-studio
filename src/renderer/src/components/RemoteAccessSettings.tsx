@@ -356,14 +356,13 @@ function PairingModal({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         aria-label="Pair a device"
-        // Opaque like the Settings face it opens from: a QR code and a
-        // fingerprint to compare must not sit on glass.
+        // An opaque reading face like the Settings pane it opens from: a QR
+        // code and a fingerprint to compare must not sit on see-through
+        // glass, and the Settings face under it already is glass.
+        className="st-pair-modal"
         style={{
           zIndex: 1,
           width: "min(400px, calc(100vw - 60px))",
-          border: "1px solid var(--rule)",
-          background: "var(--st-surface, var(--panel))",
-          boxShadow: "0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18)",
           borderRadius: 12,
           padding: 20,
           display: "grid",

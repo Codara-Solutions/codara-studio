@@ -71,20 +71,26 @@ test("a run toast is the app's glass material, and falls back cleanly with glass
     });
 
     // The real "while you were away" payload, on the channel main publishes to.
-    await app.evaluate(({ BrowserWindow }) => {
-      const win = BrowserWindow.getAllWindows()[0];
-      win.webContents.send("notification:in-app", {
-        id: "toast-glass-1",
-        kind: "run.complete",
-        tone: "success",
-        title: "Codara Studio — done",
-        body: "A run just finished while you were away.",
-        target: { type: "run", runId: "r1", workspaceId: "ws-toast" },
-        timestamp: new Date().toISOString(),
-        sourceKey: "toast-glass-1",
+    // Right after boot the main-process evaluate can fail ("Resulting promise
+    // was garbage collected") and the toast host may not be listening yet, so
+    // the send repeats until the toast is on screen. A resend is harmless:
+    // the toast stack replaces a payload with the same id.
+    await expect(async () => {
+      await app.evaluate(({ BrowserWindow }) => {
+        const win = BrowserWindow.getAllWindows()[0];
+        win.webContents.send("notification:in-app", {
+          id: "toast-glass-1",
+          kind: "run.complete",
+          tone: "success",
+          title: "Codara Studio: done",
+          body: "A run just finished while you were away.",
+          target: { type: "run", runId: "r1", workspaceId: "ws-toast" },
+          timestamp: new Date().toISOString(),
+          sourceKey: "toast-glass-1",
+        });
       });
-    });
-    await expect(page.locator(".spark-toast")).toHaveCount(1, { timeout: 15_000 });
+      await expect(page.locator(".spark-toast")).toHaveCount(1, { timeout: 1_500 });
+    }).toPass({ timeout: 20_000 });
     await expect(page.getByText("A run just finished while you were away.")).toBeVisible();
 
     const glass = (await surfaceOf(page))!;

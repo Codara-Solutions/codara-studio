@@ -355,11 +355,12 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     // account card in Settings. .first() keeps the assertion timing-proof.
     await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
-    // The runtime explainer, then one group per provider, each saying how a
-    // switch moves Cora and that provider's CLI together.
+    // The runtime explainer, then "How switching works", which says per
+    // provider what a switch reaches.
     await expect(page.getByText(/Each account keeps its own private sign-in/)).toBeVisible();
-    await expect(page.getByText(/moves Cora and Claude Code together/)).toBeVisible();
-    await expect(page.getByText(/moves Cora and Codex together/)).toBeVisible();
+    await clickAttached(page.getByRole("button", { name: "How switching works" }));
+    await expect(page.getByText(/Running Claude Code sessions switch on their next request/)).toBeVisible();
+    await expect(page.getByText(/New Codex sessions use the new account/)).toBeVisible();
     // The fake OAuth strings deliberately cannot pass the current provider
     // probe. The profile labels/header counts above prove migration without
     // pretending these synthetic credentials are a live Cora connection.
