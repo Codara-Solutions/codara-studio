@@ -176,13 +176,23 @@ async function main() {
   });
 
   await check("Codex trust is per launch and survives dots, quotes and non-ASCII in the path", async () => {
+    const quoted = "/tmp/it's/a.b";
+    const quotedTrust = launch.codexTrustOverride(quoted);
+    assert.equal(JSON.stringify(parseToml(quotedTrust).projects), JSON.stringify({ [quoted]: { trust_level: "trusted" } }));
     const cwd = '/tmp/a.b/c "q"/café \u{1F600}';
     const args = launch.codexLaunchArgs({ userArgs: [], trustCwd: cwd });
     const trust = args[args.length - 1];
-    assert.ok(/^[\x20-\x7e]+$/.test(trust), "the override must be plain ASCII");
+    assert.equal(trust, `projects={'${cwd}'={trust_level='trusted'}}`, "the path is passed as written, without escapes");
     assert.equal(JSON.stringify(parseToml(trust).projects), JSON.stringify({ [cwd]: { trust_level: "trusted" } }));
     assert.equal(launch.codexTrustOverride("/a\nb"), null, "a control character cannot be passed");
     assert.throws(() => launch.tomlBasicString("\u0007"));
+    assert.throws(() => launch.tomlString("\u0007"));
+    for (const value of ["C:\\Program Files\\Codara\\node.exe", "it's", "'quoted'", "a'''b", 'say "hi"']) {
+      assert.equal(parseToml(`v = ${launch.tomlString(value)}`).v, value, value);
+    }
+    assert.equal(launch.tomlString("C:\\x\\node.exe"), "'C:\\x\\node.exe'");
+    const notifyValue = launch.codexLaunchArgs({ userArgs: [] }).find((arg) => arg.startsWith("notify="));
+    assert.ok(notifyValue && !notifyValue.includes('"'), "the notify launcher needs double quotes");
   });
 
   await check("the args files hold the typed-command defaults, one element per line", async () => {

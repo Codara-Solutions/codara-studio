@@ -120,18 +120,38 @@ export function tomlBasicString(value: string): string {
   return `${out}"`;
 }
 
+/**
+ * The TOML string a `-c` value carries. A literal string where the value
+ * allows one: it needs no double quotes and no backslash escapes, the two
+ * things cmd.exe and Windows PowerShell rewrite on the way to codex.exe, and
+ * a Windows path stays as it is.
+ */
+export function tomlString(value: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("A control character cannot be passed to Codex.");
+  }
+  if (!value.includes("'")) return `'${value}'`;
+  if (!value.includes("'''") && !value.startsWith("'") && !value.endsWith("'")) return `'''${value}'''`;
+  return tomlBasicString(value);
+}
+
+/** A quoted TOML key: keys take no multi-line form. */
+function tomlKey(value: string): string {
+  return value.includes("'") ? tomlBasicString(value) : tomlString(value);
+}
+
 function tomlStringArray(values: readonly string[]): string {
-  return `[${values.map(tomlBasicString).join(",")}]`;
+  return `[${values.map(tomlString).join(",")}]`;
 }
 
 /** The `-c` value that adds codara-studio to a Codex launch. The key is unquoted: a quoted segment keeps its quotes. */
 export function codexStudioServerOverride(mode: AgentMcpMode): string {
   const spec = codaraStudioServerSpec(mode);
   const env = Object.entries(spec.env)
-    .map(([key, value]) => `${key}=${tomlBasicString(value)}`)
+    .map(([key, value]) => `${key}=${tomlString(value)}`)
     .join(",");
   return (
-    `mcp_servers.${SPARK_BUILTIN_SERVER_NAME}={command=${tomlBasicString(spec.command)},` +
+    `mcp_servers.${SPARK_BUILTIN_SERVER_NAME}={command=${tomlString(spec.command)},` +
     `args=${tomlStringArray(spec.args)},env={${env}},` +
     `tool_timeout_sec=${CODEX_STUDIO_TIMEOUTS.tool_timeout_sec},` +
     `startup_timeout_sec=${CODEX_STUDIO_TIMEOUTS.startup_timeout_sec}}`
@@ -144,7 +164,7 @@ export function codexStudioServerOverride(mode: AgentMcpMode): string {
  */
 export function codexTrustOverride(cwd: string): string | null {
   try {
-    return `projects={${tomlBasicString(cwd)}={trust_level="trusted"}}`;
+    return `projects={${tomlKey(cwd)}={trust_level='trusted'}}`;
   } catch {
     return null;
   }
