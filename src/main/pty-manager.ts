@@ -16,6 +16,7 @@ import { isRemotePath, parseRemotePath } from "@shared/remote";
 import {
   restoreUserZdotdir,
   sanitizeElectronViteDevEnv,
+  sanitizeHostTerminalEnv,
   sanitizeNestedAgentEnv,
   sanitizeNpmRunScriptEnv,
 } from "./env-sanitize";
@@ -1264,12 +1265,14 @@ function doSpawn(
   // CC 2.1.201 then writes NO session JSONL, killing the chat backends'
   // transcript tailing and timing out every turn. See env-sanitize.ts.
   sanitizeNestedAgentEnv(env);
-  // A dev app (`npm run dev`) and a Studio started from another Studio's pane
-  // both carry their launcher's wiring; the shell must look like one opened
-  // from a plain terminal. See env-sanitize.ts.
+  // A dev app (`npm run dev`), a Studio started from another Studio's pane and
+  // any Studio started from a terminal carry their launcher's wiring and pane
+  // address; the shell must look like a fresh terminal of Codara's own. See
+  // env-sanitize.ts.
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
   restoreUserZdotdir(env);
+  sanitizeHostTerminalEnv(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.

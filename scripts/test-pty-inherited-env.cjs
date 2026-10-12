@@ -17,6 +17,10 @@
 //     user's own ZDOTDIR (SPARK_USER_ZDOTDIR), so every integration file
 //     sourced itself until zsh stopped with "job table full or recursion
 //     limit exceeded".
+//   - A Studio started from a terminal (`npm run dev` in WezTerm) inherits
+//     that terminal's identity and pane address. In a pane, Claude Code's
+//     /sessions picker ran `wezterm cli split-pane --pane-id $WEZTERM_PANE`
+//     and opened in the WezTerm window running `npm run dev`, not in Codara.
 //
 // Drives the real shell-init and pty-manager env construction (node-pty and
 // the account runtimes stubbed as in test-pty-spawn-serialization.cjs), then
@@ -82,6 +86,21 @@ function writeUserStartupFiles(dir, tag) {
   }
 }
 
+// What WezTerm, tmux and kitty export to the shell Codara was started from.
+const HOST_TERMINAL = {
+  TERM_PROGRAM: "WezTerm",
+  TERM_PROGRAM_VERSION: "20240203-110809-5046fc22",
+  WEZTERM_PANE: "1",
+  WEZTERM_UNIX_SOCKET: "/run/user/1000/wezterm/gui-sock-8167",
+  WEZTERM_EXECUTABLE: "/usr/bin/wezterm-gui",
+  WEZTERM_EXECUTABLE_DIR: "/usr/bin",
+  TMUX: "/tmp/tmux-1000/default,4242,0",
+  TMUX_PANE: "%3",
+  KITTY_WINDOW_ID: "7",
+  KITTY_LISTEN_ON: "unix:/tmp/kitty-4242",
+  WINDOWID: "62914571",
+};
+
 const INHERITED_KEYS = [
   "ELECTRON_RENDERER_URL",
   "ELECTRON_CLI_ARGS",
@@ -92,12 +111,14 @@ const INHERITED_KEYS = [
   "NODE_ENV",
   "ZDOTDIR",
   "SPARK_USER_ZDOTDIR",
+  ...Object.keys(HOST_TERMINAL),
 ];
 
 const PROBE =
   'print -r -- "@@[${NODE_ENV-unset}][${ELECTRON_RENDERER_URL-unset}]' +
   '[${HOME_ZSHENV:-0}${HOME_ZPROFILE:-0}${HOME_ZSHRC:-0}${HOME_ZLOGIN:-0}]' +
-  '[${CUSTOM_ZSHENV:-0}${CUSTOM_ZPROFILE:-0}${CUSTOM_ZSHRC:-0}${CUSTOM_ZLOGIN:-0}]@@"';
+  '[${CUSTOM_ZSHENV:-0}${CUSTOM_ZPROFILE:-0}${CUSTOM_ZSHRC:-0}${CUSTOM_ZLOGIN:-0}]' +
+  '[${WEZTERM_PANE-unset}][${TERM_PROGRAM-unset}][${TMUX-unset}]@@"';
 
 function runZsh(call) {
   const result = spawnSync(call.exe, [...call.args, "-i", "-c", PROBE], {
@@ -107,13 +128,14 @@ function runZsh(call) {
     timeout: 20_000,
   });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  const match = /@@\[(.*?)\]\[(.*?)\]\[(\d{4})\]\[(\d{4})\]@@/.exec(output);
+  const match = /@@\[(.*?)\]\[(.*?)\]\[(\d{4})\]\[(\d{4})\]\[(.*?)\]\[(.*?)\]\[(.*?)\]@@/.exec(output);
   return {
     output,
     nodeEnv: match?.[1],
     rendererUrl: match?.[2],
     homeFiles: match?.[3],
     customFiles: match?.[4],
+    hostTerminal: match ? match.slice(5, 8) : undefined,
     recursed: /job table full|recursion limit exceeded/.test(output),
   };
 }
@@ -226,6 +248,28 @@ async function main() {
         !("NODE_ENV" in call.options.env),
         call.options.env.NODE_ENV,
       );
+    }
+
+    // --- the terminal Codara was started from ------------------------------
+    for (const integrated of [true, false]) {
+      const kind = integrated ? "an integrated" : "a plain";
+      const call = await spawnPane(HOST_TERMINAL, { integrated });
+      const env = call.options.env;
+      const leaked = Object.keys(HOST_TERMINAL).filter((key) => key in env);
+      check(
+        `${kind} pane carries no pane address or identity of the launching terminal`,
+        leaked.length === 0,
+        leaked,
+      );
+      check(`${kind} pane still names its own terminal type`, env.TERM === "xterm-256color", env.TERM);
+      if (HAS_ZSH) {
+        const zsh = runZsh(call);
+        check(
+          `zsh in ${kind} pane sees no WEZTERM_PANE, TERM_PROGRAM or TMUX`,
+          JSON.stringify(zsh.hostTerminal) === JSON.stringify(["unset", "unset", "unset"]),
+          zsh.hostTerminal ?? zsh.output.slice(-400),
+        );
+      }
     }
 
     // --- nested instance: ZDOTDIR inherited from an outer Codara pane -------
