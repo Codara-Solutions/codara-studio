@@ -290,9 +290,11 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
   `tabs/PreviewStack.tsx` holds one per preview tab. `Preview/registry.ts`
   tracks the open tabs.
 - **Agents drive it** with the `codara_preview_*` MCP tools
-  ([mcp-tools.md](./mcp-tools.md)). In `server.js`, `PREVIEW_TOOL_TO_RPC`
-  maps each tool to a `preview.*` socket method. `agent-socket.ts` sends
-  each call to one of two executors:
+  ([mcp-tools.md](./mcp-tools.md)). Each tool is defined in a module under
+  `resources/codara-studio-mcp/tools/` (`browser-core.cjs`,
+  `browser-input.cjs`, ...), which names the `preview.*` socket method it
+  calls; `tools/index.cjs` collects them for `server.js`. `agent-socket.ts`
+  sends each call to one of two executors:
   - DOM work (navigate, snapshot, click, type, evaluate, screenshot) goes
     through `preview-bridge.ts` to `components/Preview/previewRpc.ts` in the
     renderer, which uses `domActions.ts` and `domSnapshot.ts`.
@@ -421,7 +423,7 @@ Debugging:
 | A keyboard shortcut or command | `src/renderer/src/shortcuts/commands.ts` (`COMMANDS`) | The handler in `App.tsx`; [shortcuts-and-settings.md](./shortcuts-and-settings.md) |
 | A setting | `AppSettings` in `src/shared/types.ts`, defaults in `src/main/storage.ts` | `components/SettingsDialog.tsx` |
 | Something the UI asks main to do | A `handle("...")` in `src/main/ipc.ts` | The matching method in `src/preload/index.ts`. `test-ipc-gate-default` fails if a handler skips the trusted-sender gate. |
-| A tool agents can call | `resources/codara-studio-mcp/server.js` (schema, roster, tool-to-method map) | The method in `dispatch` in `src/main/agent-socket.ts`; [mcp-tools.md](./mcp-tools.md); `test-codara-studio-mcp` |
+| A tool agents can call | A module in `resources/codara-studio-mcp/tools/` (browser tools and other studio tools; the contract is in `tools/index.cjs`), or `server.js` for the orchestration rosters | The method in `dispatch` in `src/main/agent-socket.ts`; [mcp-tools.md](./mcp-tools.md); `test-codara-studio-mcp`, `test-mcp-tool-manifest` |
 | What Cora says or how she plans | `resources/pi-cora/prompt.ts` (`buildCoraPiSystemPrompt`) | `resources/orchestration/manager-profile.json`; `test-manager-playbooks`, `test-prompt-punctuation` |
 | What workers are told or allowed to do | `src/main/orchestration/worker-prompt.ts` (`renderWorkerPrompt`) | `resources/pi-cora/worker.ts`, `worker-policy.ts` |
 | Run states, pause and resume, recovery | `run-store.ts` | `run-lifecycle.ts`, `step-lifecycle.ts`, `manager-turn-policy.ts`; the regression suites in [scripts/README.md](../scripts/README.md#cora-runs-the-run-store-and-the-manager) |

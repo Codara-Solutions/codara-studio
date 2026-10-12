@@ -4,8 +4,10 @@ Codara Studio ships one MCP server, `codara-studio`, that lets agents use the
 app: drive the built-in browser, open and read terminals, edit a chat's board
 and whiteboard, and, for Cora, run workers and automations. This page explains
 who gets the server, which tool set each kind of agent sees, and what every
-tool does. The tool definitions in `resources/codara-studio-mcp/server.js`
-are the source of truth; update this page when a tool is added or renamed.
+tool does. The tool definitions are the source of truth: browser tools live
+in per-area modules under `resources/codara-studio-mcp/tools/`, the rest in
+`resources/codara-studio-mcp/server.js`. Update this page when a tool is
+added or renamed.
 
 ## Who gets it
 

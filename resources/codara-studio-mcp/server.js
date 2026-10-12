@@ -44,6 +44,9 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 
+const { toolRegistry } = require("./tools/index.cjs");
+const { PREVIEW_WAIT_MAX_MS } = require("./tools/lib/limits.cjs");
+
 const HANDSHAKE_FILE = "agent-socket.json";
 const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".codarastudio");
 
@@ -95,397 +98,19 @@ const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
 // A worktree call may fetch (30 s cap), wait its turn on the repository lock
 // (60 s cap) and then check out or delete a large tree.
 const WORKTREE_TIMEOUT_MS = 150_000;
-// A browser wait must end before the client gives up on the call.
-const PREVIEW_WAIT_MAX_MS = 50_000;
 
 // ===========================================================================
-// Preview tool set (drive the live <preview> tab). Shared flow guidance lives
-// in buildInstructions() so each description can stay short.
+// Browser tool set (drive the built-in browser tabs). The definitions live in
+// per-area modules under ./tools/ (see tools/index.cjs); shared flow guidance
+// lives in buildInstructions() so each description can stay short.
 // ===========================================================================
-const PREVIEW_TOOLS = [
-  {
-    name: "codara_preview_list",
-    description:
-      "List the browser tabs in your workspace: id, title, URL, isActive, and isLastViewed (the tab the user looked at last). When the user refers to an existing tab, match it here and pass its tabId to the other browser tools; ask if the reference is ambiguous.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "codara_preview_navigate",
-    description:
-      "Load an http, https, or file URL in a browser tab. With tabId, reuse that tab; without it, reuse or open this session's tab. Waits briefly for dom-ready. Tabs stay open afterwards.",
-    inputSchema: {
-      type: "object",
-      required: ["url"],
-      properties: {
-        tabId: { type: "string" },
-        url: { type: "string", description: "Absolute URL to load." },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_snapshot",
-    description:
-      "Read the page as a compact outline with @references, labels, values, and states. Pass an @reference as the selector of other browser tools. Hidden content is omitted. selector scopes to a section; since=<previous snapshotId> returns only the diff when smaller. Re-read after a stale reference; use a screenshot for visual content.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        mode: { type: "string", enum: ["outline"] },
-        maxBytes: { type: "number", description: "Default 12000." },
-        selector: { type: "string" },
-        since: { type: "string" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_click",
-    description:
-      "Click one element by @reference or unique CSS selector with DOM events, after waiting briefly for it to be visible and enabled. Ambiguous, stale, disabled, or covered targets fail. Use codara_preview_mouse when the page needs trusted native input.",
-    inputSchema: {
-      type: "object",
-      required: ["selector"],
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string", description: "@reference or unique CSS selector." },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_type",
-    description:
-      "Type text into an input, textarea, or contentEditable (by @reference or unique CSS selector), or pick a native dropdown option by its exact value. clearFirst empties a text field first.",
-    inputSchema: {
-      type: "object",
-      required: ["selector", "text"],
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string" },
-        text: { type: "string" },
-        clearFirst: { type: "boolean" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_press_key",
-    description:
-      "Send one key (Enter, Escape, Tab, ArrowUp, Backspace, or a single character) to the focused element or to selector. Uses trusted input when available; codara_preview_key adds modifiers.",
-    inputSchema: {
-      type: "object",
-      required: ["key"],
-      properties: {
-        tabId: { type: "string" },
-        key: { type: "string" },
-        selector: { type: "string" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_evaluate",
-    description:
-      "Run JavaScript in the page and return the last expression's value as JSON. Set awaitPromise to await an async expression.",
-    inputSchema: {
-      type: "object",
-      required: ["code"],
-      properties: {
-        tabId: { type: "string" },
-        code: { type: "string" },
-        awaitPromise: { type: "boolean" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_wait_for",
-    description:
-      "Wait until a selector is attached, visible (default), or hidden, or until timeoutMs passes.",
-    inputSchema: {
-      type: "object",
-      required: ["selector"],
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string" },
-        state: { type: "string", enum: ["attached", "visible", "hidden"] },
-        timeoutMs: { type: "number", maximum: PREVIEW_WAIT_MAX_MS, description: `Default 5000, max ${PREVIEW_WAIT_MAX_MS}.` },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_screenshot",
-    description:
-      "Capture the tab as a PNG. Also returns viewport (CSS pixels), imageSize, and scale: divide screenshot coordinates by scale before passing them to mouse tools.",
-    inputSchema: {
-      type: "object",
-      properties: { tabId: { type: "string" } },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_mouse",
-    description:
-      "Trusted mouse input (event.isTrusted=true) at a selector's center or at viewport CSS-pixel coordinates: click, dblclick, rightclick, down, or up.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        action: { type: "string", enum: ["click", "dblclick", "rightclick", "down", "up"], description: "Default click." },
-        selector: { type: "string" },
-        x: { type: "number" },
-        y: { type: "number" },
-        modifiers: { type: "array", items: { type: "string" }, description: "shift, meta, control, alt." },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_scroll",
-    description:
-      "Trusted mouse-wheel scroll at a selector's center or at CSS-pixel coordinates. Positive deltaY scrolls down.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string" },
-        x: { type: "number" },
-        y: { type: "number" },
-        deltaX: { type: "number" },
-        deltaY: { type: "number" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_hover",
-    description:
-      "Trusted mouse move over a selector's center or CSS-pixel coordinates, triggering real :hover styles, tooltips, and mouseenter handlers.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string" },
-        x: { type: "number" },
-        y: { type: "number" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_drag",
-    description:
-      "Trusted drag from one point to another. Each endpoint is { selector } or { x, y } in CSS pixels.",
-    inputSchema: {
-      type: "object",
-      required: ["from", "to"],
-      properties: {
-        tabId: { type: "string" },
-        from: {
-          type: "object",
-          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
-          additionalProperties: false,
-        },
-        to: {
-          type: "object",
-          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
-          additionalProperties: false,
-        },
-        steps: { type: "number", description: "Intermediate moves (default 12, max 100)." },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_key",
-    description:
-      "Trusted keyboard input to the focused element: a named key or single character, with optional modifiers. To type a whole string into a field use codara_preview_type.",
-    inputSchema: {
-      type: "object",
-      required: ["key"],
-      properties: {
-        tabId: { type: "string" },
-        key: { type: "string" },
-        text: { type: "string", description: "Printable text when it differs from key." },
-        modifiers: { type: "array", items: { type: "string" } },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_upload",
-    description:
-      "Set the files of an <input type=file>. paths are absolute paths on this machine; the page receives their contents, so only upload files the task needs.",
-    inputSchema: {
-      type: "object",
-      required: ["selector", "paths"],
-      properties: {
-        tabId: { type: "string" },
-        selector: { type: "string" },
-        paths: { type: "array", minItems: 1, items: { type: "string" } },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_console",
-    description:
-      "Read the tab's captured console messages, newest last (up to 500). Filter by level, trim with limit, or clear=true to reset. Messages from before the tab loaded may be missing.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        limit: { type: "number", description: "Default 100, max 500." },
-        level: { type: "string", enum: ["debug", "info", "warning", "error"] },
-        clear: { type: "boolean" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_network",
-    description:
-      "Read the tab's captured requests (url, method, status, mimeType, failure; up to 500). Capture starts on the first call, so call it once before the interaction you want to observe. filter matches a URL substring; clear=true resets.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        tabId: { type: "string" },
-        limit: { type: "number", description: "Default 100, max 500." },
-        filter: { type: "string" },
-        clear: { type: "boolean" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_resize",
-    description:
-      "Resize the viewport to CSS-pixel dimensions, for example 375x667 for a phone layout. Returns the applied size.",
-    inputSchema: {
-      type: "object",
-      required: ["width", "height"],
-      properties: {
-        tabId: { type: "string" },
-        width: { type: "number" },
-        height: { type: "number" },
-      },
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "codara_preview_run",
-    description:
-      "Run an ordered batch of browser steps in ONE call instead of one call per click or key. Each step fires the same real input as its single tool, so prefer this for any multi-step flow, for example typing `7 / 2 =` and reading the display. Every step must obey the task's tool restrictions. Stops at the first failing step unless continueOnError. Returns one result per step; screenshot steps also come back as images.",
-    inputSchema: {
-      type: "object",
-      required: ["steps"],
-      properties: {
-        tabId: { type: "string", description: "Default tab for steps without their own." },
-        continueOnError: { type: "boolean" },
-        steps: {
-          type: "array",
-          minItems: 1,
-          description:
-            "Each step is { action, ...the fields of the matching codara_preview_* tool }, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
-          items: {
-            type: "object",
-            required: ["action"],
-            properties: {
-              action: {
-                type: "string",
-                enum: [
-                  "navigate",
-                  "click",
-                  "type",
-                  "press_key",
-                  "evaluate",
-                  "wait_for",
-                  "snapshot",
-                  "screenshot",
-                  "scroll",
-                  "hover",
-                  "key",
-                  "resize",
-                ],
-              },
-              label: { type: "string", description: "Echoed back in the step result." },
-              tabId: { type: "string" },
-              url: { type: "string" },
-              selector: { type: "string" },
-              text: { type: "string" },
-              clearFirst: { type: "boolean" },
-              key: { type: "string" },
-              code: { type: "string" },
-              awaitPromise: { type: "boolean" },
-              state: { type: "string" },
-              timeoutMs: { type: "number" },
-              mode: { type: "string", enum: ["outline"] },
-              maxBytes: { type: "number", description: "Default 12000." },
-              since: { type: "string" },
-              x: { type: "number" },
-              y: { type: "number" },
-              deltaX: { type: "number" },
-              deltaY: { type: "number" },
-              width: { type: "number" },
-              height: { type: "number" },
-              modifiers: { type: "array", items: { type: "string" } },
-            },
-            additionalProperties: false,
-          },
-        },
-      },
-      additionalProperties: false,
-    },
-  },
-];
-
-const PREVIEW_TOOL_TO_RPC = {
-  codara_preview_list: "preview.list",
-  codara_preview_navigate: "preview.navigate",
-  codara_preview_snapshot: "preview.snapshot",
-  codara_preview_click: "preview.click",
-  codara_preview_type: "preview.type",
-  codara_preview_press_key: "preview.press_key",
-  codara_preview_evaluate: "preview.evaluate",
-  codara_preview_wait_for: "preview.wait_for",
-  codara_preview_screenshot: "preview.screenshot",
-  codara_preview_mouse: "preview.mouse",
-  codara_preview_scroll: "preview.scroll",
-  codara_preview_hover: "preview.hover",
-  codara_preview_drag: "preview.drag",
-  codara_preview_key: "preview.key",
-  codara_preview_upload: "preview.upload",
-  codara_preview_console: "preview.console",
-  codara_preview_network: "preview.network",
-  codara_preview_resize: "preview.resize",
-};
-
-// Callable for agents and prompts that already use them, but no longer listed:
-// codara_preview_list returns every tab's URL and title.
-const HIDDEN_PREVIEW_ALIASES = {
-  codara_preview_url: "preview.url",
-};
-
+const TOOL_REGISTRY = toolRegistry();
+const PREVIEW_TOOLS = TOOL_REGISTRY.tools;
+const PREVIEW_TOOL_TO_RPC = TOOL_REGISTRY.toRpc;
+const HIDDEN_PREVIEW_ALIASES = TOOL_REGISTRY.hiddenToRpc;
 // Step action -> RPC for the batched codara_preview_run tool. Mirrors the
 // single-shot tools so a batched step fires the identical real event.
-const STEP_ACTION_TO_RPC = {
-  navigate: "preview.navigate",
-  click: "preview.click",
-  type: "preview.type",
-  press_key: "preview.press_key",
-  evaluate: "preview.evaluate",
-  wait_for: "preview.wait_for",
-  snapshot: "preview.snapshot",
-  screenshot: "preview.screenshot",
-  // Trusted-input steps (drag/upload/console/network stay single-shot tools:
-  // drag's nested from/to and the read-tools' outputs don't batch cleanly).
-  scroll: "preview.scroll",
-  hover: "preview.hover",
-  key: "preview.key",
-  resize: "preview.resize",
-};
+const STEP_ACTION_TO_RPC = TOOL_REGISTRY.stepActionToRpc;
 
 // ===========================================================================
 // Terminal tool set (open, run in, and read terminal tabs). The socket RPCs
@@ -2018,12 +1643,7 @@ if (IS_UNTRUSTED_PULL_REQUEST) {
 // MCP tool annotations. Clients use them to auto-approve and parallelize
 // read-only calls and to warn before destructive ones.
 const READ_ONLY_TOOL_NAMES = new Set([
-  "codara_preview_list",
-  "codara_preview_snapshot",
-  "codara_preview_screenshot",
-  "codara_preview_console",
-  "codara_preview_network",
-  "codara_preview_wait_for",
+  ...TOOL_REGISTRY.annotations.readOnly,
   "codara_terminal_read",
   "codara_terminal_list",
   "codara_whiteboard_get",
@@ -2045,11 +1665,10 @@ const READ_ONLY_TOOL_NAMES = new Set([
 // Anything that runs a caller-chosen shell command or page script can destroy
 // data, and a client may auto-approve a tool that says it cannot.
 const DESTRUCTIVE_TOOL_NAMES = new Set([
+  ...TOOL_REGISTRY.annotations.destructive,
   "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
-  "codara_preview_evaluate",
-  "codara_preview_run",
   "codara_spawn_terminals",
   "codara_terminal_close",
   "codara_whiteboard_update",
@@ -2059,18 +1678,15 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_worktree_remove",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
+  ...TOOL_REGISTRY.annotations.idempotent,
   "codara_terminal_close",
   "codara_worktree_remove",
-  "codara_preview_resize",
   "codara_set_automation_enabled",
   "codara_plan_update",
   "codara_name_chat",
 ]);
 const OPEN_WORLD_TOOL_NAMES = new Set([
-  "codara_preview_navigate",
-  "codara_preview_evaluate",
-  "codara_preview_upload",
-  "codara_preview_run",
+  ...TOOL_REGISTRY.annotations.openWorld,
   "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
@@ -2110,6 +1726,7 @@ function buildInstructions() {
     parts.push(
       "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events.",
     );
+    parts.push(...TOOL_REGISTRY.instructions);
   }
   if (listed.has("codara_terminal_run")) {
     parts.push(
