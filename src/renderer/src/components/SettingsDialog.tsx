@@ -82,7 +82,6 @@ import {
   SettingsPage,
   SettingsSection,
   ToggleRow,
-  useTopbarInset,
   ValueRow,
 } from "./settings/SettingsPrimitives";
 import {
@@ -191,8 +190,6 @@ export default function SettingsDialog({
   const results = useMemo(() => searchSettings(query), [query]);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const surfaceRef = useRef<HTMLElement>(null);
-  useTopbarInset(surfaceRef);
   // A search result picked on another page: scrolled to once that page has
   // rendered the row carrying this anchor.
   const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
@@ -307,7 +304,6 @@ export default function SettingsDialog({
     <div className="st-overlay">
       <div className="spark-scrim settings-dialog-scrim" style={{ zIndex: 0 }} />
       <section
-        ref={surfaceRef}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"

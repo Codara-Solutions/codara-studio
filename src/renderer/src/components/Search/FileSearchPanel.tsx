@@ -296,14 +296,6 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
                 setQuery(e.currentTarget.value);
               }}
               onKeyDown={handleKeyDown}
-              onFocus={(e) => {
-                e.currentTarget.style.borderColor = "var(--accent-edge)";
-                e.currentTarget.style.boxShadow = "var(--focus-ring)";
-              }}
-              onBlur={(e) => {
-                e.currentTarget.style.borderColor = "var(--rule-soft)";
-                e.currentTarget.style.boxShadow = "var(--well)";
-              }}
               placeholder={cwd ? "Open file..." : "Open a workspace first"}
               spellCheck={false}
               disabled={!cwd}
@@ -315,13 +307,13 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
                 border: "1px solid var(--rule-soft)",
                 borderRadius: 7,
                 color: "var(--ink)",
-                fontFamily: "var(--font-mono)",
+                // The run switcher's field: the palette's one input, focused
+                // the whole time it is open, so it needs no ring to say so.
+                fontFamily: "var(--font-sans)",
                 fontSize: 13,
-                padding: "6px 28px 6px 10px",
+                padding: "8px 28px 8px 10px",
                 outline: "none",
                 boxShadow: "var(--well)",
-                transition:
-                  "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
               }}
             />
             {query.length > 0 ? (
@@ -495,22 +487,21 @@ function FileResultRow({
       onMouseEnter={onMouseEnter}
       onClick={onClick}
       title={row.entry.path}
+      // The selected row is the inset capsule every palette and glass menu
+      // uses (the run switcher's row), not a full-width bar.
       style={{
         display: "flex",
         alignItems: "center",
         gap: 8,
-        padding: "0 14px 0 11px",
+        margin: "0 6px",
+        padding: "0 10px",
         height: RESULT_ROW_HEIGHT,
         boxSizing: "border-box",
-        borderLeft: active
-          ? "3px solid var(--accent)"
-          : "3px solid transparent",
-        background: active ? "var(--accent-soft)" : "transparent",
-        boxShadow: active ? "var(--shadow-glow)" : "none",
+        borderRadius: 7,
+        background: active ? "var(--hover-strong)" : "transparent",
+        boxShadow: active ? "inset 0 0 0 1px color-mix(in oklab, var(--ink) 7%, transparent)" : "none",
         color: "var(--ink-dim)",
         cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <FileNodeIcon name={row.entry.name} isDir={false} size={15} />

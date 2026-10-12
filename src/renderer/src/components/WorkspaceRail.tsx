@@ -871,8 +871,8 @@ function WorkspaceRail(props: RailProps) {
                   flex: 1,
                   overflow: "auto",
                   minHeight: 0,
-                  // --scroll-edge-inset is the header's height when glass
-                  // lets the list scroll up under it, and 0 otherwise.
+                  // --scroll-edge-inset is the height of the header the list
+                  // scrolls up under.
                   padding: "calc(6px + var(--scroll-edge-inset, 0px)) 8px 10px",
                   // Positioning context for the reorder ghost, which is placed
                   // in content coordinates and must scroll with the list.

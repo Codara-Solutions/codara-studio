@@ -1418,8 +1418,8 @@ export default function ChatComposer({
 
   return (
     <div
-      // The dock's fade, and its overlap with the conversation when glass
-      // floats it, live on .cora-composer-dock.
+      // The dock's fade, and its overlap with the conversation when it
+      // floats over one, live on .cora-composer-dock.
       className="cora-composer-dock"
       style={{
         // 0 1 auto (not 0 0 auto): when the chat dock is short the composer

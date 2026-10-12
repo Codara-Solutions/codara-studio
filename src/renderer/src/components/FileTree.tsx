@@ -99,9 +99,9 @@ const VirtuosoList = React.forwardRef<
   );
 });
 
-// The scroll edge's inset (see .spark-scroll-under): with glass on the tree
-// starts under the translucent Explorer header, so the first row needs the
-// header's height above it to rest in view.
+// The scroll edge's inset (see .spark-scroll-under): the tree starts under
+// the Explorer header, so the first row needs the header's height above it
+// to rest in view.
 const ScrollEdgeInset = () => <div style={{ height: "var(--scroll-edge-inset, 0px)" }} />;
 const LIST_COMPONENTS = { List: VirtuosoList, Header: ScrollEdgeInset };
 

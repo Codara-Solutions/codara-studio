@@ -191,7 +191,7 @@ export default function ChatPanel({
     <div
       ref={panelRef}
       className="cora-chat-panel"
-      // Glass floats the composer over the conversation's tail only when a
+      // The composer floats over the conversation's tail only when a
       // conversation sits behind it; the welcome state and the other views
       // keep the composer in its own slot.
       data-composer-float={conversationShown ? "true" : undefined}
@@ -251,9 +251,9 @@ export default function ChatPanel({
             // full size at all times — this matches Codara's original (pre-
             // 2d63dca) layout that worked cross-platform.
             <div
-              // With glass on, the conversation scrolls up under the header
-              // (the scroll edge): see .spark-scroll-under in styles.css. The
-              // board and whiteboard keep their own top edge.
+              // The conversation scrolls up under the header (the scroll
+              // edge), which glass frosts: see .spark-scroll-under in
+              // styles.css. The board and whiteboard keep their own top edge.
               className={conversationShown ? "spark-scroll-under" : undefined}
               style={{ position: "relative", flex: 1, minHeight: 0 }}
             >

@@ -6212,11 +6212,11 @@ export default function App() {
               display: "flex",
               minHeight: 0,
               flex: "0 0 auto",
+              // Its inset and shadow live on .spark-rail-float, which glass
+              // turns into a floating sheet.
               ...(compactWorkbench ? {
                 position: "absolute" as const,
-                inset: "0 auto 0 0",
                 zIndex: 30,
-                boxShadow: "var(--shadow-float)",
               } : {}),
             }}
           >
@@ -6352,11 +6352,11 @@ export default function App() {
               display: "flex",
               minHeight: 0,
               flex: "0 0 auto",
+              // Its inset and shadow live on .spark-rail-float, which glass
+              // turns into a floating sheet.
               ...(compactWorkbench ? {
                 position: "absolute" as const,
-                inset: "0 0 0 auto",
                 zIndex: 30,
-                boxShadow: "var(--shadow-float)",
               } : {}),
             }}
           >
