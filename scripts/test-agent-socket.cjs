@@ -210,12 +210,23 @@ async function main() {
   );
 
   const electron = require("electron");
+  // The booted app reads the System logins and cleans the global CLI configs
+  // of the HOME it runs in, so it gets a throwaway one; the live app's pane
+  // variables and any CLI home it exported must not reach it either.
+  const userHome = path.join(HOME, "user-home");
+  fs.mkdirSync(userHome, { recursive: true });
+  const inheritedEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => !/^(SPARK_|CODARA_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|GROK_HOME$|ZDOTDIR$)/.test(key),
+    ),
+  );
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
     // Isolate both Codara's durable home and Electron's Chromium userData.
     // Without the latter this integration process can contend with a running
     // development app and start the socket before a usable renderer bridge.
     env: {
-      ...process.env,
+      ...inheritedEnv,
+      HOME: userHome,
       CODARA_HOME_DIR: HOME,
       SPARK_HOME_DIR: HOME,
       SPARK_USER_DATA_DIR: HOME,
