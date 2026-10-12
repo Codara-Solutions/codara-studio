@@ -41,6 +41,7 @@ export default function SkillsSection({
   onToggle,
   onRemove,
   onInstall,
+  onAdd,
 }: {
   loading: boolean;
   loadError: string | null;
@@ -58,17 +59,28 @@ export default function SkillsSection({
   onToggle: (group: NameGroup, enabled: boolean) => void;
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
   onInstall: (group: NameGroup, target: CliRuntime) => void;
+  onAdd: () => void;
 }) {
   return (
     <section style={sectionStyle}>
       <SectionHead
         lead={<SearchField value={search} onChange={onSearch} placeholder="Filter skills" />}
         actions={
-          loading || totalGroups === 0 ? null : (
-            <span style={countStyle} title="Read from the Claude, Codex, .agents and .pi skill folders">
-              {activeCount} of {totalGroups} on for Cora and workers
-            </span>
-          )
+          <>
+            {loading || totalGroups === 0 ? null : (
+              <span style={countStyle} title="Read from Codara's own skill folder and the Claude, Codex, .agents and .pi skill folders">
+                {activeCount} of {totalGroups} on for Cora and workers
+              </span>
+            )}
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={onAdd}
+              title="Write a skill, or import one from a folder, a zip file or a git repository"
+            >
+              Add skill
+            </button>
+          </>
         }
       />
       {truncated ? (
@@ -106,13 +118,13 @@ export default function SkillsSection({
               <EmptyRow
                 text={
                   totalGroups === 0
-                    ? "No skills yet. A skill is a folder with a SKILL.md in ~/.claude/skills or the workspace's .agents/skills."
+                    ? "No skills yet. Write one or import one with Add skill, or put a folder with a SKILL.md in the workspace's .agents/skills."
                     : "No skills match this filter."
                 }
                 action={
                   totalGroups === 0 ? (
-                    <button type="button" className="spark-btn" onClick={onRetry}>
-                      Look again
+                    <button type="button" className="spark-btn" onClick={onAdd}>
+                      Add skill
                     </button>
                   ) : (
                     <button type="button" className="spark-btn" onClick={() => onSearch("")}>

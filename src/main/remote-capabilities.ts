@@ -36,7 +36,10 @@ export function readRemoteMcpEditor(context: InventoryContext, assetId?: string)
     targets.push({ id: target, label: "Current location", runtime: asset.runtime, scope: asset.scope,
       format: asset.runtime === "codex" || asset.runtime === "grok" ? "toml" : "json" });
   }
-  return { targets, detail: { assetId: remoteCapabilityId(id), targetId: target, server, revision: mcpServerRevision(detail) } };
+  // The phone's draft contract knows stdio and HTTP only; it edits an SSE
+  // server as HTTP, as Studio's form did before it offered SSE.
+  const phoneServer = { ...server, transport: server.transport === "sse" ? "http" as const : server.transport };
+  return { targets, detail: { assetId: remoteCapabilityId(id), targetId: target, server: phoneServer, revision: mcpServerRevision(detail) } };
 }
 
 export async function updateRemoteAgentAsset(context: InventoryContext, input: Exclude<RemoteAssetUpdate, { action: "builtin" }>): Promise<string> {

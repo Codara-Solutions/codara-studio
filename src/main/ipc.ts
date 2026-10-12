@@ -402,6 +402,8 @@ import type {
   MemorySetEnabledInput,
   MemoryStatusInput,
   AgentMcpSnippetParseResult,
+  AgentSkillCreateInput,
+  AgentSkillImportSource,
   UpdateChatBackendInput,
   UpdateCoraWhiteboardInput,
   ExportCoraWhiteboardFileInput,
@@ -1140,6 +1142,57 @@ export function registerIpc(): void {
       return parsed;
     },
   );
+  handle(
+    "agents:mcpImportCandidates",
+    async (_e, input?: { cwd?: string | null }) => {
+      const { listMcpImportCandidates } = await getAgentSync();
+      return listMcpImportCandidates({ cwd: input?.cwd ?? null });
+    },
+  );
+  handle(
+    "agents:importMcp",
+    async (_e, input: { cwd?: string | null; ids?: unknown }) => {
+      const { importMcpServersToCodara } = await getAgentSync();
+      const ids = Array.isArray(input?.ids) ? input.ids.filter((id): id is string => typeof id === "string") : [];
+      return importMcpServersToCodara({ cwd: input?.cwd ?? null, ids });
+    },
+  );
+  handle("agents:createSkill", async (_e, input: AgentSkillCreateInput) => {
+    const [{ codaraSkillsDir }, { createCodaraSkill }] = await Promise.all([getAgentSync(), import("./skill-import")]);
+    return createCodaraSkill(
+      {
+        name: typeof input?.name === "string" ? input.name : "",
+        description: typeof input?.description === "string" ? input.description : "",
+        instructions: typeof input?.instructions === "string" ? input.instructions : "",
+      },
+      { skillsDir: codaraSkillsDir() },
+    );
+  });
+  handle("agents:importSkill", async (_e, input: AgentSkillImportSource) => {
+    const [{ codaraSkillsDir }, { importCodaraSkill }] = await Promise.all([getAgentSync(), import("./skill-import")]);
+    const subdir = typeof input?.subdir === "string" && input.subdir ? input.subdir : undefined;
+    const source: AgentSkillImportSource | null =
+      input?.kind === "folder" && typeof input.path === "string"
+        ? { kind: "folder", path: input.path, subdir }
+        : input?.kind === "zip" && typeof input.path === "string"
+          ? { kind: "zip", path: input.path, subdir }
+          : input?.kind === "git" && typeof input.url === "string"
+            ? { kind: "git", url: input.url, subdir }
+            : null;
+    if (!source) return { ok: false, error: "Choose a folder, a zip file or a git address to import." };
+    return importCodaraSkill(source, { skillsDir: codaraSkillsDir(), stagingDir: join(codaraHome(), "tmp") });
+  });
+  handle("dialog:openSkillArchive", async (e): Promise<string | null> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      title: "Import a skill archive",
+      properties: ["openFile"],
+      defaultPath: app.getPath("downloads"),
+      filters: [{ name: "Zip archive", extensions: ["zip"] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
   handle("agents:builtins", async () => {
     const [{ getSparkBuiltinStatus }, runtimes] = await Promise.all([
       mcpInstaller,

@@ -32,6 +32,10 @@
 //  11. The Pi delivery preview reports servers past the cap.
 //  12. The connection probe lists a real stdio server's tools, and never
 //      starts a project server from an imported pull request.
+//  13. A server added in the Capability Center lands in Codara's own list
+//      (mode 600) without touching any CLI config; SSE and reserved names are
+//      validated; importing from the CLI configs only reads them; Codara's
+//      servers reach Cora and workers per launch through the Pi roster.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -45,6 +49,12 @@ const FAKE_CWD = path.join(FAKE_HOME, "workspace");
 const OTHER_PROJECT = path.join(FAKE_HOME, "other-project");
 fs.mkdirSync(path.join(FAKE_CWD, ".git"), { recursive: true });
 fs.mkdirSync(OTHER_PROJECT);
+// codaraHomeDir() prefers these over the home folder, and a shell inside
+// Codara exports SPARK_HOME_DIR, so they must point into the fake home.
+const FAKE_CODARA_HOME = path.join(FAKE_HOME, ".codarastudio");
+process.env.CODARA_HOME_DIR = FAKE_CODARA_HOME;
+process.env.SPARK_HOME_DIR = FAKE_CODARA_HOME;
+delete process.env.SPARK_USER_DATA_DIR;
 process.on("exit", () => fs.rmSync(FAKE_HOME, { recursive: true, force: true }));
 
 const tsModuleCache = new Map();
@@ -400,7 +410,8 @@ async function main() {
 
   await check("write targets default private and refuse literal secrets in shared files", async () => {
     const targets = sync.listMcpWriteTargets({ cwd: FAKE_CWD });
-    assert.equal(targets[0].label, "Every workspace, Claude");
+    assert.equal(targets[0].label, "Codara's own list");
+    assert.equal(targets[1].label, "Every workspace, Claude");
     assert.ok(target("This workspace, project .mcp.json (Claude)").hint);
     const leaky = { name: "leaky", transport: "stdio", command: "node", env: { API_TOKEN: "sk-literal-1234" } };
     const refused = await sync.saveMcpServer({ cwd: FAKE_CWD, targetId: target("This workspace, project .mcp.json (Claude)").id, server: leaky });
@@ -455,8 +466,24 @@ async function main() {
     const agentsSkill = path.join(FAKE_HOME, ".agents", "skills", "gamma");
     fs.mkdirSync(agentsSkill, { recursive: true });
     fs.writeFileSync(path.join(agentsSkill, "SKILL.md"), "---\nname: gamma\ndescription: Gamma\n---\n");
+    const codaraSkill = path.join(FAKE_CODARA_HOME, "skills", "added-in-codara");
+    fs.mkdirSync(codaraSkill, { recursive: true });
+    fs.writeFileSync(path.join(codaraSkill, "SKILL.md"), "---\nname: added-in-codara\ndescription: Added\n---\n");
+    assert.equal(sync.codaraSkillsDir(), path.join(FAKE_CODARA_HOME, "skills"));
     const paths = sync.listPiSkillPaths({ cwd: FAKE_CWD, settings: settings({ agentDisabledSkillIds: ["skill:gamma"] }) });
     assert.ok(paths.includes(path.join(FAKE_CWD, ".pi", "skills", "quick.md")), "a Pi-native single-file skill is kept");
+    assert.ok(paths.includes(codaraSkill), "a skill added in Codara reaches Cora and workers");
+    const codaraItem = inventory().skills.find((item) => item.name === "added-in-codara");
+    assert.equal(codaraItem.runtime, "codara");
+    assert.equal(
+      sync.listPiSkillPaths({ cwd: FAKE_CWD, settings: settings({ agentDisabledSkillIds: ["skill:added-in-codara"] }) }).includes(codaraSkill),
+      false,
+      "switching a Codara skill off keeps it from the next launch",
+    );
+    return sync.deleteAgentAsset({ id: codaraItem.id }).then((removed) => {
+      assert.equal(removed.ok, true, removed.error);
+      assert.equal(fs.existsSync(codaraSkill), false);
+    });
     assert.ok(paths.includes(path.join(FAKE_HOME, ".claude", "skills", "b")), "a Claude skill reaches Cora");
     assert.equal(paths.some((entry) => entry.includes("gamma")), false, "a switched-off skill stays off");
     assert.equal(paths.some((entry) => entry.includes(".system")), false, "Codex system skills stay Codex-only");
@@ -473,6 +500,93 @@ async function main() {
     assert.equal(preview.cora.filter((entry) => entry.state === "delivered").length, 16);
     assert.equal(preview.cora.filter((entry) => entry.state === "over-cap").length, 2);
     assert.deepEqual(preview.worker, []);
+  });
+
+  await check("Codara's own server list: saved privately, validated, imported read-only, delivered per launch", async () => {
+    const CODARA_MCP = path.join(FAKE_CODARA_HOME, "mcp-servers.json");
+    assert.equal(sync.codaraMcpConfigPath(), CODARA_MCP);
+    writeJson(CLAUDE_JSON, {
+      mcpServers: {
+        github: { command: "npx", args: ["-y", "gh-mcp"], env: { GITHUB_TOKEN: "ghp_literal" } },
+        "codara-studio": { command: "should-not-import" },
+      },
+    });
+    const cliFiles = [CLAUDE_JSON, CODEX_TOML, PROJECT_MCP_JSON, PROJECT_CODEX_TOML].filter((file) => fs.existsSync(file));
+    const before = new Map(cliFiles.map((file) => [file, fs.readFileSync(file)]));
+    const codara = target("Codara's own list");
+    assert.equal(codara.path, CODARA_MCP);
+    assert.deepEqual(codara.readBy, []);
+
+    const stdio = await sync.saveMcpServer({
+      cwd: FAKE_CWD,
+      targetId: codara.id,
+      server: { name: "fixture", transport: "stdio", command: "node", args: ["server.js"], env: { API_KEY: "sk-literal-9999" } },
+    });
+    assert.equal(stdio.ok, true, stdio.error);
+    const sse = await sync.saveMcpServer({
+      cwd: FAKE_CWD,
+      targetId: codara.id,
+      server: { name: "events", transport: "sse", url: "https://sse.example/sse", headers: { Authorization: "Bearer t" } },
+    });
+    assert.equal(sse.ok, true, sse.error);
+    const saved = readJson(CODARA_MCP).mcpServers;
+    assert.deepEqual(saved.fixture, { type: "stdio", command: "node", args: ["server.js"], env: { API_KEY: "sk-literal-9999" } });
+    assert.equal(saved.events.type, "sse");
+    assert.equal(saved.events.url, "https://sse.example/sse");
+    if (process.platform !== "win32") assert.equal(fs.statSync(CODARA_MCP).mode & 0o777, 0o600);
+    assert.equal(sync.readMcpServerDetail({ id: mcpItem("events", "codara").id }).transport, "sse");
+
+    for (const [server, pattern] of [
+      [{ name: "codara-studio", transport: "stdio", command: "x" }, /reserved/],
+      [{ name: "bad", transport: "sse", url: "ftp://nope" }, /http/i],
+      [{ name: "bad", transport: "stdio", command: "a\nb" }, /line/i],
+      [{ name: "fixture", transport: "stdio", command: "other" }, /already/],
+    ]) {
+      const refused = await sync.saveMcpServer({ cwd: FAKE_CWD, targetId: codara.id, server });
+      assert.equal(refused.ok, false, `${server.name} should be refused`);
+      assert.match(refused.error, pattern);
+    }
+    const sseToCodex = await sync.saveMcpServer({
+      cwd: FAKE_CWD,
+      targetId: target("Every workspace, Codex").id,
+      server: { name: "events2", transport: "sse", url: "https://sse.example/sse" },
+    });
+    assert.equal(sseToCodex.ok, false);
+
+    const candidates = sync.listMcpImportCandidates({ cwd: FAKE_CWD });
+    assert.equal(candidates.some((entry) => entry.name === "codara-studio"), false, "a reserved name is not offered");
+    assert.equal(candidates.some((entry) => entry.runtime === "codara"), false);
+    const github = candidates.find((entry) => entry.name === "github" && entry.runtime === "claude");
+    assert.ok(github, "the Claude server is offered");
+    assert.equal(github.alreadyInCodara, false);
+    const forged = sync.listMcpImportCandidates({ cwd: FAKE_CWD })[0].id.replace(/"path":"[^"]*"/, '"path":"/etc/passwd"');
+    const imported = await sync.importMcpServersToCodara({ cwd: FAKE_CWD, ids: [github.id, github.id, forged] });
+    assert.deepEqual(imported.imported, ["github"]);
+    assert.ok(imported.skipped.some((note) => /already in Codara/.test(note)));
+    assert.deepEqual(readJson(CODARA_MCP).mcpServers.github, { type: "stdio", command: "npx", args: ["-y", "gh-mcp"], env: { GITHUB_TOKEN: "ghp_literal" } });
+    assert.equal(sync.listMcpImportCandidates({ cwd: FAKE_CWD }).find((entry) => entry.id === github.id).alreadyInCodara, true);
+
+    for (const [file, bytes] of before) assert.deepEqual(fs.readFileSync(file), bytes, `${file} was modified`);
+
+    const roster = (extra) => ({
+      cora: sync.listPiMcpServers({ cwd: FAKE_CWD, scope: "cora", settings: settings(extra) }).map((server) => server.name),
+      worker: sync.listPiMcpServers({ cwd: FAKE_CWD, scope: "worker", settings: settings(extra) }).map((server) => server.name),
+    });
+    assert.deepEqual(roster(), { cora: [], worker: [] }, "nothing reaches Pi until assigned");
+    const assigned = { agentMcpCoraManagerIds: ["mcp:fixture", "mcp:events"], agentMcpPiWorkerIds: ["mcp:fixture"] };
+    assert.deepEqual(roster(assigned), { cora: ["events", "fixture"], worker: ["fixture"] });
+    assert.deepEqual(roster({ ...assigned, agentDisabledMcpIds: ["mcp:fixture"] }), { cora: ["events"], worker: [] });
+    const piConfig = loadTypeScriptModule(path.join(__dirname, "..", "src", "main", "orchestration", "pi-mcp-config.ts"));
+    const bridge = piConfig.buildPiMcpBridgeConfig(
+      piConfig.normalizePiMcpServers(sync.listPiMcpServers({ cwd: FAKE_CWD, scope: "cora", settings: settings(assigned) }), { cwd: FAKE_CWD, env: {} }),
+      { audience: "cora" },
+    );
+    assert.deepEqual(bridge.servers.map((server) => [server.name, server.transport]), [["events", "sse"], ["fixture", "stdio"]]);
+
+    const removed = await sync.deleteAgentAsset({ id: mcpItem("events", "codara").id });
+    assert.equal(removed.ok, true, removed.error);
+    assert.equal(readJson(CODARA_MCP).mcpServers.events, undefined);
+    assert.ok(readJson(CODARA_MCP).mcpServers.fixture);
   });
 
   await check("the probe lists a stdio server's tools and reports a broken one", async () => {

@@ -1834,7 +1834,9 @@ export interface AgentSyncResult {
 }
 
 export type AgentAssetKind = "mcp" | "skill";
-export type AgentAssetRuntime = AgentFamilyRuntime | "shared";
+// "codara" is Codara's own MCP list and skill folder under the Codara home:
+// only Cora and her workers load them, no CLI does.
+export type AgentAssetRuntime = AgentFamilyRuntime | "shared" | "codara";
 export type AgentAssetScope = "user" | "workspace";
 export type AgentAssetCompatibility = "both" | "claude" | "codex" | "grok" | "unknown";
 
@@ -1881,9 +1883,8 @@ export interface AgentAssetInventoryItem {
   piLoads?: boolean;
 }
 
-// stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
-// only ever arrives from a config the user wrote by hand; the form reads it as
-// HTTP and preserves the url, so a saved edit migrates it to streamable-http.
+// stdio, streamable HTTP and SSE. The form writes all three, so an SSE entry
+// keeps its transport when it is edited.
 export type AgentMcpTransport = "stdio" | "http" | "sse";
 
 // One config file the Capability Center is willing to write a user-authored
@@ -1904,7 +1905,7 @@ export interface AgentMcpTarget {
 
 export interface AgentMcpServerDraft {
   name: string;
-  transport: "stdio" | "http";
+  transport: AgentMcpTransport;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -1995,6 +1996,49 @@ export interface AgentMcpProbeResult {
 export type AgentMcpSnippetParseResult =
   | { ok: true; servers: AgentMcpServerDraft[]; notes: string[] }
   | { ok: false; error: string };
+
+// A server found in the Claude, Codex or Grok config that can be copied into
+// Codara's own list. Listing and importing only read those files.
+export interface AgentMcpImportCandidate {
+  id: string;
+  name: string;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  path: string;
+  transport: AgentMcpTransport;
+  summary: string;
+  // A server of the same name is already in Codara's own list.
+  alreadyInCodara: boolean;
+}
+
+export interface AgentMcpImportResult {
+  ok: boolean;
+  imported: string[];
+  skipped: string[];
+  error?: string;
+}
+
+// A skill written in the Capability Center, or imported from a folder, a zip
+// archive or a git repository into Codara's own skill folder.
+export interface AgentSkillCreateInput {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
+export type AgentSkillImportSource =
+  | { kind: "folder"; path: string; subdir?: string }
+  | { kind: "zip"; path: string; subdir?: string }
+  | { kind: "git"; url: string; subdir?: string };
+
+export interface AgentSkillWriteResult {
+  ok: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
+  // The source held several skills: their folders, relative to the source.
+  candidates?: string[];
+}
 
 export interface AgentAssetDeleteResult {
   ok: boolean;

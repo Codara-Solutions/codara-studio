@@ -13,6 +13,7 @@ import type {
   WorkerRuntime,
 } from "@shared/types";
 import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
+import { codaraHomeDir } from "./orchestration/codara-managed-cli-roots";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
 import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
 import type {
@@ -21,6 +22,8 @@ import type {
   AgentAssetInventory,
   AgentAssetInventoryItem,
   AgentMcpSaveResult,
+  AgentMcpImportCandidate,
+  AgentMcpImportResult,
   AgentMcpServerDetail,
   AgentMcpServerDraft,
   AgentMcpTarget,
@@ -54,7 +57,7 @@ type SyncKind = "mcp" | "skill";
 // Grok Build reads the same Codex-shaped TOML (`[mcp_servers.<name>]`), which
 // is why mcp-installer registers the built-in server in ~/.grok/config.toml
 // with renderCodexBlock(). One parser and one writer serve both.
-type SyncSourceRuntime = "claude" | "codex" | "grok" | "shared";
+type SyncSourceRuntime = "claude" | "codex" | "grok" | "shared" | "codara";
 type TomlCopyRuntime = "codex" | "grok";
 type SyncScope = "user" | "workspace";
 type CliRuntime = "claude" | "codex" | "grok";
@@ -140,6 +143,21 @@ export function configureAgentSync(options: { trashItem?: TrashFn | null; piAgen
   if (options.piAgentDir !== undefined) defaultPiAgentDir = options.piAgentDir;
 }
 
+/**
+ * Codara's own MCP server list. Only Cora and her workers read it, and only
+ * per launch through the Pi bridge roster, so a server added here never
+ * reaches a CLI config. It is a Claude-shaped `mcpServers` map, mode 600,
+ * because env values and headers may hold credentials.
+ */
+export function codaraMcpConfigPath(): string {
+  return join(codaraHomeDir(), "mcp-servers.json");
+}
+
+/** Codara's own skill folder: skills created or imported in the Capability Center. */
+export function codaraSkillsDir(): string {
+  return join(codaraHomeDir(), "skills");
+}
+
 export function renderAgentSyncPromptLines(input: {
   cwd: string;
   runtime: WorkerRuntime;
@@ -147,11 +165,14 @@ export function renderAgentSyncPromptLines(input: {
 }): string[] {
   if (input.runtime !== "claude" && input.runtime !== "codex") return [];
 
+  // A CLI never loads Codara's own servers or skills, so naming them to one
+  // would advertise tools it cannot reach.
+  const forCli = (sources: SyncSource[]) => sources.filter((source) => source.runtime !== "codara");
   const mcpSources = input.settings.agentMcpSyncEnabled
-    ? filterSourcesForSessions(discoverMcpSources(input.cwd), input.settings.agentDisabledMcpIds)
+    ? filterSourcesForSessions(forCli(discoverMcpSources(input.cwd)), input.settings.agentDisabledMcpIds)
     : [];
   const skillSources = input.settings.agentSkillSyncEnabled
-    ? filterSourcesForSessions(discoverSkillSources(input.cwd), input.settings.agentDisabledSkillIds)
+    ? filterSourcesForSessions(forCli(discoverSkillSources(input.cwd)), input.settings.agentDisabledSkillIds)
     : [];
   if (mcpSources.length === 0 && skillSources.length === 0) return [];
 
@@ -377,6 +398,9 @@ export function listPiSkillPaths(input: {
     roots.push({ path: join(cwd, ".claude", "skills"), piNative: false });
     roots.push({ path: join(cwd, ".codex", "skills"), piNative: false });
   }
+  // Ahead of every other user root: a skill the user added in Codara wins a
+  // name clash with a copy some CLI keeps.
+  roots.push({ path: codaraSkillsDir(), piNative: false });
   if (input.piAgentDir) roots.push({ path: join(input.piAgentDir, "skills"), piNative: true });
   if (defaultPiAgentDir) roots.push({ path: join(defaultPiAgentDir, "skills"), piNative: true });
   roots.push(
@@ -449,6 +473,10 @@ export function listMcpWriteTargets(input: { cwd?: string | null }): AgentMcpTar
   const cwd = input.cwd?.trim() ?? "";
   const home = homedir();
   const targets: AgentMcpTarget[] = [];
+  targets.push(mcpTarget("codara", "user", codaraMcpConfigPath(), "Codara's own list", {
+    readBy: [],
+    hint: "Codara's own list. Cora and its workers get it per launch; your Claude, Codex and Grok configs stay untouched.",
+  }));
   targets.push(mcpTarget("claude", "user", claudeUserConfigFile(), "Every workspace, Claude", {
     readBy: ["claude"],
   }));
@@ -489,9 +517,7 @@ export function readMcpServerDetail(input: { id: string }): AgentMcpServerDetail
     id: input.id,
     targetId: mcpTargetId(parsed.runtime, parsed.scope, parsed.path),
     name: server.name,
-    // An SSE entry edits as HTTP: the form keeps the url and the save migrates
-    // it to streamable-http, which is what both runtimes read today.
-    transport: server.url ? "http" : "stdio",
+    transport: mcpTransportOf(server),
     command: server.command,
     args: server.args,
     env: server.env,
@@ -525,6 +551,90 @@ export function readMcpServerForAsset(
 /** Validate an unsaved form draft into the runtime-agnostic shape. */
 export function mcpServerFromDraft(draft: AgentMcpServerDraft): { server: McpServerConfig } | { error: string } {
   return validateMcpDraft(draft);
+}
+
+/**
+ * Servers in the Claude, Codex and Grok configs for this workspace that can
+ * be copied into Codara's own list. Read only: nothing here writes, and the
+ * import below only ever writes Codara's file.
+ */
+export function listMcpImportCandidates(input: { cwd?: string | null }): AgentMcpImportCandidate[] {
+  const sources = discoverMcpSources(input.cwd?.trim() || homedir());
+  const inCodara = new Set(
+    sources.filter((source) => source.runtime === "codara").flatMap((source) => source.names.map((name) => name.toLowerCase())),
+  );
+  const out: AgentMcpImportCandidate[] = [];
+  for (const source of sources) {
+    if (source.runtime === "codara") continue;
+    for (const name of source.names) {
+      if (isReservedMcpName(name)) continue;
+      const server = source.configs?.get(name);
+      if (!server) continue;
+      out.push({
+        id: assetId({
+          kind: "mcp",
+          runtime: source.runtime,
+          scope: source.scope,
+          name,
+          path: source.path,
+          ...(source.project !== undefined ? { project: source.project } : {}),
+        }),
+        name,
+        runtime: source.runtime,
+        scope: source.scope,
+        path: source.path,
+        transport: mcpTransportOf(server),
+        summary: describeMcpServer(server),
+        alreadyInCodara: inCodara.has(name.toLowerCase()),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Copy servers from the CLI configs into Codara's own list. Each id must name
+ * an entry the inventory lists for `cwd` (readMcpServerForAsset), so a forged
+ * id cannot pull a definition from an arbitrary file. A name Codara already
+ * has is skipped, never overwritten.
+ */
+export function importMcpServersToCodara(input: { cwd?: string | null; ids: readonly string[] }): Promise<AgentMcpImportResult> {
+  return withAssetMutation(async () => {
+    const cwd = input.cwd?.trim() || "";
+    const destination = codaraMcpConfigPath();
+    const target = mcpTarget("codara", "user", destination, "Codara");
+    const imported: string[] = [];
+    const skipped: string[] = [];
+    try {
+      for (const id of input.ids) {
+        const parsed = parseAssetId(id);
+        if (!parsed || parsed.kind !== "mcp" || parsed.runtime === "codara") {
+          skipped.push("An entry that is not a CLI server was skipped.");
+          continue;
+        }
+        const found = readMcpServerForAsset(id, cwd);
+        if (!found) {
+          skipped.push(`${parsed.name}: its definition could not be read.`);
+          continue;
+        }
+        const { enabled: _enabled, cwd: _cwd, ...server } = found.server;
+        if (isReservedMcpName(server.name) || !MCP_NAME_PATTERN.test(server.name)) {
+          skipped.push(`${server.name}: Codara cannot use this name.`);
+          continue;
+        }
+        const taken = mcpNameTaken(target, server.name, null);
+        if (taken !== false) {
+          skipped.push(taken === true ? `${server.name}: already in Codara.` : taken.error);
+          continue;
+        }
+        await upsertClaudeMcpServer(destination, server, { codaraOwned: true });
+        imported.push(server.name);
+      }
+    } catch (err) {
+      return { ok: false, imported, skipped, error: err instanceof Error ? err.message : String(err) };
+    }
+    return { ok: imported.length > 0 || skipped.length === 0, imported, skipped };
+  });
 }
 
 let assetMutationTail: Promise<void> = Promise.resolve();
@@ -581,6 +691,9 @@ async function saveMcpServerUnlocked(input: {
   if (target.runtime === "grok" && server.headers) {
     return { ok: false, error: "Grok config.toml cannot carry request headers. Save this server to a Claude or Codex config instead." };
   }
+  if (target.format === "toml" && server.type === "sse") {
+    return { ok: false, error: "Codex and Grok configs cannot carry an SSE server. Save it to Codara or a Claude config instead." };
+  }
 
   // ~/.claude.json at workspace scope is Claude's private per-project map.
   const project = isClaudeUserConfig(target.path) && target.scope === "workspace"
@@ -618,7 +731,9 @@ async function saveMcpServerUnlocked(input: {
   }
 
   try {
-    if (target.format === "json") await upsertClaudeMcpServer(target.path, server, { replaceName, project });
+    if (target.format === "json") {
+      await upsertClaudeMcpServer(target.path, server, { replaceName, project, codaraOwned: target.runtime === "codara" });
+    }
     else await upsertCodexMcpServer(target.path, server, replaceName);
     const renamedInPlace = editingHere;
     if (previous && previous.kind === "mcp" && !replacingHere && !renamedInPlace) {
@@ -1080,6 +1195,9 @@ function mcpSourceReaders(source: Pick<SyncSource, "runtime" | "scope" | "path" 
   readBy: CliRuntime[];
   note?: string;
 } {
+  if (source.runtime === "codara") {
+    return { readBy: [], note: "Codara's own list: only Cora and its workers load it, per launch." };
+  }
   if (source.runtime === "codex") return { readBy: ["codex"] };
   if (source.runtime === "grok") return { readBy: ["grok"] };
   if (source.runtime === "shared") {
@@ -1221,7 +1339,8 @@ function parseAssetId(id: string): ParsedAssetId | null {
       parsed.runtime === "claude" ||
       parsed.runtime === "codex" ||
       parsed.runtime === "grok" ||
-      parsed.runtime === "shared"
+      parsed.runtime === "shared" ||
+      parsed.runtime === "codara"
         ? parsed.runtime
         : null;
     const scope = parsed.scope === "user" || parsed.scope === "workspace" ? parsed.scope : null;
@@ -1246,6 +1365,12 @@ function parseAssetId(id: string): ParsedAssetId | null {
 // empty list, which the move path in saveMcpServerUnlocked tolerates and
 // deleteAgentAssetUnlocked reports.
 async function deleteMcpAsset(asset: ParsedAssetId): Promise<string[]> {
+  if (asset.runtime === "codara") {
+    // Only Codara's own list: an id naming any other file under this runtime
+    // is refused rather than deleted from.
+    if (normalizePathForMatch(resolve(asset.path)) !== normalizePathForMatch(resolve(codaraMcpConfigPath()))) return [];
+    return (await deleteClaudeMcpServer(asset.path, asset.name, undefined, true)) ? [asset.name] : [];
+  }
   if (asset.runtime === "claude" || asset.runtime === "shared") {
     return (await deleteClaudeMcpServer(asset.path, asset.name, asset.project)) ? [asset.name] : [];
   }
@@ -1604,9 +1729,12 @@ function validateMcpDraft(draft: AgentMcpServerDraft): { server: McpServerConfig
   if (!MCP_NAME_PATTERN.test(name)) {
     return { error: "Name may use letters, digits, dot, underscore and hyphen, and must start with a letter or digit." };
   }
-  if (draft.transport === "http") {
+  if (RESERVED_MCP_NAMES.has(name.toLowerCase())) {
+    return { error: `${name} is reserved for Codara's built-in server.` };
+  }
+  if (draft.transport === "http" || draft.transport === "sse") {
     const url = (draft.url ?? "").trim();
-    if (!url) return { error: "URL is required for an HTTP server." };
+    if (!url) return { error: `URL is required for an ${draft.transport === "sse" ? "SSE" : "HTTP"} server.` };
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -1618,10 +1746,14 @@ function validateMcpDraft(draft: AgentMcpServerDraft): { server: McpServerConfig
     }
     const headers = normalizeMcpPairs(draft.headers);
     if ("error" in headers) return { error: `Header ${headers.error}` };
-    return { server: { name, url, type: "streamable-http", headers: headers.value } };
+    return {
+      server: { name, url, type: draft.transport === "sse" ? "sse" : "streamable-http", headers: headers.value },
+    };
   }
+  if (draft.transport !== "stdio") return { error: "Choose how Codara starts the server." };
   const command = (draft.command ?? "").trim();
   if (!command) return { error: "Command is required for a stdio server." };
+  if (/[\r\n\0]/.test(command)) return { error: "The command must be a single line." };
   const args = (draft.args ?? []).slice();
   const env = normalizeMcpPairs(draft.env);
   if ("error" in env) return { error: `Environment variable ${env.error}` };
@@ -1665,7 +1797,7 @@ function ensureTrailingNewline(text: string): string {
 async function upsertClaudeMcpServer(
   path: string,
   server: McpServerConfig,
-  options?: { replaceName?: string | null; project?: string | null },
+  options?: { replaceName?: string | null; project?: string | null; codaraOwned?: boolean },
 ): Promise<void> {
   await withConfigFileLock(path, async () => {
     let parsed: Record<string, unknown> = {};
@@ -1685,7 +1817,13 @@ async function upsertClaudeMcpServer(
     if (replaceName && replaceName !== server.name) delete container[replaceName];
     container[server.name] = renderUserMcpServer(server);
     await fs.mkdir(dirname(path), { recursive: true });
-    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n", { outsideWrite: AGENT_CONFIG_EDIT });
+    // Codara's own list carries no outside-write capability, so the guard
+    // refuses the write if that path ever resolves into a CLI's home.
+    await writeConfigFileAtomic(
+      path,
+      JSON.stringify(parsed, null, 2) + "\n",
+      options?.codaraOwned ? { mode: 0o600 } : { outsideWrite: AGENT_CONFIG_EDIT },
+    );
   });
 }
 
@@ -1747,7 +1885,7 @@ function describeMcpServer(server: McpServerConfig): string {
   return text.length > 72 ? `${text.slice(0, 71)}…` : text;
 }
 
-async function deleteClaudeMcpServer(path: string, name: string, project?: string): Promise<boolean> {
+async function deleteClaudeMcpServer(path: string, name: string, project?: string, codaraOwned = false): Promise<boolean> {
   return withConfigFileLock(path, async () => {
     let raw: string;
     try {
@@ -1767,7 +1905,11 @@ async function deleteClaudeMcpServer(path: string, name: string, project?: strin
     const container = jsonMcpContainer(parsed, project);
     if (!container || !Object.prototype.hasOwnProperty.call(container, name)) return false;
     delete container[name];
-    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n", { outsideWrite: AGENT_CONFIG_EDIT });
+    await writeConfigFileAtomic(
+      path,
+      JSON.stringify(parsed, null, 2) + "\n",
+      codaraOwned ? { mode: 0o600 } : { outsideWrite: AGENT_CONFIG_EDIT },
+    );
     return true;
   });
 }
@@ -1857,6 +1999,9 @@ function mcpConfigCandidates(cwd: string): Array<{
 }> {
   const home = homedir();
   return [
+    // First, so a server the user added or imported in Codara is the copy
+    // Cora connects with when a CLI config holds the same name.
+    { runtime: "codara", scope: "user", path: codaraMcpConfigPath() },
     { runtime: "shared", scope: "workspace", path: join(cwd, ".mcp.json") },
     // Claude's private per-project servers: ~/.claude.json projects[<cwd>].
     // Other projects' maps in the same file are never read.
@@ -1888,6 +2033,7 @@ function skillRootCandidates(cwd: string): Array<{
     { runtime: "shared", scope: "workspace", path: join(cwd, ".agents", "skills") },
     // Pi's own roots: Cora loads these natively.
     { runtime: "shared", scope: "workspace", path: join(cwd, ".pi", "skills") },
+    { runtime: "codara", scope: "user", path: codaraSkillsDir() },
     { runtime: "codex", scope: "user", path: join(defaultPersonalCodexHomeDir(), "skills") },
     { runtime: "claude", scope: "user", path: join(claudeConfigDir(), "skills") },
     { runtime: "shared", scope: "user", path: join(homedir(), ".agents", "skills") },

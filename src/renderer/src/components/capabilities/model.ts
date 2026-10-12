@@ -1,4 +1,5 @@
 import type {
+  AgentMcpTransport,
   AgentAssetInventoryItem,
   AgentMcpServerDetail,
   AgentMcpTarget,
@@ -29,14 +30,17 @@ export function isCapabilityTab(value: unknown): value is CapabilityTab {
 }
 
 export type CapabilityKind = "mcp" | "skill";
-export type RuntimeColumn = "claude" | "codex" | "grok" | "shared";
+// "codara" is Codara's own list and skill folder, which only Cora and her
+// workers load.
+export type RuntimeColumn = "codara" | "claude" | "codex" | "grok" | "shared";
 export type CliRuntime = "claude" | "codex" | "grok";
 
-export const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "grok", "shared"];
+export const RUNTIME_COLUMNS: RuntimeColumn[] = ["codara", "claude", "codex", "grok", "shared"];
 export const CLI_RUNTIMES: CliRuntime[] = ["claude", "codex", "grok"];
 export const PAGE_SIZE = 40;
 
 export const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
+  codara: "Codara",
   claude: "Claude",
   codex: "Codex",
   grok: "Grok",
@@ -104,7 +108,7 @@ export interface EditorState {
   replaceId: string | null;
   originalName: string;
   name: string;
-  transport: "stdio" | "http";
+  transport: AgentMcpTransport;
   command: string;
   argsText: string;
   env: Pair[];
@@ -113,13 +117,8 @@ export interface EditorState {
   // Who should be able to use it inside Codara.
   cora: boolean;
   workers: boolean;
-  // Add: which CLI configs receive it, at which scope, unless the user picked
-  // one exact file instead.
-  clis: Record<CliRuntime, boolean>;
-  scope: "user" | "workspace";
-  customTargetId: string | null;
   // Edit: the file this copy lives in (changing it moves the entry), and the
-  // other copies of the same name.
+  // other copies of the same name. An add always lands in Codara's own list.
   targetId: string;
   copies: EditorCopy[];
 }
@@ -144,6 +143,7 @@ export function errorText(err: unknown): string {
 // readBy, so the runtime column stands in for it.
 export function itemReadBy(item: AgentAssetInventoryItem): CliRuntime[] {
   if (item.readBy) return item.readBy as CliRuntime[];
+  if (item.runtime === "codara") return [];
   if (item.runtime === "shared") return ["claude", "codex"];
   return [item.runtime as CliRuntime];
 }
@@ -158,7 +158,7 @@ export function groupByName(items: AgentAssetInventoryItem[], kind: CapabilityKi
         kind,
         name: item.name,
         sessionKey: item.sessionKey,
-        installs: { claude: [], codex: [], grok: [], shared: [] },
+        installs: { codara: [], claude: [], codex: [], grok: [], shared: [] },
         any: item,
         differs: false,
       };
@@ -367,6 +367,10 @@ export function isSecretPair(pair: Pair): boolean {
   return SECRET_KEY_PATTERN.test(pair.key) || SECRET_VALUE_PATTERN.test(pair.value.trim());
 }
 
+export function codaraTarget(targets: AgentMcpTarget[]): AgentMcpTarget | undefined {
+  return targets.find((target) => target.runtime === "codara");
+}
+
 export function blankEditor(targets: AgentMcpTarget[]): EditorState {
   return {
     mode: "add",
@@ -380,11 +384,8 @@ export function blankEditor(targets: AgentMcpTarget[]): EditorState {
     url: "",
     headers: [],
     cora: true,
-    workers: false,
-    clis: { claude: Boolean(targetFor(targets, "claude", "user")), codex: false, grok: false },
-    scope: "user",
-    customTargetId: null,
-    targetId: "",
+    workers: true,
+    targetId: codaraTarget(targets)?.id ?? "",
     copies: [],
   };
 }
@@ -407,55 +408,34 @@ export function editorFromDetail(
     headers: pairsFrom(detail.headers),
     cora: access.cora,
     workers: access.workers,
-    clis: { claude: false, codex: false, grok: false },
-    scope: "user",
-    customTargetId: null,
     targetId: detail.targetId,
     copies,
   };
 }
 
 export function editorDraft(editor: EditorState) {
+  const remote = editor.transport !== "stdio";
   return {
     name: editor.name.trim(),
     transport: editor.transport,
-    command: editor.transport === "stdio" ? editor.command.trim() : undefined,
-    args: editor.transport === "stdio" ? splitArgs(editor.argsText) : undefined,
-    env: editor.transport === "stdio" ? pairsToRecord(editor.env) : undefined,
-    url: editor.transport === "http" ? editor.url.trim() : undefined,
-    headers: editor.transport === "http" ? pairsToRecord(editor.headers) : undefined,
+    command: remote ? undefined : editor.command.trim(),
+    args: remote ? undefined : splitArgs(editor.argsText),
+    env: remote ? undefined : pairsToRecord(editor.env),
+    url: remote ? editor.url.trim() : undefined,
+    headers: remote ? pairsToRecord(editor.headers) : undefined,
   };
 }
 
-// Where an add writes: one exact file the user picked, or one file per ticked
-// CLI at the chosen scope.
+// Where an add writes: Codara's own list, never a CLI's config. The CLIs keep
+// what they have; Cora and her workers get the server per launch.
 export function editorDestinations(
-  editor: EditorState,
+  _editor: EditorState,
   targets: AgentMcpTarget[],
 ): { targets: AgentMcpTarget[]; problem: string | null } {
-  if (editor.customTargetId) {
-    const target = targets.find((item) => item.id === editor.customTargetId);
-    return target ? { targets: [target], problem: null } : { targets: [], problem: "Choose where to save this server." };
-  }
-  const picked = CLI_RUNTIMES.filter((cli) => editor.clis[cli]);
-  if (picked.length === 0) {
-    return {
-      targets: [],
-      problem: "Pick at least one CLI config to keep the server in. Cora and Pi workers read it from there.",
-    };
-  }
-  const out: AgentMcpTarget[] = [];
-  for (const cli of picked) {
-    const target = targetFor(targets, cli, editor.scope);
-    if (!target) {
-      return {
-        targets: [],
-        problem: `${CLI_LABEL[cli]} has no ${editor.scope === "workspace" ? "per-workspace" : "user"} config to save into. Untick it or choose every workspace.`,
-      };
-    }
-    out.push(target);
-  }
-  return { targets: out, problem: null };
+  const target = codaraTarget(targets);
+  return target
+    ? { targets: [target], problem: null }
+    : { targets: [], problem: "Codara's own server list is not available. Restart Codara and try again." };
 }
 
 // Mirrors the main-process rules so the user sees the problem before a write is
@@ -473,7 +453,7 @@ export function validateEditor(editor: EditorState): string | null {
     return null;
   }
   const url = editor.url.trim();
-  if (!url) return "URL is required for an HTTP server.";
+  if (!url) return `URL is required for an ${editor.transport === "sse" ? "SSE" : "HTTP"} server.`;
   if (!/^https?:\/\//i.test(url)) return "URL must start with http:// or https://.";
   return null;
 }

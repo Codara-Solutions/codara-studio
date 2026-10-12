@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type {
   AgentAssetInventoryItem,
+  AgentMcpImportCandidate,
   AgentMcpProbeResult,
   AgentPiMcpPreview,
   SparkBuiltinInstallState,
@@ -72,6 +73,13 @@ export type SyncState =
   | { phase: "running"; result: AgentSyncResult }
   | { phase: "done"; result: AgentSyncResult };
 
+// Copying servers out of the CLI configs into Codara's own list. The CLI
+// files are only read.
+export type ImportState =
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "ready"; candidates: AgentMcpImportCandidate[]; selected: ReadonlySet<string>; running: boolean };
+
 // One grid template shared by a list's header row and every row in it. Every
 // column but the first is a fixed width so the two grids resolve identically:
 // an `auto` actions column would size to each row's own buttons and the
@@ -99,6 +107,11 @@ export interface McpSectionProps {
   probes: Record<string, ProbeState>;
   canAdd: boolean;
   sync: SyncState;
+  importState: ImportState;
+  onImportOpen: () => void;
+  onImportToggle: (id: string) => void;
+  onImportRun: () => void;
+  onImportDismiss: () => void;
   onAdd: () => void;
   onTogglePiScope: (group: NameGroup, scope: "cora" | "worker", assigned: boolean) => void;
   onEdit: (group: NameGroup) => void;
@@ -149,6 +162,15 @@ export default function McpSection(props: McpSectionProps) {
             <button
               type="button"
               className="spark-btn"
+              onClick={props.onImportOpen}
+              disabled={props.importState.phase === "loading" || (props.importState.phase === "ready" && props.importState.running)}
+              title="Copy servers from your Claude, Codex and Grok configs into Codara's own list. Those configs are only read."
+            >
+              {props.importState.phase === "loading" ? "Reading" : "Import from CLIs"}
+            </button>
+            <button
+              type="button"
+              className="spark-btn"
               onClick={props.onAdd}
               disabled={!props.canAdd}
               title={props.canAdd ? "Add a server by filling in a form or pasting its config" : "No writable MCP config location was found"}
@@ -163,6 +185,12 @@ export default function McpSection(props: McpSectionProps) {
         sync={props.sync}
         onRun={props.onSyncRun}
         onDismiss={props.onSyncDismiss}
+      />
+      <ImportPanel
+        state={props.importState}
+        onToggle={props.onImportToggle}
+        onRun={props.onImportRun}
+        onDismiss={props.onImportDismiss}
       />
 
       <div className="agent-capability-list" style={listStyle}>
@@ -242,7 +270,7 @@ export default function McpSection(props: McpSectionProps) {
         <span style={{ color: "var(--st-desc)" }}>Cora and Workers</span> decide what Codara's agents may use,
         in every workspace where the server is defined.{" "}
         <span style={{ color: "var(--st-desc)" }}>Claude, Codex and Grok</span> show which CLIs load it from
-        their own config.
+        their own config. Servers you add here go into Codara's own list, which no CLI reads.
       </p>
       {props.preview && props.preview.errors.length > 0 ? (
         <p style={rowNoteStyle}>Could not check what reaches Cora: {props.preview.errors.join(" ")}</p>
@@ -294,6 +322,69 @@ function SyncPanel({
         ) : null}
         <button type="button" className="spark-btn" style={smallBtnStyle} disabled={sync.phase === "running"} onClick={onDismiss}>
           {preview && count > 0 ? "Cancel" : "Dismiss"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ImportPanel({
+  state,
+  onToggle,
+  onRun,
+  onDismiss,
+}: {
+  state: ImportState;
+  onToggle: (id: string) => void;
+  onRun: () => void;
+  onDismiss: () => void;
+}) {
+  if (state.phase !== "ready") return null;
+  const count = state.selected.size;
+  return (
+    <div style={panelStyle} role="group" aria-label="Import servers from your CLIs">
+      <div style={{ color: "var(--ink)", fontSize: 12.5, fontWeight: 600 }}>
+        {state.candidates.length === 0
+          ? "None of your Claude, Codex or Grok configs holds a server to import."
+          : "Copy servers into Codara's own list"}
+      </div>
+      {state.candidates.length > 0 ? (
+        <>
+          <div style={rowNoteStyle}>
+            Cora and its workers get the copies per launch. The CLI configs are only read, never changed.
+          </div>
+          <div style={importListStyle}>
+            {state.candidates.map((candidate) => (
+              <label key={candidate.id} style={importRowStyle} title={candidate.path}>
+                <input
+                  type="checkbox"
+                  checked={state.selected.has(candidate.id)}
+                  disabled={candidate.alreadyInCodara || state.running}
+                  onChange={() => onToggle(candidate.id)}
+                  aria-label={`Import ${candidate.name} from ${RUNTIME_LABEL[candidate.runtime as RuntimeColumn] ?? candidate.runtime}`}
+                />
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ color: "var(--ink)", fontSize: 12.5, fontWeight: 600 }}>{candidate.name}</span>{" "}
+                  <span className="spark-badge" style={badgeStyle}>{candidate.transport}</span>{" "}
+                  <span style={rowSummaryStyle}>{candidate.summary}</span>
+                  <span style={{ ...rowScopeStyle, display: "block" }}>
+                    {RUNTIME_LABEL[candidate.runtime as RuntimeColumn] ?? candidate.runtime} · {shortPath(candidate.path)}
+                    {candidate.alreadyInCodara ? " · already in Codara" : ""}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </>
+      ) : null}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        {state.candidates.length > 0 ? (
+          <button type="button" className="spark-btn is-primary" style={smallBtnStyle} disabled={count === 0 || state.running} onClick={onRun}>
+            {state.running ? "Importing" : `Import ${count} ${count === 1 ? "server" : "servers"}`}
+          </button>
+        ) : null}
+        <button type="button" className="spark-btn" style={smallBtnStyle} disabled={state.running} onClick={onDismiss}>
+          {state.candidates.length > 0 ? "Cancel" : "Dismiss"}
         </button>
       </div>
     </div>
@@ -1066,4 +1157,18 @@ const syncListStyle: React.CSSProperties = {
   lineHeight: 1.5,
   maxHeight: 160,
   overflow: "auto",
+};
+
+const importListStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 8,
+  maxHeight: 240,
+  overflow: "auto",
+};
+
+const importRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 8,
+  cursor: "default",
 };

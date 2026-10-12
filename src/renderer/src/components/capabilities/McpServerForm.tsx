@@ -1,12 +1,11 @@
 import React, { useState } from "react";
-import type { AgentMcpServerDraft, AgentMcpTarget } from "@shared/types";
+import type { AgentMcpServerDraft, AgentMcpTarget, AgentMcpTransport } from "@shared/types";
 import {
   CLI_LABEL,
-  CLI_RUNTIMES,
   RUNTIME_LABEL,
+  codaraTarget,
   isSecretPair,
   pairsFrom,
-  targetFor,
   type EditorState,
   type Pair,
 } from "./model";
@@ -68,24 +67,19 @@ export default function McpServerForm({
         </Field>
 
         <div style={fieldStyle}>
-          <span style={fieldLabelStyle}>How Codara starts it</span>
+          <span style={fieldLabelStyle}>How Codara reaches it</span>
           <div className="spark-segmented" role="group" aria-label="Transport">
-            <button
-              type="button"
-              className={editor.transport === "stdio" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-              aria-pressed={editor.transport === "stdio"}
-              onClick={() => set("transport", "stdio")}
-            >
-              Run a command (stdio)
-            </button>
-            <button
-              type="button"
-              className={editor.transport === "http" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-              aria-pressed={editor.transport === "http"}
-              onClick={() => set("transport", "http")}
-            >
-              Connect to a URL (HTTP)
-            </button>
+            {TRANSPORTS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                className={editor.transport === option.id ? "spark-segmented-item is-selected" : "spark-segmented-item"}
+                aria-pressed={editor.transport === option.id}
+                onClick={() => set("transport", option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -122,12 +116,15 @@ export default function McpServerForm({
           </>
         ) : (
           <>
-            <Field label="URL" hint="The server's streamable HTTP endpoint.">
+            <Field
+              label="URL"
+              hint={editor.transport === "sse" ? "The server's SSE endpoint, often ending in /sse." : "The server's streamable HTTP endpoint."}
+            >
               <input
                 className="spark-input spark-mono"
                 value={editor.url}
                 onChange={(event) => set("url", event.target.value)}
-                placeholder="https://example.com/mcp"
+                placeholder={editor.transport === "sse" ? "https://example.com/sse" : "https://example.com/mcp"}
                 spellCheck={false}
               />
             </Field>
@@ -166,14 +163,18 @@ export default function McpServerForm({
   );
 }
 
-// Who gets the server: Cora and Pi workers read it from whatever file it is
-// saved in, and each CLI reads only its own config. On add, the CLI ticks pick
-// the files; an exact file is still one click away for project files and
-// ~/.mcp.json.
+const TRANSPORTS: { id: AgentMcpTransport; label: string }[] = [
+  { id: "stdio", label: "Run a command (stdio)" },
+  { id: "http", label: "Streamable HTTP" },
+  { id: "sse", label: "SSE" },
+];
+
+// Who gets the server. A new one goes into Codara's own list, which only Cora
+// and its workers load, per launch, so adding a server never edits a CLI's
+// config. An edit keeps the file the entry already lives in.
 function Availability({
   editor,
   targets,
-  hasWorkspace,
   onChange,
 }: {
   editor: EditorState;
@@ -183,9 +184,7 @@ function Availability({
 }) {
   const set = <K extends keyof EditorState>(key: K, value: EditorState[K]) =>
     onChange({ ...editor, [key]: value });
-  const exactTarget = editor.customTargetId
-    ? targets.find((target) => target.id === editor.customTargetId) ?? null
-    : null;
+  const codara = codaraTarget(targets);
   const editTarget = targets.find((target) => target.id === editor.targetId) ?? null;
   return (
     <div style={{ ...panelStyle, gap: 12 }}>
@@ -210,79 +209,14 @@ function Availability({
       </div>
 
       {editor.mode === "add" ? (
-        exactTarget || editor.customTargetId !== null ? (
-          <div style={choiceGroupStyle}>
-            <Field label="Save to this file" hint={exactTarget?.hint ?? exactTarget?.path}>
-              <select
-                className="spark-input"
-                value={editor.customTargetId ?? ""}
-                onChange={(event) => set("customTargetId", event.target.value)}
-              >
-                {targets.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {exactTarget ? <ReadByLine target={exactTarget} /> : null}
-            <button type="button" className="spark-btn" style={{ ...smallBtnStyle, justifySelf: "start" }} onClick={() => set("customTargetId", null)}>
-              Pick CLIs instead
-            </button>
-          </div>
-        ) : (
-          <div style={choiceGroupStyle} role="group" aria-label="CLI configs">
-            <span style={choiceCaptionStyle}>CLI configs that keep it</span>
-            <div className="spark-segmented" role="group" aria-label="Scope">
-              <button
-                type="button"
-                className={editor.scope === "user" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-                aria-pressed={editor.scope === "user"}
-                onClick={() => onChange({ ...editor, scope: "user" })}
-              >
-                Every workspace
-              </button>
-              <button
-                type="button"
-                className={editor.scope === "workspace" ? "spark-segmented-item is-selected" : "spark-segmented-item"}
-                aria-pressed={editor.scope === "workspace"}
-                disabled={!hasWorkspace}
-                title={hasWorkspace ? undefined : "Open a workspace to save a server for it alone"}
-                onClick={() => onChange({ ...editor, scope: "workspace", clis: { ...editor.clis, grok: false } })}
-              >
-                This workspace only
-              </button>
-            </div>
-            {CLI_RUNTIMES.map((cli) => {
-              const target = targetFor(targets, cli, editor.scope);
-              return (
-                <Check
-                  key={cli}
-                  checked={Boolean(target) && editor.clis[cli]}
-                  disabled={!target}
-                  onChange={(next) => onChange({ ...editor, clis: { ...editor.clis, [cli]: next } })}
-                  label={CLI_LABEL[cli]}
-                  hint={
-                    target
-                      ? `${shortPath(target.path)}${target.hint ? `. ${target.hint}` : ""}`
-                      : `${CLI_LABEL[cli]} has no per-workspace config.`
-                  }
-                />
-              );
-            })}
-            <span style={fieldHintStyle}>
-              Cora and Pi workers read the server from these files, so keep at least one ticked.
-            </span>
-            <button
-              type="button"
-              className="spark-btn"
-              style={{ ...smallBtnStyle, justifySelf: "start" }}
-              onClick={() => set("customTargetId", targets[0]?.id ?? "")}
-            >
-              Choose an exact file instead
-            </button>
-          </div>
-        )
+        <div style={choiceGroupStyle}>
+          <span style={choiceCaptionStyle}>Saved in</span>
+          <span style={{ color: "var(--ink)", fontSize: 12, fontWeight: 600 }}>Codara's own server list</span>
+          <span style={fieldHintStyle} title={codara?.path}>
+            {codara ? `${shortPath(codara.path)}. ` : ""}Your Claude, Codex and Grok configs stay as they are. Values
+            are kept in this private file; ${"{"}VAR{"}"} placeholders read your environment instead.
+          </span>
+        </div>
       ) : (
         <div style={choiceGroupStyle}>
           <Field label="Saved in" hint={editTarget?.hint ?? editTarget?.path}>
