@@ -2,7 +2,8 @@
 "use strict";
 
 // Source-level guarantees for the Settings dialog: how it may be dismissed,
-// what its search can find, and the opaque surface it is drawn on.
+// what its search can find, and the surface it is drawn on: a glass frame
+// around a reading pane that always stays opaque.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -106,16 +107,12 @@ check("every search result names where it lives", () => {
   assert.doesNotMatch(dialog, /\{entry\.section \? \(\s*<span className="st-result__crumb">/);
 });
 
-check("the Capability Center shares the opaque Settings face", () => {
+check("the Capability Center shares the Settings face", () => {
   assert.doesNotMatch(capabilities, /spark-glass/);
   assert.match(styles, /\n\.settings-dialog-surface,\n\.agent-capabilities-surface,/);
   const surface = /\n\.agent-capabilities-surface \{([^}]*)\}/.exec(styles);
   assert.ok(surface, "the surface rule must exist");
   assert.match(surface[1], /background: var\(--st-surface\);/);
-  assert.doesNotMatch(
-    styles,
-    /html:not\(\[data-glass="off"\]\) \.agent-capabilities-surface \{[^}]*backdrop-filter/,
-  );
 });
 
 check("checkboxes are drawn, so an unchecked box never reads as checked", () => {
@@ -123,15 +120,23 @@ check("checkboxes are drawn, so an unchecked box never reads as checked", () => 
   assert.match(styles, /\.settings-dialog-surface input\[type="checkbox"\]:checked,/);
 });
 
-check("the Settings face is opaque, not glass", () => {
+check("the Settings face is opaque without glass", () => {
   assert.doesNotMatch(dialog, /spark-glass/);
-  assert.doesNotMatch(
-    styles,
-    /html:not\(\[data-glass="off"\]\) \.settings-dialog-surface \{[^}]*backdrop-filter/,
-  );
   const surface = /\n\.settings-dialog-surface \{([^}]*)\}/.exec(styles);
   assert.ok(surface, "the surface rule must exist");
   assert.match(surface[1], /background: var\(--st-surface\);/);
+});
+
+check("with glass on, only the frame frosts and the reading pane stays opaque", () => {
+  const pane =
+    /html:not\(\[data-glass="off"\]\) \.settings-dialog-surface \.st-content,\n\s*html:not\(\[data-glass="off"\]\) \.agent-capabilities-surface \.st-content,[^{]*\{([^}]*)\}/.exec(
+      styles,
+    );
+  assert.ok(pane, "the glass rule for the reading pane must exist");
+  assert.match(pane[1], /background: var\(--st-surface\);/);
+  const glassBlock = styles.indexOf('html:not([data-glass="off"]) .settings-dialog-surface .st-content');
+  const gate = styles.lastIndexOf("@media not (prefers-reduced-transparency: reduce)", glassBlock);
+  assert.ok(gate > 0, "the glass face must sit behind the reduced-transparency gate");
 });
 
 check("no em or en dashes in the new Settings files", () => {

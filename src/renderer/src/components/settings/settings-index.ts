@@ -118,8 +118,8 @@ export interface SettingsSearchEntry {
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "general", title: "Setup and guided tour", desc: "Set up local tools, connect an account and take the tour.", section: "Getting started", keywords: "onboarding tour welcome install guide" },
   { tab: "general", title: "Theme", desc: "The colors of the whole app, dark or light.", section: "Appearance", keywords: "dark light mode colors palette dracula catppuccin github rose pine one dark daylight" },
-  { tab: "general", title: "Liquid glass surfaces", desc: "Frosted, translucent menus, popovers and toasts.", section: "Appearance", keywords: "transparency translucent frosted blur opaque" },
-  { tab: "general", title: "Glass tuning", desc: "Tint, blur and refraction of the glass material.", section: "Appearance", keywords: "tint blur refraction chromatic fringe" },
+  { tab: "general", title: "Liquid glass", desc: "Translucent glass for the frame, tabs, buttons, composer, menus, dialogs and toasts.", section: "Appearance", keywords: "transparency translucent frosted blur opaque glass on off solid" },
+  { tab: "general", title: "Fine-tune glass", desc: "Tint, blur, refraction and fringe of the glass material.", section: "Appearance", keywords: "tint blur refraction chromatic fringe tuning" },
   { tab: "general", title: "Keep running in the background", desc: "Closing the window hides to the tray so automations keep running.", section: "Window", keywords: "tray quit close minimize automations" },
   { tab: "general", title: "Open local dev servers automatically", desc: "Open a preview tab when a dev server starts.", section: "Window", keywords: "browser preview localhost vite next url" },
   { tab: "general", title: "Open links in", desc: "Open clicked links in your default browser or a Codara browser tab.", section: "Window", keywords: "link url external system browser default chrome firefox safari" },

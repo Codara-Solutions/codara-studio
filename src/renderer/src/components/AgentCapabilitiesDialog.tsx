@@ -1070,9 +1070,9 @@ export default function AgentCapabilitiesDialog({
     // The scrim deliberately does nothing: only Escape, the close button and
     // Done leave, so a click that lands outside never drops the open page.
     <div style={overlayStyle}>
-      {/* The same opaque face and dimming scrim as Settings: this dialog is
-          dense tables and long descriptions, which glass made fight the
-          workbench behind it. */}
+      {/* The same face and dimming scrim as Settings, whose reading pane
+          stays opaque under glass: this dialog is dense tables and long
+          descriptions, which glass made fight the workbench behind it. */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"

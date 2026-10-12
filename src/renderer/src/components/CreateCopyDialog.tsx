@@ -102,13 +102,11 @@ export default function CreateCopyDialog({
       }}
     >
       <div
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(460px, calc(100vw - 48px))",
           maxHeight: "min(560px, calc(100vh - 96px))",
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: 10,
-          boxShadow: "var(--shadow-2)",
           fontFamily: "var(--font-sans)",
           display: "flex",
           flexDirection: "column",

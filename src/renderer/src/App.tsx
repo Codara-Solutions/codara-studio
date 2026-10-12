@@ -6177,12 +6177,12 @@ export default function App() {
   return (
     <SelectionRoutingProvider value={routingApi}>
     <div
+      className="spark-shell"
       style={{
         height: "100%",
         width: "100%",
         display: "flex",
         flexDirection: "column",
-        background: "var(--bg)",
       }}
     >
       {/* Auto-updater banner — position:fixed so the banner sits above
@@ -6207,6 +6207,7 @@ export default function App() {
         {leftPanelVisible && (
           <div
             data-responsive-panel="left"
+            className={compactWorkbench ? "spark-rail-float" : undefined}
             style={{
               display: "flex",
               minHeight: 0,
@@ -6346,6 +6347,7 @@ export default function App() {
         {rightPanelVisible && (
           <div
             data-responsive-panel="right"
+            className={compactWorkbench ? "spark-rail-float" : undefined}
             style={{
               display: "flex",
               minHeight: 0,

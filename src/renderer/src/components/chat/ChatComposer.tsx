@@ -1418,6 +1418,9 @@ export default function ChatComposer({
 
   return (
     <div
+      // The dock's fade, and its overlap with the conversation when glass
+      // floats it, live on .cora-composer-dock.
+      className="cora-composer-dock"
       style={{
         // 0 1 auto (not 0 0 auto): when the chat dock is short the composer
         // shrinks within its slot instead of overflowing past the top, which
@@ -1429,7 +1432,6 @@ export default function ChatComposer({
         display: "flex",
         flexDirection: "column",
         padding: "8px clamp(14px, 3vw, 42px) 12px",
-        background: "linear-gradient(to bottom, transparent, color-mix(in oklab, var(--panel) 88%, transparent) 38%)",
       }}
     >
       <div style={{ width: "100%", maxWidth: 768, margin: "0 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>

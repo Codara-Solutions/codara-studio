@@ -266,6 +266,24 @@ function primaryAction(
   }
 }
 
+function SwitchGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5" />
+    </svg>
+  );
+}
+
 /** The text a Remove asks to confirm (accounts spec 13). */
 export function removeConfirmText(
   card: AccountCardView,
@@ -363,7 +381,6 @@ export default function AccountCard({
               {card.builtIn ? (
                 <span className="st-acct-badge">{systemLoginBadge(descriptor)}</span>
               ) : null}
-              {card.active ? <ActiveBadge label="Active" /> : null}
             </div>
             <div className="st-acct__meta">
               {/* A System row is named after its email by default; one line of it is enough. */}
@@ -378,6 +395,9 @@ export default function AccountCard({
             </div>
           </div>
           <div className="st-acct__actions">
+            {/* The state and the way to change it share one slot at the end of
+                the row, so Active and Switch line up down the list and the
+                eye finds either in the same place. */}
             {card.busy ? (
               <span className="st-acct__working">
                 <span aria-hidden className="st-spinner" />
@@ -391,9 +411,11 @@ export default function AccountCard({
                 title={action.title}
                 onClick={() => void action.run()}
               >
+                {action.id === "use" ? <SwitchGlyph /> : null}
                 {action.label}
               </ActionButton>
             ) : null}
+            {card.active ? <ActiveBadge label="Active" /> : null}
             {/* A row with nothing in its menu keeps the menu's slot, so every
                 row's button ends on the same edge down the list. */}
             {menuActions.length > 0 || destructiveActions.length > 0 ? (
@@ -408,11 +430,15 @@ export default function AccountCard({
           </div>
         </div>
 
-        <ConnectionLine
-          state={action && status.danger ? { ...status, text: firstSentence(status.text) } : status}
-          title={status.text}
-        />
-        {systemCora ? <ConnectionLine state={systemCora} action={connectCora} /> : null}
+        {/* One quiet status line: the sign-in states sit side by side and
+            wrap only when the row is narrow. */}
+        <div className="st-acct__status">
+          <ConnectionLine
+            state={action && status.danger ? { ...status, text: firstSentence(status.text) } : status}
+            title={status.text}
+          />
+          {systemCora ? <ConnectionLine state={systemCora} action={connectCora} /> : null}
+        </div>
 
         <div className="st-acct__usage">
           {card.usage ?? (

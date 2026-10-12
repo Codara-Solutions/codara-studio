@@ -148,7 +148,11 @@ function UsageMeterGrid({
             </span>
             <span className="st-meter__pct">{rounded}%</span>
             <span className="st-meter__reset">
-              {level !== "normal" ? (rounded >= 100 ? "Limit reached" : "Almost used up") : null}
+              {level !== "normal" ? (
+                <span className="st-meter__alert">
+                  {rounded >= 100 ? "Limit reached" : "Almost used up"}
+                </span>
+              ) : null}
               {level !== "normal" && usageWindow.resetsIn ? ", " : null}
               {usageWindow.resetsIn
                 ? `${level !== "normal" ? "resets" : "Resets"} in ${usageWindow.resetsIn}`

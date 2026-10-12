@@ -293,15 +293,13 @@ function WindowChrome({
 
   return (
     <div
+      className="spark-titlebar"
       onDoubleClick={handleChromeDoubleClick}
       style={
         {
           height: 30,
           display: "flex",
           alignItems: "stretch",
-          borderBottom: "1px solid var(--rule)",
-          background: "color-mix(in oklab, var(--panel) 70%, var(--bg))",
-          boxShadow: "var(--lift-hi)",
           flex: "0 0 auto",
           userSelect: "none",
           position: "relative",

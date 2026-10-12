@@ -444,8 +444,14 @@ export default function ChatConversation({
             // activity while the last response sat fully in view.
             atBottomThreshold={72}
             // Holds the last message's hover line (MESSAGE_META_GAP) so it
-            // never lands under the composer edge.
-            components={{ Footer: () => <div style={{ height: MESSAGE_META_GAP }} /> }}
+            // never lands under the composer edge. A glass composer floats
+            // over the conversation's tail by --cora-composer-overlap, so the
+            // footer grows by that much and the last row still clears it.
+            components={{
+              Footer: () => (
+                <div style={{ height: `calc(${MESSAGE_META_GAP}px + var(--cora-composer-overlap, 0px))` }} />
+              ),
+            }}
           />
         )}
         <ConversationMinimap

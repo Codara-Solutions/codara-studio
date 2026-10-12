@@ -187,6 +187,15 @@ export default function ChatPanel({
   return (
     <div
       ref={panelRef}
+      className="cora-chat-panel"
+      // Glass floats the composer over the conversation's tail only when a
+      // conversation sits behind it; the welcome state and the other views
+      // keep the composer in its own slot.
+      data-composer-float={
+        chatView === "chat" && activeRun && !collapsed && !isUnstartedChatRun(activeRun)
+          ? "true"
+          : undefined
+      }
       style={{
         display: "flex",
         flexDirection: "column",
