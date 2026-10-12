@@ -76,6 +76,7 @@ const harnessPlugin = {
           contents:
             init +
             "export function hasSession(){ return true; }\n" +
+            "export function sessionAgentFlagsReachCli(id){ return !globalThis.__TAN.unwrappedPanes?.has(id); }\n" +
             "export function tap(id, h){ globalThis.__TAN.taps.set(id, h); return () => globalThis.__TAN.taps.delete(id); }\n" +
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
@@ -1023,6 +1024,37 @@ async function main() {
     "a turn is timed from the submit that started work, not an earlier no-op submit",
     alertCount() === beforeApproval + 4 && /build is green/.test(T.alerts.at(-1).body) && !/took/.test(T.alerts.at(-1).body),
   );
+
+  // With Codara's notify on Codex launches, a screen-read finish waits a
+  // moment for Codex's own message, but only in a pane whose shell passes
+  // the program on: a typed `codex` in fish or cmd never sends one.
+  mod.noteCodexNotifyInstalled(true);
+  T.unwrappedPanes = new Set(["g-fish"]);
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-grace", panes: [
+    { paneId: "g-fish", tabId: "tg1", tabTitle: "fish", excluded: false },
+    { paneId: "g-bash", tabId: "tg2", tabTitle: "bash", excluded: false },
+  ] });
+  const graceIds = ["g-fish", "g-bash"];
+  for (const id of graceIds) {
+    T.dimensions.set(id, { cols: 100, rows: 20 });
+    feed(id, "\x1b]633;E;codex\x07│ >_ OpenAI Codex (v0.162.1)                          │\r\n");
+    mod.noteTerminalUserInput(id, "rename the module\r");
+    feed(id, "\x1b[2J\x1b[H• Working (1s • esc to interrupt)\x1b[3;1H› Ask Codex to do anything\x1b[4;1Hgpt-6-astra high · ~/src");
+  }
+  await sleep(3700);
+  for (const id of graceIds) {
+    feed(id, "\x1b[1;1H• Working (3s • esc to interrupt)");
+    feed(id, "\x1b[1;1H\x1b[J• Renamed the module.\r\n\r\n› Ask Codex to do anything\r\ngpt-6-astra high · ~/src");
+  }
+  await waitForState("g-fish", "idle");
+  await waitForState("g-bash", "idle");
+  await sleep(500);
+  const finished = (id) => T.alerts.some((alert) => alert.kind === "complete" && alert.target.paneId === id);
+  check("codex: a pane whose shell cannot pass notify announces its screen finish at once", finished("g-fish"));
+  check("codex: a wrapped pane holds its screen finish for Codex's own message", !finished("g-bash"));
+  await sleep(3200);
+  check("codex: the held screen finish still arrives", finished("g-bash"));
+  mod.noteCodexNotifyInstalled(false);
 
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);

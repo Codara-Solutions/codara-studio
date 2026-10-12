@@ -263,7 +263,7 @@ function stubPlugin() {
     `,
     "./agent-launch-integration": `
       export function integrationFilesReady() { return Promise.resolve(); }
-      export function agentArgsDir() { return null; }
+      export function agentArgsDir() { return "/codara/integrations"; }
       export function claudeLaunchArgs() { return []; }
       export function codexLaunchArgs() { return []; }
     `,

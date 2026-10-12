@@ -193,8 +193,11 @@ fi
 # server and Codex notify as flags read from $SPARK_AGENT_ARGS_DIR (one
 # argument per line, data that is never evaluated), so nothing is written
 # to the user's own CLI config. Defined after the user's rc files, and only
-# when Codara set that folder and the user has no function or alias of that
-# name. Management subcommands and a missing file run the CLI untouched. A
+# when Codara set that folder and the user has no function of that name. An
+# alias such as `claude='claude --verbose'` still reaches the function, since
+# its expansion starts with that word; the `function` keyword keeps the alias
+# from being expanded in the definition itself. Management subcommands and a
+# missing file run the CLI untouched. A
 # `--settings` of the user's keeps Codara's out (Claude honors only the last
 # one), and `--strict-mcp-config` keeps Codara's server out of that strict
 # set. bash 3.2 safe: an empty array is expanded with the `+` guard.
@@ -203,7 +206,9 @@ _spark_agent_exec() {
   shift
   local -a extra=()
   case "$cli:${1-}" in
-    claude:auth|claude:mcp|claude:config|claude:doctor|claude:update|claude:install|claude:setup-token|claude:plugin|claude:migrate-installer|claude:-v|claude:--version|claude:-h|claude:--help|\
+    claude:auth|claude:mcp|claude:config|claude:doctor|claude:update|claude:upgrade|claude:install|claude:setup-token|claude:plugin|claude:plugins|claude:migrate-installer|\
+    claude:agents|claude:attach|claude:logs|claude:rm|claude:stop|claude:kill|claude:respawn|claude:purge|claude:auto-mode|claude:import|claude:gateway|claude:ultrareview|\
+    claude:-v|claude:--version|claude:-h|claude:--help|\
     codex:login|codex:logout|codex:mcp|codex:completion|codex:update|codex:doctor|codex:sandbox|codex:debug|codex:apply|codex:plugin|codex:app-server|codex:remote-control|codex:agents|codex:--version|codex:-V|codex:--help|codex:-h)
       command "$cli" "$@"
       return ;;
@@ -220,7 +225,7 @@ _spark_agent_exec() {
       while IFS= read -r line || [ -n "$line" ]; do
         if [ "$skip" = 1 ]; then skip=0; continue; fi
         if [ "$line" = "--settings" ] && [ "$own_settings" = 1 ]; then skip=1; continue; fi
-        if [ "$line" = "--mcp-config" ] && [ "$strict" = 1 ]; then skip=1; continue; fi
+        case "$line" in --mcp-config=*) [ "$strict" = 1 ] && continue ;; esac
         extra+=("$line")
       done < "$file"
     } 2>/dev/null
@@ -229,11 +234,11 @@ _spark_agent_exec() {
 }
 
 if [ -n "${SPARK_AGENT_ARGS_DIR-}" ]; then
-  if ! declare -F claude >/dev/null 2>&1 && ! alias claude >/dev/null 2>&1; then
-    claude() { _spark_agent_exec claude "$@"; }
+  if ! declare -F claude >/dev/null 2>&1; then
+    function claude { _spark_agent_exec claude "$@"; }
   fi
-  if ! declare -F codex >/dev/null 2>&1 && ! alias codex >/dev/null 2>&1; then
-    codex() { _spark_agent_exec codex "$@"; }
+  if ! declare -F codex >/dev/null 2>&1; then
+    function codex { _spark_agent_exec codex "$@"; }
   fi
 fi
 

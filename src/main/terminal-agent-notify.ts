@@ -285,7 +285,8 @@ function emptySignals(): PaneSignals {
 // Called once boot knows whether Codex launches carry the notify program. A
 // pane may still run a Codex started before this boot, or one launched
 // around the pane's `codex` function; the grace window below only delays the
-// heuristic, it never suppresses it.
+// heuristic, it never suppresses it, and only applies to panes whose launch
+// can carry the program.
 export function noteCodexNotifyInstalled(installed: boolean): void {
   codexNotifyInstalled = installed;
 }
@@ -632,7 +633,9 @@ function codexHasStructuredDone(w: PaneWatcher): boolean {
 }
 
 function codexStructuredExpected(w: PaneWatcher): boolean {
-  if (codexNotifyInstalled) return true;
+  // The notify program rides on the launch, so a pane whose shell does not
+  // wrap `codex` (fish, cmd, a remote host) never hears from it.
+  if (codexNotifyInstalled && pty.sessionAgentFlagsReachCli(w.paneId)) return true;
   const record = latestSessionStart(w.paneId);
   return record?.runtime === "codex" && record.active === true && !!record.transcriptPath;
 }

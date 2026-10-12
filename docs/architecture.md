@@ -164,9 +164,11 @@ so a moved app never leaves a stale one) and inserts them after the binary
 of every Claude Code and Codex launch `pty-manager.ts` makes:
 
 - Claude Code: `--settings integrations/claude/settings.json` (the hooks) and
-  `--mcp-config integrations/claude/mcp-<mode>.json`, one file per
-  `SPARK_MCP_MODE`. A user's own `--settings` wins, since Claude keeps the
-  last one, and `--strict-mcp-config` gets no server.
+  `--mcp-config=integrations/claude/mcp-<mode>.json`, one file per
+  `SPARK_MCP_MODE`. The `=` form matters: Claude's `--mcp-config` is
+  variadic, and in its two-word form a prompt or subcommand after it would
+  be read as another config file. A user's own `--settings` wins, since
+  Claude keeps the last one, and `--strict-mcp-config` gets no server.
 - Codex: `-c mcp_servers.codara-studio={...}`, `-c notify=[...]` chaining the
   user's own `notify`, `-c tui.notifications=true` only when the user left it
   unset, and, for a folder Codara itself launches Codex in, an inline
@@ -177,9 +179,11 @@ of every Claude Code and Codex launch `pty-manager.ts` makes:
 Management subcommands (`claude mcp`, `codex login` and the like) get
 nothing. For a command typed in a pane, the shell integration
 (`resources/shell-integration/`) defines pane-scoped `claude` and `codex`
-functions when `SPARK_AGENT_ARGS_DIR` is set and the user has no function or
-alias of that name; they read `integrations/<cli>/args.txt`, one argument per
-line.
+functions when `SPARK_AGENT_ARGS_DIR` is set and the user has no function of
+that name (an alias that runs the CLI itself still reaches them); they read
+`integrations/<cli>/args.txt`, one argument per line, at every call. Fish and
+cmd panes have no such functions, so a CLI typed there runs without Codara's
+flags and the notifier reads its turns from the screen.
 
 `global-config-cleanup.ts` runs once per start and removes what earlier
 builds wrote globally (the hooks block, `_sparkManaged` MCP entries unless

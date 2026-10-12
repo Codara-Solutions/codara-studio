@@ -12,8 +12,9 @@
 //     and quotes survive),
 //   - management subcommands (`claude mcp`, `codex login`) pass through,
 //   - a user `--settings` drops Codara's, `--strict-mcp-config` drops its
-//     `--mcp-config`,
-//   - a function the user defined in their rc file is never replaced,
+//     `--mcp-config=`,
+//   - a function the user defined in their rc file is never replaced, and an
+//     alias that runs the CLI itself still goes through the wrapper,
 //   - without SPARK_AGENT_ARGS_DIR, or with no args file, the CLI runs as is.
 //
 //   node scripts/test-shell-integration-agent-wrappers.cjs
@@ -42,7 +43,8 @@ const SEP = "\u001f";
 for (const dir of [HOME, USER_HOME, BIN, EMPTY_ARGS_DIR, path.join(ARGS_DIR, "claude"), path.join(ARGS_DIR, "codex")]) {
   fs.mkdirSync(dir, { recursive: true });
 }
-fs.writeFileSync(path.join(ARGS_DIR, "claude", "args.txt"), ["--settings", SETTINGS, "--mcp-config", MCP, ""].join("\n"));
+const MCP_ARG = `--mcp-config=${MCP}`;
+fs.writeFileSync(path.join(ARGS_DIR, "claude", "args.txt"), ["--settings", SETTINGS, MCP_ARG, ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "codex", "args.txt"), ["-c", CODEX_MCP, "-c", CODEX_NOTIFY, ""].join("\n"));
 
 // The fakes print @@<name><US>arg<US>arg...@@ on one line; the unit separator
@@ -70,9 +72,16 @@ const BASHRC = path.join(TMP, "bash", "bashrc");
 fs.mkdirSync(path.dirname(BASHRC), { recursive: true });
 fs.copyFileSync(path.join(INTEGRATION, "bashrc.bash"), BASHRC);
 
-// The user's own rc defines `claude`; Codara must leave it in place.
-fs.writeFileSync(path.join(USER_HOME, ".bashrc"), "claude() { printf '@@userfn@@\\n'; }\n");
-fs.writeFileSync(path.join(USER_HOME, ".zshrc"), "claude() { printf '@@userfn@@\\n'; }\n");
+// The user's own rc defines `claude`; Codara must leave it in place. An
+// alias that runs `codex` itself must still reach Codara's wrapper.
+const USER_RC = "claude() { printf '@@userfn@@\\n'; }\nalias codex='codex --full-auto'\n";
+fs.writeFileSync(path.join(USER_HOME, ".bashrc"), USER_RC);
+fs.writeFileSync(path.join(USER_HOME, ".zshrc"), USER_RC);
+const ALIAS_HOME = path.join(TMP, "alias-home");
+fs.mkdirSync(ALIAS_HOME, { recursive: true });
+const ALIAS_RC = "alias claude='claude --verbose'\n";
+fs.writeFileSync(path.join(ALIAS_HOME, ".bashrc"), ALIAS_RC);
+fs.writeFileSync(path.join(ALIAS_HOME, ".zshrc"), ALIAS_RC);
 
 let passes = 0;
 function pass(name) {
@@ -126,16 +135,20 @@ const COMMANDS = [
   "codex resume abc",
   "codex login",
   `claude 'a b' 'q"uote'`,
+  "claude agents",
+  "claude 'fix the failing test'",
 ].join("\n");
 
 const EXPECTED = [
-  ["claude", "--settings", SETTINGS, "--mcp-config", MCP, "--model", "m"],
-  ["claude", "--mcp-config", MCP, "--settings", "mine.json"],
+  ["claude", "--settings", SETTINGS, MCP_ARG, "--model", "m"],
+  ["claude", MCP_ARG, "--settings", "mine.json"],
   ["claude", "--settings", SETTINGS, "--strict-mcp-config", "--mcp-config", "own.json"],
   ["claude", "mcp", "list"],
   ["codex", "-c", CODEX_MCP, "-c", CODEX_NOTIFY, "resume", "abc"],
   ["codex", "login"],
-  ["claude", "--settings", SETTINGS, "--mcp-config", MCP, "a b", 'q"uote'],
+  ["claude", "--settings", SETTINGS, MCP_ARG, "a b", 'q"uote'],
+  ["claude", "agents"],
+  ["claude", "--settings", SETTINGS, MCP_ARG, "fix the failing test"],
 ];
 
 const PLAIN = [
@@ -146,6 +159,8 @@ const PLAIN = [
   ["codex", "resume", "abc"],
   ["codex", "login"],
   ["claude", "a b", 'q"uote'],
+  ["claude", "agents"],
+  ["claude", "fix the failing test"],
 ];
 
 const SHELLS = [];
@@ -183,18 +198,51 @@ async function shellScenarios(shell) {
   assert.deepEqual(parseCalls(output), PLAIN, `${shell.label}: missing args files\n${output}`);
   pass(`${shell.label}: a missing args file runs the CLI as is`);
 
+  // A pane spawned before the boot pass wrote the files gets them at its
+  // next launch.
+  const late = path.join(TMP, `late-${shell.label.replace(/\W/g, "_")}`);
+  output = await runShell(
+    shell.exe,
+    shell.args,
+    baseEnv({ ...shell.env, SPARK_AGENT_ARGS_DIR: late }),
+    [
+      "claude one",
+      `mkdir -p '${late}/claude' && cp '${path.join(ARGS_DIR, "claude", "args.txt")}' '${late}/claude/args.txt'`,
+      "claude two",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    parseCalls(output),
+    [["claude", "one"], ["claude", "--settings", SETTINGS, MCP_ARG, "two"]],
+    `${shell.label}: late args file\n${output}`,
+  );
+  pass(`${shell.label}: an args file written after the shell started is used at the next launch`);
+
   output = await runShell(
     shell.exe,
     shell.args,
     baseEnv({ ...shell.env, HOME: USER_HOME, SPARK_USER_ZDOTDIR: USER_HOME, SPARK_AGENT_ARGS_DIR: ARGS_DIR }),
-    "claude --model m\ncodex login\ncodex resume abc",
+    "claude --model m\ncodex resume abc",
   );
   assert.deepEqual(
     parseCalls(output),
-    [["userfn"], ["codex", "login"], ["codex", "-c", CODEX_MCP, "-c", CODEX_NOTIFY, "resume", "abc"]],
-    `${shell.label}: user function\n${output}`,
+    [["userfn"], ["codex", "-c", CODEX_MCP, "-c", CODEX_NOTIFY, "--full-auto", "resume", "abc"]],
+    `${shell.label}: user function and alias\n${output}`,
   );
-  pass(`${shell.label}: a user's own claude function is never replaced`);
+  pass(`${shell.label}: a user's own claude function is never replaced, an alias of codex still wraps`);
+
+  output = await runShell(
+    shell.exe,
+    shell.args,
+    baseEnv({ ...shell.env, HOME: ALIAS_HOME, SPARK_USER_ZDOTDIR: ALIAS_HOME, SPARK_AGENT_ARGS_DIR: ARGS_DIR }),
+    "claude 'a prompt'",
+  );
+  assert.deepEqual(
+    parseCalls(output),
+    [["claude", "--settings", SETTINGS, MCP_ARG, "--verbose", "a prompt"]],
+    `${shell.label}: alias of claude\n${output}`,
+  );
+  pass(`${shell.label}: an alias that runs claude itself still gets Codara's flags`);
 }
 
 function pwshScenarios() {
@@ -210,6 +258,8 @@ function pwshScenarios() {
     "codex resume abc",
     "codex login",
     `claude 'a b' 'q"uote'`,
+    "claude agents",
+    "claude 'fix the failing test'",
   ].join("; ");
   const run = (env, prelude = "") => {
     const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `${prelude}. ${quoted}; ${commands}`], {
@@ -244,8 +294,8 @@ function sourcePins() {
     assert.ok(!/\beval\b|Invoke-Expression|\biex\b/.test(text), `${name} never evaluates the args file`);
   }
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
-  assert.ok(pty.includes("env.SPARK_AGENT_ARGS_DIR = argsDir"), "pty-manager exports the args folder");
-  assert.ok(pty.includes("delete env.SPARK_AGENT_ARGS_DIR"), "pty-manager strips an inherited args folder");
+  assert.ok(pty.includes("env.SPARK_AGENT_ARGS_DIR = agentArgsDir();"), "pty-manager exports the args folder to every local pane");
+  assert.ok(!/if \(argsDir\)/.test(pty), "the args folder must not wait on the boot pass");
   pass("source pins: the args folder is data and reaches every local pane");
 }
 

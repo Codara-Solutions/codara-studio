@@ -191,7 +191,13 @@ interface Session {
   releaseNativeClaudeProfileLease?: () => void;
   nativeGrokProfileId?: string;
   releaseNativeGrokProfileLease?: () => void;
+  // A `claude` or `codex` started here carries Codara's per-launch flags:
+  // Codara started it, or the pane's shell defines the wrapper functions.
+  agentFlagsReachCli: boolean;
 }
+
+// The shells whose bundled integration wraps a typed `claude` / `codex`.
+const AGENT_WRAPPING_FAMILIES: ReadonlySet<ShellInfo["family"]> = new Set(["bash", "zsh", "pwsh", "powershell"]);
 
 const sessions = new Map<string, Session>();
 /** Session ids between native account resolution and `sessions.set`. */
@@ -1054,6 +1060,7 @@ async function doSpawnRemote(
     lastInputAt: createdAt,
     lastOutputAt: createdAt,
     lastAttachAt: createdAt,
+    agentFlagsReachCli: false,
     cwd: opts.cwd,
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -1382,10 +1389,10 @@ function doSpawn(
   // pane (terminal.create callerPaneId).
   env.SPARK_AGENT_PANE_ID = opts.id;
   // The pane's `claude` and `codex` shell functions read Codara's per-launch
-  // flags from this folder; one inherited from another Studio's pane goes.
-  const argsDir = agentArgsDir();
-  if (argsDir) env.SPARK_AGENT_ARGS_DIR = argsDir;
-  else delete env.SPARK_AGENT_ARGS_DIR;
+  // flags from this folder, replacing one inherited from another Studio's
+  // pane. Exported even while the boot pass is still writing the files: the
+  // shell defines its functions only when the variable is set at its start.
+  env.SPARK_AGENT_ARGS_DIR = agentArgsDir();
   if (opts.nativeCodexHome) {
     const selectedEnv = buildCodexCliSharedEnvironment(env, opts.nativeCodexHome);
     for (const key of Object.keys(env)) delete env[key];
@@ -1488,6 +1495,7 @@ function doSpawn(
     lastInputAt: createdAt,
     lastOutputAt: createdAt,
     lastAttachAt: createdAt,
+    agentFlagsReachCli: AGENT_WRAPPING_FAMILIES.has(opts.shell.family) || Boolean(opts.startupCommand),
     cwd,
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -2120,6 +2128,15 @@ export function killIfGeneration(
   markSanctioned(id);
   killNow(id);
   return true;
+}
+
+/**
+ * Whether a Codex started in this pane gets Codara's notify program. False
+ * for a remote pane and for a typed command in a shell Codara does not wrap
+ * (fish, cmd, sh), where only the screen can tell a turn ended.
+ */
+export function sessionAgentFlagsReachCli(id: string): boolean {
+  return sessions.get(id)?.agentFlagsReachCli === true;
 }
 
 export function nativeCodexProfileId(id: string): string | undefined {

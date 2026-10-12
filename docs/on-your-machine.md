@@ -43,7 +43,8 @@ program on the command line of each Claude Code or Codex session it starts,
 so a session started anywhere else behaves as if Codara were not installed:
 
 - **Claude Code** gets `--settings ~/.codarastudio/integrations/claude/settings.json`
-  (the hooks) and `--mcp-config .../mcp-<mode>.json` (the server). Claude
+  (the hooks) and `--mcp-config=.../mcp-<mode>.json` (the server, in the
+  `=` form so a prompt typed after it is not read as another config). Claude
   keeps only the last `--settings` it is given, so if you pass your own,
   yours wins and that session runs without Codara's hooks. Under
   `--strict-mcp-config`, Codara adds no server.
@@ -56,8 +57,11 @@ so a session started anywhere else behaves as if Codara were not installed:
 - **Commands you type** in a Codara pane get the same arguments: the shell
   integration defines `claude` and `codex` functions for that pane only,
   which read `integrations/<cli>/args.txt`. They are not defined if you have
-  your own alias or function of that name, and management commands
-  (`claude mcp`, `codex login` and the like) run untouched.
+  your own function of that name; an alias such as
+  `claude='claude --verbose'` still goes through them in bash and zsh, but
+  one that names another path (or a fish or cmd pane) runs the CLI without
+  Codara's flags. Management commands (`claude mcp`, `codex login` and the
+  like) run untouched.
 - **Grok** has no such flags; its Codara account homes carry a copy of your
   `config.toml` with the server added.
 

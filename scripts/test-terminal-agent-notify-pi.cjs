@@ -60,6 +60,7 @@ const harnessPlugin = {
           contents:
             init +
             "export function hasSession(){ return true; }\n" +
+            "export function sessionAgentFlagsReachCli(){ return true; }\n" +
             "export function tap(id, h){ globalThis.__TAN.taps.set(id, h); return () => globalThis.__TAN.taps.delete(id); }\n" +
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
             "export function readTailChunks(){ return []; }\n" +

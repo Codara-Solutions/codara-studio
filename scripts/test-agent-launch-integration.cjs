@@ -107,10 +107,10 @@ async function main() {
   };
   const dir = path.join(CODARA, "integrations");
 
-  await check("before boot writes the files, nothing is injected", async () => {
+  await check("before boot writes the files, nothing is injected, but panes already get the folder", async () => {
     assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), []);
     assert.deepEqual(launch.codexLaunchArgs({ userArgs: [], trustCwd: "/x" }), []);
-    assert.equal(launch.agentArgsDir(), null);
+    assert.equal(launch.agentArgsDir(), dir, "a pane spawned before the boot pass would never wrap claude or codex");
   });
 
   const summary = await launch.writeIntegrationFiles(options);
@@ -139,19 +139,50 @@ async function main() {
   const studioMcp = path.join(dir, "claude", "mcp-studio.json");
 
   await check("Claude: hooks and the server, with the user's own flags respected", async () => {
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--model", "opus"] }), ["--settings", settingsPath, "--mcp-config", studioMcp]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--model", "opus"] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
     assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [], mode: "execute" }), [
       "--settings",
       settingsPath,
-      "--mcp-config",
-      path.join(dir, "claude", "mcp-execute.json"),
+      `--mcp-config=${path.join(dir, "claude", "mcp-execute.json")}`,
     ]);
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--settings", "mine.json"] }), ["--mcp-config", studioMcp]);
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--settings=mine.json"] }), ["--mcp-config", studioMcp]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--settings", "mine.json"] }), [`--mcp-config=${studioMcp}`]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--settings=mine.json"] }), [`--mcp-config=${studioMcp}`]);
     assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["--strict-mcp-config"] }), ["--settings", settingsPath]);
-    for (const first of ["mcp", "auth", "doctor", "--version", "-h"]) {
+    for (const first of ["mcp", "auth", "doctor", "--version", "-h", "agents", "attach", "logs", "rm", "stop", "upgrade", "plugins", "purge", "respawn", "ultrareview"]) {
       assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [first] }), [], `claude ${first}`);
     }
+  });
+
+  // Claude Code declares `--mcp-config <configs...>` with commander, which
+  // keeps feeding a variadic option every following word that is not a flag
+  // and ends it only at a flag; `--opt=value` takes exactly one value.
+  const variadicValues = (argv, flag) => {
+    const values = [];
+    let active = false;
+    for (const arg of argv) {
+      if (arg === "--") break;
+      if (active && !arg.startsWith("-")) {
+        values.push(arg);
+        continue;
+      }
+      active = arg === flag;
+      if (arg.startsWith(`${flag}=`)) values.push(arg.slice(flag.length + 1));
+    }
+    return values;
+  };
+
+  await check("Claude: a prompt or a subcommand after Codara's flags is not read as an MCP config", async () => {
+    assert.deepEqual(variadicValues(["--mcp-config", "m.json", "a prompt"], "--mcp-config"), ["m.json", "a prompt"], "the model of commander is wrong");
+    for (const userArgs of [["fix the failing test"], ["fix it", "-p"], ["--model", "opus", "fix it"], ["agents"], ["logs", "abc"]]) {
+      const argv = [...launch.claudeLaunchArgs({ userArgs }), ...userArgs];
+      assert.deepEqual(
+        variadicValues(argv, "--mcp-config"),
+        launch.claudeLaunchArgs({ userArgs }).length > 0 ? [studioMcp] : [],
+        argv.join(" "),
+      );
+    }
+    const typed = fs.readFileSync(path.join(dir, "claude", "args.txt"), "utf8").split("\n").filter(Boolean);
+    assert.deepEqual(variadicValues([...typed, "fix the failing test"], "--mcp-config"), [studioMcp]);
   });
 
   await check("Codex: server, chained notify and tui.notifications, and no trust unless asked", async () => {
@@ -197,7 +228,7 @@ async function main() {
 
   await check("the args files hold the typed-command defaults, one element per line", async () => {
     const claude = fs.readFileSync(path.join(dir, "claude", "args.txt"), "utf8").split("\n");
-    assert.deepEqual(claude, ["--settings", settingsPath, "--mcp-config", studioMcp, ""]);
+    assert.deepEqual(claude, ["--settings", settingsPath, `--mcp-config=${studioMcp}`, ""]);
     const codex = fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").split("\n");
     assert.equal(codex.filter((line) => line.startsWith("projects=")).length, 0, "a typed codex was pre-trusted");
     assert.ok(codex.includes("tui.notifications=true"));
@@ -222,7 +253,7 @@ async function main() {
     });
     assert.deepEqual([result.claudeHooks, result.codexNotify], [false, false]);
     assert.equal(fs.existsSync(settingsPath), false, "a stale hooks file was left for --settings");
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--mcp-config", studioMcp]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), [`--mcp-config=${studioMcp}`]);
     const args = launch.codexLaunchArgs({ userArgs: [] });
     assert.equal(args.length, 2, args.join(" "));
     assert.equal(launch.codexNotifyInjected(), false);

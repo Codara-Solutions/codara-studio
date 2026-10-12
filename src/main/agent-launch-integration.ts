@@ -50,10 +50,24 @@ const CLAUDE_PASS_THROUGH = new Set([
   "config",
   "doctor",
   "update",
+  "upgrade",
   "install",
   "setup-token",
   "plugin",
+  "plugins",
   "migrate-installer",
+  "agents",
+  "attach",
+  "logs",
+  "rm",
+  "stop",
+  "kill",
+  "respawn",
+  "purge",
+  "auto-mode",
+  "import",
+  "gateway",
+  "ultrareview",
   "-v",
   "--version",
   "-h",
@@ -312,9 +326,14 @@ export function integrationFilesReady(timeoutMs = 3_000): Promise<void> {
   ]);
 }
 
-/** SPARK_AGENT_ARGS_DIR for a local pane, once the files exist. */
-export function agentArgsDir(): string | null {
-  return state?.dir ?? null;
+/**
+ * SPARK_AGENT_ARGS_DIR for a local pane. A fixed path, set even before the
+ * boot pass has written the files: a shell decides once, at start, whether
+ * to define its `claude` / `codex` functions, and those read the file at
+ * every call, so a pane opened early picks the files up at its next launch.
+ */
+export function agentArgsDir(): string {
+  return state?.dir ?? integrationsDir();
 }
 
 /** True while Codara passes its notify program to the Codex sessions it starts. */
@@ -339,7 +358,10 @@ export function claudeLaunchArgs(input: { userArgs: readonly string[]; mode?: Ag
   }
   const mcp = state.claudeMcpConfigPaths[input.mode ?? "studio"];
   if (mcp && !readSparkBuiltinOptOuts().has("claude") && !hasFlag(input.userArgs, "--strict-mcp-config")) {
-    out.push("--mcp-config", mcp);
+    // `--mcp-config <configs...>` is variadic: in its two-word form every
+    // later word that is not a flag (a prompt, a subcommand) would be read
+    // as one more config file. The `=` form takes exactly one.
+    out.push(`--mcp-config=${mcp}`);
   }
   return out;
 }

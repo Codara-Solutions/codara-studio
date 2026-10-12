@@ -35,7 +35,9 @@ function Global:__Spark-AgentExec {
     if ($null -eq $rest) { $rest = @() }
     $first = if ($rest.Count -gt 0) { [string]$rest[0] } else { '' }
     $passThrough = if ($cli -eq 'claude') {
-        @('auth', 'mcp', 'config', 'doctor', 'update', 'install', 'setup-token', 'plugin', 'migrate-installer', '-v', '--version', '-h', '--help')
+        @('auth', 'mcp', 'config', 'doctor', 'update', 'upgrade', 'install', 'setup-token', 'plugin', 'plugins', 'migrate-installer',
+          'agents', 'attach', 'logs', 'rm', 'stop', 'kill', 'respawn', 'purge', 'auto-mode', 'import', 'gateway', 'ultrareview',
+          '-v', '--version', '-h', '--help')
     } else {
         @('login', 'logout', 'mcp', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'plugin', 'app-server', 'remote-control', 'agents', '--version', '-V', '--help', '-h')
     }
@@ -55,10 +57,11 @@ function Global:__Spark-AgentExec {
             $lines = @()
         }
         for ($i = 0; $i -lt $lines.Length; $i++) {
-            if (($lines[$i] -ceq '--settings' -and $ownSettings) -or ($lines[$i] -ceq '--mcp-config' -and $strict)) {
+            if ($lines[$i] -ceq '--settings' -and $ownSettings) {
                 $i++
                 continue
             }
+            if ($strict -and $lines[$i].StartsWith('--mcp-config=', [System.StringComparison]::Ordinal)) { continue }
             $extra += $lines[$i]
         }
     }
