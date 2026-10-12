@@ -305,10 +305,10 @@ for (const label of [
 }
 // Accounts spec 13 copy, word for word.
 for (const copy of [
-  '"Codara uses this login as it is and never changes it."',
-  '"Cora: connected"',
+  '"Signed in"',
+  '"Cora connected"',
   '"Cora isn\'t connected."',
-  '"Signed in. Only Codara uses this account."',
+  "`${cliLabel} on this computer is signed out.`",
   '"Sign-in expired."',
   "`Remove \"${card.label}\" from Codara? Your ${cliLabel} login stays as it is. Codara stops offering it.`",
   "`Remove \"${card.label}\"? Codara deletes this sign-in from its own folder. Your ${cliLabel} login outside Codara is not affected. This can't be undone; to use it again, add it again.`",
@@ -398,7 +398,7 @@ assert.equal(
   "the Accounts UI must render one global Add account trigger",
 );
 // The provider group renders the one card for every provider.
-assert.match(cards, /\{view\.cards\.map\(\(card\) => \(\s*<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
+assert.match(cards, /\{view\.cards\.map\(\(card, position\) => \(\s*<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
 assert.match(cards, /export interface AccountActions extends AccountCardActions \{/);
 assert.match(settings, /const accountActions: AccountActions = \{/);
 assert.match(settings, /onBeginAdd: \(provider\) => \{/);

@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { registerPreviewRpcHandler } from "./components/Preview/previewRpc";
 import { registerTerminalRpcHandler } from "./components/Terminal/terminalRpc";
+import { installScrollEdgeTracking } from "./lib/scroll-edge";
 // Bundled fonts (previously fetched from Google Fonts at runtime, which
 // delayed the first styled paint on a cold cache and dropped the app to
 // system fallbacks when offline). Weights mirror the old css2 request:
@@ -22,6 +23,7 @@ import "./styles.css";
 
 registerPreviewRpcHandler();
 registerTerminalRpcHandler();
+installScrollEdgeTracking();
 
 // Safety net for external file drag-and-drop. Chromium's default action for an
 // unhandled file drop is to navigate the window to that file (file://…), which

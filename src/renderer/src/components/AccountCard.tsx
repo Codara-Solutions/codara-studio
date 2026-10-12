@@ -156,13 +156,12 @@ function connectionState(
     return { ok: false, text: card.cora.error, danger: true };
   }
   switch (state) {
+    // A healthy row says only that it is signed in. What Codara does with
+    // each kind of account is said once, under "How switching works".
     case "system":
       return terminalUsable(card)
-        ? { ok: true, text: "Codara uses this login as it is and never changes it." }
-        : {
-            ok: false,
-            text: `${cliLabel} on this computer is signed out. Codara uses this login as it is and never changes it.`,
-          };
+        ? { ok: true, text: "Signed in" }
+        : { ok: false, text: `${cliLabel} on this computer is signed out.` };
     case "needs-reconnect":
       return { ok: false, text: "Sign-in expired.", danger: true };
     case "cora-only":
@@ -198,13 +197,13 @@ function connectionState(
       if (card.terminal && !card.terminal.connected) {
         return { ok: true, text: `Signed in. The ${cliLabel} copy is catching up.` };
       }
-      return { ok: true, text: "Signed in. Only Codara uses this account." };
+      return { ok: true, text: "Signed in" };
   }
 }
 
 /** The second line on a System row: whether Cora has its own grant for it. */
 function systemCoraState(card: AccountCardView): ConnectionState {
-  if (coraUsable(card)) return { ok: true, text: "Cora: connected" };
+  if (coraUsable(card)) return { ok: true, text: "Cora connected" };
   if (card.cora?.held !== false && card.cora?.connected) {
     return { ok: false, text: "Cora's sign-in expired.", danger: true };
   }
@@ -296,21 +295,38 @@ export function removeConfirmText(
   return `Remove "${card.label}"? Codara deletes this sign-in from its own folder. Your ${cliLabel} login outside Codara is not affected. This can't be undone; to use it again, add it again.`;
 }
 
+/**
+ * Avatar colors after the provider's own: two accounts of one provider
+ * should not wear the same badge, so the first takes the brand and each one
+ * after it the next of these.
+ */
+const AVATAR_TONES = [
+  "oklch(0.66 0.13 250)",
+  "oklch(0.64 0.15 300)",
+  "oklch(0.66 0.13 160)",
+  "oklch(0.66 0.15 15)",
+  "oklch(0.72 0.13 85)",
+];
+
 export default function AccountCard({
   card,
   descriptor,
   disabled,
   actions,
+  position = 0,
 }: {
   card: AccountCardView;
   descriptor: AccountProviderDescriptor;
   /** The Pi runtime is missing or another account action is in flight. */
   disabled: boolean;
   actions: AccountCardActions;
+  /** The card's place in its provider's list, which picks its avatar color. */
+  position?: number;
 }) {
   const [renaming, setRenaming] = useState(false);
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const brand = agentBrandColor(descriptor.brand);
+  const tone = position === 0 ? brand : AVATAR_TONES[(position - 1) % AVATAR_TONES.length];
   const state = accountCardState(card);
   const controlsDisabled = disabled || card.busy;
   const status = connectionState(card, state, descriptor);
@@ -367,8 +383,8 @@ export default function AccountCard({
         aria-hidden
         className="st-acct__avatar"
         style={{
-          color: brand,
-          background: `color-mix(in oklch, ${brand} 15%, transparent)`,
+          color: tone,
+          background: `color-mix(in oklch, ${tone} 15%, transparent)`,
         }}
       >
         {initial}

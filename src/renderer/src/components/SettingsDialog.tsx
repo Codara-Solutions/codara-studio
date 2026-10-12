@@ -2198,6 +2198,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             <p>
               Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
             </p>
+            <p>
+              Only Codara uses an account you add here. A row marked as your own login is the login on this computer: Codara uses it as it is and never changes it.
+            </p>
             <dl>
               {providerViews.map((view) => (
                 <React.Fragment key={view.descriptor.provider}>

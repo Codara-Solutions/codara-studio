@@ -246,7 +246,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       onMouseDown={onClose}
     >
       {/* Liquid glass belongs on the card, not across the entire workbench. */}
-      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
+      <div className="spark-scrim spark-scrim--clear spark-scrim--palette" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"

@@ -12,8 +12,10 @@ import { promisify } from "node:util";
 // automations and runs) at two window sizes, in a dark and a light theme,
 // with glass on and off, so the material can be judged on real pixels. Each
 // on/off pair is shot from the same state by flipping html[data-glass] in
-// place, so the two frames differ only by the material. It only runs when
-// SHOTS_DIR names where the PNGs go:
+// place, so the two frames differ only by the material. Settings is the
+// exception: its glass-off frames are shot after clicking the real "Liquid
+// glass" switch, so they also show the switch off and the tuning rows gone.
+// It only runs when SHOTS_DIR names where the PNGs go:
 //
 //   SHOTS_DIR=/tmp/glass-shots SPARK_ALLOW_MULTI=1 \
 //     npx playwright test tests/e2e/zz-glass-shots.spec.ts
@@ -21,8 +23,9 @@ import { promisify } from "node:util";
 // SHOTS_ONLY=<regex> narrows the run to matching surface names (and
 // SHOTS_THEME=dark|light, SHOTS_WIDTH=1400|1000, SHOTS_GLASS=on|off to one
 // theme, size or glass state, for quick iterations), and SHOTS_PERF=1 also
-// records terminal typing and chat scrolling frame times
-// with glass on and off into SHOTS_DIR/perf-<theme>.json.
+// records terminal typing and chat scrolling frame times and input-to-paint
+// latency with glass on and off into SHOTS_DIR/perf-<theme>.json (see
+// measurePerf), with SHOTS_PERF_ONLY=1 to skip the screenshots.
 //
 // HOME, the Codara home and every CLI home point into a temp root, so the
 // shell, the chats and the accounts only ever see fixtures. Account rows come
@@ -32,6 +35,7 @@ import { promisify } from "node:util";
 const SHOTS_DIR = process.env.SHOTS_DIR?.trim() ?? "";
 const ONLY = process.env.SHOTS_ONLY?.trim() ? new RegExp(process.env.SHOTS_ONLY.trim()) : null;
 const PERF = process.env.SHOTS_PERF === "1";
+const PERF_ONLY = process.env.SHOTS_PERF_ONLY === "1";
 const ONLY_THEME = process.env.SHOTS_THEME?.trim() || null;
 const ONLY_WIDTH = Number(process.env.SHOTS_WIDTH) || null;
 const ONLY_GLASS = process.env.SHOTS_GLASS?.trim() || null;
@@ -61,11 +65,17 @@ interface Surface {
   run: (ctx: ShotContext) => Promise<void>;
 }
 
+interface ShotOptions {
+  keepPointer?: boolean;
+  /** Shoot only this state, as the page shows it now, without flipping. */
+  glass?: "on" | "off";
+}
+
 interface ShotContext {
   app: ElectronApplication;
   page: Page;
   fixture: Fixture;
-  shoot: (name: string, options?: { keepPointer?: boolean }) => Promise<void>;
+  shoot: (name: string, options?: ShotOptions) => Promise<void>;
 }
 
 const SURFACES: Surface[] = [
@@ -272,41 +282,63 @@ const SURFACES: Surface[] = [
     run: async ({ page, shoot }) => {
       await showTerminals(page);
       const dialog = await openSettings(page);
-      await showSettingsTab(dialog, "General");
-      await page.mouse.move(4, 4);
-      await shoot("settings-general");
-      const appearance = dialog.getByText("Liquid glass", { exact: false }).first();
-      if (await appearance.count()) {
-        await appearance.scrollIntoViewIfNeeded();
-        const adjust = dialog.getByRole("button", { name: "Adjust" });
-        if (await adjust.count()) await adjust.click({ force: true });
+      // Glass on as the preference has it, then off through the real switch.
+      for (const glass of ["on", "off"] as const) {
+        await showSettingsTab(dialog, "General");
+        const glassSwitch = dialog.getByRole("switch", { name: "Liquid glass" });
+        await glassSwitch.scrollIntoViewIfNeeded();
+        if (glass === "off") {
+          await glassSwitch.click({ force: true });
+          await expect
+            .poll(() => page.evaluate(() => document.documentElement.dataset.glass))
+            .toBe("off");
+          await expect(glassSwitch).toHaveAttribute("aria-checked", "false");
+          await page.waitForTimeout(250);
+        } else {
+          await dialog.locator(".st-content").first().evaluate((node) => node.scrollTo(0, 0));
+          await page.mouse.move(4, 4);
+          await shoot("settings-general", { glass });
+          const adjust = dialog.getByRole("button", { name: "Adjust" });
+          if (await adjust.count()) await adjust.click({ force: true });
+        }
         // The fine-tune rows open under the switch; bring the last one into
-        // view so the shot holds every slider.
-        await dialog.locator('input[type="range"]').last().evaluate((node) => {
-          node.scrollIntoView({ block: "end" });
-        }).catch(() => undefined);
+        // view so the shot holds every slider, or, with glass off, the
+        // switch with nothing under it.
+        const lastSlider = dialog.locator('.st-subrows input[type="range"]').last();
+        if (await lastSlider.count()) {
+          await lastSlider.evaluate((node) => node.scrollIntoView({ block: "end" }));
+        } else {
+          await glassSwitch.evaluate((node) => node.scrollIntoView({ block: "center" }));
+        }
         await page.mouse.move(4, 4);
         await page.waitForTimeout(250);
-        await shoot("settings-appearance");
+        await shoot("settings-appearance", { glass });
+        await showSettingsTab(dialog, "Accounts");
+        await expect(dialog.getByText("work@example.com").first()).toBeVisible({ timeout: 15_000 });
+        await dialog.locator(".st-content").first().evaluate((node) => node.scrollTo(0, 0));
+        await page.waitForTimeout(600);
+        await shoot("settings-accounts", { glass });
+        await dialog.locator(".st-content").first().evaluate((node) => {
+          const cards = node.querySelectorAll(".st-acct");
+          const anthropic = cards.item(cards.length - 1);
+          anthropic?.scrollIntoView({ block: "center" });
+        });
+        await page.waitForTimeout(200);
+        await shoot("settings-accounts-2", { glass });
+        await dialog
+          .getByRole("button", { name: /^More actions for/ })
+          .first()
+          .click({ force: true });
+        await expect(page.getByRole("menu").first()).toBeVisible();
+        await shoot("settings-account-menu", { glass, keepPointer: true });
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("menu")).toHaveCount(0);
       }
-      await showSettingsTab(dialog, "Accounts");
-      await expect(dialog.getByText("work@example.com").first()).toBeVisible({ timeout: 15_000 });
-      await page.waitForTimeout(600);
-      await shoot("settings-accounts");
-      await dialog.locator("nav + div").first().evaluate((node) => {
-        const cards = node.querySelectorAll(".st-acct");
-        const anthropic = cards.item(cards.length - 1);
-        anthropic?.scrollIntoView({ block: "center" });
-      });
-      await page.waitForTimeout(200);
-      await shoot("settings-accounts-2");
-      await dialog
-        .getByRole("button", { name: /^More actions for/ })
-        .first()
-        .click({ force: true });
-      await expect(page.getByRole("menu").first()).toBeVisible();
-      await shoot("settings-account-menu");
-      await page.keyboard.press("Escape");
+      await showSettingsTab(dialog, "General");
+      await dialog.getByRole("switch", { name: "Liquid glass" }).click({ force: true });
+      await expect
+        .poll(() => page.evaluate(() => document.documentElement.dataset.glass))
+        .toBe("on");
       await page.keyboard.press("Escape");
       await expect(dialog).toHaveCount(0);
     },
@@ -403,7 +435,7 @@ for (const { mode, theme } of THEMES) {
 
       if (PERF) await measurePerf(page, mode);
 
-      for (const size of SIZES) {
+      for (const size of PERF_ONLY ? [] : SIZES) {
         if (ONLY_WIDTH && ONLY_WIDTH !== size.width) continue;
         await resizeWindow(app, page, size.width, size.height);
         for (const surface of SURFACES) {
@@ -414,12 +446,18 @@ for (const { mode, theme } of THEMES) {
             fixture,
             shoot: async (name, options) => {
               if (!options?.keepPointer) await page.mouse.move(2, 450);
+              const path = (glass: string) =>
+                join(SHOTS_DIR, `${mode}-${size.width}x${size.height}-glass-${glass}-${name}.png`);
+              if (options?.glass) {
+                if (!ONLY_GLASS || ONLY_GLASS === options.glass) {
+                  await page.screenshot({ path: path(options.glass) });
+                }
+                return;
+              }
               for (const glass of ["on", "off"] as const) {
                 if (ONLY_GLASS && ONLY_GLASS !== glass) continue;
                 await flipGlass(page, glass === "on");
-                await page.screenshot({
-                  path: join(SHOTS_DIR, `${mode}-${size.width}x${size.height}-glass-${glass}-${name}.png`),
-                });
+                await page.screenshot({ path: path(glass) });
               }
               await flipGlass(page, true);
             },
@@ -633,18 +671,30 @@ async function seedChat(page: Page, cwd: string): Promise<void> {
 
 /* ------------------------------------------------------------------ perf */
 
-// Frame and main-thread cost while the terminal receives typed input, while
-// it streams output, and while the chat scrolls, with glass on and off
-// (alternated twice so drift does not favor one side). Per activity it keeps
-// the requestAnimationFrame intervals, the Event Timing durations of the key
-// presses (input to next paint, the INP measure), and the CDP task, layout
-// and style-recalc time spent during the activity.
+// Frame and input cost while the terminal takes typed input, while it
+// streams output, and while the chat scrolls, with glass on and off. After a
+// warm-up pass in each state, the states alternate off, on, off, on, off, on,
+// so drift over the run (caches, collection, a busy machine) lands on both
+// sides. Per activity it keeps:
+//   frames        requestAnimationFrame intervals
+//   inputToPaint  from each key press or wheel tick to the first task after
+//                 the next frame, measured in the page for every event (Event
+//                 Timing only reports events of 16ms or more, so it cannot
+//                 compare two fast states)
+//   slowEvents    how many events Event Timing reported, that is, took 16ms
+//                 or more from input to paint
+//   mainThreadMs  CDP task, layout, style and script time
+// It also lists every element painting a backdrop filter in the terminal and
+// chat views with glass on, which is where a slowdown would come from.
 type Activity = "typing" | "streaming" | "scrolling";
 interface Sample {
   frames: number[];
-  events: number[];
+  latencies: number[];
+  slowEvents: number;
   cdp: Record<string, number>;
 }
+
+const PERF_PASSES = 3;
 
 async function measurePerf(page: Page, mode: string): Promise<void> {
   const cdp = await page.context().newCDPSession(page).catch(() => null);
@@ -662,57 +712,87 @@ async function measurePerf(page: Page, mode: string): Promise<void> {
     const before = await metrics();
     await startFrames(page);
     await activity();
-    const { frames, events } = await stopFrames(page);
+    const { frames, latencies, slowEvents } = await stopFrames(page);
     const after = await metrics();
     const delta: Record<string, number> = {};
     for (const key of ["TaskDuration", "LayoutDuration", "RecalcStyleDuration", "ScriptDuration"]) {
       delta[key] = Number((((after[key] ?? 0) - (before[key] ?? 0)) * 1000).toFixed(1));
     }
-    return { frames, events, cdp: delta };
+    return { frames, latencies, slowEvents, cdp: delta };
   };
 
-  const results: Record<string, Record<Activity, Sample[]>> = {};
-  for (const glass of ["on", "off", "on", "off"] as const) {
-    await setGlass(page, glass === "on");
-    const bucket = (results[`glass-${glass}`] ??= { typing: [], streaming: [], scrolling: [] });
-
+  const pass = async (bucket: Record<Activity, Sample[]> | null): Promise<void> => {
     await showTerminals(page);
     const pane = page.locator(".spark-terminal-pane:visible").first();
     await pane.locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    // The pointer rests on the pane, as it often does while someone types,
+    // which shows the pane's controls pill over the terminal's top edge.
+    const paneBox = await pane.boundingBox();
+    if (paneBox) await page.mouse.move(paneBox.x + paneBox.width / 2, paneBox.y + paneBox.height / 2);
     await page.waitForTimeout(300);
-    bucket.typing.push(
-      await measure(async () => {
-        await page.keyboard.type("echo the quick brown fox jumps over the lazy dog 0123456789 abcdefghij", {
-          delay: 14,
-        });
-      }),
-    );
+    const typing = await measure(async () => {
+      await page.keyboard.type("echo the quick brown fox jumps over the lazy dog 0123456789 abcdefghij", {
+        delay: 14,
+      });
+    });
     for (let i = 0; i < 70; i += 1) await page.keyboard.press("Backspace");
     await page.waitForTimeout(200);
-    bucket.streaming.push(
-      await measure(async () => {
-        await page.keyboard.type(
-          "for i in $(seq 1 300); do echo \"stream $i ................................................\"; sleep 0.004; done",
-        );
-        await page.keyboard.press("Enter");
-        await page.waitForTimeout(2_000);
-      }),
+    await page.keyboard.type(
+      "for i in $(seq 1 300); do echo \"stream $i ................................................\"; sleep 0.004; done",
     );
+    const streaming = await measure(async () => {
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(2_000);
+    });
+    await page.keyboard.type("clear");
+    await page.keyboard.press("Enter");
 
     await showChat(page);
     const scroller = page.locator('[data-testid="cora-conversation"]').first();
     const box = await scroller.boundingBox();
     if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 3);
-    bucket.scrolling.push(
-      await measure(async () => {
-        for (let i = 0; i < 40; i += 1) {
-          await page.mouse.wheel(0, i < 20 ? -100 : 100);
-          await page.waitForTimeout(16);
-        }
-      }),
-    );
+    const scrolling = await measure(async () => {
+      for (let i = 0; i < 40; i += 1) {
+        await page.mouse.wheel(0, i < 20 ? -100 : 100);
+        await page.waitForTimeout(16);
+      }
+    });
+    if (!bucket) return;
+    bucket.typing.push(typing);
+    bucket.streaming.push(streaming);
+    bucket.scrolling.push(scrolling);
+  };
+
+  for (const glass of ["off", "on"] as const) {
+    await setGlass(page, glass === "on");
+    await pass(null);
   }
-  const summary: Record<string, unknown> = {};
+  const results: Record<string, Record<Activity, Sample[]>> = {};
+  for (let i = 0; i < PERF_PASSES; i += 1) {
+    for (const glass of ["off", "on"] as const) {
+      await setGlass(page, glass === "on");
+      await pass((results[`glass-${glass}`] ??= { typing: [], streaming: [], scrolling: [] }));
+    }
+  }
+  await setGlass(page, true);
+  await showTerminals(page);
+  const hovered = await page.locator(".spark-terminal-pane:visible").first().boundingBox();
+  if (hovered) await page.mouse.move(hovered.x + hovered.width / 2, hovered.y + hovered.height / 2);
+  await page.waitForTimeout(200);
+  const terminalBlurs = await listBlurLayers(page);
+  await showChat(page);
+  await page.evaluate(() => {
+    const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
+    if (scroller) scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 150);
+  });
+  await page.waitForTimeout(300);
+  const chatBlurs = await listBlurLayers(page);
+
+  const summary: Record<string, unknown> = {
+    passes: PERF_PASSES,
+    order: "warm-up off, on; then off, on alternating",
+    blurLayers: { terminals: terminalBlurs, chatScrolled: chatBlurs },
+  };
   for (const [key, byActivity] of Object.entries(results)) {
     const out: Record<string, unknown> = {};
     for (const [activity, samples] of Object.entries(byActivity)) {
@@ -722,7 +802,10 @@ async function measurePerf(page: Page, mode: string): Promise<void> {
       }
       out[activity] = {
         frames: stats(samples.flatMap((s) => s.frames)),
-        inputToPaint: stats(samples.flatMap((s) => s.events)),
+        inputToPaint: stats(samples.flatMap((s) => s.latencies)),
+        slowEvents: samples.reduce((sum, s) => sum + s.slowEvents, 0),
+        perPassFrameP95Ms: samples.map((s) => stats(s.frames).p95Ms),
+        perPassInputToPaintP95Ms: samples.map((s) => stats(s.latencies).p95Ms),
         mainThreadMs: cdpSum,
       };
     }
@@ -746,29 +829,47 @@ function stats(samples: number[]) {
   };
 }
 
+interface PerfWindow {
+  __frames?: number[];
+  __latencies?: number[];
+  __slowEvents?: number;
+  __frameStop?: boolean;
+  __eventObserver?: PerformanceObserver;
+  __onInput?: (event: Event) => void;
+}
+
 async function startFrames(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as {
-      __frames?: number[];
-      __events?: number[];
-      __frameStop?: boolean;
-      __eventObserver?: PerformanceObserver;
-    };
+    const w = window as unknown as PerfWindow;
     w.__frames = [];
-    w.__events = [];
+    w.__latencies = [];
+    w.__slowEvents = 0;
     w.__frameStop = false;
     w.__eventObserver?.disconnect();
     try {
       const observer = new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
-          if (entry.name === "keydown" || entry.name === "keypress") w.__events!.push(entry.duration);
+          if (entry.name === "keydown" || entry.name === "wheel") w.__slowEvents! += 1;
         }
       });
-      observer.observe({ type: "event", durationThreshold: 0, buffered: false } as PerformanceObserverInit);
+      observer.observe({ type: "event", durationThreshold: 16, buffered: false } as PerformanceObserverInit);
       w.__eventObserver = observer;
     } catch {
       /* Event Timing unavailable */
     }
+    const onInput = (event: Event) => {
+      const start = event.timeStamp;
+      requestAnimationFrame(() => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+          if (!w.__frameStop) w.__latencies!.push(performance.now() - start);
+        };
+        channel.port2.postMessage(0);
+      });
+    };
+    w.__onInput = onInput;
+    window.addEventListener("keydown", onInput, { capture: true });
+    window.addEventListener("wheel", onInput, { capture: true, passive: true });
     let last = performance.now();
     const tick = (now: number) => {
       if (w.__frameStop) return;
@@ -783,18 +884,45 @@ async function startFrames(page: Page): Promise<void> {
   });
 }
 
-async function stopFrames(page: Page): Promise<{ frames: number[]; events: number[] }> {
+async function stopFrames(page: Page): Promise<{ frames: number[]; latencies: number[]; slowEvents: number }> {
   await page.waitForTimeout(150);
   return page.evaluate(() => {
-    const w = window as unknown as {
-      __frames?: number[];
-      __events?: number[];
-      __frameStop?: boolean;
-      __eventObserver?: PerformanceObserver;
-    };
+    const w = window as unknown as PerfWindow;
     w.__frameStop = true;
     w.__eventObserver?.disconnect();
-    return { frames: w.__frames ?? [], events: w.__events ?? [] };
+    if (w.__onInput) {
+      window.removeEventListener("keydown", w.__onInput, { capture: true });
+      window.removeEventListener("wheel", w.__onInput, { capture: true });
+    }
+    return { frames: w.__frames ?? [], latencies: w.__latencies ?? [], slowEvents: w.__slowEvents ?? 0 };
+  });
+}
+
+// Every visible element or pseudo-element painting a backdrop filter, with
+// its box, so a perf regression can be traced to a layer.
+async function listBlurLayers(page: Page): Promise<Array<{ node: string; rect: number[]; filter: string }>> {
+  return page.evaluate(() => {
+    const out: Array<{ node: string; rect: number[]; filter: string }> = [];
+    const describe = (el: Element) => {
+      const cls = typeof el.className === "string" ? el.className.trim().split(/\s+/).slice(0, 3).join(".") : "";
+      return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+    };
+    for (const el of Array.from(document.querySelectorAll("*"))) {
+      if (!(el as HTMLElement).checkVisibility?.({ visibilityProperty: true })) continue;
+      for (const pseudo of [null, "::before", "::after"] as const) {
+        const style = getComputedStyle(el, pseudo);
+        if (!style.backdropFilter || style.backdropFilter === "none") continue;
+        if (pseudo && style.content === "none") continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        out.push({
+          node: `${describe(el)}${pseudo ?? ""}`,
+          rect: [rect.x, rect.y, rect.width, rect.height].map(Math.round),
+          filter: style.backdropFilter.slice(0, 80),
+        });
+      }
+    }
+    return out;
   });
 }
 

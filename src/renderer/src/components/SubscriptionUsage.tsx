@@ -139,10 +139,13 @@ function UsageMeterGrid({
             >
               <span
                 className="st-meter__fill"
-                // Always leave a sliver visible so a 0.4% window still reads as
-                // "started" rather than as a rendering failure.
+                // Always leave a few pixels visible so a 0.4% window still
+                // reads as "started" rather than as a rendering failure.
                 style={{
-                  width: `${Math.min(100, Math.max(usageWindow.usedPercent, usageWindow.usedPercent > 0 ? 1.5 : 0))}%`,
+                  width:
+                    usageWindow.usedPercent > 0
+                      ? `max(${Math.min(100, usageWindow.usedPercent)}%, 6px)`
+                      : 0,
                 }}
               />
             </span>

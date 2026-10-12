@@ -1108,7 +1108,9 @@ function BoardColumn({
         )}
       </div>
 
-      <div className="spark-board-lane__body">
+      {/* With glass on, the cards scroll up under the head (the scroll
+          edge): see .spark-board-lane__head in styles.css. */}
+      <div className="spark-board-lane__body spark-scroll-under">
         {visibleCards.map((card, position) => {
           const laneIndex = indexOf(card);
           return (

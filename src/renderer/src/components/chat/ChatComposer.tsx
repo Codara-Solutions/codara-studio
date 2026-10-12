@@ -2337,11 +2337,13 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 28,
+        height: 28,
+        flex: "0 0 28px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        // A circle like Send, whose slot it takes: every control in the bar
+        // is a capsule.
+        borderRadius: "50%",
         background: hover ? "var(--panel-3)" : "var(--panel-2)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
@@ -2407,11 +2409,11 @@ function SendButton({
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 28,
+        height: 28,
+        flex: "0 0 28px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        borderRadius: "50%",
         background: disabled
           ? "color-mix(in oklab, var(--ink) 7%, transparent)"
           : hover
