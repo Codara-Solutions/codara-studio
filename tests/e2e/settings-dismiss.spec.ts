@@ -6,8 +6,9 @@ import { join } from "node:path";
 
 // Settings and the Capability Center are long-lived dialogs: a click that
 // lands outside them must never close them. Only Escape, the close button and
-// Done (or Cancel on a page with a draft) leave, and an Escape that closes a
-// menu inside them closes only that menu. This drives the real renderer
+// Done (or Cancel on a page with a draft) leave, an Escape that closes a
+// menu inside them closes only that menu, and a click elsewhere in them
+// closes an open dropdown. This drives the real renderer
 // and clicks the real scrim, in a temp HOME and Codara home.
 
 test("a click outside Settings or the Capability Center never closes them", async () => {
@@ -52,6 +53,16 @@ test("a click outside Settings or the Capability Center never closes them", asyn
 
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("spark:open-capabilities")));
     const capabilities = page.getByRole("dialog", { name: "Capability Center" });
+    await expect(capabilities).toBeVisible();
+    // A dropdown inside the dialog closes on a click elsewhere in it, even
+    // though the dialog surface keeps mousedown from bubbling.
+    await capabilities.getByRole("tab", { name: /Memory/ }).click();
+    const profilePicker = capabilities.getByRole("button", { name: "Show the memory of this profile" });
+    await expect(profilePicker).toBeEnabled({ timeout: 15_000 });
+    await profilePicker.click();
+    await expect(page.getByRole("listbox")).toBeVisible();
+    await capabilities.getByText("Capability Center", { exact: true }).first().click();
+    await expect(page.getByRole("listbox")).toHaveCount(0);
     await expect(capabilities).toBeVisible();
     await clickOutside(page, capabilities);
     await expect(capabilities).toBeVisible();

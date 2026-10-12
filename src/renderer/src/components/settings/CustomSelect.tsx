@@ -84,10 +84,13 @@ export default function CustomSelect({
         triggerRef.current?.focus();
       }
     };
-    document.addEventListener("mousedown", onDown);
+    // Capture, as in AnchoredMenu: dialog surfaces such as the Capability
+    // Center stop mousedown from bubbling, and a bubble-phase listener never
+    // heard a click elsewhere in them, so the list stayed open.
+    document.addEventListener("mousedown", onDown, { capture: true });
     document.addEventListener("keydown", onKey, { capture: true });
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("mousedown", onDown, { capture: true });
       document.removeEventListener("keydown", onKey, { capture: true });
     };
   }, [open]);
