@@ -7,7 +7,8 @@ import { join } from "node:path";
 // Codara passes the built-in codara-studio server on the command line of the
 // sessions it starts, so the per-CLI switch never edits the user's config.
 // The entry an earlier build wrote into ~/.claude.json is removed once at
-// boot, with a backup that Settings, About points to. HOME points at a fake
+// boot, with a backup that Settings, About points to; an entry another
+// Codara home wrote stays. HOME points at a fake
 // home so all of this happens to a throwaway ~/.claude.json, never the
 // user's.
 
@@ -37,7 +38,16 @@ test("the built-in server is per launch: old global entries are cleaned up and t
           type: "stdio",
           command: "/Applications/Codara.app/Contents/MacOS/Codara",
           args: ["/Applications/Codara.app/Contents/Resources/codara-studio-mcp/server.js"],
-          env: { ELECTRON_RUN_AS_NODE: "1" },
+          env: { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: home },
+          _sparkManaged: true,
+          _sparkVersion: "7",
+        },
+        // Another Codara home's opt-in is that home's to take back.
+        "cora-preview": {
+          type: "stdio",
+          command: "/Applications/Codara.app/Contents/MacOS/Codara",
+          args: ["/Applications/Codara.app/Contents/Resources/cora-preview-mcp/server.js"],
+          env: { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: join(root, "other-codara-home") },
           _sparkManaged: true,
           _sparkVersion: "7",
         },
@@ -68,7 +78,7 @@ test("the built-in server is per launch: old global entries are cleaned up and t
 
     // The boot pass removes the old managed entry, keeps the user's own, and
     // backs the file up first.
-    await expect.poll(servers, { timeout: 20_000 }).toEqual(["mine"]);
+    await expect.poll(servers, { timeout: 20_000 }).toEqual(["mine", "cora-preview"]);
     const backupRoot = join(home, "backups", "global-config-cleanup");
     const [stamp] = await readdir(backupRoot);
     const manifest = JSON.parse(await readFile(join(backupRoot, stamp, "manifest.json"), "utf8"));
@@ -94,14 +104,14 @@ test("the built-in server is per launch: old global entries are cleaned up and t
     await claude.click();
     await expect(claude).toHaveAttribute("aria-checked", "false");
     await expect(dialog.getByText(/Codara Studio tools are off for the Claude CLI sessions Codara starts/)).toBeVisible();
-    expect(await servers()).toEqual(["mine"]);
+    expect(await servers()).toEqual(["mine", "cora-preview"]);
     const optOut = JSON.parse(await readFile(join(home, "builtin-mcp.json"), "utf8"));
     expect(optOut.removedFrom).toEqual(["claude"]);
     await page.screenshot({ path: testInfo.outputPath("builtin-switch-off.png") });
 
     await claude.click();
     await expect(claude).toHaveAttribute("aria-checked", "true");
-    expect(await servers()).toEqual(["mine"]);
+    expect(await servers()).toEqual(["mine", "cora-preview"]);
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
