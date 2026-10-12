@@ -117,6 +117,28 @@ two ways:
 - **As a library inside Cora's Pi processes.** Pi has no MCP client, so the
   Pi extension `require`s the same file and registers its tools as Pi tools.
   One tool list and one call path therefore serve both.
+- **As a library behind `cora tool`**, for agents without an MCP client. The
+  `cora` wrapper sits next to `codara-pane` in `<codaraHome>/integrations/bin`,
+  so any agent in a Codara pane can call every tool from its shell with the
+  same caller identity an MCP call carries.
+
+The browser tools address tabs through one interface (`src/main/browser/`):
+`tab-ref.ts` parses the `tabId` (a Codara tab, or `chrome:<tabId>` for a tab
+of the user's Chrome reached through the Codara extension) and `targets.ts`
+resolves it to a `BrowserTarget` whose backend owns a shared DevTools
+protocol session (`cdp-session.ts`: ref-counted domains, re-attach after
+navigations and renderer swaps, bounded event buffers that record console
+and network from the moment a tab opens). Codara tabs use
+`webContents.debugger`, which coexists with the user's own DevTools window.
+A Chrome tab is never used unless an agent names it, and never for an
+imported pull request. Large results (screenshots, bodies, traces) go to
+`<codaraHome>/workspace-data/<workspace>/` and the tool returns the path.
+
+What the user sends from the UI (a picked element, a comment, a screenshot)
+goes through `agent-delivery.ts`: one bracketed paste into the chosen pane's
+agent, whatever its runtime, not submitted unless the user pressed Send; a
+message in a Cora chat; or an inbox an agent pulls with
+`codara_preview_inbox`.
 
 `SPARK_MCP_MODE` picks the roster once, at startup:
 

@@ -307,7 +307,22 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
     re-attach, bounded buffers), `preview-cdp.ts` creates it over
     `webContents.debugger` as Chromium attaches the guest, and
     `recorders/` keep console and network from the tab's first request.
+  - Tools address a tab through `browser/targets.ts`: a `BrowserTarget`
+    (session, evaluate, background-safe viewport capture) resolved from the
+    `tabId` (`browser/tab-ref.ts`: a Codara tab id or `chrome:<tabId>`).
+    New features build on it with `browser/screenshot.ts` (crop, scale,
+    JPEG, element and full-page shots), `browser/locator.ts` with
+    `shared/preview-locator.ts` (refs, unique selectors, boxes, names), and
+    `browser/artifacts.ts` (files under `workspace-data/<workspace>/`).
+- **Sending to an agent.** `src/main/agent-delivery.ts` pastes into a pane's
+  agent of any runtime (unsubmitted unless the user pressed Send), adds to a
+  Cora chat, or queues for `codara_preview_inbox`; attachments become files
+  named by path. The renderer calls it through `window.spark.agentDelivery`.
+  Agents without MCP use the same tools with `cora tool`
+  (`cli/commands/tool.cjs`), which Codara's panes have on PATH.
 - **Safety.** `index.ts` hardens every `<webview>` (`will-attach-webview`).
+  `browser/guest-chords.ts` forwards chord keys from a page to the app's
+  shortcuts.
   `guest-popups.ts` turns `window.open` into in-app tabs.
   `main-window-trust.ts` tells trusted senders apart from guest pages.
   `navigation-allowlist.ts` keeps the main window on the app's own page.

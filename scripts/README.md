@@ -61,7 +61,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
-| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs` | Install it with `npx playwright install chromium`. |
+| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs` | Install it with `npx playwright install chromium`. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
@@ -234,14 +234,24 @@ probe), `test-mcp-snippet-parse` (the Add server paste box),
 `test-capability-center-ui`, `test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket-pane-open` (a pane's own
 credential and `pane.open`: overlays over the calling pane, tabs beside it),
-`test-shell-integration-codara-pane` (the `codara-pane` helper and the wrapper
-written at boot), `test-agent-socket` (needs a build).
+`test-shell-integration-codara-pane` (the `codara-pane` helper and the
+`codara-pane` and `cora` wrappers written at boot), `test-mcp-tool-manifest`
+(the tool module contract, module size budgets, the manifest against every
+roster, worker fences for new tools), `test-agent-delivery` (sending to a
+pane, a chat or the inbox, and `preview.inbox`), `test-agent-socket` (needs a
+build).
 
 ### Preview browser
 
 `test-preview-*` (auto-open, capture-paint, input-references, keyboard,
-navigation, registry, workspace), `test-browser-pane-webview-liveness`,
-`test-browser-storage-boundary`, `test-guest-popups`.
+navigation, registry, workspace, tools-routing: every tool's socket method has
+one handler and `chrome:` ids are gated), `test-browser-pane-webview-liveness`,
+`test-browser-storage-boundary`, `test-guest-popups`, `test-browser-targets`
+(tab ids and target backends), `test-browser-cdp-session` (the shared
+DevTools protocol session and its console and network recorders) and
+`test-browser-screenshot-locator` (crop and scale math, saved files, and
+selectors, boxes and names in a real page). The last two run in Playwright's
+Chromium through `scripts/fixtures/cdp-chromium.cjs` and print SKIP without it.
 
 ### Security boundaries and packaging
 
@@ -321,8 +331,9 @@ card keeps its key while it gains or loses a half).
 
 ### The `cora` CLI and its benchmark
 
-`test-cora-cli` (runs the CLI offline against made-up runs), `test-bench-*`
-(`cli/bench/`).
+`test-cora-cli` (runs the CLI offline against made-up runs), `test-cora-tool`
+(`cora tool` against a fake socket: pane identity, images as files, exit
+codes), `test-bench-*` (`cli/bench/`).
 
 ### Release tooling
 

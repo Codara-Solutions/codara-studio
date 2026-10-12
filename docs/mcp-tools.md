@@ -10,17 +10,35 @@ in per-area modules under `resources/codara-studio-mcp/tools/`, the rest in
 server's own manifest (`toolManifest()`), so it never lists a stale set.
 Update this page when a tool is added or renamed.
 
+Adding a browser tool means adding an entry to a module in `tools/` (the
+contract is at the top of `tools/index.cjs`) and a handler to the matching
+table in `src/main/preview-tools/`. Every session re-sends the tool list on
+each request, so each module declares a character `budget` and
+`test-mcp-tool-manifest` caps their sum; it also fails when a tool that
+changes the page is not fenced for read-only workers.
+
 ## Who gets it
 
-- **Claude Code, Codex and Grok.** On launch Codara adds the server to
-  `~/.claude.json`, `~/.codex/config.toml` and Grok's `config.toml` when the
-  CLI is installed. Each CLI has its own on/off switch in the Capability
-  Center (the **Tools** button in the Cora composer), under Tools (MCP
-  servers). A CLI you switch off stays off. The Behavior section's **Keep
-  Codara Studio tools installed in Claude, Codex and Grok** controls whether
-  Codara keeps the entries current on launch.
+- **Claude Code, Codex and Grok.** Every session Codara starts gets the
+  server on its own command line (`claude --mcp-config`, `codex -c
+  mcp_servers.codara-studio=...`, a managed Grok home's private config), so the
+  CLIs' own configs are not changed. Each CLI has its own on/off switch in the
+  Capability Center (the **Tools** button in the Cora composer), under Tools
+  (MCP servers). Only the opt-in **Codara tools in other apps** writes entries
+  into `~/.claude.json`, `~/.codex/config.toml` and Grok's `config.toml`, so
+  sessions started outside Codara get them too.
 - **Cora and its Pi workers.** They load the same tools in-process, so there
   is nothing to install.
+- **Agents without MCP support** (aider, opencode, amp, gemini, droid, a
+  script). In any Codara terminal, `cora tool list` shows the tools,
+  `cora tool help <name>` describes one, and `cora tool <name> '{"arg":1}'` or
+  `--arg value` calls it. It loads the same server module, so the tool set,
+  the caller's workspace and the results are those of an MCP call; images are
+  saved to files and their paths printed.
+
+Every runtime gets the same tool set for the same kind of session;
+`test-agent-launch-integration` holds the Claude and Codex launches to the
+same server command and environment.
 
 The managed entries carry a version marker; when it changes, Codara rewrites
 them on the next launch. The Codex entry also sets `tool_timeout_sec = 660`
@@ -113,17 +131,28 @@ workspace on screen.
 | `codara_preview_press_key` | Sends a key (Enter, Escape, Tab, arrows, a character) to the focused element or a selector. |
 | `codara_preview_evaluate` | Runs JavaScript in the page and returns the result. |
 | `codara_preview_wait_for` | Waits until a selector is attached, visible or hidden. |
-| `codara_preview_screenshot` | Captures the tab as a PNG, with the scale needed to turn image pixels into page coordinates. |
+| `codara_preview_screenshot` | Captures the tab as a PNG, with the scale needed to turn image pixels into page coordinates. The image is also saved under Codara's workspace data folder and its `path` returned. |
 | `codara_preview_mouse` | Trusted mouse input (click, double-click, right-click, down, up) at a selector or coordinates. |
 | `codara_preview_scroll` | Scrolls with a trusted mouse-wheel event. |
 | `codara_preview_hover` | Moves the mouse over an element, triggering real hover styles and tooltips. |
 | `codara_preview_drag` | Trusted drag from one point or element to another. |
 | `codara_preview_key` | Trusted keyboard input with optional modifiers. |
 | `codara_preview_upload` | Sets the files of an `<input type=file>`. |
-| `codara_preview_console` | Reads the tab's captured console messages. |
-| `codara_preview_network` | Reads the tab's captured network requests. |
+| `codara_preview_console` | Reads the tab's console messages, recorded since the tab opened. |
+| `codara_preview_network` | Reads the tab's network requests, recorded since the tab opened. |
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
+| `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
+
+Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
+returns it (`preview:<id>` is accepted too), or `chrome:<tabId>` for a tab of
+the user's own Chrome reached through the Codara extension. Without a
+`tabId` a call uses the caller's own Codara tab, never a Chrome tab, and an
+imported pull request's run may not use Chrome tabs at all.
+
+Large results stay out of the agent's context: images and long bodies are
+written under `<codara home>/workspace-data/<workspace>/`, never into the
+repository, and the result gives the path.
 
 `codara_preview_url` is no longer listed (`codara_preview_list` returns every
 tab's URL and title) but stays callable for agents that still use it. Outside
