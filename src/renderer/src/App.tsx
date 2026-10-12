@@ -73,6 +73,7 @@ import {
   setListShareableStudioTerminalsFn,
   setWorkspaceAgentCounts,
 } from "./components/Terminal/terminalRegistry";
+import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
   alternateScreenPanesRevision,
@@ -4882,9 +4883,24 @@ export default function App() {
       }
       return locateTerminalPane(layouts, paneId)?.workspaceId ?? null;
     });
+    // `codara-pane overlay` covers a terminal leaf of any workspace's layout;
+    // a docked cell is not a terminal and has nothing to cover.
+    setPaneOverlayHostLocator((paneId) => {
+      const current = tabsRef.current;
+      const layouts = [current.tabs, ...current.inactiveWorkspaceLayouts.map((layout) => layout.tabs)];
+      for (const tabsOfLayout of layouts) {
+        for (const tab of tabsOfLayout) {
+          if (tab.kind !== "terminal") continue;
+          const leaf = findLeafByPaneId(tab.root, paneId);
+          if (leaf) return !isDockLeaf(leaf);
+        }
+      }
+      return false;
+    });
     return () => {
       setOpenPreviewTabFn(null);
       setLocatePaneWorkspaceFn(null);
+      setPaneOverlayHostLocator(null);
     };
   }, [newPreviewTab]);
 
@@ -5020,6 +5036,7 @@ export default function App() {
         origin: input.origin,
         nativeClaudeProfileId: input.nativeClaudeProfileId,
         placeAfter,
+        requestedFromPane: input.requestedFromPane,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden

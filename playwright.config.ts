@@ -45,6 +45,8 @@ for (const key of [
   "SPARK_HOOK_URL",
   "SPARK_HOOK_TOKEN",
   "SPARK_PANE_ID",
+  "SPARK_PANE_SOCKET",
+  "SPARK_PANE_TOKEN",
 ]) {
   delete process.env[key];
 }

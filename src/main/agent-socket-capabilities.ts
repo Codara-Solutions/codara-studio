@@ -64,6 +64,31 @@ let endpoint: string | null = null;
 const claimsByTokenHash = new Map<string, StoredClaim>();
 const tokenHashById = new Map<string, string>();
 
+/**
+ * The whole surface a terminal pane's own credential reaches: opening a
+ * terminal over itself or in a new tab of its workspace. Everything a pane
+ * runs inherits the token, so it must never grow into the user's general
+ * authority; tools that need more read the mode-600 handshake file.
+ */
+export const PANE_SOCKET_METHODS = Object.freeze(["pane.open"] as const);
+
+export interface PaneSocketCapabilityClaim {
+  paneId: string;
+}
+
+export interface MintedPaneSocketCapability {
+  environment: {
+    SPARK_PANE_SOCKET: string;
+    SPARK_PANE_TOKEN: string;
+  };
+  /** Revokes this token only, so a same-id respawn keeps its own. */
+  revoke: () => void;
+}
+
+const MAX_ACTIVE_PANE_CAPABILITIES = 4_096;
+const paneIdByTokenHash = new Map<string, string>();
+const paneTokenHashByPaneId = new Map<string, string>();
+
 function tokenHash(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
@@ -89,7 +114,38 @@ export function setAgentSocketCapabilityEndpoint(value: string | null): void {
   if (value === null) {
     claimsByTokenHash.clear();
     tokenHashById.clear();
+    paneIdByTokenHash.clear();
+    paneTokenHashByPaneId.clear();
   }
+}
+
+/**
+ * A terminal pane's own socket credential, exported into that pane only.
+ * Null while the socket is not listening: the pane then has no helper
+ * access. Minting again for a pane id replaces its earlier token.
+ */
+export function mintPaneSocketCapability(paneId: string): MintedPaneSocketCapability | null {
+  if (!endpoint || !validIdentity(paneId)) return null;
+  const previous = paneTokenHashByPaneId.get(paneId);
+  if (previous) paneIdByTokenHash.delete(previous);
+  if (paneIdByTokenHash.size >= MAX_ACTIVE_PANE_CAPABILITIES) return null;
+  const token = randomBytes(32).toString("hex");
+  const hash = tokenHash(token);
+  paneIdByTokenHash.set(hash, paneId);
+  paneTokenHashByPaneId.set(paneId, hash);
+  return {
+    environment: { SPARK_PANE_SOCKET: endpoint, SPARK_PANE_TOKEN: token },
+    revoke: () => {
+      paneIdByTokenHash.delete(hash);
+      if (paneTokenHashByPaneId.get(paneId) === hash) paneTokenHashByPaneId.delete(paneId);
+    },
+  };
+}
+
+export function authorizePaneSocketCapability(token: string): PaneSocketCapabilityClaim | null {
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+  const paneId = paneIdByTokenHash.get(tokenHash(token));
+  return paneId ? { paneId } : null;
 }
 
 export function mintAgentSocketCapability(input: {
@@ -217,4 +273,6 @@ export function resetAgentSocketCapabilitiesForTests(): void {
   endpoint = null;
   claimsByTokenHash.clear();
   tokenHashById.clear();
+  paneIdByTokenHash.clear();
+  paneTokenHashByPaneId.clear();
 }

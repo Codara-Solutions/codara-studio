@@ -33,7 +33,16 @@ import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 // "create" mints a renderer-owned terminal tab, "destroy" closes it by id,
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
 // caller can supply trusted phone-origin metadata or use the default tint.
-export type TerminalOpName = "create" | "destroy" | "resize" | "list" | "agentCounts";
+// "overlay" covers an existing pane with a temporary terminal (pane.open) and
+// "closeOverlay" drops one whose PTY never started.
+export type TerminalOpName =
+  | "create"
+  | "destroy"
+  | "resize"
+  | "list"
+  | "agentCounts"
+  | "overlay"
+  | "closeOverlay";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

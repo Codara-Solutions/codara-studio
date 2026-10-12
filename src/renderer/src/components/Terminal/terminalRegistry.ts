@@ -31,6 +31,10 @@ export interface CreateAgentTerminalInput {
   // Trusted device origin supplied by main. Phone-created terminals use this
   // for a live tab badge and tooltip instead of the amber agent tint.
   origin?: TerminalLeafOrigin;
+  // A program in one of the user's panes asked for this tab (pane.open, the
+  // `codara-pane tab` helper): the user's own tab, so it takes focus and
+  // carries no agent tint.
+  requestedFromPane?: boolean;
 }
 
 export interface CreateAgentTerminalResult {

@@ -1,6 +1,11 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
+import {
+  overlayStartupCommand,
+  paneOverlaysSnapshot,
+  subscribePaneOverlays,
+} from "../components/Terminal/paneOverlays";
 import type {
   PtyExitInfo,
   RuntimeState,
@@ -723,6 +728,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   );
   const tabDrag = tabDragState?.payload ?? null;
   const ghostPos = dragState ? dragGhostPosition(dragState) : null;
+  const paneOverlays = useSyncExternalStore(subscribePaneOverlays, paneOverlaysSnapshot);
   const workerTerminal = tab.scope?.kind === "workers";
   // Worker terminals open in observation mode. Keep this renderer-local: it
   // is a safety latch for the current view, not durable run state, so every
@@ -1044,6 +1050,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       {renderLeaves.map(({ leaf }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
+        const overlay = paneOverlays.get(leaf.paneId) ?? null;
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
@@ -1260,7 +1267,10 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 leaf.worker?.nativeGrokProfileId
               }
               bootResume={leaf.bootResume === true}
-              visible={visible && !placeOffScreen}
+              // Hidden under an overlay: it keeps its size and buffer but can
+              // neither take the keyboard nor refit, and revealing it again
+              // when the overlay's command exits hands the focus back.
+              visible={visible && !placeOffScreen && !overlay}
               // An opened workspace terminal is a live in-memory surface, even
               // while another tab or workspace is selected. Keep feeding its
               // xterm so returning reveals the existing buffer immediately.
@@ -1282,6 +1292,34 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialExternalCols={leaf.origin?.initialCols}
               initialExternalRows={leaf.origin?.initialRows}
             />
+            {overlay ? (
+              <div
+                data-pane-overlay-id={overlay.paneId}
+                data-pane-overlay-host={leaf.paneId}
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  top: labelled ? DOCK_CHROME_H : 0,
+                  display: "flex",
+                  background: "var(--bg)",
+                  borderRadius: "inherit",
+                  overflow: "hidden",
+                }}
+              >
+                <TerminalPane
+                  sessionId={overlay.paneId}
+                  shell={shell}
+                  initialCwd={overlay.cwd ?? leaf.cwd}
+                  initialCommand={overlayStartupCommand(overlay.command, shell.family)}
+                  visible={visible && !placeOffScreen}
+                  writeWhileHidden
+                  scrollbackLineLimit={scrollbackLineLimit}
+                  onUserInput={bundle.onUserInput}
+                />
+              </div>
+            ) : null}
             {!placeOffScreen && !workerTerminal && workerChip ? (
               <WorkerChip worker={workerChip} />
             ) : null}

@@ -20,7 +20,7 @@ import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trus
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
-import { startAgentSocket, stopAgentSocket } from "./agent-socket";
+import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
 import { flush, loadSettings, loadState } from "./storage";
 import {
@@ -34,6 +34,7 @@ import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { setIntegrationBootPass, writeIntegrationFiles } from "./agent-launch-integration";
+import { writePaneHelperFiles } from "./pane-helper";
 import { watchStudioToolsInOtherApps } from "./builtin-mcp-actions";
 import { readSparkBuiltinOptOuts, withCodaraStudioGrokBlock } from "./mcp-installer";
 import { setManagedGrokConfigTransform } from "./orchestration/cli-account-homes";
@@ -949,6 +950,8 @@ function createWindow(): void {
     if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
     armBootWatchdog();
+    // Pane overlays are document state with no restore path.
+    closeAllPaneOverlays();
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
   // the same escalation ladder after a short delay — an immediate reload against
@@ -1039,6 +1042,11 @@ app.whenReady().then(async () => {
         noteCodexNotifyInstalled(summary.codexNotify);
       } catch (err) {
         console.warn("[main] agent integration files failed:", err);
+      }
+      try {
+        await writePaneHelperFiles();
+      } catch (err) {
+        console.warn("[main] pane helper files failed:", err);
       }
     })(),
   );

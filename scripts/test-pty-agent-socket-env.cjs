@@ -14,7 +14,10 @@
 // credentials, not even ones inherited from an outer Studio. Scoped
 // capabilities are not panes: Cora's Pi processes for imported pull requests
 // get their own scoped token (pi-runtime-electron.ts), and the last check
-// pins that the minted capability still carries it.
+// pins that the minted capability still carries it. A pane's own token
+// (SPARK_PANE_TOKEN, good for pane.open on that pane only) is the one
+// credential a pane does get: minted per pane, never inherited, revoked on
+// exit, with the codara-pane folder first on PATH.
 //
 //   node scripts/test-pty-agent-socket-env.cjs
 
@@ -46,8 +49,17 @@ async function main() {
   const saved = Object.fromEntries(SOCKET_KEYS.map((key) => [key, process.env[key]]));
   try {
     const outfile = path.join(bundleDir, "pty-manager.cjs");
+    // One bundle, so the socket endpoint set below is the one pty-manager
+    // mints pane credentials against.
     await esbuild.build({
-      entryPoints: [path.join(ROOT, "src", "main", "pty-manager.ts")],
+      stdin: {
+        contents: [
+          `export * from ${JSON.stringify(path.join(ROOT, "src", "main", "pty-manager.ts"))};`,
+          `export { authorizePaneSocketCapability, setAgentSocketCapabilityEndpoint } from ${JSON.stringify(path.join(ROOT, "src", "main", "agent-socket-capabilities.ts"))};`,
+        ].join("\n"),
+        resolveDir: path.join(ROOT, "src", "main"),
+        loader: "ts",
+      },
       bundle: true,
       platform: "node",
       format: "cjs",
@@ -123,6 +135,44 @@ async function main() {
         !("SPARK_AGENT_TOKEN" in explicitEnv),
       explicitEnv.SPARK_AGENT_SOCKET,
     );
+
+    // The pane's own credential for `codara-pane`: absent until the socket
+    // listens, then minted per pane, never inherited, and gone with the pane.
+    check(
+      "no pane credential while the socket is not listening",
+      !("SPARK_PANE_SOCKET" in shellEnv) && !("SPARK_PANE_TOKEN" in shellEnv),
+    );
+    process.env.SPARK_PANE_SOCKET = "http://127.0.0.1:45679";
+    process.env.SPARK_PANE_TOKEN = "f".repeat(64);
+    pty.setAgentSocketCapabilityEndpoint("http://127.0.0.1:43124");
+    await pty.spawn({ ...localOptions("pane-own"), env: { PATH: "/usr/bin:/bin" } });
+    const ownCall = controller.localSpawnCalls.at(-1);
+    const ownEnv = ownCall.options.env;
+    check(
+      "a pane gets this app's socket and a token of its own",
+      ownEnv.SPARK_PANE_SOCKET === "http://127.0.0.1:43124" &&
+        /^[a-f0-9]{64}$/.test(ownEnv.SPARK_PANE_TOKEN) &&
+        ownEnv.SPARK_PANE_TOKEN !== "f".repeat(64),
+      ownEnv.SPARK_PANE_SOCKET,
+    );
+    check(
+      "the token names exactly that pane",
+      pty.authorizePaneSocketCapability(ownEnv.SPARK_PANE_TOKEN)?.paneId === "pane-own",
+    );
+    check(
+      "the pane finds codara-pane first on its PATH",
+      (ownEnv.PATH ?? "").split(path.delimiter)[0] === path.join("/codara/integrations", "bin"),
+      ownEnv.PATH,
+    );
+    controller.exitLocal(ownCall.pid);
+    pty.dispose("pane-own");
+    check(
+      "the token is revoked when the pane's process exits",
+      pty.authorizePaneSocketCapability(ownEnv.SPARK_PANE_TOKEN) === null,
+    );
+    delete process.env.SPARK_PANE_SOCKET;
+    delete process.env.SPARK_PANE_TOKEN;
+    pty.setAgentSocketCapabilityEndpoint(null);
 
     const capabilitiesOut = path.join(bundleDir, "capabilities.cjs");
     await esbuild.build({
