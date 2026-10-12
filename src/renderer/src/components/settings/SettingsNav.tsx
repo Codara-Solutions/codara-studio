@@ -1,4 +1,5 @@
 import React from "react";
+import { IS_MAC } from "../../shortcuts/platform";
 import {
   SETTINGS_NAV_GROUPS,
   tabMeta,
@@ -126,20 +127,33 @@ function SearchIcon() {
   );
 }
 
+export interface SettingsSearchKeys {
+  /** Id of the results listbox the field controls. */
+  listboxId: string;
+  /** Id of the highlighted result, or undefined. */
+  activeOptionId?: string;
+  resultCount: number;
+  onMove: (delta: number | "first" | "last") => void;
+  onOpenActive: () => void;
+}
+
 export default function SettingsNav({
   activeTab,
   query,
   searchRef,
+  searchKeys,
   onQueryChange,
   onSelect,
 }: {
   activeTab: SettingsTab;
   query: string;
   searchRef: React.RefObject<HTMLInputElement>;
+  searchKeys: SettingsSearchKeys;
   onQueryChange: (next: string) => void;
   onSelect: (tab: SettingsTab) => void;
 }) {
   const searching = query.trim().length > 0;
+  const expanded = searching && searchKeys.resultCount > 0;
   return (
     <nav className="st-nav" aria-label="Settings sections">
       <div className="st-nav__brand">Settings</div>
@@ -150,9 +164,15 @@ export default function SettingsNav({
         <input
           ref={searchRef}
           type="search"
+          role="combobox"
           className="st-search__input"
           placeholder="Search settings"
           aria-label="Search settings"
+          aria-autocomplete="list"
+          aria-expanded={expanded}
+          aria-controls={searchKeys.listboxId}
+          aria-activedescendant={expanded ? searchKeys.activeOptionId : undefined}
+          aria-keyshortcuts={IS_MAC ? "Meta+F /" : "Control+F /"}
           value={query}
           spellCheck={false}
           onChange={(event) => onQueryChange(event.currentTarget.value)}
@@ -161,9 +181,33 @@ export default function SettingsNav({
             if (event.key === "Escape" && query) {
               event.stopPropagation();
               onQueryChange("");
+              return;
+            }
+            if (!searching) return;
+            const move =
+              event.key === "ArrowDown"
+                ? 1
+                : event.key === "ArrowUp"
+                  ? -1
+                  : event.key === "PageDown"
+                    ? 5
+                    : event.key === "PageUp"
+                      ? -5
+                      : null;
+            if (move !== null) {
+              event.preventDefault();
+              searchKeys.onMove(move);
+            } else if (event.key === "Enter") {
+              event.preventDefault();
+              searchKeys.onOpenActive();
             }
           }}
         />
+        {query ? null : (
+          <span className="st-search__hint" aria-hidden>
+            {IS_MAC ? "\u2318F" : "Ctrl+F"}
+          </span>
+        )}
       </div>
       <div className="st-nav__groups">
         {SETTINGS_NAV_GROUPS.map((group) => (

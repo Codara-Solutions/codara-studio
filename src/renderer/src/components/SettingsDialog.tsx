@@ -1,4 +1,13 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   AGENT_FAMILIES,
   AGENT_FAMILY_IDS,
@@ -40,7 +49,12 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
-import KeybindingsSection from "../shortcuts/KeybindingsSection";
+import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
+import { buildBindingTable } from "../shortcuts/bindings";
+import { IS_MAC } from "../shortcuts/platform";
+import { isRecording } from "../shortcuts/recording";
+import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
+import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
 import {
   UsageEntryBody,
   useSubscriptionUsage,
@@ -81,15 +95,19 @@ import {
   SettingRow,
   SettingsPage,
   SettingsSection,
+  Switch,
   ToggleRow,
   ValueRow,
 } from "./settings/SettingsPrimitives";
 import {
-  searchSettings,
+  entryLocation,
+  matchRanges,
+  rankSettings,
   tabMeta,
   type SettingsSearchEntry,
   type SettingsTab,
 } from "./settings/settings-index";
+import { bindToggle } from "./settings/setting-toggles";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -187,12 +205,17 @@ export default function SettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const searching = query.trim().length > 0;
-  const results = useMemo(() => searchSettings(query), [query]);
+  const results = useMemo(() => rankSettings(query).map((hit) => hit.entry), [query]);
+  const [activeResult, setActiveResult] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   // A search result picked on another page: scrolled to once that page has
   // rendered the row carrying this anchor.
-  const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
+  const [pendingTarget, setPendingTarget] = useState<SearchTarget | null>(null);
+
+  useEffect(() => {
+    setActiveResult(0);
+  }, [query]);
   // Terminal and API edit a draft that only Save persists; every other page
   // applies each change as it is made. The footer says which, and only the
   // draft pages offer Cancel and Save.
@@ -217,68 +240,133 @@ export default function SettingsDialog({
   // never throws away the page the user was working on. The listener sits on
   // window so it runs after the document-level listeners of menus opened
   // from here: a menu that took the Escape marks it handled, and Settings
-  // stays open.
+  // stays open. A search in progress is cleared first, wherever focus is.
+  const queryRef = useRef(query);
+  queryRef.current = query;
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (queryRef.current.trim()) {
+        setQuery("");
+        searchRef.current?.focus();
+        return;
+      }
       onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Ctrl or Cmd+F, or "/" outside a text field, jumps to the search, as in
+  // a browser or an editor. A shortcut being recorded keeps the keys, and a
+  // control that already handled the key (a menu) wins.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isRecording()) return;
+      const find =
+        event.key.toLowerCase() === "f" &&
+        (IS_MAC ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey;
+      const slash =
+        event.key === "/" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !isTextEntry(event.target);
+      if (!find && !slash) return;
+      const input = searchRef.current;
+      if (!input) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // The title bar grows a hairline only once the page scrolls under it, so a
   // line cut at the pane's top edge reads as scrolled rather than clipped.
   const [scrolled, setScrolled] = useState(false);
 
+  // Only a change of page or of search mode starts at the top. Clearing the
+  // pending target once its row is in view must not scroll the row away.
+  const pendingTargetRef = useRef(pendingTarget);
+  pendingTargetRef.current = pendingTarget;
   useEffect(() => {
-    if (pendingAnchor) return;
+    if (pendingTargetRef.current) return;
     contentRef.current?.scrollTo({ top: 0 });
     setScrolled(false);
-  }, [renderedTab, searching, pendingAnchor]);
+  }, [renderedTab, searching]);
 
   // Rows behind async data (preferences, accounts) mount a beat after the
-  // page, so the lookup retries for a short while before giving up.
+  // page, so the lookup retries for a short while before giving up. A row
+  // that is not shown right now (its parent setting is off) leaves the user
+  // at its section instead.
   useEffect(() => {
-    if (!pendingAnchor || searching || renderedTab !== activeTab) return;
+    if (!pendingTarget || searching || renderedTab !== activeTab) return;
     let frame = 0;
     let tries = 0;
-    let flashTimer: number | undefined;
-    const find = () => {
+    const lookup = (anchor: string | undefined) => {
       const pane = contentRef.current;
-      const target = pane
-        ? Array.from(pane.querySelectorAll<HTMLElement>("[data-setting-anchor]")).find(
-            (node) => node.dataset.settingAnchor === pendingAnchor,
-          )
-        : undefined;
+      if (!pane || !anchor) return undefined;
+      return Array.from(pane.querySelectorAll<HTMLElement>("[data-setting-anchor]")).find(
+        (node) => node.dataset.settingAnchor === anchor,
+      );
+    };
+    const find = () => {
+      tries += 1;
+      const giveUp = tries >= 60;
+      const target =
+        lookup(pendingTarget.anchor) ??
+        (giveUp ? pendingTarget.fallbacks.map(lookup).find(Boolean) : undefined);
       if (target) {
-        target.scrollIntoView({ block: "center" });
-        target.classList.add("is-flash");
-        flashTimer = window.setTimeout(() => target.classList.remove("is-flash"), 1600);
-        setPendingAnchor(null);
+        revealSettingRow(target, pendingTarget.focus);
+        setPendingTarget(null);
         return;
       }
-      tries += 1;
-      if (tries < 60) frame = window.requestAnimationFrame(find);
-      else setPendingAnchor(null);
+      if (giveUp) setPendingTarget(null);
+      else frame = window.requestAnimationFrame(find);
     };
     frame = window.requestAnimationFrame(find);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      if (flashTimer !== undefined) window.clearTimeout(flashTimer);
-    };
-  }, [pendingAnchor, searching, renderedTab, activeTab]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingTarget, searching, renderedTab, activeTab]);
 
   const selectTab = (tab: SettingsTab) => {
     setQuery("");
-    setPendingAnchor(null);
+    setPendingTarget(null);
     setActiveTab(tab);
   };
 
-  const openResult = (entry: SettingsSearchEntry) => {
+  const openResult = (entry: SettingsSearchEntry, focus: boolean) => {
     setQuery("");
+    if (entry.tab === "capabilities") {
+      // As from the Accounts page: Settings closes first so two modals never
+      // stack and fight over focus and Escape.
+      onClose();
+      window.dispatchEvent(
+        new CustomEvent("spark:open-capabilities", { detail: { tab: entry.capabilityTab } }),
+      );
+      return;
+    }
     setActiveTab(entry.tab);
-    setPendingAnchor(entry.title);
+    setPendingTarget({
+      anchor: entry.title,
+      reveal: entry.reveal,
+      fallbacks: [entry.reveal, entry.section].filter((anchor): anchor is string => Boolean(anchor)),
+      focus,
+    });
+  };
+
+  const moveActiveResult = (delta: number | "first" | "last") => {
+    if (results.length === 0) return;
+    setActiveResult((current) => {
+      if (delta === "first") return 0;
+      if (delta === "last") return results.length - 1;
+      const next = current + delta;
+      if (Math.abs(delta) === 1) return (next + results.length) % results.length;
+      return Math.max(0, Math.min(results.length - 1, next));
+    });
   };
 
   const save = async () => {
@@ -314,6 +402,16 @@ export default function SettingsDialog({
           activeTab={activeTab}
           query={query}
           searchRef={searchRef}
+          searchKeys={{
+            listboxId: SEARCH_LISTBOX_ID,
+            activeOptionId: results.length > 0 ? searchOptionId(activeResult) : undefined,
+            resultCount: results.length,
+            onMove: moveActiveResult,
+            onOpenActive: () => {
+              const entry = results[activeResult] ?? results[0];
+              if (entry) openResult(entry, true);
+            },
+          }}
           onQueryChange={setQuery}
           onSelect={selectTab}
         />
@@ -327,8 +425,19 @@ export default function SettingsDialog({
           }}
         >
           {searching ? (
-            <SearchResults query={query} results={results} onOpen={openResult} />
+            <SearchResults
+              query={query}
+              results={results}
+              activeIndex={activeResult}
+              onHover={setActiveResult}
+              onOpen={(entry) => openResult(entry, false)}
+              onClear={() => {
+                setQuery("");
+                searchRef.current?.focus();
+              }}
+            />
           ) : (
+            <SettingsRevealContext.Provider value={pendingTarget?.reveal ?? null}>
             <SettingsPage>
               {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
               {renderedTab === "editor" && <EditorSettings />}
@@ -355,6 +464,7 @@ export default function SettingsDialog({
               {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
               {renderedTab === "about" && <AboutSettings />}
             </SettingsPage>
+            </SettingsRevealContext.Provider>
           )}
         </div>
 
@@ -370,8 +480,8 @@ export default function SettingsDialog({
             <p className="st-topbar__desc">
               {searching
                 ? results.length === 0
-                  ? `Nothing matches “${query.trim()}”.`
-                  : `${results.length} ${results.length === 1 ? "result" : "results"} for “${query.trim()}”.`
+                  ? `No settings match “${query.trim()}”.`
+                  : `${results.length} ${results.length === 1 ? "result" : "results"} for “${query.trim()}”. Arrow keys move, Enter opens.`
                 : meta.description}
             </p>
           </div>
@@ -422,88 +532,204 @@ export default function SettingsDialog({
   );
 }
 
+const SEARCH_LISTBOX_ID = "settings-search-results";
+
+function searchOptionId(index: number): string {
+  return `settings-search-result-${index}`;
+}
+
+interface SearchTarget {
+  anchor: string;
+  // The disclosure that hides the row, opened before the row is looked up.
+  reveal?: string;
+  // Where to land when the row is not shown right now, nearest first.
+  fallbacks: string[];
+  // Opened from the keyboard: focus moves into the row's control.
+  focus: boolean;
+}
+
+// The disclosure a picked search result sits behind, while the dialog is
+// scrolling to it. A page that folds rows away opens the fold on a match.
+const SettingsRevealContext = createContext<string | null>(null);
+
+function useRevealOnSearch(disclosure: string, open: () => void): void {
+  const reveal = useContext(SettingsRevealContext);
+  const openRef = useRef(open);
+  openRef.current = open;
+  useEffect(() => {
+    if (reveal === disclosure) openRef.current();
+  }, [reveal, disclosure]);
+}
+
+const NON_TEXT_INPUTS = new Set([
+  "checkbox",
+  "radio",
+  "button",
+  "submit",
+  "reset",
+  "range",
+  "color",
+  "file",
+]);
+
+function isTextEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  return target instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(target.type);
+}
+
+function revealSettingRow(row: HTMLElement, focus: boolean): void {
+  row.scrollIntoView({ block: "center" });
+  row.classList.remove("is-flash");
+  // The flash restarts only if a style flush separates the remove and the add.
+  void row.offsetWidth;
+  row.classList.add("is-flash");
+  row.addEventListener("animationend", () => row.classList.remove("is-flash"), { once: true });
+  if (!focus) return;
+  row
+    .querySelector<HTMLElement>(
+      "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])",
+    )
+    ?.focus({ preventScroll: true });
+}
+
 function SearchResults({
   query,
   results,
+  activeIndex,
+  onHover,
   onOpen,
+  onClear,
 }: {
   query: string;
   results: SettingsSearchEntry[];
+  activeIndex: number;
+  onHover: (index: number) => void;
   onOpen: (entry: SettingsSearchEntry) => void;
+  onClear: () => void;
 }) {
-  const words = useMemo(
-    () => query.trim().toLowerCase().split(/\s+/).filter(Boolean),
-    [query],
+  const { preferences, hydrated, setPreference } = usePreferences();
+  const fastMode = useOpenAiFastMode();
+  const bindings = useMemo(
+    () =>
+      new Map(
+        buildBindingTable(preferences.keybindings).map((binding) => [
+          binding.command.label,
+          binding,
+        ]),
+      ),
+    [preferences.keybindings],
   );
-  const grouped = useMemo(() => {
-    const map = new Map<SettingsTab, SettingsSearchEntry[]>();
-    for (const entry of results) {
-      const list = map.get(entry.tab) ?? [];
-      list.push(entry);
-      map.set(entry.tab, list);
-    }
-    return [...map.entries()];
-  }, [results]);
-  return (
-    <div className="st-page">
-      {results.length === 0 ? (
+
+  useEffect(() => {
+    document.getElementById(searchOptionId(activeIndex))?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, results]);
+
+  if (results.length === 0) {
+    return (
+      <div className="st-page">
         <EmptyState
           icon={<SearchGlyph />}
-          title="No settings found"
-          body="Try a shorter or different word, like “theme”, “git” or “account”."
+          title={`No settings match “${query.trim()}”`}
+          body="Check the spelling, or try another word, like “theme”, “git” or “account”."
+          action={
+            <button type="button" className="spark-btn" onClick={onClear}>
+              Clear search
+            </button>
+          }
         />
-      ) : (
-        grouped.map(([tab, entries]) => (
-          <SettingsSection key={tab} title={tabMeta(tab).title} plain>
-            <div className="st-list">
-              {entries.map((entry) => (
-                <button
-                  key={`${entry.tab}:${entry.title}`}
-                  type="button"
-                  className="st-list__row st-result"
-                  onClick={() => onOpen(entry)}
+      </div>
+    );
+  }
+
+  const toggleFor = (entry: SettingsSearchEntry) => {
+    if (!entry.toggle) return null;
+    if (entry.toggle === "fastMode") {
+      return { checked: fastMode.enabled, onChange: () => fastMode.toggle() };
+    }
+    // Before preferences load every switch would read as its default.
+    if (!hydrated) return null;
+    return bindToggle(entry.toggle, preferences, setPreference);
+  };
+
+  return (
+    <div className="st-page">
+      <div
+        id={SEARCH_LISTBOX_ID}
+        role="listbox"
+        aria-label="Matching settings"
+        className="st-list"
+      >
+        {results.map((entry, index) => {
+          const toggle = toggleFor(entry);
+          const binding = entry.shortcut ? bindings.get(entry.title) : undefined;
+          const active = index === activeIndex;
+          const title = entry.label ?? entry.title;
+          return (
+            <div
+              key={`${entry.tab}:${entry.title}`}
+              id={searchOptionId(index)}
+              role="option"
+              aria-selected={active}
+              data-search-result={entry.title}
+              className={`st-list__row st-result${active ? " is-active" : ""}`}
+              onMouseMove={() => {
+                if (!active) onHover(index);
+              }}
+              onClick={() => onOpen(entry)}
+            >
+              <span className="st-result__text">
+                <span className="st-result__title">
+                  <Highlight text={title} query={query} />
+                </span>
+                <span className="st-result__desc">
+                  <Highlight text={entry.desc} query={query} />
+                </span>
+                <span className="st-result__crumb">{entryLocation(entry).join(" › ")}</span>
+              </span>
+              {binding ? (
+                <span className="st-result__control">
+                  <ChordChips binding={binding} />
+                </span>
+              ) : null}
+              {toggle ? (
+                // The switch flips the setting in place; only the rest of the
+                // row navigates to it.
+                <span
+                  className="st-result__control"
+                  onClick={(event) => event.stopPropagation()}
                 >
-                  <span className="st-result__text">
-                    <span className="st-result__title">
-                      <Highlight text={entry.label ?? entry.title} words={words} />
-                    </span>
-                    <span className="st-result__desc">
-                      <Highlight text={entry.desc} words={words} />
-                    </span>
-                  </span>
-                  {/* The group heading already names the page, so a result
-                      only adds the section it sits in. */}
-                  <span className="st-result__crumb">{entry.section ?? ""}</span>
-                  <ChevronRight />
-                </button>
-              ))}
+                  <Switch checked={toggle.checked} onChange={toggle.onChange} ariaLabel={title} />
+                </span>
+              ) : null}
+              <ChevronRight />
             </div>
-          </SettingsSection>
-        ))
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-/** Marks every place a search word appears, case-insensitively. */
-function Highlight({ text, words }: { text: string; words: ReadonlyArray<string> }) {
-  if (words.length === 0) return <>{text}</>;
-  const escaped = words.map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const parts = text.split(new RegExp(`(${escaped.join("|")})`, "gi"));
-  return (
-    <>
-      {parts.map((part, index) =>
-        index % 2 === 1 ? (
-          <mark key={index} className="st-mark">
-            {part}
-          </mark>
-        ) : (
-          part
-        ),
-      )}
-    </>
-  );
+function Highlight({ text, query }: { text: string; query: string }) {
+  const ranges = matchRanges(text, query);
+  if (ranges.length === 0) return <>{text}</>;
+  const parts: React.ReactNode[] = [];
+  let at = 0;
+  for (const [start, end] of ranges) {
+    if (start > at) parts.push(text.slice(at, start));
+    parts.push(
+      <mark key={start} className="st-mark">
+        {text.slice(start, end)}
+      </mark>,
+    );
+    at = end;
+  }
+  if (at < text.length) parts.push(text.slice(at));
+  return <>{parts}</>;
 }
+
 
 function SearchGlyph() {
   return (
@@ -926,6 +1152,7 @@ function GeneralSettings({
   const fetchMinutes =
     preferences.gitAutoFetchIntervalMinutes ?? DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
   const [glassTuningOpen, setGlassTuningOpen] = useState(false);
+  useRevealOnSearch("Fine-tune glass", () => setGlassTuningOpen(true));
   return (
     <>
       <SettingsSection title="Getting started">
@@ -953,8 +1180,7 @@ function GeneralSettings({
           <ToggleRow
             title="Liquid glass"
             desc="Translucent frame, tabs, buttons, composer, menus, dialogs and toasts. Off gives a solid, opaque look. Always off when the system reduces transparency."
-            checked={preferences.glassEffects !== false}
-            onChange={(v) => void setPreference("glassEffects", v)}
+            {...bindToggle("glassEffects", preferences, setPreference)}
           />
         ) : null}
         {hydrated && preferences.glassEffects !== false ? (
@@ -1032,14 +1258,12 @@ function GeneralSettings({
             <ToggleRow
               title="Keep running in the background"
               desc="Closing the window hides Codara Studio to the tray so automations keep running. Quit from the tray menu."
-              checked={preferences.keepRunningInBackground !== false}
-              onChange={(v) => void setPreference("keepRunningInBackground", v)}
+              {...bindToggle("keepRunningInBackground", preferences, setPreference)}
             />
             <ToggleRow
               title="Open local dev servers automatically"
               desc="Open a localhost URL an agent or terminal prints in a browser tab. When off, a link chip appears instead."
-              checked={Boolean(preferences.autoOpenPreview)}
-              onChange={(v) => void setPreference("autoOpenPreview", v)}
+              {...bindToggle("autoOpenPreview", preferences, setPreference)}
             />
             <SettingRow
               title="Open links in"
@@ -1087,14 +1311,12 @@ function GeneralSettings({
             <ToggleRow
               title="Let agents create and remove worktrees"
               desc="Removal needs proof the branch is merged, no local changes and nothing running in the worktree. It never forces, and the last commit stays recoverable for 30 days. When off, agents can still list worktrees."
-              checked={preferences.agentWorktreesEnabled !== false}
-              onChange={(v) => void setPreference("agentWorktreesEnabled", v)}
+              {...bindToggle("agentWorktreesEnabled", preferences, setPreference)}
             />
             <ToggleRow
               title="Let agents remove worktrees I created"
               desc="When off, agents only remove worktrees an agent created. The same merge and safety checks apply either way."
-              checked={preferences.agentsMayRemoveUserWorktrees === true}
-              onChange={(v) => void setPreference("agentsMayRemoveUserWorktrees", v)}
+              {...bindToggle("agentsMayRemoveUserWorktrees", preferences, setPreference)}
             />
           </SettingsSection>
 
@@ -1102,8 +1324,7 @@ function GeneralSettings({
             <ToggleRow
               title="Middle-click to close tabs"
               desc="Close a workspace tab with the mouse wheel button."
-              checked={preferences.closeTabsOnMiddleClick}
-              onChange={(v) => void setPreference("closeTabsOnMiddleClick", v)}
+              {...bindToggle("closeTabsOnMiddleClick", preferences, setPreference)}
             />
           </SettingsSection>
 
@@ -1114,13 +1335,7 @@ function GeneralSettings({
             <ToggleRow
               title="In-app toast"
               desc="A card in the top right while Codara Studio is focused. Click it to jump to the chat or terminal."
-              checked={preferences.notificationChannels.inApp}
-              onChange={(v) =>
-                void setPreference("notificationChannels", {
-                  ...preferences.notificationChannels,
-                  inApp: v,
-                })
-              }
+              {...bindToggle("notifyInApp", preferences, setPreference)}
             />
             {preferences.notificationChannels.inApp ? (
               <SettingRow
@@ -1139,35 +1354,17 @@ function GeneralSettings({
             <ToggleRow
               title="Native OS notification"
               desc="A system alert, only while Codara Studio is minimized or in the background, so it never doubles up with the toast."
-              checked={preferences.notificationChannels.native}
-              onChange={(v) =>
-                void setPreference("notificationChannels", {
-                  ...preferences.notificationChannels,
-                  native: v,
-                })
-              }
+              {...bindToggle("notifyNative", preferences, setPreference)}
             />
             <ToggleRow
               title="Sound"
               desc="A short chime: one for needs you, one for done."
-              checked={preferences.notificationChannels.sound}
-              onChange={(v) =>
-                void setPreference("notificationChannels", {
-                  ...preferences.notificationChannels,
-                  sound: v,
-                })
-              }
+              {...bindToggle("notifySound", preferences, setPreference)}
             />
             <ToggleRow
               title="Dock badge and taskbar flash"
               desc="The macOS dock badge or Windows taskbar flash. Clears when you focus Codara Studio."
-              checked={preferences.notificationChannels.osCues}
-              onChange={(v) =>
-                void setPreference("notificationChannels", {
-                  ...preferences.notificationChannels,
-                  osCues: v,
-                })
-              }
+              {...bindToggle("notifyOsCues", preferences, setPreference)}
             />
           </SettingsSection>
 
@@ -1178,8 +1375,7 @@ function GeneralSettings({
             <ToggleRow
               title="Fetch remotes in the background"
               desc="When off, the Fetch button is the only network activity."
-              checked={preferences.gitAutoFetchEnabled !== false}
-              onChange={(v) => void setPreference("gitAutoFetchEnabled", v)}
+              {...bindToggle("gitAutoFetchEnabled", preferences, setPreference)}
             />
             {preferences.gitAutoFetchEnabled !== false ? (
               <>
@@ -1198,14 +1394,12 @@ function GeneralSettings({
                 <ToggleRow
                   title="Notify me when teammates push"
                   desc="One quiet alert per repository, checked with your signed-in gh account so your own merges never count. GitHub remotes only."
-                  checked={preferences.notifyTeammatePushes !== false}
-                  onChange={(v) => void setPreference("notifyTeammatePushes", v)}
+                  {...bindToggle("notifyTeammatePushes", preferences, setPreference)}
                 />
                 <ToggleRow
                   title="Notify me when a pull request is opened"
                   desc="One alert with a chime when someone opens, reopens or readies a pull request. Drafts stay quiet."
-                  checked={preferences.notifyPullRequests !== false}
-                  onChange={(v) => void setPreference("notifyPullRequests", v)}
+                  {...bindToggle("notifyPullRequests", preferences, setPreference)}
                 />
               </>
             ) : null}
@@ -1456,8 +1650,7 @@ function EditorSettings() {
         <ToggleRow
           title="Vim mode"
           desc="Modal editing with the :w, :q, :wq and :x commands."
-          checked={preferences.vimMode}
-          onChange={(v) => void setPreference("vimMode", v)}
+          {...bindToggle("vimMode", preferences, setPreference)}
         />
         <SettingRow
           title="Editor theme"
@@ -1481,8 +1674,7 @@ function EditorSettings() {
         <ToggleRow
           title="Autosave"
           desc="Saves the active file after you stop typing. If an agent changed it on disk, autosave pauses and asks. Ctrl or Cmd+S always saves."
-          checked={preferences.autosaveEnabled}
-          onChange={(v) => void setPreference("autosaveEnabled", v)}
+          {...bindToggle("autosaveEnabled", preferences, setPreference)}
         />
         {preferences.autosaveEnabled ? (
           <>
@@ -1529,8 +1721,7 @@ function EditorSettings() {
               <Kbd>Alt+\</Kbd> asks for one.
             </>
           }
-          checked={preferences.inlineAutocompleteEnabled}
-          onChange={(v) => void setPreference("inlineAutocompleteEnabled", v)}
+          {...bindToggle("inlineAutocompleteEnabled", preferences, setPreference)}
         />
         <SettingRow
           title="Suggestion timing"
@@ -2238,6 +2429,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       </SettingsSection>
 
       <SettingsSection title="Limits and runtime">
+        <FastModeRow />
         {/* Limits live inside each account above; this row re-reads them. */}
         {overview?.runtimeInstalled ? (
           <SettingRow
@@ -2472,6 +2664,20 @@ function accountUsageNote(
 // Accounts, plus a way into the Capability Center. The fast-mode toggle used
 // to sit here; it now lives on the composer's flash button, next to the model
 // it applies to.
+// The same setting as the composer's lightning toggle, so either place can
+// turn it off once its cost is noticed.
+function FastModeRow() {
+  const fastMode = useOpenAiFastMode();
+  return (
+    <ToggleRow
+      title="Fast mode"
+      desc={`Cora and her workers answer faster on models that support it. ${FAST_MODE_COST_NOTE}`}
+      checked={fastMode.enabled}
+      onChange={() => fastMode.toggle()}
+    />
+  );
+}
+
 function AgentsSettings({ onClose }: { onClose: () => void }) {
   // Settings closes first so two modals never stack and fight over focus and
   // Escape. Nothing on this tab is a draft, so closing loses nothing.
@@ -2804,8 +3010,7 @@ function SessionsSettings({
           <ToggleRow
             title="Resume running agent sessions when Codara reopens"
             desc="Reopens terminal tabs that still had Claude Code, Codex, Grok or Pi running and resumes their exact session. A pane whose shell dies under a live agent resumes in place."
-            checked={preferences.restoreAgentSessions === true}
-            onChange={(next) => void setPreference("restoreAgentSessions", next)}
+            {...bindToggle("restoreAgentSessions", preferences, setPreference)}
           />
         ) : null}
       </SettingsSection>
@@ -3651,7 +3856,7 @@ function GlassSliderRow({
   };
 
   return (
-    <div className="st-subrow">
+    <div className="st-subrow" data-setting-anchor={label}>
       <span className="st-subrow__text">
         <span className="st-subrow__label">{label}</span>
         <span className="st-subrow__hint">{hint}</span>

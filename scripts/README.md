@@ -313,7 +313,9 @@ These suites bundle renderer modules without React where they can:
 `test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
 `test-settings-dialog` (Settings closes only through Escape, X, Done or
 Cancel; every search result is rendered; the face is opaque; a menu closes on
-a scroll only when its anchor moved), `test-account-card-keys` (an account
+a scroll only when its anchor moved), `test-settings-search` (every rendered
+Settings row has a search entry; ranking, typos, synonyms and highlights),
+`test-account-card-keys` (an account
 card keeps its key while it gains or loses a half).
 
 ### The `cora` CLI and its benchmark
