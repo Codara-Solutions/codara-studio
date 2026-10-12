@@ -16,6 +16,64 @@
 #
 # OSC = ESC ]   ST = BEL (0x07)
 
+# A `claude` or `codex` typed in a Codara pane gets Codara's hooks, MCP
+# server and Codex notify as flags read from $env:SPARK_AGENT_ARGS_DIR (one
+# argument per line, data that is never evaluated), so nothing is written to
+# the user's own CLI config. Defined before the early return below so agent
+# panes get them too, and only when Codara set that folder and no function
+# or alias of that name exists. Management subcommands and a missing file
+# run the CLI untouched. A `--settings` of the user's keeps Codara's out
+# (Claude honors only the last one), and `--strict-mcp-config` keeps
+# Codara's server out of that strict set.
+function Global:__Spark-AgentExec {
+    param([string]$cli, [object[]]$rest)
+    $target = Get-Command -Name $cli -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $target) {
+        Write-Error "${cli}: command not found"
+        return
+    }
+    if ($null -eq $rest) { $rest = @() }
+    $first = if ($rest.Count -gt 0) { [string]$rest[0] } else { '' }
+    $passThrough = if ($cli -eq 'claude') {
+        @('auth', 'mcp', 'config', 'doctor', 'update', 'install', 'setup-token', 'plugin', 'migrate-installer', '-v', '--version', '-h', '--help')
+    } else {
+        @('login', 'logout', 'mcp', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'plugin', 'app-server', 'remote-control', 'agents', '--version', '-V', '--help', '-h')
+    }
+    $extra = @()
+    $file = if ($env:SPARK_AGENT_ARGS_DIR) { Join-Path (Join-Path $env:SPARK_AGENT_ARGS_DIR $cli) 'args.txt' } else { $null }
+    if ($file -and ($passThrough -cnotcontains $first) -and [System.IO.File]::Exists($file)) {
+        $ownSettings = $false
+        $strict = $false
+        foreach ($arg in $rest) {
+            $text = [string]$arg
+            if ($text -ceq '--settings' -or $text.StartsWith('--settings=', [System.StringComparison]::Ordinal)) { $ownSettings = $true }
+            if ($text -ceq '--strict-mcp-config') { $strict = $true }
+        }
+        try {
+            $lines = [System.IO.File]::ReadAllLines($file)
+        } catch {
+            $lines = @()
+        }
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if (($lines[$i] -ceq '--settings' -and $ownSettings) -or ($lines[$i] -ceq '--mcp-config' -and $strict)) {
+                $i++
+                continue
+            }
+            $extra += $lines[$i]
+        }
+    }
+    & $target @extra @rest
+}
+
+if ($env:SPARK_AGENT_ARGS_DIR) {
+    if (-not (Get-Command -Name claude -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        function Global:claude { __Spark-AgentExec 'claude' $args }
+    }
+    if (-not (Get-Command -Name codex -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        function Global:codex { __Spark-AgentExec 'codex' $args }
+    }
+}
+
 # Worker sessions (Claude / Codex hosted in pwsh) set this var so the
 # integration is skipped: its OSC writes confuse Ink-based TUIs and the
 # PSReadLine key hook can desync the cursor before claude takes over.

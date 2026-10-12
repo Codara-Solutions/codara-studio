@@ -189,6 +189,54 @@ if [ -z "$__SPARK_HOOKS_LOADED" ] && [ "$SPARK_NO_SHELL_INTEGRATION" != "1" ]; t
   _spark_precmd
 fi
 
+# A `claude` or `codex` typed in a Codara pane gets Codara's hooks, MCP
+# server and Codex notify as flags read from $SPARK_AGENT_ARGS_DIR (one
+# argument per line, data that is never evaluated), so nothing is written
+# to the user's own CLI config. Defined after the user's rc files, and only
+# when Codara set that folder and the user has no function or alias of that
+# name. Management subcommands and a missing file run the CLI untouched. A
+# `--settings` of the user's keeps Codara's out (Claude honors only the last
+# one), and `--strict-mcp-config` keeps Codara's server out of that strict
+# set. bash 3.2 safe: an empty array is expanded with the `+` guard.
+_spark_agent_exec() {
+  local cli="$1" file line arg own_settings=0 strict=0 skip=0
+  shift
+  local -a extra=()
+  case "$cli:${1-}" in
+    claude:auth|claude:mcp|claude:config|claude:doctor|claude:update|claude:install|claude:setup-token|claude:plugin|claude:migrate-installer|claude:-v|claude:--version|claude:-h|claude:--help|\
+    codex:login|codex:logout|codex:mcp|codex:completion|codex:update|codex:doctor|codex:sandbox|codex:debug|codex:apply|codex:plugin|codex:app-server|codex:remote-control|codex:agents|codex:--version|codex:-V|codex:--help|codex:-h)
+      command "$cli" "$@"
+      return ;;
+  esac
+  file="${SPARK_AGENT_ARGS_DIR-}/$cli/args.txt"
+  if [ -n "${SPARK_AGENT_ARGS_DIR-}" ] && [ -r "$file" ]; then
+    for arg in "$@"; do
+      case "$arg" in
+        --settings|--settings=*) own_settings=1 ;;
+        --strict-mcp-config) strict=1 ;;
+      esac
+    done
+    {
+      while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$skip" = 1 ]; then skip=0; continue; fi
+        if [ "$line" = "--settings" ] && [ "$own_settings" = 1 ]; then skip=1; continue; fi
+        if [ "$line" = "--mcp-config" ] && [ "$strict" = 1 ]; then skip=1; continue; fi
+        extra+=("$line")
+      done < "$file"
+    } 2>/dev/null
+  fi
+  command "$cli" ${extra[@]+"${extra[@]}"} "$@"
+}
+
+if [ -n "${SPARK_AGENT_ARGS_DIR-}" ]; then
+  if ! declare -F claude >/dev/null 2>&1 && ! alias claude >/dev/null 2>&1; then
+    claude() { _spark_agent_exec claude "$@"; }
+  fi
+  if ! declare -F codex >/dev/null 2>&1 && ! alias codex >/dev/null 2>&1; then
+    codex() { _spark_agent_exec codex "$@"; }
+  fi
+fi
+
 # Follow the pointer right before a command runs. bash has no preexec;
 # PS0 expands in a subshell (cannot export) so a DEBUG trap is the only
 # hook that runs in the shell before the fork. An existing DEBUG trap (a
