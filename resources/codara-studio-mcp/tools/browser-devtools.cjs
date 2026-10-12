@@ -5,6 +5,7 @@
 
 module.exports = {
   order: 40,
+  budget: 3000,
   tools: [
     {
       name: "codara_preview_console",

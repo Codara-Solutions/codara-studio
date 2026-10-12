@@ -24,7 +24,11 @@ fs.writeFileSync(
   JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }),
 );
 
-const PREVIEW_TOOLS = [
+// The browser tools ship from the modules in resources/codara-studio-mcp/tools/
+// (test-mcp-tool-manifest.cjs checks their contract), so every roster below
+// takes the browser list from that registry. These are the tools that must
+// never disappear from it.
+const CORE_PREVIEW_TOOLS = [
   "codara_preview_list",
   "codara_preview_navigate",
   "codara_preview_snapshot",
@@ -45,6 +49,10 @@ const PREVIEW_TOOLS = [
   "codara_preview_resize",
   "codara_preview_run",
 ];
+const PREVIEW_TOOLS = require(path.join(__dirname, "..", "resources", "codara-studio-mcp", "tools", "index.cjs"))
+  .toolRegistry()
+  .tools.map((tool) => tool.name);
+for (const name of CORE_PREVIEW_TOOLS) assert.ok(PREVIEW_TOOLS.includes(name), `${name} is missing from the browser tool modules`);
 const TERMINAL_TOOLS = [
   "codara_terminal_run",
   "codara_terminal_create",
@@ -74,8 +82,11 @@ const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, 
 const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
-// Code, Codex and Grok session pays for on every request.
-const LIST_BUDGET = { studio: 20_000, run: 30_000, worker: 26_000, execute: 85_000, automation: 60_000 };
+// Code, Codex and Grok session pays for on every request. Each roster carries
+// every tool module, so these move with TOOL_MODULES_BUDGET in
+// test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
+// round that added the Chrome extension, audits and captures).
+const LIST_BUDGET = { studio: 29_000, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

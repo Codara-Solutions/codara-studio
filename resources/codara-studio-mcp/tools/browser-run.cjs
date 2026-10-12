@@ -7,6 +7,7 @@
 
 module.exports = {
   order: 1000,
+  budget: 1800,
   tools: [
     {
       name: "codara_preview_run",

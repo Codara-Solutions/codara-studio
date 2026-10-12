@@ -71,6 +71,20 @@ assert.deepEqual(
   "the run tool lists exactly the registered step actions",
 );
 
+// Every session re-sends the tool list on each request, so each module spends
+// at most its own budget and the budgets together stay under one cap. A
+// module that needs more takes it from another module's budget; raising the
+// cap raises every session's cost (the roster budgets in
+// test-codara-studio-mcp.cjs follow it).
+const TOOL_MODULES_BUDGET = 18_300;
+let budgeted = 0;
+for (const mod of registry.modules) {
+  assert.equal(typeof mod.budget, "number", `${mod.file} declares its budget`);
+  assert.ok(mod.chars <= mod.budget, `${mod.file} uses ${mod.chars} characters, over its budget of ${mod.budget}`);
+  budgeted += mod.budget;
+}
+assert.ok(budgeted <= TOOL_MODULES_BUDGET, `tool module budgets add up to ${budgeted}, over the cap of ${TOOL_MODULES_BUDGET}`);
+
 // A module dropped into a copy of the folder is picked up with no other edit,
 // and the registry rejects the mistakes that would break a roster.
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codara-tool-modules-"));
@@ -109,6 +123,8 @@ try {
     { name: "codara_preview_norpc", description: "x", inputSchema: { type: "object" } },
   ] };\n`);
   assert.throws(() => freshRegistry(), /needs an rpc/);
+  fs.writeFileSync(path.join(scratch, "zz-probe.cjs"), `module.exports = { order: 55, budget: "lots", tools: [] };\n`);
+  assert.throws(() => freshRegistry(), /budget must be a number/);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }
@@ -143,5 +159,46 @@ for (const env of MODES) {
 const installer = fs.readFileSync(path.join(ROOT, "src", "main", "mcp-installer.ts"), "utf8");
 assert.doesNotMatch(installer, /"codara_[a-z_]+"/, "mcp-installer.ts must not hand-keep tool names");
 assert.match(installer, /toolManifest/, "mcp-installer.ts reads the server's manifest");
+
+// 4. A browser tool that changes the page is fenced for read-only workers
+// (resources/pi-cora/worker-policy.ts), or is listed here as safe for them.
+// A new tool that does neither fails here until someone decides.
+const FENCE_EXEMPT = new Set([
+  "codara_preview_navigate",
+  "codara_preview_scroll",
+  "codara_preview_hover",
+  "codara_preview_resize",
+  "codara_preview_inbox",
+]);
+const policyBundle = require("esbuild").buildSync({
+  entryPoints: [path.join(ROOT, "resources", "pi-cora", "worker-policy.ts")],
+  bundle: true,
+  write: false,
+  platform: "node",
+  format: "cjs",
+}).outputFiles[0].text;
+const policyModule = { exports: {} };
+new Function("module", "exports", "require", policyBundle)(policyModule, policyModule.exports, require);
+const readonlyFence = policyModule.exports.fencedToolNames({ CODARA_PI_WORKER_ACCESS: "readonly" });
+for (const name of manifest.browser) {
+  if (registry.annotations.readOnly.has(name)) {
+    assert.ok(!FENCE_EXEMPT.has(name), `${name} is read-only; drop it from FENCE_EXEMPT`);
+    continue;
+  }
+  assert.ok(
+    readonlyFence.has(name) !== FENCE_EXEMPT.has(name),
+    readonlyFence.has(name)
+      ? `${name} is fenced; drop it from FENCE_EXEMPT`
+      : `${name} changes the page: add it to FENCE_BRIDGE_MUTATING in resources/pi-cora/worker-policy.ts, mark it readOnly, or list it in FENCE_EXEMPT`,
+  );
+}
+
+// Terminal tools run commands, so every fenced worker loses all of them.
+const shellFence = policyModule.exports.fencedToolNames({ CODARA_PI_WORKER_ACCESS: "edits" });
+for (const name of Object.values(manifest).flat()) {
+  if (name.startsWith("codara_terminal_")) {
+    assert.ok(shellFence.has(name), `${name} runs commands: add it to FENCE_BRIDGE_SHELL in resources/pi-cora/worker-policy.ts`);
+  }
+}
 
 console.log(`mcp tool manifest: ${manifestNames.size} tools in ${Object.keys(manifest).length} families, ${registry.modules.length} tool modules`);

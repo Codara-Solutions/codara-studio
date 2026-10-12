@@ -6,6 +6,7 @@
 
 module.exports = {
   order: 30,
+  budget: 3400,
   tools: [
     {
       name: "codara_preview_mouse",

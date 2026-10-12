@@ -7,6 +7,7 @@ const { PREVIEW_WAIT_MAX_MS } = require("./lib/limits.cjs");
 
 module.exports = {
   order: 10,
+  budget: 4400,
   tools: [
     {
       name: "codara_preview_list",

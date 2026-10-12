@@ -5,6 +5,7 @@
 
 module.exports = {
   order: 20,
+  budget: 2200,
   tools: [
     {
       name: "codara_preview_screenshot",

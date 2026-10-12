@@ -13,6 +13,9 @@ import { chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
 import { devtoolsPreviewTools } from "./devtools";
 import { inputPreviewTools } from "./input";
+import { insightPreviewTools } from "./insight";
+import { pointPreviewTools } from "./point";
+import { serverTools } from "./servers";
 import { PreviewToolParamsError, type PreviewToolEntry, type PreviewToolHost, type PreviewToolTable } from "./types";
 
 export { PreviewToolParamsError, type PreviewToolHost } from "./types";
@@ -22,6 +25,9 @@ const TABLES: readonly PreviewToolTable[] = [
   capturePreviewTools,
   inputPreviewTools,
   devtoolsPreviewTools,
+  insightPreviewTools,
+  pointPreviewTools,
+  serverTools,
 ];
 
 function mergeTables(tables: readonly PreviewToolTable[]): Map<string, PreviewToolEntry> {

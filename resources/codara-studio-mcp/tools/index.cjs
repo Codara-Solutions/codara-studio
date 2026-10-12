@@ -11,6 +11,10 @@
 //   {
 //     order: 40,              // modules list their tools in ascending order
 //     family: "browser",      // optional, default "browser"; see FAMILIES
+//     budget: 1250,           // JSON characters its tools may add to every
+//                             // roster (definitions plus run-step fields);
+//                             // scripts/test-mcp-tool-manifest.cjs caps the
+//                             // sum, since every session re-sends the list
 //     instructions: "...",    // optional, appended to the initialize text
 //     tools: [entry, ...],
 //   }
@@ -63,7 +67,8 @@ function loadModules(dir) {
     if (typeof mod.order !== "number" || !Number.isFinite(mod.order)) fail(file, "must export a numeric order");
     const family = mod.family === undefined ? "browser" : mod.family;
     if (!FAMILIES.has(family)) fail(file, `unknown family ${JSON.stringify(family)}`);
-    modules.push({ file, order: mod.order, family, instructions: mod.instructions, tools: mod.tools });
+    if (mod.budget !== undefined && (typeof mod.budget !== "number" || !(mod.budget >= 0))) fail(file, "budget must be a number of characters");
+    modules.push({ file, order: mod.order, family, budget: mod.budget, instructions: mod.instructions, tools: mod.tools });
   }
   modules.sort((a, b) => a.order - b.order || a.file.localeCompare(b.file));
   return modules;
@@ -83,9 +88,11 @@ function buildRegistry(dir = __dirname) {
   const families = {};
   const annotations = { readOnly: new Set(), destructive: new Set(), idempotent: new Set(), openWorld: new Set() };
   const instructions = [];
+  const cost = new Map();
   let runEntry = null;
 
   for (const mod of modules) {
+    let chars = 0;
     if (typeof mod.instructions === "string" && mod.instructions.trim()) instructions.push(mod.instructions.trim());
     for (const entry of mod.tools) {
       const name = entry && entry.name;
@@ -113,12 +120,15 @@ function buildRegistry(dir = __dirname) {
           order: entry.step.order,
           properties: entry.step.properties || {},
         });
+        chars += name.length - STEP_PREFIX.length + 3 + JSON.stringify(entry.step.properties || {}).length;
       }
       if (name === RUN_TOOL) runEntry = entry;
       if (entry.rpc) toRpc[name] = entry.rpc;
       tools.push(definition(entry));
+      chars += JSON.stringify(definition(entry)).length;
       (families[mod.family] ||= []).push(name);
     }
+    cost.set(mod.file, chars);
   }
 
   steps.sort((a, b) => a.order - b.order || a.action.localeCompare(b.action));
@@ -136,7 +146,14 @@ function buildRegistry(dir = __dirname) {
     families,
     annotations,
     instructions,
-    modules: modules.map((mod) => ({ file: mod.file, order: mod.order, family: mod.family, tools: mod.tools.map((entry) => entry.name) })),
+    modules: modules.map((mod) => ({
+      file: mod.file,
+      order: mod.order,
+      family: mod.family,
+      budget: mod.budget,
+      chars: cost.get(mod.file),
+      tools: mod.tools.map((entry) => entry.name),
+    })),
   };
 }
 
