@@ -136,11 +136,15 @@ export default function WorkerModelsSection({
                 {group.models.map((modelId) => {
                   const entry = byId.get(modelId);
                   const on = enabled.includes(modelId);
+                  // A signed-out provider says so once in its heading; a row
+                  // repeats it only when it is switched on and so idle.
                   const reason = isOpenRouterModelId(modelId)
                     ? on && !usableSet.has(modelId)
                       ? "Key not verified"
                       : null
-                    : entry?.unavailable ?? null;
+                    : entry?.unavailable === "Not signed in" && !on
+                      ? null
+                      : entry?.unavailable ?? null;
                   return (
                     <WorkerModelRow
                       key={modelId}
