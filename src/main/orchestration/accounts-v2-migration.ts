@@ -335,7 +335,8 @@ interface RowPlan {
  * Classify every v1 row (spec 11, step 3). At most one row per provider
  * becomes the System row: the first whose identity is the System login and
  * that v1 had in the System home (personal, or the managed profile it had
- * moved there).
+ * moved there). Only when no row matches that way does a personal row whose
+ * identity cannot be compared take the slot.
  */
 async function classify(
   deps: AccountsV2MigrationDeps,
@@ -344,24 +345,36 @@ async function classify(
   journal: AccountsV2Journal,
   now: number,
 ): Promise<RowPlan[]> {
-  const systemTaken = new Set<PiSubscriptionProvider>();
-  const plans: RowPlan[] = [];
+  // Two passes, because the order of the rows says nothing: a positive match
+  // further down (the managed profile v1 had moved into the System home)
+  // must win over an earlier personal row that cannot be compared, or that
+  // profile stays managed and Codara keeps refreshing the user's own family.
+  const positive = new Map<PiSubscriptionProvider, PiAccountLegacyProfile>();
+  const unknown = new Map<PiSubscriptionProvider, PiAccountLegacyProfile>();
   for (const row of rows) {
     const context = contexts.get(row.provider)!;
+    if (!context.system.signedIn) continue;
     const personal = isPersonal(row);
     const managedId = !personal && row.cliProfileId ? row.cliProfileId : null;
     const inSystemHome = personal || (managedId !== null && managedId === context.liveId);
+    if (!inSystemHome) continue;
     // A personal row whose identity cannot be compared is treated as the
     // System login's: guessing wrong there would spend its token family.
     const identityKnown =
       Boolean(row.identityFingerprint && context.system.identityFingerprint) ||
       Boolean(normalizeEmail(row.accountEmail) && normalizeEmail(context.system.email));
-    const isSystem =
-      context.system.signedIn &&
-      inSystemHome &&
-      (sameIdentity(row, context.system) || (personal && !identityKnown));
-    if (isSystem && !systemTaken.has(row.provider)) {
-      systemTaken.add(row.provider);
+    if (sameIdentity(row, context.system)) {
+      if (!positive.has(row.provider)) positive.set(row.provider, row);
+    } else if (personal && !identityKnown && !unknown.has(row.provider)) {
+      unknown.set(row.provider, row);
+    }
+  }
+  const plans: RowPlan[] = [];
+  for (const row of rows) {
+    const context = contexts.get(row.provider)!;
+    const personal = isPersonal(row);
+    const managedId = !personal && row.cliProfileId ? row.cliProfileId : null;
+    if ((positive.get(row.provider) ?? unknown.get(row.provider)) === row) {
       plans.push({ row, kase: "system", cli: { kind: "system" }, cora: "borrowed" });
       continue;
     }

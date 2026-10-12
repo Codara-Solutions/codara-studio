@@ -44,6 +44,7 @@ const ROW = {
   mainC: "a65c34aa-0000-4000-8000-000000000005",
   workC: "a0000000-0000-4000-8000-000000000006",
   oneX: "51a7666f-0000-4000-8000-000000000007",
+  oneC: "a0000000-0000-4000-8000-000000000008",
 };
 const CLAUDE_MAIN = "bd5882bc-0000-4000-8000-000000000011";
 const CLAUDE_WORK = "bd5882bc-0000-4000-8000-000000000012";
@@ -134,7 +135,11 @@ const claudeLogin = (access, expiresAt) => ({
 
 let fixtureIndex = 0;
 
-/** The owner's v1 machine (spec 11.1), optionally with a still-alive old personal Claude login. */
+/**
+ * The owner's v1 machine (spec 11.1), optionally with a still-alive old
+ * personal Claude login, or with personal rows that carry no identity and
+ * come before the rows v1 had moved into the System homes.
+ */
 async function buildFixture(H, options = {}) {
   fixtureIndex += 1;
   const HOME = path.join(TMP, `fixture-${fixtureIndex}`, "home");
@@ -210,14 +215,23 @@ async function buildFixture(H, options = {}) {
   writeJson(path.join(piRoot, "auth.json"), pi("anthropic", "legacy", NOW.getTime() + DAY));
   const at = "2026-01-01T00:00:00.000Z";
   const row = (id, provider, label, extra) => ({ id, provider, label, createdAt: at, updatedAt: at, ...extra });
+  const mainA = row(ROW.mainA, "anthropic", "Main", { identityFingerprint: sha(MAIN_UUID), cliProfileId: CLAUDE_MAIN });
+  const mainC = row(ROW.mainC, "openai-codex", "Main", { identityFingerprint: sha(CODEX_MAIN), cliProfileId: CODEX_MAIN_CLI });
+  const oneA = options.identitylessPersonalFirst
+    ? row(ROW.oneA, "anthropic", "Account 1", { cliProfileId: "personal" })
+    : row(ROW.oneA, "anthropic", "Account 1", { identityFingerprint: sha(KUNIX_UUID), cliProfileId: "personal" });
+  if (options.identitylessPersonalFirst) {
+    writeJson(piAuth(ROW.oneC), pi("openai-codex", "codex-personal-cora", NOW.getTime() + DAY));
+  }
   writeJson(path.join(piRoot, "account-profiles.json"), {
     version: 1,
     profiles: [
-      row(ROW.mainA, "anthropic", "Main", { identityFingerprint: sha(MAIN_UUID), cliProfileId: CLAUDE_MAIN }),
-      row(ROW.oneA, "anthropic", "Account 1", { identityFingerprint: sha(KUNIX_UUID), cliProfileId: "personal" }),
+      ...(options.identitylessPersonalFirst
+        ? [oneA, row(ROW.oneC, "openai-codex", "Account 1", { cliProfileId: "personal" }), mainA]
+        : [mainA, oneA]),
       row(ROW.workA, "anthropic", "Work", { identityFingerprint: sha(WORK_UUID), cliProfileId: CLAUDE_WORK }),
       row(ROW.coraA, "anthropic", "Cora only", {}),
-      row(ROW.mainC, "openai-codex", "Main", { identityFingerprint: sha(CODEX_MAIN), cliProfileId: CODEX_MAIN_CLI }),
+      mainC,
       row(ROW.workC, "openai-codex", "Work", { identityFingerprint: sha(CODEX_WORK), cliProfileId: CODEX_WORK_CLI }),
       row(ROW.oneX, "xai", "Account 1", { identityFingerprint: sha(GROK_SUBJECT), cliProfileId: "personal" }),
     ],
@@ -340,6 +354,22 @@ async function main() {
   assert.equal(again.migrated, false);
   assert.equal(fs.readFileSync(path.join(f.piRoot, "account-profiles.json"), "utf8"), registryBytes);
   pass("a second run changes nothing");
+
+  // --- A personal row with no identity comes before the moved-in account ----
+  const p = await buildFixture(H, { identitylessPersonalFirst: true });
+  const systemBeforeP = p.systemHashes();
+  const ordered = await H.migration.migrateAccountsToV2(p.deps);
+  assert.equal(ordered.cases[ROW.mainA], "system", "the moved-in Claude account must take the System slot");
+  assert.equal(ordered.cases[ROW.mainC], "system", "the moved-in Codex account must take the System slot");
+  assert.equal(ordered.cases[ROW.oneA], "dead");
+  assert.equal(ordered.cases[ROW.oneC], "cora-only");
+  assert.equal(readJson(p.piAuth(ROW.mainA)).anthropic.refresh, "", "Cora kept a refresh token of the user's own family");
+  assert.equal(readJson(p.piAuth(ROW.mainC))["openai-codex"].refresh, "");
+  assert.equal(readJson(p.piAuth(ROW.oneC))["openai-codex"].refresh, "codex-personal-cora-refresh");
+  assert.deepEqual((await p.claudeStore.snapshot()).profiles.map((profile) => profile.id), [CLAUDE_WORK]);
+  assert.deepEqual((await p.codexStore.snapshot()).profiles.map((profile) => profile.id), [CODEX_WORK_CLI]);
+  assert.deepEqual(p.systemHashes(), systemBeforeP);
+  pass("an identity-less personal row listed first does not keep the moved-in account managed");
 
   // --- A crash before the commit resumes without duplicating work ------------
   const g = await buildFixture(H, { personalAlive: true });
