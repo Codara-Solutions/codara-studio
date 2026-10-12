@@ -322,6 +322,34 @@ async function main() {
     assert.deepEqual(reset, wmc.emptyCatalogState());
   });
 
+  await check("a switched-on dated id keeps its row and stays usable once its undated twin appears", () => {
+    const listing = (ids) => ({
+      listedFrom: "provider",
+      models: ids.map((id) => ({ id })),
+      authoritative: true,
+      note: null,
+      checkedAt: null,
+    });
+    const build = (piIds, enabled) => wmc.buildWorkerModelCatalog({
+      pi: piIds.map((id) => ({ id, label: id, provider: "anthropic", reasoning: true, thinkingLevels: ["low"] })),
+      listings: { anthropic: listing(["claude-opus-7-20270101"]) },
+      signedIn: new Set(["anthropic"]),
+      enabled,
+      state: wmc.emptyCatalogState(),
+      now: clock,
+    }).catalog;
+    const before = build([], ["claude-opus-7-20270101"]);
+    assert.equal(find(before, "claude-opus-7-20270101").unavailable, null);
+    const after = build(["claude-opus-7"], ["claude-opus-7-20270101"]);
+    const saved = find(after, "claude-opus-7-20270101");
+    assert.ok(saved, "the saved selection is still listed");
+    assert.equal(saved.unavailable, null, "Pi learning the evergreen alias does not retire the saved id");
+    assert.deepEqual(saved.sources, ["provider"]);
+    assert.equal(find(after, "claude-opus-7").unavailable, null);
+    const unselected = build(["claude-opus-7"], []);
+    assert.equal(find(unselected, "claude-opus-7-20270101"), undefined, "an unselected snapshot still folds into its twin");
+  });
+
   await check("the picker shape leaves out ids nobody lists", async () => {
     const result = await catalog.read();
     const listed = result.models.filter((model) => model.sources.length > 0);

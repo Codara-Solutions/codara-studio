@@ -336,17 +336,19 @@ export function buildWorkerModelCatalog(input: {
       });
     }
   }
-  // An evergreen id and its dated snapshot launch the same model.
+  const enabled = new Set(input.enabled.map((id) => id.trim()).filter(Boolean));
+  // An evergreen id and its dated snapshot launch the same model. A dated id
+  // the user switched on keeps its own row: merged away, it would come back
+  // below with no source and read "No longer listed" while it still runs.
   for (const id of [...candidates.keys()]) {
     const dated = DATED_ID.exec(id);
-    if (dated && candidates.has(dated[1])) {
+    if (dated && candidates.has(dated[1]) && !enabled.has(id)) {
       const twin = candidates.get(dated[1])!;
       for (const source of candidates.get(id)!.sources) twin.sources.add(source);
       candidates.delete(id);
     }
   }
 
-  const enabled = new Set(input.enabled.map((id) => id.trim()).filter(Boolean));
   for (const id of enabled) {
     const provider = workerModelSubscription(id);
     if (!provider || candidates.has(id) || !routableWorkerModel(provider, id)) continue;
