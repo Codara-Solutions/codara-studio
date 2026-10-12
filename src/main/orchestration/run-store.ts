@@ -266,7 +266,7 @@ import {
 import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
-import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { forgetRunMemory, formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
@@ -14918,6 +14918,8 @@ export async function deleteRun(runId: string): Promise<void> {
   }
   activeAutopilotPlans.delete(run.id);
   activeAutopilotReviews.delete(run.id);
+  // The chat's outcome record goes with it. Never throws.
+  await forgetRunMemory(run);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
