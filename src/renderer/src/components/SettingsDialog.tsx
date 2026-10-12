@@ -58,6 +58,7 @@ import {
   accountProviderSummary,
   type AccountProviderDescriptor,
 } from "../lib/account-provider-descriptors";
+import { stableAccountCardKeys } from "../lib/account-card-keys";
 import RemoteAccessSettings from "./RemoteAccessSettings";
 import { CardOverflowMenu } from "./AccountCardPrimitives";
 import { CodaraMark, RuntimeMark } from "./BrandMarks";
@@ -1614,6 +1615,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   const [cliInspection, setCliInspection] =
     useState<NativeCliAccountsInspection | null>(null);
   const [cliError, setCliError] = useState<string | null>(null);
+  // Every id's card key for as long as this list is mounted; see
+  // stableAccountCardKeys.
+  const cardKeysRef = useRef(new Map<string, string>());
   const {
     overview: usageOverview,
     loading: usageLoading,
@@ -1925,9 +1929,10 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       const cliUnavailable = inspected?.unavailable === true;
 
       // One card per account, paired in the main process: every Cora row
-      // names its terminal half, so nothing is matched here. Keys are the
-      // row id (or the terminal id for a half without a row), which never
-      // changes when a half is shared, so cards never remount.
+      // names its terminal half, so nothing is matched here. A card is first
+      // keyed by the row id (or the terminal id for a half without a row) and
+      // then keeps that key while it gains or loses a half; see
+      // stableAccountCardKeys.
       const linked = new Set(
         piProfiles.flatMap((profile) =>
           profile.cliProfileId ? [profile.cliProfileId] : [],
@@ -1991,7 +1996,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         }));
       // No card is drawn without a row; the System login appears only as
       // its offer line until the user adds it.
-      const cards = [...rows, ...terminalOnly];
+      const cards = stableAccountCardKeys([...rows, ...terminalOnly], cardKeysRef.current);
       const systemRow = piProfiles.some((profile) => profile.builtIn);
       const anyActive = piProfiles.some((profile) => profile.isDefault);
       const systemOffer = overview?.systemOffers?.[provider];

@@ -41,7 +41,10 @@ export type AccountCardState =
   | "system";
 
 export interface AccountCardView {
-  /** Stable across pairing: <provider>:<coraId> or <provider>:cli:<cliId>. */
+  /**
+   * <provider>:<coraId> or <provider>:cli:<cliId> when first drawn, then kept
+   * while the account gains or loses a half (stableAccountCardKeys).
+   */
   key: string;
   provider: PiSubscriptionProvider;
   label: string;

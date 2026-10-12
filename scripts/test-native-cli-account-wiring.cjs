@@ -212,9 +212,14 @@ assert.doesNotMatch(
   "no switch or sign-in may go through the native CLI account store",
 );
 assert.doesNotMatch(card, /nativeCliAccounts|spark:open-native-cli/);
-// Card keys are ids main assigned, so pairing never remounts a card.
+// Card keys start as ids main assigned and are kept while an account gains
+// or loses a half, so pairing never remounts a card.
 assert.match(settings, /key: `\$\{provider\}:\$\{profile\.id\}`/);
 assert.match(settings, /key: `\$\{provider\}:cli:\$\{profile\.id\}`/);
+assert.match(
+  settings,
+  /const cards = stableAccountCardKeys\(\[\.\.\.rows, \.\.\.terminalOnly\], cardKeysRef\.current\);/,
+);
 // No pseudo-card for the CLI's own login; the Codara-side label preference
 // is gone with the two-facet card.
 assert.doesNotMatch(settings, /account-one|"Account 1"/);

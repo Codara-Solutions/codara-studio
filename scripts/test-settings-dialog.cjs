@@ -63,6 +63,15 @@ check("an Escape a menu already took never closes the dialog behind it", () => {
   assert.match(capabilities, /window\.addEventListener\("keydown", onKey\);/);
 });
 
+check("a scroll delivered after a menu opened closes it only when the anchor moved", () => {
+  const menu = read(...components, "chat", "composer", "AnchoredMenu.tsx");
+  assert.match(menu, /placedAnchorRef\.current = \{ top: rect\.top, left: rect\.left \};/);
+  assert.match(
+    menu,
+    /if \(!target\.contains\(anchor\)\) return;\s*const placed = placedAnchorRef\.current;[\s\S]*?Math\.abs\(rect\.top - placed\.top\) < 1[\s\S]*?return;\s*\}\s*onClose\(\);/,
+  );
+});
+
 check("a click on the Capability Center backdrop never closes it either", () => {
   assert.doesNotMatch(capabilities, /onMouseDown=\{\(\) => requestLeave\(/);
   assert.match(capabilities, /<div style=\{overlayStyle\}>\s*\n/);

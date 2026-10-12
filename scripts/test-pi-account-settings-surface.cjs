@@ -156,7 +156,10 @@ assert.match(settings, /\.\.\.\(profile\.terminal \? \{ terminal: profile\.termi
 // No card is drawn without a row: the System login is a row the user added
 // or a one-line offer, never a pseudo-card.
 assert.doesNotMatch(settings, /account-one|accountOneSlot|"Account 1"/);
-assert.match(settings, /const cards = \[\.\.\.rows, \.\.\.terminalOnly\];/);
+assert.match(
+  settings,
+  /const cards = stableAccountCardKeys\(\[\.\.\.rows, \.\.\.terminalOnly\], cardKeysRef\.current\);/,
+);
 assert.match(settings, /const systemOffer = overview\?\.systemOffers\?\.\[provider\];/);
 assert.match(settings, /canUseSystemLogin: anyActive && !systemRow,/);
 // No provider branch, no renderer-side pairing, no second card shape.
