@@ -51,12 +51,15 @@ function fakeDeps() {
     calls: [],
     killed: [],
     spawnOk: true,
+    // Per-call answers for waitForSpawn, used before spawnOk.
+    spawnResults: [],
     nextOverlay: 1,
     nextTab: 1,
     directories: new Set(["/work", "/work/sub"]),
     paneAlive: (paneId) => alive.has(paneId),
     waitForSpawn: async (paneId) => {
-      if (!deps.spawnOk) return false;
+      const answer = deps.spawnResults.length > 0 ? deps.spawnResults.shift() : deps.spawnOk;
+      if (!answer) return false;
       alive.add(paneId);
       return true;
     },
@@ -226,11 +229,24 @@ async function main() {
   const failingOpener = paneOpen.createPaneOpener(failing);
   await rejectsWith(failingOpener.open({ paneId: "pane-x", mode: "overlay", command: "x" }), "spawn", /failed to start/);
   assert.deepEqual(failing.calls.map((call) => call.op), ["overlay", "closeOverlay"]);
+  assert.deepEqual(failing.killed, ["overlay-1"], "an overlay PTY already asked for is ended with its overlay");
   await rejectsWith(failingOpener.open({ paneId: "pane-x", mode: "tab" }), "spawn", /failed to start/);
   assert.deepEqual(failing.calls.at(-1), { op: "destroy", params: { tabId: "term-1", paneId: "pane-new-1" } });
   failing.spawnOk = true;
   const retried = await failingOpener.open({ paneId: "pane-x", mode: "overlay", command: "x" });
   assert.equal(retried.mode, "overlay", "a failed overlay does not block the next one");
+
+  // The wait runs out, then the renderer's PTY comes up after all: it has no
+  // overlay to show in, so it is ended instead of running unseen.
+  const late = fakeDeps();
+  late.alive.add("pane-y");
+  late.spawnResults.push(false, true);
+  const lateOpener = paneOpen.createPaneOpener(late);
+  await rejectsWith(lateOpener.open({ paneId: "pane-y", mode: "overlay", command: "x" }), "spawn", /failed to start/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(late.killed, ["overlay-1", "overlay-1"], "a late overlay PTY is ended once it appears");
+  assert.equal(late.alive.has("overlay-1"), false);
+  assert.equal(lateOpener.hostOf("overlay-1"), null);
   console.log("PASS a terminal that never starts is cleaned up and reported as a spawn failure");
 }
 

@@ -124,6 +124,13 @@ export function createPaneOpener(deps: PaneOpenDeps) {
       }
       if (!(await deps.waitForSpawn(overlay, SPAWN_WAIT_MS))) {
         await deps.requestTerminalOp("closeOverlay", { paneId: overlay }).catch(() => undefined);
+        // The renderer may already have asked for this PTY. Once the overlay
+        // is gone nothing shows it and no host exit ends it, so one that
+        // comes up now or a little later must not keep running unseen.
+        deps.kill(overlay);
+        void deps.waitForSpawn(overlay, SPAWN_WAIT_MS).then((late) => {
+          if (late) deps.kill(overlay);
+        });
         throw new PaneOpenError("the overlay's terminal failed to start", "spawn");
       }
       hostByOverlay.set(overlay, host);
