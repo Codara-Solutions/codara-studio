@@ -480,6 +480,10 @@ interface Options {
   // workspace terminal stays a fully live in-memory surface. That trades some
   // background renderer work for instant, lossless tab/workspace returns.
   writeWhileHidden?: boolean;
+  // Asked each time the pane would take the keyboard on its own (first
+  // attach, reveal). Returning false leaves the focus where the user put it.
+  // The explicit focus() handle ignores it.
+  mayAutoFocus?: () => boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
@@ -589,6 +593,7 @@ export function useTerminalSession({
   initialExternalRows,
   rawTailReattach = false,
   writeWhileHidden = false,
+  mayAutoFocus,
   onSearchReady,
   onExit,
   onCwd,
@@ -622,6 +627,8 @@ export function useTerminalSession({
   useEffect(() => {
     inputBlockedRef.current = inputBlocked;
   }, [inputBlocked]);
+  const mayAutoFocusRef = useRef(mayAutoFocus);
+  mayAutoFocusRef.current = mayAutoFocus;
   const externalSizeOwnerRef = useRef<boolean>(externalSizeOwner);
   const externalGridRef = useRef<{ cols: number; rows: number } | null>(
     initialExternalCols && initialExternalRows
@@ -3606,7 +3613,8 @@ export function useTerminalSession({
         visible &&
         !readOnlyRef.current &&
         !inputBlockedRef.current &&
-        !modalDialogIsOpen()
+        !modalDialogIsOpen() &&
+        (mayAutoFocusRef.current?.() ?? true)
       ) {
         term.focus();
       }
@@ -3925,7 +3933,12 @@ export function useTerminalSession({
     // open modal dialog is the same hazard: it focused itself deliberately and
     // this must not take that back. Click-to-focus (the explicit focus() API)
     // still works for copy/scroll in every case.
-    if (!readOnlyRef.current && !inputBlockedRef.current && !modalDialogIsOpen()) {
+    if (
+      !readOnlyRef.current &&
+      !inputBlockedRef.current &&
+      !modalDialogIsOpen() &&
+      (mayAutoFocusRef.current?.() ?? true)
+    ) {
       termRef.current?.focus();
     }
     return () => {

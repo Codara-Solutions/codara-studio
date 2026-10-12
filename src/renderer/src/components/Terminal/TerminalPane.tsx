@@ -65,6 +65,8 @@ interface Props {
   // persistent live-TUI hosts and normal workspace terminals whose rendered
   // buffer must remain immediately ready across tab/workspace switches.
   writeWhileHidden?: boolean;
+  // See useTerminalSession: gates the pane taking the keyboard on its own.
+  mayAutoFocus?: () => boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
@@ -117,6 +119,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
+      mayAutoFocus,
       onSearchReady,
       onExit,
       onCwd,
@@ -155,6 +158,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
+      mayAutoFocus,
       onSearchReady,
       onExit,
       onCwd,

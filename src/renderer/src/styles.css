@@ -212,9 +212,10 @@
        --glass-bg-menu / --glass-blur-menu: menus that list rows. Enough
          frost that the text behind a row turns into color, not words.
        --glass-bg-read / --glass-blur-read / --glass-saturate-read: the
-         legibility tier. Dialogs, palettes and the notification center hold
-         dense text over live content (a scrolling terminal, a streaming
-         chat), so they keep the rim and frost but a deeper tint.
+         legibility tier. Dialogs, palettes, toasts, the notification center
+         and the Settings nav hold dense text over live content (a scrolling
+         terminal, a streaming chat), so they keep the rim and frost but a
+         deeper tint.
        --glass-specular: the top-lit highlight, a background-image layer over
          the fill. Brighter than --glass-sheen and gone by mid-height.
        --modal-scrim: the one dim behind every modal dialog, per theme, with
@@ -3944,8 +3945,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) {
     /* Toast fill: Toast paints --notify-surface inline, so the translucent
        fill rides the token; the blur comes from .spark-backdrop-glass.
-       Strong fill — toasts land over busy terminals and must stay readable. */
-    --notify-surface: var(--glass-bg-strong);
+       Read tier: toasts land over busy terminals and must stay readable. */
+    --notify-surface: var(--glass-bg-read);
   }
   /* Menus and popovers list rows of text over whatever they open on, so they
      take the menu tier: the lens still bends the rim, and the frost turns the
@@ -3979,10 +3980,10 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
   }
   html:not([data-glass="off"]) .spark-toast {
-    background-color: var(--glass-bg-strong);
+    background-color: var(--glass-bg-read);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
     border-color: var(--glass-border);
     box-shadow:
       var(--toast-status),
@@ -4004,22 +4005,10 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
-  /* Settings and the Capability Center keep an opaque reading pane (see the
-     Settings block below): both stay open over a live workbench while the
-     user reads dense text, and glass made that text fight whatever moved
-     behind it. Only their frame is glass. */
-  /* The worker session picker is the third surface with this problem: a tall
-     dialog whose rows repaint under the pointer (the highlight follows hover)
-     while the three-channel SVG lens re-rasterizes the whole dialog on top of
-     a blurred full-window scrim. That is what made the session list feel
-     laggy. Same compromise as the two panels above — one composited blur, no
-     lens, and `contain: paint` so a row repaint or a
-     list scroll can't invalidate the workbench behind the dialog. */
-  html:not([data-glass="off"]) .worker-session-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    contain: paint;
-  }
+  /* The worker session picker is a spark-overlay-surface: its rows repaint
+     under the pointer, so it takes the read tier below (one composited blur,
+     no lens, `contain: paint`) rather than running the SVG lens over a tall
+     list. */
   /* Fast modal glass: keep the translucent fill, sheen, rim and one local
      frost layer on the card, but never run the SVG refraction lens over a
      large scrolling dialog. */
@@ -4028,11 +4017,10 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
   }
-  /* Menus nested in either opaque face match it rather than frost it: the
-     face's `contain: paint` is a backdrop root, so a frosted menu inside it
-     would blur the panel's own interior and paint flat anyway. The account
-     and session menus are portalled out of the face but open over the same
-     dense rows, so they are opaque too. */
+  /* Menus nested in either face match its opaque reading pane rather than
+     frost it: they open over its dense rows, and inside the nav they would
+     be glass on glass. The account and session menus are portalled out of
+     the face but open over the same rows, so they are opaque too. */
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong,
   html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu,
@@ -4105,23 +4093,25 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .spark-quick-open__results {
     background: transparent;
   }
-  /* Settings and the Capability Center: the face is a glass frame (the nav
-     column frosts the dimmed workbench) around an opaque reading pane, so
-     long descriptions read on a solid tint. The face is the one glass layer:
-     its title bar, pane, footer and the cards in the pane stay opaque, so
-     nothing inside it frosts again. */
+  /* Settings and the Capability Center: the nav column is the one glass
+     layer, frosting the dimmed workbench at the read tier so its labels
+     never depend on what is open behind it. The face itself carries no
+     backdrop filter: its title bar, reading pane and footer are opaque, and a
+     filter on the whole face would re-blur that covered area on every frame
+     of a live terminal or chat behind Settings. Nothing inside the nav
+     frosts again. */
   html:not([data-glass="off"]) .settings-dialog-surface,
   html:not([data-glass="off"]) .agent-capabilities-surface {
-    --st-sidebar: color-mix(in oklab, var(--bg) min(calc(35% * var(--glass-veil-scale, 1)), 98%), transparent);
+    --st-sidebar: var(--glass-bg-read);
     background: transparent;
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
     border-color: var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
   }
   html:not([data-glass="off"]) .settings-dialog-surface .st-nav,
   html:not([data-glass="off"]) .agent-capabilities-surface .st-nav {
     background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
     border-right-color: color-mix(in oklab, var(--ink) 8%, transparent);
   }
   html:not([data-glass="off"]) .settings-dialog-surface .st-content,
@@ -4132,7 +4122,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-surface,
   :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-surface {
-    --st-sidebar: color-mix(in oklab, var(--panel) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
   }
 }
@@ -6567,7 +6556,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   display: flex;
   flex-direction: column;
   background: color-mix(in oklab, var(--bg) 88%, transparent);
-  backdrop-filter: blur(4px);
   outline: none;
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
 }
@@ -8923,11 +8911,6 @@ button.st-list__row:hover,
   border-radius: 50%;
   background: var(--ok);
 }
-.st-acct-status--ok {
-  flex: none;
-  align-items: center;
-  font-size: 11.5px;
-}
 .st-acct-status {
   display: flex;
   align-items: flex-start;
@@ -8936,11 +8919,17 @@ button.st-list__row:hover,
   font-size: 12px;
   line-height: 1.45;
 }
+/* Every tone but danger keeps --st-desc: --st-faint falls under 4.5:1 on the
+   card fill at this size, and a muted line can be a problem to act on (a
+   System login whose CLI is signed out). The green dot says "healthy". This
+   rule follows the base one so its size and alignment win. */
+.st-acct-status--ok {
+  flex: none;
+  align-items: center;
+  font-size: 11.5px;
+}
 .st-acct-status--danger { color: var(--danger); }
-.st-acct-status--ok { color: var(--st-faint); }
 .st-acct-status--ok .st-acct-status__glyph { color: var(--ok); }
-.st-acct-status--muted { color: var(--st-faint); }
-.st-acct-status--warn { color: var(--st-desc); }
 .st-acct-status--warn .st-acct-status__glyph { color: var(--warn); }
 .st-acct-status__glyph {
   flex: none;
@@ -9445,10 +9434,11 @@ button.st-list__row:hover,
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
   /* Section labels are the panel's scroll edge: a band of the panel's own
-     tint, nearly opaque, that the rows pass under. It does not frost them:
+     tint that the rows pass under. It stays opaque, since any translucency
+     ghosts the rows' text through the label, and it does not frost them:
      the panel is already the one glass layer here. */
   html:not([data-glass="off"]) .nc-section-head {
-    background: color-mix(in oklab, var(--panel-2) 94%, transparent);
+    background: var(--panel-2);
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09), inset 0 -1px 0 color-mix(in oklab, var(--ink) 7%, transparent);
   }
   html:not([data-glass="off"]) .nc-foot {
@@ -9460,7 +9450,7 @@ button.st-list__row:hover,
     background-color: var(--glass-bg-read);
   }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-section-head {
-    background: color-mix(in oklab, var(--panel) 96%, transparent);
+    background: var(--panel);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -9602,9 +9592,8 @@ button.st-list__row:hover,
    that arrow keys land on carries the ring, never the whole list. */
 .nc-list:focus-visible { box-shadow: none; }
 .nc-section + .nc-section { margin-top: 2px; }
-/* Opaque without glass: rows scroll under a sticky header, and plain
-   translucency shows their text through the label. Glass frosts it instead.
-   It sits above the rows' own stacking contexts (content-visibility implies
+/* Opaque with glass on or off: rows scroll under a sticky header, and any
+   translucency shows their text through the label. It sits above the rows' own stacking contexts (content-visibility implies
    paint containment). */
 .nc-section-head {
   position: sticky;

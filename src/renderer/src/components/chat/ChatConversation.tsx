@@ -609,7 +609,7 @@ function ConversationMinimap({
       })}
       {active ? (
         <div
-          className="cora-timeline-minimap__preview spark-glass--strong"
+          className="cora-timeline-minimap__preview spark-glass--strong spark-overlay-surface"
           style={{
             top: `${entries.length === 1 ? 0 : (entries.findIndex((entry) => entry.id === active.id) / (entries.length - 1)) * 100}%`,
           }}

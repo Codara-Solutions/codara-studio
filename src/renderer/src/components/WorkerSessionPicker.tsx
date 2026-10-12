@@ -343,7 +343,7 @@ export default function WorkerSessionPicker({
         aria-modal="true"
         aria-label={`${runtimeLabel} sessions`}
         tabIndex={-1}
-        className="spark-glass--strong worker-session-surface"
+        className="spark-glass--strong spark-overlay-surface worker-session-surface"
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={handleKeyDown}
         style={{

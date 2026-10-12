@@ -15,7 +15,8 @@ import { join } from "node:path";
 //   - the Liquid glass setting and the OS reduced-transparency setting each
 //     remove every backdrop filter, pseudo-elements included
 // It drives the real renderer in a temp Codara home, with a terminal, a
-// scrolled Cora chat, a workspace menu, the notification center and Settings.
+// scrolled Cora chat, a workspace folder in the rail, a workspace menu, the
+// notification center and Settings.
 
 test("glass is only on the layers that open above the window, one level deep, and fully off when asked", async () => {
   test.setTimeout(150_000);
@@ -46,6 +47,7 @@ test("glass is only on the layers that open above the window, one level deep, an
     });
     await expect(page.locator(".cora-jump-latest")).toBeVisible();
     await page.mouse.move(1, 450);
+    await expect(page.locator(".spark-workspace-folder").first()).toBeVisible();
 
     // The resting window holds no glass, and glass changes none of it.
     expect(await backdropFilters(page), "backdrop filters on the resting window").toEqual([]);
@@ -100,6 +102,26 @@ test("glass is only on the layers that open above the window, one level deep, an
     expect(withSettings.length, "the Settings face frosts").toBeGreaterThan(0);
     expect(nested(withSettings), "glass inside glass in Settings").toEqual([]);
     expect(await frostedOutside(page, ".settings-dialog-surface"), "frost outside Settings").toEqual([]);
+    // Only the nav column frosts, and at the read tier, so its labels never
+    // depend on what is open behind Settings.
+    const face = await settings.evaluate((node) => {
+      const filter = (el: Element) => getComputedStyle(el).backdropFilter || "none";
+      const nav = node.querySelector(".st-nav")!;
+      const fill = getComputedStyle(nav).backgroundColor;
+      const slash = fill.match(/\/\s*([\d.]+%?)\s*\)$/);
+      const rgba = fill.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\)$/);
+      const alpha = slash
+        ? slash[1].endsWith("%")
+          ? Number.parseFloat(slash[1]) / 100
+          : Number(slash[1])
+        : rgba
+          ? Number(rgba[1])
+          : 1;
+      return { face: filter(node), nav: filter(nav), navAlpha: alpha };
+    });
+    expect(face.face, "the Settings face frosts the area its opaque panes cover").toBe("none");
+    expect(face.nav, "the Settings nav frosts").not.toBe("none");
+    expect(face.navAlpha, "the Settings nav tint").toBeGreaterThanOrEqual(0.85);
     const pane = await settings.locator(".st-content").first().evaluate((node) => getComputedStyle(node).backgroundColor);
     expect(pane, "the Settings reading pane is opaque").not.toMatch(/\/\s*0?\.\d+\)$|rgba\(/);
     await setGlass(page, false);
@@ -312,11 +334,17 @@ async function prepareFixture(root: string) {
   const workspaceDir = join(root, "workspace");
   await mkdir(userDataDir, { recursive: true });
   await mkdir(workspaceDir, { recursive: true });
+  const filedDir = join(root, "filed");
+  await mkdir(filedDir, { recursive: true });
   await writeFile(join(workspaceDir, "README.md"), "# glass\n", "utf8");
   await writeFile(
     join(userDataDir, "spark-state.json"),
     JSON.stringify({
-      workspaces: [{ id: "ws-glass", name: "glass", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
+      workspaces: [
+        { id: "ws-glass", name: "glass", cwd: workspaceDir, color: "#42D6C7", workers: [] },
+        { id: "ws-filed", name: "filed", cwd: filedDir, color: "#D6A742", workers: [], groupId: "group-glass" },
+      ],
+      workspaceGroups: [{ id: "group-glass", name: "Folder", collapsed: false, color: "#D6A742" }],
       activeWorkspaceId: "ws-glass",
     }),
     "utf8",

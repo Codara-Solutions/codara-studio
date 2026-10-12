@@ -46,7 +46,7 @@ export default function SshManagerDialog({ onClose, onPick }: Props) {
     >
       <div className="spark-scrim" style={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <div
-        className="spark-glass"
+        className="spark-glass--strong spark-overlay-surface"
         onClick={(e) => e.stopPropagation()}
         style={{
           // Above the sibling scrim, which is the only other positioned child.

@@ -2043,7 +2043,7 @@ export default function FileTree({
           <div
             role="alertdialog"
             aria-label="Confirm folder move"
-            className="spark-glass--strong"
+            className="spark-glass--strong spark-overlay-surface"
             onClick={(e) => e.stopPropagation()}
             style={{
               width: 320,

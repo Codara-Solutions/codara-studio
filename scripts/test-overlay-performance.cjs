@@ -108,7 +108,6 @@ async function main() {
     "settings-dialog-surface",
     "agent-capabilities-surface",
     "nc-panel",
-    "spark-board-lightbox",
   ];
   const baseClasses = [
     "spark-shell",
@@ -148,6 +147,7 @@ async function main() {
           classesOf(selector).some((name) => overlayClasses.includes(name)),
           `${selector} frosts something that is not an overlay`,
         );
+        assert.match(selector, /:not\(\[data-glass="off"\]\)/, `${selector} frosts with Liquid glass off`);
       }
     }
     for (const selector of selectors) {
@@ -159,6 +159,49 @@ async function main() {
   assert.doesNotMatch(styles, /--glass-ambient|--glass-band|--capsule-|--scroll-edge-inset|--cora-composer-overlap/);
   assert.equal(fs.existsSync(renderer("lib", "scroll-edge.ts")), false);
   assert.doesNotMatch(source("tabs", "TerminalStack.tsx"), /spark-glass[\w-]* spark-pane-toolbar/);
+
+  // Inline styles and component stylesheets sit outside the glass gate, so
+  // a backdrop filter there would frost with glass off and under reduced
+  // transparency. Scrims dim with --modal-scrim and are never blurred.
+  for (const parts of [
+    ["components", "WorkspaceRail.tsx"],
+    ["components", "file-preview", "FilePreview.tsx"],
+    ["components", "git", "SplitCommitsDialog.tsx"],
+  ]) {
+    assert.doesNotMatch(source(...parts), /backdropFilter|WebkitBackdropFilter/, `${parts.join("/")} frosts outside the glass gate`);
+  }
+  assert.doesNotMatch(source("components", "onboarding", "onboarding.css"), /backdrop-filter/);
+  assert.match(source("components", "git", "SplitCommitsDialog.tsx"), /background: "var\(--modal-scrim\)"/);
+
+  // Dense dialogs and floating previews over live content take the read
+  // tier, which has no lens, instead of the thin strong or menu recipe.
+  for (const [parts, pattern] of [
+    [["components", "WorkerSessionPicker.tsx"], /className="spark-glass--strong spark-overlay-surface worker-session-surface"/],
+    [["components", "FileTree.tsx"], /aria-label="Confirm folder move"\s+className="spark-glass--strong spark-overlay-surface"/],
+    [["components", "remote", "SshManagerDialog.tsx"], /className="spark-glass--strong spark-overlay-surface"/],
+    [["components", "remote", "RemoteAuthPrompt.tsx"], /className="spark-glass--strong spark-overlay-surface"/],
+    [["components", "chat", "ChatConversation.tsx"], /cora-timeline-minimap__preview spark-glass--strong spark-overlay-surface/],
+  ]) {
+    assert.match(source(...parts), pattern, `${parts.join("/")} is not on the read tier`);
+  }
+  for (const parts of [
+    ["components", "remote", "SshManagerDialog.tsx"],
+    ["components", "remote", "RemoteAuthPrompt.tsx"],
+  ]) {
+    assert.doesNotMatch(source(...parts), /className="spark-glass"/, `${parts.join("/")} runs the lens over a dialog`);
+  }
+  const toastRule = /html:not\(\[data-glass="off"\]\) \.spark-toast \{([^}]*)\}/.exec(styles);
+  assert.ok(toastRule, "the glass toast rule must exist");
+  assert.match(toastRule[1], /background-color: var\(--glass-bg-read\);/);
+  assert.match(styles, /--notify-surface: var\(--glass-bg-read\);/);
+
+  // Sticky notification section heads stay opaque under glass: rows scroll
+  // under them, and any translucency ghosts the rows' text through the label.
+  for (const match of styles.matchAll(/:not\(\[data-glass="off"\]\) \.nc-section-head \{([^}]*)\}/g)) {
+    const fill = /background:([^;]*);/.exec(match[1]);
+    assert.ok(fill, "a glass section head must set its fill");
+    assert.doesNotMatch(fill[1], /transparent/, "a glass section head is translucent");
+  }
 
   const selectRows = await loadRunSelector();
   const workspaces = [

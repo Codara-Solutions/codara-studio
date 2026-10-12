@@ -5,8 +5,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.48);
-  backdrop-filter: blur(12px);
+  background: var(--modal-scrim);
   font-family: var(--font-sans);
   color: var(--ink);
 }

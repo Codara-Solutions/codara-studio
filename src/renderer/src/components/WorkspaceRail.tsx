@@ -1469,13 +1469,11 @@ function WorkspaceFolder({
           : "1px solid color-mix(in oklab, var(--rule) 72%, transparent)",
         background: landing
           ? `color-mix(in oklab, ${accent} 12%, var(--panel))`
-          : "color-mix(in oklab, var(--panel-raised, var(--panel)) 78%, transparent)",
+          : "var(--panel-raised, var(--panel))",
         boxShadow: landing ? `0 0 18px color-mix(in oklab, ${accent} 18%, transparent)` : "var(--lift-hi)",
         opacity: dragging ? 0.46 : 1,
         // Compositor-only slide while a top-level reorder is previewing.
         ...(dragOffset ? { transform: `translate3d(0, ${dragOffset}px, 0)` } : {}),
-        backdropFilter: "blur(18px) saturate(125%)",
-        WebkitBackdropFilter: "blur(18px) saturate(125%)",
         // See the row: --ws-reorder-motion is 0s at rest, so the committed
         // order settles instantly instead of animating backwards out of the
         // offsets it was previewing.

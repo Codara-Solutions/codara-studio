@@ -729,6 +729,14 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   const tabDrag = tabDragState?.payload ?? null;
   const ghostPos = dragState ? dragGhostPosition(dragState) : null;
   const paneOverlays = useSyncExternalStore(subscribePaneOverlays, paneOverlaysSnapshot);
+  // The overlays as of the last commit. Read during render so a host revealed
+  // by its overlay closing can tell that apart from a tab or workspace reveal;
+  // written in a layout effect, which React runs after every child's reveal
+  // effect of the same commit.
+  const committedOverlaysRef = useRef(paneOverlays);
+  useLayoutEffect(() => {
+    committedOverlaysRef.current = paneOverlays;
+  });
   const workerTerminal = tab.scope?.kind === "workers";
   // Worker terminals open in observation mode. Keep this renderer-local: it
   // is a safety latch for the current view, not durable run state, so every
@@ -1051,6 +1059,12 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
         const overlay = paneOverlays.get(leaf.paneId) ?? null;
+        const overlayJustClosed = !overlay && committedOverlaysRef.current.has(leaf.paneId);
+        const overlayFocusGate = () =>
+          overlayMayTakeFocus(
+            isActive,
+            tabRootRef.current?.querySelector(`[data-terminal-pane-id="${CSS.escape(leaf.paneId)}"]`) ?? null,
+          );
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
@@ -1269,8 +1283,10 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               bootResume={leaf.bootResume === true}
               // Hidden under an overlay: it keeps its size and buffer but can
               // neither take the keyboard nor refit, and revealing it again
-              // when the overlay's command exits hands the focus back.
+              // when the overlay's command exits hands the focus back, but
+              // only to a user who was in the overlay.
               visible={visible && !placeOffScreen && !overlay}
+              mayAutoFocus={overlayJustClosed ? overlayFocusGate : undefined}
               // An opened workspace terminal is a live in-memory surface, even
               // while another tab or workspace is selected. Keep feeding its
               // xterm so returning reveals the existing buffer immediately.
@@ -1314,6 +1330,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                   initialCwd={overlay.cwd ?? leaf.cwd}
                   initialCommand={overlayStartupCommand(overlay.command, shell.family)}
                   visible={visible && !placeOffScreen}
+                  mayAutoFocus={overlayFocusGate}
                   writeWhileHidden
                   scrollbackLineLimit={scrollbackLineLimit}
                   onUserInput={bundle.onUserInput}
@@ -1592,6 +1609,17 @@ const RESIZE_SNAP_RATIOS = [
 ];
 const MIN_RATIO = 0.05;
 const MAX_RATIO = 0.95;
+
+// A pane overlay opens and closes when a program says so, not when the user
+// acts, so it moves the keyboard only for a user who is in that pane: the
+// focus ring follows tab.activePaneId, and a program in another split cell
+// must not pull keystrokes away from the pane, chat or field being typed in.
+// A closing overlay's xterm leaves the focus on the body.
+function overlayMayTakeFocus(isActive: boolean, frame: Element | null): boolean {
+  if (!isActive) return false;
+  const focused = document.activeElement;
+  return !focused || focused === document.body || !!frame?.contains(focused);
+}
 
 function pct(fraction: number): string {
   return `${fraction * 100}%`;

@@ -148,6 +148,35 @@ check("with glass on, only the frame frosts and the reading pane stays opaque", 
   assert.ok(gate > 0, "the glass face must sit behind the reduced-transparency gate");
 });
 
+check("with glass on, the nav column alone frosts, at the read tier", () => {
+  const face =
+    /html:not\(\[data-glass="off"\]\) \.settings-dialog-surface,\n\s*html:not\(\[data-glass="off"\]\) \.agent-capabilities-surface \{([^}]*)\}/.exec(
+      styles,
+    );
+  assert.ok(face, "the glass rule for the face must exist");
+  assert.doesNotMatch(face[1], /backdrop-filter/, "the face must not frost the area its opaque panes cover");
+  assert.match(face[1], /--st-sidebar: var\(--glass-bg-read\);/);
+  assert.doesNotMatch(styles, /--st-sidebar: color-mix\(in oklab, var\(--(?:bg|panel)\) min\(calc\(\d+% \* var\(--glass-veil-scale/);
+  const nav =
+    /html:not\(\[data-glass="off"\]\) \.settings-dialog-surface \.st-nav,\n\s*html:not\(\[data-glass="off"\]\) \.agent-capabilities-surface \.st-nav \{([^}]*)\}/.exec(
+      styles,
+    );
+  assert.ok(nav, "the glass rule for the nav must exist");
+  assert.match(nav[1], /(?:^|\s)backdrop-filter: blur\(var\(--glass-blur-read\)\)/);
+});
+
+check("account status lines stay readable, and the ok line's own size applies", () => {
+  for (const tone of ["ok", "muted"]) {
+    for (const match of styles.matchAll(new RegExp(`\\.st-acct-status--${tone} \\{([^}]*)\\}`, "g"))) {
+      assert.doesNotMatch(match[1], /--st-faint/, `the ${tone} status line falls under 4.5:1`);
+    }
+  }
+  const base = styles.indexOf("\n.st-acct-status {");
+  const ok = styles.indexOf("\n.st-acct-status--ok {\n  flex: none;");
+  assert.ok(base > 0 && ok > 0, "both status rules must exist");
+  assert.ok(ok > base, "the ok rule must follow the base rule, or its size and alignment never apply");
+});
+
 check("account cards are solid inside the glass face, never glass on glass", () => {
   for (const selector of ["\\.st-acct", "\\.st-acct\\.is-active"]) {
     const rule = new RegExp(`\\n${selector} \\{([^}]*)\\}`).exec(styles);

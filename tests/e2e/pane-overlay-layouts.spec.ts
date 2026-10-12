@@ -11,7 +11,9 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // leaving the workspace and coming back must leave the keyboard in it,
 // splitting the pane underneath must keep it over that pane's cell only,
 // the keys typed must reach the overlay while it is open and the pane once
-// it closes, and closing the pane underneath must end the overlay's program.
+// it closes, an overlay opening or closing while the user is in another cell
+// must leave the keyboard there, and closing the pane underneath must end the
+// overlay's program.
 
 function waitFor(signals: string, name: string): string {
   return `while [ ! -f ${JSON.stringify(join(signals, name))} ]; do sleep 0.2; done`;
@@ -88,17 +90,21 @@ test("a pane overlay keeps the keyboard across workspaces and splits and ends wi
     const hostGot = join(signals, "host-got");
     const secondPid = join(signals, "second-pid");
     const overlayScript = join(signals, "overlay.sh");
+    const elsewhereScript = join(signals, "elsewhere.sh");
     const secondScript = join(signals, "second.sh");
     await writeFile(
       overlayScript,
       `echo OVERLAY-UP; read first; printf '%s' "$first" > ${JSON.stringify(overlayGot)}; ${waitFor(signals, "close")}\n`,
     );
+    await writeFile(elsewhereScript, `echo ELSEWHERE-UP; ${waitFor(signals, "close-elsewhere")}\n`);
     await writeFile(secondScript, `echo $$ > ${JSON.stringify(secondPid)}; ${waitFor(signals, "never")}\n`);
     const callerScript = [
       waitFor(signals, "open"),
       `codara-pane overlay -- sh ${JSON.stringify(overlayScript)}`,
       "read back",
       `printf '%s' "$back" > ${JSON.stringify(hostGot)}`,
+      waitFor(signals, "elsewhere"),
+      `codara-pane overlay -- sh ${JSON.stringify(elsewhereScript)}`,
       waitFor(signals, "again"),
       `codara-pane overlay -- sh ${JSON.stringify(secondScript)}`,
     ].join("; ");
@@ -175,6 +181,25 @@ test("a pane overlay keeps the keyboard across workspaces and splits and ends wi
     await page.keyboard.type("typed-into-host");
     await page.keyboard.press("Enter");
     await expect.poll(() => fileText(hostGot), { timeout: 10_000 }).toBe("typed-into-host");
+
+    // The user moves into the neighbour, and the program in the other cell
+    // opens an overlay and later closes it: neither moves the keyboard out of
+    // the cell the focus ring marks.
+    const sibling = page.locator(`[data-terminal-pane-id="${siblingId}"]`);
+    await sibling.locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+    await expect.poll(() => keyboardOwner(page)).toBe(`pane:${siblingId}`);
+    await writeFile(join(signals, "elsewhere"), "");
+    await expect(overlay).toBeVisible({ timeout: 20_000 });
+    const elsewhereId = (await overlay.getAttribute("data-pane-overlay-id"))!;
+    await expect
+      .poll(async () => JSON.stringify(await request("terminal.read", { paneId: elsewhereId })), { timeout: 15_000 })
+      .toContain("ELSEWHERE-UP");
+    await page.waitForTimeout(500);
+    expect(await keyboardOwner(page)).toBe(`pane:${siblingId}`);
+    await writeFile(join(signals, "close-elsewhere"), "");
+    await expect(overlay).toHaveCount(0, { timeout: 20_000 });
+    await page.waitForTimeout(500);
+    expect(await keyboardOwner(page)).toBe(`pane:${siblingId}`);
 
     // A second overlay, then the pane underneath is closed: the overlay and
     // its program go with it.

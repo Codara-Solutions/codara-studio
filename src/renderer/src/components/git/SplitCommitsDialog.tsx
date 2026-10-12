@@ -136,8 +136,7 @@ export default function SplitCommitsDialog({ cwd, onClose, onDone }: Props): Rea
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklab, var(--bg) 68%, transparent)",
-        backdropFilter: "blur(3px)",
+        background: "var(--modal-scrim)",
       }}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget && phase.kind !== "executing") onClose();

@@ -435,9 +435,8 @@ function FloatingPreviewAction({ children }: { children: ReactNode }) {
         display: "flex",
         padding: 2,
         borderRadius: 9,
-        background: "color-mix(in oklch, var(--panel) 86%, transparent)",
+        background: "var(--panel)",
         boxShadow: "var(--lift-hi), 0 5px 18px rgba(0,0,0,0.16)",
-        backdropFilter: "blur(12px) saturate(1.25)",
       }}
     >
       {children}
