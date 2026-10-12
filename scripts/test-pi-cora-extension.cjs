@@ -85,18 +85,23 @@ assert.doesNotMatch(autoAlwaysVerify, /Small, low-risk changes are yours to make
 assert.match(autoAlwaysVerify, /Trivial work is two moves/);
 assert.match(execute, /Trivial work is two moves/);
 assert.doesNotMatch(execute, /make the small change yourself/);
-assert.doesNotMatch(automation, /you have codara_remember/, "the automation roster has no codara_remember");
+assert.doesNotMatch(automation, /codara_remember|codara_recall/, "the automation roster has no memory tools");
 // An untrusted pull request's manager has only the orchestration bridge tools,
 // so the prompt must not send it to tools it does not have.
 assert.match(auto, /codara_plan_update/);
 assert.match(auto, /call codara_tools/);
 for (const mode of ["auto", "execute"]) {
   const untrusted = extension.buildCoraPiSystemPrompt(mode, "fast", { untrusted: true });
-  for (const tool of ["codara_plan_update", "codara_tools", "web_search", "deep_search", "fetch_url", "codara_remember"]) {
+  for (const tool of ["codara_plan_update", "codara_tools", "web_search", "deep_search", "fetch_url", "codara_remember", "codara_recall"]) {
     assert.doesNotMatch(untrusted, new RegExp(`\\b${tool}\\b`), `untrusted ${mode} prompt names ${tool}`);
   }
 }
-assert.match(auto, /you have codara_remember/);
+// Memory guidance names both tiers and asks for an immediate save on a
+// correction, which is what makes the global tier ever get written.
+assert.match(auto, /save it right away with\s+codara_remember: scope global for the user's own preferences/);
+assert.match(auto, /scope workspace for facts about this repository/);
+assert.match(auto, /codara_recall/);
+assert.doesNotMatch(auto, /most runs teach nothing/);
 assert.match(auto, /direct-work exception remains binding here/);
 assert.match(auto, /do not spawn a plan verifier/);
 assert.match(auto, /at least one\s+bounded worker/);
@@ -294,7 +299,10 @@ for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_wo
     false,
   );
 }
-assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember"/);
+assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" &&\s+tool.name !== "codara_remember" &&\s+tool.name !== "codara_recall"/);
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, { CODARA_PI_DIRECT_TASK: "1" }), true);
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, {}), false, "delegated workers get memory in the prompt, not the search tool");
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", true, { CODARA_PI_DIRECT_TASK: "1" }), false);
 
 // Automation worker roster: lifecycle pair + board read appear; manager
 // orchestration and mutating board/whiteboard tools stay out.

@@ -775,6 +775,7 @@ async function main() {
         action: "add",
         bullets: ["poison"],
       }],
+      ["orchestrator.recall", { runId: "run-untrusted-pr", query: "preferences" }],
       ["automation.list", { runId: "run-untrusted-pr" }],
       ["automation.create", { runId: "run-untrusted-pr" }],
       ["worktree.create", { runId: "run-untrusted-pr", callerRole: "manager" }],

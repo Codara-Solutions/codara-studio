@@ -39,7 +39,9 @@ export function isWorkerSafeBridgeTool(
   ) {
     return true;
   }
-  if (name === "codara_remember") return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
+  if (name === "codara_remember" || name === "codara_recall") {
+    return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
+  }
   // A direct task is the user's own chat run as a single worker, so it
   // manages worktrees like a manager; a worker a manager spawned never does.
   if (name.startsWith("codara_worktree_")) {
