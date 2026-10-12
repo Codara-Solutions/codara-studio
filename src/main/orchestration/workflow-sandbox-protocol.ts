@@ -12,6 +12,12 @@ export interface SandboxLimits {
   /** Continuous synchronous execution allowed between host calls. */
   busyMs: number;
   maxItems: number;
+  /** Size of one agent() call's prompt and options as JSON. */
+  maxCallBytes: number;
+  /** Total size of the agent() calls main has not answered yet. */
+  maxPendingCallBytes: number;
+  /** log() and phase() notes posted to main; later ones are dropped. */
+  maxNotes: number;
 }
 
 export type MainToSandbox =
@@ -52,4 +58,7 @@ export const DEFAULT_SANDBOX_LIMITS: SandboxLimits = {
   stackBytes: 256 * 1024,
   busyMs: 5_000,
   maxItems: 4096,
+  maxCallBytes: 256 * 1024,
+  maxPendingCallBytes: 32 * 1024 * 1024,
+  maxNotes: 10_000,
 };

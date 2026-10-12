@@ -43,6 +43,7 @@ const EFFORTS: readonly AgentEffortLevel[] = ["minimal", "low", "medium", "high"
 const ACCESS: readonly WorkflowAgentAccess[] = ["full", "edits", "readonly"];
 const AGENT_TYPES: readonly WorkflowAgentType[] = ["worker", "verifier", "researcher"];
 const MAX_LOG_LINES = 200;
+const NO_USAGE: JournalUsage = { in: 0, out: 0, usd: 0 };
 export const DEFAULT_WORKFLOW_PHASE = "Main";
 
 export interface WorkflowAgentRequest {
@@ -159,12 +160,14 @@ export class WorkflowRuntime {
   private readonly calls = new Map<number, CallState>();
   private readonly order: CallState[] = [];
   private readonly phaseOrder: string[] = [];
+  private readonly phaseSeen = new Set<string>();
   private readonly logs: string[] = [];
   private readonly counter = new CallKeyCounter();
   private readonly queue: CallState[] = [];
   private nextSeq = 0;
   private running = 0;
   private liveLaunched = 0;
+  private refused = 0;
   private replayer: JournalReplayer | null;
   private replaying: boolean;
   private divergedAtSeq: number | null = null;
@@ -601,20 +604,16 @@ export class WorkflowRuntime {
 
   private dispatchLive(call: CallState): void {
     if (call.invalid) {
-      this.answer(call, { status: "error", usage: { in: 0, out: 0, usd: 0 }, note: call.invalid });
+      this.refuse(call, call.invalid);
       return;
     }
     if (this.liveLaunched >= this.options.caps.maxAgents) {
-      this.answer(call, {
-        status: "error",
-        usage: { in: 0, out: 0, usd: 0 },
-        note: `maxAgents reached: this run may start at most ${this.options.caps.maxAgents} agents`,
-      });
+      this.refuse(call, `maxAgents reached: this run may start at most ${this.options.caps.maxAgents} agents`);
       return;
     }
     const ceiling = this.ceilingProblem();
     if (ceiling) {
-      this.answer(call, { status: "error", usage: { in: 0, out: 0, usd: 0 }, note: ceiling });
+      this.refuse(call, ceiling);
       return;
     }
     // Counted at issue, not at launch, so a script cannot queue past the cap
@@ -629,7 +628,7 @@ export class WorkflowRuntime {
       const call = this.queue.shift()!;
       const ceiling = this.ceilingProblem();
       if (ceiling) {
-        this.answer(call, { status: "error", usage: { in: 0, out: 0, usd: 0 }, note: ceiling });
+        this.refuse(call, ceiling);
         continue;
       }
       this.running += 1;
@@ -747,7 +746,7 @@ export class WorkflowRuntime {
   // guest is gone and is not answered either.
   private settleAborted(call: CallState, reason: WorkflowAbortReason): void {
     if (reason === "skip") {
-      this.answer(call, { status: "skipped", usage: call.liveUsage ?? { in: 0, out: 0, usd: 0 }, note: "skipped by the user" });
+      this.answer(call, { status: "skipped", usage: call.liveUsage ?? NO_USAGE, note: "skipped by the user" });
       return;
     }
     if (!call.answered) {
@@ -774,10 +773,11 @@ export class WorkflowRuntime {
     if (call.answered) return;
     call.answered = true;
     call.liveUsage = undefined;
-    const usage = outcome.usage ?? { in: 0, out: 0, usd: 0 };
-    this.spentSettled.in += usage.in;
-    this.spentSettled.out += usage.out;
-    this.spentSettled.usd += usage.usd;
+    // The prompt can be large and a long run issues many calls; only the
+    // tree row is needed once a call is answered.
+    call.request = undefined;
+    const usage = outcome.usage ?? NO_USAGE;
+    this.addSettled(usage);
     const value = outcome.status === "ok" ? (outcome.value === undefined ? null : outcome.value) : null;
 
     const statusMap: Record<typeof outcome.status, WorkflowCallStatus> = {
@@ -837,6 +837,22 @@ export class WorkflowRuntime {
     this.changed();
   }
 
+  // A refusal answers at once without yielding to anything, so a script
+  // that catches it in a loop would otherwise issue calls forever.
+  private refuse(call: CallState, note: string): void {
+    this.answer(call, { status: "error", usage: NO_USAGE, note });
+    this.refused += 1;
+    if (this.refused > WORKFLOW_HARD_LIMITS.refusedCalls) {
+      this.fail(`the script kept calling agent() after ${WORKFLOW_HARD_LIMITS.refusedCalls} calls were refused (the last one: ${note})`);
+    }
+  }
+
+  private addSettled(usage: JournalUsage): void {
+    this.spentSettled.in += usage.in;
+    this.spentSettled.out += usage.out;
+    this.spentSettled.usd += usage.usd;
+  }
+
   // ── Endings ─────────────────────────────────────────────────────────────
 
   // The guest settled, nothing it waits on is outstanding and it has not
@@ -888,7 +904,9 @@ export class WorkflowRuntime {
   }
 
   private notePhase(title: string): void {
-    if (!this.phaseOrder.includes(title)) this.phaseOrder.push(title);
+    if (this.phaseSeen.has(title)) return;
+    this.phaseSeen.add(title);
+    this.phaseOrder.push(title);
   }
 
   private changed(): void {

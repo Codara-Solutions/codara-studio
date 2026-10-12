@@ -41,7 +41,9 @@ let busySince = 0;
 let busyExceeded = false;
 let finished = false;
 let nextCallId = 1;
-const pendingCalls = new Map<number, { guest: GuestContext; deferred: QuickJSDeferredPromise }>();
+let pendingCallBytes = 0;
+let notesPosted = 0;
+const pendingCalls = new Map<number, { guest: GuestContext; deferred: QuickJSDeferredPromise; bytes: number }>();
 const pendingChildStarts: Array<() => void> = [];
 const contexts: GuestContext[] = [];
 
@@ -138,15 +140,31 @@ function createGuest(options: {
     const deferred = ctx.newPromise();
     try {
       const op = ctx.getString(opHandle);
-      const payload = JSON.parse(ctx.getString(payloadHandle)) as {
+      if (op !== "agent") throw new Error(`unknown host operation ${op}`);
+      const text = ctx.getString(payloadHandle);
+      // Every posted call is copied into main and held there until answered,
+      // so its size is bounded here, before it crosses: a loop of large
+      // unawaited calls would otherwise exhaust main's heap, not this thread's.
+      const bytes = Buffer.byteLength(text, "utf8");
+      if (bytes > limits.maxCallBytes) {
+        throw new RangeError(
+          `agent(): the prompt and options are ${Math.ceil(bytes / 1024)} KB; the limit is ${Math.floor(limits.maxCallBytes / 1024)} KB`,
+        );
+      }
+      if (pendingCallBytes + bytes > limits.maxPendingCallBytes) {
+        throw new RangeError(
+          `agent(): more than ${Math.floor(limits.maxPendingCallBytes / (1024 * 1024))} MB of calls are waiting for an answer; await some before issuing more`,
+        );
+      }
+      const payload = JSON.parse(text) as {
         prompt: string;
         opts: Record<string, unknown>;
         phase: string | null;
       };
-      if (op !== "agent") throw new Error(`unknown host operation ${op}`);
       const id = nextCallId;
       nextCallId += 1;
-      pendingCalls.set(id, { guest, deferred });
+      pendingCallBytes += bytes;
+      pendingCalls.set(id, { guest, deferred, bytes });
       post({ type: "call", id, ctx: guest.name, op: "agent", call: payload });
     } catch (err) {
       const reply = ctx.newString(
@@ -165,6 +183,14 @@ function createGuest(options: {
   const hostNote = ctx.newFunction("__wfNote", (opHandle, valueHandle) => {
     const op = ctx.getString(opHandle);
     if (op !== "log" && op !== "phase") return;
+    // A loop of log() calls can post a million notes inside one busy window;
+    // past the cap main hears once that the rest were dropped.
+    if (notesPosted >= limits.maxNotes) return;
+    notesPosted += 1;
+    if (notesPosted === limits.maxNotes) {
+      post({ type: "note", ctx: guest.name, op: "log", value: "log limit reached: later log() and phase() output is not shown" });
+      return;
+    }
     let value = "";
     try {
       value = String(JSON.parse(ctx.getString(valueHandle)));
@@ -295,6 +321,7 @@ function reply(message: Extract<MainToSandbox, { type: "reply" }>): void {
   const pending = pendingCalls.get(message.id);
   if (!pending || finished) return;
   pendingCalls.delete(message.id);
+  pendingCallBytes -= pending.bytes;
   if (message.usage) {
     spent.tokens += Math.max(0, message.usage.tokens || 0);
     spent.usd += Math.max(0, message.usage.usd || 0);

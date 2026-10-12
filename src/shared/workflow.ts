@@ -216,6 +216,8 @@ export const WORKFLOW_HARD_LIMITS = {
   schemaBytes: 32 * 1024,
   resultBytes: 512 * 1024,
   returnBytes: 1024 * 1024,
+  /** agent() calls a run may have refused (caps, ceilings, bad options) before it fails. */
+  refusedCalls: 8192,
 } as const;
 
 export const WORKFLOW_DEFAULTS = {

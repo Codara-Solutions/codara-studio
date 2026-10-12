@@ -3,7 +3,8 @@
 // failing agent resolving null instead of failing the run, skip and stop,
 // exact resume from the journal (zero agents for an unchanged finished run,
 // the recorded completion order reproduced under concurrency, divergence at
-// the first changed call) and the guard against a script that awaits nothing.
+// the first changed call), and the guards against a script that awaits nothing, retries refused calls forever
+// or floods main with notes.
 //
 //   node scripts/test-workflow-runtime.cjs
 
@@ -375,6 +376,29 @@ async function main() {
   {
     const { outcome } = await runScript(`await agent("x"); await new Promise(() => {}); return 1;`, { timeoutMs: 5_000 });
     check("the deadlock guard also fires after agents ran", outcome.status === "failed" && /can never settle/.test(outcome.error), outcome);
+  }
+
+  {
+    // A refusal answers at once, so catching it in a loop never yields to
+    // anything that could end the run.
+    const { outcome } = await runScript(`for (;;) { try { await agent("x"); } catch (e) {} }`, {
+      caps: { maxAgents: 1 },
+      timeoutMs: 15_000,
+    });
+    check("a script retrying refused calls forever fails", outcome.status === "failed" && /calls were refused/.test(outcome.error), outcome);
+  }
+  {
+    const { outcome } = await runScript(`for (;;) { try { await agent("x", { effort: "huge" }); } catch (e) {} }`, { timeoutMs: 15_000 });
+    check("so does one retrying an invalid call forever", outcome.status === "failed" && /calls were refused/.test(outcome.error), outcome);
+  }
+  {
+    // A burst of phase() titles used to cost a linear scan each on main.
+    const journal = memoryJournal();
+    const started = Date.now();
+    const { outcome } = await runScript(`for (let i = 0; ; i++) phase("p" + i);`, { journal, limits: { busyMs: 1_500 }, timeoutMs: 15_000 });
+    check("a phase() flood ends as a busy script", outcome.status === "failed" && /busy too long/.test(outcome.error), outcome);
+    check("main heard at most the note limit", journal.entries.filter((e) => e.t === "phase").length < 10_000, journal.entries.length);
+    check("main stayed responsive", Date.now() - started < 8_000, Date.now() - started);
   }
 
   // ── The journal on disk ──────────────────────────────────────────────────

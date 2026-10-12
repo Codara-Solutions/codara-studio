@@ -201,6 +201,37 @@ async function main() {
     const logs = result.notes.filter((n) => n.op === "log").map((n) => n.value);
     check("log and console reach the host as text", JSON.stringify(logs) === JSON.stringify(["hello", '{"a":1}', "via console"]), logs);
   }
+
+  // Everything posted to main is held there, so size and count are bounded
+  // before it leaves the thread.
+  {
+    const result = await run(`try { await agent("x".repeat(300000)); return "sent"; } catch (e) { return e.message; }`);
+    check("an oversized call never reaches main", result.calls.length === 0, result.calls.length);
+    check("the script hears the size limit", result.ok && /KB; the limit is 256 KB/.test(result.value), result.value ?? result.error);
+  }
+  {
+    const result = await run(
+      `const ps = [];
+       for (let i = 0; i < 10; i++) ps.push(agent("y".repeat(20000) + i).then(() => "ok", (e) => e.message));
+       return await Promise.all(ps);`,
+      {
+        limits: { maxPendingCallBytes: 100_000 },
+        agent: () => new Promise((resolve) => setTimeout(() => resolve({ ok: true, value: 1 }), 200)),
+      },
+    );
+    const values = result.value ?? [];
+    check("unanswered calls are capped by total size", result.calls.length === 4, result.calls.length);
+    check(
+      "calls past the pending cap throw in the script",
+      values.filter((v) => v === "ok").length === 4 && values.filter((v) => /waiting for an answer/.test(v)).length === 6,
+      values,
+    );
+  }
+  {
+    const result = await run(`for (let i = 0; i < 500; i++) log("n" + i); phase("late"); return 1;`, { limits: { maxNotes: 50 } });
+    check("notes stop at the limit", result.ok && result.notes.length === 50, result.notes.length);
+    check("the last note says the rest were dropped", /log limit reached/.test(result.notes.at(-1)?.value ?? ""), result.notes.at(-1));
+  }
 }
 
 main()
