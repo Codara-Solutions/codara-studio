@@ -259,6 +259,25 @@ async function main() {
     // Unknown method → JSON-RPC error, not a crash.
     const unknown = await rpc(handshake, "nope.nothing", {});
     check("unknown method errors", Boolean(unknown.error), JSON.stringify(unknown).slice(0, 120));
+    // pane.open (the codara-pane helper): a made-up pane token is no
+    // credential at all, and the method checks its parameters and caller.
+    const forgedPane = await rpcRaw(
+      { ...handshake, token: "b".repeat(64) },
+      { jsonrpc: "2.0", id: 1, method: "pane.open", params: { mode: "tab" } },
+    );
+    check("a forged pane token is rejected", forgedPane.status === 401, `status=${forgedPane.status}`);
+    const badMode = await rpc(handshake, "pane.open", { paneId: "pane-x", mode: "window" });
+    check(
+      "pane.open rejects an unknown mode",
+      badMode.error?.code === -32602 && /mode must be/.test(badMode.error?.message ?? ""),
+      JSON.stringify(badMode).slice(0, 160),
+    );
+    const noPane = await rpc(handshake, "pane.open", { paneId: "pane-not-running", mode: "overlay", command: "true" });
+    check(
+      "pane.open refuses a pane that is not running",
+      noPane.error?.code === -32602 && /not running/.test(noPane.error?.message ?? ""),
+      JSON.stringify(noPane).slice(0, 160),
+    );
     const unownedClose = await rpc(handshake, "terminal.close", {
       paneId: "pane-not-created-by-agent",
       runId: "run-socket-test",

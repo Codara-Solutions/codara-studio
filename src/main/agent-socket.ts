@@ -101,9 +101,12 @@ import type { WhiteboardIssue } from "@shared/whiteboard-quality";
 import { rememberWhiteboardInspection, requireWhiteboardInspection, whiteboardSourceIssues } from "./whiteboard-review";
 import {
   authorizeAgentSocketCapability,
+  authorizePaneSocketCapability,
+  PANE_SOCKET_METHODS,
   setAgentSocketCapabilityEndpoint,
   type AgentSocketCapabilityClaim,
 } from "./agent-socket-capabilities";
+import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
 import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
@@ -448,7 +451,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
 
 type AgentSocketAuth =
   | { kind: "root" }
-  | { kind: "scoped"; claim: AgentSocketCapabilityClaim };
+  | { kind: "scoped"; claim: AgentSocketCapabilityClaim }
+  | { kind: "pane"; paneId: string };
 
 function authenticateRequest(
   req: IncomingMessage,
@@ -471,7 +475,9 @@ function authenticateRequest(
     }
   }
   const claim = authorizeAgentSocketCapability(presented);
-  return claim ? { kind: "scoped", claim } : null;
+  if (claim) return { kind: "scoped", claim };
+  const pane = authorizePaneSocketCapability(presented);
+  return pane ? { kind: "pane", paneId: pane.paneId } : null;
 }
 
 function requestTooLargeMessage(bytes: number, limit: number): string {
@@ -609,6 +615,19 @@ async function dispatch(
       // otherwise name a trusted sibling run in an allowed method.
       params.runId = auth.claim.runId;
     }
+    if (auth.kind === "pane") {
+      if (!(PANE_SOCKET_METHODS as readonly string[]).includes(method)) {
+        return errorResponse(
+          id,
+          ERR_FORBIDDEN,
+          "a terminal pane's credential only opens terminals over or beside that pane",
+        );
+      }
+      // The token, never the request, names the pane, so a process can only
+      // open terminals over or beside the pane it runs in.
+      delete params.runId;
+      params.paneId = auth.paneId;
+    }
     if (isUntrustedPullRequestBlockedMethod(method)) {
       const runId = stringParam(params, "runId");
       if (runId) {
@@ -645,6 +664,8 @@ async function dispatch(
         return await handleTerminalRun(params, id, res);
       case "terminal.list":
         return await handleTerminalList(params, id);
+      case "pane.open":
+        return await handlePaneOpen(params, id);
       case "agent.notify":
         return await handleAgentNotify(params, id);
       case "chat.append":
@@ -1421,6 +1442,38 @@ async function handleTerminalWrite(
   }
   pty.inject(paneId, text, { submit });
   return successResponse(id, { ok: true });
+}
+
+const paneOpener = createPaneOpener({
+  paneAlive: (paneId) => pty.exists(paneId),
+  waitForSpawn: (paneId, timeoutMs) => pty.waitForSpawn(paneId, timeoutMs),
+  onExit: (paneId, handler) => pty.onExit(paneId, () => handler()),
+  kill: (paneId) => pty.killImmediate(paneId),
+  isDirectory: async (path) => (await fsp.stat(path).catch(() => null))?.isDirectory() === true,
+  requestTerminalOp: (op, opParams) => requestTerminalOp(op, opParams),
+});
+
+/** The window's document is being replaced: end every pane overlay it showed. */
+export function closeAllPaneOverlays(): void {
+  paneOpener.closeAll();
+}
+
+// pane.open (the `codara-pane` helper): a terminal over the calling pane or
+// in a new tab beside it. A pane credential always names its own pane; a root
+// caller names one explicitly. See pane-open.ts.
+async function handlePaneOpen(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    return successResponse(id, await paneOpener.open(parsePaneOpenParams(params)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof PaneOpenError) {
+      return errorResponse(id, error.kind === "spawn" ? ERR_TERMINAL_SPAWN : ERR_INVALID_PARAMS, message);
+    }
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
 }
 
 // Stop an auxiliary terminal created through terminal.create and remove its

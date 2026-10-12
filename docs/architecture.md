@@ -94,6 +94,16 @@ automations and boards. A dev-only `app.*` namespace lets you inspect the UI
 from a terminal. Runs of imported pull requests get a scoped token instead,
 limited to a list of methods (`agent-socket-capabilities.ts`).
 
+Each local pane also gets a token of its own (`SPARK_PANE_SOCKET`,
+`SPARK_PANE_TOKEN`), revoked when its process exits. It reaches one method,
+`pane.open`, and always names the pane it was minted for, so a program in a
+pane can open a terminal over that pane (an overlay that takes the keyboard
+and closes when its command exits) or a tab beside it, and nothing else.
+The `codara-pane` command wraps it (`resources/shell-integration/codara-pane.cjs`;
+the wrapper is written to `<codaraHome>/integrations/bin` at boot and only
+Codara's panes have that folder on PATH). `pane-open.ts` holds the logic;
+overlays live in the renderer (`components/Terminal/paneOverlays.ts`).
+
 `resources/codara-studio-mcp/server.js` holds the agent tools. It runs in
 two ways:
 

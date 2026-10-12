@@ -951,6 +951,10 @@ export interface AgentTerminalTabOptions {
   origin?: TerminalLeafOrigin;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
+  // Opened at the request of a program in one of the user's own panes
+  // (`codara-pane tab`): no agent tint, and selected like a tab the user
+  // opened. A background workspace keeps its frozen selection.
+  requestedFromPane?: boolean;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -983,7 +987,7 @@ export function appendAgentTerminalToWorkspaceLayout(
         : {}),
     },
     activePaneId: paneId,
-    ...(options?.origin?.kind === "phone"
+    ...(options?.origin?.kind === "phone" || (options?.requestedFromPane && !options.color)
       ? {}
       : { color: options?.color ?? "var(--agent-tab-accent)" }),
   };
@@ -1947,8 +1951,8 @@ export function useTabs(
       };
       const title = options?.title?.trim() || "terminals";
       const color =
-        options?.origin?.kind === "phone"
-          ? undefined
+        options?.origin?.kind === "phone" || options?.requestedFromPane
+          ? options?.color
           : options?.color ?? "var(--agent-tab-accent)";
       setTabs((curr) => {
         const tab: TerminalTab = {
@@ -1961,8 +1965,10 @@ export function useTabs(
         };
         return normalizeTerminalTitles(insertTabAfter(curr, tab, options?.placeAfter?.(curr)));
       });
-      // Deliberately NOT setActiveId: an agent-spawned terminal appears in the
-      // strip tinted but does not steal focus from the user's current tab.
+      // Deliberately NOT setActiveId for agents: an agent-spawned terminal
+      // appears in the strip tinted but does not steal focus from the user's
+      // current tab. A pane's own request is the user acting.
+      if (options?.requestedFromPane) setActiveId(id);
       return { tabId: id, paneId };
     },
     [],

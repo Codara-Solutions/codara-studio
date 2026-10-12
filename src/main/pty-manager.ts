@@ -59,6 +59,8 @@ import {
   codexLaunchArgs,
   integrationFilesReady,
 } from "./agent-launch-integration";
+import { mintPaneSocketCapability } from "./agent-socket-capabilities";
+import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
 import { continueForegroundJob } from "./terminal-foreground";
 import {
   beginPosixPtyTreeTeardown,
@@ -195,6 +197,9 @@ interface Session {
   // A `claude` or `codex` started here carries Codara's per-launch flags:
   // Codara started it, or the pane's shell defines the wrapper functions.
   agentFlagsReachCli: boolean;
+  // Revokes the pane's own socket token (SPARK_PANE_TOKEN) once its process
+  // is gone, so a leaked copy cannot act for a pane that no longer exists.
+  revokePaneAccess?: () => void;
 }
 
 // The shells whose bundled integration wraps a typed `claude` / `codex`.
@@ -233,6 +238,12 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   if (releaseGrok && session.nativeGrokProfileId) {
     notifyNativeGrokProfileLeaseReleased(session.nativeGrokProfileId);
   }
+}
+
+function revokePaneAccess(session: Session): void {
+  const revoke = session.revokePaneAccess;
+  session.revokePaneAccess = undefined;
+  revoke?.();
 }
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
@@ -386,6 +397,8 @@ const AGENT_SOCKET_ENV_KEYS = [
   "SPARK_AGENT_TOKEN",
   "SPARK_AGENT_CAPABILITY",
 ] as const;
+
+const PANE_SOCKET_ENV_KEYS = ["SPARK_PANE_SOCKET", "SPARK_PANE_TOKEN"] as const;
 
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
@@ -1446,6 +1459,17 @@ function doSpawn(
     Object.assign(env, personalCliShellHomeEnvironment());
   }
 
+  // The pane's own socket credential, scoped to opening terminals over this
+  // pane or in a new tab beside it (`codara-pane`). Set after the account
+  // selections above, which rebuild the environment. An inherited pair names
+  // another Studio's pane and never survives.
+  for (const key of PANE_SOCKET_ENV_KEYS) delete env[key];
+  const paneAccess = mintPaneSocketCapability(opts.id);
+  if (paneAccess) {
+    Object.assign(env, paneAccess.environment);
+    withPaneHelperOnPath(env, paneHelperBinDir());
+  }
+
   const cwd =
     opts.cwd && opts.cwd.trim().length > 0
       ? opts.cwd
@@ -1471,19 +1495,25 @@ function doSpawn(
   // encoding:null asks node-pty for raw Buffers so we can preserve byte
   // boundaries for ANSI/UTF-8 across IPC. xterm.js's parser/decoder reassembles
   // partial sequences across writes when fed Uint8Array.
-  const pty = nodePty.spawn(opts.shell.exe, shellArgs, {
-    name: "xterm-256color",
-    cols,
-    rows,
-    cwd,
-    env,
-    encoding: null as unknown as string,
-    useConpty: process.platform === "win32" ? true : undefined,
-    // Ship node-pty's own conpty.dll instead of whatever the host Windows
-    // build carries, so ConPTY behaviour and throughput do not vary by OS
-    // build (older builds are markedly slower and buggier under floods).
-    useConptyDll: process.platform === "win32" ? true : undefined,
-  } as nodePty.IPtyForkOptions);
+  let pty: nodePty.IPty;
+  try {
+    pty = nodePty.spawn(opts.shell.exe, shellArgs, {
+      name: "xterm-256color",
+      cols,
+      rows,
+      cwd,
+      env,
+      encoding: null as unknown as string,
+      useConpty: process.platform === "win32" ? true : undefined,
+      // Ship node-pty's own conpty.dll instead of whatever the host Windows
+      // build carries, so ConPTY behaviour and throughput do not vary by OS
+      // build (older builds are markedly slower and buggier under floods).
+      useConptyDll: process.platform === "win32" ? true : undefined,
+    } as nodePty.IPtyForkOptions);
+  } catch (err) {
+    paneAccess?.revoke();
+    throw err;
+  }
 
   // If a renderer's xterm was bound to this sessionId on a just-killed PTY
   // (mode-flip respawn), re-adopt that webContents so the UI follows the new
@@ -1533,6 +1563,7 @@ function doSpawn(
     releaseNativeClaudeProfileLease: opts.releaseNativeClaudeProfileLease,
     nativeGrokProfileId: opts.nativeGrokProfileId,
     releaseNativeGrokProfileLease: opts.releaseNativeGrokProfileLease,
+    revokePaneAccess: paneAccess?.revoke,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -1593,6 +1624,7 @@ function doSpawn(
       }
       exitWaiters.delete(opts.id);
       releaseNativeProfileSessionLeases(s);
+      revokePaneAccess(s);
       return;
     }
     if (s) {
@@ -1613,6 +1645,7 @@ function doSpawn(
     }
     if (current === session) sessions.delete(opts.id);
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     const t = pendingKills.get(opts.id);
     if (t) {
       clearTimeout(t);
@@ -2586,6 +2619,7 @@ export function sweepDeadSessions(): string[] {
     if (!strandedBindings.has(id)) stashWebContents(id, s);
     if (s.flushTimer) clearTimeout(s.flushTimer);
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     sessions.delete(id);
     const waiters = exitWaiters.get(id) ?? [];
     exitWaiters.delete(id);
@@ -2701,6 +2735,7 @@ async function disposeSessionsGraceful(
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     sessions.delete(id);
   }
   if (process.platform !== "win32") {
@@ -2885,5 +2920,6 @@ function killNow(id: string): void {
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   releaseNativeProfileSessionLeases(s);
+  revokePaneAccess(s);
   sessions.delete(id);
 }
