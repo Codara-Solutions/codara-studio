@@ -24,9 +24,10 @@
 
 import { promises as fs } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 
 import { resolveBundledResourcePath } from "./bundled-resources";
+import { temporaryRoots } from "./temporary-roots";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -79,24 +80,6 @@ function isInside(child: string, parent: string): boolean {
     process.platform === "win32" ? value.toLowerCase() : value;
   const rel = relative(normalize(parent), normalize(child));
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
-function temporaryRoots(): string[] {
-  const roots = [tmpdir(), process.env.TMPDIR, process.env.TMP, process.env.TEMP];
-  if (process.platform !== "win32") {
-    // macOS per-user temp lives under /var/folders and is reaped by the OS.
-    roots.push("/tmp", "/var/tmp", "/var/folders");
-  }
-  return roots.filter((value): value is string => typeof value === "string" && value.trim() !== "");
-}
-
-/** True when `dir` is itself one of the temporary folders, not just inside one. */
-export async function isTemporaryRoot(dir: string): Promise<boolean> {
-  const real = await realpathBestEffort(dir);
-  for (const root of temporaryRoots()) {
-    if ((await realpathBestEffort(root)) === real) return true;
-  }
-  return false;
 }
 
 // True when the path lives somewhere that can vanish while a config that

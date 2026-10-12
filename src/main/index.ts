@@ -1,3 +1,4 @@
+import "./appimage-launch-boot";
 import {
   app,
   BrowserWindow,

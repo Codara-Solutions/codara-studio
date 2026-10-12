@@ -234,7 +234,9 @@ navigation, registry, workspace), `test-browser-pane-webview-liveness`,
 `test-navigation-allowlist`, `test-declared-deps` (every module the main and
 preload bundles load at runtime is a declared dependency),
 `test-bundled-resources`, `test-renderer-chunks.mjs` (size budget of the
-renderer's JavaScript).
+renderer's JavaScript), `test-appimage-launch` (only the process running
+from an AppImage's mount keeps its APPIMAGE, so electron-updater cannot
+replace an installed AppImage from a build that merely inherited it).
 
 ### App state, files and system meters
 
