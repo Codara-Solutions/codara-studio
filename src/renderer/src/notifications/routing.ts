@@ -14,7 +14,8 @@ export interface NavigationHandlers {
   // section (teammate-push alerts from the background auto-fetcher).
   openWorkspace: (workspaceId: string, panel?: "git") => void;
   // Whether the target still exists. A row whose pane was closed or whose
-  // run was deleted is "gone", and opening it lands on its workspace instead.
+  // run was deleted (or swept by retention) is "gone", and opening it lands
+  // on its workspace instead.
   describeTarget: (target: NavigationTarget) => NotifyTargetStatus;
   // Say why a click landed somewhere other than its target.
   explain: (title: string, body: string) => void;
@@ -34,7 +35,7 @@ export type NavigateTo = (target: NavigationTarget) => NavigateOutcome;
 
 export const GONE_LABEL: Record<NotifyGoneReason, string> = {
   pane: "Pane closed",
-  run: "Run deleted",
+  run: "Run no longer available",
   workspace: "Workspace removed",
 };
 
@@ -50,7 +51,7 @@ export function createNavigateTo(handlers: NavigationHandlers): NavigateTo {
       }
       handlers.openWorkspace(workspaceId);
       handlers.explain(
-        status.reason === "pane" ? "That pane was closed" : "That run was deleted",
+        status.reason === "pane" ? "That pane was closed" : "That run is no longer available",
         "Opened its workspace instead.",
       );
       return "fallback";

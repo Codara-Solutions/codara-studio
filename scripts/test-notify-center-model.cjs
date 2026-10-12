@@ -93,13 +93,54 @@ test("repeats from one pane fold into one row that counts them", () => {
   assert.equal(list[0].firstAt, iso(NOW - 30 * MIN));
 });
 
-test("a new state replaces the pane's stale question and restarts the count", () => {
+test("a new state replaces the pane's stale question without losing the count", () => {
   const list = [];
-  M.insertEntry(list, event({ kind: "terminal.agent.needs-input" }), { read: false }, NOW);
+  M.insertEntry(list, event({ createdAt: iso(NOW - 40 * MIN) }), { read: false }, NOW - 40 * MIN);
+  M.insertEntry(list, event({ createdAt: iso(NOW - 30 * MIN) }), { read: false }, NOW - 30 * MIN);
+  M.insertEntry(list, event({ kind: "terminal.agent.needs-input", createdAt: iso(NOW - 20 * MIN) }), { read: false }, NOW - 20 * MIN);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].kind, "terminal.agent.needs-input");
+  assert.equal(list[0].count, undefined);
+  assert.deepEqual(list[0].kindCounts, {
+    "terminal.agent.done": { count: 2, firstAt: iso(NOW - 40 * MIN), earlier: ["Finished its turn."] },
+  });
   M.insertEntry(list, event({}), { read: false }, NOW);
   assert.equal(list.length, 1);
   assert.equal(list[0].kind, "terminal.agent.done");
-  assert.equal(list[0].count, undefined);
+  assert.equal(list[0].count, 3, "finished 3 times, the prompt in between does not reset it");
+  assert.equal(list[0].firstAt, iso(NOW - 40 * MIN));
+  assert.deepEqual(list[0].kindCounts, {
+    "terminal.agent.needs-input": { count: 1, firstAt: iso(NOW - 20 * MIN), earlier: ["Finished its turn."] },
+  });
+});
+
+test("a folded row keeps its last three distinct bodies, newest first", () => {
+  const list = [];
+  const bodies = [
+    "6 commits to main \u2014 Merge pull request #64",
+    "New commits to memory/hooks",
+    "New commits to memory/hooks",
+    "9 commits to memory/review \u2014 Merge origin/main",
+    "10 commits to main \u2014 Merge pull request #65",
+    "New commits to memory/review",
+  ];
+  bodies.forEach((body, i) => M.insertEntry(list, push({ body }), { read: false }, NOW + i));
+  assert.equal(list.length, 1);
+  assert.equal(list[0].count, 6);
+  assert.equal(list[0].body, "New commits to memory/review");
+  assert.deepEqual(list[0].earlier, [
+    "10 commits to main \u2014 Merge pull request #65",
+    "9 commits to memory/review \u2014 Merge origin/main",
+    "New commits to memory/hooks",
+  ]);
+});
+
+test("earlier bodies come only from the same kind", () => {
+  const list = [];
+  M.insertEntry(list, event({ body: "Refactored the parser" }), { read: false }, NOW);
+  M.insertEntry(list, event({ kind: "terminal.agent.needs-input", body: "Allow npm test?" }), { read: false }, NOW);
+  M.insertEntry(list, event({ body: "Fixed the flaky test" }), { read: false }, NOW);
+  assert.deepEqual(list[0].earlier, ["Refactored the parser"]);
 });
 
 test("teammate pushes and pull-request updates fold per source too", () => {
@@ -294,7 +335,8 @@ test("the badge counts unread open questions that are not muted", () => {
     row({ id: "push", kind: "git.teammate-push", sourceKey: "github-push:x" }),
     row({ id: "fail", kind: "run.failed", sourceKey: "run:r5" }),
   ];
-  assert.deepEqual(M.summarize(list, [], NOW), { unread: 5, needsYou: 2, mutes: [] });
+  // The failure is notable (the bell's dot); the teammate push is not.
+  assert.deepEqual(M.summarize(list, [], NOW), { unread: 5, needsYou: 2, notable: 2, mutes: [] });
   const mutes = [
     { key: S.workspaceMuteKey("w2"), label: "w2", until: NOW + HOUR },
     { key: S.sourceMuteKey("run:r1"), label: "lapsed", until: NOW - 1 },
@@ -314,6 +356,47 @@ test("a mute matches the event's source or its workspace until it lapses", () =>
     M.sanitizeMutes([{ key: "workspace:w1", until: NOW + 1 }, { key: "", until: NOW + 1 }, { key: "x", until: NOW - 1 }], NOW),
     [{ key: "workspace:w1", label: "workspace:w1", until: NOW + 1 }],
   );
+});
+
+test("clear all keeps the questions still waiting, read or not", () => {
+  const list = [
+    row({ id: "open", kind: "run.blocked", sourceKey: "run:r1" }),
+    { ...row({ id: "seen", kind: "terminal.agent.needs-input", sourceKey: "pane:p2" }), read: true },
+    { ...row({ id: "answered", kind: "run.blocked", sourceKey: "run:r3" }), settled: true },
+    row({ id: "done" }),
+    push({ id: "push" }),
+  ];
+  assert.equal(M.clearExceptOpen(list), true);
+  assert.deepEqual(list.map((e) => e.id), ["open", "seen"]);
+  assert.equal(M.clearExceptOpen(list), false);
+});
+
+test("sanitize keeps valid per-kind counts and earlier bodies and drops the rest", () => {
+  const entry = M.sanitizeEntry({
+    ...row({ body: "latest" }),
+    kindCounts: {
+      "terminal.agent.needs-input": { count: 2.7, firstAt: iso(NOW) },
+      "terminal.agent.done": { count: 4, firstAt: iso(NOW) },
+      "run.failed": { count: "x", firstAt: iso(NOW) },
+      "run.complete": { count: 1, firstAt: "garbage" },
+    },
+    earlier: ["latest", "one", 7, "", "one", "two", "three", "four"],
+  });
+  assert.deepEqual(entry.kindCounts, { "terminal.agent.needs-input": { count: 2, firstAt: iso(NOW) } });
+  assert.deepEqual(entry.earlier, ["one", "two", "three"]);
+  const bare = M.sanitizeEntry({ ...row({}), kindCounts: [], earlier: "nope" });
+  assert.equal("kindCounts" in bare, false);
+  assert.equal("earlier" in bare, false);
+});
+
+test("the badge rule: unread, open, not muted, not gone", () => {
+  const q = row({ id: "q", kind: "run.blocked", sourceKey: "run:r1", target: { type: "run", runId: "r1", workspaceId: "w1" } });
+  assert.equal(S.countsAsNeedsYou(q, [], NOW), true);
+  assert.equal(S.countsAsNeedsYou({ ...q, read: true }, [], NOW), false);
+  assert.equal(S.countsAsNeedsYou({ ...q, settled: true }, [], NOW), false);
+  assert.equal(S.countsAsNeedsYou(q, [{ key: "workspace:w1", label: "", until: NOW + 1 }], NOW), false);
+  assert.equal(S.countsAsNeedsYou(q, [], NOW, () => true), false);
+  assert.equal(S.countsAsNeedsYou(row({}), [], NOW), false);
 });
 
 test("state vocabulary: needs-you, failed, done, info", () => {

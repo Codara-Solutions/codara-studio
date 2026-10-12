@@ -185,32 +185,48 @@ config). Agents without those fall back to reading the screen.
 
 The bell in the title bar keeps every alert, including the ones you did not
 see because you were watching, Do Not Disturb was on, or the source was
-muted. Its badge counts the questions still waiting on you (a Cora run, a
-terminal agent or an automation that needs you); a dot means there are only
-other unread alerts.
+muted. Its badge counts the questions you have not seen yet that are still
+waiting on you (a Cora run, a terminal agent or an automation that needs you),
+leaving out muted sources and questions whose pane or run is gone. The
+**Needs you** tab and the pinned section count exactly the same rows. When
+there are none, a dot means there are other unread alerts; teammate pushes
+and muted sources do not light it.
 
-- **Needs you** sits on top: every open question, read or not, with a button
-  that goes straight to it (**Reply in terminal**, **Open run**, **Open
-  automation**). A question stops waiting once its source moves on, and a
-  terminal prompt from before a restart no longer counts.
+- **Needs you** sits on top: the unseen questions, each with its action on
+  the card (**Reply in terminal**, **Open run**, **Open automation**). A
+  blocked Cora run or automation shows its answer options as buttons and a
+  reply field, so you can answer without leaving what you are doing. A
+  question you have read or muted is still open but no longer pinned: it
+  stays in its day with a **Waiting** tag and a quiet button, and the header
+  says how many (for example "Needs you 6 · 9 seen"). A question stops
+  waiting once its source moves on: the agent resumes, the run continues,
+  the pane closes or the run is deleted. A terminal prompt from before a
+  restart no longer counts.
 - Below it the history is grouped by day, or by workspace with the folder
-  button. Repeats from one source fold into one row with a count
-  (`52×` for a busy bot), and the same alert from several panes stacks under
-  its newest copy.
+  button. Repeats from one source fold into one row: a prompt between two
+  finished turns does not restart the count, and the last three distinct
+  messages stay on the row (a bot's row reads "52 pushes to main,
+  feature/sync" with **3 earlier** to expand). The same alert from several
+  panes stacks under one heading such as "Claude Code finished 7× in
+  api-server".
 - Filters: **All**, **Needs you** and **Unread**. The filter and grouping are
   remembered.
 - Clicking a row opens its exact pane, run or automation and marks it read.
-  If the pane was closed or the run deleted, the row says so and opening it
-  lands on its workspace instead; rows of a removed workspace open nothing.
-  Opening the pane or run yourself also marks its alerts read.
+  If the pane was closed or the run is no longer available, the row says so
+  and opening it lands on its workspace instead; rows of a removed workspace
+  open nothing. Opening the pane or run yourself also marks its alerts read.
 - Hover a row for **Mark read** or **Mark unread**, **Mute** (this source or
   its whole workspace, for an hour or until 08:00 tomorrow) and **Dismiss**.
   Muted sources still land in the history, silently; the footer lists active
-  mutes with **Unmute**. **Clear all** and **Dismiss** can be undone for a few
-  seconds.
+  mutes with **Unmute**. **Clear all** removes everything except the
+  questions still waiting, and says how many it keeps. **Clear all** and
+  **Dismiss** can be undone for a few seconds; removals made while the undo
+  bar shows are undone together.
 - Keys, with the list focused: Up and Down (or J and K), Home and End, Enter
-  to open, R to toggle read, M to mute, Delete to dismiss, Escape to close the
-  menu and then the panel.
+  to open, R to toggle read, M to open the mute menu (arrows move in it,
+  Enter picks), Delete to dismiss, Right and Left to show or hide earlier
+  messages. Escape closes the menu, then leaves a reply field, then closes
+  the panel and returns focus to the bell.
 
 The history keeps 200 rows. When it is full the oldest read row goes first,
 and an open question goes last. Read rows are dropped after 7 days and any

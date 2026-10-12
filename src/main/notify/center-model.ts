@@ -3,8 +3,9 @@ import type {
   NotificationMute,
   NotificationViewSnapshot,
   NotifyEvent,
+  NotifyKind,
 } from "@shared/types";
-import { isNeedsYouKind, isTargetViewed, targetWorkspaceId } from "@shared/notify-center";
+import { isNeedsYouKind, isOpenQuestion, isTargetViewed, targetWorkspaceId } from "@shared/notify-center";
 
 // Pure list operations behind the notification center (center-store.ts owns
 // the state, persistence and pushes). No Electron or fs imports, so
@@ -55,7 +56,27 @@ export function sanitizeEntry(raw: unknown): NotificationCenterEntry | null {
   }
   if (typeof e.firstAt !== "string" || !Number.isFinite(Date.parse(e.firstAt))) delete entry.firstAt;
   if (e.settled !== true) delete entry.settled;
+  const kindCounts = sanitizeKindCounts(e.kindCounts, entry.kind);
+  if (kindCounts) entry.kindCounts = kindCounts;
+  else delete entry.kindCounts;
+  const earlier = Array.isArray(e.earlier) ? distinctBodies(e.earlier, entry.body) : [];
+  if (earlier.length > 0) entry.earlier = earlier;
+  else delete entry.earlier;
   return entry;
+}
+
+function sanitizeKindCounts(raw: unknown, own: NotifyKind): KindCounts | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: KindCounts = {};
+  for (const [kind, tally] of Object.entries(raw as Record<string, unknown>)) {
+    if (kind === own || !tally || typeof tally !== "object") continue;
+    const { count, firstAt, earlier } = tally as { count?: unknown; firstAt?: unknown; earlier?: unknown };
+    if (typeof count !== "number" || !Number.isFinite(count) || count < 1) continue;
+    if (typeof firstAt !== "string" || !Number.isFinite(Date.parse(firstAt))) continue;
+    const bodies = Array.isArray(earlier) ? distinctBodies(earlier, "") : [];
+    out[kind as NotifyKind] = { count: Math.floor(count), firstAt, ...(bodies.length > 0 ? { earlier: bodies } : {}) };
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 export function sanitizeEntries(raw: unknown): NotificationCenterEntry[] {
@@ -91,41 +112,125 @@ function collapseKey(entry: Pick<NotifyEvent, "kind" | "sourceKey" | "body">): s
   return entry.kind === "automation.step" ? `${entry.sourceKey}\u0000${entry.body}` : entry.sourceKey;
 }
 
+type KindCounts = NonNullable<NotificationCenterEntry["kindCounts"]>;
+
+interface Tally {
+  count: number;
+  firstAt: string;
+  // Newest first.
+  bodies: string[];
+}
+
+function addTally(
+  tallies: Map<NotifyKind, Tally>,
+  kind: NotifyKind,
+  count: number,
+  firstAt: string,
+  bodies: readonly string[] = [],
+): void {
+  const prior = tallies.get(kind);
+  if (!prior) {
+    tallies.set(kind, { count, firstAt, bodies: [...bodies] });
+    return;
+  }
+  prior.count += count;
+  if (timeOf(firstAt) < timeOf(prior.firstAt)) prior.firstAt = firstAt;
+  prior.bodies.push(...bodies);
+}
+
+function addKindCounts(tallies: Map<NotifyKind, Tally>, kindCounts: KindCounts | undefined): void {
+  for (const [kind, tally] of Object.entries(kindCounts ?? {})) {
+    if (tally) addTally(tallies, kind as NotifyKind, tally.count, tally.firstAt, tally.earlier);
+  }
+}
+
+// What a row being folded carries: a fresh event stands for one, a row from
+// disk being replayed (coalesceEntries) for whatever it already counted.
+type Foldable = NotifyEvent &
+  Partial<Pick<NotificationCenterEntry, "count" | "firstAt" | "kindCounts" | "earlier">>;
+
 // Record one event. Earlier rows from the same source that are unread or
 // recent fold into the new row, which moves to the top: the latest state wins
-// (a finished turn replaces the pane's stale "needs you"), and repeats of the
-// same kind carry their count forward ("finished 3 times"). Older read rows
-// stay as history.
+// (a finished turn replaces the pane's stale "needs you"), repeats of the
+// same kind carry their count forward ("finished 3 times"), and counts of the
+// kinds it replaced wait on the row until that kind comes back, so a prompt
+// between two finished turns does not restart the count. The last few
+// distinct bodies of the same kind stay on the row. Older read rows stay as
+// history.
 export function insertEntry(
   list: NotificationCenterEntry[],
-  event: NotifyEvent,
+  event: Foldable,
   opts: { read: boolean; suppressed?: string },
   now: number,
   cap = CENTER_CAP,
 ): void {
   const key = collapseKey(event);
-  let count = 1;
-  let firstAt = event.createdAt;
-  for (let i = list.length - 1; i >= 0; i -= 1) {
+  const tallies = new Map<NotifyKind, Tally>();
+  addTally(
+    tallies,
+    event.kind,
+    entryCount(event as NotificationCenterEntry),
+    event.firstAt ?? event.createdAt,
+    event.earlier,
+  );
+  addKindCounts(tallies, event.kindCounts);
+  // Newest first, so the bodies kept are the most recent ones.
+  for (let i = 0; i < list.length; i += 1) {
     const prior = list[i];
     if (collapseKey(prior) !== key) continue;
     const recent = now - timeOf(prior.createdAt) < COLLAPSE_WINDOW_MS;
     if (prior.read && !recent) continue;
     list.splice(i, 1);
-    if (prior.kind === event.kind) {
-      count += entryCount(prior);
-      const priorFirst = prior.firstAt ?? prior.createdAt;
-      if (timeOf(priorFirst) < timeOf(firstAt)) firstAt = priorFirst;
-    }
+    i -= 1;
+    addTally(tallies, prior.kind, entryCount(prior), prior.firstAt ?? prior.createdAt, [
+      prior.body,
+      ...(prior.earlier ?? []),
+    ]);
+    addKindCounts(tallies, prior.kindCounts);
   }
   const entry: NotificationCenterEntry = { ...event, read: opts.read };
+  delete entry.count;
+  delete entry.firstAt;
+  delete entry.kindCounts;
+  delete entry.earlier;
+  delete entry.suppressed;
+  delete entry.settled;
   if (opts.suppressed) entry.suppressed = opts.suppressed;
-  if (count > 1) {
-    entry.count = count;
-    entry.firstAt = firstAt;
+  const own = tallies.get(event.kind)!;
+  tallies.delete(event.kind);
+  if (own.count > 1) {
+    entry.count = own.count;
+    entry.firstAt = own.firstAt;
+  }
+  const earlier = distinctBodies(own.bodies, event.body);
+  if (earlier.length > 0) entry.earlier = earlier;
+  if (tallies.size > 0) {
+    const kindCounts: KindCounts = {};
+    for (const [kind, tally] of tallies) {
+      const bodies = distinctBodies(tally.bodies, "");
+      kindCounts[kind] = { count: tally.count, firstAt: tally.firstAt, ...(bodies.length > 0 ? { earlier: bodies } : {}) };
+    }
+    entry.kindCounts = kindCounts;
   }
   list.unshift(entry);
   evictToCap(list, cap);
+}
+
+const MAX_EARLIER = 3;
+const MAX_EARLIER_BODY = 300;
+
+function distinctBodies(bodies: readonly unknown[], current: string): string[] {
+  const seen = new Set([current.trim()]);
+  const out: string[] = [];
+  for (const raw of bodies) {
+    if (typeof raw !== "string") continue;
+    const body = raw.trim().slice(0, MAX_EARLIER_BODY);
+    if (!body || seen.has(body)) continue;
+    seen.add(body);
+    out.push(body);
+    if (out.length === MAX_EARLIER) break;
+  }
+  return out;
 }
 
 // Apply the folding rule to a list loaded from disk, oldest first, as if each
@@ -137,22 +242,9 @@ export function coalesceEntries(list: NotificationCenterEntry[]): boolean {
   const replay = [...list].reverse();
   list.length = 0;
   for (const entry of replay) {
-    const event: NotificationCenterEntry = { ...entry };
-    delete event.count;
-    delete event.firstAt;
-    delete event.settled;
-    delete event.suppressed;
-    const { read, suppressed, firstAt, settled } = entry;
-    insertEntry(list, event, { read, suppressed }, timeOf(entry.createdAt), Number.POSITIVE_INFINITY);
-    const inserted = list[0];
-    // insertEntry counted this row as one event; it may already stand for more.
-    const own = entryCount(entry);
-    if (own > 1) inserted.count = entryCount(inserted) + own - 1;
-    const earliest = firstAt ?? entry.createdAt;
-    if (inserted.count && timeOf(earliest) < timeOf(inserted.firstAt ?? inserted.createdAt)) {
-      inserted.firstAt = earliest;
-    }
-    if (settled) inserted.settled = true;
+    const { read, suppressed, settled } = entry;
+    insertEntry(list, entry, { read, suppressed }, timeOf(entry.createdAt), Number.POSITIVE_INFINITY);
+    if (settled) list[0].settled = true;
   }
   return list.length !== before;
 }
@@ -166,7 +258,7 @@ export function evictToCap(list: NotificationCenterEntry[], cap = CENTER_CAP): b
     let victim = -1;
     for (let i = list.length - 1; i >= 0 && victim < 0; i -= 1) if (list[i].read) victim = i;
     for (let i = list.length - 1; i >= 0 && victim < 0; i -= 1) {
-      if (!isNeedsYouKind(list[i].kind) || list[i].settled) victim = i;
+      if (!isOpenQuestion(list[i])) victim = i;
     }
     if (victim < 0) victim = list.length - 1;
     list.splice(victim, 1);
@@ -257,6 +349,14 @@ export function removeIds(list: NotificationCenterEntry[], ids: readonly string[
   const wanted = new Set(ids);
   const before = list.length;
   for (let i = list.length - 1; i >= 0; i -= 1) if (wanted.has(list[i].id)) list.splice(i, 1);
+  return list.length !== before;
+}
+
+// Clear all: everything except the questions still waiting on an answer.
+// Clearing a list must not make a blocked agent or run look handled.
+export function clearExceptOpen(list: NotificationCenterEntry[]): boolean {
+  const before = list.length;
+  for (let i = list.length - 1; i >= 0; i -= 1) if (!isOpenQuestion(list[i])) list.splice(i, 1);
   return list.length !== before;
 }
 

@@ -83,12 +83,29 @@ function test(name, fn) {
 
 let V;
 let R;
+let S;
+
+const build = (entries, extra = {}) =>
+  V.buildSections(entries, { filter: "all", grouping: "time", now: NOW, mutes: [], workspaces: WORKSPACES, ...extra });
 
 test("display text drops the brand prefix and moves the tab to the context", () => {
   assert.deepEqual(V.displayText(row({})), { title: "Claude Code finished", context: "server" });
   assert.deepEqual(V.displayText(question({})), { title: "Cora needs you", context: null });
   assert.deepEqual(V.displayText(row({ title: "" })), { title: "Agent finished", context: null });
   assert.deepEqual(V.displayText(row({ title: "Deploy done" })), { title: "Deploy done", context: null });
+  assert.deepEqual(V.displayText(row({ title: "Claude Code \u2014 finished" })), { title: "Claude Code finished", context: null });
+});
+
+test("a terminal body drops the filler its title already says", () => {
+  assert.equal(V.displayBody(row({ body: "Finished its turn. · took 15m" })), "Took 15m");
+  assert.equal(V.displayBody(row({ body: "Finished its turn." })), null);
+  assert.equal(V.displayBody(row({ body: "Refactored the parser · took 3m" })), "Refactored the parser · took 3m");
+  assert.equal(
+    V.displayBody(row({ body: "Finished after 9m in “terminals”. Click to jump to the terminal." })),
+    "Finished after 9m in “terminals”.",
+  );
+  assert.equal(V.displayBody(row({ kind: "terminal.agent.needs-input", body: "Waiting for your answer." })), null);
+  assert.equal(V.displayBody(question({ body: "Finished its turn." })), "Finished its turn.");
 });
 
 test("relative times: now, minutes, hours, then a day or a clock time", () => {
@@ -100,57 +117,110 @@ test("relative times: now, minutes, hours, then a day or a clock time", () => {
   assert.equal(V.rowTime("garbage", NOW, true), "");
 });
 
-test("open questions are pinned above the days, read or not", () => {
-  const entries = [row({}), question({ read: true }), question({}), row({ createdAt: iso(NOW - 30 * HOUR) })];
-  const sections = V.buildSections(entries, { filter: "all", grouping: "time", now: NOW, workspaces: WORKSPACES });
+test("only unseen open questions are pinned; seen ones stay in their day", () => {
+  const seen = question({ read: true });
+  const entries = [row({}), seen, question({}), row({ createdAt: iso(NOW - 30 * HOUR) })];
+  const sections = build(entries);
   assert.deepEqual(sections.map((s) => s.key), ["needs-you", "d0", "d1"]);
-  assert.equal(sections[0].rows, 2);
-  assert.equal(sections[0].limit, 3);
+  assert.equal(sections[0].rows, 1);
+  assert.equal(sections[0].note, "1 seen");
+  assert.ok(sections[1].items.some((item) => item.type === "row" && item.entry.id === seen.id));
+});
+
+test("a muted question is not pinned and the header says so", () => {
+  const muted = question({ target: { type: "run", runId: "rm", workspaceId: "w2" } });
+  const sections = build([question({}), muted], { mutes: [{ key: "workspace:w2", label: "web", until: NOW + HOUR }] });
+  assert.equal(sections[0].key, "needs-you");
+  assert.equal(sections[0].rows, 1);
+  assert.equal(sections[0].note, "1 muted");
 });
 
 test("a settled question or one whose target is gone is not pinned", () => {
   const settled = question({ settled: true });
   const gone = question({});
-  const sections = V.buildSections([settled, gone], {
-    filter: "all",
-    grouping: "time",
-    now: NOW,
-    workspaces: WORKSPACES,
-    isGone: (e) => e.id === gone.id,
-  });
+  const isGone = (e) => e.id === gone.id;
+  const sections = build([settled, gone], { isGone });
   assert.deepEqual(sections.map((s) => s.key), ["d0"]);
-  assert.deepEqual(V.filterCounts([settled, gone], (e) => e.id === gone.id), { all: 2, "needs-you": 0, unread: 2 });
+  assert.deepEqual(V.filterCounts([settled, gone], { now: NOW, mutes: [], isGone }), { "needs-you": 0, unread: 2 });
 });
 
-test("the Needs you filter lists only open questions, without a pinned copy", () => {
-  const entries = [row({}), question({}), question({ settled: true })];
-  const sections = V.buildSections(entries, { filter: "needs-you", grouping: "time", now: NOW, workspaces: WORKSPACES });
-  assert.equal(sections.length, 1);
-  assert.equal(sections[0].key, "d0");
-  assert.equal(sections[0].rows, 1);
+test("the badge, the Needs you tab and the pinned header always agree", () => {
+  const mutes = [{ key: "workspace:w2", label: "web", until: NOW + HOUR }];
+  const goneId = "gone-q";
+  const entries = [
+    question({}),
+    question({}),
+    question({ read: true }),
+    question({ target: { type: "run", runId: "rm", workspaceId: "w2" } }),
+    question({ id: goneId }),
+    question({ settled: true }),
+    row({ kind: "terminal.agent.needs-input", title: "Codex needs you · tests" }),
+    row({}),
+    row({ kind: "git.teammate-push", title: "bot pushed" }),
+  ];
+  const isGone = (e) => e.id === goneId;
+  const badge = S.countCenter(entries, mutes, NOW, isGone).needsYou;
+  const tab = V.filterCounts(entries, { now: NOW, mutes, isGone })["needs-you"];
+  for (const filter of ["all", "needs-you", "unread"]) {
+    for (const grouping of ["time", "workspace"]) {
+      const pinned = build(entries, { filter, grouping, mutes, isGone }).find((s) => s.key === "needs-you");
+      assert.equal(pinned.rows, badge, `${filter}/${grouping}`);
+    }
+  }
+  assert.equal(badge, 3);
+  assert.equal(tab, badge);
+  // Main has no view of panes; without the gone row it counts the same.
+  assert.equal(S.summarizeCenter(entries.filter((e) => !isGone(e)), mutes, NOW).needsYou, badge);
+});
+
+test("a pinned list shows whole unless at least three would hide", () => {
+  const five = Array.from({ length: 5 }, () => question({}));
+  assert.equal(build(five)[0].limit, undefined);
+  const six = Array.from({ length: 6 }, () => question({}));
+  assert.equal(build(six)[0].limit, 3);
+});
+
+test("the Needs you filter lists unseen questions, then the seen ones", () => {
+  const entries = [row({}), question({}), question({ read: true }), question({ settled: true })];
+  const sections = build(entries, { filter: "needs-you" });
+  assert.deepEqual(sections.map((s) => [s.key, s.rows]), [["needs-you", 1], ["seen", 1]]);
 });
 
 test("the Unread filter hides read rows", () => {
   const entries = [row({ read: true }), row({})];
-  const sections = V.buildSections(entries, { filter: "unread", grouping: "time", now: NOW, workspaces: WORKSPACES });
+  const sections = build(entries, { filter: "unread" });
   assert.equal(sections[0].rows, 1);
 });
 
 test("the same agent finishing in several panes stacks under the newest", () => {
-  const entries = [row({}), row({}), row({}), row({ title: "Codex finished" })];
-  const [today] = V.buildSections(entries, { filter: "all", grouping: "time", now: NOW, workspaces: WORKSPACES });
+  const entries = [row({ count: 4 }), row({}), row({ count: 2 }), row({ title: "Codex finished" })];
+  const [today] = build(entries);
   assert.equal(today.items.length, 2);
   assert.equal(today.items[0].type, "stack");
   assert.equal(today.items[0].entries.length, 3);
   assert.equal(today.rows, 4);
+  assert.equal(V.stackTitle(today.items[0].entries, "api"), "Claude Code finished 7× in api");
+  assert.equal(V.stackTitle(today.items[0].entries, null), "Claude Code finished 7×");
+});
+
+test("a folded push names its branches", () => {
+  const pushRow = row({
+    kind: "git.teammate-push",
+    count: 52,
+    body: "1 commit to feature/sync \u2014 Retry once",
+    earlier: ["10 commits to main \u2014 Merge #65", "New commits to memory/review", "3 commits to main \u2014 Bump"],
+  });
+  assert.equal(V.foldSummary(pushRow), "52 pushes to feature/sync, main, memory/review");
+  assert.equal(V.foldSummary({ ...pushRow, count: undefined }), null);
+  assert.equal(V.foldSummary(row({ count: 3 })), null);
 });
 
 test("rows older than six days start folded under Older", () => {
   const entries = [row({}), row({ createdAt: iso(NOW - 9 * 24 * HOUR) })];
-  const sections = V.buildSections(entries, { filter: "all", grouping: "time", now: NOW, workspaces: WORKSPACES });
+  const sections = build(entries);
   assert.equal(sections[1].key, "older");
   assert.equal(sections[1].collapsed, true);
-  const alone = V.buildSections([entries[1]], { filter: "all", grouping: "time", now: NOW, workspaces: WORKSPACES });
+  const alone = build([entries[1]]);
   assert.equal(alone[0].collapsed, false);
 });
 
@@ -160,10 +230,26 @@ test("grouping by workspace makes one section per workspace with its name", () =
     row({ target: { type: "workspace", workspaceId: "w2" }, kind: "git.teammate-push", title: "bob pushed" }),
     row({ target: { type: "automation", jobId: "j" }, kind: "automation.finished", title: "Nightly", workspaceName: "ops" }),
   ];
-  const sections = V.buildSections(entries, { filter: "all", grouping: "workspace", now: NOW, workspaces: WORKSPACES });
+  const sections = build(entries, { grouping: "workspace" });
   assert.deepEqual(sections.map((s) => s.label), ["api", "web", "ops"]);
   assert.equal(sections[0].color, "#f00");
-  assert.equal(sections[0].limit, 4);
+  const many = Array.from({ length: 7 }, (_, i) => row({ title: `Agent ${i} finished` }));
+  assert.equal(build(many, { grouping: "workspace" })[0].limit, 4);
+});
+
+test("clear all keeps open questions unless their target is gone", () => {
+  const open = question({});
+  const seen = question({ read: true });
+  const goneQ = question({});
+  const done = row({});
+  const ids = V.clearableIds([open, seen, goneQ, done], (e) => e.id === goneQ.id);
+  assert.deepEqual(ids, [goneQ.id, done.id]);
+});
+
+test("undo labels count what one Undo puts back", () => {
+  assert.equal(V.undoLabel("Dismissed", 1), "Dismissed");
+  assert.equal(V.undoLabel("Dismissed", 2), "Dismissed 2 notifications");
+  assert.equal(V.undoLabel("Removed", 5), "Removed 5 notifications");
 });
 
 test("mute labels name what would go quiet", () => {
@@ -228,6 +314,7 @@ test("a malformed target is gone without calling anything", () => {
 (async () => {
   V = await load(path.join(NOTIFY_DIR, "center-view.ts"));
   R = await load(path.join(NOTIFY_DIR, "routing.ts"));
+  S = await load(path.join(SHARED_DIR, "notify-center.ts"));
   for (const { name, fn } of tests) {
     fn();
     console.log(`  PASS ${name}`);

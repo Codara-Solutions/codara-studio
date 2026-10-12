@@ -13,6 +13,7 @@ import { writeFileAtomic } from "../fs-atomic";
 import { getPreferenceCached } from "../preferences-store";
 import { codaraHome } from "../codara-home";
 import {
+  clearExceptOpen,
   coalesceEntries,
   evictToCap,
   insertEntry,
@@ -250,11 +251,7 @@ export function removeCenterEntries(ids: readonly string[]): Promise<void> {
 }
 
 export function clearCenter(): Promise<void> {
-  return enqueue(() => {
-    if (entries.length === 0) return;
-    entries.length = 0;
-    commit({ entries: true });
-  });
+  return enqueue(() => commit({ entries: clearExceptOpen(entries) }));
 }
 
 export function restoreCenterEntries(raw: unknown): Promise<void> {

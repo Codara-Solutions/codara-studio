@@ -1,15 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { NotificationCenterEntry, NotificationMute } from "@shared/types";
-import { summarizeCenter } from "@shared/notify-center";
+import type {
+  NotificationCenterEntry,
+  NotificationCenterSummary,
+  NotificationMute,
+} from "@shared/types";
+import { undoLabel } from "./center-view";
 
-// Renderer state for the notification center. The bell only needs counts,
-// which arrive in the "notify:center-updated" summary push. The rows are
-// fetched when the panel opens and refetched on each push while it is open;
-// a push while closed marks them stale so the next open refetches.
-// Mutations update the rows optimistically, and while rows are loaded the
-// counts are derived from them, so the badge reacts immediately.
+// Renderer state for the notification center. The rows are held whether or
+// not the panel is open: the bell's badge has to apply the same rule as the
+// panel (countsAsNeedsYou, with this window's view of which panes and runs
+// still exist), and that needs the rows. They are fetched at mount and again
+// after each "notify:center-updated" push, coalesced, so a burst of alerts
+// costs one fetch. Mutations update the rows optimistically. Until the first
+// fetch lands, the pushed summary stands in for the counts.
 
 const UNDO_MS = 6_000;
+const REFETCH_DELAY_MS = 120;
+
+type UndoVerb = "Dismissed" | "Cleared";
 
 export interface CenterUndo {
   label: string;
@@ -19,13 +27,14 @@ export interface CenterUndo {
 export interface NotificationCenterApi {
   entries: NotificationCenterEntry[];
   loaded: boolean;
-  unread: number;
-  needsYou: number;
+  summary: Pick<NotificationCenterSummary, "unread" | "needsYou" | "notable">;
   mutes: NotificationMute[];
+  // Bumps when a mute lapses, so counts that depend on mutes recompute.
+  muteClock: number;
   setRead: (ids: string[], read: boolean) => void;
   markAllRead: () => void;
-  dismiss: (ids: string[], label?: string) => void;
-  clearAll: () => void;
+  dismiss: (ids: string[]) => void;
+  clear: (ids: string[]) => void;
   undo: CenterUndo | null;
   runUndo: () => void;
   dropUndo: () => void;
@@ -36,16 +45,18 @@ export interface NotificationCenterApi {
 export function useNotificationCenter(open: boolean): NotificationCenterApi {
   const [entries, setEntries] = useState<NotificationCenterEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [summary, setSummary] = useState({ unread: 0, needsYou: 0, mutes: [] as NotificationMute[] });
-  const [undo, setUndo] = useState<CenterUndo | null>(null);
-  const openRef = useRef(open);
-  openRef.current = open;
-  const staleRef = useRef(true);
+  const [summary, setSummary] = useState({ unread: 0, needsYou: 0, notable: 0 });
+  const [mutes, setMutes] = useState<NotificationMute[]>([]);
+  const [muteClock, setMuteClock] = useState(0);
+  const [undo, setUndo] = useState<{ verb: UndoVerb | "Removed"; entries: NotificationCenterEntry[] } | null>(null);
   // Mirror the latest rows so mutation callbacks can snapshot them without
   // closing over stale state, which keeps the state updaters pure.
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  const undoRef = useRef(undo);
+  undoRef.current = undo;
   const undoTimer = useRef<number | null>(null);
+  const refetchTimer = useRef<number | null>(null);
   // A fetch that started before a local mutation must not overwrite it.
   const fetchSeq = useRef(0);
 
@@ -54,7 +65,6 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     try {
       const list = await window.spark.notifications.list();
       if (seq !== fetchSeq.current) return;
-      staleRef.current = false;
       setEntries(list);
       setLoaded(true);
     } catch {
@@ -62,28 +72,55 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     }
   }, []);
 
+  const scheduleRefresh = useCallback(() => {
+    if (refetchTimer.current !== null) return;
+    refetchTimer.current = window.setTimeout(() => {
+      refetchTimer.current = null;
+      void refresh();
+    }, REFETCH_DELAY_MS);
+  }, [refresh]);
+
   useEffect(() => {
     let alive = true;
+    const apply = (next: NotificationCenterSummary) => {
+      setSummary({ unread: next.unread, needsYou: next.needsYou, notable: next.notable ?? 0 });
+      setMutes(next.mutes);
+    };
     void window.spark.notifications
       .summary()
       .then((next) => {
-        if (alive) setSummary(next);
+        if (alive) apply(next);
       })
       .catch(() => undefined);
+    void refresh();
     const off = window.spark.notifications.onCenterUpdated?.((next) => {
-      setSummary(next);
-      staleRef.current = true;
-      if (openRef.current) void refresh();
+      apply(next);
+      scheduleRefresh();
     });
     return () => {
       alive = false;
       off?.();
+      if (refetchTimer.current !== null) window.clearTimeout(refetchTimer.current);
+      refetchTimer.current = null;
     };
-  }, [refresh]);
+  }, [refresh, scheduleRefresh]);
 
+  // Opening the panel always shows fresh rows, even if a push was missed.
   useEffect(() => {
-    if (open && staleRef.current) void refresh();
+    if (open) void refresh();
   }, [open, refresh]);
+
+  // A mute lapses on its own; wake when the soonest one does.
+  useEffect(() => {
+    if (mutes.length === 0) return;
+    const soonest = Math.min(...mutes.map((m) => m.until));
+    const delay = Math.max(1_000, Math.min(soonest - Date.now() + 250, 2 ** 31 - 1));
+    const timer = window.setTimeout(() => {
+      setMutes((current) => current.filter((m) => m.until > Date.now()));
+      setMuteClock((n) => n + 1);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [mutes]);
 
   const bumpLocal = () => {
     fetchSeq.current += 1;
@@ -100,47 +137,8 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
   const markAllRead = useCallback(() => {
     bumpLocal();
     setEntries((current) => current.map((e) => (e.read ? e : { ...e, read: true })));
-    setSummary((s) => ({ ...s, unread: 0, needsYou: 0 }));
     void window.spark.notifications.markAllRead().catch(() => undefined);
   }, []);
-
-  const offerUndo = useCallback((next: CenterUndo) => {
-    if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
-    setUndo(next);
-    undoTimer.current = window.setTimeout(() => {
-      undoTimer.current = null;
-      setUndo(null);
-    }, UNDO_MS);
-  }, []);
-
-  const dismiss = useCallback(
-    (ids: string[], label?: string) => {
-      if (ids.length === 0) return;
-      bumpLocal();
-      const wanted = new Set(ids);
-      const removed = entriesRef.current.filter((e) => wanted.has(e.id));
-      setEntries((current) => current.filter((e) => !wanted.has(e.id)));
-      if (removed.length > 0) {
-        offerUndo({
-          label: label ?? (removed.length === 1 ? "Dismissed" : `Dismissed ${removed.length}`),
-          entries: removed,
-        });
-      }
-      void window.spark.notifications.remove(ids).catch(() => undefined);
-    },
-    [offerUndo],
-  );
-
-  const clearAll = useCallback(() => {
-    bumpLocal();
-    const removed = entriesRef.current;
-    setEntries([]);
-    setSummary((s) => ({ ...s, unread: 0, needsYou: 0 }));
-    if (removed.length > 0) {
-      offerUndo({ label: `Cleared ${removed.length} notification${removed.length === 1 ? "" : "s"}`, entries: removed });
-    }
-    void window.spark.notifications.clear().catch(() => undefined);
-  }, [offerUndo]);
 
   const dropUndo = useCallback(() => {
     if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
@@ -148,15 +146,50 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     setUndo(null);
   }, []);
 
+  // A second removal inside the undo window joins the first, so Undo puts
+  // back everything removed since the bar appeared, not just the last batch.
+  const offerUndo = useCallback((verb: UndoVerb, removed: NotificationCenterEntry[]) => {
+    if (removed.length === 0) return;
+    if (undoTimer.current !== null) window.clearTimeout(undoTimer.current);
+    const pending = undoRef.current;
+    const next = pending
+      ? { verb: pending.verb === verb ? verb : ("Removed" as const), entries: [...pending.entries, ...removed] }
+      : { verb, entries: removed };
+    undoRef.current = next;
+    setUndo(next);
+    undoTimer.current = window.setTimeout(() => {
+      undoTimer.current = null;
+      undoRef.current = null;
+      setUndo(null);
+    }, UNDO_MS);
+  }, []);
+
+  const remove = useCallback(
+    (ids: string[], verb: UndoVerb) => {
+      if (ids.length === 0) return;
+      bumpLocal();
+      const wanted = new Set(ids);
+      const removed = entriesRef.current.filter((e) => wanted.has(e.id));
+      setEntries((current) => current.filter((e) => !wanted.has(e.id)));
+      offerUndo(verb, removed);
+      void window.spark.notifications.remove(ids).catch(() => undefined);
+    },
+    [offerUndo],
+  );
+
+  const dismiss = useCallback((ids: string[]) => remove(ids, "Dismissed"), [remove]);
+  const clear = useCallback((ids: string[]) => remove(ids, "Cleared"), [remove]);
+
   const runUndo = useCallback(() => {
-    const pending = undo;
+    const pending = undoRef.current;
     dropUndo();
+    undoRef.current = null;
     if (!pending) return;
     void window.spark.notifications
       .restore(pending.entries)
       .then(() => refresh())
       .catch(() => undefined);
-  }, [undo, dropUndo, refresh]);
+  }, [dropUndo, refresh]);
 
   useEffect(
     () => () => {
@@ -167,32 +200,26 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
 
   const mute = useCallback((key: string, label: string, durationMs: number) => {
     const until = Date.now() + durationMs;
-    setSummary((s) => ({ ...s, mutes: [...s.mutes.filter((m) => m.key !== key), { key, label, until }] }));
+    setMutes((current) => [...current.filter((m) => m.key !== key), { key, label, until }]);
     void window.spark.notifications.mute(key, label, durationMs).catch(() => undefined);
   }, []);
 
   const unmute = useCallback((key: string) => {
-    setSummary((s) => ({ ...s, mutes: s.mutes.filter((m) => m.key !== key) }));
+    setMutes((current) => current.filter((m) => m.key !== key));
     void window.spark.notifications.unmute(key).catch(() => undefined);
   }, []);
-
-  // With rows in hand (panel open), counts come from them so an optimistic
-  // change shows on the badge at once; otherwise the pushed summary is the
-  // truth.
-  const counts =
-    open && loaded ? summarizeCenter(entries, summary.mutes, Date.now()) : summary;
 
   return {
     entries,
     loaded,
-    unread: counts.unread,
-    needsYou: counts.needsYou,
-    mutes: summary.mutes,
+    summary,
+    mutes,
+    muteClock,
     setRead,
     markAllRead,
     dismiss,
-    clearAll,
-    undo,
+    clear,
+    undo: undo ? { label: undoLabel(undo.verb, undo.entries.length), entries: undo.entries } : null,
     runUndo,
     dropUndo,
     mute,

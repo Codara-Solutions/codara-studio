@@ -202,6 +202,15 @@ function formatDuration(ms: number): string {
 }
 
 function handleRunEvent(event: SparkEvent): void {
+  // A deleted run (by the user or the retention sweep) can never be
+  // answered, so its question stops counting. Run-scoped automation
+  // questions share the run's source key and settle with it.
+  if (event.type === "run.deleted" && event.runId) {
+    void settleCenterSource(runSourceKey(event.runId)).catch((err) => {
+      console.warn("[notify] center settle failed:", err);
+    });
+    return;
+  }
   // Only run-level status transitions alert; worker events fire many times
   // per run and would be pure noise.
   if (event.type !== "run.status_updated") return;

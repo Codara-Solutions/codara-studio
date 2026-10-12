@@ -8,7 +8,9 @@ import { join } from "node:path";
 // assertion suite: it seeds a fake Codara home with a realistic
 // notifications.json and photographs the open panel in each state, at two
 // window sizes and in a dark and a light theme, so a visual change can be
-// judged side by side. Shots land in SHOTS_DIR (or the test output folder).
+// judged side by side. Shots land in SHOTS_DIR, and without it the harness is
+// skipped: it takes a minute and asserts little (notification-center.spec.ts
+// checks the behaviour).
 // HOME and the Codara home are throwaway directories, so nothing here reads or
 // writes the user's real ~/.codarastudio.
 
@@ -44,6 +46,10 @@ const PR_TITLES = [
 ];
 
 const TABS = ["terminals", "terminals 2", "server", "tests", "review"];
+const BRANCHES = ["feature/sync", "main", "feature/sync", "memory/review"];
+
+// Runs seeded as blocked on an open question (see seedTargets).
+const BLOCKED_RUNS = new Set(["run-ws-web-b1"]);
 
 let seq = 0;
 function makeEntry(minutesAgo: number, fields: Record<string, unknown>): Entry {
@@ -110,7 +116,7 @@ function teammatePush(minutesAgo: number, ws: (typeof WORKSPACES)[number], i: nu
     silent: true,
     title: `release-bot[bot] pushed to ${ws.name}`,
     workspaceName: ws.name,
-    body: `${commits} commit${commits === 1 ? "" : "s"} to feature/sync ${DASH} ${COMMITS[i % COMMITS.length]}`,
+    body: `${commits} commit${commits === 1 ? "" : "s"} to ${BRANCHES[i % BRANCHES.length]} ${DASH} ${COMMITS[i % COMMITS.length]}`,
     target: { type: "workspace", workspaceId: ws.id, panel: "git" },
   });
 }
@@ -311,21 +317,39 @@ async function seedTargets(home: string, entries: Entry[]): Promise<Layouts> {
     const runDir = join(home, "runs", runId);
     await mkdir(runDir, { recursive: true });
     const at = new Date(Date.now() - 3 * 60 * MINUTE).toISOString();
+    // A blocked run carries the open question its row can answer in place.
+    const blocked = BLOCKED_RUNS.has(runId);
     await writeFile(
       join(runDir, "run.json"),
       JSON.stringify({
         id: runId,
         workspaceId,
         title: "Session middleware refactor",
-        status: "complete",
+        status: blocked ? "blocked" : "complete",
         settingsSnapshot: { workspaceCwd: join(home, "..", "projects") },
         artifactDir: runDir,
         createdAt: at,
         updatedAt: at,
-        completedAt: at,
+        ...(blocked ? {} : { completedAt: at }),
         conversationEpoch: 0,
         plans: [], steps: [], workerTasks: [], workerAttempts: [], checkpoints: [], assumptions: [],
-        sparkCalls: [], humanMessages: [],
+        sparkCalls: [],
+        humanMessages: blocked
+          ? [
+              {
+                id: `question-${runId}`,
+                runId,
+                author: "spark",
+                kind: "question",
+                message: "Should the migration drop the unused `legacy_sessions` table, or keep it for one more release?",
+                questionOptions: [
+                  { id: "drop", label: "Drop it now", description: "Nothing has read the table since March.", answer: "Drop legacy_sessions in this migration.", recommended: true },
+                  { id: "keep", label: "Keep one more release", description: "Rename it and drop it next release.", answer: "Keep legacy_sessions for one more release." },
+                ],
+                createdAt: at,
+              },
+            ]
+          : [],
         chatBackend: "pi", chatMode: "auto",
       }),
       "utf8",
@@ -508,11 +532,12 @@ async function darkWide(page: Page): Promise<void> {
 }
 
 test.describe.configure({ mode: "serial" });
+test.skip(!process.env.SHOTS_DIR, "screenshot harness: set SHOTS_DIR to run it");
 
 for (const scenario of SCENARIOS) {
-  test(`notification center shots: ${scenario.name}`, async ({}, testInfo) => {
+  test(`notification center shots: ${scenario.name}`, async () => {
     test.setTimeout(240_000);
-    const dir = process.env.SHOTS_DIR || testInfo.outputPath("shots");
+    const dir = process.env.SHOTS_DIR ?? "";
     await mkdir(dir, { recursive: true });
     const { app, page, root } = await launch(scenario.entries, scenario.seedTargets);
     try {
@@ -573,10 +598,25 @@ for (const scenario of SCENARIOS) {
         await page.keyboard.press("ArrowDown");
         await page.waitForTimeout(150);
         await panel(page).screenshot({ path: join(dir, `${scenario.name}-1400x900-dark-keyboard-panel.png`) });
+        // M opens the mute menu with its first item focused.
+        await page.keyboard.press("m");
+        await page.keyboard.press("ArrowDown");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, `${scenario.name}-1400x900-dark-keyboard-menu-panel.png`) });
+        await page.keyboard.press("Escape");
       }
 
       if (scenario.name === "needs-you") {
         await darkWide(page);
+        // The blocked Cora run answers in place.
+        await rows(page).filter({ hasText: "Cora needs you" }).first().locator(".nc-reply input").fill("Keep it, but rename it to legacy_sessions_old");
+        await page.waitForTimeout(100);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-answer-panel.png") });
+        await rows(page).filter({ hasText: "Cora needs you" }).first().locator(".nc-reply input").fill("");
+        await setTheme(page, "codara-daylight");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-light-answer-panel.png") });
+        await setTheme(page, "codara-classic");
         await setFilter(page, "Needs you");
         await page.waitForTimeout(150);
         await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-filter-panel.png") });
@@ -589,6 +629,7 @@ for (const scenario of SCENARIOS) {
         await page.mouse.move(10, 400);
         await page.waitForTimeout(250);
         await page.screenshot({ path: join(dir, "needs-you-1400x900-dark-muted.png") });
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-muted-panel.png") });
       }
 
       if (scenario.name === "few") {

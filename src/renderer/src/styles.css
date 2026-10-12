@@ -7071,6 +7071,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .nc-btn:hover:not(:disabled) { background: var(--hover-strong); color: var(--ink); }
 .nc-btn:active:not(:disabled) { background: var(--press); }
 .nc-btn:disabled { opacity: 0.4; }
+.nc-btn-note { color: var(--muted); font-weight: 500; }
+.nc-btn-note::before { content: "·"; margin-right: 5px; opacity: 0.7; }
 .nc-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .nc-btn svg { flex: 0 0 auto; }
 
@@ -7161,11 +7163,17 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   outline: none;
   scrollbar-gutter: stable;
 }
+/* The list takes focus on open only so the arrow keys work at once; the row
+   that arrow keys land on carries the ring, never the whole list. */
+.nc-list:focus-visible { box-shadow: none; }
 .nc-section + .nc-section { margin-top: 2px; }
+/* Opaque even on glass: rows scroll under a sticky header, and any
+   translucency shows their text through the label. It sits above the rows'
+   own stacking contexts (content-visibility implies paint containment). */
 .nc-section-head {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 3;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -7178,11 +7186,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-@media not (prefers-reduced-transparency: reduce) {
-  html:not([data-glass="off"]) .nc-section-head {
-    background: color-mix(in oklab, var(--panel-2) 97%, transparent);
-  }
-}
 .nc-section[data-tone="needs-you"] .nc-section-head { color: color-mix(in oklch, var(--warn) 78%, var(--ink)); }
 .nc-section-head[data-workspace="true"] { text-transform: none; letter-spacing: 0.01em; font-size: 11.5px; color: var(--ink-dim); }
 .nc-section-count {
@@ -7191,6 +7194,15 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+.nc-section[data-tone="needs-you"] .nc-section-count { color: inherit; }
+.nc-section-note {
+  color: var(--muted);
+  font-weight: 550;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 11px;
+}
+.nc-section-note::before { content: "·"; margin-right: 6px; opacity: 0.7; }
 .nc-section-toggle {
   appearance: none;
   display: inline-flex;
@@ -7232,9 +7244,9 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .nc-row:hover { background: var(--hover); }
 .nc-row:focus-visible { background: var(--hover); box-shadow: var(--focus-ring); }
-.nc-row[data-waiting="true"] { background: color-mix(in oklch, var(--warn) 7%, transparent); }
-.nc-row[data-waiting="true"]:hover { background: color-mix(in oklch, var(--warn) 11%, transparent); }
-.nc-row[data-waiting="true"]::before {
+.nc-row[data-waiting="pinned"] { background: color-mix(in oklch, var(--warn) 7%, transparent); }
+.nc-row[data-waiting="pinned"]:hover { background: color-mix(in oklch, var(--warn) 11%, transparent); }
+.nc-row[data-waiting="pinned"]::before {
   content: "";
   position: absolute;
   left: 0;
@@ -7244,10 +7256,30 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border-radius: 0 3px 3px 0;
   background: var(--warn);
 }
-.nc-row[data-waiting="true"] + .nc-row[data-waiting="true"] { margin-top: 3px; }
+.nc-row[data-waiting="pinned"] + .nc-row[data-waiting="pinned"] { margin-top: 3px; }
 /* content-visibility implies paint containment, which would clip the mute
-   menu; the row with an open menu also has to paint above its neighbours. */
+   menu; the row with an open menu also has to paint above its neighbours
+   and the sticky section headers. */
 .nc-row[data-menu="true"] { content-visibility: visible; z-index: 4; }
+
+/* The title is the row's open control; a click elsewhere on the row that
+   lands on no other control opens it too. */
+.nc-open {
+  appearance: none;
+  flex: 0 1 auto;
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  outline: none;
+}
+.nc-open:focus-visible { box-shadow: none; }
 
 .nc-icon {
   position: relative;
@@ -7323,7 +7355,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border-radius: 50%;
   background: var(--accent);
 }
-.nc-row[data-waiting="true"] .nc-unread-dot { background: var(--warn); }
+.nc-row[data-waiting="pinned"] .nc-unread-dot { background: var(--warn); }
 
 .nc-meta {
   display: flex;
@@ -7341,7 +7373,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  max-width: 55%;
   color: var(--ink-dim);
   font-weight: 550;
 }
@@ -7358,7 +7391,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   line-height: 15px;
 }
 .nc-tag[data-kind="gone"] { border-style: dashed; }
+.nc-tag[data-kind="waiting"] {
+  border-color: color-mix(in oklch, var(--warn) 45%, transparent);
+  color: color-mix(in oklch, var(--warn) 70%, var(--ink-dim));
+}
 .nc-tag svg { vertical-align: -1px; }
+.nc-meta-text { flex: 0 1 auto; }
 
 .nc-body {
   margin-top: 3px;
@@ -7373,30 +7411,156 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .nc-row[data-unread="false"] .nc-body { color: var(--muted); }
 
-.nc-primary-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 7px;
-}
+/* The row's one action sits at the end of the meta line, so a question card
+   is three lines, not four. */
 .nc-primary {
   appearance: none;
-  height: 24px;
-  padding: 0 10px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: 21px;
+  padding: 0 9px;
   border: 1px solid color-mix(in oklch, var(--nc-tone, var(--accent)) 45%, transparent);
   border-radius: var(--radius-control, 7px);
   background: color-mix(in oklch, var(--nc-tone, var(--accent)) 16%, transparent);
   color: color-mix(in oklch, var(--nc-tone, var(--accent)) 75%, var(--ink));
-  font: 600 11.5px var(--font-sans);
+  font: 600 11px var(--font-sans);
   cursor: default;
-  transition: background var(--motion-fast) var(--ease-out);
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .nc-primary:hover { background: color-mix(in oklch, var(--nc-tone, var(--accent)) 26%, transparent); }
 .nc-primary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-primary[data-quiet="true"] {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  font-weight: 550;
+}
+.nc-primary[data-quiet="true"]:hover { background: var(--hover-strong); color: var(--ink); }
+.nc-row[data-waiting] .nc-meta { margin-top: 2px; min-height: 21px; }
+
+.nc-earlier { margin-top: 3px; }
+.nc-earlier-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px 1px 3px;
+  margin-left: -3px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: 550 11px var(--font-sans);
+  cursor: default;
+}
+.nc-earlier-toggle:hover { background: var(--hover-strong); color: var(--ink-dim); }
+.nc-earlier-list {
+  margin: 3px 0 0;
+  padding: 0 0 0 9px;
+  border-left: 1px solid var(--rule);
+  list-style: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.42;
+}
+.nc-earlier-list li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nc-earlier-list li + li { margin-top: 2px; }
+
+.nc-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 7px;
+}
+.nc-options { display: flex; flex-wrap: wrap; gap: 5px; }
+.nc-option {
+  appearance: none;
+  max-width: 100%;
+  height: 23px;
+  padding: 0 9px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 550 11.5px var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
+}
+.nc-option:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--nc-tone, var(--accent)) 55%, transparent);
+  background: color-mix(in oklch, var(--nc-tone, var(--accent)) 12%, var(--panel));
+}
+.nc-option[data-recommended="true"] {
+  border-color: color-mix(in oklch, var(--nc-tone, var(--accent)) 50%, transparent);
+  background: color-mix(in oklch, var(--nc-tone, var(--accent)) 14%, var(--panel));
+  color: color-mix(in oklch, var(--nc-tone, var(--accent)) 60%, var(--ink));
+}
+.nc-option:disabled { opacity: 0.55; }
+.nc-option:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-reply {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 27px;
+  padding: 0 3px 0 9px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--panel);
+  transition: border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+}
+.nc-reply:focus-within {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--rule));
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 16%, transparent);
+}
+.nc-reply input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: 12px var(--font-sans);
+  outline: none;
+}
+.nc-reply input:focus-visible { box-shadow: none; }
+.nc-reply input::placeholder { color: var(--muted); }
+.nc-reply-send {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: color-mix(in oklab, var(--bg) 92%, var(--accent));
+  cursor: default;
+}
+.nc-reply-send:disabled { background: var(--hover-strong); color: var(--muted); }
+.nc-reply-send:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-answer-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+.nc-answer-error { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
 
 .nc-actions {
   position: absolute;
-  top: 6px;
+  top: 4px;
   right: 6px;
   display: flex;
   gap: 1px;
@@ -7409,7 +7573,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   transition: opacity var(--motion-fast) var(--ease-out);
 }
 .nc-row:hover .nc-actions,
-.nc-row:focus-within .nc-actions,
+.nc-row:focus-visible .nc-actions,
+.nc-row:has(:focus-visible) .nc-actions,
 .nc-row[data-menu="true"] .nc-actions {
   opacity: 1;
   pointer-events: auto;
@@ -7419,7 +7584,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   display: grid;
   place-items: center;
   width: 24px;
-  height: 22px;
+  height: 20px;
   padding: 0;
   border: none;
   border-radius: 6px;
@@ -7434,7 +7599,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 
 .nc-menu {
   position: absolute;
-  top: 34px;
+  top: 30px;
   right: 6px;
   z-index: 5;
   min-width: 220px;

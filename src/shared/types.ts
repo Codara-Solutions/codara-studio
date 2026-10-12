@@ -1536,6 +1536,15 @@ export interface NotificationCenterEntry extends NotifyEvent {
   // rows written by older builds, which read as a count of one.
   count?: number;
   firstAt?: string;
+  // Counts (and earlier bodies) the same source built up under other kinds
+  // before its latest state replaced them, so an agent that finished 6
+  // times, asked once and then finished again reads "finished 7 times"
+  // rather than starting over.
+  kindCounts?: Partial<Record<NotifyKind, { count: number; firstAt: string; earlier?: string[] }>>;
+  // Up to three earlier distinct bodies of the folded events, newest first:
+  // the branches a bot pushed to, what an agent finished before its latest
+  // turn.
+  earlier?: string[];
   // The source moved on after asking (the agent resumed, the run continued,
   // the pane closed), so a needs-you row no longer waits on the user.
   settled?: boolean;
@@ -1551,13 +1560,14 @@ export interface NotificationMute {
 }
 
 // Pushed on "notify:center-updated" whenever the center's contents change,
-// so the renderer bell tracks counts without refetching the list. `needsYou`
-// is what the badge shows: unread rows still waiting on the user, minus any
-// whose source is muted. `version` increases on every change so a closed
-// panel knows its cached rows are stale.
+// so every window and the dock badge track counts. `needsYou` is what the
+// badge shows (countsAsNeedsYou in notify-center.ts); `notable` is the unread
+// rows that light the bell's quiet dot instead. `version` increases on every
+// change so a renderer knows its cached rows are stale.
 export interface NotificationCenterSummary {
   unread: number;
   needsYou: number;
+  notable: number;
   mutes: NotificationMute[];
   version: number;
 }

@@ -68,24 +68,75 @@ export function mutedBy(
   return mutes.find((mute) => mute.until > now && keys.has(mute.key)) ?? null;
 }
 
-// Unread rows, and the subset the badge shows: rows still waiting on the user
-// whose source is not muted right now.
+// A row still waiting on the user: a needs-you kind whose source has not
+// moved on since (resumed, answered, closed or deleted).
+export function isOpenQuestion(entry: Pick<NotificationCenterEntry, "kind" | "settled">): boolean {
+  return NEEDS_YOU_KINDS.has(entry.kind) && entry.settled !== true;
+}
+
+export type IsGone = (entry: NotificationCenterEntry) => boolean;
+
+// The one rule behind the bell badge, the "Needs you" tab count and the
+// pinned section: an open question the user has not seen, whose source is
+// not muted, and whose pane, run or workspace still exists. Main has no view
+// of panes, so it passes no isGone and relies on settling instead (a pane's
+// disposal and a run's deletion settle their questions); the renderer passes
+// one so a closed pane drops out as soon as its layout changes. A read or
+// muted question is still open, but no longer asks for attention.
+export function countsAsNeedsYou(
+  entry: NotificationCenterEntry,
+  mutes: readonly NotificationMute[],
+  now: number,
+  isGone?: IsGone,
+): boolean {
+  if (entry.read || !isOpenQuestion(entry)) return false;
+  if (mutes.length > 0 && mutedBy(entry, mutes, now)) return false;
+  return !isGone?.(entry);
+}
+
+// Unread rows that earn the bell's quiet dot when nothing needs the user:
+// not muted, and not a teammate's push, which arrives all day and never asks
+// for anything.
+export function countsAsNotable(
+  entry: NotificationCenterEntry,
+  mutes: readonly NotificationMute[],
+  now: number,
+): boolean {
+  if (entry.read || entry.kind === "git.teammate-push") return false;
+  return !(mutes.length > 0 && mutedBy(entry, mutes, now));
+}
+
+export interface CenterCounts {
+  unread: number;
+  needsYou: number;
+  notable: number;
+}
+
+export function countCenter(
+  list: readonly NotificationCenterEntry[],
+  mutes: readonly NotificationMute[],
+  now: number,
+  isGone?: IsGone,
+): CenterCounts {
+  const live = activeMutes(mutes, now);
+  let unread = 0;
+  let needsYou = 0;
+  let notable = 0;
+  for (const entry of list) {
+    if (entry.read) continue;
+    unread += 1;
+    if (countsAsNeedsYou(entry, live, now, isGone)) needsYou += 1;
+    else if (countsAsNotable(entry, live, now)) notable += 1;
+  }
+  return { unread, needsYou, notable };
+}
+
 export function summarizeCenter(
   list: readonly NotificationCenterEntry[],
   mutes: readonly NotificationMute[],
   now: number,
-): { unread: number; needsYou: number; mutes: NotificationMute[] } {
-  const live = activeMutes(mutes, now);
-  let unread = 0;
-  let needsYou = 0;
-  for (const entry of list) {
-    if (entry.read) continue;
-    unread += 1;
-    if (!isNeedsYouKind(entry.kind) || entry.settled) continue;
-    if (live.length > 0 && mutedBy(entry, live, now)) continue;
-    needsYou += 1;
-  }
-  return { unread, needsYou, mutes: live };
+): CenterCounts & { mutes: NotificationMute[] } {
+  return { ...countCenter(list, mutes, now), mutes: activeMutes(mutes, now) };
 }
 
 // Whether a row's target is the exact surface on screen. Only a visible run

@@ -269,7 +269,9 @@ tricks it tries).
 chime burst filter), `test-notify-center-store` (persistence, mutes, the
 summary push), `test-notify-center-model` (folding, eviction, age limits,
 settling, the badge count), `test-notify-center-view` (the bell panel's
-sections, stacks, times and what a click on a gone target does),
+sections, stacks, times, that the badge, tab and pinned header agree, and
+what a click on a gone target does), `test-notify-run-settle` (a deleted run
+settles its question),
 `test-toast-lifecycle`, `test-sse-client` (the update event stream and
 `notify-release.cjs`).
 

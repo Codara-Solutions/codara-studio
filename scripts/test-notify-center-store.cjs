@@ -212,8 +212,17 @@ async function mutations() {
     pushed.length > 0 && pushed[pushed.length - 1].payload.needsYou === 1,
   );
 
+  await store.clearCenter();
+  live = await store.listCenterEntries();
+  check(
+    "clear all keeps the question still waiting and the badge with it",
+    live.map((e) => e.id).join(",") === "terminal-blocked" && (await store.centerSummary()).needsYou === 1,
+  );
+
   await store.settleCenterSource("pane:p1");
   check("settling the pane drops the badge", (await store.centerSummary()).needsYou === 0);
+  await store.clearCenter();
+  check("a settled question clears like any row", (await store.listCenterEntries()).length === 0);
   await store.flushNotificationCenter();
 }
 

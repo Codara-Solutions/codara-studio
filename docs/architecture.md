@@ -362,8 +362,14 @@ automations:
   pushes a summary (unread, needs-you, mutes) to every window after each
   change. The list operations (folding repeats per source, eviction, age
   limits, settling answered questions) are pure functions in
-  `center-model.ts`; the badge rule and the "is this target on screen" rule
-  live in `src/shared/notify-center.ts` so main and the renderer agree.
+  `center-model.ts`; the badge rule (`countsAsNeedsYou`) and the "is this
+  target on screen" rule live in `src/shared/notify-center.ts` so main and
+  the renderer agree. Main cannot see panes, so a question stops counting
+  there by being settled: when its source resumes, when its pane is disposed
+  (the terminal notifier re-arms the pane) and when its run is deleted (the
+  run adapter settles on `run.deleted`). Each window also holds the rows and
+  applies the same rule with its own view of closed panes and missing runs,
+  so the bell, the **Needs you** tab and the pinned header always agree.
 
 Phone delivery goes through `remote-access/phone-notify.ts`.
 
