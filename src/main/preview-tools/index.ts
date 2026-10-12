@@ -12,6 +12,7 @@ import { capturePreviewTools } from "./capture";
 import { chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
 import { devtoolsPreviewTools } from "./devtools";
+import { inboxPreviewTools } from "./inbox";
 import { inputPreviewTools } from "./input";
 import { insightPreviewTools } from "./insight";
 import { pointPreviewTools } from "./point";
@@ -25,6 +26,7 @@ const TABLES: readonly PreviewToolTable[] = [
   capturePreviewTools,
   inputPreviewTools,
   devtoolsPreviewTools,
+  inboxPreviewTools,
   insightPreviewTools,
   pointPreviewTools,
   serverTools,

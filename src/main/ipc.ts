@@ -475,6 +475,8 @@ import type {
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
+import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
+import { agentDelivery } from "./agent-delivery";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -3011,6 +3013,17 @@ export function registerIpc(): void {
     // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
   });
+
+  // UI sends to an agent: pasted into a pane's prompt, added to a Cora chat,
+  // or queued for an agent to pull. Each send carries its own workspace; the
+  // service refuses a pane or chat that belongs to another one.
+  handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
+    if (request?.target?.kind === "pane") await awaitPendingSpawn(request.target.paneId);
+    return agentDelivery().deliver(request);
+  });
+  handle("agent:inboxPending", async (_e, args: { workspaceId: string; paneId?: string | null }): Promise<number> =>
+    agentDelivery().pending(args.workspaceId, args.paneId ?? null),
+  );
 
   handle(
     "pty:inject",

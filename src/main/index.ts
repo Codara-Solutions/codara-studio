@@ -47,6 +47,7 @@ import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { registerPreviewCdpSessions } from "./browser/preview-cdp";
 import { registerPreviewTargets } from "./browser/preview-target";
+import { registerAgentDelivery } from "./agent-delivery-live";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
@@ -1165,6 +1166,7 @@ app.whenReady().then(async () => {
   // binds announced guests to their tabs.
   registerPreviewCdpSessions();
   registerPreviewTargets();
+  registerAgentDelivery();
   registerPreviewInput();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
