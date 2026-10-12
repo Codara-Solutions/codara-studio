@@ -212,6 +212,13 @@ export function insertEntry(
     }
     entry.kindCounts = kindCounts;
   }
+  // A read question older than the fold window stays behind as history, but
+  // the source has moved on to a newer state since, so it no longer waits.
+  for (const prior of list) {
+    if (prior.sourceKey !== event.sourceKey || !isOpenQuestion(prior)) continue;
+    prior.settled = true;
+    prior.read = true;
+  }
   list.unshift(entry);
   evictToCap(list, cap);
 }
@@ -250,13 +257,16 @@ export function coalesceEntries(list: NotificationCenterEntry[]): boolean {
 }
 
 // Over the cap, drop the oldest read row first, then the oldest row that is
-// not waiting on the user, and only then the oldest row of all. A chatty
-// repository must not push a pending question out of the history.
+// not waiting on the user, and only then the oldest row of all. A question
+// still open counts as waiting even once read. A chatty repository must not
+// push a pending question out of the history.
 export function evictToCap(list: NotificationCenterEntry[], cap = CENTER_CAP): boolean {
   let changed = false;
   while (list.length > cap) {
     let victim = -1;
-    for (let i = list.length - 1; i >= 0 && victim < 0; i -= 1) if (list[i].read) victim = i;
+    for (let i = list.length - 1; i >= 0 && victim < 0; i -= 1) {
+      if (list[i].read && !isOpenQuestion(list[i])) victim = i;
+    }
     for (let i = list.length - 1; i >= 0 && victim < 0; i -= 1) {
       if (!isOpenQuestion(list[i])) victim = i;
     }

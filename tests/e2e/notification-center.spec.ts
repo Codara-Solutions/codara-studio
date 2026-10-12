@@ -254,6 +254,12 @@ test("notification center counts, keyboard, undo and closed panes", async () => 
       await expect(menu).toHaveCount(0);
       await expect(panel(page)).toBeVisible();
       await expect(row(page, "q-web")).toBeFocused();
+      // Tab leaves the menu rather than being swallowed by it.
+      await page.keyboard.press("m");
+      await expect(menu.getByRole("menuitem").first()).toBeFocused();
+      await page.keyboard.press("Tab");
+      await expect(menu).toHaveCount(0);
+      await expect(row(page, "q-web")).toBeFocused();
       await page.keyboard.press("Escape");
       await expect(panel(page)).toBeHidden();
       await expect(bell(page)).toBeFocused();

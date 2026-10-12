@@ -1551,8 +1551,10 @@ export interface NotificationCenterEntry extends NotifyEvent {
 }
 
 // A per-source silence the user chose from the center ("mute this workspace
-// for an hour"). `key` is "workspace:<id>" or "source:<sourceKey>"; `until`
-// is an epoch-ms deadline after which the mute lapses on its own.
+// for an hour"). `key` is "workspace:<id>", "source:<sourceKey>",
+// "agent:<agent id>" or "job:<automation id>" (MUTE_KEY_PATTERN in
+// notify-center.ts); `until` is an epoch-ms deadline after which the mute
+// lapses on its own.
 export interface NotificationMute {
   key: string;
   label: string;

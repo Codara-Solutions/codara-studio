@@ -321,8 +321,35 @@ async function mutesPersist() {
   await store.flushNotificationCenter();
 }
 
+async function muteLapse() {
+  const home = freshHome();
+  fs.writeFileSync(
+    path.join(home, "notifications.json"),
+    JSON.stringify([entry("ask", false, { kind: "run.blocked", sourceKey: "run:ask", createdAt: ago(MIN) })]),
+  );
+  fs.writeFileSync(
+    path.join(home, "notification-mutes.json"),
+    JSON.stringify([{ key: "workspace:w1", label: "api", until: Date.now() + 400 }]),
+  );
+  globalThis.__centerPushes = [];
+  const store = await bundle();
+  await store.loadNotificationCenter();
+  const last = () => {
+    const pushes = globalThis.__centerPushes.filter((p) => p.channel === "notify:center-updated");
+    return pushes.length > 0 ? pushes[pushes.length - 1].payload : null;
+  };
+  check("loading pushes the counts, so the dock badge is set at launch", last() !== null && last().needsYou === 0);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  check(
+    "a lapsed mute pushes the counts again without any other change",
+    last() !== null && last().needsYou === 1 && last().mutes.length === 0,
+  );
+  await store.flushNotificationCenter();
+}
+
 async function main() {
   await mutations();
+  await muteLapse();
   await recordBeforeLoad();
   await corruptFile();
   await loadCleanup();

@@ -213,7 +213,8 @@ and muted sources do not light it.
   panes stacks under one heading such as "Claude Code finished 7× in
   api-server", which counts finished turns; the control under it counts the
   rows it opens ("Show 3 panes · 1 unread"). Pull requests stack as "Pull
-  requests #41, #42 in api-server".
+  requests #41, #42 in api-server"; pushes stack only when the same people
+  pushed to the same repository.
 - Filters: **All**, **Needs you** and **Unread**. The filter and grouping are
   remembered.
 - Clicking a row opens its exact pane, run or automation and marks it read.
@@ -222,8 +223,8 @@ and muted sources do not light it.
   open nothing. Opening the pane or run yourself also marks its alerts read.
 - Hover a row for **Mark read** or **Mark unread**, **Mute** and
   **Dismiss**; they take the place of the time while the pointer is there.
-  The mute menu picks how long first (**1 hour** or **Until morning**, which
-  is 08:00 tomorrow), then what: this pane, run, automation or repository;
+  The mute menu picks how long first (**1 hour** or **Until morning**, the
+  next 08:00), then what: this pane, run, automation or repository;
   the agent everywhere (**Claude Code everywhere**, **All Cora runs**, **All
   automations**); or everything in the workspace. A source that can never
   notify again, such as a closed pane or a finished run, is not offered.
@@ -234,12 +235,14 @@ and muted sources do not light it.
   bar shows are undone together.
 - Keys, with the list focused: Up and Down (or J and K), Home and End, Enter
   to open, R to toggle read, M to open the mute menu (arrows move in it,
-  Enter picks), Delete to dismiss, Right and Left to show or hide earlier
-  messages. Escape closes the menu, then leaves a reply field, then closes
+  Enter picks, Tab leaves it), Delete to dismiss, Right and Left to show or
+  hide earlier messages. Escape closes the menu, then leaves a reply field, then closes
   the panel and returns focus to the bell.
 
 The history keeps 200 rows. When it is full the oldest read row goes first,
-and an open question goes last. Read rows are dropped after 7 days and any
+and an open question goes last, even once read. A question superseded by a
+newer alert from the same source (the run failed, the pane asked again)
+reads **Resolved**. Read rows are dropped after 7 days and any
 row after 30 days; a question still waiting on you keeps the 30 days even
 once read. It is saved in `notifications.json` and the mutes in
 `notification-mutes.json` (see [on-your-machine.md](./on-your-machine.md)).

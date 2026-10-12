@@ -306,10 +306,12 @@ function dayBucket(iso: string, now: number): { key: string; label: string } {
 
 // Rows that read as "the same thing again" stack under their newest one:
 // one agent finishing in several panes of a workspace, several pull requests
-// in one repository. A question is never folded away.
+// in one repository. Pushes stack only under the same title: the head's
+// "alice pushed to api" speaks for the stack, so bob's pushes to web must
+// not hide under it. A question is never folded away.
 function stackKey(entry: NotificationCenterEntry, workspaceKey: string): string | null {
   if (isWaiting(entry)) return null;
-  if (entry.kind.startsWith("git.")) return `${workspaceKey}\u0000${entry.kind}`;
+  if (entry.kind === "git.pull-request") return `${workspaceKey}\u0000${entry.kind}`;
   return `${workspaceKey}\u0000${entry.kind}\u0000${displayText(entry).title}`;
 }
 
@@ -486,9 +488,12 @@ export function undoLabel(verb: "Dismissed" | "Cleared" | "Removed", count: numb
   return verb === "Dismissed" && count === 1 ? "Dismissed" : `${verb} ${plural(count, "notification")}`;
 }
 
-// The next 08:00 local time after `now`, for "until tomorrow morning".
-export function untilTomorrowMs(now: number): number {
+// The next 08:00 local time after `now`, for "until morning": this morning's
+// when muting after midnight, tomorrow's otherwise.
+export function untilMorningMs(now: number): number {
   const d = new Date(now);
+  const today = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 8, 0, 0, 0);
+  if (today.getTime() > now) return today.getTime() - now;
   const next = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 8, 0, 0, 0);
   return next.getTime() - now;
 }

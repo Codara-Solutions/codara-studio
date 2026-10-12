@@ -24,7 +24,7 @@ import {
   rowTime,
   stackMoreLabel,
   stackTitle,
-  untilTomorrowMs,
+  untilMorningMs,
   workspaceOf,
   type CenterFilter,
   type CenterGrouping,
@@ -849,7 +849,11 @@ const CenterRow = memo(function CenterRow({
     else if (e.key === "Home") next = 0;
     else if (e.key === "End") next = items.length - 1;
     else if (e.key === "Tab") {
+      // Tab leaves a menu, as in any menu: it closes and the row takes focus.
       e.preventDefault();
+      e.stopPropagation();
+      actions.toggleMenu(null);
+      rowRef.current?.focus({ preventScroll: true });
       return;
     } else return;
     e.preventDefault();
@@ -1130,7 +1134,7 @@ const CenterRow = memo(function CenterRow({
                     role="menuitemradio"
                     tabIndex={-1}
                     aria-checked={muteSpan === "morning"}
-                    title="Until 8:00 tomorrow"
+                    title="Until 8:00"
                     onClick={() => setMuteSpan("morning")}
                   >
                     Until morning
@@ -1148,7 +1152,7 @@ const CenterRow = memo(function CenterRow({
                       entry.id,
                       choice.key,
                       choice.label,
-                      muteSpan === "hour" ? HOUR_MS : untilTomorrowMs(Date.now()),
+                      muteSpan === "hour" ? HOUR_MS : untilMorningMs(Date.now()),
                     )
                   }
                 >

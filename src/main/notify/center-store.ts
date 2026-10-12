@@ -103,6 +103,7 @@ function load(): Promise<void> {
     const settled = settleTerminalQuestions(entries);
     if (evictToCap(entries) || coalesced || pruned || settled) dirtyEntries = true;
     mutes = sanitizeMutes(rawMutes, now);
+    scheduleMuteExpiry();
   })();
   return loadPromise;
 }
@@ -170,8 +171,30 @@ export function centerSummarySync(): NotificationCenterSummary {
   return { ...summarize(entries, mutes, Date.now()), version };
 }
 
+// A mute lapses on its own, with no mutation to announce it, and the dock
+// badge would keep the count it had while the mute held. Push once more when
+// the soonest mute ends.
+let muteTimer: NodeJS.Timeout | null = null;
+
+function scheduleMuteExpiry(): void {
+  if (muteTimer) clearTimeout(muteTimer);
+  muteTimer = null;
+  const live = activeMutes(mutes, Date.now());
+  if (live.length === 0) return;
+  const soonest = Math.min(...live.map((mute) => mute.until));
+  muteTimer = setTimeout(
+    () => {
+      muteTimer = null;
+      pushSummary();
+    },
+    Math.min(Math.max(0, soonest - Date.now()) + 50, 2 ** 31 - 1),
+  );
+  muteTimer.unref();
+}
+
 // Every window shows a bell, so every window gets the summary.
 function pushSummary(): void {
+  scheduleMuteExpiry();
   const summary = centerSummarySync();
   for (const win of BrowserWindow.getAllWindows()) {
     try {
@@ -190,9 +213,14 @@ function pushSummary(): void {
   }
 }
 
-// Read the history early so mutes apply to the first alerts after launch.
+// Read the history early so mutes apply to the first alerts after launch,
+// and put its count on the dock badge, which nothing else would set until
+// the next change. Launch-time clean-up is written back the same way.
 export function loadNotificationCenter(): Promise<void> {
-  return enqueue(() => undefined);
+  return enqueue(() => {
+    if (dirtyEntries) schedulePersist();
+    pushSummary();
+  });
 }
 
 // Synchronous so publish() can consult it before deciding delivery. Until the

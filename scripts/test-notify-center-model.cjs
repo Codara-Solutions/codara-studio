@@ -202,6 +202,34 @@ test("over the cap, read rows go first and questions go last", () => {
   assert.deepEqual(list.map((e) => e.id).sort(), ["new", "q"]);
 });
 
+test("over the cap, a question read but still open outlives unread history", () => {
+  const list = [
+    { ...row({ id: "seen-q", kind: "run.blocked", sourceKey: "run:r1", createdAt: iso(NOW - 3 * HOUR) }), read: true },
+    row({ id: "push-a", kind: "git.teammate-push", sourceKey: "s2", createdAt: iso(NOW - 2 * HOUR) }),
+    row({ id: "push-b", kind: "git.teammate-push", sourceKey: "s3", createdAt: iso(NOW - HOUR) }),
+  ].reverse();
+  M.evictToCap(list, 2);
+  assert.deepEqual(list.map((e) => e.id).sort(), ["push-b", "seen-q"]);
+});
+
+test("a newer state settles a question the fold left behind as history", () => {
+  const list = [];
+  M.insertEntry(
+    list,
+    event({ id: "ask", kind: "run.blocked", sourceKey: "run:r1", createdAt: iso(NOW - 8 * HOUR) }),
+    { read: true },
+    NOW - 8 * HOUR,
+  );
+  M.insertEntry(list, event({ id: "fail", kind: "run.failed", sourceKey: "run:r1" }), { read: false }, NOW);
+  assert.deepEqual(list.map((e) => e.id), ["fail", "ask"]);
+  assert.equal(list[1].settled, true);
+  assert.equal(S.isOpenQuestion(list[1]), false);
+  // Another source's question is untouched.
+  M.insertEntry(list, event({ id: "other", kind: "run.blocked", sourceKey: "run:r2" }), { read: true }, NOW);
+  M.insertEntry(list, event({ id: "next", kind: "run.complete", sourceKey: "run:r3" }), { read: false }, NOW);
+  assert.equal(list.find((e) => e.id === "other").settled, undefined);
+});
+
 test("age limits: read rows after a week, anything after a month", () => {
   const list = [
     { ...row({ id: "read-8d", sourceKey: "a", createdAt: iso(NOW - 8 * DAY) }), read: true },

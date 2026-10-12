@@ -234,6 +234,21 @@ test("a stack of pull requests names them", () => {
   assert.equal(V.stackMoreLabel([pr(42), pr(41)]), "Show both pull requests");
 });
 
+test("pushes from different people or repositories do not stack under one title", () => {
+  const pushRow = (title, sourceKey) =>
+    row({ kind: "git.teammate-push", title, sourceKey, target: { type: "workspace", workspaceId: "w1", panel: "git" } });
+  const [today] = build([
+    pushRow("alice pushed to api", "github-push:acme/api"),
+    pushRow("bob pushed to web", "github-push:acme/web"),
+    pushRow("alice pushed to api", "github-push:acme/api"),
+  ]);
+  assert.deepEqual(
+    today.items.map((item) => (item.type === "stack" ? item.entries.length : 1)),
+    [2, 1],
+  );
+  assert.equal(V.stackTitle(today.items[0].entries, "api"), "alice pushed to api 2× in api");
+});
+
 test("a folded push names its branches", () => {
   const pushRow = row({
     kind: "git.teammate-push",
@@ -313,11 +328,18 @@ test("the mute menu offers the source, the agent everywhere, then the workspace"
   assert.deepEqual(V.muteChoices(loom, { id: null, name: null }, false).map((c) => c.key), ["job:j1", "agent:automations"]);
 });
 
-test("until tomorrow morning means the next 08:00", () => {
-  const ms = V.untilTomorrowMs(NOW);
+test("until morning means the next 08:00", () => {
+  const ms = V.untilMorningMs(NOW);
   const at = new Date(NOW + ms);
   assert.equal(at.getHours(), 8);
   assert.equal(at.getDate(), 13);
+  // Muting at 01:30 means this morning, not a day and a half.
+  const night = new Date(2026, 9, 13, 1, 30, 0).getTime();
+  const wake = new Date(night + V.untilMorningMs(night));
+  assert.equal(wake.getDate(), 13);
+  assert.equal(wake.getHours(), 8);
+  const eight = new Date(2026, 9, 13, 8, 0, 0).getTime();
+  assert.equal(new Date(eight + V.untilMorningMs(eight)).getDate(), 14);
   assert.equal(V.remainingLabel(NOW + 30 * 60_000, NOW), "30m left");
   assert.equal(V.remainingLabel(NOW + 5 * HOUR, NOW), "5h left");
 });
