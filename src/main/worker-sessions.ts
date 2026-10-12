@@ -778,7 +778,7 @@ async function removeSessionHistoryEntries(path: string, sessionId: string): Pro
   });
   if (!changed) return;
   // history.jsonl in a managed account is a share link to the personal file
-  // (native-cli-shared-state.ts); the rewrite must rename over the REAL file,
+  // (cli-account-homes.ts); the rewrite must rename over the REAL file,
   // or the link would be replaced by a private fork of the history.
   const target = await fs.realpath(path).catch(() => path);
   const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
@@ -923,7 +923,7 @@ export async function deleteWorkerSession(
   } else if (input.memoryScope === "codex-all") {
     const { memoriesRoot } = resolveCodexHomePaths(options.codexHome);
     // memories/ in a managed account is a share link to the personal store
-    // (native-cli-shared-state.ts); "delete all memories" means the ONE
+    // (cli-account-homes.ts); "delete all memories" means the ONE
     // shared store, so remove the real directory, not just the link — which
     // removeIfPresent would otherwise unlink and the next heal recreate.
     // Personal homes reject a symlinked memories/ upstream, so realpath only

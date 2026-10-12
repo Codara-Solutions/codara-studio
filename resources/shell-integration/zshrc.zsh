@@ -15,11 +15,11 @@
 # Follow the Active account. A plain user pane carries
 # SPARK_FOLLOW_ACTIVE_ACCOUNT=1 and main rewrites
 # $SPARK_HOME_DIR/shell/active-cli-env on every account switch. The file is
-# data, never sourced or evaluated: only CLAUDE_CONFIG_DIR and GROK_HOME lines
-# whose value sits under this Codara home's managed accounts root are
-# honored, and a variable is only ever written when it is unset or itself
-# inside that root or matches the personal home supplied at spawn. A different
-# value the user exports manually is never touched.
+# data, never sourced or evaluated: only CLAUDE_CONFIG_DIR, CODEX_HOME and
+# GROK_HOME lines whose value sits under this Codara home's directory for
+# that CLI are honored, and a variable is only ever written when it is unset
+# or itself inside that root or matches the personal home supplied at spawn.
+# A different value the user exports manually is never touched.
 # Cost per prompt is one builtin read of the header line: no fork, no stat,
 # and an unchanged revision returns before anything else is parsed. Every
 # failure (missing file, unreadable, bad header) is silent and leaves the
@@ -40,13 +40,14 @@ _spark_follow_active_account() {
   [[ "$word" = "codara-active-cli-env" ]] || return 0
   [[ -n "$rev" ]] || return 0
   [[ "$rev" = "$__SPARK_ACTIVE_ENV_REV" ]] && return 0
-  local claude_root="$spark_home/claude-cli/accounts/"
+  local claude_root="$spark_home/claude-cli/"
+  local codex_root="$spark_home/codex-cli/accounts/"
   local grok_root="$spark_home/grok-cli/accounts/"
-  local line value claude="" grok=""
+  local line value claude="" codex="" grok=""
   {
     while IFS= read -r line || [[ -n "$line" ]]; do
       case "$line" in
-        CLAUDE_CONFIG_DIR=*|GROK_HOME=*) ;;
+        CLAUDE_CONFIG_DIR=*|CODEX_HOME=*|GROK_HOME=*) ;;
         *) continue ;;
       esac
       value="${line#*=}"
@@ -56,12 +57,15 @@ _spark_follow_active_account() {
       case "$line" in
         CLAUDE_CONFIG_DIR=*)
           case "$value" in "$claude_root"?*) claude="$value" ;; esac ;;
+        CODEX_HOME=*)
+          case "$value" in "$codex_root"?*) codex="$value" ;; esac ;;
         GROK_HOME=*)
           case "$value" in "$grok_root"?*) grok="$value" ;; esac ;;
       esac
     done < "$file"
   } 2>/dev/null || return 0
   _spark_follow_var CLAUDE_CONFIG_DIR "$claude_root" "$claude" "${SPARK_PERSONAL_CLAUDE_CONFIG_DIR-}"
+  _spark_follow_var CODEX_HOME "$codex_root" "$codex" "${SPARK_PERSONAL_CODEX_HOME-}"
   _spark_follow_var GROK_HOME "$grok_root" "$grok" "${SPARK_PERSONAL_GROK_HOME-}"
   __SPARK_ACTIVE_ENV_REV="$rev"
 }
@@ -87,6 +91,54 @@ _spark_follow_var() {
     unset "$name"
   fi
 }
+
+# A `claude` or `codex` typed in a Codara pane gets Codara's hooks, MCP
+# server and Codex notify as flags read from $SPARK_AGENT_ARGS_DIR (one
+# argument per line, data that is never evaluated), so nothing is written
+# to the user's own CLI config. Defined only when Codara set that folder and
+# the user has no function or alias of that name. Management subcommands
+# and a missing file run the CLI untouched. A `--settings` of the user's
+# keeps Codara's out (Claude honors only the last one), and
+# `--strict-mcp-config` keeps Codara's server out of that strict set.
+_spark_agent_exec() {
+  emulate -L zsh
+  local cli="$1" file line arg own_settings=0 strict=0 skip=0
+  shift
+  local -a extra
+  case "$cli:${1-}" in
+    claude:auth|claude:mcp|claude:config|claude:doctor|claude:update|claude:install|claude:setup-token|claude:plugin|claude:migrate-installer|claude:-v|claude:--version|claude:-h|claude:--help|\
+    codex:login|codex:logout|codex:mcp|codex:completion|codex:update|codex:doctor|codex:sandbox|codex:debug|codex:apply|codex:plugin|codex:app-server|codex:remote-control|codex:agents|codex:--version|codex:-V|codex:--help|codex:-h)
+      command "$cli" "$@"
+      return ;;
+  esac
+  file="${SPARK_AGENT_ARGS_DIR-}/$cli/args.txt"
+  if [[ -n "${SPARK_AGENT_ARGS_DIR-}" && -r "$file" ]]; then
+    for arg in "$@"; do
+      case "$arg" in
+        --settings|--settings=*) own_settings=1 ;;
+        --strict-mcp-config) strict=1 ;;
+      esac
+    done
+    {
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if (( skip )); then skip=0; continue; fi
+        if [[ "$line" = "--settings" ]] && (( own_settings )); then skip=1; continue; fi
+        if [[ "$line" = "--mcp-config" ]] && (( strict )); then skip=1; continue; fi
+        extra+=("$line")
+      done < "$file"
+    } 2>/dev/null
+  fi
+  command "$cli" "${extra[@]}" "$@"
+}
+
+if [[ -n "${SPARK_AGENT_ARGS_DIR-}" ]]; then
+  if (( ! $+functions[claude] && ! $+aliases[claude] )); then
+    claude() { _spark_agent_exec claude "$@"; }
+  fi
+  if (( ! $+functions[codex] && ! $+aliases[codex] )); then
+    codex() { _spark_agent_exec codex "$@"; }
+  fi
+fi
 
 # Worker and agent sessions (Claude / Codex hosted in zsh) set this var so
 # the prompt integration is skipped: its OSC writes confuse Ink-based TUIs

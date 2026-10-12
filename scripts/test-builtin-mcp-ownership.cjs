@@ -3,25 +3,24 @@
 
 // Ownership of the built-in codara-studio entry in a TOML config (Codex, Grok)
 // cannot rest on the `# >>> SPARK_AGENT_BUILTIN_MCP` comment markers: both CLIs
-// rewrite their own config.toml and drop them, after which the Capability
-// Center used to demote Codara's own entry to "Set up by you" and refuse to
-// remove it. This drives the real main-process mcp-installer functions against
-// a throwaway fake home, so nothing here can reach the user's real
+// rewrite their own config.toml and drop them. The opt-in "Codara tools in
+// other apps" repair and removal, and a managed Grok home's private copy, all
+// decide by shape. This drives the real main-process mcp-installer functions
+// against a throwaway fake home, so nothing here can reach the user's real
 // ~/.codex/config.toml or ~/.grok/config.toml.
 //
 // Proven here:
 //   1. A Codara-shaped [mcp_servers."codara-studio"] section with NO markers,
-//      whose server.js exists, reports state "installed" for Codex.
-//   2. The same for Grok.
-//   3. A codara-studio section that is NOT ours still reports "user-managed",
-//      and its uninstall is still refused with the unchanged wording, leaving a
-//      byte-identical file.
-//   4. The pre-existing stranded case (our shape, server.js gone) still
-//      classifies as "stale", still reports "available", and is still
-//      removable.
-//   5. A reclaimed entry is repaired in place: repairSparkBuiltinEntries
+//      whose server.js exists, is classified as Codara's.
+//   2. A codara-studio section that is NOT ours is never rewritten by repair
+//      nor removed from a managed Grok copy.
+//   3. The stranded case (our shape, server.js gone) classifies as "stale",
+//      is repaired in place, and is then removable.
+//   4. A reclaimed entry is repaired in place: repairSparkBuiltinEntries
 //      re-wraps it in fresh markers, keeps the user's own sections, and the
 //      result is then removable.
+//   5. A managed Grok home's config copy carries exactly one Codara block,
+//      stable across refreshes, and none when Grok is switched off.
 //
 // Homedir technique copied from scripts/test-grok-mcp-copy.cjs; the esbuild +
 // electron-stub bundling from scripts/test-codex-home-routing.cjs (mcp-installer
@@ -171,120 +170,61 @@ async function main() {
     assert.equal(p.startsWith(path.join(realHome, ".codex")), false);
     assert.equal(p.startsWith(path.join(realHome, ".grok")), false);
   };
+  const repair = (target) =>
+    mcp.repairSparkBuiltinEntries({ codexHome: target.codexHome, grokHome: target.grokHome });
 
-  const statusFor = (target) =>
-    mcp.getSparkBuiltinStatus({
-      claudeRuntimeAvailable: false,
-      codexRuntimeAvailable: true,
-      grokRuntimeAvailable: true,
-      autoInstallEnabled: true,
-      codexHome: target.codexHome,
-      grokHome: target.grokHome,
-    });
-
-  // ── 1. Codex: our shape, markers gone, install alive ───────────────────────
-  await check("a marker-less Codara-shaped Codex entry reports installed", async () => {
-    const target = makeCase({ codex: codaraShapedConfig(LIVE_SCRIPT) });
+  // ── 1. Our shape, markers gone, install alive ──────────────────────────────
+  await check("a marker-less Codara-shaped entry is classified as Codara's", async () => {
+    const target = makeCase({ codex: codaraShapedConfig(LIVE_SCRIPT), grok: codaraShapedConfig(LIVE_SCRIPT) });
     assertFake(target.codexPath);
-    const before = fs.readFileSync(target.codexPath);
-    const [status] = await statusFor(target);
-    assert.equal(status.codex.state, "installed");
-    assert.equal(status.codex.configPath, target.codexPath);
+    assertFake(target.grokPath);
     assert.equal(
-      classifyCodexBuiltinSection(before.toString("utf8")),
+      classifyCodexBuiltinSection(codaraShapedConfig(LIVE_SCRIPT)),
       "reclaimable",
       "a live Codara-shaped section must be classified as ours",
     );
-    assert.equal(
-      fs.readFileSync(target.codexPath).equals(before),
-      true,
-      "detection must not rewrite the config",
-    );
   });
 
-  // ── 2. Grok: same entry, same verdict ──────────────────────────────────────
-  await check("a marker-less Codara-shaped Grok entry reports installed", async () => {
-    const target = makeCase({ grok: codaraShapedConfig(LIVE_SCRIPT) });
-    assertFake(target.grokPath);
-    const [status] = await statusFor(target);
-    assert.equal(status.grok.state, "installed");
-    assert.equal(status.grok.configPath, target.grokPath);
-  });
-
-  // ── 3. A section that is NOT ours stays untouchable ────────────────────────
-  await check("a foreign codara-studio section stays user-managed and unremovable", async () => {
+  // ── 2. A section that is NOT ours stays untouchable ────────────────────────
+  await check("a foreign codara-studio section is never rewritten or removed", async () => {
     const target = makeCase({ codex: foreignConfig(), grok: foreignConfig() });
     assert.equal(classifyCodexBuiltinSection(foreignConfig()), "user");
-    const [status] = await statusFor(target);
-    assert.equal(status.codex.state, "user-managed");
-    assert.equal(status.grok.state, "user-managed");
-
-    const expectedError =
-      "A user-defined codara-studio section exists in config.toml; Codara won't remove it.";
-    for (const [runtime, configPath, options] of [
-      ["codex", target.codexPath, { codexHome: target.codexHome }],
-      ["grok", target.grokPath, { grokHome: target.grokHome }],
-    ]) {
-      const before = fs.readFileSync(configPath);
-      const result = await mcp.uninstallSparkBuiltin("codara-studio", runtime, options);
-      assert.deepEqual(result, { ok: false, error: expectedError }, `${runtime} uninstall wording`);
-      assert.equal(
-        fs.readFileSync(configPath).equals(before),
-        true,
-        `${runtime} config changed even though the uninstall was refused`,
-      );
-    }
-
-    // An install pass must leave it alone too.
-    const beforeInstall = fs.readFileSync(target.codexPath);
-    await mcp.installSparkPreviewMcpForCodex(true, { codexHome: target.codexHome });
-    assert.equal(
-      fs.readFileSync(target.codexPath).equals(beforeInstall),
-      true,
-      "install overwrote a user-owned codara-studio section",
-    );
+    const codexBefore = fs.readFileSync(target.codexPath);
+    const grokBefore = fs.readFileSync(target.grokPath);
+    const repaired = await repair(target);
+    assert.deepEqual([repaired.codex, repaired.grok], [false, false]);
+    assert.equal(fs.readFileSync(target.codexPath).equals(codexBefore), true, "repair rewrote a user-owned section");
+    assert.equal(fs.readFileSync(target.grokPath).equals(grokBefore), true, "repair rewrote a user-owned section");
+    assert.equal(mcp.withCodaraStudioGrokBlock(foreignConfig(), true), foreignConfig());
+    assert.equal(mcp.withCodaraStudioGrokBlock(foreignConfig(), false), foreignConfig());
   });
 
-  // ── 4. The stranded case behaves exactly as it did before ──────────────────
-  await check("a stranded Codara entry stays stale, available and removable", async () => {
+  // ── 3. The stranded case is repaired in place ──────────────────────────────
+  await check("a stranded Codara entry is stale and repaired in place", async () => {
     assert.equal(fs.existsSync(GONE_SCRIPT), false, "precondition: the install path is gone");
     const target = makeCase({
       codex: codaraShapedConfig(GONE_SCRIPT),
       grok: codaraShapedConfig(GONE_SCRIPT),
     });
     assert.equal(classifyCodexBuiltinSection(codaraShapedConfig(GONE_SCRIPT)), "stale");
-    const [status] = await statusFor(target);
-    assert.equal(status.codex.state, "available");
-    assert.equal(status.grok.state, "available");
-
-    const repaired = await mcp.repairSparkBuiltinEntries({
-      codexHome: target.codexHome,
-      grokHome: target.grokHome,
-    });
+    const repaired = await repair(target);
     assert.equal(repaired.codex, true, "a stranded Codex entry must still be repaired in place");
     assert.equal(repaired.grok, true, "a stranded Grok entry must still be repaired in place");
     const repairedText = fs.readFileSync(target.codexPath, "utf8");
     assert.ok(repairedText.includes(CODEX_BLOCK_START) && repairedText.includes(CODEX_BLOCK_END));
     assert.doesNotMatch(repairedText, new RegExp(GONE_SCRIPT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-
-    const removed = await mcp.uninstallSparkBuiltin("codara-studio", "codex", {
-      codexHome: target.codexHome,
-    });
-    assert.deepEqual(removed, { ok: true });
-    assert.doesNotMatch(fs.readFileSync(target.codexPath, "utf8"), /codara-studio/);
-    assert.match(fs.readFileSync(target.codexPath, "utf8"), /^\[mcp_servers\.hand-written\]$/m);
+    const removed = mcp.withCodaraStudioGrokBlock(repairedText, false);
+    assert.doesNotMatch(removed, /codara-studio/);
+    assert.match(removed, /^\[mcp_servers\.hand-written\]$/m);
   });
 
-  // ── 5. A reclaimed live entry is repaired back inside fresh markers ────────
+  // ── 4. A reclaimed live entry is repaired back inside fresh markers ────────
   await check("a reclaimed entry is re-wrapped in markers and then removable", async () => {
     const target = makeCase({
       codex: codaraShapedConfig(LIVE_SCRIPT),
       grok: codaraShapedConfig(LIVE_SCRIPT),
     });
-    const repaired = await mcp.repairSparkBuiltinEntries({
-      codexHome: target.codexHome,
-      grokHome: target.grokHome,
-    });
+    const repaired = await repair(target);
     assert.equal(repaired.codex, true, "a reclaimed Codex entry must be repairable without a click");
     assert.equal(repaired.grok, true, "a reclaimed Grok entry must be repairable without a click");
 
@@ -296,20 +236,18 @@ async function main() {
       assert.equal(sections.length, 1, `expected one codara-studio section, got ${sections.length}`);
       assert.match(text, /^model = "gpt-5-codex"$/m, "a top-level key the user wrote was dropped");
       assert.match(text, /^\[mcp_servers\.hand-written\]$/m, "a hand-written section was dropped");
+      assert.doesNotMatch(mcp.withCodaraStudioGrokBlock(text, false), /codara-studio/);
     }
+  });
 
-    const [status] = await statusFor(target);
-    assert.equal(status.codex.state, "installed");
-    assert.equal(status.grok.state, "installed");
-
-    for (const [runtime, configPath, options] of [
-      ["codex", target.codexPath, { codexHome: target.codexHome }],
-      ["grok", target.grokPath, { grokHome: target.grokHome }],
-    ]) {
-      const removed = await mcp.uninstallSparkBuiltin("codara-studio", runtime, options);
-      assert.deepEqual(removed, { ok: true }, `${runtime} uninstall must be allowed`);
-      assert.doesNotMatch(fs.readFileSync(configPath, "utf8"), /codara-studio/);
-    }
+  // ── 5. A managed Grok home's private config gets exactly one block ────────
+  await check("a managed Grok copy carries one Codara block, or none when switched off", async () => {
+    const userText = ["model = \"grok-4\"", "", ...USER_SECTION, ""].join("\n");
+    const withBlock = mcp.withCodaraStudioGrokBlock(userText, true);
+    assert.equal((withBlock.match(/^\[mcp_servers\."codara-studio"\]$/gm) ?? []).length, 1);
+    assert.equal(mcp.withCodaraStudioGrokBlock(withBlock, true), withBlock, "the copy is stable across refreshes");
+    assert.match(withBlock, /^\[mcp_servers\.hand-written\]$/m);
+    assert.doesNotMatch(mcp.withCodaraStudioGrokBlock(withBlock, false), /codara-studio/);
   });
 
   console.log(results.map((name) => `  ok  ${name}`).join("\n"));

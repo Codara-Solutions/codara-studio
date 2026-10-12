@@ -97,6 +97,7 @@ assert.match(help, /██/, "help shows the Codara logo");
 for (const command of ["chat", "start", "send", "watch", "agents", "board", "whiteboard", "auto", "auth", "bench", "runs"]) {
   assert.match(help, new RegExp(`\\b${command}\\b`), `help lists ${command}`);
 }
+assert.match(help, /auth use <provider> system/, "help offers the System login");
 
 const {
   formatNativeAccounts,

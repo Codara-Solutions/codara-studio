@@ -56,10 +56,6 @@ function read(file) {
 }
 
 async function main() {
-  const trust = await bundle(
-    "codex-trust",
-    path.join(ROOT, "src", "main", "orchestration", "codex-trust.ts"),
-  );
   const mcp = await bundle(
     "mcp-installer",
     path.join(ROOT, "src", "main", "mcp-installer.ts"),
@@ -84,49 +80,27 @@ async function main() {
     { mode: 0o600 },
   );
 
-  await trust.ensureCodexProjectTrust(cwd, homeA);
-  assert.match(read(configA), /trust_level = "trusted"/);
-  assert.equal(fs.existsSync(configB), false);
-  await trust.ensureCodexProjectTrust(cwd, homeB);
-  assert.match(read(configB), /trust_level = "trusted"/);
-  assert.equal(
-    (read(configA).match(/trust_level = "trusted"/g) || []).length,
-    1,
-    "trust cache must remain scoped to the selected config",
-  );
-
-  await mcp.installSparkPreviewMcpForCodex(true, { codexHome: homeA });
-  assert.match(read(configA), /SPARK_AGENT_BUILTIN_MCP/);
+  // A block the opt-in wrote into a selected home, gone stale.
+  const block = `${mcp.__test.renderCodexBlock({ timeouts: true })}\n`;
+  fs.writeFileSync(configA, block.replace(`# Version: ${mcp.__test.SPARK_VERSION}`, "# Version: stale"), {
+    mode: 0o600,
+  });
+  fs.writeFileSync(configB, block, { mode: 0o600 });
   assert.match(
-    read(configA),
+    block,
     /tool_timeout_sec = 660/,
     "Codex must not cut codara_terminal_run off at its 60s default",
   );
-  assert.doesNotMatch(read(configA), /PERSONAL_CONFIG_MUST_NOT_BE_COPIED/);
-  assert.doesNotMatch(read(configB), /SPARK_AGENT_BUILTIN_MCP/);
-  assert.match(
-    read(path.join(personalCodexHome, "config.toml")),
-    /PERSONAL_CONFIG_MUST_NOT_BE_COPIED/,
-  );
   assert.equal(
-    await mcp.isSparkOrchestratorMcpInstalled("codex", { codexHome: homeA }),
+    await mcp.isSparkOrchestratorMcpInstalled("codex", { codexHome: homeB }),
     true,
   );
   assert.equal(
-    await mcp.isSparkOrchestratorMcpInstalled("codex", { codexHome: homeB }),
+    await mcp.isSparkOrchestratorMcpInstalled("codex", { codexHome: homeA }),
     false,
+    "a stale block reads as not installed",
   );
-
-  await mcp.installSparkPreviewMcpForCodex(true, { codexHome: homeB });
   const untouchedB = read(configB);
-  fs.writeFileSync(
-    configA,
-    read(configA).replace(
-      `# Version: ${mcp.__test.SPARK_VERSION}`,
-      "# Version: stale",
-    ),
-    { mode: 0o600 },
-  );
   const repaired = await mcp.repairSparkBuiltinEntries({ codexHome: homeA });
   assert.equal(repaired.codex, true);
   assert.match(
@@ -137,6 +111,11 @@ async function main() {
     read(configB),
     untouchedB,
     "repair must not rewrite another Codex home",
+  );
+  assert.match(
+    read(path.join(personalCodexHome, "config.toml")),
+    /PERSONAL_CONFIG_MUST_NOT_BE_COPIED\nmodel = "personal"\n$/,
+    "a selected home's repair leaves the personal config alone",
   );
 
   assert.throws(() => paths.resolveCodexHomeDir("relative-home"), /absolute/i);
@@ -159,17 +138,7 @@ async function main() {
     const unsafeHome = path.join(TMP, "unsafe-config-home");
     fs.mkdirSync(unsafeHome);
     fs.symlinkSync(configA, path.join(unsafeHome, "config.toml"));
-    await assert.rejects(
-      () => trust.ensureCodexProjectTrust(cwd, unsafeHome),
-      /symbolic link/i,
-    );
-    await assert.rejects(
-      () =>
-        mcp.installSparkPreviewMcpForCodex(true, {
-          codexHome: unsafeHome,
-        }),
-      /symbolic link/i,
-    );
+    assert.throws(() => paths.resolveCodexHomePaths(unsafeHome), /symbolic link/i);
 
     const unsafeSessionsHome = path.join(TMP, "unsafe-sessions-home");
     fs.mkdirSync(unsafeSessionsHome);
@@ -202,7 +171,7 @@ async function main() {
 
     // Inside a CODARA-MANAGED home the same links are the designed state:
     // managed profiles share memories/sessions/config/history with the
-    // personal ~/.codex (native-cli-shared-state.ts), so resolution must
+    // personal ~/.codex (cli-account-homes.ts), so resolution must
     // follow them instead of throwing. The strict rejections above prove
     // non-managed homes keep the old rule.
     const codaraHome = path.join(personalOsHome, ".codarastudio");
@@ -251,7 +220,7 @@ async function main() {
   }
 
   console.log(
-    "PASS native Codex home routing: trust/cache, MCP install/detect/repair, personal isolation, and symlink/canonical safety",
+    "PASS native Codex home routing: MCP detect/repair per home, personal isolation, and symlink/canonical safety",
   );
 }
 

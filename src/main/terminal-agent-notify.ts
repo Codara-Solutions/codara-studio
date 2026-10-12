@@ -49,10 +49,10 @@ import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 //      message and the background tasks still running), UserPromptSubmit
 //      starts one, PreToolUse for AskUserQuestion / ExitPlanMode and the
 //      Notification hook's permission types mean "needs you". Subagent
-//      events never end a turn. For Codex, the notify program (installed by
-//      codex-notify-installer.ts) reports agent-turn-complete with the last
-//      agent message, and the session file (codex-rollout-tail.ts) records
-//      task_complete / turn_aborted.
+//      events never end a turn. For Codex, the notify program (passed to each
+//      launch by agent-launch-integration.ts) reports agent-turn-complete
+//      with the last agent message, and the session file
+//      (codex-rollout-tail.ts) records task_complete / turn_aborted.
 //   3. Screen and stream heuristics (src/shared/agent-patterns.ts): the
 //      working footer repainting, an idle frame, a permission dialog. Used
 //      for Grok and Pi, and for Claude or Codex when nothing above exists. An
@@ -282,9 +282,9 @@ function emptySignals(): PaneSignals {
   return { hooks: false, programStatus: false, codexNotify: false, codexRollout: false };
 }
 
-// Called once the Codex notify program is (or is not) in the user's Codex
-// config. Codex reads that config at launch, so a pane may still run a Codex
-// started before the install; the grace window below only delays the
+// Called once boot knows whether Codex launches carry the notify program. A
+// pane may still run a Codex started before this boot, or one launched
+// around the pane's `codex` function; the grace window below only delays the
 // heuristic, it never suppresses it.
 export function noteCodexNotifyInstalled(installed: boolean): void {
   codexNotifyInstalled = installed;

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
+import { assertCodaraOwnedWrite, type OutsideWriteCapability } from "./outside-write-guard";
 
 /** Persist directory-entry changes such as rename/unlink on POSIX. */
 export async function syncDirectory(path: string): Promise<void> {
@@ -22,8 +23,9 @@ export async function syncDirectory(path: string): Promise<void> {
 export async function writeFileAtomic(
   path: string,
   content: string,
-  options?: { mode?: number },
+  options?: { mode?: number; outsideWrite?: OutsideWriteCapability },
 ): Promise<void> {
+  assertCodaraOwnedWrite(path, options?.outsideWrite);
   const dir = dirname(path);
   // sibling tmp keeps the rename within the same volume so it stays atomic.
   // pid + clock alone is not unique: two same-process writers in the same

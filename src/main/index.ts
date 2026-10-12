@@ -32,9 +32,11 @@ import { flushNotificationCenter, registerMainWindow, startNotifications } from 
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
-import { installClaudeHooks } from "./hook-installer";
-import { installCodexNotify, uninstallCodexNotify } from "./codex-notify-installer";
-import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
+import { setIntegrationBootPass, writeIntegrationFiles } from "./agent-launch-integration";
+import { watchStudioToolsInOtherApps } from "./builtin-mcp-actions";
+import { readSparkBuiltinOptOuts, withCodaraStudioGrokBlock } from "./mcp-installer";
+import { setManagedGrokConfigTransform } from "./orchestration/cli-account-homes";
+import { runGlobalConfigCleanup } from "./global-config-cleanup";
 import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
 import { openLinkFromApp } from "./open-link";
@@ -66,8 +68,6 @@ import {
   cleanupRetiredCodexHomeEnvironment,
 } from "./orchestration/native-cli-terminal-cleanup";
 import {
-  followNativeLogins,
-  startNativeLoginFollower,
   startStudioClaudeLoginKeeper,
   startUnifiedAccountMigration,
 } from "./orchestration/unified-account-migration";
@@ -1014,38 +1014,33 @@ app.whenReady().then(async () => {
     logMain("boot", "graphics backend=wayland-hardware (Vulkan disabled, ANGLE=OpenGL)");
   }
 
-  // Install Codara's Python hooks into ~/.claude/settings.json so every
-  // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
-  // / ... events into <spark-home>/hooks/ for the watcher to ingest below.
-  // This is the "CLI hook ingestion (free observability)" big-bet's installer
-  // half. Fire-and-forget — failures (no Claude installed, settings.json
-  // malformed, etc) are logged but never block boot.
-  void installClaudeHooks().catch((err) =>
-    console.warn("[main] hook installer failed:", err),
+  // Codara's hooks, its MCP server and Codex's notify program reach only the
+  // sessions Codara starts, on their command line. First take back what
+  // earlier builds wrote into the user's own CLI configs (exact Codara
+  // entries only, with a backup), then write the per-launch files; the
+  // cleanup runs first so the user's own Codex notify, restored by it, is
+  // the one the injected notify chains to. SPARK_CODEX_NOTIFY=0 leaves the
+  // notify program out.
+  setManagedGrokConfigTransform((source) =>
+    withCodaraStudioGrokBlock(source, !readSparkBuiltinOptOuts().has("grok")),
   );
-
-  // Codex's turn-complete notify program, chained in front of any notify
-  // entry the user already has. SPARK_CODEX_NOTIFY=0 takes it back out.
-  const codexNotifyEnabled = process.env.SPARK_CODEX_NOTIFY !== "0";
-  void (codexNotifyEnabled ? installCodexNotify() : uninstallCodexNotify())
-    .then((result) => noteCodexNotifyInstalled(codexNotifyEnabled && result.installed))
-    .catch((err) => console.warn("[main] codex notify installer failed:", err));
-
-  // Auto-install the codara-studio MCP server in the user's Claude / Codex
-  // configs so manually-run and orchestrated agents can drive the live
-  // <preview> tab (browser-use / computer-use). Guarded by a setting
-  // (default on). Unlike the older behavior, this createIfMissing's the config
-  // when the corresponding CLI binary resolves on disk — so a user with
-  // `claude`/`codex` installed but never launched still gets the entry.
-  void (async () => {
-    try {
-      const settings = await loadSettings();
-      if (settings.playwrightMcpAutoInstall === false) return;
-      await installSparkPreviewMcpAtBoot();
-    } catch (err) {
-      console.warn("[main] codara-studio mcp installer failed:", err);
-    }
-  })();
+  setIntegrationBootPass(
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        watchStudioToolsInOtherApps(settings);
+        await runGlobalConfigCleanup({ keepMcpEntries: settings.studioToolsInOtherApps === true });
+      } catch (err) {
+        console.warn("[main] global config cleanup failed:", err);
+      }
+      try {
+        const summary = await writeIntegrationFiles({ codexNotify: process.env.SPARK_CODEX_NOTIFY !== "0" });
+        noteCodexNotifyInstalled(summary.codexNotify);
+      } catch (err) {
+        console.warn("[main] agent integration files failed:", err);
+      }
+    })(),
+  );
 
   // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
   // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
@@ -1099,17 +1094,14 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
-  // Unified Anthropic accounts: fold whatever an earlier build left on disk
-  // into the two-halves model and start the credential mirror. Every account
-  // handler registered above awaits this pass, so it must start before any
-  // of them can run, which is why it follows registerIpc() synchronously.
+  // Accounts: migrate an earlier build's registry once, project the Active
+  // accounts and start the credential mirror. Every account handler
+  // registered above awaits this pass, so it must start before any of them
+  // can run, which is why it follows registerIpc() synchronously.
   void startUnifiedAccountMigration();
   // The live Claude login gets one refresher ahead of Claude Code and Cora,
   // so the two never race for its single-use refresh token.
   startStudioClaudeLoginKeeper();
-  // A `/login` or `codex login` in any terminal as another known account
-  // makes that account the Active one here too.
-  startNativeLoginFollower();
   // Earlier builds installed a copy of Pi of their own under the Codara
   // home. Cora now runs the user's Pi (or the bundled one) and nothing
   // reads that copy any more.
@@ -1268,7 +1260,6 @@ app.whenReady().then(async () => {
       void import("./orchestration/claude-login-keeper")
         .then((m) => m.nudgeClaudeLoginKeeper())
         .catch(() => undefined);
-      void followNativeLogins().catch(() => undefined);
       // Waking the machine is exactly when remote state is stale: bring every
       // repository's next background fetch forward (short jitter, not now).
       void import("./git-auto-fetch")

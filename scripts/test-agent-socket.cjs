@@ -168,10 +168,36 @@ function parkedManagerTurn(runId, overrides = {}) {
 }
 
 async function main() {
+  // One registered Cora-only Claude account, the default. The retired single
+  // login (pi-agent/auth.json) is archived by the accounts migration and
+  // never becomes an account.
   const piRoot = path.join(HOME, "pi-agent");
-  fs.mkdirSync(piRoot, { recursive: true, mode: 0o700 });
+  const accountId = "44444444-4444-4444-8444-444444444444";
+  const accountDir = path.join(piRoot, "accounts", accountId);
+  fs.mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const createdAt = "2026-10-01T00:00:00.000Z";
   fs.writeFileSync(
-    path.join(piRoot, "auth.json"),
+    path.join(piRoot, "account-profiles.json"),
+    JSON.stringify({
+      version: 2,
+      profiles: [{
+        id: accountId,
+        provider: "anthropic",
+        label: "Socket account",
+        createdAt,
+        updatedAt: createdAt,
+        cli: { kind: "none" },
+        cora: "own",
+      }],
+      defaults: { anthropic: accountId },
+      tombstones: [],
+      dismissedSystemOffers: [],
+      pendingPurge: [],
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(accountDir, "auth.json"),
     JSON.stringify({
       anthropic: {
         type: "oauth",
@@ -184,12 +210,23 @@ async function main() {
   );
 
   const electron = require("electron");
+  // The booted app reads the System logins and cleans the global CLI configs
+  // of the HOME it runs in, so it gets a throwaway one; the live app's pane
+  // variables and any CLI home it exported must not reach it either.
+  const userHome = path.join(HOME, "user-home");
+  fs.mkdirSync(userHome, { recursive: true });
+  const inheritedEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => !/^(SPARK_|CODARA_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|GROK_HOME$|ZDOTDIR$)/.test(key),
+    ),
+  );
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
     // Isolate both Codara's durable home and Electron's Chromium userData.
     // Without the latter this integration process can contend with a running
     // development app and start the socket before a usable renderer bridge.
     env: {
-      ...process.env,
+      ...inheritedEnv,
+      HOME: userHome,
       CODARA_HOME_DIR: HOME,
       SPARK_HOME_DIR: HOME,
       SPARK_USER_DATA_DIR: HOME,

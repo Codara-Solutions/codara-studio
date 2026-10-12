@@ -265,14 +265,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}`,
   );
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
-    if (restore.runtime === "codex") {
-      await window.spark.agentSession
-        .ensureCodexTrust(
-          restore.cwd,
-          restore.nativeCodexProfileId,
-        )
-        .catch(() => undefined);
-    } else if (decision.kind === "repair-resume") {
+    if (restore.runtime === "claude" && decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
       // the conversation is preserved.

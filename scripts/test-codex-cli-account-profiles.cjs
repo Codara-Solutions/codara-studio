@@ -71,7 +71,7 @@ async function main() {
   assert.deepEqual(initial.profiles, [
     {
       id: "personal",
-      label: "Account 1",
+      label: "Codex login",
       managed: false,
       isDefault: true,
       connected: true,
@@ -95,7 +95,8 @@ async function main() {
   assert.equal(alpha.profile.label, "Work Codex");
   assert.equal(alpha.snapshot.defaultProfileId, "personal");
   const alphaPaths = mod.codexCliManagedProfilePaths(storeRoot, alpha.profile.id);
-  assert.equal(path.dirname(alphaPaths.homeDir), path.join(storeRoot, "accounts"));
+  assert.equal(path.dirname(alphaPaths.profileDir), path.join(storeRoot, "accounts"));
+  assert.equal(path.dirname(alphaPaths.homeDir), alphaPaths.profileDir);
   if (process.platform !== "win32") {
     assert.equal(mode(storeRoot), 0o700);
     assert.equal(mode(path.join(storeRoot, "accounts")), 0o700);
@@ -185,7 +186,7 @@ async function main() {
     "accounts",
     `.${alpha.profile.id}.deleting-deadbeef`,
   );
-  fs.renameSync(alphaPaths.homeDir, alphaStage);
+  fs.renameSync(alphaPaths.profileDir, alphaStage);
   const restored = await store.reconcile();
   assert.deepEqual(restored.restoredProfileIds, [alpha.profile.id]);
   assert.equal(fs.existsSync(alphaPaths.homeDir), true);
@@ -210,7 +211,7 @@ async function main() {
   }
   const betaStageName = `.${beta.profile.id}.deleting-cafebabe`;
   const betaStage = path.join(storeRoot, "accounts", betaStageName);
-  fs.renameSync(betaPaths.homeDir, betaStage);
+  fs.renameSync(betaPaths.profileDir, betaStage);
   const removed = await store.reconcile();
   assert.ok(removed.removedDeletingDirectories.includes(betaStageName));
   assert.equal(fs.existsSync(betaStage), false);
@@ -230,7 +231,7 @@ async function main() {
   privateFile(gammaPaths.authFile, "GAMMA_SECRET");
   const deleted = await store.deleteProfile(gamma.profile.id);
   assert.equal(deleted.deleted, true);
-  assert.equal(fs.existsSync(gammaPaths.homeDir), false);
+  assert.equal(fs.existsSync(gammaPaths.profileDir), false);
   assert.equal(fs.existsSync(alphaPaths.homeDir), true);
   assert.equal((await store.deleteProfile(gamma.profile.id)).deleted, false);
   await rejects(() => store.deleteProfile("personal"), /cannot be deleted/i);
@@ -238,8 +239,8 @@ async function main() {
   // Profile-home and auth symlinks are never followed.
   const symlinkProfile = await store.createProfile({ label: "Symlink target" });
   const symlinkPaths = mod.codexCliManagedProfilePaths(storeRoot, symlinkProfile.profile.id);
-  fs.rmSync(symlinkPaths.homeDir, { recursive: true, force: true });
-  fs.symlinkSync(personalHome, symlinkPaths.homeDir, "dir");
+  fs.rmSync(symlinkPaths.profileDir, { recursive: true, force: true });
+  fs.symlinkSync(personalHome, symlinkPaths.profileDir, "dir");
   await rejects(
     () => store.resolveProfile({ profileId: symlinkProfile.profile.id }),
     /unsafe|symlink/i,

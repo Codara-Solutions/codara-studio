@@ -3,8 +3,9 @@
 
 // The active account pointer a running plain shell follows: format,
 // atomicity, permissions, a strictly increasing revision, absence for a
-// personal default, refusal of values outside the managed roots, the
-// CODARA_HOME_DIR override, and never a CODEX_HOME or CLAUDE_CONFIG_DIR line.
+// System login, refusal of values outside the managed roots, and the
+// CODARA_HOME_DIR override. Version 2 carries CLAUDE_CONFIG_DIR (Codara's
+// live slot), CODEX_HOME and GROK_HOME, each only inside Codara's home.
 //
 //   node scripts/test-active-cli-env-pointer.cjs
 
@@ -21,6 +22,8 @@ process.env.CODARA_HOME_DIR = HOME;
 delete process.env.SPARK_HOME_DIR;
 delete process.env.CLAUDE_CONFIG_DIR;
 delete process.env.GROK_HOME;
+delete process.env.CODEX_HOME;
+const CODEX_ID = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
 const CLAUDE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
 const GROK_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 
@@ -40,6 +43,8 @@ async function build() {
       `export * from ${JSON.stringify(orchestration("active-cli-env-pointer.ts"))};`,
       `export * as roots from ${JSON.stringify(orchestration("codara-managed-cli-roots.ts"))};`,
       `export * as grokProfiles from ${JSON.stringify(orchestration("grok-cli-account-profiles.ts"))};`,
+      `export * as codexProfiles from ${JSON.stringify(orchestration("codex-cli-account-profiles.ts"))};`,
+      `export * as claudeProfiles from ${JSON.stringify(orchestration("claude-cli-account-profiles.ts"))};`,
     ].join("\n"),
   );
   await esbuild.build({
@@ -73,18 +78,23 @@ async function main() {
   assert.equal(pointerFile.includes(path.join("cli", "active")), false);
   pass("the pointer lives under shell/, never under cli/active");
 
-  const claudeDir = path.join(HOME, "claude-cli", "accounts", CLAUDE_ID);
+  const claudeDir = path.join(HOME, "claude-cli", "live", "home");
+  const codexDir = path.join(HOME, "codex-cli", "accounts", CODEX_ID, "home");
   const grokDir = path.join(HOME, "grok-cli", "accounts", GROK_ID);
   const read = () => fs.readFileSync(pointerFile, "utf8");
   const revisionOf = (text) => Number(text.split("\n")[0].split(" ")[2]);
 
-  // Format: header, then the managed line; 0600 in a 0700 directory. Claude
-  // never gets a line: every Claude account runs in the one home, and the
-  // line's absence is what makes an older shell unset a managed directory.
-  await M.writeActiveCliEnvPointer({ claudeConfigDir: claudeDir, grokHome: grokDir }, { now: () => 1000 });
+  // Format: header, then one line per managed selector; 0600 in a 0700
+  // directory. A line's absence is what makes a shell unset the variable.
+  await M.writeActiveCliEnvPointer(
+    { claudeConfigDir: claudeDir, codexHome: codexDir, grokHome: grokDir },
+    { now: () => 1000 },
+  );
   const first = read();
   assert.deepEqual(first.split("\n"), [
-    "codara-active-cli-env 1 1000",
+    "codara-active-cli-env 2 1000",
+    `CLAUDE_CONFIG_DIR=${claudeDir}`,
+    `CODEX_HOME=${codexDir}`,
     `GROK_HOME=${grokDir}`,
     "",
   ]);
@@ -93,7 +103,7 @@ async function main() {
     assert.equal(fs.statSync(path.dirname(pointerFile)).mode & 0o777, 0o700);
   }
   assert.equal(fs.readdirSync(path.dirname(pointerFile)).some((name) => name.endsWith(".tmp")), false, "no temporary is left behind");
-  pass("the pointer is written atomically with the documented format, private modes and no Claude line");
+  pass("the pointer is written atomically with the documented format and private modes");
 
   // The revision strictly increases even when the clock does not move.
   await M.writeActiveCliEnvPointer({ grokHome: grokDir }, { now: () => 1000 });
@@ -104,11 +114,11 @@ async function main() {
   assert.equal(revisionOf(read()), 5000);
   pass("the revision strictly increases on every write");
 
-  // A personal default omits its line; nothing but the header remains.
+  // The System login omits its line; nothing but the header remains.
   await M.writeActiveCliEnvPointer({});
   assert.deepEqual(read().split("\n").slice(1), [""]);
-  assert.match(read(), /^codara-active-cli-env 1 \d+\n$/);
-  pass("a personal default is expressed by absence");
+  assert.match(read(), /^codara-active-cli-env 2 \d+\n$/);
+  pass("the System login is expressed by absence");
 
   // Values outside the managed roots are never written: the user's own
   // directory, the retired cli/active pointer, a path with a control
@@ -120,15 +130,18 @@ async function main() {
     [{ grokHome: "grok-cli/accounts/relative" }, "a relative path"],
     [{ grokHome: path.join(HOME, "grok-cli", "accounts") }, "the accounts root itself"],
     [{ grokHome: path.join(HOME, "claude-cli", "accounts", CLAUDE_ID) }, "a Claude directory as GROK_HOME"],
+    [{ claudeConfigDir: path.join(TMP, ".claude") }, "the user's own Claude home"],
+    [{ codexHome: path.join(TMP, ".codex") }, "the user's own Codex home"],
+    [{ codexHome: path.join(HOME, "grok-cli", "accounts", GROK_ID) }, "a Grok directory as CODEX_HOME"],
   ]) {
     await M.writeActiveCliEnvPointer(selectors);
     assert.deepEqual(read().split("\n").slice(1), [""], `${description} must be refused`);
   }
-  assert.equal(M.formatActiveCliEnvPointer({ grokHome: grokDir }, 7, HOME), `codara-active-cli-env 1 7\nGROK_HOME=${grokDir}\n`);
+  assert.equal(M.formatActiveCliEnvPointer({ grokHome: grokDir }, 7, HOME), `codara-active-cli-env 2 7\nGROK_HOME=${grokDir}\n`);
   if (process.platform === "win32") {
     assert.equal(
       M.formatActiveCliEnvPointer({ grokHome: grokDir.toUpperCase() }, 7, HOME),
-      `codara-active-cli-env 1 7\nGROK_HOME=${grokDir.toUpperCase()}\n`,
+      `codara-active-cli-env 2 7\nGROK_HOME=${grokDir.toUpperCase()}\n`,
     );
   }
   pass("values outside the managed roots are refused");
@@ -154,8 +167,7 @@ async function main() {
   assert.equal(fs.readFileSync(target, "utf8"), "untouched\n");
   pass("a symlinked pointer is refused");
 
-  // refresh derives the selector from the Grok store default; CODEX_HOME and
-  // CLAUDE_CONFIG_DIR never appear.
+  // refresh derives each selector from its store's default.
   const grokRoot = path.join(HOME, "grok-cli");
   const grokStore = new M.grokProfiles.GrokCliAccountProfileStore(grokRoot, {
     personalHomeDir: path.join(TMP, ".grok"),
@@ -171,13 +183,39 @@ async function main() {
   const revisionBefore = revisionOf(read());
   await M.refreshActiveCliEnvPointer({ grokStore });
   assert.ok(revisionOf(read()) > revisionBefore, "every refresh writes a new revision");
-  assert.equal(read().includes("CODEX_HOME"), false);
-  assert.equal(read().includes("CLAUDE_CONFIG_DIR"), false);
+  // Claude and Codex follow their store defaults the same way.
+  const claudeStore = new M.claudeProfiles.ClaudeCliAccountProfileStore(path.join(HOME, "claude-cli"), {
+    personalConfigDir: path.join(TMP, ".claude"),
+    personalConfigDirEnv: null,
+    idFactory: () => CLAUDE_ID,
+    authChecker: () => ({ connected: true }),
+  });
+  const codexStore = new M.codexProfiles.CodexCliAccountProfileStore(path.join(HOME, "codex-cli"), {
+    personalHomeDir: path.join(TMP, ".codex"),
+    idFactory: () => CODEX_ID,
+    authChecker: () => ({ connected: true }),
+  });
+  await claudeStore.createProfile({ label: "Work" });
+  await codexStore.createProfile({ label: "Work" });
+  await M.refreshActiveCliEnvPointer({ claudeStore, codexStore, grokStore });
+  assert.deepEqual(read().split("\n").slice(1), [`GROK_HOME=${grokDir}`, ""], "System defaults add no line");
+  await claudeStore.setDefaultProfile(CLAUDE_ID);
+  await codexStore.setDefaultProfile(CODEX_ID);
+  await M.refreshActiveCliEnvPointer({ claudeStore, codexStore, grokStore });
+  assert.deepEqual(read().split("\n").slice(1), [
+    `CLAUDE_CONFIG_DIR=${claudeStore.liveConfigDir}`,
+    `CODEX_HOME=${codexDir}`,
+    `GROK_HOME=${grokDir}`,
+    "",
+  ]);
+  assert.equal(claudeStore.liveConfigDir, claudeDir, "every managed Claude account shares the live slot");
+  await claudeStore.setDefaultProfile("personal");
+  await codexStore.setDefaultProfile("personal");
   // An unreadable store contributes nothing rather than failing the write.
   const broken = { rootDir: grokRoot, snapshot: async () => { throw new Error("unreadable"); } };
   await M.refreshActiveCliEnvPointer({ grokStore: broken });
   assert.deepEqual(read().split("\n").slice(1), [""]);
-  pass("refresh follows the store default and never names CODEX_HOME or CLAUDE_CONFIG_DIR");
+  pass("refresh follows each store default, and the System login adds no line");
 
   // Two overlapping refreshes: the store read of the first is slow and
   // resolves after the second one wrote. The reads run inside the write
@@ -203,9 +241,9 @@ async function main() {
   // The module is data, not a script: no shell export text anywhere in it.
   const source = fs.readFileSync(path.join(ROOT, "src", "main", "orchestration", "active-cli-env-pointer.ts"), "utf8");
   assert.equal(source.includes("export CLAUDE_CONFIG_DIR"), false);
+  assert.equal(source.includes("export CODEX_HOME"), false);
   assert.equal(source.includes("export GROK_HOME"), false);
   assert.equal(source.includes("cli/active"), false);
-  assert.equal(source.includes("CODEX_HOME="), false);
   pass("the pointer module carries no shell export and no reference to cli/active");
 
   console.log(`\nPASS active cli env pointer (${passes} groups)`);

@@ -8574,12 +8574,9 @@ button.st-list__row:hover,
 }
 .st-provider__detail {
   margin: 0 0 8px;
-  overflow: hidden;
   color: var(--st-desc);
   font-size: 12.5px;
   line-height: 1.5;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* Rows sit flush with the page edges, so a row's last control ends on the
    same line as Add account and every other page's controls. The active row
@@ -8749,6 +8746,64 @@ button.st-list__row:hover,
   align-items: center;
   gap: 12px;
   padding: 14px 0;
+}
+.st-acct-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+  color: var(--st-desc);
+  font-size: 11px;
+  font-weight: 500;
+}
+.st-acct-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--st-line);
+  border-radius: 8px;
+}
+.st-acct-confirm__text {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-acct-confirm__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* The System login offer and the "no Active account" line sit above the
+   provider's rows, one line each, with their actions at the end. */
+.st-acct-system-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.st-acct-system-line__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-acct-system-line__actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+.st-acct-footnote {
+  margin: 0;
+  color: var(--st-faint);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .st-acct-empty__text {
   display: flex;

@@ -131,18 +131,9 @@ export default function WorkerSessionPicker({
 
   const tint = agentBrandColor(request.runtime);
 
-  const prepareCodex = async (nativeCodexProfileId?: string) => {
-    if (request.runtime === "codex") {
-      await window.spark.agentSession
-        .ensureCodexTrust(request.cwd, nativeCodexProfileId)
-        .catch(() => undefined);
-    }
-  };
-
-  const launchNew = async () => {
+  const launchNew = () => {
     if (launching) return;
     setLaunching(true);
-    await prepareCodex();
     request.launch(
       request.runtime === "claude"
         ? CLAUDE_LAUNCH_COMMAND
@@ -154,10 +145,9 @@ export default function WorkerSessionPicker({
     onClose();
   };
 
-  const resume = async (session: WorkerSessionSummary) => {
+  const resume = (session: WorkerSessionSummary) => {
     if (launching) return;
     setLaunching(true);
-    await prepareCodex(session.nativeCodexProfileId);
     const pointer: TerminalAgentSession = {
       runtime: session.runtime,
       nativeCodexProfileId: session.nativeCodexProfileId,

@@ -69,7 +69,6 @@ async function main() {
   const {
     PI_ACCOUNT_PROFILES_FILE,
     PiAccountProfileRegistry,
-    nextDefaultAfterDeletion,
     rankPiAccountCandidates,
   } = require(outfile);
 
@@ -88,9 +87,12 @@ async function main() {
   const empty = await basic.snapshot();
   check(
     "missing registry reads as an empty versioned snapshot",
-    empty.version === 1 &&
+    empty.version === 2 &&
       empty.profiles.length === 0 &&
       Object.keys(empty.defaults).length === 0 &&
+      empty.tombstones.length === 0 &&
+      empty.dismissedSystemOffers.length === 0 &&
+      empty.pendingPurge.length === 0 &&
       !fs.existsSync(basicRoot),
     JSON.stringify(empty),
   );
@@ -117,9 +119,12 @@ async function main() {
   check(
     "persistence is mode 0600 and contains metadata only",
     (process.platform === "win32" || mode === 0o600) &&
-      Object.keys(persisted).sort().join(",") === "defaults,profiles,version" &&
+      Object.keys(persisted).sort().join(",") ===
+        "defaults,dismissedSystemOffers,pendingPurge,profiles,tombstones,version" &&
       Object.keys(persisted.profiles[0]).sort().join(",") ===
-        "createdAt,id,identityFingerprint,label,provider,updatedAt" &&
+        "cli,cora,createdAt,id,identityFingerprint,label,provider,updatedAt" &&
+      persisted.profiles[0].cli.kind === "none" &&
+      persisted.profiles[0].cora === "own" &&
       !/access.?token|refresh.?token|secret/i.test(JSON.stringify(persisted)),
     `mode=${mode.toString(8)} data=${JSON.stringify(persisted)}`,
   );
@@ -212,14 +217,45 @@ async function main() {
 
   const deletedDefault = await basic.deleteProfile(IDS.a);
   check(
-    "deleting a default promotes the deterministic oldest remaining provider profile",
+    "deleting the Active row leaves no default: the provider falls back to the System login",
     deletedDefault.deleted &&
-      deletedDefault.snapshot.defaults.anthropic === IDS.b &&
+      deletedDefault.snapshot.defaults.anthropic === undefined &&
       deletedDefault.snapshot.profiles.every((profile) => profile.id !== IDS.a),
     JSON.stringify(deletedDefault),
   );
+  check(
+    "the deletion and its tombstone land in one write",
+    deletedDefault.snapshot.tombstones.length === 1 &&
+      deletedDefault.snapshot.tombstones[0].provider === "anthropic" &&
+      deletedDefault.snapshot.tombstones[0].identityFingerprint === FP_A &&
+      JSON.parse(fs.readFileSync(filePath, "utf8")).tombstones.length === 1,
+    JSON.stringify(deletedDefault.snapshot.tombstones),
+  );
   const deletedAgain = await basic.deleteProfile(IDS.a);
   check("deleting an absent profile is idempotent", !deletedAgain.deleted);
+  await expectThrows(
+    "a tombstoned identity is never registered again on its own",
+    () => basic.registerProfile({ provider: "anthropic", label: "Back", identityFingerprint: FP_A }),
+    "PiAccountProfileTombstonedError",
+  );
+  check(
+    "the tombstone does not reach another provider",
+    !(await basic.isTombstoned("openai-codex", { identityFingerprint: FP_A })) &&
+      (await basic.isTombstoned("anthropic", { identityFingerprint: FP_A })),
+  );
+  const readded = await basic.registerProfile({
+    provider: "anthropic",
+    label: "Added again",
+    identityFingerprint: FP_A,
+    explicitUserAdd: true,
+  });
+  check(
+    "an explicit add registers it again and lifts the tombstone in the same write",
+    readded.created &&
+      readded.snapshot.tombstones.length === 0 &&
+      !(await basic.isTombstoned("anthropic", { identityFingerprint: FP_A })),
+    JSON.stringify(readded.snapshot),
+  );
 
   // Two registry objects targeting the same file share the in-process mutation
   // queue. Concurrent registration with one fingerprint must land once.
@@ -304,6 +340,8 @@ async function main() {
         id: IDS.a,
         provider: "anthropic",
         label: "Default",
+        cli: { kind: "none" },
+        cora: "own",
         createdAt: "2026-07-30T08:00:00.000Z",
         updatedAt: "2026-07-30T08:00:00.000Z",
       },
@@ -311,6 +349,8 @@ async function main() {
         id: IDS.b,
         provider: "anthropic",
         label: "Roomiest",
+        cli: { kind: "none" },
+        cora: "own",
         createdAt: "2026-07-30T08:01:00.000Z",
         updatedAt: "2026-07-30T08:01:00.000Z",
       },
@@ -318,6 +358,8 @@ async function main() {
         id: IDS.c,
         provider: "anthropic",
         label: "Unknown",
+        cli: { kind: "none" },
+        cora: "own",
         createdAt: "2026-07-30T08:02:00.000Z",
         updatedAt: "2026-07-30T08:02:00.000Z",
       },
@@ -325,6 +367,8 @@ async function main() {
         id: IDS.d,
         provider: "openai-codex",
         label: "Other provider",
+        cli: { kind: "none" },
+        cora: "own",
         createdAt: "2026-07-30T08:03:00.000Z",
         updatedAt: "2026-07-30T08:03:00.000Z",
       },
@@ -436,8 +480,9 @@ async function main() {
   check(
     "a link given at registration round-trips through the file",
     linkedAtRegister.profile.cliProfileId === "personal" &&
+      linkedAtRegister.profile.cli.kind === "system" &&
       (await links.getProfile(IDS.a))?.cliProfileId === "personal" &&
-      (await links.accountOneProfile("anthropic"))?.id === IDS.a,
+      (await links.systemProfile("anthropic"))?.id === IDS.a,
   );
   const unlinked = await links.registerProfile({ provider: "anthropic", label: "Work" });
   const recorded = await links.recordCliProfileId(unlinked.profile.id, CLI_A);
@@ -492,9 +537,9 @@ async function main() {
       grokRow.profile.cliProfileId === CLI_B &&
       grokOne.profile.cliProfileId === "personal" &&
       codexOne.profile.cliProfileId === "personal" &&
-      (await links.accountOneProfile("xai"))?.id === grokOne.profile.id &&
-      (await links.accountOneProfile("openai-codex"))?.id === codexOne.profile.id &&
-      (await links.accountOneProfile("anthropic"))?.id === IDS.a,
+      (await links.systemProfile("xai"))?.id === grokOne.profile.id &&
+      (await links.systemProfile("openai-codex"))?.id === codexOne.profile.id &&
+      (await links.systemProfile("anthropic"))?.id === IDS.a,
   );
   check(
     "the reverse lookup is scoped by provider",
@@ -529,25 +574,34 @@ async function main() {
     ),
   );
 
-  // Deleting the Anthropic default lands on Account 1 even when an older row
-  // exists; other providers keep the oldest-row rule.
+  // Deleting the Active row never promotes another account, not even the
+  // System row: the default is simply gone. A managed half is tombstoned by
+  // its CLI profile id so a stale reference cannot bring it back.
   await links.recordCliProfileId(IDS.b, CLI_A);
-  await links.setDefaultProfile("anthropic", IDS.c);
-  const promoted = await links.deleteProfile(IDS.c);
+  await links.setDefaultProfile("anthropic", IDS.b);
+  const removed = await links.deleteProfile(IDS.b);
   check(
-    "deleting the anthropic default promotes the Account 1 row over older rows",
-    promoted.snapshot.defaults.anthropic === IDS.a,
-    JSON.stringify(promoted.snapshot.defaults),
+    "deleting the anthropic default promotes nothing",
+    removed.snapshot.defaults.anthropic === undefined,
+    JSON.stringify(removed.snapshot.defaults),
   );
   check(
-    "nextDefaultAfterDeletion falls back to the oldest row without an Account 1",
-    nextDefaultAfterDeletion(
-      [
-        { id: IDS.c, provider: "anthropic", label: "c", createdAt: "2026-01-02T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" },
-        { id: IDS.d, provider: "anthropic", label: "d", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" },
-      ],
-      "anthropic",
-    ) === IDS.d,
+    "a deleted managed half is tombstoned by its CLI profile id",
+    (await links.isTombstoned("anthropic", { cliProfileId: CLI_A })) &&
+      !(await links.isTombstoned("openai-codex", { cliProfileId: CLI_A })),
+  );
+  await expectThrows(
+    "a tombstoned CLI half cannot be linked again without an explicit add",
+    () => links.registerProfile({ provider: "anthropic", label: "Again", cliProfileId: CLI_A }),
+    "PiAccountProfileTombstonedError",
+  );
+  const systemRow = await links.getProfile(IDS.a);
+  await links.deleteProfile(IDS.a);
+  check(
+    "deleting the System row removes it and leaves a tombstone",
+    systemRow?.cli.kind === "system" &&
+      (await links.snapshot()).tombstones.some((entry) => entry.provider === "anthropic") &&
+      (await links.systemProfile("anthropic")) === undefined,
   );
 
   for (const [name, profiles, expectedName] of [

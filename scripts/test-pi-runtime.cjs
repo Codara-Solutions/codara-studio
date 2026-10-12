@@ -53,6 +53,40 @@ function loadTypeScriptModule(sourcePath) {
   return loaded.exports;
 }
 
+const CORA_ACCOUNT_ID = "33333333-3333-4333-8333-333333333333";
+
+/**
+ * Register one Cora-only Claude account as the default and write its
+ * credential where the auth store keeps it. The retired single login
+ * (pi-agent/auth.json) is archived by the accounts migration and never read.
+ */
+function seedDefaultCoraAccount(codaraHome, credential) {
+  const piRoot = path.join(codaraHome, "pi-agent");
+  const accountDir = path.join(piRoot, "accounts", CORA_ACCOUNT_ID);
+  fs.mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const createdAt = "2026-10-01T00:00:00.000Z";
+  fs.writeFileSync(path.join(piRoot, "account-profiles.json"), JSON.stringify({
+    version: 2,
+    profiles: [{
+      id: CORA_ACCOUNT_ID,
+      provider: "anthropic",
+      label: "Cora Claude",
+      createdAt,
+      updatedAt: createdAt,
+      cli: { kind: "none" },
+      cora: "own",
+    }],
+    defaults: { anthropic: CORA_ACCOUNT_ID },
+    tombstones: [],
+    dismissedSystemOffers: [],
+    pendingPurge: [],
+  }));
+  const authPath = path.join(accountDir, "auth.json");
+  fs.writeFileSync(authPath, JSON.stringify({ anthropic: credential }));
+  fs.chmodSync(authPath, 0o600);
+  return { piRoot, accountDir, authPath };
+}
+
 async function withTempDirectory(run) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pi-runtime-"));
   try { return await run(directory); }
@@ -791,13 +825,9 @@ async function main() {
   await withTempDirectory(async (directory) => {
     process.env.CODARA_HOME_DIR = directory;
     const plans = await loadElectronLaunchPlans(directory);
-    const configDir = path.join(directory, "pi-agent");
-    fs.mkdirSync(configDir, { recursive: true });
-    const authPath = path.join(configDir, "auth.json");
-    fs.writeFileSync(authPath, JSON.stringify({
-      anthropic: { type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh" },
-    }));
-    fs.chmodSync(authPath, 0o600);
+    const { piRoot: configDir } = seedDefaultCoraAccount(directory, {
+      type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh",
+    });
 
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
@@ -986,13 +1016,7 @@ async function main() {
     const bundleDirectory = fs.mkdtempSync(path.join(ROOT, "node_modules", ".codara-pi-runtime-test-"));
     try {
       const plans = await loadElectronLaunchPlans(directory, bundleDirectory);
-      const configDir = path.join(directory, "pi-agent");
-      fs.mkdirSync(configDir, { recursive: true });
-      const authPath = path.join(configDir, "auth.json");
-      fs.writeFileSync(authPath, JSON.stringify({
-        anthropic: { type: "oauth", access: "synthetic-access", expires: 1 },
-      }));
-      fs.chmodSync(authPath, 0o600);
+      seedDefaultCoraAccount(directory, { type: "oauth", access: "synthetic-access", expires: 1 });
       globalThis.__codaraTestMcpServers = [{ name: "files", command: "npx", args: ["-y", "files-mcp"] }];
       await assert.rejects(
         plans.createCodaraPiLaunchPlan({

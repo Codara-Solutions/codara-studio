@@ -1,16 +1,17 @@
 import { test, expect } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The built-in codara-studio server used to show a bare "Managed" badge in
-// each CLI column whenever auto-install was on, so it could not be removed
-// from one CLI, and a removal from elsewhere came back at the next launch.
-// Each CLI now has a switch. HOME points at a fake home so the switch edits a
-// throwaway ~/.claude.json, never the user's.
+// Codara passes the built-in codara-studio server on the command line of the
+// sessions it starts, so the per-CLI switch never edits the user's config.
+// The entry an earlier build wrote into ~/.claude.json is removed once at
+// boot, with a backup that Settings, About points to. HOME points at a fake
+// home so all of this happens to a throwaway ~/.claude.json, never the
+// user's.
 
-test("the Capability Center switches the built-in server off for one CLI", async ({}, testInfo) => {
+test("the built-in server is per launch: old global entries are cleaned up and the switch writes nothing global", async ({}, testInfo) => {
   test.setTimeout(90_000);
   const root = await mkdtemp(join(tmpdir(), "codara-builtin-switch-"));
   const home = join(root, "codara-home");
@@ -60,9 +61,28 @@ test("the Capability Center switches the built-in server off for one CLI", async
       SPARK_ALLOW_MULTI: "1",
     },
   });
+  const servers = async () => Object.keys(JSON.parse(await readFile(claudeJson, "utf8")).mcpServers ?? {});
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
+
+    // The boot pass removes the old managed entry, keeps the user's own, and
+    // backs the file up first.
+    await expect.poll(servers, { timeout: 20_000 }).toEqual(["mine"]);
+    const backupRoot = join(home, "backups", "global-config-cleanup");
+    const [stamp] = await readdir(backupRoot);
+    const manifest = JSON.parse(await readFile(join(backupRoot, stamp, "manifest.json"), "utf8"));
+    expect(JSON.stringify(manifest)).toContain(".claude.json");
+    const mcpConfig = JSON.parse(await readFile(join(home, "integrations", "claude", "mcp-studio.json"), "utf8"));
+    expect(Object.keys(mcpConfig.mcpServers)).toEqual(["codara-studio"]);
+
+    await page.getByTitle("Settings").click({ force: true });
+    const settings = page.getByRole("dialog", { name: "Settings" });
+    await settings.locator("nav").getByRole("button", { name: "About", exact: true }).click({ force: true });
+    await expect(settings.getByText(/Removed Codara's old entries from your Claude Code and Codex config\. Backup: /)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(settings).toHaveCount(0);
+
     await page.getByRole("button", { name: "Tools, skills and memory" }).first().click();
     const dialog = page.getByRole("dialog", { name: "Capability Center" });
     await expect(dialog).toBeVisible();
@@ -73,12 +93,15 @@ test("the Capability Center switches the built-in server off for one CLI", async
 
     await claude.click();
     await expect(claude).toHaveAttribute("aria-checked", "false");
-    await expect(dialog.getByText(/Removed Codara Studio tools from the Claude CLI/)).toBeVisible();
-    const servers = JSON.parse(await readFile(claudeJson, "utf8")).mcpServers;
-    expect(Object.keys(servers)).toEqual(["mine"]);
+    await expect(dialog.getByText(/Codara Studio tools are off for the Claude CLI sessions Codara starts/)).toBeVisible();
+    expect(await servers()).toEqual(["mine"]);
     const optOut = JSON.parse(await readFile(join(home, "builtin-mcp.json"), "utf8"));
     expect(optOut.removedFrom).toEqual(["claude"]);
     await page.screenshot({ path: testInfo.outputPath("builtin-switch-off.png") });
+
+    await claude.click();
+    await expect(claude).toHaveAttribute("aria-checked", "true");
+    expect(await servers()).toEqual(["mine"]);
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });

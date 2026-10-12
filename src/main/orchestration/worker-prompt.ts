@@ -273,7 +273,6 @@ function sparkPreviewToolsAvailable(
   run: RunState,
   task: WorkerTask,
   cwd: string,
-  settings: AppSettings,
 ): boolean {
   if (usesPiWorkerHarness(task)) return true;
   // Structured automation workers always get the tools regardless of config
@@ -289,10 +288,7 @@ function sparkPreviewToolsAvailable(
   ) {
     return true;
   }
-  return isSparkPreviewMcpAvailable({
-    cwd,
-    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
-  });
+  return isSparkPreviewMcpAvailable({ cwd });
 }
 
 // Only the Pi harness loads the vendored pi-web-search extension, so only
@@ -692,7 +688,7 @@ function renderImplementationWorkerPrompt({
     "Treat exact public names, shapes, formats, and examples as tests. If the brief is mechanically impossible, make only the smallest safe in-scope repair, report `partial`, and prove why; otherwise report `blocked`.",
   );
 
-  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd);
   const uiQualityGuidance = renderUiQualityGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiQualityGuidance.length) {
     lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
@@ -813,7 +809,6 @@ function renderDirectTaskPrompt({
   step,
   task,
   paths,
-  settings,
   priorHandoffs,
 }: {
   cwd: string;
@@ -857,12 +852,12 @@ function renderDirectTaskPrompt({
     lines.push("", "## VERIFY", ...task.verificationCommands.map((command) => `- ${command}`));
   }
 
-  if (sparkPreviewToolsAvailable(run, task, cwd, settings)) {
+  if (sparkPreviewToolsAvailable(run, task, cwd)) {
     lines.push("", "## BROWSER", "Use `codara_preview_list` to identify an existing workspace browser by title, URL, or last-viewed marker when the user refers to it; pass its tabId and ask if ambiguous. Otherwise navigate without tabId to use your own browser. Read `codara_preview_snapshot` first for page text and controls. Use its @references as selectors, scoped snapshots for sections, and since with the previous snapshotId for changes. Use screenshots for layout, images, or canvas; they include CSS viewport and image scale. Stop after the requested result is verified. Browser tabs remain open when you finish.");
   }
 
   if (taskLooksLikeVisibleUi(step, task)) {
-    const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+    const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd);
     lines.push(
       "",
       "## UI CHECK",
@@ -965,7 +960,7 @@ function renderVerifierWorkerPrompt({
     );
   }
 
-  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd);
   const uiVerifierGuidance = renderUiVerifierGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiVerifierGuidance.length) {
     lines.push("", ...uiVerifierGuidance);

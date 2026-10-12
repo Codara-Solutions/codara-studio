@@ -261,8 +261,11 @@ function stubPlugin() {
       }
       export function notifyNativeGrokProfileLeaseReleased() {}
     `,
-    "./orchestration/codex-trust": `
-      export function ensureCodexProjectTrust() { return Promise.resolve(); }
+    "./agent-launch-integration": `
+      export function integrationFilesReady() { return Promise.resolve(); }
+      export function agentArgsDir() { return null; }
+      export function claudeLaunchArgs() { return []; }
+      export function codexLaunchArgs() { return []; }
     `,
     "./orchestration/claude-cli-profile-environment": `
       export function buildClaudeCliProfileEnvironment(baseEnv, configDir) {
@@ -294,9 +297,6 @@ function stubPlugin() {
         env.GROK_HOME = grokHome;
         return env;
       }
-    `,
-    "./hook-installer": `
-      export function installClaudeHooks() { return Promise.resolve(); }
     `,
     "./terminal-foreground": `
       export async function continueForegroundJob(pid) {

@@ -34,6 +34,7 @@ ${c.bold("ACCOUNTS")}
   auth list [provider]                 list accounts (Cora and CLI sides)
   auth add <provider> [label]          sign in to another account
   auth use <provider> <#|label|id>     make it the Active account (Cora + CLI)
+  auth use <provider> system           new sessions use the CLI's own login
   auth login|rename|remove <provider> …
   auth cli list [claude|codex|grok]    list the CLI side of each account
   auth cli rename|remove <runtime> …   rename a CLI side, remove an unused one

@@ -2,10 +2,11 @@
 "use strict";
 
 // The unified account service over the Codex adapter, against real temp
-// roots: a real Pi account store and registry, the real auth-only vault and
-// its marker, the real credential mirror and the REAL pinned Pi AuthStorage.
-// The refresh grant is a stubbed fetch, the terminal session table and the
-// external process count are stubs; identities come from JWT claims.
+// roots: a real Pi account store and registry, real per-account CODEX_HOMEs
+// under Codara's home, the real credential mirror and the REAL pinned Pi
+// AuthStorage. The refresh grant is a stubbed fetch and the terminal session
+// table is a stub; identities come from JWT claims. HOME is a fake home
+// whose ~/.codex is the System login; nothing in it may change.
 //
 //   node scripts/test-codex-accounts.cjs
 
@@ -21,6 +22,7 @@ const ROOT = path.resolve(__dirname, "..");
 const PI_PACKAGE_ROOT = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-codex-accounts-"));
 const HOME = path.join(TMP, "home");
+process.env.HOME = HOME;
 process.env.CODARA_HOME_DIR = path.join(HOME, ".codarastudio");
 delete process.env.CODEX_HOME;
 
@@ -30,10 +32,10 @@ const CLI_IDS = [
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
 ];
-const ACCOUNT_A = "acct-11111111-1111-4111-8111-111111111111";
-const ACCOUNT_B = "acct-22222222-2222-4222-8222-222222222222";
-const ACCOUNT_C = "acct-33333333-3333-4333-8333-333333333333";
-const ACCOUNT_D = "acct-44444444-4444-4444-8444-444444444444";
+const SYSTEM_ACCOUNT = "acct-11111111-1111-4111-8111-111111111111";
+const WORK_ACCOUNT = "acct-22222222-2222-4222-8222-222222222222";
+const HOME_ACCOUNT = "acct-33333333-3333-4333-8333-333333333333";
+const STRANGER = "acct-44444444-4444-4444-8444-444444444444";
 const fingerprintOf = (accountId) => crypto.createHash("sha256").update(accountId).digest("hex");
 const T0 = 1_900_000_000;
 const LIFETIME = 240 * 3600;
@@ -59,7 +61,6 @@ async function buildHarness() {
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as codexProfiles from ${JSON.stringify(orchestration("codex-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("codex-cli-profile-execution.ts"))};`,
-      `export * as selector from ${JSON.stringify(orchestration("codex-cli-auth-selector.ts"))};`,
     ].join("\n"),
   );
   const out = path.join(TMP, "harness.cjs");
@@ -117,17 +118,17 @@ function mode(file) {
   return fs.statSync(file).mode & 0o777;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitFor(predicate, timeoutMs = 8000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await sleep(25);
-  }
-  throw new Error("condition not met in time");
+function snapshotTree(dir) {
+  const out = {};
+  const walk = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out[path.relative(dir, full)] = fs.readFileSync(full, "utf8");
+    }
+  };
+  walk(dir);
+  return out;
 }
 
 let passes = 0;
@@ -139,25 +140,37 @@ function pass(name) {
 async function main() {
   const H = await buildHarness();
   const AuthStorage = await loadAuthStorage();
+
+  const authFile = (accountId, n) => ({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: {
+      id_token: idTokenFor(accountId, n),
+      access_token: accessFor(accountId, n),
+      refresh_token: `refresh-${accountId.slice(5, 13)}-${n}`,
+      account_id: accountId,
+    },
+    last_refresh: "2026-08-01T00:00:00.000Z",
+  });
+  const writeFile = (file, value) => privateFile(file, JSON.stringify(value, null, 2));
+  const readFile = (file) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null);
+
+  // The System login: the user's own ~/.codex, signed in as SYSTEM_ACCOUNT,
+  // with the shared state a real Codex home carries.
+  const systemHome = path.join(HOME, ".codex");
+  writeFile(path.join(systemHome, "auth.json"), authFile(SYSTEM_ACCOUNT, 1));
+  privateFile(path.join(systemHome, "config.toml"), 'model = "gpt-5"\n');
+  privateFile(path.join(systemHome, "sessions", "2026", "rollout.jsonl"), "{}\n");
+  const ownBefore = snapshotTree(systemHome);
+
   const piRoot = path.join(HOME, ".codarastudio", "pi-agent");
   const codexRoot = path.join(HOME, ".codarastudio", "codex-cli");
-  const codexHome = path.join(HOME, ".codex");
-  privateDir(codexHome);
-  const liveFile = path.join(codexHome, "auth.json");
-  const vaultFile = (cliId) =>
-    cliId === "personal"
-      ? H.selector.codexCliPersonalAuthFile(codexRoot)
-      : H.codexProfiles.codexCliManagedProfilePaths(codexRoot, cliId).authFile;
-  const marker = () =>
-    fs.existsSync(path.join(codexRoot, "active-auth.json"))
-      ? JSON.parse(fs.readFileSync(path.join(codexRoot, "active-auth.json"), "utf8")).profileId
-      : null;
+  const homeOf = (cliId) => H.codexProfiles.codexCliManagedProfilePaths(codexRoot, cliId);
   const piStore = new H.piStore.PiAccountAuthStore(piRoot);
   const leases = new H.execution.CodexCliProfileLeaseRegistry();
   let cliIndex = 0;
   const codexStore = new H.codexProfiles.CodexCliAccountProfileStore(codexRoot, {
-    personalHomeDir: codexHome,
-    personalAuthFile: H.selector.codexCliPersonalAuthFile(codexRoot),
+    personalHomeDir: systemHome,
     leases,
     idFactory: () => CLI_IDS[cliIndex++],
   });
@@ -169,536 +182,240 @@ async function main() {
     if (typeof grantResponse === "function") return grantResponse(body);
     return { ok: false, status: 429, text: async () => "slow down" };
   };
-  let externalSessions = 0;
   const logs = [];
-  const adapter = H.codexAdapter.createCodexAccountAdapter({
-    store: codexStore,
-    leases,
-    loadAuthStorage,
-    fetchImpl,
-    externalSessionCount: () => externalSessions,
-    now: () => new Date("2026-08-30T12:00:00.000Z"),
-    log: (message) => logs.push(message),
-  });
-  const mirror = new H.mirror.CredentialMirror({
-    loadAuthStorage,
-    pollWhenWatchBlind: null,
-    debounceMs: 30,
-    retryDelayMs: 20,
-    log: (message) => logs.push(message),
-  });
-  // These pairs are WATCHED. Writing a file the mirror watches schedules a
-  // debounced reconcile, and under load that reconcile can perform the write
-  // before the explicit reconcile below reaches it — leaving the explicit call
-  // with an already-synced pair and nothing to do. Both orders are the mirror
-  // doing the same correct thing, so the direction assertions accept "this call
-  // wrote it" OR "it was already written"; the state assertions that follow
-  // each one still pin the credential that had to arrive.
-  const syncedInto = (result, side) =>
-    result.wrote === side || result.verdict === "equal" || result.verdict === "none";
-  let broadcasts = 0;
   const liveOwners = new Set();
-  let liveRuntimeCount;
-  const disposed = [];
-  const shutdowns = [];
-  const service = new H.accounts.UnifiedAccountService(adapter, {
-    piStore,
-    mirror,
-    loadAuthStorage,
-    invalidateCaches: async () => undefined,
-    broadcast: () => {
-      broadcasts += 1;
-    },
-    sessions: {
-      liveOwnerIds: () => liveOwners,
-      liveRuntimeSessionCount: async () => liveRuntimeCount ?? liveOwners.size,
-      disposeProfileSessions: async (profileId) => {
-        disposed.push(profileId);
-        let count = 0;
-        for (const owner of leases.owners(profileId)) {
-          if (owner.startsWith("terminal:")) {
-            liveOwners.delete(owner);
-            count += 1;
-          }
-        }
-        return { closedSessionCount: count };
+  let defaultsChanged = 0;
+  const makeService = () =>
+    new H.accounts.UnifiedAccountService(
+      H.codexAdapter.createCodexAccountAdapter({
+        store: codexStore,
+        leases,
+        loadAuthStorage,
+        fetchImpl,
+        now: () => new Date("2026-08-30T12:00:00.000Z"),
+        log: (message) => logs.push(message),
+      }),
+      {
+        piStore,
+        mirror: new H.mirror.CredentialMirror({
+          loadAuthStorage,
+          pollWhenWatchBlind: null,
+          debounceMs: 30,
+          retryDelayMs: 20,
+          log: (message) => logs.push(message),
+        }),
+        loadAuthStorage,
+        invalidateCaches: async () => undefined,
+        sessions: { liveOwnerIds: () => liveOwners },
+        defaultsChanged: () => {
+          defaultsChanged += 1;
+        },
+        log: (message) => logs.push(message),
       },
-    },
-    sessionShutdown: async () => {
-      let count = externalSessions;
-      externalSessions = 0;
-      for (const owner of [...liveOwners]) {
-        liveOwners.delete(owner);
-        count += 1;
-      }
-      leases.sweep(liveOwners);
-      shutdowns.push(count);
-      return { closedSessionCount: count };
-    },
-    log: (message) => logs.push(message),
-  });
+    );
+  let service = makeService();
   assert.equal(service.provider, "openai-codex");
 
-  const authFile = (accountId, n, extra = {}) => ({
-    auth_mode: "chatgpt",
-    OPENAI_API_KEY: null,
-    tokens: {
-      id_token: idTokenFor(accountId, n),
-      access_token: accessFor(accountId, n),
-      refresh_token: `refresh-${accountId.slice(5, 13)}-${n}`,
-      account_id: accountId,
-    },
-    last_refresh: "2026-08-01T00:00:00.000Z",
-    ...extra,
-  });
-  const writeFile = (file, value) => privateFile(file, JSON.stringify(value, null, 2));
-  const readFile = (file) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null);
-  const piCredential = (accountId, n) => ({
+  const piCredential = (accountId, n, extra = {}) => ({
     type: "oauth",
     access: accessFor(accountId, n),
     refresh: `refresh-${accountId.slice(5, 13)}-${n}`,
     expires: (T0 + n + LIFETIME) * 1000 - 12345,
     accountId,
+    ...extra,
   });
   const piAuthFile = (coraId) => H.piStore.piAccountProfilePaths(piRoot, coraId).authFile;
-  const readPi = (coraId) =>
-    fs.existsSync(piAuthFile(coraId))
-      ? JSON.parse(fs.readFileSync(piAuthFile(coraId), "utf8"))["openai-codex"] ?? null
-      : null;
+  const readPi = (coraId) => readFile(piAuthFile(coraId))?.["openai-codex"] ?? null;
   const writePi = async (coraId, credential) => {
     const { configDir, authFile: target } = H.piStore.piAccountProfilePaths(piRoot, coraId);
     privateDir(configDir);
     await AuthStorage.create(target).modify("openai-codex", async () => credential);
     fs.chmodSync(target, 0o600);
   };
-  const connectCora = async (label, accountId, n) => {
+  const connectCora = async (label, accountId, credential) => {
     const target = await piStore.prepareCredentialTarget({
       provider: "openai-codex",
       label,
       identityFingerprint: fingerprintOf(accountId),
     });
-    await writePi(target.profile.id, piCredential(accountId, n));
+    await writePi(target.profile.id, credential);
     return target.profile;
   };
+  const defaults = async () => (await piStore.registry.snapshot()).defaults["openai-codex"];
 
-  // Account 1 from the live file while the marker names personal.
-  assert.equal(await service.ensureAccountOne(), null);
-  writeFile(liveFile, authFile(ACCOUNT_A, 2));
-  await H.selector.ensureCodexCliAuthVault(codexStore);
-  assert.equal(marker(), "personal");
-  const accountOne = await service.ensureAccountOne();
-  assert.equal(accountOne.label, "Account 1");
-  assert.equal(accountOne.cliProfileId, "personal");
-  assert.equal(accountOne.identityFingerprint, fingerprintOf(ACCOUNT_A));
-  assert.equal(accountOne.accountEmail, "11111111@example.com");
-  assert.deepEqual(readPi(accountOne.id), {
-    type: "oauth",
-    access: accessFor(ACCOUNT_A, 2),
-    refresh: "refresh-11111111-2",
-    expires: (T0 + 2 + LIFETIME) * 1000,
-    accountId: ACCOUNT_A,
-    idToken: idTokenFor(ACCOUNT_A, 2),
-  });
-  assert.equal(mode(piAuthFile(accountOne.id)), 0o600);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], accountOne.id);
-  pass("Account 1 is created from the live ~/.codex login with the JWT expiry");
+  // --- The System login is offered, never adopted ----------------------------
+  assert.deepEqual(await piStore.registry.listProfiles(), []);
+  assert.deepEqual(await service.systemOffer(), { email: "11111111@example.com" });
+  assert.deepEqual(await piStore.registry.listProfiles(), [], "an offer registers nothing");
+  const system = await service.addSystemAccount();
+  assert.equal(system.cli.kind, "system");
+  assert.equal(system.cora, "none");
+  assert.equal(system.identityFingerprint, fingerprintOf(SYSTEM_ACCOUNT));
+  assert.equal(readPi(system.id), null, "nothing of the System login is copied to Cora");
+  assert.equal(await service.systemOffer(), null);
+  pass("the System login is offered, and Use in Codara adds a row without copying its login");
 
-  // Live rotation (Codex refreshed in place) lands in Pi and the vault copy.
-  writeFile(liveFile, authFile(ACCOUNT_A, 10));
-  const rotated = await service.reconcileCliProfile("personal");
-  assert.ok(syncedInto(rotated, "pi"), JSON.stringify(rotated));
-  assert.equal(readPi(accountOne.id).access, accessFor(ACCOUNT_A, 10));
-  assert.equal(readPi(accountOne.id).expires, (T0 + 10 + LIFETIME) * 1000);
-  // Pi rotation lands in the live file and the vault, with id_token kept.
-  await writePi(accountOne.id, piCredential(ACCOUNT_A, 20));
-  const back = await service.reconcileProfile(accountOne.id);
-  assert.ok(syncedInto(back, "cli"), JSON.stringify(back));
-  const liveAfter = readFile(liveFile);
-  assert.equal(liveAfter.tokens.access_token, accessFor(ACCOUNT_A, 20));
-  assert.equal(liveAfter.tokens.refresh_token, "refresh-11111111-20");
-  assert.equal(liveAfter.tokens.id_token, idTokenFor(ACCOUNT_A, 10), "id_token survives a Pi rotation");
-  assert.equal(liveAfter.tokens.account_id, ACCOUNT_A);
-  assert.equal(liveAfter.last_refresh, "2026-08-30T12:00:00.000Z");
-  assert.equal(mode(liveFile), 0o600);
-  assert.deepEqual(readFile(vaultFile("personal")), liveAfter, "the vault trails the live file");
-  assert.equal(mode(vaultFile("personal")), 0o600);
-  pass("rotations flow live -> Pi and Pi -> live+vault with id_token preserved");
-
-  // A Cora sign-in of another account: the Codex half needs an id_token,
-  // which only a refresh grant returns. A refused grant leaves the row
-  // Cora-only; a successful one writes Pi first, then the vault slot.
-  const work = await connectCora("Work", ACCOUNT_B, 5);
-  const canonical = H.codexCodec.canonicalFromCodexPi(piCredential(ACCOUNT_B, 5));
-  await assert.rejects(() => service.ensureCliHalf(work.id, canonical), /refused \(429\)/);
+  // --- A Cora sign-in grows its own CODEX_HOME --------------------------------
+  // Codex insists on an id_token, which only a refresh grant returns. A
+  // refused grant leaves the row Cora-only and no home behind.
+  const work = await connectCora("Work", WORK_ACCOUNT, piCredential(WORK_ACCOUNT, 5));
+  const workCanonical = H.codexCodec.canonicalFromCodexPi(piCredential(WORK_ACCOUNT, 5));
+  await assert.rejects(() => service.ensureCliHalf(work.id, workCanonical), /refused \(429\)/);
   assert.equal((await piStore.registry.getProfile(work.id)).cliProfileId, undefined);
-  assert.equal((await codexStore.snapshot()).profiles.length, 0, "no half-built vault slot");
-  assert.equal(readPi(work.id).refresh, "refresh-22222222-5", "a failed grant leaves Pi untouched");
+  assert.equal((await codexStore.snapshot()).profiles.length, 0, "no half-built home");
+  assert.equal(fs.existsSync(homeOf(CLI_IDS[0]).profileDir), false);
   grantResponse = (body) => {
     assert.equal(body.grant_type, "refresh_token");
-    assert.equal(body.client_id, "app_EMoamEEZ73f0CkXaXp7hrann");
-    assert.equal(body.scope, "openid profile email");
     return {
       ok: true,
       status: 200,
       text: async () =>
         JSON.stringify({
-          access_token: accessFor(ACCOUNT_B, 6),
+          access_token: accessFor(WORK_ACCOUNT, 6),
           refresh_token: "refresh-22222222-6",
-          id_token: idTokenFor(ACCOUNT_B, 6),
+          id_token: idTokenFor(WORK_ACCOUNT, 6),
           expires_in: LIFETIME,
         }),
     };
   };
-  const workCli = await service.ensureCliHalf(work.id, canonical);
-  assert.equal(workCli, CLI_IDS[0]);
+  const workCli = await service.ensureCliHalf(work.id, workCanonical);
+  assert.equal(workCli, CLI_IDS[0], "a refused grant never reached the store");
   assert.equal(grants.at(-1).body.refresh_token, "refresh-22222222-5", "the grant used Pi's refresh token");
-  const workPi = readPi(work.id);
-  assert.equal(workPi.access, accessFor(ACCOUNT_B, 6));
-  assert.equal(workPi.refresh, "refresh-22222222-6", "the rotated refresh token reached Pi");
-  assert.equal(workPi.idToken, idTokenFor(ACCOUNT_B, 6));
-  assert.equal(workPi.accountId, ACCOUNT_B);
-  const workVault = readFile(vaultFile(workCli));
-  assert.equal(workVault.tokens.id_token, idTokenFor(ACCOUNT_B, 6));
-  assert.equal(workVault.tokens.access_token, accessFor(ACCOUNT_B, 6));
-  assert.equal(workVault.tokens.account_id, ACCOUNT_B);
-  assert.equal(workVault.auth_mode, "chatgpt");
-  assert.equal(mode(vaultFile(workCli)), 0o600);
-  assert.equal(marker(), "personal", "sharing does not move the live slot");
-  assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_A);
-  assert.equal((await piStore.registry.getProfile(work.id)).cliProfileId, workCli);
-  pass("ensureCliHalf grows a Cora-only account through one refresh grant and writes the vault slot");
+  assert.equal(readPi(work.id).refresh, "refresh-22222222-6", "the rotated refresh token reached Pi first");
+  const workHome = homeOf(workCli);
+  assert.equal(workHome.homeDir, path.join(codexRoot, "accounts", workCli, "home"));
+  const workAuth = readFile(workHome.authFile);
+  assert.equal(workAuth.tokens.account_id, WORK_ACCOUNT);
+  assert.equal(workAuth.tokens.id_token, idTokenFor(WORK_ACCOUNT, 6));
+  assert.equal(mode(workHome.authFile), 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.readlinkSync(path.join(workHome.homeDir, "config.toml")), path.join(systemHome, "config.toml"));
+    assert.equal(fs.readlinkSync(path.join(workHome.homeDir, "sessions")), path.join(systemHome, "sessions"));
+    assert.equal(fs.lstatSync(workHome.authFile).isSymbolicLink(), false, "auth.json is the home's own");
+  }
+  assert.equal((await piStore.registry.getProfile(work.id)).cora, "linked");
+  pass("a Cora sign-in grows its own CODEX_HOME with shared state linked and a private auth.json");
 
-  // A concurrent Pi refresh wins over the grant.
-  const racer = await connectCora("Racer", ACCOUNT_C, 7);
-  grantResponse = async () => {
-    await writePi(racer.id, piCredential(ACCOUNT_C, 9));
-    return {
-      ok: true,
-      status: 200,
-      text: async () =>
-        JSON.stringify({
-          access_token: accessFor(ACCOUNT_C, 8),
-          refresh_token: "refresh-33333333-8",
-          id_token: idTokenFor(ACCOUNT_C, 8),
-          expires_in: LIFETIME,
-        }),
-    };
-  };
-  await assert.rejects(
-    () => service.ensureCliHalf(racer.id, H.codexCodec.canonicalFromCodexPi(piCredential(ACCOUNT_C, 7))),
-    /refreshed this account/,
-  );
-  assert.equal(readPi(racer.id).refresh, "refresh-33333333-9", "the concurrent Pi refresh is kept");
-  assert.equal((await piStore.registry.getProfile(racer.id)).cliProfileId, undefined);
-  await piStore.deleteProfile(racer.id);
-  pass("a Pi refresh that lands during the grant wins and the grant's tokens are dropped");
+  // Rotations flow both ways through the account's own auth.json.
+  writeFile(workHome.authFile, authFile(WORK_ACCOUNT, 10));
+  await service.reconcileCliProfile(workCli);
+  assert.equal(readPi(work.id).access, accessFor(WORK_ACCOUNT, 10));
+  await writePi(work.id, piCredential(WORK_ACCOUNT, 20));
+  await service.reconcileProfile(work.id);
+  const rotated = readFile(workHome.authFile);
+  assert.equal(rotated.tokens.access_token, accessFor(WORK_ACCOUNT, 20));
+  assert.equal(rotated.tokens.id_token, idTokenFor(WORK_ACCOUNT, 10), "id_token survives a Pi rotation");
+  pass("rotations flow between Cora and the account's own auth.json");
 
-  // Switch: same id is a no-op for the side effects; a different id refuses
-  // with a count while sessions run, then closes only after consent and
-  // moves the live file and the marker.
-  broadcasts = 0;
-  await service.useAccount(accountOne.id);
-  assert.deepEqual(shutdowns, []);
-  assert.equal(marker(), "personal");
-  leases.acquire("personal", "terminal:codex-pane");
-  liveOwners.add("terminal:codex-pane");
-  externalSessions = 2;
-  assert.equal(await service.switchSessionCount(), 3);
-  liveRuntimeCount = 0;
-  assert.equal(await service.switchSessionCount(), 2, "a live shell lease is not a running Codex session");
-  assert.equal(leases.isLeased("personal"), true, "runtime inspection does not release live shell leases");
-  liveRuntimeCount = 1;
-  await assert.rejects(
-    () => service.useAccount(work.id),
-    (error) => error.name === "UnifiedAccountSessionsError" && error.sessionCount === 3 && /switch/.test(error.message),
-  );
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], accountOne.id, "a refused switch moves nothing");
-  assert.equal(marker(), "personal");
-  const switched = await service.useAccount(work.id, { closeSessions: true });
-  assert.equal(switched.closedSessionCount, 3);
-  liveRuntimeCount = undefined;
-  assert.equal(await service.switchSessionCount(), 0, "closed sessions disappear from the live count");
-  assert.deepEqual(shutdowns, [3]);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], work.id);
-  assert.equal((await codexStore.snapshot()).defaultProfileId, workCli);
-  assert.equal(marker(), workCli);
-  assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_B, "the live file is the switched account");
-  assert.equal(readFile(vaultFile("personal")).tokens.account_id, ACCOUNT_A, "Account 1 is saved to its vault slot");
-  assert.equal(await adapter.activeCliProfileId(), workCli);
-  const liveStatBefore = fs.statSync(liveFile);
-  await service.useAccount(work.id);
-  assert.deepEqual(shutdowns, [3], "switching to the active account closes nothing");
-  assert.equal(fs.statSync(liveFile).ino, liveStatBefore.ino, "re-selecting the live account does not replace the live file");
-  assert.equal(fs.statSync(liveFile).mtimeMs, liveStatBefore.mtimeMs, "re-selecting the live account does not rewrite the live file");
-  pass("a switch refuses with a session count, then closes sessions and moves the live slot");
-
-  // Live-while-active: the switched account's slot is now the live file. A
-  // rotation there lands in Pi; a Pi rotation lands in the live file and the
-  // vault; Account 1's vault copy is what its pair reads now.
-  writeFile(liveFile, authFile(ACCOUNT_B, 30));
-  assert.ok(syncedInto(await service.reconcileCliProfile(workCli), "pi"));
-  assert.equal(readPi(work.id).access, accessFor(ACCOUNT_B, 30));
-  assert.equal(readFile(vaultFile(workCli)).tokens.access_token, accessFor(ACCOUNT_B, 6), "the vault only trails on a Codara write");
-  await writePi(work.id, piCredential(ACCOUNT_B, 40));
-  assert.ok(syncedInto(await service.reconcileProfile(work.id), "cli"));
-  assert.equal(readFile(liveFile).tokens.access_token, accessFor(ACCOUNT_B, 40));
-  assert.equal(readFile(vaultFile(workCli)).tokens.access_token, accessFor(ACCOUNT_B, 40));
-  assert.equal(readFile(liveFile).tokens.id_token, idTokenFor(ACCOUNT_B, 30));
-  const one = await service.reconcileProfile(accountOne.id);
-  assert.equal(one.verdict, "equal", "Account 1 reads its vault copy while another account is live");
-  const statuses = await service.terminalStatuses();
-  assert.equal(statuses.get("personal").connected, true);
-  assert.equal(statuses.get(workCli).connected, true);
-  assert.equal(statuses.get(workCli).canRefresh, true);
-  pass("the live file answers for the active account and the vault for the others");
-
-  // An external `codex login` as another account while Work owns the live
-  // file: Work's identity is fixed at pairing time, so the foreign login is
-  // neither mirrored into Work's Cora half nor saved into Work's vault by
-  // the next switch; it is reported and dropped.
+  // A stranger's `codex login` inside Work's home is never adopted.
   {
     const piBefore = readPi(work.id);
-    const vaultBefore = readFile(vaultFile(workCli));
-    writeFile(liveFile, authFile(ACCOUNT_C, 45));
+    const before = fs.readFileSync(workHome.authFile, "utf8");
+    writeFile(workHome.authFile, authFile(STRANGER, 30));
     const foreign = await service.reconcileProfile(work.id);
     assert.equal(foreign.verdict, "foreign");
-    assert.equal(foreign.wrote, null);
-    assert.deepEqual(readPi(work.id), piBefore, "Cora keeps Work's own tokens");
-    assert.deepEqual(readFile(vaultFile(workCli)), vaultBefore, "the vault keeps Work's own tokens");
-    assert.ok(logs.some((line) => /another account/.test(line)), "the foreign login is logged");
-    assert.equal((await service.terminalStatuses()).get(workCli).connected, false, "a foreign live file is not Work signed in");
-    assert.equal((await service.terminalStatuses()).get("personal").connected, true);
-    await service.useAccount(accountOne.id);
-    assert.deepEqual(readFile(vaultFile(workCli)), vaultBefore, "the switch does not save the foreign login into Work's slot");
-    assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_A);
-    await service.useAccount(work.id);
-    assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_B, "Work's own login is back in the live file");
     assert.deepEqual(readPi(work.id), piBefore);
-    assert.equal(readFile(vaultFile("personal")).tokens.account_id, ACCOUNT_A);
-    pass("an external login of another account is never adopted by the live profile");
+    fs.writeFileSync(workHome.authFile, before, { mode: 0o600 });
+    pass("another account's login in a managed home is neither mirrored nor overwritten");
   }
 
-  // An external `codex logout` while Work is live: one sign-in per account,
-  // so a managed half is re-created from Cora once Cora can produce a file
-  // (an id_token); the personal slot is the only one whose logout
-  // propagates. Until then the slot shows as signed out.
-  mirror.watch(service.pairFromProfile(await piStore.registry.getProfile(work.id)));
-  await mirror.reconcileNow(work.id);
-  fs.rmSync(liveFile);
-  const signedOut = await service.reconcileProfile(work.id);
-  assert.equal(signedOut.verdict, "pi-only");
-  assert.equal(signedOut.wrote, null, "Cora holds no id_token, so no Codex file can be written");
-  assert.equal((await service.terminalStatuses()).get(workCli).connected, false, "an external logout shows as signed out");
-  assert.equal(readPi(work.id).access, accessFor(ACCOUNT_B, 40), "Cora keeps the login");
-  assert.ok(logs.some((line) => /sharing the login grows it/.test(line)));
-  await writePi(work.id, { ...piCredential(ACCOUNT_B, 41), idToken: idTokenFor(ACCOUNT_B, 41) });
-  await service.reconcileProfile(work.id);
-  assert.equal(readFile(liveFile)?.tokens.account_id, ACCOUNT_B, "the managed half is re-created from Cora");
-  assert.equal(readFile(liveFile).tokens.access_token, accessFor(ACCOUNT_B, 41));
-  assert.equal(readFile(liveFile).tokens.id_token, idTokenFor(ACCOUNT_B, 41));
-  assert.equal((await service.terminalStatuses()).get(workCli).connected, true);
-  pass("an external codex logout of a managed account is undone from Cora, never propagated as a delete");
-
-  // A rotation arriving between the debounce and the write lands in the
-  // right file: the switch and the mirror serialize on the selection lock.
-  {
-    const pairs = new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 40, retryDelayMs: 20 });
-    pairs.watch(service.pairFromProfile(await piStore.registry.getProfile(work.id)));
-    pairs.watch(service.pairFromProfile(await piStore.registry.getProfile(accountOne.id)));
-    await pairs.reconcileAll();
-    await sleep(150);
-    // Cora rotates Work while Work is live, and the user switches to
-    // Account 1 in the same instant.
-    await writePi(work.id, piCredential(ACCOUNT_B, 50));
-    await sleep(10);
-    await H.selector.activateCodexCliAccount(codexStore, "personal");
-    await waitFor(async () => readFile(vaultFile(workCli))?.tokens.access_token === accessFor(ACCOUNT_B, 50));
-    await sleep(200);
-    assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_A, "the live file never received Work's token after the switch");
-    assert.equal(readFile(vaultFile(workCli)).tokens.access_token, accessFor(ACCOUNT_B, 50), "Work's rotation landed in its vault slot");
-    await H.selector.activateCodexCliAccount(codexStore, workCli);
-    pairs.stop();
-    pass("a rotation arriving mid-switch lands in the account's own slot");
-  }
-
-  // Delete: hand-off to Account 1 even when Account 1 is signed out
-  // everywhere; the marker follows and the vault slot goes.
-  fs.rmSync(vaultFile("personal"));
-  await AuthStorage.create(piAuthFile(accountOne.id)).delete("openai-codex");
-  const releaseWorker = leases.acquire(workCli, "worker:run-1");
-  await assert.rejects(
-    () => service.deleteAccount(work.id, { closeSessions: true }),
-    (error) => error.name !== "UnifiedAccountSessionsError" && /running task/.test(error.message),
+  // A Cora credential that already carries an id_token needs no grant.
+  const grantsBefore = grants.length;
+  const homeRow = await connectCora(
+    "Home",
+    HOME_ACCOUNT,
+    piCredential(HOME_ACCOUNT, 7, { idToken: idTokenFor(HOME_ACCOUNT, 7) }),
   );
-  releaseWorker();
-  leases.acquire(workCli, "terminal:codex-work");
-  liveOwners.add("terminal:codex-work");
-  await assert.rejects(
-    () => service.deleteAccount(work.id),
-    (error) => error.name === "UnifiedAccountSessionsError" && error.sessionCount === 1,
+  const homeCli = await service.ensureCliHalf(
+    homeRow.id,
+    H.codexCodec.canonicalFromCodexPi(readPi(homeRow.id)),
   );
-  const deleted = await service.deleteAccount(work.id, { closeSessions: true });
-  assert.equal(deleted.deleted, true);
-  assert.equal(marker(), "personal", "the marker follows the hand-off");
-  assert.equal(fs.existsSync(liveFile), false, "a signed-out Account 1 leaves no live file");
-  assert.equal(fs.existsSync(vaultFile(workCli)), false);
-  assert.equal(fs.existsSync(path.dirname(vaultFile(workCli))), false);
+  assert.equal(grants.length, grantsBefore);
+  assert.equal(readFile(homeOf(homeCli).authFile).tokens.account_id, HOME_ACCOUNT);
+  pass("a Cora credential with an id_token becomes a Codex home without a grant");
+
+  // --- Use: new sessions start in the account's home ---------------------------
+  const workAuthBefore = fs.readFileSync(workHome.authFile, "utf8");
+  defaultsChanged = 0;
+  await service.useAccount(work.id);
+  assert.equal(await defaults(), work.id);
+  assert.equal((await codexStore.snapshot()).defaultProfileId, workCli);
+  assert.equal((await codexStore.resolveProfile({ useDefault: true })).homeDir, workHome.homeDir);
+  assert.ok(defaultsChanged >= 1, "the shell pointer is told to follow");
+  await service.useAccount(homeRow.id);
+  assert.equal((await codexStore.resolveProfile({ useDefault: true })).homeDir, homeOf(homeCli).homeDir);
+  assert.equal(
+    fs.readFileSync(workHome.authFile, "utf8"),
+    workAuthBefore,
+    "a session already running in Work's home keeps its account",
+  );
+  assert.equal(fs.existsSync(path.join(codexRoot, "active-auth.json")), false, "there is no Codex live slot");
+  await service.useSystemLogin();
+  assert.equal(await defaults(), system.id);
+  const resolvedSystem = await codexStore.resolveProfile({ useDefault: true });
+  assert.equal(resolvedSystem.profileId, "personal");
+  assert.equal(resolvedSystem.homeDir, systemHome);
+  await service.useAccount(work.id);
+  pass("Use only changes which home new sessions start in; running sessions keep theirs");
+
+  // --- Delete: a home a terminal still runs in is purged when it exits -------
+  liveOwners.add("terminal:codex-pane");
+  const release = leases.acquire(workCli, "terminal:codex-pane");
+  const deleted = await service.deleteAccount(work.id);
+  assert.deepEqual(deleted, { deleted: true, purgePending: true });
   assert.equal(await piStore.registry.getProfile(work.id), null);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], undefined);
+  assert.equal(await defaults(), undefined, "no other account is promoted");
   assert.equal((await codexStore.snapshot()).defaultProfileId, "personal");
-  pass("delete hands off to a signed-out Account 1 and removes the vault slot");
+  assert.equal(fs.existsSync(workHome.homeDir), true, "the running terminal keeps its home");
+  assert.equal(fs.existsSync(workHome.authFile), false, "the login leaves the home at once");
+  const queued = (await piStore.registry.snapshot()).pendingPurge;
+  assert.deepEqual(queued.map((entry) => entry.path), [workHome.profileDir]);
+  assert.deepEqual(await service.purgePending(), [], "a held home waits");
+  release();
+  liveOwners.clear();
+  assert.deepEqual(await service.purgePending(), [workHome.profileDir]);
+  assert.equal(fs.existsSync(workHome.profileDir), false);
+  assert.deepEqual((await piStore.registry.snapshot()).pendingPurge, []);
+  assert.ok(await piStore.registry.isTombstoned("openai-codex", { identityFingerprint: fingerprintOf(WORK_ACCOUNT) }));
+  pass("delete tombstones the account and purges its home once the last terminal exits");
 
-  // Activation failure rolls back both defaults and the marker.
-  writeFile(liveFile, authFile(ACCOUNT_A, 60));
-  await service.reconcileProfile(accountOne.id).catch(() => null);
-  await service.ensureAccountOne();
-  await writePi(accountOne.id, piCredential(ACCOUNT_A, 60));
-  await service.useAccount(accountOne.id);
-  const other = await connectCora("Other", ACCOUNT_C, 70);
-  grantResponse = () => ({
-    ok: true,
-    status: 200,
-    text: async () =>
-      JSON.stringify({
-        access_token: accessFor(ACCOUNT_C, 71),
-        refresh_token: "refresh-33333333-71",
-        id_token: idTokenFor(ACCOUNT_C, 71),
-        expires_in: LIFETIME,
-      }),
-  });
-  const otherCli = await service.ensureCliHalf(other.id, H.codexCodec.canonicalFromCodexPi(piCredential(ACCOUNT_C, 70)));
-  // A vault slot that vanished is rebuilt from Cora by the reconcile a
-  // switch runs first, so the switch still succeeds; a live file that is
-  // not a regular file makes the activation itself fail after both
-  // defaults moved, which is the rollback path.
-  fs.rmSync(vaultFile(otherCli));
-  await service.useAccount(other.id);
-  assert.equal(marker(), otherCli);
-  assert.equal(readFile(vaultFile(otherCli)).tokens.access_token, accessFor(ACCOUNT_C, 71));
-  await service.useAccount(accountOne.id);
-  assert.equal(marker(), "personal");
-  const liveBytes = fs.readFileSync(liveFile);
-  fs.rmSync(liveFile);
-  fs.symlinkSync(path.join(codexHome, "elsewhere.json"), liveFile);
-  await assert.rejects(() => service.useAccount(other.id), /not a regular file/);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], accountOne.id, "the Cora default is rolled back");
-  assert.equal((await codexStore.snapshot()).defaultProfileId, "personal", "the Codex default is rolled back");
-  assert.equal(marker(), "personal");
-  fs.rmSync(liveFile);
-  privateFile(liveFile, liveBytes);
-  assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_A);
-  pass("a failed activation rolls back both defaults and leaves the marker");
+  // A home with no terminal goes at once.
+  const deletedHome = await service.deleteAccount(homeRow.id);
+  assert.deepEqual(deletedHome, { deleted: true, purgePending: false });
+  assert.equal(fs.existsSync(homeOf(homeCli).profileDir), false);
+  pass("a home no terminal holds is purged at once");
 
-  // A Cora-only row (its refresh grant was refused) can be made active: the
-  // Codex selection rests on the personal slot, signed in or not, and no
-  // Codex session is closed while the live slot is already personal.
-  grantResponse = null;
-  const solo = await connectCora("Solo", ACCOUNT_D, 80);
-  await assert.rejects(
-    () => service.ensureCliHalf(solo.id, H.codexCodec.canonicalFromCodexPi(piCredential(ACCOUNT_D, 80))),
-    /refused \(429\)/,
-  );
-  shutdowns.length = 0;
-  await service.useAccount(solo.id);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], solo.id);
-  assert.equal((await codexStore.snapshot()).defaultProfileId, "personal");
-  assert.equal(marker(), "personal");
-  assert.equal(readFile(liveFile).tokens.account_id, ACCOUNT_A, "the personal login stays live");
-  assert.deepEqual(shutdowns, [], "resting on the live personal slot closes nothing");
-  await service.useAccount(other.id);
-  assert.equal(marker(), otherCli);
-  fs.rmSync(vaultFile("personal"));
-  await AuthStorage.create(piAuthFile(accountOne.id)).delete("openai-codex");
-  await service.useAccount(solo.id);
-  assert.equal(marker(), "personal", "a signed-out personal slot still takes the selection");
-  assert.equal(fs.existsSync(liveFile), false);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], solo.id);
-  pass("a Cora-only account can be made active whether or not Account 1 is signed in");
-
-  // Deleting the active account hands off to a Cora-only sibling while the
-  // personal slot is signed out: the delete succeeds, the marker is
-  // personal and no live file is left.
-  await service.useAccount(other.id);
-  assert.equal(marker(), otherCli);
-  const deletedOther = await service.deleteAccount(other.id);
-  assert.equal(deletedOther.deleted, true);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], solo.id, "the hand-off lands on the Cora-only row");
-  assert.equal((await codexStore.snapshot()).defaultProfileId, "personal");
-  assert.equal(marker(), "personal");
-  assert.equal(fs.existsSync(liveFile), false, "a signed-out personal slot leaves no live file");
-  assert.equal(fs.existsSync(path.dirname(vaultFile(otherCli))), false);
-  pass("deleting the active account hands off to a Cora-only sibling with a signed-out personal slot");
-
-  // A personal `codex logout` sticks: Account 1 signs out of Cora, its
-  // trailing vault copy goes with the live file, and a later switch to a
-  // managed account does not find a stale personal login to report or to
-  // mirror back into Cora.
-  writeFile(liveFile, authFile(ACCOUNT_A, 90));
-  await service.ensureAccountOne();
-  await service.useAccount(accountOne.id);
-  assert.equal(readPi(accountOne.id).access, accessFor(ACCOUNT_A, 90));
-  assert.equal(readFile(vaultFile("personal")).tokens.access_token, accessFor(ACCOUNT_A, 90), "the vault trails the live personal login");
-  fs.rmSync(liveFile);
-  const personalLogout = await service.reconcileProfile(accountOne.id);
-  assert.ok(
-    personalLogout.wrote === "pi-delete" || personalLogout.verdict === "none",
-    JSON.stringify(personalLogout),
-  );
-  assert.equal(readPi(accountOne.id), null);
-  assert.equal(fs.existsSync(vaultFile("personal")), false, "the personal vault copy goes with the logout");
-  grantResponse = () => ({
-    ok: true,
-    status: 200,
-    text: async () =>
-      JSON.stringify({
-        access_token: accessFor(ACCOUNT_C, 96),
-        refresh_token: "refresh-33333333-96",
-        id_token: idTokenFor(ACCOUNT_C, 96),
-        expires_in: LIFETIME,
-      }),
-  });
-  const third = await connectCora("Third", ACCOUNT_C, 95);
-  const thirdCli = await service.ensureCliHalf(third.id, H.codexCodec.canonicalFromCodexPi(piCredential(ACCOUNT_C, 95)));
-  await service.useAccount(third.id);
-  assert.equal(marker(), thirdCli);
-  assert.equal((await service.terminalStatuses()).get("personal").connected, false, "Account 1 stays signed out after the switch");
-  assert.equal((await service.reconcileProfile(accountOne.id)).wrote, null);
-  assert.equal(readPi(accountOne.id), null, "nothing is mirrored back into Account 1");
-  pass("a personal codex logout is not undone by a stale vault copy");
-
-  // Every produced file is owner-only.
-  const offending = [];
-  const visit = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const file = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) visit(file);
-      else if (/auth\.json$|account-profiles\.json$/.test(entry.name) && (mode(file) & 0o077) !== 0) {
-        offending.push(file);
-      }
-    }
-  };
-  visit(path.join(HOME, ".codarastudio"));
-  visit(codexHome);
-  assert.deepEqual(offending, []);
-  const dumped = JSON.stringify(await service.listAccounts());
-  for (const forbidden of [codexRoot, piRoot, "refresh-", "eyJ"]) {
-    assert.equal(dumped.includes(forbidden), false, `${forbidden} must not be listed`);
-  }
-  pass("every produced file is owner-only and the list is token-blind");
-
-  mirror.stop();
+  // --- Restart: nothing comes back ---------------------------------------------
   service.stop();
-  console.log(`\nPASS unified Codex account service (${passes} groups)`);
+  service = makeService();
+  await service.clearDanglingLinks();
+  await service.reprojectDefaults();
+  await service.purgePending();
+  assert.deepEqual(
+    (await piStore.registry.listProfiles()).map((profile) => profile.id),
+    [system.id],
+    "deleted accounts stay deleted across a restart",
+  );
+  assert.equal((await codexStore.snapshot()).profiles.length, 0);
+  pass("a restart resurrects nothing");
+
+  // Deleting the System row only forgets it.
+  await service.deleteAccount(system.id);
+  assert.equal(await service.systemOffer(), null, "a deleted System row's offer stays hidden");
+  pass("deleting the System row only forgets it");
+
+  // --- The user's own Codex home -----------------------------------------------
+  assert.deepEqual(snapshotTree(systemHome), ownBefore, "~/.codex is byte-for-byte unchanged");
+  pass("the user's own Codex home is never written");
+
+  console.log(`\nPASS Codex accounts (${passes} checks)`);
 }
 
 main()
-  .then(() => {
-    fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(0);
-  })
   .catch((error) => {
     console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
     fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(1);
   });

@@ -130,6 +130,7 @@ import type {
   PiSubscriptionShareLoginInput,
   PiSubscriptionMakeDefaultInput,
   PiSubscriptionOverview,
+  PiSubscriptionProvider,
   PiSubscriptionProfileLoginRequest,
   PiSubscriptionReconnectAccountInput,
   PiSubscriptionRenameAccountInput,
@@ -322,6 +323,15 @@ const api = {
       input: PiSubscriptionDeleteAccountInput,
     ): Promise<PiSubscriptionOverview> =>
       ipcRenderer.invoke("pi-subscriptions:delete-account", input),
+    // The System login (the CLI's own ~/.claude or ~/.codex login): use it
+    // as is for new sessions, add it as a Codara account, or hide the offer.
+    // None of them changes that login.
+    useSystemLogin: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:use-system-login", { provider }),
+    addSystemAccount: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:add-system-account", { provider }),
+    dismissSystemOffer: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:dismiss-system-offer", { provider }),
     // Give a half account its other half: a Cora row gets a Claude Code
     // profile, or a terminal-only Claude Code profile gets a Cora row.
     shareLogin: (
@@ -1179,15 +1189,6 @@ const api = {
       nativeGrokProfileId?: string;
     }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
-    // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
-    ensureCodexTrust: (
-      cwd: string,
-      nativeCodexProfileId?: string,
-    ): Promise<void> =>
-      ipcRenderer.invoke("agentSession:ensureCodexTrust", {
-        cwd,
-        nativeCodexProfileId,
-      }),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
     repairTranscript: (args: {
@@ -1303,6 +1304,9 @@ const api = {
   app: {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+    /** Where the one-time cleanup of older builds' global config put its backup; null if it never cleaned anything. */
+    globalConfigCleanupNotice: (): Promise<string | null> =>
+      ipcRenderer.invoke("app:global-config-cleanup-notice"),
     inspectorPreloadUrl: (): Promise<string> =>
       ipcRenderer.invoke("app:inspectorPreloadUrl"),
     // Fired by main just before the OS suspends (system sleep). The renderer

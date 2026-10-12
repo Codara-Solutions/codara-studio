@@ -89,7 +89,6 @@ import {
 } from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { findPiSessionFile } from "./pi-session-tracker";
-import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import {
@@ -107,13 +106,11 @@ import {
   providerForRuntime,
   unifiedAccountsFor,
 } from "./orchestration/unified-account-registry";
-import { UnifiedAccountSessionsError } from "./orchestration/unified-account-errors";
 import { unifiedAccountsReady } from "./orchestration/unified-account-migration";
 import {
   assertPiAccountProfileIsNotActive as assertPiAccountProfileIsNotActiveInRuns,
   PI_ACCOUNT_IN_USE_MESSAGE,
 } from "./orchestration/pi-account-run-guard";
-import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
 import { anthropicAccounts } from "./orchestration/unified-account-registry";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
@@ -714,38 +711,12 @@ export function registerIpc(): void {
   handle("onboarding:check", () => setupService.check());
   handle("onboarding:install", (_event, tool: unknown) => setupService.installTool(tool));
   handle("onboarding:install-status", () => setupService.installStatus());
-  // A Codex switch is a runtime-wide transaction: Codex keeps one sign-in
-  // for every terminal, so first give every Codara-owned Codex terminal the
-  // normal PTY close path so transcripts flush, then close codex sessions
-  // started in other local terminals. Only after both stages settle may the
-  // live slot change. The service asks for consent (with the count) first.
-  const closeEveryCodexSession = async () => {
-    const studio = await pty.disposeNativeCliRuntimeGraceful("codex");
-    const external = await shutdownExternalNativeCliProcesses("codex");
-    return {
-      closedSessionCount:
-        studio.closedSessionCount + external.closedProcessCount,
-    };
-  };
-  codexAccounts.setSessionShutdown(closeEveryCodexSession);
-  // The unified account services close only the terminals of the account
-  // being deleted, and only after the user confirmed it; the pty layer owns
-  // the session table, so it is handed in here. Claude and Grok panes are
-  // per-account; Codex panes all share the live slot.
-  anthropicAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) =>
-      pty.disposeNativeClaudeProfileSessions(profileId),
-  });
-  grokAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) => pty.disposeNativeGrokProfileSessions(profileId),
-  });
-  codexAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    liveRuntimeSessionCount: () => pty.liveNativeCliRuntimeSessionCount("codex"),
-    disposeProfileSessions: () => closeEveryCodexSession(),
-  });
+  // Account changes never close a terminal: a deleted account's home waits
+  // for its terminals to exit. The pty layer owns the session table, so the
+  // services learn which lease owners are still alive from it.
+  for (const accounts of [anthropicAccounts, codexAccounts, grokAccounts]) {
+    accounts.setTerminalSessions({ liveOwnerIds: () => pty.liveSessionOwnerIds() });
+  }
   for (const provider of ["anthropic", "openai-codex", "xai"] as const) {
     unifiedAccountsFor(provider).setBroadcast(() => {
       broadcastPiSubscriptionChanged(provider);
@@ -910,18 +881,40 @@ export function registerIpc(): void {
       await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
-      // One switch for both halves: Cora and the CLI move together. A Codex
-      // switch that would close sessions refuses with their count until the
-      // card asks again with closeSessions; the count travels in the message.
-      try {
-        await unifiedAccountsFor(provider).useAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-        });
-      } catch (error) {
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      // One switch for both halves: Cora and the CLI move together.
+      await unifiedAccountsFor(provider).useAccount(profileId);
       broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  // The System login: new sessions use the CLI's own login, the offer line
+  // adds it as an account, or hides it. None of them touches that login.
+  handle(
+    "pi-subscriptions:use-system-login",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).useSystemLogin();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:add-system-account",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).addSystemAccount();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:dismiss-system-offer",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).dismissSystemOffer();
       return inspectAfterPiAccountMetadataChange(provider);
     },
   );
@@ -935,20 +928,12 @@ export function registerIpc(): void {
         (profile) => profile.id === profileId,
       );
       if (!target) throw new Error(`Pi account profile not found: ${profileId}`);
-      try {
-        await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-          ownershipGuard: async (profile) => {
-            await assertPiAccountProfileIsNotActive(profile.id);
-            return false;
-          },
-        });
-      } catch (error) {
-        // The count travels in the message so the card's second step can say
-        // how many terminals it would close.
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
+        ownershipGuard: async (profile) => {
+          await assertPiAccountProfileIsNotActive(profile.id);
+          return false;
+        },
+      });
       broadcastNativeCliAccountsChanged();
       return inspectAfterPiAccountMetadataChange(target.provider);
     },
@@ -1034,13 +1019,12 @@ export function registerIpc(): void {
       const result = await syncAgentAssets({ cwd: input?.cwd ?? null, dryRun });
       // The built-in repair below writes, so a preview leaves it out.
       if (dryRun) return result;
-      // Sync is also the manual repair path for the built-in: an entry stranded
-      // by a moved install (command path gone) is rewritten to the current app
-      // path here instead of waiting for the next launch. Repair only: a runtime
-      // the user removed the built-in from must not get it back from a sync
-      // click, so nothing is reported for it either.
+      // Sync is also the manual repair path for the opt-in global entries: one
+      // stranded by a moved install (command path gone) is rewritten to the
+      // current app path. Repair only, and only while "Codara tools in other
+      // apps" is on: without the opt-in Codara keeps out of the CLIs' configs.
       const settings = await loadSettings();
-      if (settings.playwrightMcpAutoInstall !== false) {
+      if (settings.studioToolsInOtherApps === true) {
         try {
           const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = mcpInstaller;
           const repaired = await repairSparkBuiltinEntries();
@@ -1157,10 +1141,9 @@ export function registerIpc(): void {
     },
   );
   handle("agents:builtins", async () => {
-    const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
+    const [{ getSparkBuiltinStatus }, runtimes] = await Promise.all([
       mcpInstaller,
       detectAgentRuntimes(false),
-      loadSettings(),
     ]);
     const isAvailable = (kind: "claude" | "codex" | "grok") =>
       runtimes.some((r) => r.kind === kind && r.installed);
@@ -1168,7 +1151,6 @@ export function registerIpc(): void {
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
       grokRuntimeAvailable: isAvailable("grok"),
-      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
   handle(
@@ -3251,23 +3233,6 @@ export function registerIpc(): void {
     },
   );
 
-  // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
-  // pane so its TUI never stalls on the "trust this directory?" prompt.
-  handle("agentSession:ensureCodexTrust", async (
-    _e,
-    args: { cwd: string; nativeCodexProfileId?: string },
-  ): Promise<void> => {
-    const execution =
-      args.nativeCodexProfileId === undefined
-        ? await resolveNewNativeCodexProfile()
-        : await resolveFrozenNativeCodexProfile(
-            args.nativeCodexProfileId,
-          );
-    await ensureCodexProjectTrust(
-      args.cwd,
-      execution.stateHome,
-    ).catch(() => undefined);
-  });
 
   // Repair a Claude transcript whose tail was truncated by an abrupt kill
   // (sleep/crash mid-write) so `claude --resume` accepts it. Truncates the
@@ -3461,6 +3426,10 @@ export function registerIpc(): void {
 
   handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   handle("app:home", async (): Promise<string> => app.getPath("home"));
+  handle("app:global-config-cleanup-notice", async (): Promise<string | null> => {
+    const { globalConfigCleanupNotice } = await import("./global-config-cleanup");
+    return globalConfigCleanupNotice();
+  });
 
   // Resolve the absolute file:// URL of the webview-side inspector preload
   // bundle so the renderer can attach it via `<webview preload="...">`.

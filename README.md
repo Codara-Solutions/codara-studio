@@ -55,12 +55,13 @@ place to run several of them side by side, across projects and accounts.
    `codex`, `grok` or `pi` as usual, or pick one from the **+** menu.
 3. Click **Cora** in the tab bar and describe what you want done.
 4. Ask any agent to check its work in the browser: the Codara Studio MCP
-   server is added to Claude Code, Codex and Grok for you.
+   server is given to the Claude Code, Codex and Grok sessions Codara starts.
 
-To connect to your agents, Codara adds its MCP server to the Claude Code,
-Codex and Grok configs and a hook to `~/.claude/settings.json`. Each CLI's MCP
-entry can be switched off in the Capability Center (the **Tools** button in
-the Cora composer). Every file Codara touches outside its own
+To connect to your agents, Codara passes its MCP server and hooks on the
+command line of each session it starts, and never edits your own Claude
+Code or Codex config unless you turn on **Codara tools in other apps**. The
+server can be switched off for each CLI in the Capability Center (the
+**Tools** button in the Cora composer). Every file Codara touches outside its own
 `~/.codarastudio` folder is listed in
 [docs/on-your-machine.md](./docs/on-your-machine.md).
 

@@ -64,9 +64,9 @@ Some files are very large. Search inside them rather than reading from the top:
 | Preview pages | the `<webview>` in `BrowserPane.tsx` | any web page, plus `src/preload/inspector-preload.ts` | None: they are untrusted. The renderer runs DOM actions in them with `executeJavaScript`, and main sends trusted input over the Chrome DevTools Protocol. |
 | Shells and agent CLIs | `pty-manager.ts` (node-pty) | your shell, `claude`, `codex`, `grok`, `pi` | Terminal bytes. Every PTY gets `SPARK_PANE_ID` and `SPARK_AGENT_PANE_ID`, but not the agent socket's token: tools that call the app read `agent-socket.json`. |
 | Pi (Cora's manager and workers) | `pi-rpc-client.ts` | the Pi package, run with `--mode rpc` and the extension in `resources/pi-cora/` | Pi's RPC protocol on stdin and stdout. The extension loads the MCP server's code in-process and calls the agent socket. |
-| `codara-studio` MCP server | Claude Code, Codex or Grok, from their MCP config | `resources/codara-studio-mcp/server.js` | HTTP JSON-RPC to the agent socket. `mcp-installer.ts` writes the config entry. |
+| `codara-studio` MCP server | Claude Code or Codex, from the flags Codara launches them with; Grok, from its Codara account home's config | `resources/codara-studio-mcp/server.js` | HTTP JSON-RPC to the agent socket. `agent-launch-integration.ts` builds the flags; `mcp-installer.ts` writes global entries only for the opt-in. |
 | `cora` CLI | you | `cli/cora.cjs` | HTTP JSON-RPC to the agent socket. Reads run files directly when the app is closed. |
-| Claude Code hook | Claude Code, from `~/.claude/settings.json` | `resources/claude-hooks/codara-hook.py` | Writes one JSON file per event under `~/.codarastudio/hooks/`. |
+| Claude Code hook | Claude Code, from the `--settings` file Codara launches it with | `resources/claude-hooks/codara-hook.py` | Writes one JSON file per event under `~/.codarastudio/hooks/`. |
 
 One more loopback server, `hook-rpc.ts`, lets an agent report its own state
 (`SPARK_HOOK_URL`). `preview-bridge.ts` and `terminal-bridge.ts` are IPC
@@ -241,27 +241,24 @@ explains the model. The code path of a switch:
    apply it.
 3. **What the adapter does.**
    - Claude: `activateClaudeCliAccount` in `claude-cli-live-login.ts` saves
-     the live login into the outgoing account's vault file and copies the
-     incoming one into `~/.claude`. Only the sign-in keys and the
-     `oauthAccount` identity move.
-   - Codex: `activateCodexCliAccount` in `codex-cli-auth-selector.ts` swaps
-     `~/.codex/auth.json`.
-   - Grok: new terminals get the account's own `GROK_HOME`
-     (`grok-cli-account-profiles.ts`). Running shells follow through the
+     the live slot's login into the outgoing account's vault file and puts
+     the incoming one into Codara's live slot (`claude-cli/live/home`). The
+     System login moves nothing: new terminals simply get no
+     `CLAUDE_CONFIG_DIR`.
+   - Codex and Grok: new terminals get the account's own `CODEX_HOME` or
+     `GROK_HOME` (`cli-account-homes.ts`). Running shells follow through the
      pointer file written by `active-cli-env-pointer.ts`.
 4. **Keeping the halves in sync.** `credential-mirror.ts` watches both halves
    and copies the newer token across. `claude-login-keeper.ts` refreshes the
    live Claude login before it expires. Cora's Pi processes ask Studio for a
    fresh Claude token over the agent socket (`accounts.anthropic.renew`,
    `resources/pi-cora/anthropic-refresh.ts`).
-5. **Sign-ins made in a terminal.** `followNativeLogins` in
-   `unified-account-migration.ts` runs once a minute and on wake. It calls
-   `UnifiedAccountService.followNativeLogin`, so a `/login` or `codex login`
-   as a known account makes that account the Active one.
+5. **Nothing outside Codara's home.** `outside-write-guard.ts` refuses
+   every write into the user's CLI homes; the System login is read for its
+   identity only (`system-cli-login.ts`).
 
-Startup: `startUnifiedAccountMigration` (the one-time layout migration),
-`startStudioClaudeLoginKeeper` and `startNativeLoginFollower` are all called
-from `index.ts`.
+Startup: `startUnifiedAccountMigration` (the accounts v2 migration and the
+startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
 
 ### 3.4 The preview browser
 
@@ -306,9 +303,11 @@ the `remoteAccessEnabled` preference is on.
 
 ### 3.6 Claude Code hooks
 
-`hook-installer.ts` writes a `hooks` block into `~/.claude/settings.json`. It
-runs at boot and whenever a Claude pane starts. The hook command exits at
-once outside a Codara pane (no `SPARK_PANE_ID`). Inside one, it runs
+`hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`
+writes to `~/.codarastudio/integrations/claude/settings.json` at boot and
+passes to every Claude launch with `--settings` (typed commands get it
+through the pane's `claude` function). The hook command exits at once
+outside a Codara pane (no `SPARK_PANE_ID`). Inside one, it runs
 `codara-hook.py`, which writes a JSON file under `~/.codarastudio/hooks/`.
 `hook-watcher.ts` picks each file up and routes it to three places: the
 terminal notifier, the session registry, and the run store. It then moves the file to `processed/`. If you change the hook
@@ -332,9 +331,10 @@ owns each file:
 | `pi-agent/` (Cora's logins, Pi sessions) | `pi-account-auth-store.ts`, `pi-runtime-electron.ts` (`codaraPiPaths`) |
 | `memory/` (Cora's memory) | `cora-memory.ts`, `cora-profiles.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
-| `claude-cli/` (saved Claude logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts` |
-| `codex-cli/` (saved Codex logins, `active-auth.json`) | `codex-cli-auth-selector.ts`, `codex-cli-account-profiles.ts` |
-| `grok-cli/` (managed Grok homes) | `grok-cli-account-profiles.ts`, `native-cli-shared-state.ts` |
+| `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `codex-cli/` (one managed `CODEX_HOME` per account) | `codex-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `grok-cli/` (one managed `GROK_HOME` per account) | `grok-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `backups/accounts-v2/` (the v1 archive and its journal) | `accounts-v2-migration.ts` |
 | `shell/active-cli-env` | `active-cli-env-pointer.ts` |
 | `builtin-mcp.json` (the MCP server turned off for some CLIs) | `mcp-installer.ts` |
 | `remote/` (identity, paired devices, ledger) | `remote-access/` |
@@ -371,8 +371,8 @@ Debugging:
   with its own home, as `docs/harness-lab/README.md` describes:
   `CODARA_HOME_DIR`, `SPARK_HOME_DIR` and `SPARK_USER_DATA_DIR` pointing at
   one directory outside the repository, plus `SPARK_ALLOW_MULTI=1` to lift
-  the single-instance lock. A dev build still edits the CLIs' own configs
-  (hooks in `~/.claude/settings.json`, the MCP entry); see
+  the single-instance lock. On its first start a build also removes what
+  earlier builds wrote into the CLIs' own configs, with a backup; see
   [on-your-machine.md](./on-your-machine.md).
 - **Talk to the running app.** `node cli/cora.cjs rpc <method> [params-json]`
   calls any agent-socket method. The `app.*` methods (`app.screenshot`,
@@ -400,7 +400,7 @@ Debugging:
 | What workers are told or allowed to do | `src/main/orchestration/worker-prompt.ts` (`renderWorkerPrompt`) | `resources/pi-cora/worker.ts`, `worker-policy.ts` |
 | Run states, pause and resume, recovery | `run-store.ts` | `run-lifecycle.ts`, `step-lifecycle.ts`, `manager-turn-policy.ts`; the regression suites in [scripts/README.md](../scripts/README.md#cora-runs-the-run-store-and-the-manager) |
 | How Pi is found or started | `pi-runtime-electron.ts`, `pi-runtime.ts` | `pi-backend.ts`, `pi-rpc-client.ts` |
-| Accounts | `unified-accounts.ts` and the adapter in `account-adapters/` | `claude-cli-live-login.ts`, `claude-login-keeper.ts`, `codex-cli-auth-selector.ts`, `credential-mirror.ts`; `components/AccountCards.tsx` |
+| Accounts | `unified-accounts.ts` and the adapter in `account-adapters/` | `claude-cli-live-login.ts`, `claude-login-keeper.ts`, `cli-account-homes.ts`, `credential-mirror.ts`, `outside-write-guard.ts`; `components/AccountCards.tsx` |
 | Terminal rendering or input | `components/Terminal/useTerminalSession.ts` | `pty-manager.ts` on the main side |
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |

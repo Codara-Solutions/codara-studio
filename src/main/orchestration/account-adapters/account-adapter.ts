@@ -1,16 +1,18 @@
-import type {
-  CanonicalCredential,
-  CredentialMirrorAdapter,
-  MirrorWatchTarget,
-} from "../credential-mirror";
+import type { CanonicalCredential, CredentialMirrorAdapter } from "../credential-mirror";
 import type { NativeCliAccountIdentity } from "../native-cli-account-identity";
 
 /**
  * The seam between the provider-neutral account service and one CLI. An
- * adapter knows where a CLI keeps a login, how to read and write that slot,
- * how to identify the account behind it, and which side effects a switch
- * needs. The service knows registries, defaults, pairing, mirroring and
- * deletion, and never a provider-specific path.
+ * adapter knows where a managed account keeps its CLI login inside Codara's
+ * home, how to read and write it, how to identify the account behind it,
+ * and what activating an account means for that CLI. The service knows the
+ * registry, defaults, pairing, mirroring and deletion, and never a
+ * provider-specific path.
+ *
+ * The System login (the CLI's own login in its own home) is never located,
+ * read for secrets or written through an adapter: Codara uses it by not
+ * setting the CLI's home variable, and reads only who it is
+ * (system-cli-login.ts).
  *
  * Locations are opaque to everything but the adapter that produced them and
  * live in the main process only.
@@ -20,7 +22,7 @@ export type CliRuntime = "claude" | "codex" | "grok";
 
 /** What a login can be identified by; the raw uuids never cross IPC. */
 export interface AccountIdentity extends NativeCliAccountIdentity {
-  /** Claude only: written into a managed directory's .claude.json. */
+  /** Claude only: recorded beside the login as Claude Code's oauthAccount. */
   accountUuid?: string;
   organizationUuid?: string;
 }
@@ -41,7 +43,10 @@ export interface AccountCliStore {
   readonly rootDir: string;
   snapshot(): Promise<{ profiles: Array<{ id: string; label: string }>; defaultProfileId: string }>;
   createProfile(input: { label: string }): Promise<{ profile: { id: string; label: string } }>;
-  deleteProfile(profileId: string): Promise<{ deleted: boolean }>;
+  deleteProfile(
+    profileId: string,
+    options?: { keepDirectory?: boolean },
+  ): Promise<{ deleted: boolean }>;
   setDefaultProfile(profileId: string | null | undefined): Promise<unknown>;
 }
 
@@ -51,31 +56,16 @@ export interface AccountCliLeases {
   sweep(liveOwnerIds: ReadonlySet<string>, ownerPrefix?: string): string[];
 }
 
-export interface SwitchContext {
-  closeSessions: boolean;
-  /** Studio panes currently running this CLI, including launches in progress. */
-  liveSessionCount(): Promise<number>;
-  /** Closes every session of this CLI; null when the host wired none. */
-  sessionShutdown: (() => Promise<{ closedSessionCount: number }>) | null;
-}
-
-export interface SwitchSideEffects {
-  sessionCount(context: SwitchContext): Promise<number>;
+/** A managed account's directory, removed when its account is deleted. */
+export interface ManagedCliHome {
+  /** The directory to purge, strictly inside `accountsRoot`. */
+  path: string;
+  accountsRoot: string;
   /**
-   * Runs before either default moves. Throws UnifiedAccountSessionsError
-   * when the switch would close sessions the caller did not agree to close.
+   * Whether terminals run inside it. Claude sessions run in the shared live
+   * slot, so its per-account directory never waits for a terminal to exit.
    */
-  beforeSwitch(target: string, context: SwitchContext): Promise<{ closedSessionCount: number }>;
-  /** Runs after both defaults moved; a throw rolls both back. */
-  afterDefault(target: string, options?: { allowSignedOut?: boolean }): Promise<void>;
-}
-
-export interface NativeLoginChange {
-  /** The CLI profile that was live. */
-  from: string;
-  /** The CLI profile the live login now belongs to. */
-  to: string;
-  adopt(): Promise<boolean>;
+  holdsSessions: boolean;
 }
 
 export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
@@ -84,19 +74,21 @@ export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
   readonly labels: { cliLabel: string; loginHint: string };
   readonly store: AccountCliStore;
   readonly leases: AccountCliLeases;
+  /** The per-CLI store's id for the System login. */
+  readonly systemProfileId: string;
   locate(cliProfileId: string): Loc;
   isManagedProfileId(value: unknown): value is string;
   /** Every profile of the CLI with a token-blind status, from one read each. */
   inspectCli(): Promise<CliProfileStatus[]>;
   clearCli(location: Loc): Promise<void>;
-  /** The slots the personal probe watches while no Account 1 row exists. */
-  personalProbePaths(): MirrorWatchTarget[];
   readCliIdentity(location: Loc): Promise<NativeCliAccountIdentity>;
   /**
    * Who a freshly issued Cora credential belongs to. Anthropic asks its
    * profile endpoint (network); Codex and Grok read JWT claims.
    */
   connectTimeIdentity(canonical: CanonicalCredential): Promise<AccountIdentity>;
+  /** Create or refresh a managed home before its login is written into it. */
+  prepareCliHome?(cliProfileId: string): Promise<void>;
   /** Claude: record the identity block Claude Code expects beside the credential. */
   afterCliHalfWritten?(location: Loc, identity: AccountIdentity): Promise<void>;
   /**
@@ -109,20 +101,23 @@ export interface AccountProviderAdapter<Loc = unknown, Raw = unknown>
     authFile: string,
     signal: AbortSignal,
   ): Promise<CanonicalCredential>;
-  /** The CLI profile whose login is live right now, when that differs from the store default. */
-  activeCliProfileId?(): Promise<string>;
+  /** The managed directory of a CLI profile, for the purge that follows a delete. */
+  managedHome(cliProfileId: string): ManagedCliHome;
+  /** The directory every managed home of this CLI sits in. */
+  managedAccountsRoot(): string;
+  /** Claude: the managed profile whose login the live slot holds, or null. */
+  activeCliProfileId?(): Promise<string | null>;
   /**
-   * A sign-in made in a terminal (`/login`, `codex login`) put another known
-   * profile's account in the live slot: which profile it was and which it
-   * is now, with `adopt` making that profile the live one without touching
-   * the login (false when the slot changed meanwhile). Null otherwise.
+   * Claude's hot swap: put a managed profile's login into the live slot
+   * every Codara Claude session runs in. The System login moves nothing.
    */
-  detectNativeLogin?(): Promise<NativeLoginChange | null>;
-  readonly switchSideEffects?: SwitchSideEffects;
+  activate?(cliProfileId: string): Promise<void>;
+  /** Claude: empty the live slot when the account it holds is deleted. */
+  releaseActive?(cliProfileId: string): Promise<void>;
   /**
-   * Every session runs on whichever login is live, never on a profile of its
-   * own (Claude's one home). Deleting any account then never has to close a
-   * session, and a lease only records which account a session started on.
+   * Every session runs in one live slot whatever account it started on
+   * (Claude), so a lease only records which account a session started on
+   * and deleting an account never waits for a terminal.
    */
   readonly sessionsFollowLiveLogin?: boolean;
 }

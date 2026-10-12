@@ -97,10 +97,13 @@ limited to a list of methods (`agent-socket-capabilities.ts`).
 `resources/codara-studio-mcp/server.js` holds the agent tools. It runs in
 two ways:
 
-- **As a stdio MCP server**, which Claude Code, Codex and Grok start from their
-  own config. `mcp-installer.ts` writes the `codara-studio` entry into
+- **As a stdio MCP server**, which Claude Code and Codex start because Codara
+  names it on their command line (see [Per-launch integration](#per-launch-integration)),
+  and Grok from the private `config.toml` of a Codara account home. Only the
+  opt-in **Codara tools in other apps** setting (`studioToolsInOtherApps`)
+  makes `mcp-installer.ts` write the `codara-studio` entry into
   `~/.claude.json`, `~/.codex/config.toml` and Grok's `config.toml`. You can
-  turn it off for each CLI in the Capability Center.
+  turn the server off for each CLI in the Capability Center.
 - **As a library inside Cora's Pi processes.** Pi has no MCP client, so the
   Pi extension `require`s the same file and registers its tools as Pi tools.
   One tool list and one call path therefore serve both.
@@ -118,16 +121,47 @@ The full list is in [mcp-tools.md](./mcp-tools.md). `cli/cora.cjs` speaks
 the same JSON-RPC (`cli/lib/rpc.cjs`). When the app is closed, it reads run
 files from disk instead (`cli/lib/store.cjs`).
 
+## Per-launch integration
+
+Codara never puts its hooks, MCP server or notify program into the user's
+own CLI config. `agent-launch-integration.ts` writes them under
+`~/.codarastudio/integrations/` at every start (paths of the running binary,
+so a moved app never leaves a stale one) and inserts them after the binary
+of every Claude Code and Codex launch `pty-manager.ts` makes:
+
+- Claude Code: `--settings integrations/claude/settings.json` (the hooks) and
+  `--mcp-config integrations/claude/mcp-<mode>.json`, one file per
+  `SPARK_MCP_MODE`. A user's own `--settings` wins, since Claude keeps the
+  last one, and `--strict-mcp-config` gets no server.
+- Codex: `-c mcp_servers.codara-studio={...}`, `-c notify=[...]` chaining the
+  user's own `notify`, `-c tui.notifications=true` only when the user left it
+  unset, and, for a folder Codara itself launches Codex in, an inline
+  `projects` trust entry instead of a write to `config.toml`. Values are
+  TOML literal strings, because cmd.exe and Windows PowerShell rewrite
+  double quotes and backslashes on the way to the child.
+
+Management subcommands (`claude mcp`, `codex login` and the like) get
+nothing. For a command typed in a pane, the shell integration
+(`resources/shell-integration/`) defines pane-scoped `claude` and `codex`
+functions when `SPARK_AGENT_ARGS_DIR` is set and the user has no function or
+alias of that name; they read `integrations/<cli>/args.txt`, one argument per
+line.
+
+`global-config-cleanup.ts` runs once per start and removes what earlier
+builds wrote globally (the hooks block, `_sparkManaged` MCP entries unless
+the opt-in is on, the Codex `notify` and its marker block). It backs every
+file up under `backups/global-config-cleanup/<time>/` with a manifest,
+re-reads each file right before writing and leaves it for the next start if
+it changed, and records a report that Settings, About shows.
+
 ## Claude Code hooks
 
-`hook-installer.ts` writes a hooks block into `~/.claude/settings.json` for
-SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop,
-SubagentStart, SubagentStop, SessionEnd, Notification and PreCompact.
-Claude Code reads that file for every session on the machine, including
-sessions in other terminal apps. The hook command therefore exits at once
-unless `SPARK_PANE_ID` is set, which Codara does in every PTY. Inside a
-Codara pane it runs `resources/claude-hooks/codara-hook.py`, which writes one
-JSON file per event under `~/.codarastudio/hooks/`. `hook-watcher.ts` watches
+The hooks block Codara passes with `--settings` covers SessionStart,
+PreToolUse, PostToolUse, UserPromptSubmit, Stop, SubagentStart,
+SubagentStop, SessionEnd, Notification and PreCompact. The hook command
+exits at once unless `SPARK_PANE_ID` is set, which Codara does in every PTY.
+Inside a Codara pane it runs `resources/claude-hooks/codara-hook.py`, which
+writes one JSON file per event under `~/.codarastudio/hooks/`. `hook-watcher.ts` watches
 that folder and passes each event to three places: the terminal notifier
 (for panes you opened), the session registry (so a pane can resume its
 session after a restart), and the run store (for panes that belong to a
@@ -254,41 +288,54 @@ An account has two halves:
 - The **Cora half** is a Pi OAuth login in
   `~/.codarastudio/pi-agent/accounts/<id>/auth.json`.
 - The **CLI half** is the login that Claude Code, Codex or Grok uses in a
-  terminal. Where it lives depends on the CLI, as described below.
+  terminal. It is either the **System login** (whatever the CLI is signed in
+  to in its own home, `~/.claude`, `~/.codex` or `~/.grok`) or a **managed**
+  login that lives entirely under `~/.codarastudio`.
 
-"Account 1" is your own login in the CLI's default home.
+The list of accounts changes only through the user (`pi-account-profiles.ts`,
+registry version 2). A signed-in System login is offered as one line ("Use in
+Codara") and never registered on its own. A delete writes a tombstone in the
+same registry write, so no later scan, file or sign-in can bring the account
+back; only an explicit add does.
 
-### Claude Code and Codex: every account in one home
+### The user's homes are read-only
 
-Both CLIs run every account in the user's own home, `~/.claude` and
-`~/.codex`, exactly as they do in any other terminal app.
+Codara never writes inside `~/.claude`, `~/.claude.json`, `~/.codex`,
+`~/.grok`, a home the user set through `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or
+`GROK_HOME`, or the base Claude Code Keychain item. Every write helper asks
+`outside-write-guard.ts` first, which also refuses writes through a symlink
+into those homes. The few writes the user asks for (the opt-in global
+integrations, deleting a session) carry a capability, and the files allowed
+to mint one are pinned by `test-outside-write-guard.cjs`. The System login is
+read for its identity alone (`system-cli-login.ts`), never for a token, and
+Codara never refreshes it or signals a process it did not start.
 
-- The Active account's login is the one in that home. Every other account's
-  login waits in a vault file under `~/.codarastudio` (`claude-cli/` and
-  `codex-cli/`).
-- A switch moves only the login, the way `/login` as another account does.
-  For Claude Code that means the account-scoped secure-storage keys and the
-  `oauthAccount` identity (`claude-cli-live-login.ts`). For Codex it means
-  `auth.json` (`codex-cli-auth-selector.ts`).
-- Everything else exists once and survives every switch: MCP sign-ins,
-  settings, history, project trust. A terminal outside Codara sees the same
-  account.
-- A Claude switch holds Claude Code's own refresh and storage locks and
-  closes no session. Running sessions pick up the new login on their next
-  request.
-- Switches for one CLI take turns through `account-selection-lock.ts`, a lock
-  file as well as an in-process queue, because a development build and the
-  installed app can run side by side and manage the same `~/.claude` and
-  `~/.codex`.
+### Managed homes
 
-### Grok: one home per account
+`cli-account-homes.ts` builds every managed home under `~/.codarastudio`. Shared
+state (projects, sessions, skills, settings, history) is linked into the
+user's own home from an allowlist; the login and everything account-scoped
+stays private. A name a CLI update invents stays private until someone
+classifies it.
 
-Grok gives each managed account a private `GROK_HOME` under
-`~/.codarastudio/grok-cli/`. Its user state (sessions, skills, memory,
-config) is symlinked to the personal home from an allowlist in
-`native-cli-shared-state.ts`. An allowlist fails safe: a new name that a Grok
-update invents stays private to one account until someone classifies it. New
-terminals get the Active account's `GROK_HOME` from `pty-manager.ts`.
+Managed Claude homes link `projects` and `sessions` too, because `/resume`
+and session pickers list `projects/*.jsonl` and read `sessions/*.json`.
+
+- **Claude Code** runs every managed account in one Codara-owned live slot,
+  `claude-cli/live/home`, which is the `CLAUDE_CONFIG_DIR` of every managed
+  launch. Each account's login waits in `claude-cli/accounts/<id>/login.json`.
+  "Use" swaps the login in the slot atomically under Claude Code's own locks
+  (`claude-cli-live-login.ts`), so running managed sessions pick up the new
+  account on their next request and nothing is closed. The System login
+  means no `CLAUDE_CONFIG_DIR` at all.
+- **Codex** gets one `CODEX_HOME` per account, `codex-cli/accounts/<id>/home`.
+  A running Codex loads `auth.json` once and refuses a file that names
+  another account on its next refresh, so "Use" only changes which home new
+  sessions start in.
+- **Grok** gets one `GROK_HOME` per account, `grok-cli/accounts/<id>`, with a
+  private copy of the user's `config.toml`.
+
+New terminals get the Active account's variable from `pty-manager.ts`.
 Running shells follow a later switch through their prompt hooks, which
 re-read the pointer file written by `active-cli-env-pointer.ts`.
 
@@ -296,7 +343,10 @@ re-read the pointer file written by `active-cli-env-pointer.ts`.
 
 `unified-accounts.ts` is the only code that changes accounts (use, share
 login, delete, rename). It serializes every change and calls a per-provider
-adapter in `account-adapters/`.
+adapter in `account-adapters/`. Deleting an account purges its managed home
+at once, or, for a Codex or Grok home a terminal still runs in, once that
+terminal exits; the pending purge is recorded in the registry so a crash
+cannot leave it behind.
 
 ### Keeping the two halves in sync
 
@@ -304,44 +354,35 @@ The providers rotate refresh tokens, or may rotate them: after a refresh,
 only the new token works. When two copies of one login refresh on their
 own, the slower one ends up holding a spent token.
 
-- **The mirror.** `credential-mirror.ts` copies the newer login to the other
-  half. The newer expiry wins. A side without a refresh token never wins.
-  A login that belongs to another account is never adopted. Writes go
-  through Pi's lock and the adapter's atomic store.
+- **The mirror.** `credential-mirror.ts` copies the newer login between the
+  Cora half and a managed CLI half. The newer expiry wins. A side without a
+  refresh token never wins. A login that belongs to another account is
+  never adopted. A System row is never mirrored.
 - **One refresher for Claude.** While Studio runs, `claude-login-keeper.ts`
-  renews the live Claude login ahead of Claude Code. It works under Claude
-  Code's own refresh lock and compare-and-swap, so Claude Code never finds
-  the login due. It acts only while the live login is still the Active
-  account's: after a `/login` as an account Codara does not know, it leaves
-  that login alone.
+  renews the managed login in the live slot ahead of Claude Code, under
+  Claude Code's own refresh lock and compare-and-swap. It never refreshes
+  the System login.
 - **Cora never spends a Claude refresh token.** Its Pi processes register an
   OAuth refresh for the `anthropic` provider
   (`resources/pi-cora/anthropic-refresh.ts`) that asks Studio over the agent
   socket (`accounts.anthropic.renew`). The caller must present the account's
   current refresh token, so the method hands out nothing the process does
-  not already hold; scoped processes (imported pull requests, workers) reach
-  it through their capability claim. Studio adopts the token in the
-  account's Claude slot if it is still good, or renews it through that slot
-  (the live home when it holds this account, otherwise its vault), and Pi
-  stores the answer. The commit-message helper runs Pi without the
-  extension, so Studio renews its credential before starting it.
+  not already hold. Studio renews through the account's managed slot; a
+  Cora half that borrows the System login's grant is never refreshed, and
+  once its access token is spent the auth store records it as `none`, so the
+  card offers Connect Cora instead of a refresh that cannot succeed.
 - **Blanked logins are repaired.** Claude Code blanks its stored login after
   a refresh with a spent token. Codara repairs that login from the Cora half
   and never reads it as a sign-out.
 
-### Following sign-ins made in a terminal
+### Startup and the v1 migration
 
-A `/login` or `codex login` as another account Codara knows is followed. Once
-a minute and on wake, `UnifiedAccountService.followNativeLogin` looks for
-such a sign-in:
-
-- Claude's is recognized by the account Claude Code records in
-  `.claude.json`, confirmed against the token itself.
-- Codex's is recognized by the account id in `auth.json` together with the
-  user, because every member of a Team workspace shares one account id.
-
-That account's slot takes the live login and the marker, and both defaults
-(Active and Cora) move to it. The login itself is not changed.
+`unified-account-migration.ts` runs one pass at every launch behind a ready
+gate: the one-time accounts v2 migration (`accounts-v2-migration.ts`, which
+archives every v1 file under `backups/accounts-v2/` and journals each step
+so a crash resumes), then per provider clear-dangling-links,
+project-defaults, purge-deleted-homes and start-mirror, then the shell
+pointer. No step adds, pairs or adopts an account.
 
 ## Notifications
 

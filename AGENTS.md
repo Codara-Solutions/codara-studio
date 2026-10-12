@@ -76,8 +76,11 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `run-store.ts`, and `automation-loop.ts`; accounts span
   `unified-accounts.ts`, `credential-mirror.ts`, the adapters in
   `account-adapters/`, the `*-cli-account-profiles.ts` files,
-  `claude-cli-live-login.ts` and `claude-login-keeper.ts` (Claude's one
-  home and its one refresher), and `codex-cli-auth-selector.ts`. Cora runs
+  `claude-cli-live-login.ts` and `claude-login-keeper.ts` (Claude's live
+  slot and its one refresher), `cli-account-homes.ts` (the managed homes),
+  `system-cli-login.ts`, and `accounts-v2-migration.ts`. Nothing there may
+  write into the user's CLI homes: `src/main/outside-write-guard.ts`
+  refuses it. Cora runs
   on Pi: `pi-runtime-electron.ts` resolves and launches it, `pi-backend.ts`
   runs manager turns.
 - Shared types and catalogs are in `src/shared/`; the renderer reads them via
