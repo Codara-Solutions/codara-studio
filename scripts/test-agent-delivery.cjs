@@ -58,6 +58,7 @@ function fakeDeps() {
       async pasteIntoPane(paneId, text, submit) { log.push({ paste: paneId, text, submit }); },
       async runWorkspace(runId) { return { "run-1": "ws-1" }[runId] ?? null; },
       async addChatMessage(runId, text, attachments) { log.push({ chat: runId, text, attachments }); },
+      async sourceAllowed(file) { return path.dirname(file) === HOME; },
       now: () => clock,
     },
   };
@@ -130,6 +131,15 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
       delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox" }, text: "x", attachments: [{ name: "gone", sourcePath: path.join(HOME, "missing") }], source: "picker" }),
       /is not a file/,
     );
+    const sealed = fs.mkdtempSync(path.join(os.tmpdir(), "codara-delivery-sealed-"));
+    fs.writeFileSync(path.join(sealed, "identity.json"), "private key");
+    const inboxBefore = fs.readdirSync(inboxRoot).length;
+    await assert.rejects(
+      delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox" }, text: "x", attachments: [{ name: "ok.txt", data: "eA==" }, { name: "key", sourcePath: path.join(sealed, "identity.json") }], source: "picker" }),
+      (error) => error instanceof lib.AgentDeliveryError && /outside the folders Codara may send from/.test(error.message),
+    );
+    assert.equal(fs.readdirSync(inboxRoot).length, inboxBefore, "a refused file leaves no folder behind, even after an accepted one");
+    fs.rmSync(sealed, { recursive: true, force: true });
 
     // The inbox: addressed items reach only their pane, workspace items any pane.
     await delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox" }, text: "for anyone", source: "picker", tabId: "chrome:12", url: "https://example.test/" });

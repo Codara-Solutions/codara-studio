@@ -34,6 +34,12 @@ export interface AgentDeliveryDeps {
   pasteIntoPane(paneId: string, text: string, submit: boolean): Promise<void>;
   runWorkspace(runId: string): Promise<string | null>;
   addChatMessage(runId: string, text: string, attachments: { sourcePath: string; name: string; kind: "image" | "file" }[]): Promise<void>;
+  /**
+   * Whether a file named by path may be copied into a delivery. The request
+   * comes from the renderer, so it may name only what the renderer could
+   * read itself, never Codara's own keys and tokens.
+   */
+  sourceAllowed(path: string): Promise<boolean>;
   /** Root folder for saved attachments; defaults to the workspace's inbox folder. */
   inboxDir?(workspaceId: string): string;
   now?(): number;
@@ -84,18 +90,17 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
     for (let i = queue.length - 1; i >= 0; i--) if (queue[i].at < cutoff) queue.splice(i, 1);
   }
 
-  async function saveAttachments(workspaceId: string, id: string, attachments: readonly AgentDeliveryAttachment[]): Promise<string[]> {
-    if (!attachments.length) return [];
+  async function readAttachments(attachments: readonly AgentDeliveryAttachment[]): Promise<Buffer[]> {
     if (attachments.length > MAX_ATTACHMENTS) throw new AgentDeliveryError(`At most ${MAX_ATTACHMENTS} files can be sent at once.`);
-    const dir = join(inboxDir(workspaceId), id);
-    await fs.mkdir(dir, { recursive: true });
-    const used = new Set<string>();
-    const paths: string[] = [];
+    const out: Buffer[] = [];
     for (const attachment of attachments) {
       let data: Buffer;
       if (typeof attachment.data === "string") {
         data = Buffer.from(attachment.data, "base64");
       } else if (typeof attachment.sourcePath === "string" && attachment.sourcePath) {
+        if (!(await deps.sourceAllowed(attachment.sourcePath))) {
+          throw new AgentDeliveryError(`${attachment.sourcePath} is outside the folders Codara may send from.`);
+        }
         const stat = await fs.stat(attachment.sourcePath).catch(() => null);
         if (!stat?.isFile()) throw new AgentDeliveryError(`${attachment.sourcePath} is not a file.`);
         if (stat.size > MAX_ATTACHMENT_BYTES) throw new AgentDeliveryError(`${attachment.sourcePath} is larger than 25 MB.`);
@@ -104,6 +109,19 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
         throw new AgentDeliveryError("Each attachment needs data or a sourcePath.");
       }
       if (data.length > MAX_ATTACHMENT_BYTES) throw new AgentDeliveryError(`${attachment.name} is larger than 25 MB.`);
+      out.push(data);
+    }
+    return out;
+  }
+
+  async function saveAttachments(workspaceId: string, id: string, attachments: readonly AgentDeliveryAttachment[], contents: readonly Buffer[]): Promise<string[]> {
+    if (!attachments.length) return [];
+    const dir = join(inboxDir(workspaceId), id);
+    await fs.mkdir(dir, { recursive: true });
+    const used = new Set<string>();
+    const paths: string[] = [];
+    for (const [index, attachment] of attachments.entries()) {
+      const data = contents[index];
       let name = safeFileName(attachment.name || basename(attachment.sourcePath ?? ""), attachment.mimeType);
       for (let n = 2; used.has(name); n++) name = name.replace(/(\.[^.]*)?$/, (ext) => `-${n}${ext}`);
       used.add(name);
@@ -141,8 +159,10 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
         throw new AgentDeliveryError("Unknown delivery target.");
       }
 
+      // Every file is read and checked first, so a refused one leaves no folder behind.
+      const contents = await readAttachments(attachments);
       const id = `${new Date(now()).toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`;
-      const paths = await saveAttachments(workspaceId, id, attachments);
+      const paths = await saveAttachments(workspaceId, id, attachments, contents);
       const text = composeDeliveryText(rawText, paths);
 
       if (target.kind === "pane") {

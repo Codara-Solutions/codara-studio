@@ -16,6 +16,11 @@ export function safeWorkspaceSegment(workspaceId: string | null | undefined): st
   return safe || NO_WORKSPACE;
 }
 
+/** The folder that holds every workspace's data folder. */
+export function workspaceDataRoot(): string {
+  return join(codaraHome(), "workspace-data");
+}
+
 export function workspaceDataDir(workspaceId: string | null | undefined, ...segments: string[]): string {
-  return join(codaraHome(), "workspace-data", safeWorkspaceSegment(workspaceId), ...segments);
+  return join(workspaceDataRoot(), safeWorkspaceSegment(workspaceId), ...segments);
 }
