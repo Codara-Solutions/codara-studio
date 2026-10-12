@@ -46,12 +46,7 @@ import {
   type NameGroup,
   type StatusMessage,
 } from "./capabilities/model";
-import {
-  AccentDot,
-  CloseButton,
-  useInteractive,
-  withFocusRing,
-} from "./capabilities/controls";
+import { CloseButton } from "./capabilities/controls";
 import McpSection, { type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
 import McpServerForm from "./capabilities/McpServerForm";
 import SkillsSection from "./capabilities/SkillsSection";
@@ -123,10 +118,22 @@ function requestTargets(cwd: string | null): Promise<AgentMcpTarget[]> {
 
 const EMPTY_PROFILE_DRAFT: ProfileDraft = { name: "", description: "", instructions: "" };
 
+// The one line under each page's title, as Settings pages have. It is the
+// page's only description: sections open straight on their toolbar or first
+// row, and finer detail lives in row descriptions.
+const TAB_DESCRIPTION: Record<CapabilityTab, string> = {
+  mcp: "Extra tools for Cora, its workers and your CLIs: a database, a browser, an issue tracker.",
+  skills: "Instructions an agent loads when a task needs them, like a release checklist.",
+  profiles: "Separate Coras, each with its own instructions and memory, picked per chat.",
+  memory: "What Cora remembers between chats, as markdown files you can edit.",
+  workers: "The models Cora may hand implementation and verification work to.",
+  policy: "How Cora works on your requests and how workers are briefed.",
+};
+
 // What the footer says while no action has reported: there is no Save step,
-// and when each kind of change takes effect.
+// and when each kind of change takes effect. One line at the smallest window.
 const STANDING_NOTE: Record<CapabilityTab, string> = {
-  mcp: "Changes apply as you make them. Cora picks up MCP changes on your next message; running workers keep what they started with.",
+  mcp: "Changes apply as you make them, from Cora's next message. Running workers keep theirs.",
   skills: "Changes apply as you make them. New Cora chats and workers load the skills switched on.",
   profiles: "Changes apply as you make them. A started chat keeps the profile it began with.",
   memory: "Memory changes apply immediately.",
@@ -148,6 +155,10 @@ export default function AgentCapabilitiesDialog({
   // holds builds its DOM. The nav follows activeTab immediately while React
   // renders the section body at deferred priority. Mirrors SettingsDialog.
   const renderedTab = useDeferredValue(activeTab);
+  // As in Settings, the title bar grows a hairline only once the page
+  // scrolls under it, and every page opens at its top.
+  const contentRef = useRef<HTMLElement | null>(null);
+  const [scrolled, setScrolled] = useState(false);
   const [assets, setAssets] = useState<AgentAssetInventory | null>(null);
   const [assetsError, setAssetsError] = useState<string | null>(null);
   const [builtins, setBuiltins] = useState<SparkBuiltinMcpStatus[] | null>(null);
@@ -375,8 +386,8 @@ export default function AgentCapabilitiesDialog({
     }
   };
 
-  // The form is a view inside the dialog, so Escape, the scrim and the nav
-  // back out of it first. Anything typed and not saved is confirmed before it
+  // The form is a view inside the dialog, so Escape and the nav back out
+  // of it first. Anything typed and not saved is confirmed before it
   // is thrown away, and closing asks the same about the profile drafts.
   const requestLeave = (action: LeaveAction) => {
     if (editorBusy && action.kind !== "close") return;
@@ -401,9 +412,12 @@ export default function AgentCapabilitiesDialog({
 
   const latestLeave = useRef({ requestLeave, confirmLeave, editor });
   latestLeave.current = { requestLeave, confirmLeave, editor };
+  // On window, after the document-level listeners of menus opened from
+  // here: a menu that took the Escape marks it handled and the dialog stays.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (event.defaultPrevented) return;
       const current = latestLeave.current;
       if (current.confirmLeave) {
         setConfirmLeave(null);
@@ -411,8 +425,8 @@ export default function AgentCapabilitiesDialog({
       }
       current.requestLeave(current.editor ? { kind: "back" } : { kind: "close" });
     };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   // ── Inventory ──────────────────────────────────────────────────────────────
@@ -1017,14 +1031,16 @@ export default function AgentCapabilitiesDialog({
   const visibleSkills = filteredSkills.slice(0, skillLimit);
   // Right-aligned nav counts, omitted until the inventory read lands so the nav
   // never reports an empty workspace while it is still being walked. The MCP
-  // count includes the pinned built-ins: they are rows in the same list.
+  // count includes the pinned built-ins, since they are rows in the same list,
+  // but a page that holds only what ships with the app shows no count: a "1"
+  // there says nothing the user set up, and it costs the long label its room.
   const enabledWorkerCount = workerChoices.filter((model) => view.coraWorkerModels.includes(model)).length;
   const tabCount = (tab: CapabilityTab): string | null => {
     if (tab === "workers") return `${enabledWorkerCount}/${workerChoices.length}`;
-    if (tab === "profiles") return profiles.length > 0 ? String(profiles.length) : null;
+    if (tab === "profiles") return profiles.length > 1 ? String(profiles.length) : null;
     if (assets === null) return null;
-    if (tab === "mcp") return String(mcpGroups.length + (builtins?.length ?? 0));
-    if (tab === "skills") return `${activeSkillCount}/${skillGroups.length}`;
+    if (tab === "mcp") return mcpGroups.length > 0 ? String(mcpGroups.length + (builtins?.length ?? 0)) : null;
+    if (tab === "skills") return skillGroups.length > 0 ? `${activeSkillCount}/${skillGroups.length}` : null;
     return null;
   };
 
@@ -1043,42 +1059,37 @@ export default function AgentCapabilitiesDialog({
     navRef.current?.querySelector<HTMLButtonElement>(`#capability-tab-${tab}`)?.focus();
   };
 
+  const editorMode = editor?.mode ?? null;
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+    setScrolled(false);
+  }, [renderedTab, editorMode]);
+
   const statusText = status?.text ?? null;
   return (
-    // Clicking outside backs out one level, matching Escape, so a half-filled
-    // server is never discarded together with the whole dialog.
-    <div style={overlayStyle} onMouseDown={() => requestLeave(editor ? { kind: "back" } : { kind: "close" })}>
-      {/* Scrim + dialog face come from the shared glass classes (frosted in
-          glass mode, opaque panel look otherwise). */}
+    // The scrim deliberately does nothing: only Escape, the close button and
+    // Done leave, so a click that lands outside never drops the open page.
+    <div style={overlayStyle}>
+      {/* The same opaque face and dimming scrim as Settings: this dialog is
+          dense tables and long descriptions, which glass made fight the
+          workbench behind it. */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Capability Center"
-        className="spark-glass--strong agent-capabilities-surface"
+        className={`agent-capabilities-surface${scrolled ? " is-scrolled" : ""}`}
         data-agent-capabilities-surface
         style={dialogStyle}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header className="agent-capabilities-header" style={headerStyle}>
-          <AccentDot />
-          <div
-            data-capability-tab={renderedTab}
-            aria-busy={renderedTab !== activeTab}
-            style={titleStyle}
-          >
-            Capability Center
-          </div>
-          <div style={subtitleStyle}>Tools, skills, profiles and memory for Cora and your CLIs</div>
-          <div style={{ flex: 1 }} />
-          <CloseButton onClick={() => requestLeave({ kind: "close" })} />
-        </header>
-
-        <div style={bodyStyle}>
+        {/* The Settings layout: the dialog's name over the nav, the page's
+            title and one line in the bar over the content. */}
+        <div className="st-nav agent-capabilities-nav">
+          <div className="st-nav__brand">Capability Center</div>
           <nav
             ref={navRef}
-            className="agent-capabilities-nav"
-            style={navStyle}
+            style={tabListStyle}
             role="tablist"
             aria-orientation="vertical"
             aria-label="Capability Center sections"
@@ -1095,148 +1106,176 @@ export default function AgentCapabilitiesDialog({
               />
             ))}
           </nav>
-
-          <main
-            className="agent-capabilities-scroll"
-            style={mainStyle}
-            role="tabpanel"
-            id="capability-panel"
-            aria-labelledby={`capability-tab-${activeTab}`}
-          >
-            {editor ? (
-              <McpServerForm
-                editor={editor}
-                targets={editorTargets}
-                hasWorkspace={Boolean(workspaceCwd)}
-                busy={editorBusy}
-                error={editorError}
-                probe={editorProbe}
-                onChange={setEditor}
-                onTest={testEditor}
-                onParse={parseSnippet}
-              />
-            ) : (
-              <>
-                {renderedTab === "mcp" ? (
-                  <McpSection
-                    hasWorkspace={Boolean(workspaceCwd)}
-                    loading={assets === null && assetsError === null}
-                    loadError={assets === null ? assetsError : null}
-                    onRetry={refreshAssets}
-                    groups={visibleMcp}
-                    totalGroups={mcpGroups.length}
-                    filteredTotal={filteredMcp.length}
-                    search={mcpSearch}
-                    onSearch={setMcpSearch}
-                    onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
-                    builtins={builtins}
-                    builtinsError={builtinsError}
-                    onRetryBuiltins={refreshBuiltins}
-                    coraAssigned={coraAssigned}
-                    workerAssigned={workerAssigned}
-                    preview={preview}
-                    busy={busy}
-                    probes={probes}
-                    canAdd={targets.length > 0}
-                    sync={sync}
-                    onAdd={openAdd}
-                    onTogglePiScope={togglePiScope}
-                    onEdit={openEdit}
-                    onRemove={removeGroup}
-                    onInstall={installToRuntime}
-                    onTest={testGroup}
-                    onDismissProbe={dismissProbe}
-                    onInstallBuiltin={(id, runtime) => setBuiltin(id, runtime, true)}
-                    onUninstallBuiltin={(id, runtime) => setBuiltin(id, runtime, false)}
-                    onSyncPreview={previewSync}
-                    onSyncRun={runSync}
-                    onSyncDismiss={() => setSync({ phase: "idle" })}
-                  />
-                ) : null}
-
-                {renderedTab === "skills" ? (
-                  <SkillsSection
-                    loading={assets === null && assetsError === null}
-                    loadError={assets === null ? assetsError : null}
-                    onRetry={refreshAssets}
-                    groups={visibleSkills}
-                    totalGroups={skillGroups.length}
-                    filteredTotal={filteredSkills.length}
-                    activeCount={activeSkillCount}
-                    truncated={Boolean(assets?.skillsTruncated)}
-                    search={skillSearch}
-                    onSearch={setSkillSearch}
-                    onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
-                    disabled={disabledSkills}
-                    busy={busy}
-                    onToggle={toggleSkill}
-                    onRemove={removeGroup}
-                    onInstall={installToRuntime}
-                  />
-                ) : null}
-
-                {renderedTab === "profiles" ? (
-                  <ProfilesSection
-                    profiles={profiles}
-                    loading={profilesLoading}
-                    operation={profileOperation}
-                    draft={profileDraft}
-                    onDraftChange={setProfileDraft}
-                    onCreate={createProfile}
-                    onMakeDefault={makeDefaultProfile}
-                    onDelete={deleteProfile}
-                    onShowMemory={showProfileMemory}
-                    documentDraft={documentDraft}
-                    documentBusy={documentBusy}
-                    documentError={documentError}
-                    onEditDocument={editProfileDocument}
-                    onDocumentChange={(content) =>
-                      setDocumentDraft((current) => (current ? { ...current, content } : current))
-                    }
-                    onSaveDocument={saveProfileDocument}
-                    onCancelDocument={() => {
-                      setDocumentDraft(null);
-                      setDocumentError(null);
-                    }}
-                    focusProfileId={initialProfileId}
-                  />
-                ) : null}
-
-                {renderedTab === "memory" ? (
-                  <MemorySection
-                    profiles={profiles}
-                    viewedProfileId={viewedProfile ?? null}
-                    onViewProfile={viewMemoryOf}
-                    memory={memory}
-                    memoryError={memoryError}
-                    onRetry={() => setMemoryReload((current) => current + 1)}
-                    busy={memoryBusy}
-                    workspaceAvailable={workspaceId !== null}
-                    onToggle={toggleMemory}
-                    onOpen={openMemoryFile}
-                    onClear={clearMemory}
-                  />
-                ) : null}
-
-                {renderedTab === "workers" ? (
-                  <WorkerModelsSection
-                    choices={workerChoices}
-                    enabled={view.coraWorkerModels}
-                    usable={usableWorkers}
-                    openRouterVerified={openRouterVerified}
-                    onToggle={toggleWorkerModel}
-                  />
-                ) : null}
-
-                {renderedTab === "policy" ? (
-                  <BehaviorSection view={view} onChange={changeBehavior} />
-                ) : null}
-              </>
-            )}
-          </main>
         </div>
 
-        <footer className="agent-capabilities-footer" style={footerStyle}>
+        <header className="st-topbar agent-capabilities-header">
+          <div className="st-topbar__titles">
+            <h2
+              className="st-topbar__title"
+              data-capability-tab={renderedTab}
+              aria-busy={renderedTab !== activeTab}
+            >
+              {editor
+                ? editor.mode === "add"
+                  ? "Add a tool server"
+                  : `Edit ${editor.originalName}`
+                : CAPABILITY_TABS.find((tab) => tab.id === renderedTab)?.label}
+            </h2>
+            <p className="st-topbar__desc">
+              {editor
+                ? editor.mode === "add"
+                  ? "Fill in the form, or paste the snippet from the server's README."
+                  : "Changes are written to the config file when you save."
+                : TAB_DESCRIPTION[renderedTab]}
+            </p>
+          </div>
+          <CloseButton onClick={() => requestLeave({ kind: "close" })} />
+        </header>
+
+        <main
+          ref={contentRef}
+          className="agent-capabilities-scroll st-content"
+          onScroll={(event) => {
+            const next = event.currentTarget.scrollTop > 2;
+            if (next !== scrolled) setScrolled(next);
+          }}
+          role="tabpanel"
+          id="capability-panel"
+          aria-labelledby={`capability-tab-${activeTab}`}
+        >
+          {editor ? (
+            <McpServerForm
+              editor={editor}
+              targets={editorTargets}
+              hasWorkspace={Boolean(workspaceCwd)}
+              busy={editorBusy}
+              error={editorError}
+              probe={editorProbe}
+              onChange={setEditor}
+              onTest={testEditor}
+              onParse={parseSnippet}
+            />
+          ) : (
+            <>
+              {renderedTab === "mcp" ? (
+                <McpSection
+                  hasWorkspace={Boolean(workspaceCwd)}
+                  loading={assets === null && assetsError === null}
+                  loadError={assets === null ? assetsError : null}
+                  onRetry={refreshAssets}
+                  groups={visibleMcp}
+                  totalGroups={mcpGroups.length}
+                  filteredTotal={filteredMcp.length}
+                  search={mcpSearch}
+                  onSearch={setMcpSearch}
+                  onMore={() => setMcpLimit((current) => current + PAGE_SIZE)}
+                  builtins={builtins}
+                  builtinsError={builtinsError}
+                  onRetryBuiltins={refreshBuiltins}
+                  coraAssigned={coraAssigned}
+                  workerAssigned={workerAssigned}
+                  preview={preview}
+                  busy={busy}
+                  probes={probes}
+                  canAdd={targets.length > 0}
+                  sync={sync}
+                  onAdd={openAdd}
+                  onTogglePiScope={togglePiScope}
+                  onEdit={openEdit}
+                  onRemove={removeGroup}
+                  onInstall={installToRuntime}
+                  onTest={testGroup}
+                  onDismissProbe={dismissProbe}
+                  onInstallBuiltin={(id, runtime) => setBuiltin(id, runtime, true)}
+                  onUninstallBuiltin={(id, runtime) => setBuiltin(id, runtime, false)}
+                  onSyncPreview={previewSync}
+                  onSyncRun={runSync}
+                  onSyncDismiss={() => setSync({ phase: "idle" })}
+                />
+              ) : null}
+
+              {renderedTab === "skills" ? (
+                <SkillsSection
+                  loading={assets === null && assetsError === null}
+                  loadError={assets === null ? assetsError : null}
+                  onRetry={refreshAssets}
+                  groups={visibleSkills}
+                  totalGroups={skillGroups.length}
+                  filteredTotal={filteredSkills.length}
+                  activeCount={activeSkillCount}
+                  truncated={Boolean(assets?.skillsTruncated)}
+                  search={skillSearch}
+                  onSearch={setSkillSearch}
+                  onMore={() => setSkillLimit((current) => current + PAGE_SIZE)}
+                  disabled={disabledSkills}
+                  busy={busy}
+                  onToggle={toggleSkill}
+                  onRemove={removeGroup}
+                  onInstall={installToRuntime}
+                />
+              ) : null}
+
+              {renderedTab === "profiles" ? (
+                <ProfilesSection
+                  profiles={profiles}
+                  loading={profilesLoading}
+                  operation={profileOperation}
+                  draft={profileDraft}
+                  onDraftChange={setProfileDraft}
+                  onCreate={createProfile}
+                  onMakeDefault={makeDefaultProfile}
+                  onDelete={deleteProfile}
+                  onShowMemory={showProfileMemory}
+                  documentDraft={documentDraft}
+                  documentBusy={documentBusy}
+                  documentError={documentError}
+                  onEditDocument={editProfileDocument}
+                  onDocumentChange={(content) =>
+                    setDocumentDraft((current) => (current ? { ...current, content } : current))
+                  }
+                  onSaveDocument={saveProfileDocument}
+                  onCancelDocument={() => {
+                    setDocumentDraft(null);
+                    setDocumentError(null);
+                  }}
+                  focusProfileId={initialProfileId}
+                />
+              ) : null}
+
+              {renderedTab === "memory" ? (
+                <MemorySection
+                  profiles={profiles}
+                  viewedProfileId={viewedProfile ?? null}
+                  onViewProfile={viewMemoryOf}
+                  memory={memory}
+                  memoryError={memoryError}
+                  onRetry={() => setMemoryReload((current) => current + 1)}
+                  busy={memoryBusy}
+                  workspaceAvailable={workspaceId !== null}
+                  onToggle={toggleMemory}
+                  onOpen={openMemoryFile}
+                  onClear={clearMemory}
+                />
+              ) : null}
+
+              {renderedTab === "workers" ? (
+                <WorkerModelsSection
+                  choices={workerChoices}
+                  enabled={view.coraWorkerModels}
+                  usable={usableWorkers}
+                  openRouterVerified={openRouterVerified}
+                  onToggle={toggleWorkerModel}
+                />
+              ) : null}
+
+              {renderedTab === "policy" ? (
+                <BehaviorSection view={view} onChange={changeBehavior} />
+              ) : null}
+            </>
+          )}
+        </main>
+
+        <footer className="st-footer agent-capabilities-footer">
           {confirmLeave ? (
             <>
               <div role="alert" style={{ ...statusStyle, color: "var(--ink)" }}>
@@ -1260,7 +1299,7 @@ export default function AgentCapabilitiesDialog({
                 aria-live="polite"
                 style={{
                   ...statusStyle,
-                  color: status?.tone === "error" ? "var(--danger)" : status?.tone === "ok" ? "var(--ink-dim)" : "var(--muted)",
+                  color: status?.tone === "error" ? "var(--danger)" : status?.tone === "ok" ? "var(--ink-dim)" : "var(--st-faint)",
                 }}
               >
                 {editor
@@ -1279,7 +1318,7 @@ export default function AgentCapabilitiesDialog({
                   </button>
                 </>
               ) : (
-                <button type="button" className="spark-btn is-primary" onClick={() => requestLeave({ kind: "close" })}>
+                <button type="button" className="spark-btn" onClick={() => requestLeave({ kind: "close" })}>
                   Done
                 </button>
               )}
@@ -1304,11 +1343,7 @@ function TabButton({
   active: boolean;
   onClick: () => void;
 }) {
-  const { hover, focus, pressed, handlers } = useInteractive();
-  // A quiet macOS-style sidebar row: selection is a calm ink fill alone, and
-  // font-weight is held constant across states (color carries selection) so the
-  // label never reflows. Matches SettingsDialog's nav exactly.
-  const restShadow = active ? "var(--lift-hi)" : undefined;
+  // The Settings sidebar row (.st-nav__item), so both dialogs share one nav.
   return (
     <button
       type="button"
@@ -1318,46 +1353,9 @@ function TabButton({
       aria-controls="capability-panel"
       tabIndex={active ? 0 : -1}
       onClick={onClick}
-      {...handlers}
-      style={{
-        appearance: "none",
-        width: "100%",
-        border: "1px solid transparent",
-        borderRadius: "var(--radius-control, 5px)",
-        background: active
-          ? "color-mix(in oklab, var(--ink) 7%, var(--panel))"
-          : pressed
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover
-              ? "var(--hover)"
-              : "transparent",
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "8px 10px",
-        textAlign: "left",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        fontWeight: 600,
-        letterSpacing: "0.005em",
-        cursor: "default",
-        display: "flex",
-        alignItems: "center",
-        gap: 9,
-        boxShadow: withFocusRing(restShadow, focus),
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
+      className={`st-nav__item${active ? " is-active" : ""}`}
     >
-      <span
-        aria-hidden
-        style={{
-          flex: "0 0 18px",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "flex-start",
-          color: active ? "var(--ink)" : "var(--muted)",
-          transition: "color var(--motion-fast) var(--ease-out)",
-        }}
-      >
+      <span aria-hidden className="st-nav__icon">
         <NavIcon tab={tab} />
       </span>
       <span style={navLabelStyle}>{label}</span>
@@ -1440,59 +1438,18 @@ const overlayStyle: React.CSSProperties = {
   fontFamily: "var(--font-sans)",
 };
 
+// The footprint and grid are Settings' own (.agent-capabilities-surface in
+// styles.css), so the two dialogs open at the same size.
 const dialogStyle: React.CSSProperties = {
-  // Fixed footprint: the body scrolls internally, the dialog stays put.
   zIndex: 1,
-  width: "min(1120px, calc(100vw - 44px))",
-  height: "min(760px, calc(100vh - 44px))",
-  display: "grid",
-  gridTemplateRows: "auto minmax(0, 1fr) auto",
-  borderRadius: 12,
-  overflow: "hidden",
   animation: "spark-fade-in var(--motion) var(--ease-out)",
 };
 
-const headerStyle: React.CSSProperties = {
-  padding: "15px 18px",
-  borderBottom: "1px solid var(--rule-soft)",
-  boxShadow: "var(--lift-hi)",
-  display: "flex",
-  alignItems: "center",
-  gap: 10,
-};
-
-const titleStyle: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 15,
-  fontWeight: 600,
-  letterSpacing: "-0.005em",
-};
-
-const subtitleStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 12,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  minWidth: 0,
-};
-
-const bodyStyle: React.CSSProperties = {
-  display: "flex",
-  minHeight: 0,
-  minWidth: 0,
-};
-
-const navStyle: React.CSSProperties = {
-  flex: "0 0 200px",
-  borderRight: "1px solid var(--rule-soft)",
-  // Translucent so the dialog's glass face shows through; over the opaque
-  // fallback face it reads like the old --bg/--panel mix.
-  background: "color-mix(in oklab, var(--bg) 45%, transparent)",
-  padding: "12px 10px",
+const tabListStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 3,
+  gap: 1,
+  paddingTop: 2,
 };
 
 const navLabelStyle: React.CSSProperties = {
@@ -1504,35 +1461,16 @@ const navLabelStyle: React.CSSProperties = {
 };
 
 const navCountStyle: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 500,
-};
-
-const mainStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  minHeight: 0,
-  overflow: "auto",
-  padding: "22px 26px 28px",
-  display: "flex",
-  flexDirection: "column",
-  gap: 22,
-};
-
-const footerStyle: React.CSSProperties = {
-  borderTop: "1px solid var(--rule-soft)",
-  padding: "12px 18px",
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
+  color: "var(--st-faint)",
+  fontSize: 11.5,
+  fontWeight: 400,
+  fontVariantNumeric: "tabular-nums",
 };
 
 const statusStyle: React.CSSProperties = {
   flex: 1,
-  fontSize: 11.5,
-  fontWeight: 500,
+  fontSize: 12,
+  fontWeight: 400,
   lineHeight: 1.45,
   overflowWrap: "anywhere",
 };

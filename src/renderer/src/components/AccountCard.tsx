@@ -2,12 +2,13 @@ import React, { useState } from "react";
 import type { PiSubscriptionProvider } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
 import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
+import { UsagePlaceholder } from "./SubscriptionUsage";
 import {
   ActionButton,
+  ActiveBadge,
   CardOverflowMenu,
   ConnectionLine,
   RenameForm,
-  UsingChip,
   type CardAction,
   type ConnectionState,
 } from "./AccountCardPrimitives";
@@ -70,6 +71,10 @@ export interface AccountCardView {
   busy: boolean;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
+  /** Said on the empty meters when this account has no reading to draw. */
+  usageNote?: string;
+  /** Why the last limit read failed, said once under the empty meters. */
+  usageMessage?: string;
   /**
    * Terminals still running on this account (the count main refused a delete
    * with, or the live count): the next Delete closes that many first.
@@ -91,6 +96,8 @@ export interface AccountCardActions {
   /** Give a half account its other half. */
   onShare: (card: AccountCardView) => void;
   onRename: (card: AccountCardView, label: string) => Promise<boolean>;
+  /** Put a terminal command on the clipboard; resolves false if that failed. */
+  onCopyCommand: (command: string) => Promise<boolean>;
   onDelete: (
     card: AccountCardView,
     options: { closeSessions: boolean },
@@ -113,6 +120,18 @@ export function accountCardState(card: AccountCardView): AccountCardState {
   return card.active ? "active" : "signed-in";
 }
 
+/**
+ * Ready is what the row shows, never a separate guess: an account counts
+ * when its row carries the Active badge with no problem under it, or the
+ * Switch button. A store error turns the row's button into a fix (Reconnect,
+ * or the sign-in command), so that row is not ready even while its state
+ * still reads as signed in.
+ */
+export function accountCardReady(card: AccountCardView): boolean {
+  const state = accountCardState(card);
+  return (state === "active" || state === "signed-in") && !card.cora?.error;
+}
+
 export function accountOneSignedOutHint(
   descriptor: AccountProviderDescriptor,
 ): string {
@@ -125,6 +144,16 @@ function terminalUsable(card: AccountCardView): boolean {
     Boolean(card.terminal?.connected) &&
     !(card.terminal?.expired && !card.terminal.canRefresh)
   );
+}
+
+/**
+ * The state alone, without the instruction that follows it. A row whose
+ * button already carries the fix shows only this, so the sentence and the
+ * button never say the same thing twice.
+ */
+function firstSentence(text: string): string {
+  const match = /^(.+?)[.!?](?:\s|$)/.exec(text);
+  return match ? match[1] : text;
 }
 
 function sessions(count: number): string {
@@ -203,14 +232,40 @@ function connectionState(
 function primaryAction(
   card: AccountCardView,
   state: AccountCardState,
+  status: ConnectionState,
   descriptor: AccountProviderDescriptor,
   actions: AccountCardActions,
   disabled: boolean,
+  onCopyLogin: () => void,
 ): CardAction | undefined {
+  // Account 1 is the user's own CLI login and is never reconnected from
+  // here: its fix is the login command, one click from the clipboard. A
+  // lapsed sign-in on any other row is fixed by reconnecting it, never by
+  // switching to it.
+  // The label names the outcome; the command itself is in the tooltip.
+  const copyLogin: CardAction = {
+    id: "copy-login",
+    label: "Copy sign-in command",
+    title: `Copies ${descriptor.loginHint} to run in a terminal`,
+    disabled: false,
+    run: onCopyLogin,
+  };
+  if (status.danger && state !== "terminal-only") {
+    if (card.builtIn) return copyLogin;
+    if (card.coraProfileId) {
+      return {
+        id: "reconnect",
+        label: "Reconnect",
+        disabled,
+        run: () => actions.onReconnect(card),
+      };
+    }
+  }
   switch (state) {
     case "active":
-    case "account-one-signed-out":
       return undefined;
+    case "account-one-signed-out":
+      return terminalUsable(card) ? undefined : copyLogin;
     case "signed-in": {
       // Main refused the switch with a count; the same button now closes
       // those sessions and switches. Only Codex ever reports one.
@@ -220,7 +275,7 @@ function primaryAction(
         label:
           switchCount > 0
             ? `Close ${sessions(switchCount)} and switch`
-            : "Use this account",
+            : "Switch to this account",
         disabled,
         run: () => actions.onUse(card, { closeSessions: switchCount > 0 }),
       };
@@ -264,11 +319,27 @@ export default function AccountCard({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [deleteArmed, setDeleteArmed] = useState(false);
+  const [copied, setCopied] = useState(false);
   const brand = agentBrandColor(descriptor.brand);
   const state = accountCardState(card);
   const controlsDisabled = disabled || card.busy;
   const status = connectionState(card, state, descriptor);
-  const action = primaryAction(card, state, descriptor, actions, controlsDisabled);
+  const copyLogin = () => {
+    void actions.onCopyCommand(descriptor.loginHint).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    });
+  };
+  const action = primaryAction(
+    card,
+    state,
+    status,
+    descriptor,
+    actions,
+    controlsDisabled,
+    copyLogin,
+  );
   const renameable = Boolean(card.coraProfileId || card.cliProfileId);
 
   const menuActions: CardAction[] = [];
@@ -315,158 +386,127 @@ export default function AccountCard({
     });
   }
 
+  // The plain healthy states need no sentence: the Active badge or the
+  // Switch button already says it. Anything else (a refresh in flight, a
+  // half that is catching up, an error, a missing half) is spelled out.
+  const healthy =
+    (state === "active" || state === "signed-in") &&
+    status.ok &&
+    !card.cora?.expired &&
+    !(card.terminal && !card.terminal.connected);
+  const signedOut = state === "account-one-signed-out" && !card.email;
+  // A signed-out Account 1 says so under its name and its button copies the
+  // login command, so a status line would only repeat the two.
+  const statusRepeatsRow = signedOut && action?.id === "copy-login" && !card.cora?.error;
+  const initial = (card.label.trim().charAt(0) || "?").toUpperCase();
+
   return (
     <div
       aria-busy={card.busy || undefined}
       aria-current={card.active ? "true" : undefined}
-      style={{
-        display: "grid",
-        gap: 10,
-        padding: "12px 13px",
-        borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule)",
-        background: "var(--panel-2)",
-        boxShadow: card.active ? `inset 2px 0 0 ${brand}` : "none",
-      }}
+      className={`st-acct${card.active ? " is-active" : ""}${signedOut ? " is-signed-out" : ""}`}
     >
-      <div
+      <span
+        aria-hidden
+        className="st-acct__avatar"
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
+          color: brand,
+          background: `color-mix(in oklch, ${brand} 15%, transparent)`,
         }}
       >
-        <div
-          style={{
-            minWidth: 0,
-            display: "grid",
-            gridAutoFlow: "column",
-            gridAutoColumns: "minmax(0, max-content)",
-            justifyContent: "start",
-            alignItems: "baseline",
-            columnGap: 7,
-          }}
-        >
-          <span
-            style={{
-              minWidth: 0,
-              color: "var(--ink)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 650,
-              lineHeight: 1.3,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {card.label}
-          </span>
-          {card.email ? (
-            <span
-              title={card.email}
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 11,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.email}
-            </span>
-          ) : null}
-          {card.plan ? (
-            <span
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.plan} plan
-            </span>
-          ) : null}
+        {initial}
+      </span>
+      <div className="st-acct__body">
+        <div className="st-acct__head">
+          <div className="st-acct__id">
+            <div className="st-acct__name-line">
+              <span className="st-acct__name">{card.label}</span>
+              {card.active ? <ActiveBadge label="Active" /> : null}
+            </div>
+            <div className="st-acct__meta">
+              {card.email ? (
+                <span className="st-acct__email" title={card.email}>
+                  {card.email}
+                </span>
+              ) : (
+                <span className="st-acct__email is-missing">
+                  {signedOut ? "Not signed in" : "Email not reported"}
+                </span>
+              )}
+              {card.plan ? <span className="st-acct__plan">{card.plan} plan</span> : null}
+            </div>
+          </div>
+          <div className="st-acct__actions">
+            {card.busy ? (
+              <span className="st-acct__working">
+                <span aria-hidden className="st-spinner" />
+                Working…
+              </span>
+            ) : action ? (
+              // Every row action is the same quiet button: the only accent in
+              // the list is the Active badge and its rule.
+              <ActionButton
+                disabled={action.disabled}
+                title={action.title}
+                onClick={() => void action.run()}
+              >
+                {action.id === "copy-login" && copied ? "Copied" : action.label}
+              </ActionButton>
+            ) : null}
+            {/* A row with nothing in its menu keeps the menu's slot, so every
+                row's button ends on the same edge down the list. */}
+            {menuActions.length > 0 || destructiveActions.length > 0 ? (
+              <CardOverflowMenu
+                label={`More actions for ${card.label}`}
+                groups={[menuActions, destructiveActions]}
+                onClose={() => setDeleteArmed(false)}
+              />
+            ) : (
+              <span aria-hidden className="st-acct__menu-slot" />
+            )}
+          </div>
         </div>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 7,
-            flex: "0 0 auto",
-          }}
-        >
-          {card.active ? <UsingChip label="Using" color={brand} /> : null}
-          {card.busy ? (
-            <span
-              style={{
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Working…
-            </span>
-          ) : action ? (
-            <ActionButton
-              compact
-              primary
-              tone={brand}
-              disabled={action.disabled}
-              onClick={() => void action.run()}
-            >
-              {action.label}
-            </ActionButton>
-          ) : null}
-          {menuActions.length > 0 || destructiveActions.length > 0 ? (
-            <CardOverflowMenu
-              label={`More actions for ${card.label}`}
-              groups={[menuActions, destructiveActions]}
-              onClose={() => setDeleteArmed(false)}
+
+        {healthy || statusRepeatsRow ? null : (
+          <ConnectionLine
+            state={
+              action
+                ? { ...status, text: firstSentence(status.text) }
+                : status
+            }
+            title={
+              status.danger && card.builtIn && state !== "account-one-signed-out"
+                ? `${status.text} ${accountOneSignedOutHint(descriptor)}`
+                : status.text
+            }
+            code={descriptor.loginHint}
+          />
+        )}
+
+        <div className="st-acct__usage">
+          {card.usage ?? (
+            <UsagePlaceholder
+              labels={descriptor.usageWindows}
+              note={card.usageNote ?? "Not available"}
+              message={card.usageMessage}
             />
-          ) : null}
-        </span>
-      </div>
-
-      <ConnectionLine state={status} />
-
-      {card.usage ? (
-        <div
-          style={{
-            display: "grid",
-            gap: 6,
-            paddingTop: 10,
-            borderTop: "1px solid var(--rule-soft)",
-          }}
-        >
-          {card.usage}
+          )}
         </div>
-      ) : null}
 
-      {renaming ? (
-        <RenameForm
-          ariaLabel={`Rename ${card.label}`}
-          initial={card.label}
-          busy={card.busy}
-          onSave={async (label) => {
-            const saved = await actions.onRename(card, label);
-            if (saved) setRenaming(false);
-            return saved;
-          }}
-          onCancel={() => setRenaming(false)}
-        />
-      ) : null}
+        {renaming ? (
+          <RenameForm
+            ariaLabel={`Rename ${card.label}`}
+            initial={card.label}
+            busy={card.busy}
+            onSave={async (label) => {
+              const saved = await actions.onRename(card, label);
+              if (saved) setRenaming(false);
+              return saved;
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

@@ -62,16 +62,14 @@ export default function SkillsSection({
   return (
     <section style={sectionStyle}>
       <SectionHead
-        title="Skills"
-        detail={
-          <>
-            A skill is a folder of instructions an agent loads when a task needs it, like a release
-            checklist or a house style. Cora and Pi workers load every skill switched on here, from the
-            Claude, Codex, .agents and .pi skill folders.{" "}
-            {loading || totalGroups === 0 ? null : `${activeCount} of ${totalGroups} on.`}
-          </>
+        lead={<SearchField value={search} onChange={onSearch} placeholder="Filter skills" />}
+        actions={
+          loading || totalGroups === 0 ? null : (
+            <span style={countStyle} title="Read from the Claude, Codex, .agents and .pi skill folders">
+              {activeCount} of {totalGroups} on for Cora and workers
+            </span>
+          )
         }
-        actions={<SearchField value={search} onChange={onSearch} placeholder="Filter skills" />}
       />
       {truncated ? (
         <div style={noticeStyle} role="note">
@@ -84,7 +82,9 @@ export default function SkillsSection({
       ) : null}
 
       <div className="agent-capability-list" style={listStyle}>
-        <TableHeader template={SKILL_GRID} labels={["Skill", "Cora and workers", "Claude CLI", "Codex CLI", ""]} />
+        {totalGroups > 0 || loading ? (
+          <TableHeader template={SKILL_GRID} labels={["Skill", "Cora and workers", "Claude CLI", "Codex CLI", ""]} />
+        ) : null}
         {loadError ? (
           <ErrorRow text={`Could not read your skill folders: ${loadError}`} onRetry={onRetry} />
         ) : loading ? (
@@ -106,8 +106,19 @@ export default function SkillsSection({
               <EmptyRow
                 text={
                   totalGroups === 0
-                    ? "No skills were found. Put a folder with a SKILL.md in ~/.claude/skills or the workspace's .agents/skills."
+                    ? "No skills yet. A skill is a folder with a SKILL.md in ~/.claude/skills or the workspace's .agents/skills."
                     : "No skills match this filter."
+                }
+                action={
+                  totalGroups === 0 ? (
+                    <button type="button" className="spark-btn" onClick={onRetry}>
+                      Look again
+                    </button>
+                  ) : (
+                    <button type="button" className="spark-btn" onClick={() => onSearch("")}>
+                      Clear filter
+                    </button>
+                  )
                 }
               />
             ) : null}
@@ -139,7 +150,9 @@ function SkillRow({
   const folder = group.any.skillDir ?? group.any.path;
   const systemSkill = groupItems(group).every((item) => item.piLoads === false) && enabled;
   return (
-    <div className="agent-capability-row" style={{ ...skillRowStyle, opacity: enabled ? 1 : 0.6 }}>
+    // Off rows keep full contrast, as in Settings: the switch already says
+    // off, and a dimmed row reads like the "not loaded" states the cells name.
+    <div className="agent-capability-row" style={skillRowStyle}>
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle} title={group.name}>
           {group.name}
@@ -177,6 +190,12 @@ function SkillRow({
     </div>
   );
 }
+
+const countStyle: React.CSSProperties = {
+  color: "var(--st-faint)",
+  fontSize: 12.5,
+  fontVariantNumeric: "tabular-nums",
+};
 
 const skillRowStyle: React.CSSProperties = {
   ...rowStyle,

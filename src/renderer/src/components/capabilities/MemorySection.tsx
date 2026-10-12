@@ -3,21 +3,19 @@ import type { CoraMemoryScope, CoraMemoryStatus, CoraProfile, MemoryTierStatus }
 import { formatMemoryBytes, memoryTone } from "./model";
 import {
   ErrorRow,
-  SectionHead,
   Switch,
   cellLabelStyle,
-  fieldLabelStyle,
   listStyle,
   microBtnStyle,
   rowMetaStyle,
   rowNameStyle,
   rowNoteStyle,
   rowStyle,
-  rowSummaryStyle,
   sectionStyle,
   smallBtnStyle,
 } from "./controls";
 import { shortPath } from "./McpSection";
+import CustomSelect from "../settings/CustomSelect";
 
 export default function MemorySection({
   profiles,
@@ -48,46 +46,34 @@ export default function MemorySection({
   const globalOff = memory !== null && !memory.global.enabled;
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        title="Memory"
-        detail={
-          <>
-            What Cora has learned and keeps between chats, as two plain markdown files per profile. Cora reads
-            them at the start of a chat and adds lessons as it works. You can edit them like any other file.
-          </>
-        }
-        actions={
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={fieldLabelStyle}>Profile</span>
-            <select
-              className="spark-input"
-              style={{ width: 200 }}
-              value={viewedProfileId ?? memory?.profile.id ?? "default"}
-              disabled={profiles.length === 0 || busy !== null}
-              onChange={(event) => onViewProfile(event.target.value)}
-              aria-label="Show the memory of this profile"
-            >
-              {profiles.map((profile) => (
-                <option key={profile.id} value={profile.id}>
-                  {profile.name}
-                  {profile.isDefault ? " (default)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        }
-      />
-      <p style={{ ...rowNoteStyle, margin: 0 }}>
-        Global memory is the master switch for {profileName}: while it is off, Cora neither reads nor writes
-        any memory for this profile, including workspace memory. Profile instructions still apply.
-      </p>
-
       <div className="agent-capability-list" style={listStyle}>
+        {/* Each profile keeps its own two files, so whose memory this is
+            comes first, as an ordinary row. */}
+        <div style={rowStyle}>
+          <div style={{ minWidth: 0 }}>
+            <div style={rowNameStyle}>Profile</div>
+            <div style={{ ...rowNoteStyle, marginTop: 3 }}>
+              Each profile has its own memory. Cora reads it at the start of a chat and adds lessons as it works.
+            </div>
+          </div>
+          <CustomSelect
+            ariaLabel="Show the memory of this profile"
+            width={200}
+            value={viewedProfileId ?? memory?.profile.id ?? "default"}
+            disabled={profiles.length === 0 || busy !== null}
+            onChange={onViewProfile}
+            options={profiles.map((profile) => ({
+              value: profile.id,
+              label: profile.name,
+              ...(profile.isDefault ? { detail: "default" } : {}),
+            }))}
+          />
+        </div>
         {memoryError ? <ErrorRow text={`Could not read memory: ${memoryError}`} onRetry={onRetry} /> : null}
         <MemoryRow
           scope="global"
           title={`Global memory for ${profileName}`}
-          detail="Facts about you and this machine: how you want Cora to work, tools that are installed, preferences that outlive one repository."
+          detail={`Facts about you and this machine that outlive one repository. This is the master switch: while it is off, Cora reads and writes no memory for ${profileName}, workspace memory included. Profile instructions still apply.`}
           status={memory?.global ?? null}
           busy={busy === "global"}
           unavailable={null}
@@ -149,7 +135,9 @@ function MemoryRow({
   const switchBlocked = unavailable !== null || status === null;
   const lines = status ? status.counts.user + status.counts.cora + status.counts.auto : 0;
   return (
-    <div className="agent-capability-row" style={{ ...rowStyle, opacity: switchBlocked || !enabled ? 0.7 : 1 }}>
+    // Only a tier that cannot be switched dims; an off tier keeps full
+    // contrast and its switch says off.
+    <div className="agent-capability-row" style={{ ...rowStyle, opacity: switchBlocked ? 0.7 : 1 }}>
       <div style={{ minWidth: 0 }}>
         <div style={rowNameStyle} title={title}>
           {title}
@@ -175,8 +163,7 @@ function MemoryRow({
         </div>
       </div>
       <div style={memoryControlsStyle}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={cellLabelStyle}>{enabled ? "On" : "Off"}</span>
+        <div style={{ display: "flex", alignItems: "center" }}>
           <Switch
             checked={enabled}
             disabled={switchBlocked || busy}
@@ -215,8 +202,8 @@ function MemoryPath({ path }: { path: string }) {
   const cut = Math.max(short.lastIndexOf("/"), short.lastIndexOf("\\")) + 1;
   return (
     <span style={memoryPathStyle} title={path}>
-      <span style={{ ...rowSummaryStyle, flex: "0 1 auto", minWidth: 0 }}>{short.slice(0, cut)}</span>
-      <span style={{ ...rowSummaryStyle, flex: "0 0 auto" }}>{short.slice(cut)}</span>
+      <span style={{ ...memoryPathPartStyle, flex: "0 1 auto", minWidth: 0 }}>{short.slice(0, cut)}</span>
+      <span style={{ ...memoryPathPartStyle, flex: "0 0 auto" }}>{short.slice(cut)}</span>
     </span>
   );
 }
@@ -333,6 +320,16 @@ const memoryPathStyle: React.CSSProperties = {
   maxWidth: "100%",
 };
 
+// One line: the folder ellipsizes while the file name stays whole.
+const memoryPathPartStyle: React.CSSProperties = {
+  overflow: "hidden",
+  color: "var(--st-faint)",
+  fontSize: 12,
+  lineHeight: 1.45,
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
 const memoryControlsStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
@@ -379,8 +376,8 @@ const memoryFillStyle: React.CSSProperties = {
 };
 
 const memoryNoteStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 10.5,
+  color: "var(--st-faint)",
+  fontSize: 12,
   lineHeight: 1.45,
 };
 

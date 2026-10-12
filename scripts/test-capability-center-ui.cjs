@@ -54,7 +54,8 @@ const check = (name, fn) => {
 };
 
 check("sections carry plain-language names, including Profiles", () => {
-  assert.match(model, /\{ id: "mcp", label: "Tools \(MCP servers\)" \}/);
+  // Short enough that the selected label never truncates in the nav.
+  assert.match(model, /\{ id: "mcp", label: "MCP servers" \}/);
   assert.match(model, /\{ id: "profiles", label: "Profiles" \}/);
   assert.match(model, /\{ id: "workers", label: "Worker models" \}/);
   assert.match(model, /\{ id: "policy", label: "Behavior" \}/);
@@ -89,11 +90,13 @@ check("one save model: settings apply as they change, never through a draft", ()
   assert.match(dialog, /Memory changes apply immediately\./);
 });
 
-check("unsaved drafts are confirmed before Escape, the scrim, X or the nav drop them", () => {
+check("unsaved drafts are confirmed before Escape, X or the nav drop them", () => {
   assert.match(dialog, /const anyDirty = editorDirty \|\| profileDraftDirty \|\| documentDirty;/);
   assert.match(dialog, /if \(discards\) setConfirmLeave\(action\);/);
   assert.match(dialog, /if \(event\.key !== "Escape"\) return;[\s\S]{0,300}?current\.requestLeave\(/);
-  assert.match(dialog, /onMouseDown=\{\(\) => requestLeave\(editor \? \{ kind: "back" \} : \{ kind: "close" \}\)\}/);
+  // A click outside the dialog never leaves it: only Escape, X and Done do.
+  assert.doesNotMatch(dialog, /onMouseDown=\{\(\) => requestLeave\(/);
+  assert.match(dialog, /<div style=\{overlayStyle\}>/);
   assert.match(dialog, /<CloseButton onClick=\{\(\) => requestLeave\(\{ kind: "close" \}\)\} \/>/);
   assert.match(dialog, /requestLeave\(\{ kind: "tab", tab \}\);/);
   assert.match(dialog, /Discard them\?/);
@@ -132,12 +135,13 @@ check("the built-in server keeps its row, its controls and a placeholder while l
   );
   assert.match(
     mcpSection,
-    /<span style=\{rowScopeStyle\}>\{builtin\.name\}<\/span>\s*\n\s*<span className="spark-badge is-accent" style=\{badgeStyle\}>\s*\n\s*built in\s*\n\s*<\/span>\s*\n\s*<span className="spark-badge" style=\{badgeStyle\} title=\{builtin\.tools\.join\(", "\)\}>/,
+    /<span style=\{rowScopeStyle\}>\{builtin\.name\}<\/span>\s*\n\s*<span className="spark-badge is-accent" style=\{badgeStyle\}>\s*\n\s*Built in\s*\n\s*<\/span>\s*\n\s*<span className="spark-badge" style=\{badgeStyle\} title=\{builtin\.tools\.join\(", "\)\}>/,
   );
-  // The wider dialog, and the compact wrap the MCP rows switch to before the
-  // fixed columns would squeeze the name to nothing.
-  assert.match(dialog, /width: "min\(1120px, calc\(100vw - 44px\)\)"/);
-  assert.match(styles, /@media \(max-width: 1000px\) \{\s*\n\s*\.agent-capability-row--mcp \{\s*\n\s*display: flex !important;/);
+  // Settings' footprint and grid, and the compact wrap the MCP rows switch to
+  // when the pane itself, not the window, leaves the fixed columns too little.
+  assert.match(styles, /\.agent-capabilities-surface \{\s*\n\s*position: relative;\s*\n\s*width: min\(920px, calc\(100vw - 48px\)\);/);
+  assert.match(styles, /container: capabilities \/ inline-size;/);
+  assert.match(styles, /@container capabilities \(max-width: 760px\) \{\s*\n\s*\.agent-capability-row--mcp \{\s*\n\s*display: flex !important;/);
 });
 
 check("Grok Build is a real copy target through the same install path", () => {
@@ -220,7 +224,32 @@ check("sync previews what it would copy before it writes", () => {
   assert.match(mcpSection, /Sync Claude and Codex/);
   assert.match(agentSync, /dryRun/);
   // Behavior says plainly that its switches are global.
-  assert.match(behaviorSection, /These apply to all workspaces\./);
+  assert.match(dialog, /policy: "Changes apply as you make them, for every workspace\."/);
+});
+
+check("each page is described once, in the title bar", () => {
+  // The title bar's line is the only description: no section repeats it in
+  // an intro paragraph above its first row.
+  assert.match(dialog, /const TAB_DESCRIPTION: Record<CapabilityTab, string> = \{/);
+  for (const [name, text] of [
+    ["McpSection.tsx", mcpSection],
+    ["SkillsSection.tsx", skillsSection],
+    ["ProfilesSection.tsx", profilesSection],
+    ["MemorySection.tsx", memorySection],
+    ["WorkerModelsSection.tsx", workersSection],
+    ["BehaviorSection.tsx", behaviorSection],
+  ]) {
+    assert.doesNotMatch(text, /<SectionHead\s+detail=/, `${name} repeats the page description`);
+  }
+  // Memory opens on whose memory it is, as an ordinary row.
+  assert.ok(memorySection.indexOf("Show the memory of this profile") < memorySection.indexOf('scope="global"'));
+  // Off rows keep full contrast; only "on but out of reach" dims.
+  assert.match(workersSection, /color: idle \? "var\(--st-desc\)" : "var\(--ink\)"/);
+  // The built-in server never mixes ticks with switches.
+  assert.match(mcpSection, /<span style=\{cellNoteStyle\}>Always on<\/span>/);
+  assert.match(styles, /\.agent-capability-row--mcp > \.agent-capability-cell--fixed \{\s*\n\s*display: none !important;/);
+  // Rows carry no hover tint, as Settings rows do not.
+  assert.doesNotMatch(styles, /\.agent-capability-row:hover/);
 });
 
 check("Behavior offers Cora's edit verification in plain words", () => {
@@ -250,7 +279,9 @@ check("retired vocabulary does not come back", () => {
 });
 
 check("memory shows whose it is and why a tier is off", () => {
-  assert.match(memorySection, /aria-label="Show the memory of this profile"/);
+  assert.match(memorySection, /ariaLabel="Show the memory of this profile"/);
+  assert.match(memorySection, /<CustomSelect/);
+  assert.doesNotMatch(memorySection, /<select/);
   assert.match(dialog, /window\.spark\.memory\.setEnabled\(scope, workspaceId, enabled, viewedProfile\)/);
   assert.match(dialog, /window\.spark\.memory\.clear\(scope, workspaceId, includeUserLines, viewedProfile\)/);
   assert.match(dialog, /window\.spark\.memory\s*\n\s*\.ensureFile\(scope, workspaceId, viewedProfile\)/);

@@ -102,14 +102,101 @@ function UsageBar({
   );
 }
 
+// Calm by default: a neutral fill that only turns amber, then red, as the
+// window nears its limit. A meter that is green-to-red at every level reads
+// as an alarm even at 10%.
+const USAGE_WARN_AT = 80;
+const USAGE_DANGER_AT = 95;
+
+/**
+ * The in-card meters: every window of one account on a shared grid, so the
+ * labels, bars, percentages and reset times line up down the list.
+ */
+function UsageMeterGrid({
+  windows,
+  stale = false,
+}: {
+  windows: ReadonlyArray<PiUsageWindow>;
+  /** The last reading of an account that cannot be read right now. */
+  stale?: boolean;
+}) {
+  return (
+    <div className={`st-meters${stale ? " is-stale" : ""}`}>
+      {windows.map((usageWindow) => {
+        const rounded = Math.round(usageWindow.usedPercent);
+        const level =
+          rounded >= USAGE_DANGER_AT ? "danger" : rounded >= USAGE_WARN_AT ? "warn" : "normal";
+        return (
+          <div key={usageWindow.id} className={`st-meter is-${level}`}>
+            <span className="st-meter__label">{usageWindow.label}</span>
+            <span
+              role="meter"
+              aria-valuenow={rounded}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`${usageWindow.label} quota used`}
+              className="st-meter__track"
+            >
+              <span
+                className="st-meter__fill"
+                // Always leave a sliver visible so a 0.4% window still reads as
+                // "started" rather than as a rendering failure.
+                style={{
+                  width: `${Math.min(100, Math.max(usageWindow.usedPercent, usageWindow.usedPercent > 0 ? 1.5 : 0))}%`,
+                }}
+              />
+            </span>
+            <span className="st-meter__pct">{rounded}%</span>
+            <span className="st-meter__reset">
+              {level !== "normal" ? (rounded >= 100 ? "Limit reached" : "Almost used up") : null}
+              {level !== "normal" && usageWindow.resetsIn ? ", " : null}
+              {usageWindow.resetsIn
+                ? `${level !== "normal" ? "resets" : "Resets"} in ${usageWindow.resetsIn}`
+                : null}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The limits line of an account with no reading to draw: the windows it
+ * would show, named once, and one short reason. Empty tracks repeating the
+ * same note on every window were chrome that said nothing more. With no
+ * labels the provider reports no limits at all, which the line says plainly.
+ */
+export function UsagePlaceholder({
+  labels,
+  note,
+  message,
+}: {
+  labels: ReadonlyArray<string>;
+  note: string;
+  /** Why the last read failed, said once under the line. */
+  message?: string;
+}) {
+  return (
+    <div className="st-usage">
+      <div className="st-usage-empty">
+        <span className="st-usage-empty__labels">
+          {labels.length === 0 ? "Limits" : labels.join(" · ")}
+        </span>
+        <span className="st-usage-empty__note">{note}</span>
+      </div>
+      {message ? <span className="st-usage__message">{message}</span> : null}
+    </div>
+  );
+}
+
 /**
  * The limit report for one account, without any card chrome: the Accounts
  * section renders this inside the account's own card, so the usage block must
  * not draw a competing border or its own accent ring.
  *
- * `compact` is that in-card density: smaller labels, hairline bars, and the
- * three windows drawn tight enough to read as one block. The title bar
- * popover keeps the roomier scale.
+ * `compact` is that in-card density: one aligned meter grid with thin bars.
+ * The title bar popover keeps the roomier scale.
  */
 export function UsageEntryBody({
   usage,
@@ -124,6 +211,29 @@ export function UsageEntryBody({
   // no client-readable quota. Render nothing rather than a red empty report.
   if (connected && usage.windows.length === 0 && !usage.limitReached) {
     return null;
+  }
+  if (compact) {
+    // A failed read that still carries the last windows keeps drawing them,
+    // faded, with the reason under them in a quiet line.
+    return (
+      <div className="st-usage">
+        {usage.windows.length > 0 ? (
+          <UsageMeterGrid windows={usage.windows} stale={!connected} />
+        ) : null}
+        {!connected && usage.status !== "not_connected" ? (
+          <span className={temporarilyThrottled ? "st-text-warn" : "st-usage__message"}>
+            {usage.message || "Could not read usage limits."}
+          </span>
+        ) : null}
+        {usage.limitReached ? (
+          <span className="st-text-danger st-usage__limit">
+            {usage.generalLimitReached
+              ? "General limit reached. Normal agent requests will be refused until this resets."
+              : "A model or feature limit is reached. Check the scoped window above."}
+          </span>
+        ) : null}
+      </div>
+    );
   }
   return (
     <div style={{ display: "grid", gap: compact ? 4 : 7 }}>

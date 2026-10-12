@@ -8,14 +8,14 @@ import { join } from "node:path";
 // REAL renderer, the REAL preload bridge, and the REAL agentSession:* IPC.
 // Nothing is stubbed: the rows are whatever `listAll` finds in the native
 // Claude and Codex stores on disk, and "Delete selected" runs the same delete
-// path the single-row trash does. Both stores are redirected into a temp home
+// path the single-row delete does. Both stores are redirected into a temp home
 // (CLAUDE_CONFIG_DIR + CODEX_HOME), so the list is exactly the four seeded
 // sessions and a delete can only ever reach fixture files.
 //
 // What this proves:
 //  - Claude and Codex sessions from any project land in one list.
 //  - A click on the row BODY toggles that row, and a click on a real control
-//    inside the row (the trash) belongs to the control instead — the
+//    inside the row (its menu) belongs to the control instead: the
 //    event-target guard in SessionManagerRow.
 //  - Select-all reaches only the rows the filter is showing, while the
 //    selection itself outlives a filter change.
@@ -83,10 +83,11 @@ test("the sessions manager selects in bulk and deletes exactly what was ticked",
     await expect(rowCheckbox(dialog, ALPHA.title)).toBeChecked();
 
     // 3. A click that lands on a real control inside the row belongs to that
-    // control: the trash opens the single-delete confirm and leaves the
-    // selection exactly as it was.
+    // control: the row menu's Delete opens the single-delete confirm and
+    // leaves the selection exactly as it was.
     const confirm = dialog.getByRole("alertdialog", { name: "Confirm session deletion" });
-    await rowDelete(dialog, BRAVO.title).click({ force: true });
+    await rowMenu(dialog, BRAVO.title).click({ force: true });
+    await dialog.page().getByRole("menuitem", { name: "Delete session…", exact: true }).click();
     await expect(
       confirm.getByText(`Permanently delete “${BRAVO.title}”?`, { exact: true }),
     ).toBeVisible();
@@ -106,12 +107,11 @@ test("the sessions manager selects in bulk and deletes exactly what was ticked",
     await expect(confirm).toHaveCount(0);
 
     // 5. Select-all reaches the filtered rows and nothing else.
-    const provider = dialog.getByLabel("Filter sessions by provider");
     const selectAll = dialog.getByRole("checkbox", {
       name: "Select all filtered sessions",
       exact: true,
     });
-    await provider.selectOption("claude");
+    await chooseProvider(dialog, "Claude");
     await expect(exact("3 of 4 sessions")).toBeVisible();
     await expect(rowBody(dialog, CODEX_SESSION.title)).toHaveCount(0);
     await selectAll.check({ force: true });
@@ -123,7 +123,7 @@ test("the sessions manager selects in bulk and deletes exactly what was ticked",
     // The selection survives the filter opening back up: the Codex row was
     // never in scope, so it returns unticked and the header checkbox drops to
     // indeterminate rather than claiming the whole list.
-    await provider.selectOption("all");
+    await chooseProvider(dialog, "All agents");
     await expect(exact("4 of 4 sessions")).toBeVisible();
     await expect(rowCheckbox(dialog, CODEX_SESSION.title)).not.toBeChecked();
     await expect(exact("3 selected")).toBeVisible();
@@ -198,7 +198,7 @@ async function openSessionsSettings(page: Page): Promise<Locator> {
 
 // Rows carry no landmark role, so each is reached through an attribute the row
 // itself owns. The title element is the row BODY — clicking it is a click the
-// row's own handler has to act on, unlike the trash button beside it.
+// row's own handler has to act on, unlike the menu button beside it.
 function rowBody(dialog: Locator, title: string): Locator {
   return dialog.getByTitle(title, { exact: true });
 }
@@ -207,8 +207,13 @@ function rowCheckbox(dialog: Locator, title: string): Locator {
   return dialog.getByRole("checkbox", { name: `Select session “${title}”`, exact: true });
 }
 
-function rowDelete(dialog: Locator, title: string): Locator {
-  return dialog.getByTitle(`Delete “${title}”`, { exact: true });
+function rowMenu(dialog: Locator, title: string): Locator {
+  return dialog.getByRole("button", { name: `More actions for “${title}”`, exact: true });
+}
+
+async function chooseProvider(dialog: Locator, label: string): Promise<void> {
+  await dialog.getByRole("button", { name: "Filter sessions by provider", exact: true }).click({ force: true });
+  await dialog.getByRole("option", { name: label, exact: true }).click({ force: true });
 }
 
 /* -------------------------------------------------------------- fixtures */

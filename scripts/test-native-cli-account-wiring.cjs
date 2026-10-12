@@ -183,10 +183,10 @@ assert.match(
 );
 
 // ---------------------------------------------------------------------------
-// Settings presents one merged Accounts section with one card model for
+// Settings presents one merged Accounts page with one card model for
 // every provider: an account is one sign-in with two halves paired in the
 // main process, and the words come from a per-provider descriptor.
-assert.match(settings, /title="Accounts"/);
+assert.match(settings, /<SettingsSection anchor="Accounts" plain>/);
 assert.match(settings, /Every account is one sign-in for both Cora and its terminal tool/);
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
