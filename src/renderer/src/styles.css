@@ -7437,11 +7437,23 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   scrollbar-gutter: stable;
   padding: 10px calc(var(--st-pad-x) - 8px) 32px var(--st-pad-x);
 }
-/* Once scrolled, the first few pixels under the title bar fade out, so a
-   line half under the edge dissolves instead of reading as cut. */
-.settings-dialog-surface.is-scrolled .st-content {
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 22px);
+/* Once scrolled, a line half under the title bar dissolves instead of
+   reading as cut. The fade is painted over the content in the page colour,
+   never a mask: with glass on the face behind .st-content is transparent, so
+   a masked edge would show whatever window sits behind Settings. */
+.st-topbar {
+  position: relative;
+  z-index: 1;
+}
+.settings-dialog-surface.is-scrolled .st-topbar::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 22px;
+  background: linear-gradient(to bottom, var(--st-surface), transparent);
+  pointer-events: none;
 }
 .st-footer {
   grid-area: footer;

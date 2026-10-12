@@ -189,6 +189,16 @@ check("account cards are solid inside the glass face, never glass on glass", () 
   }
 });
 
+check("a scrolled Settings page never masks its content into the window behind", () => {
+  // With glass on the face behind the reading pane is transparent, so any
+  // mask on .st-content shows the terminal or chat behind Settings.
+  assert.doesNotMatch(styles, /\.st-content \{[^}]*mask-image/);
+  assert.doesNotMatch(styles, /\.is-scrolled \.st-content \{[^}]*mask-image/);
+  const fade = /\.settings-dialog-surface\.is-scrolled \.st-topbar::after \{([^}]*)\}/.exec(styles);
+  assert.ok(fade, "the scrolled edge fade must be painted from the title bar");
+  assert.match(fade[1], /background: linear-gradient\(to bottom, var\(--st-surface\), transparent\);/);
+});
+
 check("no em or en dashes in the new Settings files", () => {
   for (const { name, source } of settingsParts) {
     assert.doesNotMatch(source, /[\u2013\u2014]/, `${name} contains a dash`);
