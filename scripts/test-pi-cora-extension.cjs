@@ -775,35 +775,75 @@ const noInput = {};
   }
 }
 
-// ── Provider service tier (resources/pi-cora/service-tier.ts) ──────────────
-// OpenAI's faster tier is opt-in from Settings; Anthropic can never carry a
-// fast/priority tier at all. The extension's before_provider_request hook is
-// the last code to touch the request body, so this is where both are decided.
+// ── Fast mode (resources/pi-cora/service-tier.ts) ──────────────────────────
+// One opt-in setting: OpenAI's priority tier, or Anthropic's `speed: "fast"`
+// on the Claude models that accept it. The extension's before_provider_request
+// hook is the last code to touch the request body, so this is where it is
+// decided, for the manager and for every worker.
 {
   const tier = loadTypeScriptModule(
     path.join(__dirname, "..", "resources", "pi-cora", "service-tier.ts"),
   );
+  const shared = loadTypeScriptModule(
+    path.join(__dirname, "..", "src", "shared", "fast-mode.ts"),
+  );
   const apply = tier.applyServiceTierPolicy;
   const FAST = tier.OPENAI_FAST_SERVICE_TIER;
+  const BETA = "fast-mode-2026-02-01";
   // "priority" and "fast" are OpenAI aliases for the same tier (renamed to
   // "Fast mode" on 2026-07-30). We send "priority": it is the spelling pi-ai
   // types and prices, and the only one in the OpenAI Responses service_tier
   // union.
   assert.equal(FAST, "priority", "pi-ai types and prices the 'priority' spelling");
 
-  // (a) Setting OFF: no tier on an OpenAI request.
+  // The extension cannot import src/shared, so its copies must not drift.
+  assert.deepEqual([...tier.ANTHROPIC_FAST_MODE_MODELS], [...shared.ANTHROPIC_FAST_MODE_MODELS]);
+  assert.equal(tier.ANTHROPIC_FAST_MODE_BETA, shared.ANTHROPIC_FAST_MODE_BETA);
+  assert.equal(tier.ANTHROPIC_FAST_MODE_BETA, BETA);
+  assert.equal(tier.FAST_MODE_FALLBACK_MARKER, shared.FAST_MODE_FALLBACK_MARKER);
+  for (const model of [
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "Claude-Opus-5", "claude-opus-5:1m",
+    "claude-opus-4-8-20260601", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5",
+    "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5", "", undefined, 42,
+  ]) {
+    assert.equal(
+      tier.anthropicModelSupportsFastMode(model),
+      shared.anthropicModelSupportsFastMode(typeof model === "string" ? model : undefined),
+      `extension and app disagree about ${String(model)}`,
+    );
+  }
+  for (const model of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
+    assert.equal(tier.anthropicModelSupportsFastMode(model), true, `${model} supports fast mode`);
+  }
+  // Opus 4.7 errors on speed:fast and Opus 4.6 silently ignores it; every
+  // Sonnet, Haiku and Fable rejects it.
+  for (const model of ["claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5"]) {
+    assert.equal(tier.anthropicModelSupportsFastMode(model), false, `${model} has no fast mode`);
+  }
+
+  // (a) Setting OFF: nothing fast-mode shaped on any request.
   for (const provider of ["openai-codex", "openai"]) {
     const body = apply({ model: "gpt-5.6-sol", input: [] }, provider, false);
     assert.equal("service_tier" in body, false, `${provider} must carry no tier when fast mode is off`);
   }
-  // An inherited tier is removed rather than left to ride along.
   assert.equal(
     "service_tier" in apply({ service_tier: "priority" }, "openai-codex", false),
     false,
     "fast mode off must strip a tier the body already carried",
   );
+  {
+    const body = apply(
+      { model: "claude-opus-5", speed: "fast", betas: ["oauth-2025-04-20", BETA], messages: [] },
+      "anthropic",
+      false,
+    );
+    assert.equal("speed" in body, false, "fast mode off strips speed");
+    assert.deepEqual(body.betas, ["oauth-2025-04-20"], "fast mode off strips only the fast beta");
+    const lone = apply({ model: "claude-opus-5", betas: [BETA] }, "anthropic", false);
+    assert.equal("betas" in lone, false, "an emptied beta list is removed, not sent empty");
+  }
 
-  // (b) Setting ON: the fast tier is present on OpenAI requests.
+  // (b) Setting ON, OpenAI: the priority tier.
   for (const provider of ["openai-codex", "openai"]) {
     assert.equal(
       apply({ model: "gpt-5.6-sol", input: [] }, provider, true).service_tier,
@@ -812,39 +852,57 @@ const noInput = {};
     );
   }
 
-  // (c) Anthropic NEVER carries a fast tier, either way. Not gated on the
-  // setting, not gated on anything a prompt or a future UI could reach.
-  for (const fastMode of [false, true]) {
-    const clean = apply({ model: "claude-opus-5", messages: [] }, "anthropic", fastMode);
-    assert.equal(
-      "service_tier" in clean,
-      false,
-      `anthropic must never carry a service tier (fastMode=${fastMode})`,
+  // (c) Setting ON, Anthropic, supported model: speed + beta, appended once
+  // to whatever betas pi-ai already chose.
+  for (const model of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
+    const body = apply(
+      { model, betas: ["claude-code-20250219", "oauth-2025-04-20"], messages: [] },
+      "anthropic",
+      true,
     );
-    // Even when something upstream already put one there.
+    assert.equal(body.speed, "fast", `${model} gets speed:fast`);
+    assert.deepEqual(body.betas, ["claude-code-20250219", "oauth-2025-04-20", BETA]);
+    assert.equal("service_tier" in body, false, "fast mode is not Anthropic's Priority Tier");
+  }
+  assert.deepEqual(apply({ model: "claude-opus-5" }, "anthropic", true).betas, [BETA]);
+  assert.deepEqual(
+    apply({ model: "claude-opus-5", betas: [BETA] }, "anthropic", true).betas,
+    [BETA],
+    "the beta is never duplicated",
+  );
+
+  // (d) Setting ON, Anthropic, unsupported model: standard speed, nothing
+  // added, and a stray speed is removed, because those models answer it with
+  // an error.
+  for (const model of ["claude-sonnet-5", "claude-opus-4-7", "claude-fable-5-1", "claude-haiku-4-5"]) {
+    const body = apply({ model, speed: "fast", betas: [BETA, "oauth-2025-04-20"] }, "anthropic", true);
+    assert.equal("speed" in body, false, `${model} must not carry speed`);
+    assert.deepEqual(body.betas, ["oauth-2025-04-20"], `${model} must not carry the fast beta`);
+  }
+
+  // (e) Anthropic never carries a service tier, either way.
+  for (const fastMode of [false, true]) {
     for (const key of ["service_tier", "serviceTier"]) {
       const stripped = apply({ [key]: "priority", model: "claude-opus-5" }, "anthropic", fastMode);
-      assert.equal(
-        key in stripped,
-        false,
-        `anthropic must strip an inherited ${key} (fastMode=${fastMode})`,
-      );
+      assert.equal(key in stripped, false, `anthropic must strip an inherited ${key} (fastMode=${fastMode})`);
     }
   }
 
-  // The guard keys off the provider Codara stamps, so verify the classifiers.
+  // (f) A declined model skips fast mode for either provider.
+  assert.equal("speed" in apply({ model: "claude-opus-5" }, "anthropic", true, (m) => m === "claude-opus-5"), false);
+  assert.equal("service_tier" in apply({ model: "gpt-5.6-sol" }, "openai-codex", true, () => true), false);
+
   assert.equal(tier.isAnthropicProvider("anthropic"), true);
   assert.equal(tier.isAnthropicProvider("ANTHROPIC"), true);
   assert.equal(tier.isAnthropicProvider("openai-codex"), false);
   assert.equal(tier.isOpenAiProvider("openai-codex"), true);
   assert.equal(tier.isOpenAiProvider("anthropic"), false);
 
-  // An unknown provider never GAINS a tier from Codara.
-  assert.equal(
-    "service_tier" in apply({ model: "mystery" }, "some-future-provider", true),
-    false,
-    "an unrecognized provider must not be given a tier",
-  );
+  // An unknown provider never GAINS anything from Codara.
+  for (const provider of ["some-future-provider", "openrouter", "xai"]) {
+    const body = apply({ model: "claude-opus-5" }, provider, true);
+    assert.equal("service_tier" in body || "speed" in body || "betas" in body, false, `${provider} gains nothing`);
+  }
 
   // Env reading: only the exact "1" stamp enables fast mode.
   assert.equal(tier.fastModeEnabled({}), false);
@@ -860,21 +918,179 @@ const noInput = {};
   // A malformed payload passes through instead of failing the turn.
   for (const odd of [null, undefined, 42, "body", []]) {
     assert.equal(apply(odd, "openai-codex", true), odd);
+    assert.equal(apply(odd, "anthropic", true), odd);
   }
 
-  // Registration wires the hook Pi actually consults.
-  const handlers = new Map();
-  tier.registerServiceTierPolicy(
-    { on: (event, handler) => handlers.set(event, handler) },
-    { CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" },
+  // Refusal classification: only failures that can be about fast mode.
+  const piAiDist = path.join(
+    __dirname, "..", "node_modules", "@earendil-works", "pi-coding-agent", "node_modules",
+    "@earendil-works", "pi-ai", "dist",
   );
-  const hook = handlers.get("before_provider_request");
-  assert.ok(hook, "before_provider_request must be the service-tier seam");
-  assert.equal(
-    "service_tier" in hook({ type: "before_provider_request", payload: { service_tier: "priority" } }),
-    false,
-    "an anthropic session strips the tier even with fast mode stamped on",
+  const { isRetryableAssistantError } = await import(
+    require("node:url").pathToFileURL(path.join(piAiDist, "utils", "retry.js")).href
   );
+  const { isContextOverflow } = await import(
+    require("node:url").pathToFileURL(path.join(piAiDist, "utils", "overflow.js")).href
+  );
+  const refusals = [
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"speed: fast mode is not supported for this model"}}', false, "400"],
+    ['429 {"type":"error","error":{"type":"rate_limit_error","message":"Fast mode rate limit exceeded"}}', true, "429"],
+    ['529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true, "529"],
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"Fast mode requires usage credits; check billing"}}', false, "400"],
+    ['403 {"type":"error","error":{"type":"permission_error","message":"Fast mode has been disabled by your organization"}}', false, "403"],
+    ["400 Unsupported service_tier: priority", false, "400"],
+    // Matched on status alone: it may have nothing to do with fast mode, so it
+    // only cools fast mode down instead of turning it off for the process.
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}', true, "400"],
+    ['404 {"type":"error","error":{"type":"not_found_error","message":"Not found"}}', true, "404"],
+  ];
+  for (const [error, transient, status] of refusals) {
+    assert.deepEqual(tier.classifyFastModeRefusal(error), { transient, status }, error);
+    const rewritten = tier.fastModeFallbackError("claude-opus-5", tier.classifyFastModeRefusal(error));
+    assert.ok(rewritten.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    assert.doesNotMatch(rewritten, /billing/i, "the provider's own wording is never carried over");
+    const failed = { role: "assistant", stopReason: "error", errorMessage: rewritten, content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+    assert.equal(isRetryableAssistantError(failed), true, `Pi must retry after: ${error}`);
+    assert.equal(isContextOverflow(failed, 200_000), false, "the fallback must not read as an overflow");
+    const note = shared.fastModeFallbackNote(rewritten);
+    assert.ok(note && note.includes("claude-opus-5 declined fast mode") && !note.includes(tier.FAST_MODE_FALLBACK_MARKER), note);
+  }
+  assert.equal(shared.fastModeFallbackNote("429 rate limited"), null);
+  for (const unrelated of [
+    '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 300000 tokens > 200000 maximum"}}',
+    "socket hang up",
+    "500 Internal server error",
+    "",
+    undefined,
+    `${tier.FAST_MODE_FALLBACK_MARKER} claude-opus-5 declined fast mode (HTTP 400)`,
+  ]) {
+    assert.equal(tier.classifyFastModeRefusal(unrelated), null, `not a fast-mode refusal: ${unrelated}`);
+  }
+
+  // Declines: permanent for a refusal, a cooldown for a rate limit.
+  {
+    let clock = 1_000;
+    const declines = tier.createFastModeDeclines(() => clock);
+    declines.decline("claude-opus-4-7", { transient: false, status: "400" });
+    declines.decline("claude-opus-5", { transient: true, status: "429" });
+    assert.equal(declines.declined("claude-opus-4-7"), true);
+    assert.equal(declines.declined("claude-opus-5"), true);
+    assert.equal(declines.declined("gpt-5.6-sol"), false);
+    clock += tier.FAST_MODE_COOLDOWN_MS + 1;
+    assert.equal(declines.declined("claude-opus-5"), false, "a rate-limit decline cools down");
+    assert.equal(declines.declined("claude-opus-4-7"), true, "a refusal lasts for the process");
+  }
+
+  // Registration: the hook shapes requests, and a refused fast request is
+  // retried once at standard speed with the marker note.
+  function register(env) {
+    const handlers = new Map();
+    tier.registerServiceTierPolicy({ on: (event, handler) => handlers.set(event, handler) }, env);
+    return handlers;
+  }
+  {
+    const handlers = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    const request = handlers.get("before_provider_request");
+    const messageEnd = handlers.get("message_end");
+    assert.ok(request, "before_provider_request must be the fast-mode seam");
+    assert.ok(messageEnd, "message_end drives the fallback");
+    assert.equal(
+      "service_tier" in request({ type: "before_provider_request", payload: { service_tier: "priority" } }),
+      false,
+      "an anthropic session never sends a service tier",
+    );
+    const first = request({ type: "before_provider_request", payload: { model: "claude-opus-5", betas: ["oauth-2025-04-20"] } });
+    assert.equal(first.speed, "fast");
+    const failed = {
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: '400 {"type":"error","error":{"type":"invalid_request_error","message":"speed is not available"}}',
+      content: [],
+    };
+    const replaced = messageEnd({ type: "message_end", message: failed });
+    assert.ok(replaced?.message, "a refused fast request is rewritten");
+    assert.equal(replaced.message.role, "assistant", "the replacement keeps the role");
+    assert.equal(replaced.message.stopReason, "error");
+    assert.ok(replaced.message.errorMessage.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    // Pi's retry rebuilds the body and asks the hook again: standard speed now.
+    const retry = request({ type: "before_provider_request", payload: { model: "claude-opus-5", betas: ["oauth-2025-04-20"] } });
+    assert.equal("speed" in retry, false, "the retry runs at standard speed");
+    assert.deepEqual(retry.betas, ["oauth-2025-04-20"]);
+    // Only once: the retry's own failure is reported as it is.
+    assert.equal(messageEnd({ type: "message_end", message: { ...failed } }), undefined);
+    // A successful fast reply, a user message, or a request that never asked
+    // for fast mode is left alone.
+    const other = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    other.get("before_provider_request")({ type: "before_provider_request", payload: { model: "claude-opus-5" } });
+    assert.equal(other.get("message_end")({ type: "message_end", message: { role: "user", content: [] } }), undefined);
+    assert.equal(other.get("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [] } }), undefined);
+    const sonnet = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    sonnet.get("before_provider_request")({ type: "before_provider_request", payload: { model: "claude-sonnet-5" } });
+    assert.equal(sonnet.get("message_end")({ type: "message_end", message: { ...failed } }), undefined);
+  }
+  {
+    const handlers = register({ CODARA_PI_PROVIDER: "openai-codex", CODARA_PI_FAST_MODE: "1" });
+    const request = handlers.get("before_provider_request");
+    assert.equal(request({ type: "before_provider_request", payload: { model: "gpt-5.6-sol" } }).service_tier, FAST);
+    const replaced = handlers.get("message_end")({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", errorMessage: "400 Unsupported service_tier: priority", content: [] },
+    });
+    assert.ok(replaced.message.errorMessage.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    assert.equal("service_tier" in request({ type: "before_provider_request", payload: { model: "gpt-5.6-sol" } }), false);
+  }
+  {
+    // Fast mode off registers no fallback at all.
+    const handlers = register({ CODARA_PI_PROVIDER: "anthropic" });
+    assert.equal(handlers.has("message_end"), false);
+    assert.equal("speed" in handlers.get("before_provider_request")({ payload: { model: "claude-opus-5" } }), false);
+  }
+
+  // The real request, offline: pi-ai's Anthropic builder runs the hook, and
+  // the SDK it uses turns `betas` into the anthropic-beta header and sends
+  // `speed` in the body. A stub fetch answers, so nothing leaves the machine.
+  {
+    const toUrl = (file) => require("node:url").pathToFileURL(path.join(piAiDist, file)).href;
+    const anthropic = await import(toUrl("api/anthropic-messages.js"));
+    const { getModel } = await import(toUrl("compat.js"));
+    async function capture(modelId, fastMode) {
+      const sent = [];
+      const fetchStub = async (url, init) => {
+        sent.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(init.body) });
+        return new Response(
+          JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "offline stub" } }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      };
+      const stream = anthropic.stream(
+        getModel("anthropic", modelId),
+        { systemPrompt: "x", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        {
+          apiKey: "sk-ant-oat01-offline-test",
+          fetch: fetchStub,
+          maxRetries: 0,
+          onPayload: (payload) => apply(payload, "anthropic", fastMode),
+        },
+      );
+      for await (const _event of stream) { /* drain */ }
+      assert.equal(sent.length, 1, "exactly one request was attempted");
+      return sent[0];
+    }
+    const fast = await capture("claude-opus-5", true);
+    assert.equal(new URL(fast.url).hostname, "api.anthropic.com");
+    assert.match(new URL(fast.url).search, /beta=true/, "fast mode needs the beta messages endpoint");
+    assert.equal(fast.body.speed, "fast");
+    assert.equal("betas" in fast.body, false, "betas travel as a header, not in the body");
+    assert.ok(fast.headers.get("anthropic-beta").split(",").includes(BETA), fast.headers.get("anthropic-beta"));
+    assert.ok(fast.headers.get("anthropic-beta").split(",").includes("oauth-2025-04-20"), "pi-ai's own betas survive");
+    const standard = await capture("claude-opus-5", false);
+    assert.equal("speed" in standard.body, false);
+    assert.equal(standard.headers.get("anthropic-beta").split(",").includes(BETA), false);
+    const sonnet = await capture("claude-sonnet-5", true);
+    assert.equal("speed" in sonnet.body, false, "an unsupported model is never sent speed");
+    assert.equal(sonnet.headers.get("anthropic-beta").split(",").includes(BETA), false);
+  }
 
   // Both extensions must wire it up.
   for (const file of ["index.ts", "worker.ts"]) {
@@ -885,7 +1101,7 @@ const noInput = {};
     assert.match(
       source,
       /registerServiceTierPolicy\(pi\)/,
-      `${file} must register the service-tier policy`,
+      `${file} must register the fast-mode policy`,
     );
   }
 }
@@ -1034,7 +1250,7 @@ console.log("pi Cora mode + execution-policy prompts: ok");
 console.log("pi Claude login renewal (through Studio): ok");
 console.log("pi worker policy (roster + access fence): ok");
 console.log("pi session compaction (256k trigger): ok");
-console.log("pi provider service tier (OpenAI opt-in, Anthropic never): ok");
+console.log("pi fast mode (opt-in, OpenAI tier + Claude Opus speed, standard-speed fallback): ok");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

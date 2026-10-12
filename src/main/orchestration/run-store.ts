@@ -77,6 +77,7 @@ import type {
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
+import { fastModeFallbackNote } from "@shared/fast-mode";
 import {
   FAN_OUT_DIRECTIVE_MARKER,
   MANAGER_TURN_RECOVERY_FAILURE_KINDS,
@@ -21237,7 +21238,11 @@ async function runPiWorkerSession({
             piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
         }
         const failure = piWorkerEventFailure(event);
-        if (failure) {
+        const fastFallback = failure ? fastModeFallbackNote(failure) : null;
+        if (fastFallback) {
+          reportActivity(piWorkerSafeText(fastFallback, 300));
+          paint(`\r\n  ${paneDim(piWorkerSafeText(fastFallback, 700))}\r\n`);
+        } else if (failure) {
           reportActivity(`Provider error: ${piWorkerSafeText(failure, 300)}`);
           paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
         }

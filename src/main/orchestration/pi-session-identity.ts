@@ -21,8 +21,8 @@ export interface PiBackendSessionIdentity {
   sessionId: string;
   /** Effective fast mode for THIS process: the composer's toggle reaches the
    *  runtime only as launch-time env (CODARA_PI_FAST_MODE), so it must be part
-   *  of the reuse key or a flip would silently never apply. Always false for
-   *  anthropic, which has no priority tier. */
+   *  of the reuse key or a flip would silently never apply. Always false for a
+   *  model without a fast mode, so a flip there does not restart anything. */
   fastMode: boolean;
 }
 

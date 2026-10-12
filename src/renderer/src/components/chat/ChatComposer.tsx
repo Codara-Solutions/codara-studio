@@ -16,9 +16,7 @@ import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { unwrapIpcError } from "../../lib/ipc-error";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
-import {
-  chatModelIsOpenAi,
-} from "@shared/chat-policy";
+import { fastModeSupportFor } from "@shared/fast-mode";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
   backendFailureRetryText,
@@ -1167,13 +1165,11 @@ export default function ChatComposer({
     activeChatModelId,
     false,
   );
-  // Fast mode remains a single GLOBAL setting even
-  // though its control now lives here: the flash button writes
-  // AppSettings.openAiFastMode, and there is still no per-chat fast-mode
-  // state. It shows only for an OpenAI model — Anthropic has no priority tier
-  // and must never be offered one.
+  // Fast mode remains a single GLOBAL setting even though its control lives
+  // here: the flash button writes AppSettings.openAiFastMode, which the manager
+  // and every worker read at launch, and there is no per-chat fast-mode state.
   const fastMode = useOpenAiFastMode();
-  const fastModeAvailable = chatModelIsOpenAi(activeChatModelId);
+  const fastModeSupport = fastModeSupportFor(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -1585,9 +1581,11 @@ export default function ChatComposer({
               }}
               onManage={openProfileManager}
             />
-            {fastModeAvailable && (
-              <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
-            )}
+            <FastModeToggle
+              enabled={fastMode.enabled}
+              onToggle={fastMode.toggle}
+              unavailableReason={fastModeSupport.supported ? undefined : fastModeSupport.reason}
+            />
           </div>
           {workerActivity ? (
             <WorkerActivityStatus

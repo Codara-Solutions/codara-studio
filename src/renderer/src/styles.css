@@ -3499,6 +3499,15 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 .composer-fast:active {
   background: var(--press);
 }
+.composer-fast:disabled {
+  opacity: 0.45;
+  background: transparent;
+  color: var(--ink-dim);
+}
+.composer-fast.is-on.is-unavailable {
+  background: transparent;
+  border-style: dashed;
+}
 .composer-chevron {
   display: inline-flex;
   align-items: center;

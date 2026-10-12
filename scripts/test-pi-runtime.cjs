@@ -489,7 +489,7 @@ async function main() {
     bridgePath: "/bridge/server.js",
     extensionPaths: ["/extensions/cora.ts"],
     model: "google/gemini-flash-latest",
-    openAiFastMode: true,
+    fastMode: true,
     baseEnv: { OPENROUTER_API_KEY: "stale-inherited-key" },
   });
   assert.equal(openRouterPlan.provider, "openrouter");
@@ -545,11 +545,11 @@ async function main() {
     }).env.CODARA_PI_COMPACT_AT_TOKENS;
   assert.equal(compactPlanFor("120000"), "120000");
 
-  // Service tier: the extension needs the provider stamped, and the fast-mode
-  // flag is stamped ONLY for OpenAI. An anthropic plan never carries it, which
-  // is the launcher half of the two-layer guarantee that Anthropic can never
-  // run a fast/priority tier (the extension strips one regardless).
-  const tierPlanFor = (provider, openAiFastMode) =>
+  // Fast mode: the extension needs the provider stamped, and the fast-mode
+  // flag is stamped only when the caller resolved it on. The caller has
+  // already narrowed it to the provider and model (resolveCodaraPiFastMode);
+  // the extension still checks the model on every request.
+  const tierPlanFor = (provider, fastMode) =>
     runtime.buildPiManagerLaunchPlan({
       runtime: fakeRuntime,
       provider,
@@ -562,7 +562,7 @@ async function main() {
       bridgePath: "/bridge/server.js",
       extensionPaths: ["/extensions/cora.ts"],
       processExecutable: "/electron",
-      ...(openAiFastMode === undefined ? {} : { openAiFastMode }),
+      ...(fastMode === undefined ? {} : { fastMode }),
       baseEnv: {},
     }).env;
   assert.equal(tierPlanFor("anthropic").CODARA_PI_PROVIDER, "anthropic");
@@ -612,13 +612,10 @@ async function main() {
       `${provider} must not carry a fast-mode stamp when the setting is off`,
     );
   }
-  // Setting on: OpenAI gets it, Anthropic still does not.
+  // Setting on: OpenAI and Anthropic both get it, so a Claude Opus worker
+  // runs fast exactly like a GPT one. OpenRouter never does (checked above).
   assert.equal(tierPlanFor("openai-codex", true).CODARA_PI_FAST_MODE, "1");
-  assert.equal(
-    tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE,
-    undefined,
-    "an anthropic plan must never carry the fast-mode stamp, even with the setting on",
-  );
+  assert.equal(tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE, "1");
   for (const absurd of ["0", "-5", "NaN", "later", "Infinity"]) {
     assert.equal(
       compactPlanFor(absurd),

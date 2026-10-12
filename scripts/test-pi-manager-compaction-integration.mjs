@@ -21,7 +21,8 @@ async function loadTs(file, imports = {}) {
 const { registerContextCompaction } = await loadTs("../resources/pi-cora/compaction.ts");
 const { PiManagerCompaction } = await loadTs("../src/main/orchestration/pi-manager-compaction.ts");
 const shared = await loadTs("../src/shared/context-compaction.ts");
-const { PiTurnAccumulator } = await loadTs("../src/main/orchestration/pi-turn.ts", { "@shared/context-compaction": shared });
+const fastMode = await loadTs("../src/shared/fast-mode.ts");
+const { PiTurnAccumulator } = await loadTs("../src/main/orchestration/pi-turn.ts", { "@shared/context-compaction": shared, "@shared/fast-mode": fastMode });
 const root = await mkdtemp(join(tmpdir(), "codara-pi-manager-compact-"));
 let session;
 try {

@@ -213,6 +213,16 @@ test("plain conversational Cora turns omit empty technical disclosures", async (
     await expect(page.getByText(/Worked for 3\.6\s*s/)).toHaveCount(0);
     await expect(page.getByText("Technical details", { exact: false })).toHaveCount(0);
     await expect(page.locator('[data-manager-call-id="spark-conversation-only"]')).toHaveCount(0);
+
+    // Fast mode is opt-in: off on a fresh profile, and its tooltip states the
+    // cost (or why the chat's model cannot run fast) before anyone turns it on.
+    const fastToggle = page.locator(".composer-fast").last();
+    await expect(fastToggle).toBeVisible();
+    await expect(fastToggle).toHaveAttribute("aria-pressed", "false");
+    await expect(fastToggle).toHaveAttribute(
+      "title",
+      /^Fast mode (off\. Fast costs more|unavailable\. )/,
+    );
   } finally {
     await app?.close();
   }

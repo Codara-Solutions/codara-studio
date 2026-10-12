@@ -3098,8 +3098,8 @@ async function updateCoraBoardForRemote(input: {
 
 // Fast mode is one global app setting (AppSettings.openAiFastMode), the same
 // one Studio's composer bolt writes. An absent value means OFF, matching the
-// desktop hook's fail-closed read: the wrong answer costs 2x on every OpenAI
-// token rather than merely running at normal speed.
+// desktop hook's fail-closed read: the wrong answer bills a premium rate on
+// every token rather than merely running at normal speed.
 async function getOpenAiFastModeForRemote(): Promise<boolean> {
   const settings = await loadSettings();
   return settings.openAiFastMode === true;

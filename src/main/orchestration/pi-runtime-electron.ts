@@ -11,6 +11,7 @@ import type {
 } from "@shared/types";
 
 import { familyForSubscription } from "../../shared/agent-families";
+import { anthropicModelSupportsFastMode } from "../../shared/fast-mode";
 import { resolveBundledResourcePath } from "../bundled-resources";
 import {
   mintAgentSocketCapability,
@@ -86,7 +87,7 @@ export interface CreateCodaraPiLaunchOptions {
   resolvedAccount?: PiExecutionAccount;
   /** Same contract for fast mode: the value the caller compared identity
    *  against. Undefined reads the setting here. */
-  openAiFastMode?: boolean;
+  fastMode?: boolean;
 }
 
 function codaraPiBridgePath(): string {
@@ -118,11 +119,12 @@ export function codaraPiPaths(configDir = join(codaraHome(), "pi-agent")): Codar
 }
 
 /**
- * The composer's fast-mode toggle (AppSettings.openAiFastMode). Read
- * fail-closed: any error means OFF, because the wrong answer costs the user 2x
- * on every OpenAI token rather than merely running at normal speed.
+ * The composer's fast-mode toggle (AppSettings.openAiFastMode; the key predates
+ * Anthropic support). Read fail-closed: any error means OFF, because the wrong
+ * answer bills a premium rate on every token rather than merely running at
+ * normal speed.
  */
-async function openAiFastModeEnabled(): Promise<boolean> {
+async function fastModeSettingEnabled(): Promise<boolean> {
   try {
     return (await loadSettings()).openAiFastMode === true;
   } catch {
@@ -131,18 +133,23 @@ async function openAiFastModeEnabled(): Promise<boolean> {
 }
 
 /**
- * The fast mode a session for `provider` would actually launch with. Anthropic
- * is always false: it has no priority tier, and buildPiManagerLaunchPlan
- * refuses to stamp the flag for it regardless of the setting. Callers that
- * compare session identity resolve this ONCE per turn and pass the same value
- * back into the launch options, so the identity check and the process env can
- * never disagree about a setting the user flipped mid-turn.
+ * The fast mode a session for `provider` and `model` would actually launch
+ * with. Managers and workers both resolve it here, from the one global
+ * setting, which is how a worker inherits the manager's fast mode. OpenRouter
+ * and providers without a fast mode are always false, and so is a Claude model
+ * the API would refuse it for. Callers that compare session identity resolve
+ * this ONCE per turn and pass the same value back into the launch options, so
+ * the identity check and the process env can never disagree about a setting
+ * the user flipped mid-turn.
  */
 export async function resolveCodaraPiFastMode(
   provider: PiProvider,
+  model: string | undefined,
 ): Promise<boolean> {
-  if (provider === "anthropic" || provider === "openrouter") return false;
-  return openAiFastModeEnabled();
+  if (provider === "openrouter") return false;
+  if (provider === "anthropic" && !anthropicModelSupportsFastMode(model)) return false;
+  if (provider !== "anthropic" && provider !== "openai-codex") return false;
+  return fastModeSettingEnabled();
 }
 
 export async function resolveCodaraPiExecutionAccount(
@@ -685,8 +692,8 @@ export async function createCodaraPiLaunchPlan(
       provider: options.provider,
       apiKey: options.apiKey,
       accountProfileId: account.accountProfileId,
-      openAiFastMode:
-        options.openAiFastMode ?? (await resolveCodaraPiFastMode(options.provider)),
+      fastMode:
+        options.fastMode ?? (await resolveCodaraPiFastMode(options.provider, options.model)),
       configDir: paths.configDir,
       sessionDir: paths.sessionDir,
       sessionId: options.sessionId,
@@ -869,7 +876,7 @@ export async function createCodaraPiWorkerLaunchPlan(
       provider: options.provider,
       apiKey: options.apiKey,
       accountProfileId: account.accountProfileId,
-      openAiFastMode: await openAiFastModeEnabled(),
+      fastMode: await resolveCodaraPiFastMode(options.provider, options.model),
       configDir: paths.configDir,
       sessionDir: paths.sessionDir,
       sessionId,
