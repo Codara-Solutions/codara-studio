@@ -86,6 +86,13 @@ function makeCase(files) {
     grokConfigPath: path.join(dir, ".grok", "config.toml"),
   };
   paths.managedClaudeRoot = path.join(paths.home, "claude-cli");
+  // The fake home is a temp dir, so the installer's gate would refuse; the
+  // cases that test that gate pass their own.
+  paths.blockedReason = async () => null;
+  // Every fake config sits in a temp dir; the gate cases say which are real.
+  paths.isThrowawayPath = async () => false;
+  // Each case's home stands for the user's own install.
+  paths.defaultHome = paths.home;
   fs.mkdirSync(paths.home, { recursive: true });
   for (const [key, text] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(paths[key]), { recursive: true });
@@ -109,15 +116,20 @@ async function main() {
     _sparkManaged: true,
   });
   const userHook = { type: "command", command: "say done" };
-  const managedServer = {
+  const serverFor = (home) => ({
     type: "stdio",
     command: "/opt/Codara/codara",
     args: ["/opt/Codara/resources/codara-studio-mcp/server.js"],
-    env: { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: CODARA },
+    env: { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: home },
     _sparkManaged: true,
     _sparkVersion: 7,
-  };
-  const codexBlock = mcp.__test.renderCodexBlock({ timeouts: true });
+  });
+  const managedServer = serverFor(CODARA);
+  const renderedBlock = mcp.__test.renderCodexBlock({ timeouts: true });
+  assert.ok(renderedBlock.includes(`SPARK_HOME_DIR = ${JSON.stringify(CODARA)}`));
+  const blockFor = (home) => renderedBlock.replace(`SPARK_HOME_DIR = ${JSON.stringify(CODARA)}`, `SPARK_HOME_DIR = ${JSON.stringify(home)}`);
+  const blockWithoutHome = renderedBlock.replace(/^SPARK_HOME_DIR = .*\n/m, "");
+  const codexBlock = blockWithoutHome;
   const oldNotify = (previous) =>
     notify.buildCodexNotifyArgv("python3", path.join(CODARA, "codex-hooks", "codara-codex-notify.py"), previous);
 
@@ -168,16 +180,17 @@ async function main() {
   });
 
   await check("~/.claude.json: only the Codara-managed server goes", async () => {
+    const target = makeCase({});
     const config = {
       numStartups: 4,
       mcpServers: {
-        "codara-studio": managedServer,
-        "cora-preview": { ...managedServer, args: ["/old/resources/cora-preview-mcp/server.js"] },
+        "codara-studio": serverFor(target.home),
+        "cora-preview": { ...managedServer, args: ["/old/resources/cora-preview-mcp/server.js"], env: { ELECTRON_RUN_AS_NODE: "1" } },
         mine: { command: "mine" },
       },
       projects: { "/x": { allowedTools: [] } },
     };
-    const target = makeCase({ claudeConfigPath: JSON.stringify(config, null, 2) });
+    fs.writeFileSync(target.claudeConfigPath, JSON.stringify(config, null, 2));
     await cleanup.runGlobalConfigCleanup(target);
     const after = JSON.parse(read(target.claudeConfigPath));
     assert.deepEqual(Object.keys(after.mcpServers), ["mine"]);
@@ -208,6 +221,81 @@ async function main() {
     assert.equal(read(target.claudeConfigPath), claude);
     assert.equal(read(target.codexConfigPath), codex);
     assert.equal(read(target.grokConfigPath), codex);
+  });
+
+  await check("an MCP entry baked for another Codara home is that home's opt-in and stays", async () => {
+    const target = makeCase({});
+    const other = path.join(TMP, "other-codara-home");
+    const claude = {
+      mcpServers: {
+        "codara-studio": serverFor(other),
+        "spark-preview": { ...serverFor(`${target.home}${path.sep}`), args: ["/old/resources/spark-preview-mcp/server.js"] },
+        "cora-preview": { ...serverFor(path.join(path.dirname(target.home), ".Cora")), args: ["/old/resources/cora-preview-mcp/server.js"] },
+      },
+    };
+    fs.writeFileSync(target.claudeConfigPath, JSON.stringify(claude, null, 2));
+    const otherToml = `model = "gpt-6"\n\n${blockFor(other)}\n`;
+    for (const file of [target.codexConfigPath, target.grokConfigPath]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, otherToml);
+    }
+    const report = await cleanup.runGlobalConfigCleanup(target);
+    assert.deepEqual(Object.keys(JSON.parse(read(target.claudeConfigPath)).mcpServers), ["codara-studio"], "this home's and its legacy home's entries go");
+    assert.equal(JSON.parse(read(target.claudeConfigPath)).mcpServers["codara-studio"].env.SPARK_HOME_DIR, other);
+    assert.equal(read(target.codexConfigPath), otherToml, "another home's Codex block was removed");
+    assert.equal(read(target.grokConfigPath), otherToml, "another home's Grok block was removed");
+    assert.equal(report.skipped, undefined);
+
+    // A home reached through a link (~/.Codara is left pointing at the
+    // renamed home) is the same home.
+    const linked = path.join(TMP, `linked-home-${caseNo}`);
+    fs.symlinkSync(target.home, linked);
+    fs.writeFileSync(target.codexConfigPath, `model = "gpt-6"\n\n${blockFor(linked)}\n`);
+    await cleanup.runGlobalConfigCleanup(target);
+    assert.doesNotMatch(read(target.codexConfigPath), /codara-studio/, "this home's own block stayed");
+
+    // Entries that carry no home were written by builds that only knew the
+    // default one; another home leaves them.
+    const unmarkedClaude = JSON.stringify({ mcpServers: { "codara-studio": { ...managedServer, env: { ELECTRON_RUN_AS_NODE: "1" } } } }, null, 2);
+    const unmarkedToml = `model = "gpt-6"\n\n${blockWithoutHome}\n`;
+    const custom = makeCase({ claudeConfigPath: unmarkedClaude, codexConfigPath: unmarkedToml, grokConfigPath: unmarkedToml });
+    await cleanup.runGlobalConfigCleanup({ ...custom, defaultHome: path.join(TMP, "default-home") });
+    assert.equal(read(custom.claudeConfigPath), unmarkedClaude, "a custom home removed an unmarked Claude entry");
+    assert.equal(read(custom.codexConfigPath), unmarkedToml, "a custom home removed an unmarked Codex block");
+    assert.equal(read(custom.grokConfigPath), unmarkedToml, "a custom home removed an unmarked Grok block");
+    await cleanup.runGlobalConfigCleanup(custom);
+    assert.deepEqual(JSON.parse(read(custom.claudeConfigPath)).mcpServers, {});
+    assert.doesNotMatch(read(custom.codexConfigPath), /codara-studio/);
+  });
+
+  await check("a temporary home or a transient build leaves the user's own configs alone", async () => {
+    const claude = JSON.stringify({ mcpServers: { "codara-studio": serverFor(CODARA) } }, null, 2);
+    const codex = `${notify.setTopLevelNotify('model = "gpt-6"\n', oldNotify(["notify-send", "Codex"])).trimEnd()}\n\n${blockFor(CODARA)}\n`;
+    const settings = JSON.stringify({ hooks: { Stop: [{ hooks: [hook("Stop")] }] } }, null, 2);
+    for (const gate of [async () => "This Codara build runs from a temporary folder or a worktree.", undefined]) {
+      const target = makeCase({ claudeSettingsPath: settings, claudeConfigPath: claude, codexConfigPath: codex, grokConfigPath: codex });
+      const managedCopy = path.join(target.managedClaudeRoot, "accounts", "a1", "home", ".claude.json");
+      fs.mkdirSync(path.dirname(managedCopy), { recursive: true });
+      fs.writeFileSync(managedCopy, claude);
+      // Without a gate of the test's own, the real one: this test's
+      // CODARA_HOME_DIR is a temp dir.
+      const report = await cleanup.runGlobalConfigCleanup({ ...target, home: CODARA, blockedReason: gate });
+      assert.equal(read(target.claudeConfigPath), claude, "the user's opted-in Claude entry was removed");
+      assert.equal(read(target.codexConfigPath), codex, "the user's Codex config was rewritten");
+      assert.equal(read(target.grokConfigPath), codex, "the user's opted-in Grok block was removed");
+      assert.equal(read(target.claudeSettingsPath), settings, "the user's Claude settings were rewritten");
+      assert.ok(report.skipped, "the report does not say why nothing was cleaned");
+      assert.deepEqual(JSON.parse(read(managedCopy)).mcpServers, {}, "Codara's own managed copy was not cleaned");
+    }
+    // A throwaway CLI home (an e2e run's fake HOME) is cleaned all the same.
+    const target = makeCase({ claudeSettingsPath: settings, claudeConfigPath: claude, codexConfigPath: codex, grokConfigPath: codex });
+    const report = await cleanup.runGlobalConfigCleanup({ ...target, home: CODARA, defaultHome: CODARA, blockedReason: undefined, isThrowawayPath: undefined });
+    assert.match(report.skipped, /temporary home/);
+    assert.deepEqual(JSON.parse(read(target.claudeConfigPath)).mcpServers, {});
+    assert.deepEqual(JSON.parse(read(target.claudeSettingsPath)), { hooks: {} });
+    assert.doesNotMatch(read(target.codexConfigPath), /codara-studio/);
+    assert.match(read(target.codexConfigPath), /^notify = \["notify-send", "Codex"\]$/m);
+    assert.doesNotMatch(read(target.grokConfigPath), /codara-studio/);
   });
 
   await check("Codex: the marked block goes and the user's notify comes back", async () => {

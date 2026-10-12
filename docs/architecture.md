@@ -183,7 +183,12 @@ line.
 
 `global-config-cleanup.ts` runs once per start and removes what earlier
 builds wrote globally (the hooks block, `_sparkManaged` MCP entries unless
-the opt-in is on, the Codex `notify` and its marker block). It backs every
+the opt-in is on, the Codex `notify` and its marker block). An MCP entry is
+removed only when its `SPARK_HOME_DIR` is this instance's home (or one it was
+renamed from, or none for the default home): another home's entry is that
+home's opt-in. A temporary home, or a build running from a temporary folder or
+a worktree, leaves the user's own CLI configs alone and cleans only throwaway
+ones and Codara's managed homes. It backs every
 file up under `backups/global-config-cleanup/<time>/` with a manifest,
 re-reads each file right before writing and leaves it for the next start if
 it changed, and records a report that Settings, About shows.

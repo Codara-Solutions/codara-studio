@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
-import { dirname, join } from "node:path";
+import { promises as fs, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { lock } from "proper-lockfile";
 
-import { codaraHome } from "./codara-home";
+import { codaraHome, defaultCodaraHome, LEGACY_DIR_NAMES } from "./codara-home";
 import { restoreUserNotify } from "./codex-notify-installer";
 import { writeFileAtomic } from "./fs-atomic";
-import { isGeneratedHookCommand } from "./hook-installer";
+import { isGeneratedHookCommand, isTransientPath } from "./hook-installer";
+import { globalInstallBlockedReason } from "./mcp-installer";
 import { parseTomlText } from "./mcp-toml";
 import { claudeUserConfigFile, personalClaudeConfigDir } from "./orchestration/claude-paths";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
@@ -51,6 +52,8 @@ export interface GlobalConfigCleanupReport {
   files: CleanupFileReport[];
   /** `.codara-backup-*` files earlier builds left beside the configs; listed, never removed. */
   leftoverBackups: string[];
+  /** Why the user's own CLI configs were left alone in this run, when the installer's gate refused. */
+  skipped?: string;
 }
 
 export interface GlobalConfigCleanupOptions {
@@ -66,6 +69,12 @@ export interface GlobalConfigCleanupOptions {
   now?: () => Date;
   /** Test seam: runs between the first read and the re-read of a file. */
   beforeReread?: (path: string) => Promise<void>;
+  /** Why this instance may not touch the user's CLI configs; the installer's gate by default. */
+  blockedReason?: () => Promise<string | null>;
+  /** A config that is itself throwaway (in a temp directory) is cleaned even then. */
+  isThrowawayPath?: (path: string) => Promise<boolean>;
+  /** The home the user's own install runs with; ~/.codarastudio by default. */
+  defaultHome?: string;
 }
 
 type Plan = { next: string; removed: string[] } | "nothing" | "parse-error";
@@ -154,14 +163,52 @@ const MANAGED_MCP_NAMES = new Set(["codara-studio", "cora-preview", "cora-orches
 const MANAGED_MCP_KEYS = new Set(["type", "command", "args", "env", "_sparkManaged", "_sparkVersion"]);
 const MANAGED_SERVER_SCRIPT = /(?:^|[\\/])(?:codara-studio-mcp|cora-preview-mcp|cora-orchestrator-mcp|spark-preview-mcp|spark-orchestrator-mcp)[\\/]server\.js$/;
 
-function isGeneratedMcpEntry(name: string, entry: unknown): boolean {
+/**
+ * Whose "Codara tools in other apps" entries a run may take back. An entry
+ * baked for another Codara home is that home's opt-in, which this instance's
+ * setting says nothing about. The default home also owns the homes it was
+ * renamed or copied from, and entries of builds that baked no SPARK_HOME_DIR,
+ * which no other home can claim.
+ */
+export interface HomeOwner {
+  homes: ReadonlySet<string>;
+  unmarked: boolean;
+}
+
+function canonicalPath(value: string): string {
+  let out: string;
+  try {
+    out = realpathSync(value);
+  } catch {
+    out = resolve(value);
+  }
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
+export function homeOwner(home: string, defaultHome: string = defaultCodaraHome()): HomeOwner {
+  const own = canonicalPath(home);
+  const isDefault = own === canonicalPath(defaultHome);
+  const legacy = isDefault ? LEGACY_DIR_NAMES.map((name) => canonicalPath(join(dirname(defaultHome), name))) : [];
+  return { homes: new Set([own, ...legacy]), unmarked: isDefault };
+}
+
+// A null owner (Codara's own managed copies) accepts every home.
+function bakedForHome(env: unknown, owner: HomeOwner | null): boolean {
+  if (owner === null) return true;
+  const baked = isRecord(env) ? env.SPARK_HOME_DIR : undefined;
+  if (typeof baked !== "string" || baked.trim() === "") return owner.unmarked;
+  return owner.homes.has(canonicalPath(baked.trim()));
+}
+
+function isGeneratedMcpEntry(name: string, entry: unknown, owner: HomeOwner | null = null): boolean {
   if (!MANAGED_MCP_NAMES.has(name) && !name.startsWith("spark-")) return false;
   if (!isRecord(entry) || entry._sparkManaged !== true || !onlyKeys(entry, MANAGED_MCP_KEYS)) return false;
   const args = entry.args;
-  return Array.isArray(args) && typeof args[0] === "string" && MANAGED_SERVER_SCRIPT.test(args[0]);
+  if (!Array.isArray(args) || typeof args[0] !== "string" || !MANAGED_SERVER_SCRIPT.test(args[0])) return false;
+  return bakedForHome(entry.env, owner);
 }
 
-export function planClaudeUserConfig(text: string): Plan {
+export function planClaudeUserConfig(text: string, owner: HomeOwner | null = null): Plan {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -174,7 +221,7 @@ export function planClaudeUserConfig(text: string): Plan {
   const removed: string[] = [];
   const nextServers: Record<string, unknown> = {};
   for (const [name, entry] of Object.entries(servers)) {
-    if (isGeneratedMcpEntry(name, entry)) removed.push(`mcpServers.${name}`);
+    if (isGeneratedMcpEntry(name, entry, owner)) removed.push(`mcpServers.${name}`);
     else nextServers[name] = entry;
   }
   if (removed.length === 0) return "nothing";
@@ -194,7 +241,7 @@ const TOML_SERVER_KEYS = new Set(["command", "args", "enabled", "startup_timeout
 const TOML_ENV_KEYS = new Set(["ELECTRON_RUN_AS_NODE", "SPARK_HOME_DIR", "SPARK_MCP_MODE"]);
 
 // The block must hold nothing but codara-studio-shaped server tables.
-function isGeneratedTomlBlock(block: string): boolean {
+function isGeneratedTomlBlock(block: string, owner: HomeOwner | null = null): boolean {
   const parsed = parseTomlText(block);
   if (!parsed.ok) return false;
   const keys = Object.keys(parsed.value);
@@ -206,6 +253,7 @@ function isGeneratedTomlBlock(block: string): boolean {
     if (table.env !== undefined && (!isRecord(table.env) || !onlyKeys(table.env, TOML_ENV_KEYS))) return false;
     const args = table.args;
     if (!Array.isArray(args) || typeof args[0] !== "string" || !MANAGED_SERVER_SCRIPT.test(args[0])) return false;
+    if (!bakedForHome(table.env, owner)) return false;
   }
   return true;
 }
@@ -219,7 +267,10 @@ function lineEnd(text: string, index: number): number {
   return nl < 0 ? text.length : nl + 1;
 }
 
-export function planTomlConfig(text: string, options: { mcp: boolean; notify: boolean }): Plan {
+export function planTomlConfig(
+  text: string,
+  options: { mcp: boolean; notify: boolean; owner?: HomeOwner | null },
+): Plan {
   if (!parseTomlText(text).ok) return "parse-error";
   let next = text;
   const removed: string[] = [];
@@ -232,7 +283,7 @@ export function planTomlConfig(text: string, options: { mcp: boolean; notify: bo
         if (close < 0) break;
         const from = lineStart(next, at);
         const to = lineEnd(next, close);
-        if (!isGeneratedTomlBlock(next.slice(from, to))) break;
+        if (!isGeneratedTomlBlock(next.slice(from, to), options.owner ?? null)) break;
         const candidate = next.slice(0, from) + next.slice(to);
         if (!parseTomlText(candidate).ok) break;
         next = candidate;
@@ -395,28 +446,47 @@ export async function runGlobalConfigCleanup(
   const codexPath = options.codexConfigPath === undefined ? codexConfigPath() : options.codexConfigPath;
   const grokPath = options.grokConfigPath ?? join(defaultPersonalGrokHomeDir(), "config.toml");
   const mcp = options.keepMcpEntries !== true;
+  // A temporary home, or a build running from a temporary folder or a
+  // worktree, has no say over the user's own CLI configs: the installer
+  // refuses to write them for it, its default-off settings are not the
+  // user's choice, and the backups and report would vanish with it. It
+  // cleans only configs that are throwaway themselves (an e2e run's fake
+  // HOME) and Codara's own managed homes.
+  const blocked = await (options.blockedReason ?? globalInstallBlockedReason)();
+  const throwaway = options.isThrowawayPath ?? isTransientPath;
+  const mayTouch = async (path: string | null): Promise<boolean> =>
+    path !== null && (blocked === null || (await throwaway(path)));
+  const [claudeSettingsOk, claudeConfigOk, codexOk, grokOk] = await Promise.all(
+    [claudeSettingsPath, claudeConfigPath, codexPath, grokPath].map(mayTouch),
+  );
+  const owner = homeOwner(home, options.defaultHome);
 
   const managedRoot = options.managedClaudeRoot ?? join(home, "claude-cli");
   const managedSettings = await managedClaudeFiles(managedRoot, "settings.json");
   const managedUserConfigs = mcp ? await managedClaudeFiles(managedRoot, ".claude.json") : [];
   const targets: Target[] = [
-    { label: "claude-settings.json", path: claudeSettingsPath, plan: planClaudeSettings },
+    ...(claudeSettingsOk ? [{ label: "claude-settings.json", path: claudeSettingsPath, plan: planClaudeSettings }] : []),
     ...managedSettings.map((path, index) => ({
       label: `codara-claude-home-${index + 1}-settings.json`,
       path,
       plan: planClaudeSettings,
     })),
-    ...(mcp ? [{ label: "claude.json", path: claudeConfigPath, plan: planClaudeUserConfig, claudeLock: true }] : []),
+    ...(mcp && claudeConfigOk
+      ? [{ label: "claude.json", path: claudeConfigPath, plan: (text: string) => planClaudeUserConfig(text, owner), claudeLock: true }]
+      : []),
+    // Codara's own managed homes: every copy there is Codara's to clean.
     ...managedUserConfigs.map((path, index) => ({
       label: `codara-claude-home-${index + 1}-claude.json`,
       path,
-      plan: planClaudeUserConfig,
+      plan: (text: string) => planClaudeUserConfig(text),
       claudeLock: true,
     })),
-    ...(codexPath
-      ? [{ label: "codex-config.toml", path: codexPath, plan: (text: string) => planTomlConfig(text, { mcp, notify: true }) }]
+    ...(codexPath && codexOk
+      ? [{ label: "codex-config.toml", path: codexPath, plan: (text: string) => planTomlConfig(text, { mcp, notify: true, owner }) }]
       : []),
-    ...(mcp ? [{ label: "grok-config.toml", path: grokPath, plan: (text: string) => planTomlConfig(text, { mcp: true, notify: false }) }] : []),
+    ...(mcp && grokOk
+      ? [{ label: "grok-config.toml", path: grokPath, plan: (text: string) => planTomlConfig(text, { mcp: true, notify: false, owner }) }]
+      : []),
   ];
   const files: CleanupFileReport[] = [];
   for (const target of targets) {
@@ -436,6 +506,7 @@ export async function runGlobalConfigCleanup(
         (dir): dir is string => dir !== null,
       ),
     ),
+    ...(blocked ? { skipped: blocked } : {}),
   };
   await recordReport(home, report);
   return report;

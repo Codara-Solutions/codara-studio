@@ -31,7 +31,7 @@ const RENAMED_DIR_NAME = ".Codara";
 // on first boot after the rename; the old dirs are left untouched as a
 // backstop. ".Codara" is listed here only for the case where the rename leg
 // could not run (both dirs already existed); then it falls back to a copy.
-const LEGACY_DIR_NAMES = [RENAMED_DIR_NAME, ".Cora", ".SparkAgent"];
+export const LEGACY_DIR_NAMES: readonly string[] = [RENAMED_DIR_NAME, ".Cora", ".SparkAgent"];
 const MIGRATION_MARKER = ".migrated";
 // The per-home files/dirs worth carrying across a rename. Deliberately NOT
 // copied: worktrees/ (git registers their absolute paths in the source repos;

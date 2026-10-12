@@ -371,7 +371,7 @@ export function withCodaraStudioGrokBlock(source: string, include: boolean): str
 // there tomorrow: a temp-directory home (an e2e run) or a server script inside
 // a temp directory or worktree would leave the user's config pointing at a
 // path that disappears.
-async function globalInstallBlockedReason(): Promise<string | null> {
+export async function globalInstallBlockedReason(): Promise<string | null> {
   if (isSandboxedHome()) return "This Codara instance runs with a temporary home.";
   if (await isTransientPath(resolveServerScript())) {
     return "This Codara build runs from a temporary folder or a worktree.";
