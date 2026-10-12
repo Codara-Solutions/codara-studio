@@ -23,6 +23,7 @@ import {
   contentInTarget,
   createCheckoutWorktree,
   createCopyWorktree,
+  dropMissingWorktreeRegistration,
   hiddenLocalChanges,
   ignoredEntries,
   inProgressOperation,
@@ -1275,8 +1276,8 @@ export async function verifyRemovable(
     }
     return undefined;
   })();
-  // Gone from disk, registered or not: nothing local is left to lose, and a
-  // stale registration is pruned during removal.
+  // Gone from disk, registered or not: nothing local is left to lose, and
+  // removal drops this worktree's stale registration, never another's.
   if (!stat) {
     verdict.alreadyRemoved = true;
     return verdict;
@@ -1973,7 +1974,8 @@ async function removeLocked(
       return refusal(mapRemoveError(removed.error), removed.error, { workspaceId: workspace.id, path: workspace.cwd });
     }
   } else {
-    await runGit(repo, ["worktree", "prune"]).catch(() => undefined);
+    const dropped = await dropMissingWorktreeRegistration(repo, workspace.cwd);
+    if (!dropped.ok) warnings.push(`the stale worktree registration was kept: ${cleanText(dropped.error, 200)}`);
   }
 
   if (input.deleteBranch) {

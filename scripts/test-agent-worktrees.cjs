@@ -386,8 +386,18 @@ async function main() {
       "a pane the renderer still shows is open",
     );
     h.terminals = [];
+    // A worktree on a drive that is unmounted right now: its folder is
+    // missing, but removing some other worktree must not drop its
+    // registration, or its branch would look free and its work unlisted.
+    const unmounted = path.join(scratch, "unmounted-drive", "wt");
+    git(repo, ["worktree", "add", "-q", "-b", "on-unmounted-drive", unmounted]);
+    fs.rmSync(path.dirname(unmounted), { recursive: true, force: true });
+    const isRegistered = (dir) =>
+      git(repo, ["worktree", "list", "--porcelain"]).split("\n").includes(`worktree ${dir}`);
+    assert.ok(isRegistered(unmounted));
     const paneClosed = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps);
     assert.equal(paneClosed.ok, true, JSON.stringify(paneClosed));
+    assert.ok(isRegistered(unmounted), "a removal keeps another worktree's registration");
 
     // A worktree deleted from disk behind Codara's back: the row goes, the
     // branch only when its tip is merged.
@@ -400,6 +410,10 @@ async function main() {
     assert.equal(vanishedResult.branchDeleted, false);
     assert.ok(refExists(repo, "refs/heads/agent/vanished"), "unmerged work on a branch is never deleted");
     assert.equal(workspaceOf(vanished.workspaceId), undefined);
+    assert.equal(isRegistered(vanished.path), false, "the vanished worktree's own registration is dropped");
+    assert.ok(isRegistered(unmounted), "a missing folder elsewhere keeps its registration");
+    git(repo, ["worktree", "remove", unmounted]);
+    git(repo, ["branch", "-D", "on-unmounted-drive"]);
 
     // ── List ───────────────────────────────────────────────────────────────
     const listed = await aw.createAgentWorktree(terminalAgent, { branch: "agent/listed" }, deps);

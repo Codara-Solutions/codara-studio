@@ -442,6 +442,28 @@ export async function isRegisteredWorktree(repoCwd: string, worktreePath: string
   }
 }
 
+// Drop one worktree's registration once its folder is gone. `git worktree
+// prune` would also drop every other registration whose folder is missing at
+// that moment, such as a worktree on a drive that is only unmounted, and its
+// branch would then look free and its work unlisted. `git worktree remove` on
+// a missing folder deletes just that entry and refuses a locked one.
+export async function dropMissingWorktreeRegistration(
+  repoCwd: string,
+  worktreePath: string,
+): Promise<GitOpResult> {
+  try {
+    const target = normalizePathForCompare(resolve(worktreePath));
+    const entry = (await listWorktreeRegistrations(repoCwd)).find(
+      (candidate) => normalizePathForCompare(candidate.path) === target,
+    );
+    if (!entry || entry.locked || existsSync(entry.path)) return { ok: true };
+    await runGit(repoCwd, ["worktree", "remove", entry.path]);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+}
+
 // Clear an orphaned worktree directory off disk. Heavily guarded: we only ever
 // delete a path that is non-empty, distinct from the repo root, and NOT an
 // ancestor of the repo (so a bad input can never wipe the repository itself).
@@ -568,12 +590,8 @@ export async function removeCopyWorktree(
   }
   if (!removed) return { ok: false, error: lastError };
 
-  // Best-effort prune of any stale admin entry left behind.
-  try {
-    await runGit(input.repoCwd, ["worktree", "prune"]);
-  } catch {
-    /* ignore — prune failure is not fatal */
-  }
+  // Best-effort: only this worktree's own registration, if one was left.
+  await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);
   if (input.deleteBranch) {
     try {
       // Safe delete: git refuses (-d) if the branch has unmerged commits.
