@@ -180,7 +180,10 @@ A build that runs with a temporary home, from a temporary folder or from a
 git worktree leaves your own config alone, and Settings, About says so and
 why: the old entries then stay active until an installed Codara starts. A
 Linux AppImage counts as installed even though it runs from a temporary
-mount, unless the `.AppImage` file itself sits in a temporary folder.
+mount, unless the `.AppImage` file itself sits in a temporary folder. Only
+the process running from that mount counts: a build started from one of its
+terminals, which inherit the AppImage's environment, does not, and Codara's
+terminals no longer carry `APPIMAGE`, `APPDIR`, `OWD` or `ARGV0`.
 
 Every file an account leaves on disk is listed in
 [on-your-machine.md](./on-your-machine.md).

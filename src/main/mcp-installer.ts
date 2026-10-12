@@ -30,7 +30,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type {
   SparkBuiltinActionResult,
@@ -48,7 +48,7 @@ import { resolveCodexHomePaths } from "./orchestration/codex-home";
 import { claudeConfigDir, claudeUserConfigFile } from "./orchestration/claude-paths";
 import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-profiles";
 import { codaraHome } from "./codara-home";
-import { isTransientPath } from "./hook-installer";
+import { isTemporaryRoot, isTransientPath } from "./hook-installer";
 import { outsideWriteCapability } from "./outside-write-guard";
 
 /** Explicit exception to the outside-write guard: the opt-in "Codara tools in other apps". */
@@ -382,8 +382,12 @@ export async function globalInstallBlockedReason(): Promise<string | null> {
 
 export interface CleanupGateProbe {
   packaged: boolean;
-  /** The AppImage runtime's APPIMAGE: the .AppImage file this build was started from. */
+  /** The AppImage runtime's APPIMAGE: the .AppImage file it was started from. */
   appImage?: string;
+  /** The runtime's APPDIR: where it mounted or extracted that AppImage. */
+  appDir?: string;
+  /** This process's executable. */
+  execPath: string;
   /** Test seam: the installer's gate. */
   installBlockedReason?: () => Promise<string | null>;
 }
@@ -398,13 +402,47 @@ export interface CleanupGateProbe {
 // MCP entries an older build wrote keep firing outside Codara with nothing
 // left to remove them.
 export async function globalCleanupBlockedReason(
-  probe: CleanupGateProbe = { packaged: app.isPackaged, appImage: process.env.APPIMAGE },
+  probe: CleanupGateProbe = {
+    packaged: app.isPackaged,
+    appImage: process.env.APPIMAGE,
+    appDir: process.env.APPDIR,
+    execPath: process.execPath,
+  },
 ): Promise<string | null> {
   const blocked = await (probe.installBlockedReason ?? globalInstallBlockedReason)();
   if (!blocked || isSandboxedHome() || !probe.packaged) return blocked;
+  return (await runsFromKeptAppImage(probe)) ? null : blocked;
+}
+
+// The type 2 runtime mounts at $TMPDIR/.mount_<name><random>; with
+// APPIMAGE_EXTRACT_AND_RUN it extracts to $TMPDIR/appimage_extracted_<hash>.
+const APPIMAGE_RUNTIME_DIR = /^(\.mount_|appimage_extracted_)./;
+
+// APPIMAGE and APPDIR are inherited by every child of an AppImage (a Codara
+// pane, a terminal emulator that is itself an AppImage), so they describe this
+// process only when its executable is inside APPDIR. An unpacked build started
+// from such a child reports isPackaged too and must stay behind the worktree
+// and temp gates. APPDIR must also be the runtime's own directory straight in
+// a temporary folder: any other temp or worktree folder that merely contains
+// the executable is the transient build the install gate refused.
+async function runsFromKeptAppImage(probe: CleanupGateProbe): Promise<boolean> {
   const appImage = probe.appImage?.trim();
-  if (!appImage || !isAbsolute(appImage) || !existsSync(appImage)) return blocked;
-  return (await isTransientPath(appImage)) ? blocked : null;
+  const appDir = probe.appDir?.trim();
+  if (!appImage || !appDir || !isAbsolute(appImage) || !isAbsolute(appDir)) return false;
+  let realAppDir: string;
+  let realExec: string;
+  try {
+    if (!(await fs.stat(appImage)).isFile()) return false;
+    realAppDir = await fs.realpath(appDir);
+    realExec = await fs.realpath(probe.execPath);
+  } catch {
+    return false;
+  }
+  const fromAppDir = relative(realAppDir, realExec);
+  if (fromAppDir === "" || fromAppDir.startsWith("..") || isAbsolute(fromAppDir)) return false;
+  if (!APPIMAGE_RUNTIME_DIR.test(basename(realAppDir))) return false;
+  if (!(await isTemporaryRoot(dirname(realAppDir)))) return false;
+  return !(await isTransientPath(appImage));
 }
 
 /**

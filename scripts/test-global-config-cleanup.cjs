@@ -366,37 +366,99 @@ async function main() {
   });
 
   await check("a packaged AppImage counts as installed for the cleanup, nothing else does", async () => {
-    // The AppImage runtime mounts the app under /tmp/.mount_*, which reads as
-    // a temporary build: the installer's gate blocks it whatever happens.
+    // The AppImage runtime mounts the app under $TMPDIR/.mount_*, which reads
+    // as a temporary build: the installer's gate blocks it whatever happens.
     const mounted = async () => "This Codara build runs from a temporary folder or a worktree.";
-    // An existing file outside every temporary folder and worktree.
+    // Stands in for the .AppImage file only: an existing file outside every
+    // temporary folder and worktree. The executable is always passed apart.
     const kept = process.execPath;
     const inTmp = path.join(TMP, "Codara.AppImage");
     fs.writeFileSync(inTmp, "");
+    const layout = (dir) => {
+      const exe = path.join(dir, "codara-studio");
+      fs.mkdirSync(path.join(dir, "resources", "codara-studio-mcp"), { recursive: true });
+      fs.writeFileSync(exe, "");
+      return exe;
+    };
+    // What the runtime makes: straight in the temp folder, as mkdtemp names it.
+    const mount = fs.mkdtempSync(path.join(os.tmpdir(), ".mount_Codara"));
+    const extracted = fs.mkdtempSync(path.join(os.tmpdir(), "appimage_extracted_"));
+    const mountedExe = layout(mount);
+    const extractedExe = layout(extracted);
+    // `npm run package:linux` output in a linked worktree.
+    const repo = path.join(TMP, "repo");
+    const worktree = path.join(TMP, "wt");
+    fs.mkdirSync(path.join(repo, ".git", "worktrees", "wt"), { recursive: true });
+    fs.mkdirSync(worktree, { recursive: true });
+    fs.writeFileSync(path.join(worktree, ".git"), `gitdir: ${path.join(repo, ".git", "worktrees", "wt")}\n`);
+    const unpackedExe = layout(path.join(worktree, "dist", "linux-unpacked"));
+    const nestedMount = path.join(TMP, ".mount_Nested");
+    const nestedExe = layout(nestedMount);
     const savedHome = process.env.CODARA_HOME_DIR;
     process.env.CODARA_HOME_DIR = path.join(path.parse(ROOT).root, "codara-persistent-home-probe");
     try {
       const gate = (probe) => mcp.globalCleanupBlockedReason({ installBlockedReason: mounted, ...probe });
-      assert.equal(await gate({ packaged: true, appImage: kept }), null);
-      assert.match(await gate({ packaged: false, appImage: kept }), /temporary folder or a worktree/, "a dev build is not an AppImage");
-      assert.match(await gate({ packaged: true }), /temporary folder or a worktree/, "a packaged build without APPIMAGE");
-      assert.match(await gate({ packaged: true, appImage: "relative/Codara.AppImage" }), /temporary/);
-      assert.match(await gate({ packaged: true, appImage: path.join(TMP, "missing.AppImage") }), /temporary/);
-      assert.match(await gate({ packaged: true, appImage: inTmp }), /temporary/, "an AppImage run from a temporary folder");
+      const running = { packaged: true, appImage: kept, appDir: mount, execPath: mountedExe };
+      assert.equal(await gate(running), null, "the AppImage's own process, from its mount");
       assert.equal(
-        await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept, installBlockedReason: async () => null }),
+        await gate({ ...running, appDir: extracted, execPath: extractedExe }),
         null,
+        "the AppImage's own process, extracted by APPIMAGE_EXTRACT_AND_RUN",
       );
+      assert.equal(await gate({ ...running, appDir: `${mount}/` }), null, "APPDIR with a trailing slash");
+      assert.equal(await mcp.globalCleanupBlockedReason({ ...running, installBlockedReason: async () => null }), null);
+
+      const blocked = /temporary folder or a worktree/;
+      // Every child of an AppImage inherits APPIMAGE and APPDIR.
+      assert.match(
+        await gate({ ...running, execPath: unpackedExe }),
+        blocked,
+        "an unpacked worktree build started from an AppImage's pane",
+      );
+      assert.match(
+        await gate({ ...running, execPath: kept }),
+        blocked,
+        "a packaged build outside APPDIR that inherited APPIMAGE and APPDIR",
+      );
+      assert.match(
+        await gate({ ...running, appDir: extracted }),
+        blocked,
+        "APPDIR names another AppImage's directory",
+      );
+      assert.match(await gate({ ...running, appDir: undefined }), blocked, "APPIMAGE without APPDIR");
+      assert.match(await gate({ ...running, appDir: "" }), blocked, "an empty APPDIR");
+      assert.match(await gate({ ...running, appDir: "relative/.mount_Codara" }), blocked);
+      assert.match(await gate({ ...running, appDir: path.join(os.tmpdir(), ".mount_gone") }), blocked, "a missing APPDIR");
+      assert.match(await gate({ ...running, appDir: mountedExe }), blocked, "APPDIR is the executable itself");
+      assert.match(
+        await gate({ ...running, appDir: path.join(worktree, "dist", "linux-unpacked") }),
+        blocked,
+        "an APPDIR that is not the runtime's own directory",
+      );
+      assert.match(
+        await gate({ ...running, appDir: nestedMount, execPath: nestedExe }),
+        blocked,
+        "a .mount_ folder deeper in a temporary folder",
+      );
+      assert.match(await gate({ ...running, packaged: false }), blocked, "a dev build is not an AppImage");
+      assert.match(await gate({ ...running, appImage: undefined }), blocked, "a packaged build without APPIMAGE");
+      assert.match(await gate({ ...running, appImage: "relative/Codara.AppImage" }), blocked);
+      assert.match(await gate({ ...running, appImage: path.join(TMP, "missing.AppImage") }), blocked);
+      assert.match(await gate({ ...running, appImage: mount }), blocked, "APPIMAGE is a directory");
+      assert.match(await gate({ ...running, appImage: inTmp }), blocked, "an AppImage run from a temporary folder");
     } finally {
       process.env.CODARA_HOME_DIR = savedHome;
+      fs.rmSync(mount, { recursive: true, force: true });
+      fs.rmSync(extracted, { recursive: true, force: true });
     }
     // This suite's CODARA_HOME_DIR is a temp dir.
+    const tempHomeProbe = { packaged: true, appImage: kept, appDir: mount, execPath: mountedExe };
     assert.notEqual(
-      await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept, installBlockedReason: mounted }),
+      await mcp.globalCleanupBlockedReason({ ...tempHomeProbe, installBlockedReason: mounted }),
       null,
       "a temporary home stays blocked even in an AppImage",
     );
-    assert.match(await mcp.globalCleanupBlockedReason({ packaged: true, appImage: kept }), /temporary home/);
+    assert.match(await mcp.globalCleanupBlockedReason(tempHomeProbe), /temporary home/);
   });
 
   await check("Settings says when this launch skipped the user's configs, and why", async () => {

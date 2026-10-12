@@ -206,6 +206,7 @@ function stubPlugin() {
       export function sanitizeElectronViteDevEnv() {}
       export function sanitizeNpmRunScriptEnv() {}
       export function sanitizeHostTerminalEnv() {}
+      export function sanitizeAppImageLaunchEnv() {}
       export function restoreUserZdotdir() {}
       export function userZdotdirFromEnv() { return undefined; }
     `,

@@ -139,6 +139,31 @@ export function sanitizeHostTerminalEnv(env: Record<string, string | undefined>)
   for (const key of HOST_TERMINAL_ENV) delete env[key];
 }
 
+// AppImage identity.
+//
+// The AppImage runtime exports APPIMAGE (the .AppImage file), APPDIR (its
+// mount), OWD and ARGV0 to the app it starts, and electron-updater adds
+// APPIMAGE_SILENT_INSTALL or APPIMAGE_EXIT_AFTER_INSTALL to the Codara it
+// relaunches after an update. All of them describe Codara's own launch. In a
+// pane they make an unpacked or dev build started there take itself for the
+// installed AppImage (its updater would replace that file, and its config
+// gates would treat it as installed), and electron-builder's AppRun, run from
+// an extracted AppDir, would start Codara's binary from the inherited APPDIR.
+// The user's own APPIMAGE_* runtime knobs (APPIMAGE_EXTRACT_AND_RUN) stay.
+const APPIMAGE_LAUNCH_ENV = [
+  "APPIMAGE",
+  "APPDIR",
+  "OWD",
+  "ARGV0",
+  "APPIMAGE_SILENT_INSTALL",
+  "APPIMAGE_EXIT_AFTER_INSTALL",
+];
+
+/** Delete the AppImage runtime's description of Codara's own launch from `env`, in place. */
+export function sanitizeAppImageLaunchEnv(env: Record<string, string | undefined>): void {
+  for (const key of APPIMAGE_LAUNCH_ENV) delete env[key];
+}
+
 /**
  * A copy of process.env without electron-vite's dev wiring, for a child that
  * runs the user's own commands outside pty-manager (automation steps and
@@ -148,6 +173,7 @@ export function processEnvWithoutElectronViteDev(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
+  sanitizeAppImageLaunchEnv(env);
   return env;
 }
 

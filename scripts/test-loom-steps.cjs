@@ -208,6 +208,38 @@ async function main() {
     }
   });
 
+  await t("command + script: an installed AppImage's launch stays out of the child", async () => {
+    // A step that starts an unpacked build must not hand it Codara's
+    // APPIMAGE and APPDIR, or that build takes itself for the AppImage.
+    const launch = {
+      APPIMAGE: "/home/user/Applications/Codara.AppImage",
+      APPDIR: "/tmp/.mount_CodaraAb12Cd",
+      OWD: "/home/user",
+      ARGV0: "Codara.AppImage",
+      APPIMAGE_EXTRACT_AND_RUN: "1",
+    };
+    const keys = Object.keys(launch);
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      Object.assign(process.env, launch);
+      const r = await executeStep(
+        step("s", {
+          type: "script",
+          language: "node",
+          code: `console.log(${JSON.stringify(keys)}.map((k) => process.env[k] ?? "-").join("|"))`,
+        }),
+        ctx(),
+      );
+      assert.strictEqual(r.ok, true, r.error);
+      assert.strictEqual(r.output, "-|-|-|-|1");
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   if (!isWin) {
     await t("script: bash", async () => {
       const r = await executeStep(step("s", { type: "script", language: "bash", code: 'x=3\necho "bash $x"' }), ctx());

@@ -21,6 +21,9 @@
 //     that terminal's identity and pane address. In a pane, Claude Code's
 //     /sessions picker ran `wezterm cli split-pane --pane-id $WEZTERM_PANE`
 //     and opened in the WezTerm window running `npm run dev`, not in Codara.
+//   - An installed AppImage hands its panes APPIMAGE and APPDIR. An unpacked
+//     build started there took itself for that AppImage, so its boot cleanup
+//     treated it as installed and rewrote the user's real CLI configs.
 //
 // Drives the real shell-init and pty-manager env construction (node-pty and
 // the account runtimes stubbed as in test-pty-spawn-serialization.cjs), then
@@ -101,6 +104,18 @@ const HOST_TERMINAL = {
   WINDOWID: "62914571",
 };
 
+// What the AppImage runtime and electron-updater export to an installed
+// Codara, plus a runtime knob of the user's own.
+const APPIMAGE_LAUNCH = {
+  APPIMAGE: "/home/user/Applications/Codara.AppImage",
+  APPDIR: "/tmp/.mount_CodaraAb12Cd",
+  OWD: "/home/user",
+  ARGV0: "Codara.AppImage",
+  APPIMAGE_SILENT_INSTALL: "true",
+  APPIMAGE_EXIT_AFTER_INSTALL: "true",
+};
+const USER_APPIMAGE_KNOB = { APPIMAGE_EXTRACT_AND_RUN: "1" };
+
 const INHERITED_KEYS = [
   "ELECTRON_RENDERER_URL",
   "ELECTRON_CLI_ARGS",
@@ -112,6 +127,8 @@ const INHERITED_KEYS = [
   "ZDOTDIR",
   "SPARK_USER_ZDOTDIR",
   ...Object.keys(HOST_TERMINAL),
+  ...Object.keys(APPIMAGE_LAUNCH),
+  ...Object.keys(USER_APPIMAGE_KNOB),
 ];
 
 const PROBE =
@@ -269,6 +286,29 @@ async function main() {
           JSON.stringify(zsh.hostTerminal) === JSON.stringify(["unset", "unset", "unset"]),
           zsh.hostTerminal ?? zsh.output.slice(-400),
         );
+      }
+    }
+
+    // --- an installed AppImage's own launch --------------------------------
+    for (const integrated of [true, false]) {
+      const kind = integrated ? "an integrated" : "a plain";
+      const call = await spawnPane({ ...APPIMAGE_LAUNCH, ...USER_APPIMAGE_KNOB }, { integrated });
+      const env = call.options.env;
+      const leaked = Object.keys(APPIMAGE_LAUNCH).filter((key) => key in env);
+      check(`${kind} pane does not inherit Codara's AppImage identity`, leaked.length === 0, leaked);
+      check(
+        `${kind} pane keeps the user's own AppImage runtime knob`,
+        env.APPIMAGE_EXTRACT_AND_RUN === "1",
+        env.APPIMAGE_EXTRACT_AND_RUN,
+      );
+      if (HAS_ZSH) {
+        const result = spawnSync(
+          call.exe,
+          [...call.args, "-i", "-c", 'print -r -- "@@[${APPIMAGE-unset}][${APPDIR-unset}][${OWD-unset}][${ARGV0-unset}]@@"'],
+          { cwd: call.options.cwd, env: call.options.env, encoding: "latin1", timeout: 20_000 },
+        );
+        const seen = /@@(.*?)@@/.exec(`${result.stdout ?? ""}${result.stderr ?? ""}`)?.[1];
+        check(`zsh in ${kind} pane sees no APPIMAGE, APPDIR, OWD or ARGV0`, seen === "[unset][unset][unset][unset]", seen);
       }
     }
 

@@ -379,6 +379,11 @@ async function main() {
     NODE_ENV_ELECTRON_VITE: "development",
     ELECTRON_RENDERER_URL: "http://localhost:5173",
     ELECTRON_EXEC_PATH: "/opt/electron/Electron",
+    APPIMAGE: "/home/user/Applications/Codara.AppImage",
+    APPDIR: "/tmp/.mount_CodaraAb12Cd",
+    OWD: "/home/user",
+    ARGV0: "Codara.AppImage",
+    APPIMAGE_EXTRACT_AND_RUN: "1",
   }, "/tmp/codara-pi-config", "/tmp/codara-pi-sessions");
   assert.equal(sanitized.ANTHROPIC_API_KEY, undefined);
   assert.equal(sanitized.OPENAI_API_KEY, undefined);
@@ -397,6 +402,9 @@ async function main() {
   assert.equal(sanitized.NODE_ENV_ELECTRON_VITE, undefined);
   assert.equal(sanitized.ELECTRON_RENDERER_URL, undefined);
   assert.equal(sanitized.ELECTRON_EXEC_PATH, undefined);
+  // Nor an installed AppImage's description of Codara's own launch.
+  for (const key of ["APPIMAGE", "APPDIR", "OWD", "ARGV0"]) assert.equal(sanitized[key], undefined, key);
+  assert.equal(sanitized.APPIMAGE_EXTRACT_AND_RUN, "1");
   assert.equal(
     runtime.buildPiSubscriptionEnvironment(
       { NODE_ENV: "production", NODE_ENV_ELECTRON_VITE: "development" },

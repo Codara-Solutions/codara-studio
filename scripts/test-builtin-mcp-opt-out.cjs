@@ -78,7 +78,7 @@ const stubPlugin = {
               getPath: () => ${JSON.stringify(FAKE_HOME)}
             };`
           : args.path === "hook-installer"
-            ? "export async function isTransientPath() { return false; }"
+            ? "export async function isTransientPath() { return false; } export async function isTemporaryRoot() { return false; }"
             : "export async function resolveBinary(name) { return globalThis.__installedClis.has(name) ? '/fake/bin/' + name : null; }",
       loader: "js",
     }));

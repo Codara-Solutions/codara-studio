@@ -15,6 +15,7 @@ import type {
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import {
   restoreUserZdotdir,
+  sanitizeAppImageLaunchEnv,
   sanitizeElectronViteDevEnv,
   sanitizeHostTerminalEnv,
   sanitizeNestedAgentEnv,
@@ -1297,6 +1298,7 @@ function doSpawn(
   sanitizeNpmRunScriptEnv(env);
   restoreUserZdotdir(env);
   sanitizeHostTerminalEnv(env);
+  sanitizeAppImageLaunchEnv(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.

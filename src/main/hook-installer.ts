@@ -90,6 +90,15 @@ function temporaryRoots(): string[] {
   return roots.filter((value): value is string => typeof value === "string" && value.trim() !== "");
 }
 
+/** True when `dir` is itself one of the temporary folders, not just inside one. */
+export async function isTemporaryRoot(dir: string): Promise<boolean> {
+  const real = await realpathBestEffort(dir);
+  for (const root of temporaryRoots()) {
+    if ((await realpathBestEffort(root)) === real) return true;
+  }
+  return false;
+}
+
 // True when the path lives somewhere that can vanish while a config that
 // outlives this process still references it: a temp directory, or a git
 // worktree checkout. The opt-in global MCP install refuses such paths.
