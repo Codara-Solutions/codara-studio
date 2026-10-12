@@ -545,6 +545,44 @@ async function main() {
     }).env.CODARA_PI_COMPACT_AT_TOKENS;
   assert.equal(compactPlanFor("120000"), "120000");
 
+  // The user's auto-compact percentage reaches the extension per launch; a
+  // developer token override in the base environment outranks it.
+  const percentPlanFor = (autoCompactPercent, baseEnv = {}) =>
+    runtime.buildPiManagerLaunchPlan({
+      runtime: fakeRuntime,
+      provider: "anthropic",
+      configDir: "/config",
+      sessionDir: "/sessions",
+      sessionId: "session-123",
+      runId: "run-123",
+      mode: "execute",
+      cwd: "/workspace",
+      bridgePath: "/bridge/server.js",
+      extensionPaths: ["/extensions/cora.ts"],
+      processExecutable: "/electron",
+      autoCompactPercent,
+      baseEnv,
+    }).env;
+  assert.equal(percentPlanFor(70).CODARA_PI_COMPACT_PERCENT, "70");
+  assert.equal(percentPlanFor(70).CODARA_PI_COMPACT_AT_TOKENS, "256000");
+  assert.equal(percentPlanFor(null).CODARA_PI_COMPACT_PERCENT, undefined, "Auto stamps no percentage");
+  assert.equal(percentPlanFor(7).CODARA_PI_COMPACT_PERCENT, undefined, "an unsupported percentage is Auto");
+  assert.equal(
+    percentPlanFor(70, { CODARA_PI_COMPACT_AT_TOKENS: "90000" }).CODARA_PI_COMPACT_PERCENT,
+    undefined,
+    "a developer token override outranks the percentage",
+  );
+  assert.equal(
+    percentPlanFor(70, { CODARA_PI_COMPACT_PERCENT: "40" }).CODARA_PI_COMPACT_PERCENT,
+    "70",
+    "an inherited percentage never leaks past the user's setting",
+  );
+  assert.equal(
+    percentPlanFor(null, { CODARA_PI_COMPACT_PERCENT: "40" }).CODARA_PI_COMPACT_PERCENT,
+    undefined,
+    "Auto drops an inherited percentage",
+  );
+
   // Fast mode: the extension needs the provider stamped, and the fast-mode
   // flag is stamped only when the caller resolved it on. The caller has
   // already narrowed it to the provider and model (resolveCodaraPiFastMode);

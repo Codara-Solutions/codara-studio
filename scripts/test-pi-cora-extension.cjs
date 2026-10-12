@@ -21,6 +21,12 @@ function loadTypeScriptModule(sourcePath) {
   const loaded = new Module(sourcePath, module);
   loaded.filename = sourcePath;
   loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
+  // Extension modules import their TypeScript siblings ("./compaction-ledger").
+  loaded.require = (id) => {
+    const sibling = id.startsWith("./") ? path.join(path.dirname(sourcePath), `${id}.ts`) : null;
+    if (sibling && fs.existsSync(sibling)) return loadTypeScriptModule(sibling);
+    return Module.prototype.require.call(loaded, id);
+  };
   loaded._compile(output, sourcePath);
   return loaded.exports;
 }
@@ -691,10 +697,49 @@ const noInput = {};
   // A small-window model still compacts on Pi's earlier trigger.
   assert.equal(decide({ tokens: 200000, contextWindow: 200000 }), true);
 
+  // The user's percentage: the extension and the shared helper (meter, launch
+  // plan, manager trigger) must price it identically on every window.
+  assert.equal(shared.MIN_COMPACT_AT_TOKENS, compaction.MIN_COMPACT_AT_TOKENS);
+  assert.equal(shared.MIN_AUTO_COMPACT_PERCENT, compaction.MIN_AUTO_COMPACT_PERCENT);
+  assert.equal(shared.MAX_AUTO_COMPACT_PERCENT, compaction.MAX_AUTO_COMPACT_PERCENT);
+  for (const window of [32_000, 128_000, 200_000, 256_000, 400_000, 1_000_000]) {
+    for (const pct of [30, 50, 75, 90, 95]) {
+      assert.equal(
+        shared.autoCompactLimitTokens({ contextWindowTokens: window, percent: pct }),
+        compaction.effectiveCompactAtTokens(window, DEFAULT, compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: String(pct) })),
+        `percent helpers disagree for window=${window} pct=${pct}`,
+      );
+    }
+  }
+  assert.equal(compaction.resolveCompactPercent({}), null);
+  assert.equal(compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: "70" }), 70);
+  for (const absurd of ["", "0", "29", "96", "NaN", "lots"]) {
+    assert.equal(compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: absurd }), null, absurd);
+  }
+  assert.equal(compaction.effectiveCompactAtTokens(1_000_000, DEFAULT, 70), 700_000);
+  assert.equal(compaction.effectiveCompactAtTokens(200_000, DEFAULT, 95), 200_000 - 16384, "never later than Pi");
+  assert.equal(compaction.effectiveCompactAtTokens(100_000, DEFAULT, 30), 48_000, "never below the floor");
+  assert.equal(
+    compaction.shouldCompactNow({ usage: { tokens: 150_001, contextWindow: 200_000 }, thresholdTokens: DEFAULT, compactionInFlight: false, percent: 75 }),
+    true,
+    "75% of a 200k window compacts past 150k",
+  );
+  assert.equal(
+    compaction.shouldCompactNow({ usage: { tokens: 150_001, contextWindow: 200_000 }, thresholdTokens: DEFAULT, compactionInFlight: false, percent: 75, rearmAt: 160_000 }),
+    false,
+    "a re-arm point holds the trigger until the context grows past it",
+  );
+  assert.equal(compaction.rearmAtTokens(100_000, 150_000), 115_000);
+  assert.equal(compaction.rearmAtTokens(1_000, 1_000), 9_000);
+
   // Registration: one compaction per crossing, and the in-flight latch holds
   // until the session_compact event (or the completion callback) clears it.
   const handlers = new Map();
-  const pi = { on: (event, handler) => { handlers.set(event, handler); } };
+  const sent = [];
+  const pi = {
+    on: (event, handler) => { handlers.set(event, handler); },
+    sendMessage: (message, options) => { sent.push([message, options]); },
+  };
   let usage = { tokens: 10, contextWindow: 1000000 };
   let compactCalls = 0;
   let lastOptions = null;
@@ -717,14 +762,31 @@ const noInput = {};
     compaction.CORA_COMPACTION_INSTRUCTIONS,
     "automatic compaction uses Cora's continuation handoff prompt",
   );
-  assert.match(lastOptions.customInstructions, /newest user intent/);
-  assert.match(lastOptions.customInstructions, /exact files\/symbols\/commands\/IDs/);
-  assert.match(lastOptions.customInstructions, /pending tasks/);
+  assert.match(lastOptions.customInstructions, /quote every user requirement/);
+  assert.match(lastOptions.customInstructions, /## Errors and fixes/);
+  assert.match(lastOptions.customInstructions, /## Open todos/);
+  assert.match(lastOptions.customInstructions, /carry every unresolved item forward unchanged/);
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "an in-flight compaction suppresses a second request");
 
   // Pi's own threshold compaction latches the flag the same way.
+  handlers.get("session_before_compact")({
+    type: "session_before_compact",
+    preparation: {
+      firstKeptEntryId: "e9",
+      messagesToSummarize: [
+        { role: "user", content: "Rename the export to parseLedger. Never touch src/legacy/." },
+        { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "src/ledger.ts" } }] },
+        { role: "toolResult", toolCallId: "c1", toolName: "edit", content: [{ type: "text", text: "ok" }] },
+      ],
+    },
+  });
   handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  assert.equal(sent.length, 1, "every compaction re-injects the durable state");
+  assert.equal(sent[0][0].customType, "codara-durable-state");
+  assert.match(sent[0][0].content, /Never touch src\/legacy\//, "the user's words survive verbatim");
+  assert.match(sent[0][0].content, /src\/ledger\.ts/, "the files touched survive");
+  assert.deepEqual(sent[0][1], { deliverAs: "nextTurn" }, "an idle session gets the state with its next prompt");
   usage = { tokens: 20, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "usage is re-read after a compaction, not looped on");
@@ -735,15 +797,57 @@ const noInput = {};
   assert.equal(compactCalls, 1, "a Pi-initiated compaction suppresses ours while it runs");
   lastOptions.onComplete?.();
   handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  assert.match(sent[1][0].content, /Never touch src\/legacy\//, "the ledger rolls forward across compactions");
+  usage = { tokens: 30, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  usage = { tokens: 1500, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 2, "the trigger re-arms once the compaction finishes");
+
+  // No loop: a compaction that leaves the context over the limit (kept turns
+  // alone exceed it) waits for real growth before trying again.
+  handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 2, "an over-limit context after compaction does not compact again at once");
+  usage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 3, "growth past the re-arm point compacts again");
+
+  // Deterministic fallback: the host's last rung asks for a summary built
+  // without a model, which must keep the user's words and cut where Pi cut.
+  const fallback = handlers.get("session_before_compact")({
+    type: "session_before_compact",
+    customInstructions: compaction.DETERMINISTIC_COMPACTION_MARKER,
+    preparation: {
+      firstKeptEntryId: "e42",
+      tokensBefore: 1500,
+      previousSummary: "## Goal\nShip the ledger.",
+      messagesToSummarize: [
+        { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: { command: "npm test" } }] },
+        { role: "toolResult", toolCallId: "c2", toolName: "bash", isError: true, content: [{ type: "text", text: "1 failing" }] },
+      ],
+      fileOps: { edited: new Set(["src/ledger.ts"]), written: new Set() },
+    },
+  });
+  assert.equal(fallback.compaction.firstKeptEntryId, "e42");
+  assert.match(fallback.compaction.summary, /Ship the ledger\./, "the previous summary carries forward");
+  assert.match(fallback.compaction.summary, /Never touch src\/legacy\//);
+  assert.match(fallback.compaction.summary, /FAILED bash/);
+  assert.deepEqual(fallback.compaction.details.modifiedFiles, ["src/ledger.ts"]);
+  assert.equal(
+    handlers.get("session_before_compact")({ type: "session_before_compact", customInstructions: "normal", preparation: { firstKeptEntryId: "e1" } }),
+    undefined,
+    "an ordinary compaction is left to the model",
+  );
 
   const hostHandlers = new Map();
   const entries = [];
   let aborts = 0;
-  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args) }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
-  assert.equal(hostHandlers.has("agent_end"), false, "host-owned workers must not race an asynchronous extension compaction");
-  const hostContext = { getContextUsage: () => ({ tokens: 1500, contextWindow: 1000000 }), abort: () => { aborts += 1; } };
+  let hostUsage = { tokens: 1500, contextWindow: 1000000 };
+  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(hostHandlers.has("agent_end"), true, "agent_end only tracks whether a loop is running");
+  const hostContext = { getContextUsage: () => hostUsage, abort: () => { aborts += 1; } };
   const turnEnd = hostHandlers.get("turn_end");
   turnEnd({ toolResults: [] }, hostContext);
   turnEnd({ toolResults: [{ toolName: "submit_result" }] }, hostContext);
@@ -753,21 +857,104 @@ const noInput = {};
   assert.equal(aborts, 1);
   assert.equal(entries[0][0], "codara-context-pause");
   assert.equal(entries[0][1].reason, "threshold");
+  assert.equal(entries[0][1].phase, "mid-turn");
+  hostHandlers.get("session_before_compact")({});
   hostHandlers.get("session_compact")({});
+  hostUsage = { tokens: 200, contextWindow: 1000000 };
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  hostUsage = { tokens: 1500, contextWindow: 1000000 };
   turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
   assert.equal(aborts, 2, "a completed compaction re-arms later tool rounds");
 
   const managerHandlers = new Map();
   const managerEntries = [];
-  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args) }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
-  assert.equal(managerHandlers.has("turn_end"), false);
-  managerHandlers.get("agent_end")({}, hostContext);
-  managerHandlers.get("agent_end")({}, hostContext);
+  let managerAborts = 0;
+  let managerUsage = { tokens: 1500, contextWindow: 1000000 };
+  const managerContext = { getContextUsage: () => managerUsage, abort: () => { managerAborts += 1; } };
+  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  const managerTurnEnd = managerHandlers.get("turn_end");
+  assert.ok(managerTurnEnd, "managers pause mid-turn too");
+  managerTurnEnd({ toolResults: [] }, managerContext);
+  managerTurnEnd({ toolResults: [{ toolName: "codara_complete" }] }, managerContext);
+  assert.equal(managerAborts, 0, "the answer round and the closing tool never pause");
+  managerHandlers.get("agent_end")({}, managerContext);
+  managerHandlers.get("agent_end")({}, managerContext);
   assert.equal(managerEntries.length, 1, "manager marks one request for host settlement");
-  assert.equal(aborts, 2, "manager compaction cannot abort its completed answer");
+  assert.equal(managerEntries[0][1].phase, "settled");
+  assert.equal(managerAborts, 0, "manager compaction cannot abort its completed answer");
   managerHandlers.get("session_compact_failed")({});
-  managerHandlers.get("agent_end")({}, hostContext);
+  managerHandlers.get("agent_end")({}, managerContext);
+  assert.equal(managerEntries.length, 1, "a failed compaction is not retried at the same size");
+  managerUsage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  managerHandlers.get("agent_end")({}, managerContext);
   assert.equal(managerEntries.length, 2, "failed native compaction cannot disable the early trigger forever");
+
+  // Mid-turn: a long tool loop pauses at a round boundary.
+  const midHandlers = new Map();
+  const midEntries = [];
+  let midAborts = 0;
+  let midUsage = { tokens: 1500, contextWindow: 1000000 };
+  const midContext = { getContextUsage: () => midUsage, abort: () => { midAborts += 1; } };
+  compaction.registerContextCompaction({ on: (event, handler) => midHandlers.set(event, handler), appendEntry: (...args) => midEntries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  midHandlers.get("agent_start")({});
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 1, "a manager tool round over the limit aborts at the boundary");
+  assert.equal(midEntries[0][1].phase, "mid-turn");
+  // The host found nothing to compact and resumed: the resumed turn must not
+  // pause again at the same size.
+  midHandlers.get("agent_end")({}, midContext);
+  midHandlers.get("agent_start")({});
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 1, "an unanswered pause re-arms on growth, never in a loop");
+  midUsage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 2);
+
+  // A round that hands the turn back to the user (a question, a handed-off
+  // iteration, opened terminals) never pauses: the continuation prompt would
+  // invite work the user has not approved. agent_end compacts it instead.
+  for (const tool of ["codara_ask_user", "codara_request_next_iteration", "codara_spawn_terminals"]) {
+    assert.ok(compaction.MANAGER_TURN_ENDING_TOOLS.has(tool), `${tool} ends the manager's turn`);
+    const handlers = new Map();
+    const pauses = [];
+    let aborted = 0;
+    const context = { getContextUsage: () => ({ tokens: 5000, contextWindow: 1000000 }), abort: () => { aborted += 1; } };
+    compaction.registerContextCompaction({ on: (event, handler) => handlers.set(event, handler), appendEntry: (...args) => pauses.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+    handlers.get("agent_start")({});
+    handlers.get("turn_end")({ toolResults: [{ toolName: "read" }, { toolName: tool }] }, context);
+    assert.equal(aborted, 0, `${tool}: no mid-turn pause`);
+    handlers.get("agent_end")({}, context);
+    assert.equal(pauses.length, 1, `${tool}: the settled turn still compacts`);
+    assert.equal(pauses[0][1].phase, "settled");
+  }
+
+  // The model reads a round before any compaction folds it. When only the
+  // results it has not read crossed the limit, compacting now would summarize
+  // output it never saw (and a model that needs it would rerun the tool into
+  // the same compaction); the pause waits one round.
+  const text = (chars) => [{ type: "text", text: "x".repeat(chars) }];
+  assert.equal(compaction.unreadToolResultTokens([{ content: text(4000) }, { content: "y".repeat(400) }, {}]), 1100);
+  const over = { usage: { tokens: 10_000, contextWindow: 1_000_000 }, thresholdTokens: 5_000, compactionInFlight: false };
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 6_000 }), false, "the model has seen only 4k");
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 5_000 }), false, "exactly at the limit once read");
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 4_999 }), true, "already past the limit before this round");
+  assert.equal(compaction.shouldCompactNow(over), true);
+  for (const host of ["1", "settled"]) {
+    const handlers = new Map();
+    const pauses = [];
+    let usage = { tokens: 900, contextWindow: 1000000 };
+    const context = { getContextUsage: () => usage, abort: () => undefined };
+    compaction.registerContextCompaction({ on: (event, handler) => handlers.set(event, handler), appendEntry: (...args) => pauses.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: host, CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+    handlers.get("agent_start")({});
+    // A 60k-token log lands on a 900-token context.
+    usage = { tokens: 900 + 60_000, contextWindow: 1000000 };
+    handlers.get("turn_end")({ toolResults: [{ toolName: "bash", content: text(240_000) }] }, context);
+    assert.equal(pauses.length, 0, `host=${host}: the unread log is not compacted away`);
+    // The model answered with it in view; the next round compacts.
+    usage = { tokens: 900 + 60_000 + 300, contextWindow: 1000000 };
+    handlers.get("turn_end")({ toolResults: [{ toolName: "read", content: text(1_200) }] }, context);
+    assert.equal(pauses.length, 1, `host=${host}: the round after it compacts`);
+  }
 
   // Both Cora extensions must actually wire the trigger up.
   for (const file of ["index.ts", "worker.ts"]) {

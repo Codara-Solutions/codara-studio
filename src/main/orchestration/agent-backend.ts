@@ -72,6 +72,10 @@ export interface ManagerRequestInput {
   conversationEpoch: number;
   /** Called only after the provider/PTY has accepted this exact prompt. */
   onPromptAccepted?: () => void | Promise<void>;
+  /** A fresh copy of the turn's Cora memory sections, for a backend that
+   *  compacts the session mid-turn: its summary leaves them out, and the
+   *  continuation has to carry them for the rest of the turn. */
+  reloadCoraMemory?: () => Promise<string | null>;
   /** Called as soon as the backend knows which provider session this turn is
    *  writing to — before the turn settles. Run-store persists the uuid
    *  durably here so a crash mid-turn can still resume the same transcript;

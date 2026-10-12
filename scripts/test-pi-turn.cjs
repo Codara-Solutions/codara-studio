@@ -408,6 +408,24 @@ assert.equal(idless.result().finalText, "same message");
   assert.equal(wide.length, piTurnModule.TOOL_PROGRESS_MAX_CHARS);
   assert.equal(piTurnModule.toolProgressTail({ content: [] }), "");
 
+  // The usage stream reports the limit the session's own extension enforces:
+  // the owner's percentage of the model's window, else the stamped tokens.
+  {
+    const budgetFor = (launchEnv, model) => {
+      const events = [];
+      const accumulator = new PiTurnAccumulator((event) => events.push(event), { launchEnv, model });
+      accumulator.consume({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input: 1000, output: 10, cacheRead: 0, cacheWrite: 0 } },
+      });
+      return events.filter((event) => event.kind === "usage").at(-1)?.compactAtTokens;
+    };
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000", CODARA_PI_COMPACT_PERCENT: "70" }, "claude-sonnet-4-5"), 140_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000", CODARA_PI_COMPACT_PERCENT: "70" }, "claude-fable-5"), 700_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000" }, "claude-fable-5"), 256_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "120000" }, "claude-fable-5"), 120_000);
+  }
+
   console.log("pi-turn: ok");
 })().catch((error) => {
   console.error(error);

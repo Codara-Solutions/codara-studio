@@ -42,6 +42,7 @@ import type {
   StartGitHubPullRequestResult,
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
+import { compactAtOverrideTokens } from "@shared/context-compaction";
 import {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
@@ -157,7 +158,7 @@ import {
 import { repairCoraRetryFromRunWindow } from "./cora-retry-repair";
 import { CoraSendReceiptIndex } from "./cora-send-receipts";
 import { normalizeCoraMessage } from "./cora-message-policy";
-import { remoteCoraRunContext } from "./cora-run-context";
+import { remoteCoraRunContext, type RemoteCoraRunContextLimits } from "./cora-run-context";
 import { projectBoundedRemoteCoraRun, projectRemoteCoraQuestionOptions } from "./cora-run-projection";
 import {
   CORA_HISTORY_RUNS_JSON_MAX_BYTES,
@@ -1902,7 +1903,16 @@ async function getCoraGraphForRemote(input: {
   // Deliberately bypass the message-window projector. This route exists for
   // the graph, so sending a 400 KiB transcript after a pass tap would undo the
   // mobile data savings that the bounded step/worker projection provides.
-  return toRemoteRun(run, await automationJoinForRun(run), []);
+  return toRemoteRun(run, await automationJoinForRun(run), [], await remoteContextLimits());
+}
+
+// The same inputs the Pi session's limit was priced from, so the phone's pill
+// reads exactly what the desktop composer's does. Unreadable settings are Auto.
+async function remoteContextLimits(): Promise<RemoteCoraRunContextLimits> {
+  const percent = await loadSettings()
+    .then((settings) => settings.coraAutoCompactPercent ?? null)
+    .catch(() => null);
+  return { percent, overrideTokens: compactAtOverrideTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS) };
 }
 
 async function projectCoraRunForRemote(
@@ -1910,7 +1920,7 @@ async function projectCoraRunForRemote(
   afterCursor?: string,
 ): Promise<RemoteCoraRunProjection> {
   const runId = requireRemoteCoraIdentity(run.id, "run.id");
-  const base = toRemoteRun(run, await automationJoinForRun(run), []);
+  const base = toRemoteRun(run, await automationJoinForRun(run), [], await remoteContextLimits());
   const sourceMessages = remoteCoraSourceMessages(run);
   return projectBoundedRemoteCoraRun({
     base,
@@ -2658,6 +2668,7 @@ function toRemoteRun(
   run: RunState,
   automation?: RemoteAutomationJoin,
   messages: RemoteCoraMessage[] = [],
+  contextLimits: RemoteCoraRunContextLimits = {},
 ): RemoteCoraRun {
   const workerProjection = toRemoteRunWorkers(run);
   const workers = workerProjection.workers;
@@ -2701,7 +2712,7 @@ function toRemoteRun(
   const projectedBlockedMessage = blockedMessage
     ? toRemoteCoraMessage(blockedMessage)
     : undefined;
-  const context = remoteCoraRunContext(run);
+  const context = remoteCoraRunContext(run, contextLimits);
   const undo = remoteCoraUndoTarget(run);
   const workersOmitted = Math.max(0, workerProjection.total - workers.length);
   const stepsOmitted = Math.max(0, plan.total - plan.steps.length);

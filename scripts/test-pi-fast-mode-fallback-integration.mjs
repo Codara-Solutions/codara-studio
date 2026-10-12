@@ -31,8 +31,10 @@ async function loadTs(file, imports = {}) {
 const { registerServiceTierPolicy } = await loadTs("../resources/pi-cora/service-tier.ts");
 const fastMode = await loadTs("../src/shared/fast-mode.ts");
 const compaction = await loadTs("../src/shared/context-compaction.ts");
+const contextWindow = await loadTs("../src/shared/context-window.ts");
 const { PiTurnAccumulator } = await loadTs("../src/main/orchestration/pi-turn.ts", {
   "@shared/context-compaction": compaction,
+  "@shared/context-window": contextWindow,
   "@shared/fast-mode": fastMode,
 });
 

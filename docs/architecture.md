@@ -290,6 +290,34 @@ on batches that keep failing rather than on a raw count and asks you instead
 of landing the run, and a Pi worker's continuation after compaction re-sends
 its acceptance, verification and report sections and its scratchpad.
 
+**Compaction.** The owner picks the limit in Settings > Behavior
+(`coraAutoCompactPercent`, a percentage of the model's window; Auto is the
+256k-capped default in `@shared/context-compaction`). It reaches every
+runtime per launch and never through a CLI's own config: Pi sessions through
+`CODARA_PI_COMPACT_PERCENT`, Codex terminals through
+`-c model_auto_compact_token_limit`, Claude terminals through a `--settings`
+file in Codara's home (`cli-autocompact.ts`). Inside a Pi session the
+extension (`resources/pi-cora/compaction.ts`) pauses at a tool-round
+boundary, so a cut never splits a tool call and never lands before the model
+has read the round that crossed the limit, and the host compacts and
+resumes the same turn (`pi-manager-compaction.ts`, `pi-worker-compaction.ts`).
+A failed summary is retried once with a shorter brief and then replaced by a
+summary built without a model (`pi-compaction-pipeline.ts`); a compaction
+that cannot shrink the context waits for real growth before the next one.
+After every compaction the extension re-injects a ledger built from the
+transcript (`compaction-ledger.ts`): the user's instructions verbatim, files
+changed, errors and their fixes, the plan, workers and artifacts. Cora's
+memory and profile sections stay out of both the summary and the ledger:
+the host re-sends a fresh copy once after each compaction, with the
+manager's mid-turn continuation, the manager's next turn, or a worker's
+task contract. The manager never pauses mid-turn after a tool that ends its turn (asking the
+user, completing, spawning terminals); it compacts at the turn's end
+instead. Between turns the run store can still cut a conversation over to a
+fresh session; its note pairs the summary with a block rebuilt from the run
+record (`conversation-compaction.ts`), and the ledger carries that note's
+verbatim user messages forward into later compactions. `scripts/test-compaction-eval.mjs` replays
+240-tool-call runs through all of it.
+
 **Run store.** `run-store.ts` is the state machine for runs: steps, worker
 tasks and attempts, human messages, questions, the board, the whiteboard.
 At about 20,000 lines it is the largest file in the repository. A run lives

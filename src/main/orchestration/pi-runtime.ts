@@ -7,7 +7,11 @@ import type {
   ProjectPolicyMode,
 } from "@shared/types";
 import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
-import { resolveCompactAtTokens } from "@shared/context-compaction";
+import {
+  compactAtOverrideTokens,
+  normalizeAutoCompactPercent,
+  resolveCompactAtTokens,
+} from "@shared/context-compaction";
 import { isRemotePath } from "@shared/remote";
 import { sanitizeAppImageChildEnv, sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
 
@@ -145,6 +149,8 @@ export interface PiManagerLaunchOptions {
    * the pricier mode.
    */
   fastMode?: boolean;
+  /** AppSettings.coraAutoCompactPercent. null or absent is Auto. */
+  autoCompactPercent?: number | null;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -648,6 +654,16 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   env.CODARA_PI_COMPACT_AT_TOKENS = String(
     resolvePiCompactAtTokens(options.baseEnv ?? process.env),
   );
+  // The extension prices the percentage off the window Pi reports for the
+  // model it actually runs, so a 1M and a 200k model each get their own limit.
+  // A developer token override in the base environment outranks it.
+  const autoCompactPercent = normalizeAutoCompactPercent(options.autoCompactPercent);
+  if (
+    autoCompactPercent !== null &&
+    compactAtOverrideTokens((options.baseEnv ?? process.env).CODARA_PI_COMPACT_AT_TOKENS) === null
+  ) {
+    env.CODARA_PI_COMPACT_PERCENT = String(autoCompactPercent);
+  }
   // Fast-mode policy inputs. The extension's before_provider_request hook is
   // the only seam Pi 0.85.1 gives us for the request body, and it needs to
   // know which provider this process talks to and whether Settings enabled

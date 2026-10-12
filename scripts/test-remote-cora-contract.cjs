@@ -142,9 +142,10 @@ async function main() {
       createdAt: "2026-08-11T00:00:00.000Z",
       ...overrides,
     });
-    const gauge = (run) => runContext.remoteCoraRunContext(run);
+    const gauge = (run, limits) => runContext.remoteCoraRunContext(run, limits);
 
-    // The visible product gauge is a stable 256k on every model.
+    // On Auto the denominator is the 256k default wherever the window allows
+    // it, the same number pi-turn.ts streams to the desktop pill.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
@@ -155,13 +156,48 @@ async function main() {
       { usedTokens: 141_312, budgetTokens: 256_000 },
     );
 
-    // Provider window details do not silently change the visible denominator.
+    // A window smaller than the default compacts below Pi's own trigger, and
+    // the desktop pill measures against that point; so does the phone.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
         sparkCalls: [managerCall({ model: "gpt-4o", promptTokens: 50_000 })],
       }),
-      { usedTokens: 50_000, budgetTokens: 256_000 },
+      { usedTokens: 50_000, budgetTokens: 128_000 - 16_384 },
+    );
+
+    // The user's percentage prices the limit off the window the turn
+    // reported, exactly as the desktop's live reading does.
+    assert.deepEqual(
+      gauge(
+        {
+          chatBackend: "pi",
+          sparkCalls: [managerCall({ promptTokens: 80_000, contextWindowTokens: 1_000_000 })],
+        },
+        { percent: 50 },
+      ),
+      { usedTokens: 80_000, budgetTokens: 500_000 },
+    );
+    assert.deepEqual(
+      gauge(
+        {
+          chatBackend: "pi",
+          sparkCalls: [managerCall({ promptTokens: 80_000, contextWindowTokens: 200_000 })],
+        },
+        { percent: 50 },
+      ),
+      { usedTokens: 80_000, budgetTokens: 100_000 },
+    );
+    // A developer token override outranks the percentage, as at launch.
+    assert.deepEqual(
+      gauge(
+        {
+          chatBackend: "pi",
+          sparkCalls: [managerCall({ promptTokens: 80_000, contextWindowTokens: 1_000_000 })],
+        },
+        { percent: 50, overrideTokens: 120_000 },
+      ),
+      { usedTokens: 80_000, budgetTokens: 120_000 },
     );
 
     // A turn that reported a zero window reported nothing usable: fall through
@@ -218,7 +254,7 @@ async function main() {
     );
 
     // A trailing turn that reported nothing must not shadow the last one that
-    // did. The visible budget remains the stable product target.
+    // did, and the limit is priced off the window of that same turn.
     assert.deepEqual(
       gauge({
         chatBackend: "pi",
@@ -231,7 +267,7 @@ async function main() {
           }),
         ],
       }),
-      { usedTokens: 90_000, budgetTokens: 256_000 },
+      { usedTokens: 90_000, budgetTokens: 200_000 - 16_384 },
     );
 
     // Zero, negative and non-finite counts are not usage.
@@ -320,8 +356,8 @@ async function main() {
       );
     }
 
-    // Operational compaction overrides must not silently relabel the product
-    // gauge or make remote and desktop percentages disagree.
+    // The pure gauge never reads the environment: the projection passes the
+    // override in (production.ts remoteContextLimits), as the cases above do.
     const previousCompactAt = process.env.CODARA_PI_COMPACT_AT_TOKENS;
     process.env.CODARA_PI_COMPACT_AT_TOKENS = "120000";
     try {

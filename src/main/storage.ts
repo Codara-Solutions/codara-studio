@@ -18,6 +18,7 @@ import { logMain } from "./file-log";
 import { writeFileAtomic } from "./fs-atomic";
 import { removeWorkspaceFromAppState } from "./workspace-state-edits";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
+import { normalizeAutoCompactPercent } from "@shared/context-compaction";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 const STATE_FILE = "spark-state.json";
@@ -61,6 +62,7 @@ const EMPTY_SETTINGS: AppSettings = {
   autopilotSandbox: false,
   openAiFastMode: false,
   coraAlwaysVerifyEdits: false,
+  coraAutoCompactPercent: null,
 };
 
 // The OpenRouter key is stored encrypted by the operating system (Electron
@@ -384,6 +386,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     autopilotSandbox: settings.autopilotSandbox === true,
     openAiFastMode: settings.openAiFastMode === true,
     coraAlwaysVerifyEdits: settings.coraAlwaysVerifyEdits === true,
+    coraAutoCompactPercent: normalizeAutoCompactPercent(settings.coraAutoCompactPercent),
   };
 }
 
