@@ -82,11 +82,14 @@ check("a single unnamed server object leaves the name for the user", () => {
   assert.equal(result.servers[0].command, "uvx");
 });
 
-check("SSE and working directories are kept honest in the notes", () => {
+check("SSE stays SSE, and a working directory is kept honest in the notes", () => {
   const result = servers(`{ "mcpServers": { "s": { "type": "sse", "url": "https://s.example/sse" }, "c": { "command": "x", "cwd": "/tmp" } } }`);
-  assert.equal(result.servers[0].transport, "http");
-  assert.ok(result.notes.some((note) => /SSE/.test(note)));
+  // The form offers SSE, so the snippet keeps the transport it declared.
+  assert.equal(result.servers[0].transport, "sse");
+  assert.ok(!result.notes.some((note) => /SSE/.test(note)));
   assert.ok(result.notes.some((note) => /working directory/.test(note)));
+  const added = servers("claude mcp add --transport sse linear https://mcp.linear.app/sse");
+  assert.equal(added.servers[0].transport, "sse");
 });
 
 check("a Codex TOML table is read with the real parser", () => {

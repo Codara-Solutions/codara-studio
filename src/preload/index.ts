@@ -58,6 +58,11 @@ import type {
   AgentMcpProbeResult,
   AgentMcpServerDraft,
   AgentMcpSnippetParseResult,
+  AgentMcpImportCandidate,
+  AgentMcpImportResult,
+  AgentSkillCreateInput,
+  AgentSkillImportSource,
+  AgentSkillWriteResult,
   AgentPiMcpPreview,
   AgentMcpTarget,
   AgentSyncResult,
@@ -134,6 +139,7 @@ import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
   PiCatalogModel,
+  WorkerModelCatalog,
   PiSubscriptionDeleteAccountInput,
   PiSubscriptionShareLoginInput,
   PiSubscriptionMakeDefaultInput,
@@ -385,6 +391,10 @@ const api = {
       return () => ipcRenderer.off("pi-runtime:install-event", listener);
     },
   },
+  workerModels: {
+    catalog: (force = false): Promise<WorkerModelCatalog> =>
+      ipcRenderer.invoke("worker-models:catalog", { force }),
+  },
   usageAnalytics: {
     // Scans the provider CLIs' on-disk transcripts. Cold scans take seconds on
     // a large history, so callers show a scanning state rather than assuming
@@ -460,6 +470,27 @@ const api = {
         if (!isMissingIpcHandlerError(err, "agents:parseMcpSnippet")) throw err;
         return { ok: false, error: "Restart Codara to paste server definitions." };
       }),
+    mcpImportCandidates: (input?: { cwd?: string | null }): Promise<AgentMcpImportCandidate[]> =>
+      ipcRenderer.invoke("agents:mcpImportCandidates", input ?? {}).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpImportCandidates")) return [];
+        throw err;
+      }),
+    importMcp: (input: { cwd?: string | null; ids: string[] }): Promise<AgentMcpImportResult> =>
+      ipcRenderer.invoke("agents:importMcp", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:importMcp")) throw err;
+        return { ok: false, imported: [], skipped: [], error: "Restart Codara to import MCP servers." };
+      }),
+    createSkill: (input: AgentSkillCreateInput): Promise<AgentSkillWriteResult> =>
+      ipcRenderer.invoke("agents:createSkill", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:createSkill")) throw err;
+        return { ok: false, error: "Restart Codara to add skills." };
+      }),
+    importSkill: (source: AgentSkillImportSource): Promise<AgentSkillWriteResult> =>
+      ipcRenderer.invoke("agents:importSkill", source).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:importSkill")) throw err;
+        return { ok: false, error: "Restart Codara to import skills." };
+      }),
+    pickSkillArchive: (): Promise<string | null> => ipcRenderer.invoke("dialog:openSkillArchive"),
     builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
       ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:builtins")) return [];

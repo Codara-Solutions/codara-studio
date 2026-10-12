@@ -12,6 +12,7 @@ import type {
   SparkBuiltinMcpId,
   SparkBuiltinMcpStatus,
   SparkBuiltinRuntime,
+  WorkerModelCatalog,
 } from "@shared/types";
 import { CORA_WORKER_MODEL_CHOICES } from "@shared/worker-model-roster";
 import {
@@ -47,9 +48,10 @@ import {
   type StatusMessage,
 } from "./capabilities/model";
 import { CloseButton } from "./capabilities/controls";
-import McpSection, { type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
+import McpSection, { type ImportState, type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
 import McpServerForm from "./capabilities/McpServerForm";
 import SkillsSection from "./capabilities/SkillsSection";
+import SkillForm, { blankSkillEditor, validateSkillEditor, type SkillEditorState } from "./capabilities/SkillForm";
 import ProfilesSection, { type ProfileDocumentDraft, type ProfileDraft } from "./capabilities/ProfilesSection";
 import MemorySection from "./capabilities/MemorySection";
 import WorkerModelsSection from "./capabilities/WorkerModelsSection";
@@ -126,7 +128,7 @@ const TAB_DESCRIPTION: Record<CapabilityTab, string> = {
   skills: "Instructions an agent loads when a task needs them, like a release checklist.",
   profiles: "Separate Coras, each with its own instructions and memory, picked per chat.",
   memory: "What Cora remembers between chats, as markdown files you can edit.",
-  workers: "The models Cora may hand implementation and verification work to.",
+  workers: "Every model your signed-in providers offer. Switch on the ones Cora may hand work to.",
   policy: "How Cora works on your requests and how workers are briefed.",
 };
 
@@ -137,7 +139,7 @@ const STANDING_NOTE: Record<CapabilityTab, string> = {
   skills: "Changes apply as you make them. New Cora chats and workers load the skills switched on.",
   profiles: "Changes apply as you make them. A started chat keeps the profile it began with.",
   memory: "Memory changes apply immediately.",
-  workers: "Changes apply as you make them, from the next worker Cora starts.",
+  workers: "Changes apply from the next worker Cora starts. New models arrive switched off.",
   policy: "Changes apply as you make them, for every workspace.",
 };
 
@@ -182,6 +184,11 @@ export default function AgentCapabilitiesDialog({
   const [editorBusy, setEditorBusy] = useState(false);
   const [editorProbe, setEditorProbe] = useState<ProbeState | null>(null);
   const editorBaseline = useRef("");
+  const [importState, setImportState] = useState<ImportState>({ phase: "idle" });
+  const [skillEditor, setSkillEditor] = useState<SkillEditorState | null>(null);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  const [skillBusy, setSkillBusy] = useState(false);
+  const skillBaseline = useRef("");
   const [confirmLeave, setConfirmLeave] = useState<LeaveAction | null>(null);
   // Both memory tiers of the profile being viewed, or null while the first
   // read is in flight. Every memory IPC resolves to the fresh pair.
@@ -200,6 +207,11 @@ export default function AgentCapabilitiesDialog({
   const [documentBusy, setDocumentBusy] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [openRouterVerified, setOpenRouterVerified] = useState<boolean | null>(null);
+  const [workerCatalog, setWorkerCatalog] = useState<WorkerModelCatalog | null>(null);
+  const [workerCatalogLoading, setWorkerCatalogLoading] = useState(true);
+  const [workerCatalogRefreshing, setWorkerCatalogRefreshing] = useState(false);
+  const [workerCatalogError, setWorkerCatalogError] = useState<string | null>(null);
+  const [workerSearch, setWorkerSearch] = useState("");
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
   const navRef = useRef<HTMLElement | null>(null);
@@ -315,6 +327,24 @@ export default function AgentCapabilitiesDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.openRouterApiKey, view.openRouterVerifiedKeyHash, view.openRouterCoraModels]);
 
+  const loadWorkerCatalog = useCallback((force: boolean) => {
+    if (force) setWorkerCatalogRefreshing(true);
+    return window.spark.workerModels
+      .catalog(force)
+      .then((catalog) => {
+        setWorkerCatalog(catalog);
+        setWorkerCatalogError(null);
+      })
+      .catch((err: unknown) => setWorkerCatalogError(errorText(err)))
+      .finally(() => {
+        setWorkerCatalogLoading(false);
+        if (force) setWorkerCatalogRefreshing(false);
+      });
+  }, []);
+  useEffect(() => {
+    void loadWorkerCatalog(false);
+  }, [loadWorkerCatalog]);
+
   useEffect(() => {
     let cancelled = false;
     let generation = 0;
@@ -357,11 +387,23 @@ export default function AgentCapabilitiesDialog({
   }, [workspaceId, viewedProfileId, memoryReload]);
 
   // ── Leaving with unsaved drafts ────────────────────────────────────────────
-  const editorDirty = editor !== null && JSON.stringify(editor) !== editorBaseline.current;
+  const serverDirty = editor !== null && JSON.stringify(editor) !== editorBaseline.current;
+  const skillDirty =
+    skillEditor !== null && JSON.stringify({ ...skillEditor, candidates: null }) !== skillBaseline.current;
+  // Either form view: the server form or the skill form.
+  const editorDirty = serverDirty || skillDirty;
+  const formBusy = editorBusy || skillBusy;
   const profileDraftDirty =
     profileDraft.name.trim() !== "" || profileDraft.description.trim() !== "" || profileDraft.instructions.trim() !== "";
   const documentDirty = documentDraft !== null && documentDraft.content !== documentDraft.original;
   const anyDirty = editorDirty || profileDraftDirty || documentDirty;
+
+  const openSkillEditor = (state: SkillEditorState) => {
+    skillBaseline.current = JSON.stringify({ ...state, candidates: null });
+    setSkillError(null);
+    setStatus(null);
+    setSkillEditor(state);
+  };
 
   const openEditor = (state: EditorState) => {
     editorBaseline.current = JSON.stringify(state);
@@ -378,6 +420,7 @@ export default function AgentCapabilitiesDialog({
     }
     setEditor(null);
     setEditorProbe(null);
+    setSkillEditor(null);
     if (action.kind === "tab") {
       // A per-row result ("Removed X from Claude") is about the section it
       // came from, so it does not follow the user out.
@@ -390,7 +433,7 @@ export default function AgentCapabilitiesDialog({
   // of it first. Anything typed and not saved is confirmed before it
   // is thrown away, and closing asks the same about the profile drafts.
   const requestLeave = (action: LeaveAction) => {
-    if (editorBusy && action.kind !== "close") return;
+    if (formBusy && action.kind !== "close") return;
     const discards =
       action.kind === "close" ? anyDirty : editorDirty;
     if (discards) setConfirmLeave(action);
@@ -401,7 +444,8 @@ export default function AgentCapabilitiesDialog({
     // A save in flight keeps the form up: dropping it would unmount the only
     // place its result can be reported.
     if (editorBusy) return;
-    if (editor) {
+    if (skillBusy) return;
+    if (editor || skillEditor) {
       requestLeave({ kind: "tab", tab });
       return;
     }
@@ -410,8 +454,9 @@ export default function AgentCapabilitiesDialog({
     setActiveTab(tab);
   };
 
-  const latestLeave = useRef({ requestLeave, confirmLeave, editor });
-  latestLeave.current = { requestLeave, confirmLeave, editor };
+  const formOpen = editor !== null || skillEditor !== null;
+  const latestLeave = useRef({ requestLeave, confirmLeave, editor: formOpen });
+  latestLeave.current = { requestLeave, confirmLeave, editor: formOpen };
   // On window, after the document-level listeners of menus opened from
   // here: a menu that took the Escape marks it handled and the dialog stays.
   useEffect(() => {
@@ -438,15 +483,18 @@ export default function AgentCapabilitiesDialog({
   const disabledSkills = useMemo(() => new Set(view.agentDisabledSkillIds), [view.agentDisabledSkillIds]);
   const coraAssigned = useMemo(() => new Set(view.agentMcpCoraManagerIds), [view.agentMcpCoraManagerIds]);
   const workerAssigned = useMemo(() => new Set(view.agentMcpPiWorkerIds), [view.agentMcpPiWorkerIds]);
+  // The discovered catalog, in its own order, once it lands; the shipped
+  // roster until then. Switched-on ids and OpenRouter favorites always stay
+  // listed so they can be switched off.
   const workerChoices = useMemo(
     () => [
       ...new Set([
-        ...CORA_WORKER_MODEL_CHOICES,
+        ...(workerCatalog ? workerCatalog.models.map((model) => model.id) : CORA_WORKER_MODEL_CHOICES),
         ...view.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
         ...view.coraWorkerModels.map((id) => id.trim()).filter(Boolean),
       ]),
     ],
-    [view.coraWorkerModels, view.openRouterCoraModels],
+    [workerCatalog, view.coraWorkerModels, view.openRouterCoraModels],
   );
   const usableWorkers = useMemo(
     () => usableWorkerModels(view, openRouterVerified ?? true),
@@ -625,6 +673,134 @@ export default function AgentCapabilitiesDialog({
       delete next[key];
       return next;
     });
+  };
+
+  // ── Import into Codara's own list ──────────────────────────────────────────
+  const openImport = () => {
+    setImportState({ phase: "loading" });
+    setStatus(null);
+    void window.spark.agents
+      .mcpImportCandidates({ cwd: workspaceCwd })
+      .then((candidates) => setImportState({ phase: "ready", candidates, selected: new Set(), running: false }))
+      .catch((err) => {
+        setImportState({ phase: "idle" });
+        setStatus(failure(`Could not read your CLI configs: ${errorText(err)}`));
+      });
+  };
+
+  const toggleImport = (id: string) => {
+    setImportState((current) => {
+      if (current.phase !== "ready" || current.running) return current;
+      const selected = new Set(current.selected);
+      if (selected.has(id)) selected.delete(id);
+      else selected.add(id);
+      return { ...current, selected };
+    });
+  };
+
+  const runImport = () => {
+    if (importState.phase !== "ready" || importState.selected.size === 0) return;
+    const ids = [...importState.selected];
+    setImportState({ ...importState, running: true });
+    void (async () => {
+      try {
+        const result = await window.spark.agents.importMcp({ cwd: workspaceCwd, ids });
+        const access = result.imported.length > 0
+          ? await applySettings(
+            (settingsNow) =>
+              result.imported.reduce(
+                (next, name) => withPiAssignment(next, mcpSessionKey(name), { cora: true, workers: true }),
+                settingsNow,
+              ),
+            null,
+          )
+          : true;
+        const parts = [
+          result.imported.length > 0
+            ? `Imported ${result.imported.join(", ")} into Codara's own list.${access ? " Cora and its workers can use them." : " Could not switch them on for Cora and workers; use the switches in their rows."}`
+            : "",
+          result.skipped.length > 0 ? `Skipped: ${result.skipped.join(" ")}` : "",
+          result.error ? `Problem: ${result.error}` : "",
+        ].filter(Boolean);
+        setStatus(result.ok && access && !result.error ? ok(parts.join(" ")) : failure(parts.join(" ") || "Nothing was imported."));
+        setImportState({ phase: "idle" });
+        afterAssetChange();
+      } catch (err) {
+        setImportState({ phase: "idle" });
+        setStatus(failure(`Import failed: ${errorText(err)}`));
+      }
+    })();
+  };
+
+  // ── Skills ─────────────────────────────────────────────────────────────────
+  const openAddSkill = () => {
+    setActiveTab("skills");
+    openSkillEditor(blankSkillEditor());
+  };
+
+  const runSkillWrite = (current: SkillEditorState, subdir?: string) => {
+    setSkillBusy(true);
+    setSkillError(null);
+    const request =
+      current.mode === "create"
+        ? window.spark.agents.createSkill({
+          name: current.name.trim(),
+          description: current.description,
+          instructions: current.instructions,
+        })
+        : window.spark.agents.importSkill(
+          current.source === "git"
+            ? { kind: "git", url: current.url.trim(), ...(subdir ? { subdir } : {}) }
+            : { kind: current.source, path: current.path.trim(), ...(subdir ? { subdir } : {}) },
+        );
+    void request
+      .then((result) => {
+        if (!result.ok) {
+          if (result.candidates && result.candidates.length > 0) {
+            setSkillEditor((editorNow) => (editorNow ? { ...editorNow, candidates: result.candidates ?? null } : editorNow));
+          } else {
+            setSkillError(result.error ?? "Could not add this skill.");
+          }
+          return;
+        }
+        setSkillEditor(null);
+        setStatus(
+          ok(
+            `${current.mode === "create" ? "Added" : "Imported"} ${result.name}. Cora and its workers load it from their next launch.`,
+          ),
+        );
+        refreshAssets();
+      })
+      .catch((err) => setSkillError(errorText(err)))
+      .finally(() => setSkillBusy(false));
+  };
+
+  const submitSkill = () => {
+    if (!skillEditor) return;
+    const problem = validateSkillEditor(skillEditor);
+    if (problem) {
+      setSkillError(problem);
+      return;
+    }
+    runSkillWrite(skillEditor);
+  };
+
+  const pickSkillFolder = () => {
+    void window.spark.dialog
+      .openDirectory()
+      .then((path) => {
+        if (path) setSkillEditor((current) => (current ? { ...current, path, candidates: null } : current));
+      })
+      .catch((err) => setSkillError(errorText(err)));
+  };
+
+  const pickSkillArchive = () => {
+    void window.spark.agents
+      .pickSkillArchive()
+      .then((path) => {
+        if (path) setSkillEditor((current) => (current ? { ...current, path, candidates: null } : current));
+      })
+      .catch((err) => setSkillError(errorText(err)));
   };
 
   const previewSync = () => {
@@ -1059,7 +1235,7 @@ export default function AgentCapabilitiesDialog({
     navRef.current?.querySelector<HTMLButtonElement>(`#capability-tab-${tab}`)?.focus();
   };
 
-  const editorMode = editor?.mode ?? null;
+  const editorMode = editor?.mode ?? (skillEditor ? "skill" : null);
   useEffect(() => {
     contentRef.current?.scrollTo({ top: 0 });
     setScrolled(false);
@@ -1119,14 +1295,18 @@ export default function AgentCapabilitiesDialog({
                 ? editor.mode === "add"
                   ? "Add a tool server"
                   : `Edit ${editor.originalName}`
-                : CAPABILITY_TABS.find((tab) => tab.id === renderedTab)?.label}
+                : skillEditor
+                  ? "Add a skill"
+                  : CAPABILITY_TABS.find((tab) => tab.id === renderedTab)?.label}
             </h2>
             <p className="st-topbar__desc">
               {editor
                 ? editor.mode === "add"
                   ? "Fill in the form, or paste the snippet from the server's README."
                   : "Changes are written to the config file when you save."
-                : TAB_DESCRIPTION[renderedTab]}
+                : skillEditor
+                  ? "Write a skill, or import one from a folder, a zip file or a git repository."
+                  : TAB_DESCRIPTION[renderedTab]}
             </p>
           </div>
           <CloseButton onClick={() => requestLeave({ kind: "close" })} />
@@ -1155,6 +1335,16 @@ export default function AgentCapabilitiesDialog({
               onTest={testEditor}
               onParse={parseSnippet}
             />
+          ) : skillEditor ? (
+            <SkillForm
+              editor={skillEditor}
+              busy={skillBusy}
+              error={skillError}
+              onChange={setSkillEditor}
+              onPickFolder={pickSkillFolder}
+              onPickZip={pickSkillArchive}
+              onChooseCandidate={(subdir) => runSkillWrite(skillEditor, subdir)}
+            />
           ) : (
             <>
               {renderedTab === "mcp" ? (
@@ -1179,6 +1369,11 @@ export default function AgentCapabilitiesDialog({
                   probes={probes}
                   canAdd={targets.length > 0}
                   sync={sync}
+                  importState={importState}
+                  onImportOpen={openImport}
+                  onImportToggle={toggleImport}
+                  onImportRun={runImport}
+                  onImportDismiss={() => setImportState({ phase: "idle" })}
                   onAdd={openAdd}
                   onTogglePiScope={togglePiScope}
                   onEdit={openEdit}
@@ -1212,6 +1407,7 @@ export default function AgentCapabilitiesDialog({
                   onToggle={toggleSkill}
                   onRemove={removeGroup}
                   onInstall={installToRuntime}
+                  onAdd={openAddSkill}
                 />
               ) : null}
 
@@ -1261,10 +1457,17 @@ export default function AgentCapabilitiesDialog({
 
               {renderedTab === "workers" ? (
                 <WorkerModelsSection
+                  catalog={workerCatalog}
+                  loading={workerCatalogLoading}
+                  refreshing={workerCatalogRefreshing}
+                  loadError={workerCatalogError}
+                  onRefresh={() => void loadWorkerCatalog(true)}
                   choices={workerChoices}
                   enabled={view.coraWorkerModels}
                   usable={usableWorkers}
                   openRouterVerified={openRouterVerified}
+                  search={workerSearch}
+                  onSearch={setWorkerSearch}
                   onToggle={toggleWorkerModel}
                 />
               ) : null}
@@ -1282,7 +1485,9 @@ export default function AgentCapabilitiesDialog({
               <div role="alert" style={{ ...statusStyle, color: "var(--ink)" }}>
                 {confirmLeave.kind === "close" && !editorDirty
                   ? "You have an unsaved profile draft. Discard it?"
-                  : "This server has unsaved changes. Discard them?"}
+                  : skillDirty
+                    ? "This skill is not saved yet. Discard it?"
+                    : "This server has unsaved changes. Discard them?"}
               </div>
               <button type="button" className="spark-btn" onClick={() => setConfirmLeave(null)} autoFocus>
                 Keep editing
@@ -1305,9 +1510,11 @@ export default function AgentCapabilitiesDialog({
               >
                 {editor
                   ? editor.mode === "add"
-                    ? "Adding a server writes it into the config files you picked."
+                    ? "Adding a server saves it in Codara's own list. No CLI config is changed."
                     : "Saving writes the change into the config file straight away."
-                  : statusText ?? STANDING_NOTE[activeTab]}
+                  : skillEditor
+                    ? "The skill is saved in Codara's own skill folder. No CLI's skill folder is changed."
+                    : statusText ?? STANDING_NOTE[activeTab]}
               </div>
               {editor ? (
                 <>
@@ -1316,6 +1523,17 @@ export default function AgentCapabilitiesDialog({
                   </button>
                   <button type="button" className="spark-btn is-primary" onClick={submitEditor} disabled={editorBusy}>
                     {editorBusy ? "Saving" : editor.mode === "add" ? "Add server" : "Save changes"}
+                  </button>
+                </>
+              ) : skillEditor ? (
+                <>
+                  <button type="button" className="spark-btn" onClick={() => requestLeave({ kind: "back" })} disabled={skillBusy}>
+                    Back
+                  </button>
+                  <button type="button" className="spark-btn is-primary" onClick={submitSkill} disabled={skillBusy}>
+                    {skillBusy
+                      ? skillEditor.mode === "create" ? "Saving" : "Importing"
+                      : skillEditor.mode === "create" ? "Add skill" : "Import skill"}
                   </button>
                 </>
               ) : (

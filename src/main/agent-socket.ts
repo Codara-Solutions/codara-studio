@@ -2000,8 +2000,8 @@ async function handleCliChatSettings(
 ): Promise<JsonRpcResponse> {
   try {
     if (method === "models.list") {
-      const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
-      return successResponse(id, { models: await inspectPiModelCatalog(false) });
+      const { inspectUnifiedPiModelCatalog } = await import("./orchestration/worker-model-catalog");
+      return successResponse(id, { models: await inspectUnifiedPiModelCatalog(false) });
     }
 
     const runIdOrPrefix = stringParam(params, "runId")?.trim();

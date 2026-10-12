@@ -82,6 +82,10 @@ process.env.HOME = FAKE_HOME;
 process.env.CODEX_HOME = path.join(FAKE_HOME, ".codex");
 process.env.GROK_HOME = path.join(FAKE_HOME, ".grok");
 process.env.CLAUDE_CONFIG_DIR = path.join(FAKE_HOME, ".claude");
+// Codara's own server list is discovered first, and Codara exports
+// SPARK_HOME_DIR, so the real one would otherwise be read here.
+process.env.CODARA_HOME_DIR = path.join(FAKE_HOME, ".codarastudio");
+process.env.SPARK_HOME_DIR = path.join(FAKE_HOME, ".codarastudio");
 process.on("exit", () => {
   os.homedir = realHomedir;
   fs.rmSync(FAKE_HOME, { recursive: true, force: true });

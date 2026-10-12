@@ -1,12 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useMemo } from "react";
 import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 import { AGENT_FAMILIES, familyForModelId } from "@shared/agent-families";
+import type { PiSubscriptionProvider, WorkerCatalogModel, WorkerModelCatalog, WorkerModelProviderState } from "@shared/types";
+import { WORKER_MODEL_ROSTER, isOpenRouterModelId } from "@shared/worker-model-roster";
 import {
-  WORKER_MODEL_ROSTER,
-  isOpenRouterModelId,
-  workerModelSubscription,
-} from "@shared/worker-model-roster";
-import {
+  SearchField,
+  SectionHead,
   SwitchTrack,
   WarnGlyph,
   noticeStyle,
@@ -17,52 +16,81 @@ import {
   withFocusRing,
 } from "./controls";
 
+// Every model the signed-in providers offer, as the main process discovered
+// them (worker-model-catalog.ts): the provider's own list where it can be
+// read, the CLIs' caches, and Pi's catalog. A model found for the first time
+// arrives switched off with a New badge; nothing here enables it.
 export default function WorkerModelsSection({
+  catalog,
+  loading,
+  refreshing,
+  loadError,
+  onRefresh,
   choices,
   enabled,
   usable,
   openRouterVerified,
+  search,
+  onSearch,
   onToggle,
 }: {
+  catalog: WorkerModelCatalog | null;
+  loading: boolean;
+  refreshing: boolean;
+  loadError: string | null;
+  onRefresh: () => void;
   choices: string[];
   enabled: string[];
   usable: string[];
   openRouterVerified: boolean | null;
+  search: string;
+  onSearch: (next: string) => void;
   onToggle: (modelId: string) => void;
 }) {
-  const groups = groupWorkerModels(choices);
+  const byId = useMemo(() => new Map((catalog?.models ?? []).map((model) => [model.id, model])), [catalog]);
   const usableSet = new Set(usable);
-  // Cora is offered only models whose provider has a usable account, so a row
-  // for a signed-out provider says why it will not be used.
-  const [usableSubscriptions, setUsableSubscriptions] = useState<ReadonlySet<string> | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    void window.spark.piSubscriptions
-      .status()
-      .then((overview) => {
-        if (cancelled) return;
-        setUsableSubscriptions(new Set(
-          (overview.profiles ?? [])
-            .filter((profile) => profile.connected && (!profile.expired || profile.canRefresh))
-            .map((profile) => profile.provider),
-        ));
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const signedOutModel = (modelId: string): boolean => {
-    const subscription = workerModelSubscription(modelId);
-    return Boolean(usableSubscriptions && subscription && !usableSubscriptions.has(subscription));
-  };
+  const query = search.trim().toLowerCase();
+  const groups = groupWorkerModels(choices, byId).map((group) => ({
+    ...group,
+    models: query
+      ? group.models.filter((modelId) => {
+          const label = presentation(modelId, byId.get(modelId)).label;
+          return `${label} ${modelId}`.toLowerCase().includes(query);
+        })
+      : group.models,
+  }));
+  const shown = groups.reduce((total, group) => total + group.models.length, 0);
   // Switched on is not the same as runnable: with every switched-on model's
   // provider signed out, Cora has no worker to start.
+  const signedOutModel = (modelId: string) => byId.get(modelId)?.unavailable === "Not signed in";
   const runnable = enabled.filter((modelId) => usableSet.has(modelId));
-  const noneSignedIn =
-    usableSubscriptions !== null && runnable.length > 0 && runnable.every(signedOutModel);
+  const noneSignedIn = catalog !== null && runnable.length > 0 && runnable.every(signedOutModel);
+  const newCount = (catalog?.models ?? []).filter((model) => model.isNew).length;
   return (
     <section style={sectionStyle}>
+      <SectionHead
+        lead={<SearchField value={search} onChange={onSearch} placeholder="Filter models" />}
+        actions={
+          <>
+            <span style={updatedStyle} aria-live="polite">
+              {refreshing
+                ? "Checking the providers..."
+                : catalog?.refreshedAt
+                  ? `Updated ${relativeTime(catalog.refreshedAt)}${newCount > 0 ? `, ${newCount} new` : ""}`
+                  : null}
+            </span>
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={onRefresh}
+              disabled={refreshing}
+              title="Ask each signed-in provider for its current model list"
+            >
+              Refresh
+            </button>
+          </>
+        }
+      />
       {usable.length === 0 ? (
         <div style={noticeStyle} role="alert">
           <WarnGlyph />
@@ -88,71 +116,115 @@ export default function WorkerModelsSection({
           </span>
         </div>
       ) : null}
-      <div role="group" aria-label="Cora worker models" style={toggleListStyle}>
-        {groups.map((group) => (
-          <div key={group.label} role="group" aria-label={`${group.label} worker models`}>
-            <div style={groupLabelStyle}>{group.label}</div>
-            <div className="st-rows">
-              {group.models.map((modelId) => {
-                const on = enabled.includes(modelId);
-                const unusable = on && !usableSet.has(modelId)
-                  ? isOpenRouterModelId(modelId)
-                    ? "Not usable: the OpenRouter key is not verified, or this model is no longer a Cora favorite in Settings, API and model."
-                    : "Not usable right now."
-                  : null;
-                const signedOut = signedOutModel(modelId);
-                return (
-                  <WorkerModelRow
-                    key={modelId}
-                    modelId={modelId}
-                    checked={on}
-                    unusable={unusable}
-                    signedOut={signedOut}
-                    onToggle={() => onToggle(modelId)}
-                  />
-                );
-              })}
+      {loadError ? (
+        <div style={noticeStyle} role="alert">
+          <WarnGlyph />
+          <span>Could not read the model lists: {loadError}. Showing the models Codara ships with.</span>
+        </div>
+      ) : null}
+      <div role="group" aria-label="Cora worker models" aria-busy={loading} style={toggleListStyle}>
+        {groups.map((group) =>
+          group.models.length === 0 ? null : (
+            <div key={group.label} role="group" aria-label={`${group.label} worker models`}>
+              <div style={groupHeadStyle}>
+                <span style={groupLabelStyle}>{group.label}</span>
+                {group.provider ? (
+                  <ProviderNote state={catalog?.providers.find((entry) => entry.provider === group.provider)} />
+                ) : null}
+              </div>
+              <div className="st-rows">
+                {group.models.map((modelId) => {
+                  const entry = byId.get(modelId);
+                  const on = enabled.includes(modelId);
+                  // A signed-out provider says so once in its heading; a row
+                  // repeats it only when it is switched on and so idle.
+                  const reason = isOpenRouterModelId(modelId)
+                    ? on && !usableSet.has(modelId)
+                      ? "Key not verified"
+                      : null
+                    : entry?.unavailable === "Not signed in" && !on
+                      ? null
+                      : entry?.unavailable ?? null;
+                  return (
+                    <WorkerModelRow
+                      key={modelId}
+                      modelId={modelId}
+                      model={entry}
+                      checked={on}
+                      reason={reason}
+                      onToggle={() => onToggle(modelId)}
+                    />
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))}
+          ),
+        )}
+        {shown === 0 && query ? <div style={emptyStyle}>No model matches this filter.</div> : null}
       </div>
     </section>
   );
 }
 
-// The list divides by model source, not one flat roster: the three native
-// families under the names the rest of the app uses (Claude, Codex, Grok),
-// then the user's OpenRouter favorites. "Other" only exists so an id with an
-// unrecognized shape stays visible and toggleable instead of vanishing.
-const WORKER_MODEL_GROUP_ORDER = ["Claude", "Codex", "Grok", "OpenRouter", "Other"] as const;
+const PROVIDER_SOURCE: Record<WorkerModelProviderState["listedFrom"], string> = {
+  provider: "Listed by the provider for your account",
+  cli: "From the CLI's own model list",
+  pi: "From Pi's model catalog",
+};
 
-function workerModelGroupFor(modelId: string): string {
+function ProviderNote({ state }: { state: WorkerModelProviderState | undefined }) {
+  if (!state) return null;
+  if (!state.signedIn) return <span style={groupNoteStyle}>Not signed in</span>;
+  return (
+    <span style={groupNoteStyle} title={state.note ?? undefined}>
+      {PROVIDER_SOURCE[state.listedFrom]}
+      {state.note ? `. ${state.note}` : ""}
+    </span>
+  );
+}
+
+// The list divides by provider, then the user's OpenRouter favorites. "Other"
+// only exists so an id with an unrecognized shape stays visible and
+// toggleable instead of vanishing.
+const PROVIDER_GROUPS: Array<{ label: string; provider: PiSubscriptionProvider | null }> = [
+  { label: AGENT_FAMILIES.claude.displayName, provider: "anthropic" },
+  { label: AGENT_FAMILIES.codex.displayName, provider: "openai-codex" },
+  { label: AGENT_FAMILIES.grok.displayName, provider: "xai" },
+  { label: "OpenRouter", provider: null },
+  { label: "Other", provider: null },
+];
+
+function workerModelGroupFor(modelId: string, model: WorkerCatalogModel | undefined): string {
   // OpenRouter ids are vendor/model paths; native Pi ids never contain "/".
   if (modelId.includes("/")) return "OpenRouter";
+  if (model) return PROVIDER_GROUPS.find((group) => group.provider === model.provider)?.label ?? "Other";
   const family = familyForModelId(modelId);
   return family ? AGENT_FAMILIES[family].displayName : "Other";
 }
 
-function groupWorkerModels(choices: string[]): { label: string; models: string[] }[] {
+function groupWorkerModels(
+  choices: string[],
+  byId: ReadonlyMap<string, WorkerCatalogModel>,
+): Array<{ label: string; provider: PiSubscriptionProvider | null; models: string[] }> {
   const buckets = new Map<string, string[]>();
   for (const modelId of choices) {
-    const group = workerModelGroupFor(modelId);
+    const group = workerModelGroupFor(modelId, byId.get(modelId));
     const bucket = buckets.get(group);
     if (bucket) bucket.push(modelId);
     else buckets.set(group, [modelId]);
   }
-  return WORKER_MODEL_GROUP_ORDER.filter((label) => buckets.has(label)).map((label) => ({
-    label,
-    models: buckets.get(label)!,
+  return PROVIDER_GROUPS.filter((group) => buckets.has(group.label)).map((group) => ({
+    ...group,
+    models: buckets.get(group.label)!,
   }));
 }
 
-// Presentation is derived from the id alone: a friendly label for scanning
-// and a premium flag for the one roster entry that is materially more
-// expensive. Attribution comes from the group heading the row renders under.
-// The EXACT id always renders beside the label in mono: the id, not the
+// The catalog's label when the main process has one (curated, vendor, Pi);
+// otherwise one derived from the id, so a model the catalog does not know
+// still reads well. The exact id renders beside it in mono: the id, not the
 // label, is what the spawn path enforces.
-function workerModelPresentation(modelId: string): { label: string; premium: boolean } {
+function presentation(modelId: string, model: WorkerCatalogModel | undefined): { label: string; premium: boolean } {
+  if (model) return { label: model.label, premium: model.premium };
   const isOpenRouter = modelId.includes("/");
   const codexEntry = CODEX_MODEL_CATALOG.find((entry) => entry.id === modelId);
   const slug = (isOpenRouter ? modelId.split("/").at(-1) : modelId) ?? modelId;
@@ -161,41 +233,47 @@ function workerModelPresentation(modelId: string): { label: string; premium: boo
     slug
       .split(/[-_]/)
       .filter(Boolean)
-      .map((part) =>
-        part.toLowerCase() === "gpt" ? "GPT" : `${part.charAt(0).toUpperCase()}${part.slice(1)}`,
-      )
+      .map((part) => (part.toLowerCase() === "gpt" ? "GPT" : `${part.charAt(0).toUpperCase()}${part.slice(1)}`))
       .join(" ");
   return { label, premium: modelId === WORKER_MODEL_ROSTER.claude.premium };
 }
+
+const REASON_DETAIL: Record<string, string> = {
+  "Not signed in": "No account for this provider is signed in, so Cora will not use this model. Sign in under Settings, Accounts.",
+  "Not in your account's list": "The provider's model list for your account does not include it, so a launch would likely be refused.",
+  "No longer listed": "No provider list or catalog mentions this model any more. Switch it off unless you know it still works.",
+  "Key not verified": "The OpenRouter key is not verified, or this model is no longer a Cora favorite in Settings, API and model.",
+};
 
 // One compact de-boxed row per model: the whole row is the switch, and the
 // group heading above carries the provider attribution.
 function WorkerModelRow({
   modelId,
+  model,
   checked,
-  unusable,
-  signedOut,
+  reason,
   onToggle,
 }: {
   modelId: string;
+  model: WorkerCatalogModel | undefined;
   checked: boolean;
-  unusable: string | null;
-  signedOut: boolean;
+  reason: string | null;
   onToggle: () => void;
 }) {
   const { focus, handlers } = useInteractive();
-  const model = workerModelPresentation(modelId);
+  const shown = presentation(modelId, model);
   // Switched on but out of reach: the row says why in plain text and the
   // switch dims, so "on" never reads as "running".
-  const idle = checked && (signedOut || unusable !== null);
+  const idle = checked && reason !== null;
+  const detail = reason ? REASON_DETAIL[reason] ?? reason : undefined;
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      aria-label={`${model.label} (${modelId})`}
-      aria-description={unusable ?? undefined}
-      title={unusable ?? modelId}
+      aria-label={`${shown.label} (${modelId})`}
+      aria-description={detail}
+      title={detail ?? modelId}
       onClick={onToggle}
       {...handlers}
       style={{
@@ -214,37 +292,69 @@ function WorkerModelRow({
             color: idle ? "var(--st-desc)" : "var(--ink)",
           }}
         >
-          {model.label}
+          {shown.label}
         </span>
-        {model.premium ? (
+        {shown.premium ? (
           <span className="spark-badge" style={tierStyle}>
             Premium
           </span>
         ) : null}
-        {unusable ? (
-          <span style={stateNoteStyle}>Not usable right now</span>
-        ) : signedOut ? (
-          <span
-            style={stateNoteStyle}
-            title="No account for this provider is signed in, so Cora will not use this model. Sign in under Settings, Accounts."
-          >
-            Not signed in, so Cora skips it
+        {model?.isNew ? (
+          <span className="spark-badge" style={tierStyle} title={`First seen ${new Date(model.firstSeenAt).toLocaleDateString()}`}>
+            New
           </span>
         ) : null}
+        {shown.label !== modelId ? <span style={idStyle}>{modelId}</span> : null}
+        {reason ? <span style={stateNoteStyle}>{reason}</span> : null}
       </span>
       <SwitchTrack checked={checked} disabled={idle} />
     </button>
   );
 }
 
-// The source heading over each cluster: Claude, Codex, Grok, OpenRouter.
-// Drawn like a Settings section title.
-const groupLabelStyle: React.CSSProperties = {
+function relativeTime(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 60_000) return "just now";
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+const groupHeadStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "baseline",
+  flexWrap: "wrap",
+  columnGap: 10,
+  rowGap: 2,
   padding: "18px 0 10px",
+};
+
+// The provider heading over each cluster, drawn like a Settings section title.
+const groupLabelStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontSize: 13.5,
   fontWeight: 600,
   lineHeight: 1.35,
+};
+
+const groupNoteStyle: React.CSSProperties = {
+  color: "var(--st-faint)",
+  fontSize: 12,
+  minWidth: 0,
+};
+
+const updatedStyle: React.CSSProperties = {
+  color: "var(--st-faint)",
+  fontSize: 12.5,
+  fontVariantNumeric: "tabular-nums",
+};
+
+const emptyStyle: React.CSSProperties = {
+  padding: "18px 0",
+  color: "var(--st-faint)",
+  fontSize: 12.5,
 };
 
 const nameCellStyle: React.CSSProperties = {
@@ -262,8 +372,12 @@ const labelStyle: React.CSSProperties = {
   transition: "color var(--motion-fast) var(--ease-out)",
 };
 
-// The exact model id, always visible: it is the value that persists and that
-// run-store enforces at spawn, so it must be copy-checkable at a glance.
+const idStyle: React.CSSProperties = {
+  color: "var(--st-faint)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11.5,
+};
+
 const stateNoteStyle: React.CSSProperties = {
   flex: "0 0 auto",
   color: "var(--st-faint)",

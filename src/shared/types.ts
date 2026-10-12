@@ -930,6 +930,43 @@ export interface PiCatalogModel {
   thinkingLevels: string[];
 }
 
+/** Where a worker model was seen: Pi's catalog, the provider's own model
+ * list for the signed-in account, or a cache a CLI keeps on disk. */
+export type WorkerModelSource = "pi" | "provider" | "cli";
+
+export interface WorkerCatalogModel {
+  id: string;
+  /** Curated name, else the vendor's, else Pi's, else the raw id. */
+  label: string;
+  provider: PiSubscriptionProvider;
+  premium: boolean;
+  /** First seen after the catalog's baseline, within the last two weeks. */
+  isNew: boolean;
+  /** Null when Cora can launch it now, else a short reason it cannot. */
+  unavailable: string | null;
+  sources: WorkerModelSource[];
+  reasoning: boolean;
+  contextWindow?: number;
+  thinkingLevels: string[];
+  firstSeenAt: string;
+}
+
+export interface WorkerModelProviderState {
+  provider: PiSubscriptionProvider;
+  signedIn: boolean;
+  /** How the list for this provider was built on the last refresh. */
+  listedFrom: "provider" | "cli" | "pi";
+  /** One short sentence when the provider's own list could not be read. */
+  note: string | null;
+  checkedAt: string | null;
+}
+
+export interface WorkerModelCatalog {
+  models: WorkerCatalogModel[];
+  providers: WorkerModelProviderState[];
+  refreshedAt: string | null;
+}
+
 export type PiUsageWindowScope =
   | { kind: "general" }
   | { kind: "code_review" }
@@ -1836,7 +1873,9 @@ export interface AgentSyncResult {
 }
 
 export type AgentAssetKind = "mcp" | "skill";
-export type AgentAssetRuntime = AgentFamilyRuntime | "shared";
+// "codara" is Codara's own MCP list and skill folder under the Codara home:
+// only Cora and her workers load them, no CLI does.
+export type AgentAssetRuntime = AgentFamilyRuntime | "shared" | "codara";
 export type AgentAssetScope = "user" | "workspace";
 export type AgentAssetCompatibility = "both" | "claude" | "codex" | "grok" | "unknown";
 
@@ -1883,9 +1922,8 @@ export interface AgentAssetInventoryItem {
   piLoads?: boolean;
 }
 
-// stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
-// only ever arrives from a config the user wrote by hand; the form reads it as
-// HTTP and preserves the url, so a saved edit migrates it to streamable-http.
+// stdio, streamable HTTP and SSE. The form writes all three, so an SSE entry
+// keeps its transport when it is edited.
 export type AgentMcpTransport = "stdio" | "http" | "sse";
 
 // One config file the Capability Center is willing to write a user-authored
@@ -1906,7 +1944,7 @@ export interface AgentMcpTarget {
 
 export interface AgentMcpServerDraft {
   name: string;
-  transport: "stdio" | "http";
+  transport: AgentMcpTransport;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -1997,6 +2035,49 @@ export interface AgentMcpProbeResult {
 export type AgentMcpSnippetParseResult =
   | { ok: true; servers: AgentMcpServerDraft[]; notes: string[] }
   | { ok: false; error: string };
+
+// A server found in the Claude, Codex or Grok config that can be copied into
+// Codara's own list. Listing and importing only read those files.
+export interface AgentMcpImportCandidate {
+  id: string;
+  name: string;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  path: string;
+  transport: AgentMcpTransport;
+  summary: string;
+  // A server of the same name is already in Codara's own list.
+  alreadyInCodara: boolean;
+}
+
+export interface AgentMcpImportResult {
+  ok: boolean;
+  imported: string[];
+  skipped: string[];
+  error?: string;
+}
+
+// A skill written in the Capability Center, or imported from a folder, a zip
+// archive or a git repository into Codara's own skill folder.
+export interface AgentSkillCreateInput {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
+export type AgentSkillImportSource =
+  | { kind: "folder"; path: string; subdir?: string }
+  | { kind: "zip"; path: string; subdir?: string }
+  | { kind: "git"; url: string; subdir?: string };
+
+export interface AgentSkillWriteResult {
+  ok: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
+  // The source held several skills: their folders, relative to the source.
+  candidates?: string[];
+}
 
 export interface AgentAssetDeleteResult {
   ok: boolean;

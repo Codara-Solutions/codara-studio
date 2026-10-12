@@ -102,10 +102,9 @@ function draftFromJson(name: string, value: unknown, notes: string[]): AgentMcpS
   const label = name.trim() || "server";
   const url = typeof value.url === "string" ? value.url : typeof value.serverUrl === "string" ? value.serverUrl : "";
   if (url) {
-    if (value.type === "sse") notes.push(`'${label}' uses SSE. It is saved as streamable HTTP, which most servers also accept.`);
     return {
       name: name.trim(),
-      transport: "http",
+      transport: value.type === "sse" ? "sse" : "http",
       url: url.trim(),
       headers: stringRecord(value.headers),
     };
@@ -219,8 +218,7 @@ function parseClaudeAdd(words: string[], notes: string[]): AgentMcpServerDraft {
   const [name = "", target = "", ...args] = positional;
   if (!target) throw new Error("That `claude mcp add` command has no command or URL.");
   if (transport === "http" || transport === "sse" || /^https?:\/\//i.test(target)) {
-    if (transport === "sse") notes.push(`'${name || "server"}' uses SSE. It is saved as streamable HTTP, which most servers also accept.`);
-    return { name, transport: "http", url: target, headers: nonEmpty(headers) };
+    return { name, transport: transport === "sse" ? "sse" : "http", url: target, headers: nonEmpty(headers) };
   }
   return { name, transport: "stdio", command: target, args, env: nonEmpty(env) };
 }
