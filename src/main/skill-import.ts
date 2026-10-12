@@ -152,7 +152,7 @@ export async function importCodaraSkill(
       await fs.mkdir(staging, { recursive: true, mode: 0o700 });
       const clone = join(staging, "repo");
       await cloneRepository(parsed, clone, options.runGit ?? runGit);
-      root = parsed.subdir ? join(clone, ...parsed.subdir.split("/")) : clone;
+      root = parsed.subdir ? await confinedDir(clone, join(clone, ...parsed.subdir.split("/"))) : clone;
       rootName = (parsed.subdir ?? parsed.cloneUrl).split("/").pop()!.replace(/\.git$/i, "");
     }
     const skillDir = await chooseSkillDir(root, source.subdir);
@@ -201,12 +201,22 @@ function insideRoot(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
+// The lexical check above cannot see a symlinked folder on the way to `dir`,
+// which would point the copy at any folder on the machine.
+async function confinedDir(root: string, dir: string): Promise<string> {
+  const [realRoot, realDir] = await Promise.all([fs.realpath(root), fs.realpath(dir).catch(() => null)]);
+  if (realDir === null) return dir;
+  if (!insideRoot(realRoot, realDir)) throw new SkillImportError("That folder is outside the import source.");
+  return realDir;
+}
+
 async function chooseSkillDir(root: string, subdir: string | undefined): Promise<string> {
   if (subdir !== undefined && subdir !== "") {
     const rel = safeRelativePath(subdir);
     if (!rel) throw new SkillImportError("That folder is outside the import source.");
-    const dir = join(root, ...rel.split("/"));
-    if (!insideRoot(root, dir)) throw new SkillImportError("That folder is outside the import source.");
+    const lexical = join(root, ...rel.split("/"));
+    if (!insideRoot(root, lexical)) throw new SkillImportError("That folder is outside the import source.");
+    const dir = await confinedDir(root, lexical);
     if (!(await hasSkillFile(dir))) throw new SkillImportError(`${rel} has no SKILL.md.`);
     return dir;
   }
@@ -275,6 +285,23 @@ export function parseSkillFrontmatter(text: string): { name?: string; descriptio
   return out;
 }
 
+/** The SKILL.md with every frontmatter `name:` replaced by one `name: <name>`. */
+export function withSkillName(document: string, name: string): string {
+  const match = /^(﻿?---(\r?\n))([\s\S]*?)(\r?\n---[^\S\r\n]*(?:\r?\n|$))/.exec(document);
+  if (!match) return `---\nname: ${name}\n---\n\n${document}`;
+  const eol = match[2];
+  const lines = match[3].split(/\r?\n/);
+  const kept: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^name\s*:/.test(lines[index])) {
+      while (index + 1 < lines.length && /^\s+\S/.test(lines[index + 1])) index += 1;
+      continue;
+    }
+    kept.push(lines[index]);
+  }
+  return `${match[1]}name: ${name}${kept.length > 0 ? eol + kept.join(eol) : ""}${match[4]}${document.slice(match[0].length)}`;
+}
+
 async function installSkillFolder(
   skillDir: string,
   skillsDir: string,
@@ -300,6 +327,12 @@ async function installSkillFolder(
   }
   try {
     await copyTreeSafely(skillDir, dest, { files: 0, bytes: 0 }, 0);
+    // Pi and the Capability Center key a skill by its frontmatter name, not
+    // its folder, so the installed copy carries the validated name: a raw
+    // name would reach Cora's prompt and dodge the collision check above.
+    if (frontmatter.name !== name) {
+      await fs.writeFile(join(dest, "SKILL.md"), withSkillName(document, name));
+    }
   } catch (err) {
     await fs.rm(dest, { recursive: true, force: true }).catch(() => undefined);
     throw err;
