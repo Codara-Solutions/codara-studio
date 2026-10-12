@@ -2,8 +2,9 @@
 // (src/main/orchestration/workflow-worktree.ts) against throwaway git
 // repositories: an unchanged agent leaves nothing behind, a changed one
 // leaves exactly one commit on its branch and no checkout, parallel creation
-// does not race git, a non-git workspace refuses isolation, and run cleanup
-// deletes only merged branches.
+// does not race git, a non-git workspace refuses isolation, run cleanup
+// deletes only merged branches, and checkouts an app restart left behind are
+// removed with their edits kept on their branches.
 //
 //   node scripts/test-workflow-worktree.cjs
 
@@ -91,6 +92,24 @@ async function main() {
     check("cleanup deletes merged branches", cleaned.deleted.includes(mergedDone.branch), cleaned);
     check("cleanup keeps unmerged branches", cleaned.kept.includes("codara/wf/abcdef12/fix-1"), cleaned);
     check("the unmerged branch still exists", git(repo, "branch", "--list", "codara/wf/abcdef12/fix-1") !== "");
+  }
+  {
+    // An app restart cut two isolated agents off: their checkouts were never
+    // finished. Cancel or Delete must not leave them registered in the repo.
+    const edited = await wt.createWorkflowWorktree({ repoCwd: repo, root, runId, label: "cut off", seq: 8, base });
+    const clean = await wt.createWorkflowWorktree({ repoCwd: repo, root, runId, label: "idle", seq: 9, base });
+    fs.writeFileSync(path.join(edited.path, "d.txt"), "half done\n");
+    const elsewhere = path.join(tempDir(), "user-worktree");
+    git(repo, "worktree", "add", "-q", "-b", "user-branch", elsewhere, base);
+    const removed = await wt.removeWorkflowWorktrees(repo, root, "workflow test: interrupted agent");
+    check("leftover checkouts are removed", removed.length === 2 && !fs.existsSync(edited.path) && !fs.existsSync(clean.path), removed);
+    const listed = git(repo, "worktree", "list", "--porcelain");
+    check("git no longer lists the leftovers", !listed.includes(edited.path) && !listed.includes(clean.path), listed);
+    check("a worktree outside the run's folder is left alone", listed.includes(elsewhere) && fs.existsSync(elsewhere), listed);
+    check(
+      "an interrupted agent's edits are kept on its branch",
+      git(repo, "show", `${edited.branch}:d.txt`) === "half done",
+    );
   }
 }
 

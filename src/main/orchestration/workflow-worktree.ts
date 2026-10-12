@@ -8,9 +8,9 @@
 // No Electron import: the root directory is passed in, so the suite drives it
 // against throwaway repositories.
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import { withRepoLock } from "../agent-worktrees";
 import { errorText, readGitText, runGit } from "../git-exec";
@@ -83,17 +83,17 @@ export async function createWorkflowWorktree(input: {
   return { repoCwd: input.repoCwd, path, branch, base: input.base };
 }
 
-async function commitAll(worktree: WorkflowWorktree, message: string): Promise<void> {
-  await runGit(worktree.path, ["add", "-A"]);
+async function commitAll(path: string, message: string): Promise<void> {
+  await runGit(path, ["add", "-A"]);
   // --no-verify: a throwaway branch per agent would otherwise run the
   // repository's hooks dozens of times in parallel. Without a configured
   // identity the commit still lands, under a per-command Codara identity;
   // nothing is written to any git config.
   try {
-    await runGit(worktree.path, ["commit", "--no-verify", "-q", "-m", message]);
+    await runGit(path, ["commit", "--no-verify", "-q", "-m", message]);
   } catch (err) {
     if (!/user\.(name|email)|identity|tell me who you are/i.test(errorText(err))) throw err;
-    await runGit(worktree.path, [
+    await runGit(path, [
       "-c",
       "user.name=Codara workflow",
       "-c",
@@ -118,7 +118,7 @@ export async function finishWorkflowWorktree(
 ): Promise<JournalWorktree & { note?: string }> {
   try {
     const status = await readGitText(worktree.path, ["status", "--porcelain"]);
-    if (status.trim()) await commitAll(worktree, message);
+    if (status.trim()) await commitAll(worktree.path, message);
     const commit = await readGitText(worktree.path, ["rev-parse", "HEAD"]);
     const changed = commit !== worktree.base;
     const filesChanged = changed
@@ -141,6 +141,49 @@ export async function finishWorkflowWorktree(
       note: `the agent's worktree could not be finished, so it was left at ${worktree.path}: ${errorText(err)}`,
     };
   }
+}
+
+/**
+ * Removes every checkout of the repository that lives under `root` (a run's
+ * worktree folder), committing uncommitted edits to its branch first, then
+ * prunes git's records of them. Never throws for one checkout; returns the
+ * paths it removed.
+ */
+export async function removeWorkflowWorktrees(repoCwd: string, root: string, message: string): Promise<string[]> {
+  if (!(await isGitRepository(repoCwd))) return [];
+  let rootReal = resolve(root);
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    // Already gone: only git's records of it can be left.
+  }
+  const inside = (path: string) => {
+    const resolved = resolve(path);
+    return [resolve(root), rootReal].some((base) => resolved.startsWith(base + sep));
+  };
+  const listing = await readGitText(repoCwd, ["worktree", "list", "--porcelain"]);
+  const paths = listing
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter(inside);
+  const removed: string[] = [];
+  for (const path of paths) {
+    if (existsSync(path)) {
+      try {
+        const status = await readGitText(path, ["status", "--porcelain"]);
+        if (status.trim()) await commitAll(path, message);
+      } catch {
+        // A checkout git cannot read has nothing to keep.
+      }
+    }
+    const ok = await withRepoLock(repoCwd, () => runGit(repoCwd, ["worktree", "remove", "--force", path]))
+      .then(() => true)
+      .catch(() => false);
+    if (ok) removed.push(path);
+  }
+  await withRepoLock(repoCwd, () => runGit(repoCwd, ["worktree", "prune"])).catch(() => undefined);
+  return removed;
 }
 
 /**

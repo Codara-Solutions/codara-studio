@@ -4,8 +4,9 @@
 // call markers reach the launches, Stop parks the run and Resume answers the
 // finished calls from the journal, and after an app restart recovery journals
 // a report an interrupted agent had already written, parks the run and starts
-// nothing, so Resume pays for no agent twice. A saved workflow edited after it
-// was checked or approved does not run.
+// nothing, so Resume pays for no agent twice. A Stop during startup and a
+// double Resume run nothing extra, and a saved workflow edited after it was
+// checked or approved does not run.
 //
 //   node scripts/test-workflow-driver.cjs
 
@@ -263,6 +264,31 @@ return [a, b];
     Math.abs(resumed.workflow.spent.usd - 0.03) < 1e-9 && resumed.workflow.spent.inputTokens === 300,
     resumed.workflow.spent,
   );
+
+  // ── Stop and Resume races ──────────────────────────────────────────────
+  {
+    // Stop lands while the run is still loading, before it has a runtime.
+    const before = store.calls.launches.length;
+    const early = await driver.startWorkflowRun({
+      workspaceId: "ws",
+      cwd: base,
+      source: `export const meta = { name: "early", description: "early stop" };\nreturn await agent("plain");\n`,
+    });
+    const stopped = await Promise.race([
+      store.controls.stop(early.id, "Stopped by the user").then(() => "returned"),
+      sleep(5_000).then(() => "hung"),
+    ]);
+    check("Stop during startup returns at once", stopped === "returned", stopped);
+    await sleep(200);
+    check("Stop during startup parks the run", store.runs.get(early.id).workflow.state === "paused", store.runs.get(early.id).workflow.state);
+    check("Stop during startup starts no agent", store.calls.launches.length === before, store.calls.launches.length - before);
+
+    // Two Resume clicks at once run the script once.
+    await Promise.all([store.controls.resume(early.id), store.controls.resume(early.id)]);
+    const done = await driver.waitForWorkflowRun(early.id, { timeoutMs: 20_000, pollMs: 25 });
+    check("a double Resume completes the run", done.workflow.state === "complete", done.workflow);
+    check("a double Resume runs the agent once", store.calls.launches.length === before + 1, store.calls.launches.length - before);
+  }
 
   // ── Approved source ────────────────────────────────────────────────────
   {

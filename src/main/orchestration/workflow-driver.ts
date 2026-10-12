@@ -71,6 +71,7 @@ import {
   cleanupWorkflowBranches,
   createWorkflowWorktree,
   finishWorkflowWorktree,
+  removeWorkflowWorktrees,
   workflowBaseCommit,
   type WorkflowWorktree,
 } from "./workflow-worktree";
@@ -502,7 +503,9 @@ async function executeRun(active: ActiveRun, generation: number, replay: Journal
 
   let outcome: WorkflowRuntimeOutcome;
   try {
-    outcome = await runtime.start();
+    // A Stop or Cancel that arrived while this run was still loading found no
+    // runtime to stop; it must not start one now.
+    outcome = active.endReason ? { status: "stopped" } : await runtime.start();
   } finally {
     await writer.close();
     await flushProgress();
@@ -773,6 +776,7 @@ export async function cancelWorkflowRun(runId: string, reason = "Workflow cancel
   const active = activeRuns.get(runId);
   if (active) {
     await stopActive(active, "cancel", reason);
+    await removeRunWorktrees(runId);
     return;
   }
   const store = await driverEnv().store();
@@ -784,7 +788,24 @@ export async function cancelWorkflowRun(runId: string, reason = "Workflow cancel
     status: "cancelled",
     event: { type: "workflow.cancelled", message: reason },
   });
+  await removeRunWorktrees(runId, run);
 }
+
+// Isolated agents an app restart cut off leave their checkouts registered in
+// the user's repository; a cancelled or deleted run has no resume to reuse
+// them. Their edits are committed to their branches first, never dropped.
+async function removeRunWorktrees(runId: string, known?: RunState): Promise<void> {
+  const run = known ?? (await (await driverEnv().store()).getRun(runId));
+  const root = driverEnv().worktreeRoot(runId);
+  if (run?.workflow?.cwd) {
+    await removeWorkflowWorktrees(run.workflow.cwd, root, `workflow ${run.workflow.name}: interrupted agent`).catch(
+      () => undefined,
+    );
+  }
+  await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+}
+
+const resumingRuns = new Set<string>();
 
 /**
  * Replays the newest complete journal generation into a fresh sandbox: calls
@@ -796,8 +817,15 @@ export async function resumeWorkflowRun(
   runId: string,
   options: { useLatestScript?: boolean; expectedSourceHash?: string } = {},
 ): Promise<void> {
-  if (activeRuns.has(runId)) return;
-  await resumeWorkflowRunInner(runId, options);
+  // Two Resume clicks (or the hub and Cora at once) both pass the activeRuns
+  // check across the awaits below and would run the script twice.
+  if (activeRuns.has(runId) || resumingRuns.has(runId)) return;
+  resumingRuns.add(runId);
+  try {
+    await resumeWorkflowRunInner(runId, options);
+  } finally {
+    resumingRuns.delete(runId);
+  }
 }
 
 /** The saved script a "use latest" resume would switch the run to, and whether it differs. */
@@ -853,8 +881,8 @@ export async function discardWorkflowRun(runId: string): Promise<void> {
   if (active) await stopActive(active, "discard", "Run deleted");
   const store = await driverEnv().store();
   const run = await store.getRun(runId);
+  await removeRunWorktrees(runId, run ?? undefined);
   if (run?.workflow?.cwd) await cleanupWorkflowBranches(run.workflow.cwd, runId).catch(() => undefined);
-  await fs.rm(driverEnv().worktreeRoot(runId), { recursive: true, force: true }).catch(() => undefined);
 }
 
 export function skipWorkflowCall(runId: string, seq: number): boolean {
