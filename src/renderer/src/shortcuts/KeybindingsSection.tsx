@@ -179,7 +179,10 @@ function Row({
   const fixed = command.fixed === true;
 
   return (
-    <li className={`st-kb-row${isRecording ? " is-recording" : ""}`}>
+    <li
+      className={`st-kb-row${isRecording ? " is-recording" : ""}`}
+      data-setting-anchor={command.label}
+    >
       <div className="st-kb-row__text">
         <span className="st-kb-row__label">
           {command.label}
@@ -222,7 +225,7 @@ function Row({
   );
 }
 
-function ChordChips({ binding }: { binding: EffectiveBinding }) {
+export function ChordChips({ binding }: { binding: EffectiveBinding }) {
   if (binding.command.id === "view.selectByIndex") {
     const chips = [...chordToDisplay(binding.chords[0]).slice(0, -1), "1…9"];
     return <ChipRow chips={chips} />;

@@ -27,7 +27,7 @@ async function main() {
     outfile,
     logLevel: "silent",
   });
-  const { decideResume, canAutoResume, pruneAttempts, mergeSessionStart } = require(outfile);
+  const { decideResume, canAutoResume, pruneAttempts, mergeSessionStart, adoptLiveSessionAccount } = require(outfile);
 
   let failures = 0;
   const check = (name, cond) => {
@@ -232,6 +232,37 @@ async function main() {
   check("shutdown census deactivates stale Claude pointers", mergeSessionStart(ptr(), rec({ active: false, source: "shutdown" })).active === false);
   check("shutdown census recovers missing Claude pointers", mergeSessionStart(null, rec({ active: true, source: "shutdown" })).active === true);
   check("merge: process-confirmed Codex exit disables restore", exitedCodex?.active === false);
+
+  // ── adoptLiveSessionAccount: the pointer follows the live pty's account ──
+  // A stale account on the pointer used to fail every later re-attach with
+  // "already pinned to another native Claude account".
+  const A = "10000000-0000-4000-8000-00000000000a";
+  const B = "10000000-0000-4000-8000-00000000000b";
+  const claudePtr = { runtime: "claude", sessionId: "s1", cwd: "/w", capturedAt: "2026-10-01T00:00:00Z", active: true, nativeClaudeProfileId: A };
+  const adoptedClaude = adoptLiveSessionAccount(claudePtr, { nativeClaudeProfileId: B });
+  check(
+    "adopt: a Claude restore that landed on the Active account updates the pointer",
+    adoptedClaude?.nativeClaudeProfileId === B && adoptedClaude.sessionId === "s1" && adoptedClaude.active === true,
+  );
+  check("adopt: the same account changes nothing", adoptLiveSessionAccount(claudePtr, { nativeClaudeProfileId: A }) === null);
+  check(
+    "adopt: a plain shell reporting no account keeps the captured one",
+    adoptLiveSessionAccount(claudePtr, {}) === null,
+  );
+  check(
+    "adopt: another runtime's account is ignored",
+    adoptLiveSessionAccount(claudePtr, { nativeCodexProfileId: B }) === null,
+  );
+  check(
+    "adopt: a Codex pointer takes the live Codex account",
+    adoptLiveSessionAccount({ ...claudePtr, runtime: "codex", nativeClaudeProfileId: undefined, nativeCodexProfileId: A }, { nativeCodexProfileId: B })?.nativeCodexProfileId === B,
+  );
+  check(
+    "adopt: a Grok pointer without an account takes the live one",
+    adoptLiveSessionAccount({ ...claudePtr, runtime: "grok", nativeClaudeProfileId: undefined }, { nativeGrokProfileId: B })?.nativeGrokProfileId === B,
+  );
+  check("adopt: a Pi pointer has no account", adoptLiveSessionAccount({ ...claudePtr, runtime: "pi" }, { nativeClaudeProfileId: B }) === null);
+  check("adopt: no pointer, nothing to adopt", adoptLiveSessionAccount(null, { nativeClaudeProfileId: B }) === null);
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);

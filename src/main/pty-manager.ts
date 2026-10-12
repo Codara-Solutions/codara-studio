@@ -604,30 +604,8 @@ export async function spawn(
     if (!target) {
       throw new Error(`mirror attach: no pty session '${opts.id}'`);
     }
-    if (
-      opts.nativeCodexProfileId !== undefined &&
-      opts.nativeCodexProfileId !== target.nativeCodexProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Codex account`,
-      );
-    }
-    if (
-      opts.nativeClaudeProfileId !== undefined &&
-      opts.nativeClaudeProfileId !== target.nativeClaudeProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Claude account`,
-      );
-    }
-    if (
-      opts.nativeGrokProfileId !== undefined &&
-      opts.nativeGrokProfileId !== target.nativeGrokProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Grok account`,
-      );
-    }
+    // Like any attach, a mirror reports the session's own accounts whatever
+    // its caller recorded (see spawnWithSessionLock).
     // attached: the session pre-existed, so an unhandled startupCommand here
     // means "a live shell/TUI already owns this pty", not "shell can't take
     // startup commands" — callers use the distinction to decide whether a
@@ -681,30 +659,14 @@ async function spawnWithSessionLock(
 
   const existing = sessions.get(opts.id);
   if (existing) {
-    if (
-      opts.nativeCodexProfileId !== undefined &&
-      opts.nativeCodexProfileId !== existing.nativeCodexProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Codex account`,
-      );
-    }
-    if (
-      opts.nativeClaudeProfileId !== undefined &&
-      opts.nativeClaudeProfileId !== existing.nativeClaudeProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Claude account`,
-      );
-    }
-    if (
-      opts.nativeGrokProfileId !== undefined &&
-      opts.nativeGrokProfileId !== existing.nativeGrokProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Grok account`,
-      );
-    }
+    // A live process keeps the account it started with, and an attach
+    // reports that account whatever the caller recorded. The two diverge
+    // legitimately: a Claude restore resolves to the Active account rather
+    // than the one it names, a capture records whatever is Active when it
+    // runs, and a plain shell holds no account at all. An attach runs no
+    // startup command and takes no lease, so nothing starts on the requested
+    // account; refusing it left the pane dead over a running process. A
+    // caller that needs another account kills this session first.
     // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
     // mounting after the cli-session already spawned the PTY) needs the
     // recent scrollback or it sees a blank xterm — historical bytes only

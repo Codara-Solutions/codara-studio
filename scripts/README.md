@@ -213,7 +213,7 @@ its first send (`run-store.ts`).
 
 | Suites | Covers |
 |---|---|
-| `test-pty-inherited-env`, `test-npm-run-script-env`, `test-pty-agent-socket-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane (no agent-socket token, only its own `pane.open` token), backpressure, spawning, cleaning up child processes. |
+| `test-pty-inherited-env`, `test-npm-run-script-env`, `test-pty-agent-socket-env`, `test-pty-render-backpressure`, `test-pty-spawn-serialization`, `test-pty-account-reattach`, `test-posix-pty-tree-cleanup`, `test-owned-process-tree-descendants` | `pty-manager.ts`: the environment given to a pane (no agent-socket token, only its own `pane.open` token), backpressure, spawning, re-attaching a live pane whatever account its caller recorded, cleaning up child processes. |
 | `test-terminal-agent-notify`, `test-terminal-agent-notify-pi`, `test-terminal-agent-readiness`, `test-terminal-agent-state-renderer`, `test-agent-patterns`, `test-codex-terminal-screen`, `test-codex-notify` | Telling that an agent in a pane is running, blocked or idle, and when its turn ends (`terminal-agent-notify.ts`, `src/shared/agent-patterns.ts`, the Codex notify installer and session-file tail). |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
 | `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
@@ -313,7 +313,9 @@ These suites bundle renderer modules without React where they can:
 `test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
 `test-settings-dialog` (Settings closes only through Escape, X, Done or
 Cancel; every search result is rendered; the face is opaque; a menu closes on
-a scroll only when its anchor moved), `test-account-card-keys` (an account
+a scroll only when its anchor moved), `test-settings-search` (every rendered
+Settings row has a search entry; ranking, typos, synonyms and highlights),
+`test-account-card-keys` (an account
 card keeps its key while it gains or loses a half).
 
 ### The `cora` CLI and its benchmark

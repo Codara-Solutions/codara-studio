@@ -24,10 +24,10 @@ test("a click outside Settings or the Capability Center never closes them", asyn
     await clickOutside(page, settings);
     await expect(settings).toBeVisible();
     // A search with text takes the first Escape for itself.
-    await settings.getByRole("searchbox", { name: "Search settings" }).fill("theme");
-    await settings.getByRole("searchbox", { name: "Search settings" }).press("Escape");
+    await settings.getByRole("combobox", { name: "Search settings" }).fill("theme");
+    await settings.getByRole("combobox", { name: "Search settings" }).press("Escape");
     await expect(settings).toBeVisible();
-    await expect(settings.getByRole("searchbox", { name: "Search settings" })).toHaveValue("");
+    await expect(settings.getByRole("combobox", { name: "Search settings" })).toHaveValue("");
     await page.keyboard.press("Escape");
     await expect(settings).toHaveCount(0);
 

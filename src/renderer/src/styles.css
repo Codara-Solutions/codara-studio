@@ -7961,6 +7961,17 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   -webkit-appearance: none;
   display: none;
 }
+.st-search__hint {
+  position: absolute;
+  right: 8px;
+  color: var(--st-faint);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  pointer-events: none;
+}
+.st-search__input:focus + .st-search__hint {
+  display: none;
+}
 
 /* Title bar, content pane, footer */
 .st-topbar {
@@ -9095,10 +9106,19 @@ button.st-list__row:hover,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.st-result {
+  cursor: pointer;
+}
+.st-result.is-active {
+  background: var(--st-hover);
+}
 .st-result .st-result__crumb {
-  flex: 0 1 auto;
-  max-width: 34%;
-  text-align: right;
+  font-size: 11.5px;
+}
+.st-result__control {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
 }
 .st-mark {
   border-radius: 3px;

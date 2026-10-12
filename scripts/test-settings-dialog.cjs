@@ -45,7 +45,10 @@ check("a click on the Settings backdrop never closes it", () => {
 });
 
 check("Escape, the close button and Done still close Settings", () => {
-  assert.match(dialog, /if \(event\.key !== "Escape" \|\| event\.defaultPrevented\) return;\s*onClose\(\);/);
+  assert.match(
+    dialog,
+    /if \(event\.key !== "Escape" \|\| event\.defaultPrevented\) return;\s*if \(queryRef\.current\.trim\(\)\) \{\s*setQuery\(""\);\s*searchRef\.current\?\.focus\(\);\s*return;\s*\}\s*onClose\(\);/,
+  );
   assert.match(dialog, /window\.addEventListener\("keydown", onKey\);/);
   assert.match(dialog, /className="st-close" aria-label="Close"[^>]*onClick=\{onClose\}/);
   assert.match(dialog, /<FooterButton onClick=\{onClose\}>Done<\/FooterButton>/);
@@ -81,18 +84,24 @@ check("a click on the Capability Center backdrop never closes it either", () => 
 check("every search result points at something the page renders", () => {
   const entries = [...index.matchAll(/\{ tab: "([a-z-]+)", title: "([^"]+)"/g)];
   assert.ok(entries.length >= 30, "the index must cover the settings");
-  const rendered = [dialog, remote].join("\n");
+  const behavior = read(...components, "capabilities", "BehaviorSection.tsx");
+  const rendered = [dialog, remote, behavior].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {
-    const asTitle = new RegExp(`(?:title|text|anchor|data-setting-anchor)="${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"`);
+    const asTitle = new RegExp(`(?:title|text|label|anchor|data-setting-anchor)="${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"|>${title}<`);
     const isTabTitle = new RegExp(`id: "${tab}",[^}]*?title: "${title}"`).test(index);
     // Provider groups anchor on their vendor label.
     const isProvider =
       tab === "agents" &&
       /data-setting-anchor=\{descriptor\.label\}/.test(cards) &&
       new RegExp(`vendorLabel: "${title}"`).test(families);
-    assert.ok(asTitle.test(rendered) || isTabTitle || isProvider, `${tab} › ${title} is not rendered`);
+    // Capability Center pages are named by its tab labels.
+    const isCapabilityPage = tab === "capabilities" && new RegExp(`: "${title}",`).test(index);
+    assert.ok(
+      asTitle.test(rendered) || isTabTitle || isProvider || isCapabilityPage,
+      `${tab} › ${title} is not rendered`,
+    );
   }
 });
 
