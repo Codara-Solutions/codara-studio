@@ -3253,10 +3253,15 @@ export function registerIpc(): void {
       const exclude = new Set(
         (args.excludeSessionIds ?? []).map((id) => id.toLowerCase()).filter(Boolean),
       );
+      // The pane's live process is the authority on its account. The
+      // renderer's pointer can predate an account switch, and a pane that
+      // re-attached after one still runs where it started.
+      const liveCodexProfileId = args.paneId ? pty.nativeCodexProfileId(args.paneId) : undefined;
+      const liveClaudeProfileId = args.paneId ? pty.nativeClaudeProfileId(args.paneId) : undefined;
+      const liveGrokProfileId = args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined;
       const nativeCodexProfileId =
         args.runtime === "codex"
-          ? args.nativeCodexProfileId ??
-            (args.paneId ? pty.nativeCodexProfileId(args.paneId) : undefined)
+          ? liveCodexProfileId ?? args.nativeCodexProfileId
           : undefined;
       const nativeCodexExecution =
         args.runtime === "codex"
@@ -3264,8 +3269,7 @@ export function registerIpc(): void {
           : null;
       const nativeClaudeProfileId =
         args.runtime === "claude"
-          ? args.nativeClaudeProfileId ??
-            (args.paneId ? pty.nativeClaudeProfileId(args.paneId) : undefined)
+          ? liveClaudeProfileId ?? args.nativeClaudeProfileId
           : undefined;
       const nativeClaudeExecution =
         args.runtime === "claude"
@@ -3273,8 +3277,7 @@ export function registerIpc(): void {
           : null;
       const nativeGrokProfileId =
         args.runtime === "grok"
-          ? args.nativeGrokProfileId ??
-            (args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined)
+          ? liveGrokProfileId ?? args.nativeGrokProfileId
           : undefined;
       const nativeGrokExecution =
         args.runtime === "grok"
@@ -3298,7 +3301,9 @@ export function registerIpc(): void {
           found = discovered
             ? {
                 ...discovered,
-                nativeClaudeProfileId: nativeClaudeExecution?.profileId,
+                // Claude resolution always returns the Active account, so it
+                // would rename a pane that started on another one.
+                nativeClaudeProfileId: liveClaudeProfileId ?? nativeClaudeExecution?.profileId,
               }
             : null;
         } else if (args.runtime === "grok") {

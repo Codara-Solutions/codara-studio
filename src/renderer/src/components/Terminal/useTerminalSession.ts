@@ -52,6 +52,7 @@ import {
 } from "../../workers/launch-commands";
 import type { TerminalAgentSession } from "../../tabs/types";
 import {
+  adoptLiveSessionAccount,
   canAutoResume,
   decideResume,
   mergeSessionStart,
@@ -2982,8 +2983,18 @@ export function useTerminalSession({
               session.nativeCodexProfileId ?? nativeCodexProfileId,
             nativeClaudeProfileId:
               session.nativeClaudeProfileId ?? nativeClaudeProfileId,
+            nativeGrokProfileId:
+              session.nativeGrokProfileId ?? nativeGrokProfileId,
           });
           if (disposed) return;
+          const adopted = adoptLiveSessionAccount(plan.fallbackSession ?? session, spawnResult);
+          if (adopted) {
+            if (plan.fallbackSession) plan.fallbackSession = adopted;
+            else {
+              agentSessionRef.current = adopted;
+              onResumeFallbackRef.current?.(adopted);
+            }
+          }
           if (!spawnResult.startupCommandHandled) {
             // The pty just died and was deleted, so a fresh spawn should deliver;
             // if it somehow attached to a live session, mutate nothing, otherwise
@@ -3229,6 +3240,20 @@ export function useTerminalSession({
         attachedExistingSession = Boolean(spawnResult.attached);
         if (startupCommandHandled) {
           autorunFiredSessions.add(sessionId);
+        }
+        // A mirror does not own the pane's pointer.
+        if (!readOnlyRef.current) {
+          if (fallbackSession) {
+            fallbackSession = adoptLiveSessionAccount(fallbackSession, spawnResult) ?? fallbackSession;
+          }
+          const adopted = adoptLiveSessionAccount(
+            agentSessionRef.current ?? agentSession,
+            spawnResult,
+          );
+          if (adopted) {
+            agentSessionRef.current = adopted;
+            onResumeFallbackRef.current?.(adopted);
+          }
         }
         // Cold hydration deliberately strips the transient worker chip, but a
         // successfully delivered resume already gives us authoritative runtime

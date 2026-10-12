@@ -145,6 +145,43 @@ export function mergeSessionStart(
   };
 }
 
+// The accounts pty:spawn reports for the session it created or attached to.
+export interface LiveSessionAccounts {
+  nativeClaudeProfileId?: string;
+  nativeCodexProfileId?: string;
+  nativeGrokProfileId?: string;
+}
+
+/**
+ * Point a pane's restore pointer at the account its live process actually
+ * runs on. A Claude restore lands on the Active account whatever the pointer
+ * named, and a pane re-attached after an account switch keeps the account it
+ * started on; leaving the pointer behind would show the wrong account and
+ * send the stale one into every later attach. Only a reported account
+ * replaces the pointer's: a plain shell reports none and keeps the account
+ * its typed agent was captured with.
+ *
+ * Returns the updated pointer, or null when nothing changes.
+ */
+export function adoptLiveSessionAccount<P extends AgentSessionPointer>(
+  pointer: P | null | undefined,
+  live: LiveSessionAccounts | null | undefined,
+): P | null {
+  if (!pointer?.sessionId || !live) return null;
+  const key =
+    pointer.runtime === "claude"
+      ? "nativeClaudeProfileId"
+      : pointer.runtime === "codex"
+        ? "nativeCodexProfileId"
+        : pointer.runtime === "grok"
+          ? "nativeGrokProfileId"
+          : null;
+  if (!key) return null;
+  const reported = live[key];
+  if (!reported || reported === pointer[key]) return null;
+  return { ...pointer, [key]: reported };
+}
+
 const AUTO_RESUME_WINDOW_MS = 300_000; // 5 minutes
 const AUTO_RESUME_MAX = 2;
 
