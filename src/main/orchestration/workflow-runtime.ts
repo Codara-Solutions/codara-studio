@@ -430,7 +430,10 @@ export class WorkflowRuntime {
       const step = this.replayer.next(this.pendingIdles === 0);
       if (step.kind === "wait") return;
       if (step.kind === "exhausted") {
-        this.endReplay(null);
+        // Calls that were in flight when the previous generation stopped
+        // matched their issue but have no result: they still have to run.
+        if (this.replayer.leftovers().length > 0) this.diverge(null);
+        else this.endReplay(null);
         return;
       }
       if (step.kind === "diverge") {

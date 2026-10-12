@@ -249,6 +249,25 @@ async function main() {
     check("resume reuses the finished agent", resumed.outcome.value?.[0] === "echo first");
     check("resume runs only the agent that had not finished", executor.log.runs.length === 1 && executor.log.runs[0].prompt === "delay=5 second", executor.log.runs.map((r) => r.prompt));
   }
+  {
+    // The unchanged script: the stopped call is the journal's last entry, an
+    // issue with no result, and must still run once the replay runs out.
+    const body = `const a = await agent("first");
+       const b = await agent("delay=1500 second");
+       return [a, b];`;
+    const journal = memoryJournal();
+    await runScript(body, {
+      journal,
+      async during(runtime) {
+        await sleep(400);
+        await runtime.stop();
+      },
+    });
+    const executor = fakeExecutor();
+    const resumed = await runScript(body, { replay: journal.entries, executor });
+    check("resume of an unchanged script completes", resumed.outcome.status === "complete", resumed.outcome);
+    check("the call stopped last runs again", executor.log.runs.length === 1 && executor.log.runs[0].prompt === "delay=1500 second", executor.log.runs.map((r) => r.prompt));
+  }
 
   // ── Determinism and caching ──────────────────────────────────────────────
   const RACE = `
