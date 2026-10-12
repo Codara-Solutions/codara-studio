@@ -33,9 +33,11 @@
 // credits), the model is marked declined, and the failed message's error text
 // is rewritten so Pi's own auto-retry runs the request again, this time
 // without fast mode. Exactly one retry pays for the probe; the marker prefix
-// lets the host show a plain note instead of a provider error. Rate-limit and
-// capacity refusals expire after FAST_MODE_COOLDOWN_MS, the way Claude Code's
-// own fast mode cools down; every other refusal lasts for the process.
+// lets the host show a plain note instead of a provider error. Only a refusal
+// whose text names fast mode (speed, tier, usage credits) lasts for the
+// process. Rate-limit and capacity refusals, and errors that match on status
+// alone and so may have nothing to do with fast mode, expire after
+// FAST_MODE_COOLDOWN_MS, the way Claude Code's own fast mode cools down.
 //
 // Pure and import-free so scripts/test-pi-cora-extension.cjs can drive it
 // outside Pi's jiti loader, matching worker-policy.ts and compaction.ts.
@@ -169,6 +171,10 @@ const NOT_A_FAST_MODE_REFUSAL =
 const FAST_MODE_REFUSAL =
   /\b(?:400|403|404|422|429|529)\b|speed|fast.?mode|service.?tier|priority|usage credits|extra usage|rate.?limit|too many requests|overloaded|invalid_request|not supported|unsupported/i;
 const TRANSIENT_REFUSAL = /\b(?:429|529)\b|rate.?limit|too many requests|overloaded|capacity/i;
+// A 400 for an oversized image or a malformed tool schema also matches on
+// status; turning fast mode off for the whole process over it would cost the
+// user the speed they pay for until the next relaunch.
+const NAMES_FAST_MODE = /speed|fast.?mode|service.?tier|priority|usage credits|extra usage/i;
 
 export type FastModeRefusal = { transient: boolean; status: string | null };
 
@@ -179,7 +185,10 @@ export function classifyFastModeRefusal(errorMessage: unknown): FastModeRefusal 
   if (NOT_A_FAST_MODE_REFUSAL.test(errorMessage)) return null;
   if (!FAST_MODE_REFUSAL.test(errorMessage)) return null;
   const status = /\b([45]\d\d)\b/.exec(errorMessage)?.[1] ?? null;
-  return { transient: TRANSIENT_REFUSAL.test(errorMessage), status };
+  return {
+    transient: TRANSIENT_REFUSAL.test(errorMessage) || !NAMES_FAST_MODE.test(errorMessage),
+    status,
+  };
 }
 
 /**

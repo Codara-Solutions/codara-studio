@@ -3700,7 +3700,8 @@ export class RpcSession {
           }
           const p = (params ?? {}) as { enabled?: unknown };
           // A real boolean only. Coercing a truthy string here would let a
-          // malformed phone build silently double every OpenAI token's price.
+          // malformed phone build silently buy fast mode's premium rate for
+          // Cora and every worker on an OpenAI or Claude Opus model.
           if (typeof p.enabled !== "boolean") {
             this.replyError(
               id,

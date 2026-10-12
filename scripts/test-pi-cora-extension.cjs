@@ -938,6 +938,11 @@ const noInput = {};
     ['529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true, "529"],
     ['400 {"type":"error","error":{"type":"invalid_request_error","message":"Fast mode requires usage credits; check billing"}}', false, "400"],
     ['403 {"type":"error","error":{"type":"permission_error","message":"Fast mode has been disabled by your organization"}}', false, "403"],
+    ["400 Unsupported service_tier: priority", false, "400"],
+    // Matched on status alone: it may have nothing to do with fast mode, so it
+    // only cools fast mode down instead of turning it off for the process.
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}', true, "400"],
+    ['404 {"type":"error","error":{"type":"not_found_error","message":"Not found"}}', true, "404"],
   ];
   for (const [error, transient, status] of refusals) {
     assert.deepEqual(tier.classifyFastModeRefusal(error), { transient, status }, error);
