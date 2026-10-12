@@ -3342,6 +3342,10 @@ export function registerIpc(): void {
 
   handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   handle("app:home", async (): Promise<string> => app.getPath("home"));
+  handle("app:global-config-cleanup-notice", async (): Promise<string | null> => {
+    const { globalConfigCleanupNotice } = await import("./global-config-cleanup");
+    return globalConfigCleanupNotice();
+  });
 
   // Resolve the absolute file:// URL of the webview-side inspector preload
   // bundle so the renderer can attach it via `<webview preload="...">`.

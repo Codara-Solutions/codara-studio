@@ -1522,14 +1522,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   const [addingProvider, setAddingProvider] = useState<PiSubscriptionProvider | null>(null);
   const [addLabel, setAddLabel] = useState("");
   const [accountMutationId, setAccountMutationId] = useState<string | null>(null);
-  // Main refuses to delete an account while terminals run on it, and refuses
-  // a Codex switch the same way, saying how many; the card's next Delete or
-  // Use offers to close them first.
-  const [closeSessionsPrompt, setCloseSessionsPrompt] = useState<{
-    profileId: string;
-    action: "use" | "delete";
-    count: number;
-  } | null>(null);
   const [cliInspection, setCliInspection] =
     useState<NativeCliAccountsInspection | null>(null);
   const [cliError, setCliError] = useState<string | null>(null);
@@ -1556,27 +1548,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         setOverviewSettled(true);
       });
   };
-
-  useEffect(() => {
-    if (!closeSessionsPrompt) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      try {
-        const next = await window.spark.piSubscriptions.status();
-        if (!cancelled) setOverview(next);
-      } catch {
-        // Keep the last refusal if inspection fails; main rechecks on Use.
-      } finally {
-        if (!cancelled) timer = setTimeout(poll, 2_000);
-      }
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [closeSessionsPrompt]);
 
   useEffect(() => {
     refresh();
@@ -1774,61 +1745,22 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       window.spark.piSubscriptions.renameAccount({ profileId, label }),
     );
 
-  // A refusal carries the count of terminals it would close; the card's
-  // next Use or Delete resends with closeSessions.
-  const refusedWithSessions = (
-    profileId: string,
-    action: "use" | "delete",
-    err: unknown,
-  ) => {
-    const count = liveTerminalCount(ipcErrorMessage(err));
-    if (count === null) return;
-    setCloseSessionsPrompt({ profileId, action, count });
-    // The refusal is newer than the overview that rendered the Use button.
-    setOverview(current => {
-      const provider = current?.profiles?.find(profile => profile.id === profileId)?.provider;
-      if (!current || !provider || action !== "use") return current;
-      return { ...current, switchSessionCounts: { ...current.switchSessionCounts, [provider]: count } };
-    });
-  };
+  // A switch closes nothing: new sessions take the account, and a deleted
+  // account's folder waits in main for its terminals to exit.
+  const makeDefault = (provider: PiSubscriptionProvider, profileId: string): Promise<boolean> =>
+    mutateAccount(profileId, () =>
+      window.spark.piSubscriptions.makeDefault({ provider, profileId }),
+    );
 
-  const makeDefault = (
+  const deleteAccount = (profileId: string): Promise<boolean> =>
+    mutateAccount(profileId, () => window.spark.piSubscriptions.deleteAccount({ profileId }));
+
+  // The System login is only ever read: these record a row for it, hide
+  // its offer, or point new sessions back at it.
+  const systemMutation = (
     provider: PiSubscriptionProvider,
-    profileId: string,
-    closeSessions: boolean,
-  ): Promise<boolean> => {
-    setCloseSessionsPrompt(null);
-    return mutateAccount(profileId, async () => {
-      try {
-        return await window.spark.piSubscriptions.makeDefault({
-          provider,
-          profileId,
-          ...(closeSessions ? { closeSessions: true } : {}),
-        });
-      } catch (err) {
-        refusedWithSessions(profileId, "use", err);
-        throw err;
-      }
-    });
-  };
-
-  const deleteAccount = (
-    profileId: string,
-    closeSessions: boolean,
-  ): Promise<boolean> => {
-    setCloseSessionsPrompt(null);
-    return mutateAccount(profileId, async () => {
-      try {
-        return await window.spark.piSubscriptions.deleteAccount({
-          profileId,
-          ...(closeSessions ? { closeSessions: true } : {}),
-        });
-      } catch (err) {
-        refusedWithSessions(profileId, "delete", err);
-        throw err;
-      }
-    });
-  };
+    mutation: () => Promise<PiSubscriptionOverview>,
+  ): Promise<boolean> => mutateAccount(`system:${provider}`, mutation);
 
   // A terminal-only half is renamed and deleted through the native account
   // store, but its card lives in the same list, so the result is re-read as
@@ -1914,15 +1846,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       );
       const rows = piProfiles.map<AccountCardView>((profile) => {
         const usage = usageByProfile.get(profile.id);
-        const refused =
-          closeSessionsPrompt?.profileId === profile.id ? closeSessionsPrompt : null;
-        // Store-change broadcasts must not disarm the requested action.
-        // Fresh counts replace the refusal while its card stays open.
-        const closeSessionsCount = descriptor.sessionsFollowLiveLogin
-          ? 0
-          : profile.terminal?.liveSessions ?? (refused?.action === "delete" ? refused.count : 0);
-        const switchCloseSessionsCount = refused?.action === "use"
-          ? (overview?.switchSessionCounts?.[provider] ?? refused.count) : 0;
+        // Limits are read with Cora's grant, so a System row shows them only
+        // once Cora is connected to it.
+        const coraHeld = profile.coraHalf !== "none";
         return {
           key: `${provider}:${profile.id}`,
           provider,
@@ -1932,9 +1858,11 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           // SuperGrok (and any provider with no quota API) reports status ok
           // and zero windows. That is not a failure, so do not render the
           // empty report as a red "no usage windows" error on the card.
-          ...(usage && accountCardShowsUsage(usage)
+          ...(usage && coraHeld && accountCardShowsUsage(usage)
             ? { usage: <UsageEntryBody usage={usage} compact /> }
-            : accountUsageNote(usage, usageLoading, descriptor)),
+            : coraHeld
+              ? accountUsageNote(usage, usageLoading, descriptor)
+              : { usageNote: "Shown once Cora is connected" }),
           coraProfileId: profile.id,
           ...(profile.cliProfileId ? { cliProfileId: profile.cliProfileId } : {}),
           builtIn: profile.builtIn === true,
@@ -1943,16 +1871,14 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
             connected: profile.connected,
             expired: profile.expired,
             canRefresh: profile.canRefresh,
-            ...(profile.error ? { error: profile.error } : {}),
+            ...(profile.error && coraHeld ? { error: profile.error } : {}),
+            ...(coraHeld ? {} : { held: false }),
           },
           ...(profile.terminal ? { terminal: profile.terminal } : {}),
           busy: accountMutationId === profile.id,
-          ...(closeSessionsCount > 0 ? { closeSessionsCount } : {}),
-          ...(switchCloseSessionsCount > 0 ? { switchCloseSessionsCount } : {}),
         };
       });
-      // Account 1 first: it is the user's own CLI login and the account
-      // everything else hands off to.
+      // The System row first: it is the CLI's own login on this computer.
       rows.sort((left, right) => Number(right.builtIn) - Number(left.builtIn));
       // Terminal profiles no row names are terminal-only halves; the card
       // offers to share them with Cora.
@@ -1974,26 +1900,12 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           busy: accountMutationId === profile.id,
           ...accountUsageNote(undefined, false, descriptor),
         }));
-      // Main owns identity pairing. A connected personal login without a
-      // row may already belong to a managed account, so never invent a
-      // second account or claim it is linking. Keep only the sign-in hint.
-      const personal = cliProfiles.find((profile) => !profile.managed);
-      const accountOneSlot: AccountCardView[] =
-        personal && personal.status !== "connected" && !linked.has(personal.id)
-          ? [
-              {
-                key: `${provider}:account-one`,
-                provider,
-                label: personal.label || "Account 1",
-                builtIn: true,
-                active: false,
-                terminal: { connected: false },
-                busy: false,
-                ...accountUsageNote(undefined, false, descriptor),
-              },
-            ]
-          : [];
-      const cards = [...accountOneSlot, ...rows, ...terminalOnly];
+      // No card is drawn without a row; the System login appears only as
+      // its offer line until the user adds it.
+      const cards = [...rows, ...terminalOnly];
+      const systemRow = piProfiles.some((profile) => profile.builtIn);
+      const anyActive = piProfiles.some((profile) => profile.isDefault);
+      const systemOffer = overview?.systemOffers?.[provider];
       // One rule for every provider, and the row's own: ready is a row that
       // shows Switch, or Active with nothing to fix.
       const ready = cards.filter(accountCardReady).length;
@@ -2008,6 +1920,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         busy,
         cliError: cliUnavailable || Boolean(cliError && !cliInspection),
         addLabel: addingProvider === provider ? addLabel : "",
+        ...(systemOffer ? { systemOffer } : {}),
+        systemActive: !anyActive && cards.length > 0 && !systemOffer,
+        canUseSystemLogin: anyActive && !systemRow,
       };
     });
   }, [
@@ -2017,7 +1932,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
     busyProvider,
     cliError,
     cliInspection,
-    closeSessionsPrompt,
     overview,
     usageLoading,
     usageOverview,
@@ -2026,9 +1940,8 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   // One account, one action each, for every provider. Every mutation goes
   // through the Pi account channels, which switch, share, and delete both
   // halves in the main process; the terminal id is only used for a half
-  // that has no row. Cora and the terminal tool switch together, so nothing
-  // is opened here: new terminals pick the account up. Codex closes its
-  // running sessions in main, after the card has asked with the count.
+  // that has no row. Cora and the terminal tool switch together and nothing
+  // closes: new sessions pick the account up.
   const accountActions: AccountActions = {
     onBeginAdd: (provider) => {
       setAddingProvider(provider);
@@ -2041,9 +1954,24 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       setAddingProvider(null);
       setAddLabel("");
     },
-    onUse: (card, { closeSessions }) => {
+    onUse: (card) => {
       if (!card.coraProfileId) return;
-      void makeDefault(card.provider, card.coraProfileId, closeSessions);
+      void makeDefault(card.provider, card.coraProfileId);
+    },
+    onAddSystemAccount: (provider) => {
+      void systemMutation(provider, () =>
+        window.spark.piSubscriptions.addSystemAccount(provider),
+      );
+    },
+    onDismissSystemOffer: (provider) => {
+      void systemMutation(provider, () =>
+        window.spark.piSubscriptions.dismissSystemOffer(provider),
+      );
+    },
+    onUseSystemLogin: (provider) => {
+      void systemMutation(provider, () =>
+        window.spark.piSubscriptions.useSystemLogin(provider),
+      );
     },
     onReconnect: (card) => {
       if (!card.coraProfileId) return;
@@ -2066,11 +1994,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         }),
       );
     },
-    onCopyCommand: (command) =>
-      window.spark.clipboard.writeText(command).then(
-        () => true,
-        () => false,
-      ),
     onRename: (card, label) => {
       if (card.coraProfileId) return renameAccount(card.coraProfileId, label);
       if (!card.cliProfileId) return Promise.resolve(false);
@@ -2083,12 +2006,11 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         }),
       );
     },
-    onDelete: (card, { closeSessions }) => {
-      // Account 1 is deletable too: its row is forgotten (the Cora sign-in
-      // and the pairing go, the personal login stays), so the card takes the
-      // same path as any other row rather than being turned away here.
+    onDelete: (card) => {
+      // A System row goes the same way: main drops the row and Cora's grant,
+      // leaves the login itself alone, and stops offering it.
       if (card.coraProfileId) {
-        void deleteAccount(card.coraProfileId, closeSessions);
+        void deleteAccount(card.coraProfileId);
         return;
       }
       if (!card.cliProfileId) return;
@@ -2160,6 +2082,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   return (
     <>
       <SettingsSection anchor="Accounts" plain>
+        <p className="st-provider__detail">
+          Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
+        </p>
         <div className="st-acct-toolbar">
           <Disclosure
             open={howSwitchingOpen}
@@ -2175,7 +2100,7 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
         {howSwitchingOpen ? (
           <div className="st-acct-how">
             <p>
-              Every account is one sign-in for both Cora and its terminal tool. Account 1 is your own command-line login.
+              Every account is one sign-in for Cora and its terminal tool. The Active account is used by new Codara terminals and new Cora chats.
             </p>
             <dl>
               {providerViews.map((view) => (
@@ -2420,15 +2345,6 @@ function ipcErrorMessage(err: unknown): string {
   return raw
     .replace(/^Error invoking remote method '[^']*':\s*/, "")
     .replace(/^[A-Za-z]*Error:\s*/, "");
-}
-
-/**
- * The count main puts in its refusal to delete an account with terminals
- * still running on it. The card's next Delete closes that many first.
- */
-function liveTerminalCount(message: string): number | null {
-  const match = /(\d+) terminal sessions? (?:is|are) using this account/.exec(message);
-  return match ? Number(match[1]) : null;
 }
 
 // Where a Claude plan's Extra Usage is switched on or off.
@@ -3518,11 +3434,18 @@ function AboutSettings() {
   const [platform, setPlatform] = useState<string>("");
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
+  const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void window.spark.app.platform().then((p) => {
       if (alive) setPlatform(p);
     });
+    void window.spark.app.globalConfigCleanupNotice().then(
+      (notice) => {
+        if (alive) setCleanupNotice(notice);
+      },
+      () => undefined,
+    );
     return () => {
       alive = false;
     };
@@ -3582,6 +3505,9 @@ function AboutSettings() {
             </button>
           }
         />
+        {cleanupNotice ? (
+          <SettingRow title="Earlier versions" desc={cleanupNotice} />
+        ) : null}
       </SettingsSection>
     </>
   );

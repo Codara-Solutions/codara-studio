@@ -594,13 +594,13 @@ export default function AgentCapabilitiesDialog({
         if (installed) {
           setStatus(
             result.ok
-              ? ok(`Added Codara Studio tools to the ${CLI_LABEL[runtime]}.`)
+              ? ok(`Codara Studio tools are on for the ${CLI_LABEL[runtime]} sessions Codara starts.`)
               : failure(result.error ?? `Could not add Codara Studio tools to the ${CLI_LABEL[runtime]}.`),
           );
         } else {
           setStatus(
             result.ok
-              ? ok(`Removed Codara Studio tools from the ${CLI_LABEL[runtime]}. They stay off until you turn them back on.`)
+              ? ok(`Codara Studio tools are off for the ${CLI_LABEL[runtime]} sessions Codara starts. They stay off until you turn them back on.`)
               : failure(result.error ?? `Could not remove Codara Studio tools from the ${CLI_LABEL[runtime]}.`),
           );
         }

@@ -255,6 +255,45 @@ function withCode(text: string, code: string | undefined): React.ReactNode {
   );
 }
 
+/**
+ * The one confirmation a Remove asks for, drawn inside the row like Rename,
+ * so the sentence names exactly what goes and what stays before anything is
+ * deleted.
+ */
+export function RemoveConfirm({
+  text,
+  confirmLabel,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  text: string;
+  confirmLabel: string;
+  disabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div role="alertdialog" aria-label={text} className="st-acct-confirm">
+      <p className="st-acct-confirm__text">{text}</p>
+      <div className="st-acct-confirm__buttons">
+        <ActionButton disabled={disabled} onClick={onCancel}>
+          Cancel
+        </ActionButton>
+        <button
+          type="button"
+          autoFocus
+          className="spark-btn st-acct-btn is-danger"
+          disabled={disabled}
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function RenameForm({
   ariaLabel,
   initial,

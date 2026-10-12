@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { familyForRuntime } from "@shared/agent-families";
-import type { PiSubscriptionProvider } from "@shared/types";
+import type { PiSubscriptionProvider, PiSubscriptionSystemOffer } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
 import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
@@ -37,6 +37,15 @@ export interface AccountProviderView {
   cliError: boolean;
   /** The name typed into the Add-account picker while this provider is selected. */
   addLabel: string;
+  /** A signed-in System login no row uses yet, offered as one line. */
+  systemOffer?: PiSubscriptionSystemOffer;
+  /**
+   * No row is Active, so new sessions use the CLI's own login. Said only
+   * when the provider has rows, since the empty state covers the rest.
+   */
+  systemActive: boolean;
+  /** A managed row is Active and no System row exists: offer the way back. */
+  canUseSystemLogin: boolean;
 }
 
 export interface AccountActions extends AccountCardActions {
@@ -45,6 +54,11 @@ export interface AccountActions extends AccountCardActions {
   /** Start the one sign-in that writes both halves of a new account. */
   onAdd: (provider: PiSubscriptionProvider) => void;
   onCancelAdd: () => void;
+  /** Add the System login as a row (Use in Codara). */
+  onAddSystemAccount: (provider: PiSubscriptionProvider) => void;
+  onDismissSystemOffer: (provider: PiSubscriptionProvider) => void;
+  /** New sessions use the CLI's own login; nothing of it is written. */
+  onUseSystemLogin: (provider: PiSubscriptionProvider) => void;
 }
 
 export function AccountAddPicker({
@@ -158,7 +172,7 @@ export function AccountAddPicker({
               <span className="st-acct-picker__sub">
                 {!selectedView
                   ? "Pick the account you want to connect."
-                  : `Sign in once in your browser. Cora and ${selectedView.descriptor.cliLabel} both use it.`}
+                  : `Sign in in your browser. Codara keeps this account in its own folder and never touches ${selectedView.descriptor.systemHome}.`}
               </span>
             </div>
             <button
@@ -257,6 +271,12 @@ export function AccountAddPicker({
   );
 }
 
+function systemOfferText(cliLabel: string, offer: PiSubscriptionSystemOffer): string {
+  if (offer.email) return `${cliLabel} on this computer is signed in as ${offer.email}.`;
+  if (offer.apiKey) return `${cliLabel} on this computer is signed in with an API key.`;
+  return `${cliLabel} on this computer is signed in.`;
+}
+
 function AccountProviderGroup({
   view,
   actions,
@@ -280,9 +300,51 @@ function AccountProviderGroup({
           </span>
           {descriptor.label}
         </span>
-        {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
+        <span className="st-acct__actions">
+          {view.canUseSystemLogin ? (
+            <ActionButton
+              quiet
+              disabled={view.disabled || view.busy}
+              title={`New sessions use the ${descriptor.cliLabel} login on this computer. Running sessions keep their account.`}
+              onClick={() => actions.onUseSystemLogin(descriptor.provider)}
+            >
+              Use your {descriptor.cliLabel} login
+            </ActionButton>
+          ) : null}
+          {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
+        </span>
       </div>
       <p className="st-provider__detail">{view.summary}</p>
+
+      {view.systemOffer ? (
+        <div className="st-acct-system-line" role="group" aria-label={`${descriptor.cliLabel} login on this computer`}>
+          <span className="st-acct-system-line__text">
+            {systemOfferText(descriptor.cliLabel, view.systemOffer)}
+          </span>
+          <span className="st-acct-system-line__actions">
+            <ActionButton
+              disabled={view.disabled || view.busy}
+              onClick={() => actions.onAddSystemAccount(descriptor.provider)}
+            >
+              Use in Codara
+            </ActionButton>
+            <ActionButton
+              quiet
+              disabled={view.busy}
+              onClick={() => actions.onDismissSystemOffer(descriptor.provider)}
+            >
+              Dismiss
+            </ActionButton>
+          </span>
+        </div>
+      ) : null}
+      {view.systemActive ? (
+        <div className="st-acct-system-line" role="status">
+          <span className="st-acct-system-line__text">
+            No account is Active. New sessions use your own {descriptor.cliLabel} login.
+          </span>
+        </div>
+      ) : null}
 
       {view.cliError ? (
         <div role="alert" className="st-acct-status st-acct-status--danger">
@@ -345,6 +407,9 @@ export default function AccountCards({
           actions={actions}
         />
       ))}
+      <p className="st-acct-footnote">
+        MCP servers that need a sign-in must be connected once in each Codara account.
+      </p>
     </div>
   );
 }

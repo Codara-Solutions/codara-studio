@@ -18,21 +18,15 @@ export interface AccountProviderDescriptor {
   label: string;
   /** How the terminal half is named in copy; matches the main-process adapter labels. */
   cliLabel: "Claude Code" | "Codex" | "Grok";
-  /** The command that signs Account 1 in from a terminal. */
-  loginHint: "claude login" | "codex login" | "grok login";
   brand: "claude" | "codex" | "grok";
+  /** The CLI's own folder, named where copy promises Codara leaves it alone. */
+  systemHome: "~/.claude" | "~/.codex" | "~/.grok";
   /**
-   * Codex keeps one sign-in for every terminal, so switching it closes the
-   * running Codex sessions; main refuses with their count until the card
-   * asks again. Anthropic and Grok switches close nothing.
+   * Claude Code re-reads the credential in its live slot on every request,
+   * so a switch reaches running sessions. Codex loads its login once per
+   * process, and Grok is not known to re-read it, so only new sessions move.
    */
-  switchClosesSessions: boolean;
-  /**
-   * Every session runs on whichever login is live (Claude Code's one home),
-   * so a switch reaches running sessions too and deleting an account never
-   * has to close one.
-   */
-  sessionsFollowLiveLogin: boolean;
+  runningSessionsSwitch: boolean;
   /**
    * The limit windows every account row draws, by the label main gives them.
    * A row with no reading yet draws these as empty meters so every row keeps
@@ -45,29 +39,11 @@ export interface AccountProviderDescriptor {
 
 const CLI_WORDS: Record<
   AgentRuntimeKind,
-  Pick<
-    AccountProviderDescriptor,
-    "cliLabel" | "loginHint" | "switchClosesSessions" | "sessionsFollowLiveLogin"
-  >
+  Pick<AccountProviderDescriptor, "cliLabel" | "systemHome" | "runningSessionsSwitch">
 > = {
-  claude: {
-    cliLabel: "Claude Code",
-    loginHint: "claude login",
-    switchClosesSessions: false,
-    sessionsFollowLiveLogin: true,
-  },
-  codex: {
-    cliLabel: "Codex",
-    loginHint: "codex login",
-    switchClosesSessions: true,
-    sessionsFollowLiveLogin: false,
-  },
-  grok: {
-    cliLabel: "Grok",
-    loginHint: "grok login",
-    switchClosesSessions: false,
-    sessionsFollowLiveLogin: false,
-  },
+  claude: { cliLabel: "Claude Code", systemHome: "~/.claude", runningSessionsSwitch: true },
+  codex: { cliLabel: "Codex", systemHome: "~/.codex", runningSessionsSwitch: false },
+  grok: { cliLabel: "Grok", systemHome: "~/.grok", runningSessionsSwitch: false },
 };
 
 // pi-subscription-usage.ts labels windows by their length. Every row draws
@@ -92,27 +68,28 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     ...CLI_WORDS[id],
   }));
 
-/** The one line under the provider name: what a switch moves, and its catch. */
+/** What a switch reaches for this provider, said under its name. */
 export function accountProviderSummary(descriptor: AccountProviderDescriptor): string {
-  if (descriptor.switchClosesSessions) {
-    return `Switching moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions.`;
-  }
-  if (descriptor.sessionsFollowLiveLogin) {
-    return `Switching moves Cora and ${descriptor.cliLabel} together, running sessions included.`;
-  }
-  return `Switching moves Cora and ${descriptor.cliLabel} together from the next prompt.`;
+  const running = descriptor.runningSessionsSwitch
+    ? `Running ${descriptor.cliLabel} sessions switch on their next request.`
+    : `Running ${descriptor.cliLabel} sessions keep their account.`;
+  return `The Active account is used by new Codara terminals and new Cora chats. ${running}`;
 }
 
 /**
- * The one rule behind a switch that the summary line does not already say,
- * shown under "How switching works".
+ * The rule the summary leaves out, shown under "How switching works": the
+ * System login is never written to, so it cannot be swapped into a running
+ * session.
  */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
-  if (descriptor.switchClosesSessions) {
-    return `${descriptor.cliLabel} keeps one sign-in for every terminal, which is why a switch has to close its sessions.`;
-  }
-  if (descriptor.sessionsFollowLiveLogin) {
-    return "MCP sign-ins, settings and history stay shared by every account.";
-  }
-  return `A ${descriptor.cliLabel} session that is already running keeps its account until it exits.`;
+  const { cliLabel } = descriptor;
+  const running = descriptor.runningSessionsSwitch
+    ? `Running ${cliLabel} sessions switch on their next request.`
+    : `New ${cliLabel} sessions use the new account. Running ones keep theirs.`;
+  return `${running} Switching to or from your own ${cliLabel} login applies to new sessions.`;
+}
+
+/** The badge on the row for the CLI's own login on this computer. */
+export function systemLoginBadge(descriptor: AccountProviderDescriptor): string {
+  return `Your ${descriptor.cliLabel} login`;
 }

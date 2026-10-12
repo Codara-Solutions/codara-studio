@@ -187,7 +187,7 @@ assert.match(
 // every provider: an account is one sign-in with two halves paired in the
 // main process, and the words come from a per-provider descriptor.
 assert.match(settings, /<SettingsSection anchor="Accounts" plain>/);
-assert.match(settings, /Every account is one sign-in for both Cora and its terminal tool/);
+assert.match(settings, /Every account is one sign-in for Cora and its terminal tool/);
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
@@ -202,7 +202,7 @@ assert.ok(
 // and delete of a terminal-only half.
 assert.match(settings, /return ACCOUNT_PROVIDER_DESCRIPTORS\.map\(\(descriptor\) => \{/);
 assert.doesNotMatch(settings, /descriptor\.provider === "anthropic"/);
-assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId, closeSessions\)/);
+assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId\)/);
 assert.match(settings, /reconnectAccount\(card\.provider, card\.coraProfileId, card\.label\)/);
 assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
 assert.match(settings, /nativeCliAccounts\.delete\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
@@ -215,10 +215,9 @@ assert.doesNotMatch(card, /nativeCliAccounts|spark:open-native-cli/);
 // Card keys are ids main assigned, so pairing never remounts a card.
 assert.match(settings, /key: `\$\{provider\}:\$\{profile\.id\}`/);
 assert.match(settings, /key: `\$\{provider\}:cli:\$\{profile\.id\}`/);
-assert.match(settings, /key: `\$\{provider\}:account-one`/);
-// Account 1 keeps the Cora row's label for every provider (renameable
-// there); the Codara-side label preference is gone with the two-facet card.
-assert.match(settings, /label: personal\.label \|\| "Account 1"/);
+// No pseudo-card for the CLI's own login; the Codara-side label preference
+// is gone with the two-facet card.
+assert.doesNotMatch(settings, /account-one|"Account 1"/);
 assert.doesNotMatch(settings, /nativeCliAccountLabels/);
 assert.doesNotMatch(shared, /nativeCliAccountLabels/);
 assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabels/);
@@ -226,14 +225,12 @@ assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabe
 assert.doesNotMatch(settings, /Identity pairing|cliByFingerprint|cliByEmail|pairHint|pairedCliIds|unmatchedSignedInCli/);
 assert.match(settings, /function accountCardShowsUsage/);
 assert.match(settings, /accountCardShowsUsage\(usage\)/);
-// The switch refusal (Codex only) travels the same way as the delete one.
-assert.match(settings, /refusedWithSessions\(profileId, "use", err\)/);
-assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
-assert.match(card, /switchCloseSessionsCount/);
-assert.match(card, /`Close \$\{sessions\(switchCount\)\} and switch`/);
+// No switch or delete is refused for running sessions any more, so nothing
+// counts them or offers to close them.
+assert.doesNotMatch(settings, /refusedWithSessions|closeSessions/);
+assert.doesNotMatch(card, /switchCloseSessionsCount|and switch`/);
 const descriptors = read("src/renderer/src/lib/account-provider-descriptors.ts");
-assert.match(descriptors, /codex: \{\s*cliLabel: "Codex",\s*loginHint: "codex login",\s*switchClosesSessions: true,/);
-assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1);
+assert.doesNotMatch(descriptors, /switchClosesSessions|closes running/);
 
 // The fingerprint is a one-way digest of the account id, computed in main with
 // the same scheme on both sides. The id itself never crosses IPC.
@@ -341,7 +338,7 @@ for (const source of [card, settingsView, settings, app]) {
 }
 assert.match(settingsView, /export function AccountAddPicker\(/);
 assert.match(settingsView, /<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
-assert.match(settingsView, /`Sign in once in your browser\. Cora and \$\{selectedView\.descriptor\.cliLabel\} both use it\.`/);
+assert.match(settingsView, /`Sign in in your browser\. Codara keeps this account in its own folder and never touches \$\{selectedView\.descriptor\.systemHome\}\.`/);
 
 // An account change never closes a terminal, Codara's or anyone else's: a
 // switch replaces credentials, and a deleted account's home waits for its
