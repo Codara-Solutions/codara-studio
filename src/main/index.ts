@@ -45,6 +45,7 @@ import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
+import { registerPreviewCdpSessions } from "./browser/preview-cdp";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
@@ -1158,8 +1159,10 @@ app.whenReady().then(async () => {
   }
   registerPreviewBridge();
   registerTerminalBridge();
-  // Main-side computer-use executor for the preview tab: listens for tab
-  // announcements so console capture starts at dom-ready.
+  // Every preview guest gets its DevTools protocol session (and console and
+  // network recording) as Chromium attaches it; the computer-use executor
+  // binds announced guests to their tabs.
+  registerPreviewCdpSessions();
   registerPreviewInput();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to

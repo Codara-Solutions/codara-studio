@@ -11,7 +11,7 @@ module.exports = {
       rpc: "preview.console",
       annotations: { readOnly: true },
       description:
-        "Read the tab's captured console messages, newest last (up to 500). Filter by level, trim with limit, or clear=true to reset. Messages from before the tab loaded may be missing.",
+        "Read the tab's console messages and uncaught errors, newest last (up to 500), recorded since the tab opened. Filter by level, trim with limit, or clear=true to reset.",
       inputSchema: {
         type: "object",
         properties: {
@@ -28,7 +28,7 @@ module.exports = {
       rpc: "preview.network",
       annotations: { readOnly: true },
       description:
-        "Read the tab's captured requests (url, method, status, mimeType, failure; up to 500). Capture starts on the first call, so call it once before the interaction you want to observe. filter matches a URL substring; clear=true resets.",
+        "Read the tab's requests (url, method, status, mimeType, failure; up to 500), recorded since the tab opened. filter matches a URL substring; clear=true resets.",
       inputSchema: {
         type: "object",
         properties: {

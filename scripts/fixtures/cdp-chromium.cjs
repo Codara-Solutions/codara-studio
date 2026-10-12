@@ -1,0 +1,164 @@
+"use strict";
+// A real Chromium for unit suites that need the DevTools protocol: launched
+// headless with --remote-debugging-port, driven over one browser WebSocket
+// with flat sessions, the way the Chrome extension link relays
+// chrome.debugger. transportFor() returns the same CdpTransport shape
+// src/main/browser/cdp-session.ts expects.
+//
+//   const chromium = await startCdpChromium();   // null when none is installed
+//   const { targetId } = await chromium.newPage("data:text/html,...");
+//   const transport = chromium.transportFor(targetId);
+//   ...
+//   await chromium.close();
+
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+
+function findChromium() {
+  try {
+    const expected = require("playwright").chromium.executablePath();
+    if (fs.existsSync(expected)) return expected;
+  } catch {
+    /* fall through to the cache scan */
+  }
+  const cache = path.join(os.homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright");
+  const candidates = [];
+  for (const directory of fs.existsSync(cache) ? fs.readdirSync(cache) : []) {
+    for (const binary of [
+      "chrome-linux64/chrome",
+      "chrome-linux/chrome",
+      "chrome-headless-shell-linux64/chrome-headless-shell",
+      "chrome-linux/headless_shell",
+      "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+      "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+      "chrome-headless-shell-mac-x64/chrome-headless-shell",
+    ]) {
+      const candidate = path.join(cache, directory, binary);
+      if (fs.existsSync(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates.sort().pop() ?? null;
+}
+
+async function startCdpChromium() {
+  const executable = findChromium();
+  if (!executable) return null;
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "codara-cdp-chromium-"));
+  const child = spawn(executable, [
+    "--headless=new",
+    "--remote-debugging-port=0",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-gpu",
+    "about:blank",
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const wsUrl = await new Promise((resolve, reject) => {
+    let buffered = "";
+    const timer = setTimeout(() => reject(new Error("Chromium did not print its DevTools endpoint")), 15_000);
+    child.stderr.on("data", (chunk) => {
+      buffered += chunk;
+      const match = /DevTools listening on (ws:\/\/\S+)/.exec(buffered);
+      if (match) {
+        clearTimeout(timer);
+        resolve(match[1]);
+      }
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      reject(new Error(`Chromium exited early (${code})`));
+    });
+  });
+  const socket = new WebSocket(wsUrl);
+  await new Promise((resolve, reject) => {
+    socket.addEventListener("open", resolve, { once: true });
+    socket.addEventListener("error", reject, { once: true });
+  });
+  let nextId = 1;
+  const pending = new Map();
+  const eventListeners = new Set();
+  socket.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data));
+    if (message.id !== undefined) {
+      const waiter = pending.get(message.id);
+      if (!waiter) return;
+      pending.delete(message.id);
+      if (message.error) waiter.reject(new Error(message.error.message));
+      else waiter.resolve(message.result);
+      return;
+    }
+    for (const listener of eventListeners) listener(message);
+  });
+  const send = (method, params = {}, sessionId) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    });
+
+  return {
+    send,
+    async newPage(url = "about:blank") {
+      const { targetId } = await send("Target.createTarget", { url });
+      return { targetId };
+    },
+    transportFor(targetId) {
+      let sessionId = null;
+      const detachListeners = new Set();
+      const onBrowserEvent = (message) => {
+        if (message.method === "Target.detachedFromTarget" && message.params.sessionId === sessionId) {
+          sessionId = null;
+          for (const listener of detachListeners) listener(message.params.reason ?? "detached");
+        }
+      };
+      eventListeners.add(onBrowserEvent);
+      return {
+        async attach() {
+          if (sessionId) return;
+          const result = await send("Target.attachToTarget", { targetId, flatten: true });
+          sessionId = result.sessionId;
+        },
+        isAttached: () => sessionId !== null,
+        detach() {
+          if (!sessionId) return;
+          void send("Target.detachFromTarget", { sessionId }).catch(() => {});
+          sessionId = null;
+        },
+        send(method, params) {
+          if (!sessionId) return Promise.reject(new Error("not attached"));
+          return send(method, params ?? {}, sessionId);
+        },
+        onEvent(listener) {
+          const filtered = (message) => {
+            if (message.sessionId && message.sessionId === sessionId) listener(message.method, message.params ?? {});
+          };
+          eventListeners.add(filtered);
+          return () => eventListeners.delete(filtered);
+        },
+        onDetach(listener) {
+          detachListeners.add(listener);
+          return () => detachListeners.delete(listener);
+        },
+        /** For tests: drop the session as if another client took the tab. */
+        forceDetach() {
+          const id = sessionId;
+          if (id) void send("Target.detachFromTarget", { sessionId: id }).catch(() => {});
+        },
+      };
+    },
+    async close() {
+      try {
+        socket.close();
+      } catch {
+        /* already closed */
+      }
+      child.kill("SIGKILL");
+      await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
+      fs.rmSync(profile, { recursive: true, force: true });
+    },
+  };
+}
+
+module.exports = { startCdpChromium };

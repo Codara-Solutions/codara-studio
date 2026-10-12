@@ -300,9 +300,13 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
   - DOM work (navigate, snapshot, click, type, evaluate, screenshot) goes
     through `preview-bridge.ts` to `components/Preview/previewRpc.ts` in the
     renderer, which uses `domActions.ts` and `domSnapshot.ts`.
-  - Trusted input (scroll, hover, mouse, drag, keys, upload) and console or
-    network capture run in main, in `preview-input.ts`, over the Chrome
-    DevTools Protocol.
+  - Trusted input (scroll, hover, mouse, drag, keys, upload) runs in main,
+    in `preview-input.ts`, over the Chrome DevTools Protocol.
+  - Every tab has one DevTools protocol session (`src/main/browser/`):
+    `cdp-session.ts` is the transport-agnostic session (ref-counted domains,
+    re-attach, bounded buffers), `preview-cdp.ts` creates it over
+    `webContents.debugger` as Chromium attaches the guest, and
+    `recorders/` keep console and network from the tab's first request.
 - **Safety.** `index.ts` hardens every `<webview>` (`will-attach-webview`).
   `guest-popups.ts` turns `window.open` into in-app tabs.
   `main-window-trust.ts` tells trusted senders apart from guest pages.

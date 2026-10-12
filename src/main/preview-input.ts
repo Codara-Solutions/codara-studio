@@ -17,13 +17,17 @@
 // what capturePage screenshots are captured in (before devicePixelRatio
 // scaling) — so an agent can click what it sees in a screenshot.
 //
-// Ring buffers (console + network) are keyed by webContentsId. Console capture
-// is wired the moment a preview tab announces itself (dom-ready); network
-// capture attaches the CDP Network domain lazily on first use.
+// The DevTools protocol session, and the console and network recordings it
+// keeps, belong to the tab (browser/preview-cdp.ts): they start when Chromium
+// attaches the guest, before the agent's first call.
 
 import { ipcMain, webContents, type WebContents } from "electron";
 
 import { createPreviewDOM } from "../shared/preview-dom";
+import type { CdpSession } from "./browser/cdp-session";
+import { bindPreviewTabGuest, previewCdpSession } from "./browser/preview-cdp";
+import { consoleRing } from "./browser/recorders/console";
+import { clearNetwork, networkRing } from "./browser/recorders/network";
 import { previewKeyEvents } from "./preview-keyboard";
 import { requestPreviewOp } from "./preview-bridge";
 import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
@@ -55,57 +59,9 @@ const MODIFIER_SET = new Set([
   "capsLock",
 ]);
 
-interface ConsoleEntry {
-  level: string;
-  message: string;
-  line: number | null;
-  source: string | null;
-  at: string;
-}
-
-interface NetworkEntry {
-  requestId: string;
-  url: string;
-  method: string | null;
-  status: number | null;
-  mimeType: string | null;
-  failed: boolean;
-  errorText: string | null;
-  at: string;
-}
-
-interface GuestState {
-  wcId: number;
-  consoleAttached: boolean;
-  console: ConsoleEntry[];
-  debuggerAttached: boolean;
-  networkEnabled: boolean;
-  network: NetworkEntry[];
-  networkIndex: Map<string, NetworkEntry>;
-}
-
-const guests = new Map<number, GuestState>();
-
-function getState(wcId: number): GuestState {
-  let state = guests.get(wcId);
-  if (!state) {
-    state = {
-      wcId,
-      consoleAttached: false,
-      console: [],
-      debuggerAttached: false,
-      networkEnabled: false,
-      network: [],
-      networkIndex: new Map(),
-    };
-    guests.set(wcId, state);
-  }
-  return state;
-}
-
 // ---------------------------------------------------------------------------
-// Registration — wire the announce channel so console capture can begin at the
-// moment a preview tab becomes dom-ready (before the agent's first op).
+// Registration: a tab announces its guest at dom-ready, which binds the guest
+// to the tab so its recordings survive a re-created webview.
 // ---------------------------------------------------------------------------
 
 let registered = false;
@@ -126,7 +82,8 @@ export function registerPreviewInput(): void {
       // Defense in depth: even from the trusted frame, only attach to a real
       // <webview> guest of the main window, never to some other webContents id.
       if (!isTrustedPreviewGuest(wc)) return;
-      ensureConsoleAttached(wc);
+      if (typeof payload.tabId === "string" && payload.tabId) bindPreviewTabGuest(payload.tabId, wc);
+      else previewCdpSession(wc);
     },
   );
 }
@@ -178,9 +135,7 @@ async function resolveGuest(
   if (!isTrustedPreviewGuest(wc)) {
     throw new Error("preview target is not a preview guest of this window");
   }
-  // Opportunistically wire console capture in case the tab never announced
-  // (e.g. it was already open before this build attached listeners).
-  ensureConsoleAttached(wc);
+  if (typeof info.tabId === "string" && info.tabId) bindPreviewTabGuest(info.tabId, wc);
   return { wc, info };
 }
 
@@ -232,121 +187,6 @@ function normalizeModifiers(raw: unknown): string[] {
     else out.push(key);
   }
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Console capture — wired at tab announce (dom-ready). Ring buffer cap 500.
-// ---------------------------------------------------------------------------
-
-function ensureConsoleAttached(wc: WebContents): void {
-  const state = getState(wc.id);
-  if (state.consoleAttached) return;
-  state.consoleAttached = true;
-  // Modern params-object signature (Electron ≥ 30) — reading the legacy
-  // positional args triggers a deprecation warning on every message.
-  wc.on("console-message", (event) => {
-    pushConsole(state, {
-      level: typeof event.level === "string" ? event.level : "log",
-      message: typeof event.message === "string" ? event.message : String(event.message),
-      line: typeof event.lineNumber === "number" ? event.lineNumber : null,
-      source: typeof event.sourceId === "string" && event.sourceId ? event.sourceId : null,
-      at: new Date().toISOString(),
-    });
-  });
-  wc.once("destroyed", () => {
-    guests.delete(wc.id);
-  });
-}
-
-function pushConsole(state: GuestState, entry: ConsoleEntry): void {
-  state.console.push(entry);
-  if (state.console.length > RING_CAP) state.console.splice(0, state.console.length - RING_CAP);
-}
-
-// ---------------------------------------------------------------------------
-// CDP debugger — shared by network capture and file upload. Attached lazily.
-// ---------------------------------------------------------------------------
-
-function ensureDebugger(wc: WebContents): void {
-  const state = getState(wc.id);
-  if (state.debuggerAttached) return;
-  try {
-    if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
-  } catch (err) {
-    throw new Error(
-      `could not attach the DevTools protocol to the preview tab (${
-        (err as Error).message
-      }). Close the preview tab's DevTools if they're open, then retry.`,
-    );
-  }
-  state.debuggerAttached = true;
-  wc.debugger.on("message", (_event, method: string, params: Record<string, unknown>) => {
-    handleCdpMessage(state, method, params);
-  });
-  wc.debugger.on("detach", () => {
-    state.debuggerAttached = false;
-    state.networkEnabled = false;
-  });
-  wc.once("destroyed", () => {
-    guests.delete(wc.id);
-  });
-}
-
-function handleCdpMessage(
-  state: GuestState,
-  method: string,
-  params: Record<string, unknown>,
-): void {
-  if (method === "Network.requestWillBeSent") {
-    const requestId = String((params as { requestId?: unknown }).requestId ?? "");
-    const request = (params as { request?: { url?: string; method?: string } }).request ?? {};
-    const entry: NetworkEntry = {
-      requestId,
-      url: typeof request.url === "string" ? request.url : "",
-      method: typeof request.method === "string" ? request.method : null,
-      status: null,
-      mimeType: null,
-      failed: false,
-      errorText: null,
-      at: new Date().toISOString(),
-    };
-    state.networkIndex.set(requestId, entry);
-    pushNetwork(state, entry);
-  } else if (method === "Network.responseReceived") {
-    const requestId = String((params as { requestId?: unknown }).requestId ?? "");
-    const response = (params as { response?: { status?: number; mimeType?: string } }).response ?? {};
-    const entry = state.networkIndex.get(requestId);
-    if (entry) {
-      entry.status = typeof response.status === "number" ? response.status : entry.status;
-      entry.mimeType = typeof response.mimeType === "string" ? response.mimeType : entry.mimeType;
-    }
-  } else if (method === "Network.loadingFailed") {
-    const requestId = String((params as { requestId?: unknown }).requestId ?? "");
-    const entry = state.networkIndex.get(requestId);
-    if (entry) {
-      entry.failed = true;
-      entry.errorText =
-        typeof (params as { errorText?: unknown }).errorText === "string"
-          ? (params as { errorText: string }).errorText
-          : "failed";
-    }
-  }
-}
-
-function pushNetwork(state: GuestState, entry: NetworkEntry): void {
-  state.network.push(entry);
-  if (state.network.length > RING_CAP) {
-    const dropped = state.network.splice(0, state.network.length - RING_CAP);
-    for (const d of dropped) state.networkIndex.delete(d.requestId);
-  }
-}
-
-async function ensureNetworkEnabled(wc: WebContents): Promise<void> {
-  ensureDebugger(wc);
-  const state = getState(wc.id);
-  if (state.networkEnabled) return;
-  await wc.debugger.sendCommand("Network.enable");
-  state.networkEnabled = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -499,51 +339,46 @@ async function opUpload(params: Record<string, unknown>): Promise<unknown> {
     : [];
   if (paths.length === 0) throw new Error("upload requires a non-empty 'paths' array");
   const { wc } = await resolveGuest(params);
-  ensureDebugger(wc);
-  const doc = (await wc.debugger.sendCommand("DOM.getDocument", { depth: 0 })) as {
-    root?: { nodeId?: number };
-  };
+  const session = previewCdpSession(wc);
+  const doc = await session.send<{ root?: { nodeId?: number } }>("DOM.getDocument", { depth: 0 });
   const rootId = doc?.root?.nodeId;
   if (typeof rootId !== "number") throw new Error("could not read the preview DOM root");
-  const found = (await wc.debugger.sendCommand("DOM.querySelector", {
+  const found = await session.send<{ nodeId?: number }>("DOM.querySelector", {
     nodeId: rootId,
     selector,
-  })) as { nodeId?: number };
+  });
   if (!found?.nodeId) throw new Error(`file input not found: ${selector}`);
-  await wc.debugger.sendCommand("DOM.setFileInputFiles", { files: paths, nodeId: found.nodeId });
+  await session.send("DOM.setFileInputFiles", { files: paths, nodeId: found.nodeId });
   return { ok: true, selector, files: paths };
 }
 
-function opConsole(params: Record<string, unknown>): unknown {
-  return withGuestState(params, (state) => {
-    if (params.clear === true) {
-      state.console = [];
-      return { ok: true, cleared: true, entries: [] };
-    }
-    const level = typeof params.level === "string" ? params.level.toLowerCase() : null;
-    const limit = clampLimit(params.limit);
-    let entries = state.console;
-    if (level) entries = entries.filter((e) => e.level === level);
-    const sliced = entries.slice(-limit);
-    return { ok: true, count: sliced.length, total: state.console.length, entries: sliced };
-  });
+async function opConsole(params: Record<string, unknown>): Promise<unknown> {
+  const ring = consoleRing(await guestSession(params));
+  if (params.clear === true) {
+    ring.clear();
+    return { ok: true, cleared: true, entries: [] };
+  }
+  const level = typeof params.level === "string" ? params.level.toLowerCase() : null;
+  const limit = clampLimit(params.limit);
+  let entries = ring.toArray();
+  if (level) entries = entries.filter((e) => e.level === level);
+  const sliced = entries.slice(-limit);
+  return { ok: true, count: sliced.length, total: ring.size, entries: sliced };
 }
 
 async function opNetwork(params: Record<string, unknown>): Promise<unknown> {
-  const { wc } = await resolveGuest(params);
-  await ensureNetworkEnabled(wc);
-  const state = getState(wc.id);
+  const session = await guestSession(params);
+  const ring = networkRing(session);
   if (params.clear === true) {
-    state.network = [];
-    state.networkIndex.clear();
+    clearNetwork(session);
     return { ok: true, cleared: true, entries: [] };
   }
   const filter = typeof params.filter === "string" ? params.filter : null;
   const limit = clampLimit(params.limit);
-  let entries = state.network;
+  let entries = ring.toArray();
   if (filter) entries = entries.filter((e) => e.url.includes(filter));
   const sliced = entries.slice(-limit);
-  return { ok: true, count: sliced.length, total: state.network.length, entries: sliced };
+  return { ok: true, count: sliced.length, total: ring.size, entries: sliced };
 }
 
 async function opKey(params: Record<string, unknown>): Promise<unknown> {
@@ -598,9 +433,9 @@ async function dispatchKey(
   text: string | null,
 ): Promise<void> {
   const events = previewKeyEvents(key, modifiers, text);
-  ensureDebugger(wc);
-  await wc.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const event of events) await wc.debugger.sendCommand("Input.dispatchKeyEvent", event);
+  const session: CdpSession = previewCdpSession(wc);
+  await session.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+  for (const event of events) await session.send("Input.dispatchKeyEvent", event);
 }
 
 // ---------------------------------------------------------------------------
@@ -612,13 +447,9 @@ function clampLimit(raw: unknown): number {
   return Math.max(1, Math.min(n, RING_CAP));
 }
 
-// Console reads must not fabricate a fresh guest just to answer; but they do
-// need the ring buffer for the resolved tab. Resolve the guest (which also
-// wires console capture), then hand its state to the reader.
-async function withGuestState<T>(
-  params: Record<string, unknown>,
-  fn: (state: GuestState) => T,
-): Promise<T> {
+// Recordings belong to the tab's session, which resolving the guest creates
+// if this tab has none yet.
+async function guestSession(params: Record<string, unknown>): Promise<CdpSession> {
   const { wc } = await resolveGuest(params);
-  return fn(getState(wc.id));
+  return previewCdpSession(wc);
 }
