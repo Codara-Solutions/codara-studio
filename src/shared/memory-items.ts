@@ -113,9 +113,16 @@ export const MEMORY_ITEM_MAX_CHARS = 500;
 
 // ── text helpers ────────────────────────────────────────────────────────────
 
-/** Lowercase, strip accents, collapse whitespace. */
+// Smart punctuation (phone keyboards, model output) types "don’t"; left
+// as is it splits into "don" + "t" and the negation goes uncounted, which
+// flips every do/don't comparison between a memory and the user's quote.
+function foldApostrophes(text: string): string {
+  return text.replace(/[\u2018\u2019\u02bc\uff07]/g, "'");
+}
+
+/** Lowercase, strip accents, fold typographic apostrophes, collapse whitespace. */
 export function normalizeMemoryText(text: string): string {
-  return text
+  return foldApostrophes(text)
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
@@ -148,7 +155,8 @@ const STOPWORDS = new Set<string>([
 // Negation and frequency words decide a memory's polarity, so they are kept
 // out of the topic tokens and read separately by memoryPolarity.
 const POLARITY_WORDS = new Set<string>([
-  "not", "no", "never", "dont", "don't", "stop", "avoid", "without", "nunca", "jamas", "nada",
+  "not", "no", "never", "dont", "don't", "cant", "cannot", "wont", "stop", "avoid", "without",
+  "nunca", "jamas", "nada",
   "sin", "evita", "evitar", "deja", "ne", "pas", "jamais", "nicht", "nie", "kein", "keine",
   "nao", "always", "siempre", "toujours", "immer", "sempre",
 ]);
@@ -235,8 +243,8 @@ const QUOTE_MIN_COVERAGE = 0.5;
 const QUOTE_MAX_UNSUPPORTED_WORDS = 3;
 
 const NEGATORS = new Set<string>([
-  "not", "no", "never", "dont", "stop", "avoid", "without", "nunca", "jamas", "sin", "evita",
-  "evitar", "pas", "jamais", "nicht", "nie", "kein", "keine", "nao",
+  "not", "no", "never", "dont", "cant", "cannot", "wont", "stop", "avoid", "without", "nunca",
+  "jamas", "sin", "evita", "evitar", "pas", "jamais", "nicht", "nie", "kein", "keine", "nao",
 ]);
 
 /**
@@ -314,11 +322,11 @@ export function memorySimilarity(a: string, b: string): number {
 }
 
 const NEGATION_PATTERN =
-  /\b(?:not|no|never|don't|dont|do not|stop|avoid|without|nunca|jamas|jamás|sin|evita|deja de|no uses|ne\b[^.]*\bpas|jamais|nicht|nie|kein|keine|nao|não)\b/i;
+  /\b(?:not|no|never|don't|dont|do not|can't|cant|cannot|won't|wont|stop|avoid|without|nunca|jamas|jamás|sin|evita|deja de|no uses|ne\b[^.]*\bpas|jamais|nicht|nie|kein|keine|nao|não)\b/i;
 
 /** -1 for a "don't / never" memory, +1 otherwise. */
 export function memoryPolarity(text: string): -1 | 1 {
-  return NEGATION_PATTERN.test(text) ? -1 : 1;
+  return NEGATION_PATTERN.test(foldApostrophes(text)) ? -1 : 1;
 }
 
 // Slots a preference can hold exactly one value for. Two memories that name

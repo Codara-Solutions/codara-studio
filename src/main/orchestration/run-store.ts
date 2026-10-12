@@ -2077,6 +2077,8 @@ export interface WorkflowAgentLaunchInput {
 // Live usage listeners of workflow attempts, by attempt id. The Pi worker
 // session reports into it as responses arrive, so a workflow's ceilings see
 // what a running agent spends instead of only what a finished one spent.
+// Every autonomous worker runs on Pi; the only other session is the
+// human-assisted pane, which spends no model tokens to report.
 const workflowAttemptUsage = new Map<string, (usage: { in: number; out: number; usd: number }) => void>();
 
 export interface WorkflowAgentLaunchResult {

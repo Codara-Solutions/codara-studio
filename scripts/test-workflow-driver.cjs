@@ -397,6 +397,20 @@ return [a, b];
     await next.waitForWorkflowRun(small.id, { timeoutMs: 20_000, pollMs: 25 });
     const launch = store.calls.launches[before];
     check("a tiny compactAt fraction is raised to the 48k floor", launch?.call.compactAtTokens === 48_000, launch?.call);
+    // test-model falls back to the 128k default window; Pi compacts on its
+    // own 16384 tokens short of that window.
+    const huge = await next.startWorkflowRun({
+      workspaceId: "ws",
+      cwd: base,
+      source: `export const meta = { name: "huge", description: "huge compactAt" };\nreturn await parallel([() => agent("plain a", { compactAt: 1_000_000 }), () => agent("plain b", { compactAt: 1 })]);\n`,
+    });
+    await next.waitForWorkflowRun(huge.id, { timeoutMs: 20_000, pollMs: 25 });
+    const capped = store.calls.launches.slice(before + 1).map((l) => l.call.compactAtTokens);
+    check(
+      "a compactAt past the window is capped at Pi's own trigger",
+      capped.length === 2 && capped.every((tokens) => tokens === 128_000 - 16_384),
+      capped,
+    );
     const raw = await next.checkWorkflow({
       source: `export const meta = { name: "raw", description: "raw" };\nreturn await agent("plain", { compactAt: 1.5 });\n`,
     });

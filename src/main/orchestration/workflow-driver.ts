@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, promises as fs } fr
 import os from "node:os";
 import { basename, join } from "node:path";
 
-import { MIN_COMPACT_AT_TOKENS } from "@shared/context-compaction";
+import { MIN_COMPACT_AT_TOKENS, PI_BUILTIN_COMPACT_HEADROOM_TOKENS } from "@shared/context-compaction";
 import { contextWindowForModel } from "@shared/context-window";
 import { fastModeSupportFor } from "@shared/fast-mode";
 import { DEFAULT_LOOM_WORKER_MODEL } from "@shared/model-catalog";
@@ -611,14 +611,18 @@ interface AgentContext {
   baseCommit(): Promise<string>;
 }
 
-// The extension applies no floor to a token limit, so the one the
-// percentage setting has is applied here: Pi keeps about 20k tokens verbatim
-// through a compaction, and a smaller limit would compact on every tool round.
+// The extension applies no floor to a token limit, so the bounds the
+// percentage setting has are applied here, as autoCompactLimitTokens does:
+// Pi keeps about 20k tokens verbatim through a compaction, so a smaller limit
+// would compact on every tool round, and past Pi's own trigger the limit
+// would never be the one that fires.
 function compactAtTokens(request: WorkflowAgentRequest): number | undefined {
   if (request.compactAt === undefined) return undefined;
   const window = contextWindowForModel(request.model).tokens;
+  const piTrigger = window - PI_BUILTIN_COMPACT_HEADROOM_TOKENS;
+  const ceiling = piTrigger > 0 ? piTrigger : window;
   const wanted = request.compactAt <= 1 ? window * request.compactAt : request.compactAt;
-  return Math.max(Math.round(wanted), Math.min(MIN_COMPACT_AT_TOKENS, window));
+  return Math.min(Math.max(Math.round(wanted), Math.min(MIN_COMPACT_AT_TOKENS, ceiling)), ceiling);
 }
 
 async function runAgent(

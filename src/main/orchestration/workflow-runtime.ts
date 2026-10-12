@@ -30,6 +30,7 @@ import {
   WORKFLOW_RUNTIME_VERSION,
   callKeyBase,
   canonicalJson,
+  rerunsOnResume,
   sha256,
   type DoneEntry,
   type JournalEntry,
@@ -509,10 +510,12 @@ export class WorkflowRuntime {
       const call = this.calls.get(leftover.newSeq);
       if (!call || call.answered) continue;
       call.cached = false;
-      if (leftover.done && leftover.done.status !== "error") {
+      if (leftover.done && !rerunsOnResume(leftover.done)) {
         call.cached = true;
         this.deliverCached(call, leftover.done);
       } else {
+        // The cut-off attempt was paid for; its rerun must not hide that spend.
+        if (leftover.done) this.abandon(leftover.done.usage);
         this.dispatchLive(call);
       }
     }
@@ -746,7 +749,7 @@ export class WorkflowRuntime {
         if (controller.signal.reason === "skip") {
           this.answer(call, { ...outcome, status: "skipped", value: null, note: "skipped by the user" });
         } else if (controller.signal.reason === "ceiling") {
-          this.answer(call, { ...outcome, status: "null", value: null, note: call.cutOff });
+          this.answer(call, { ...outcome, status: "null", value: null, note: call.cutOff, cutOff: true });
         } else {
           this.settleAborted(call, "stop", outcome.usage);
         }
@@ -785,7 +788,7 @@ export class WorkflowRuntime {
       return;
     }
     if (reason === "ceiling") {
-      this.answer(call, { status: "null", usage: usage ?? call.liveUsage ?? NO_USAGE, note: call.cutOff });
+      this.answer(call, { status: "null", usage: usage ?? call.liveUsage ?? NO_USAGE, note: call.cutOff, cutOff: true });
       return;
     }
     if (!call.answered) {
@@ -817,6 +820,7 @@ export class WorkflowRuntime {
       workerTaskId?: string;
       worktree?: JournalWorktree;
       cached?: boolean;
+      cutOff?: boolean;
     },
   ): void {
     if (call.answered) return;
@@ -860,6 +864,7 @@ export class WorkflowRuntime {
         ...(outcome.worktree ? { worktree: outcome.worktree } : {}),
         ...(outcome.note ? { note: oneLine(outcome.note, 2_000) } : {}),
         ...(outcome.cached ? { cached: true } : {}),
+        ...(outcome.cutOff ? { cutOff: true } : {}),
       };
       if (outcome.status === "ok") {
         let inlineSize = 0;

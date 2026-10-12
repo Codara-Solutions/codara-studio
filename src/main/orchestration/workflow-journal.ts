@@ -51,6 +51,8 @@ export type JournalEntry =
       worktree?: JournalWorktree;
       note?: string;
       cached?: boolean;
+      /** A ceiling stopped the agent mid-flight; like "error", it reruns. */
+      cutOff?: boolean;
     }
   /**
    * Usage no delivered result accounts for: an agent stopped mid-flight, or a
@@ -67,6 +69,13 @@ export type JournalEntry =
 
 export type IssueEntry = Extract<JournalEntry, { t: "issue" }>;
 export type DoneEntry = Extract<JournalEntry, { t: "done" }>;
+
+// A thrown answer (maxAgents, a ceiling, a disconnected model) and an agent a
+// ceiling cut off both depend on limits the user may have changed since, so
+// a resume asks them again live instead of replaying them.
+export function rerunsOnResume(done: DoneEntry): boolean {
+  return done.status === "error" || done.cutOff === true;
+}
 
 // Keys sorted at every level, so two semantically equal option objects hash
 // the same however the script spelled them.
@@ -203,9 +212,7 @@ export class JournalReplayer {
     if (!entry) return { kind: "exhausted" };
     if (entry.t === "issue") return guestIdle ? { kind: "diverge" } : { kind: "wait" };
     const newSeq = this.matched.get(entry.seq);
-    // A thrown answer (maxAgents, a ceiling, a disconnected model) depends on
-    // limits the user may have changed since, so it is asked again live.
-    if (newSeq === undefined || entry.status === "error") return { kind: "diverge" };
+    if (newSeq === undefined || rerunsOnResume(entry)) return { kind: "diverge" };
     this.cursor += 1;
     this.delivered.add(newSeq);
     return { kind: "deliver", newSeq, done: entry };

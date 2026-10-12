@@ -214,6 +214,31 @@ async function main() {
     check("token ceiling: a cut-off agent says why", notes.filter((n) => /cut off: workflow token ceiling reached/.test(n)).length === 2, notes);
   }
   {
+    // A cut-off agent did not finish its work: a resume after the user raised
+    // the ceiling runs it again instead of replaying its null, and still
+    // counts what the cut-off attempt spent.
+    const script = `return await parallel([1, 2].map((i) => () => agent("live=60 tokens=60 delay=1500 agent " + i)));`;
+    const journal = memoryJournal();
+    const first = await runScript(script, { journal, caps: { tokenCeiling: 100 } });
+    check("cut-off run resolves both agents null", first.outcome.value?.every((v) => v === null), first.outcome);
+    const dones = journal.entries.filter((e) => e.t === "done");
+    check("cut-off answers are journaled as cut off", dones.length === 2 && dones.every((d) => d.cutOff === true), dones);
+    const executor = fakeExecutor();
+    const resumed = await runScript(script, {
+      journal: memoryJournal(),
+      replay: journal.entries,
+      executor,
+      caps: { tokenCeiling: 1000 },
+    });
+    check("resume with a raised ceiling reruns the cut-off agents", executor.log.runs.length === 2, executor.log.runs.map((r) => r.prompt));
+    check(
+      "resume with a raised ceiling finishes their work",
+      resumed.outcome.status === "complete" && resumed.outcome.value?.every((v) => typeof v === "string"),
+      resumed.outcome,
+    );
+    check("the cut-off attempts still count after the rerun", resumed.runtime.spent.inputTokens === 240, resumed.runtime.spent);
+  }
+  {
     const admission = new admissionMod.WorkflowAdmission({ machineSlots: 2, heavySlots: 1 });
     const executor = fakeExecutor();
     const [a, b] = await Promise.all([

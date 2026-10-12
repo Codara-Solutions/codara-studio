@@ -167,6 +167,7 @@ async function main() {
     ["components", "WorkspaceRail.tsx"],
     ["components", "file-preview", "FilePreview.tsx"],
     ["components", "git", "SplitCommitsDialog.tsx"],
+    ["tabs", "TerminalStack.tsx"],
   ]) {
     assert.doesNotMatch(source(...parts), /backdropFilter|WebkitBackdropFilter/, `${parts.join("/")} frosts outside the glass gate`);
   }

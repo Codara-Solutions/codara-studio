@@ -2019,8 +2019,6 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
           "0 0 28px color-mix(in oklch, var(--accent) 18%, transparent)",
         ].join(", "),
         transform: "rotate(-1.5deg) scale(1.02)",
-        backdropFilter: "blur(8px)",
-        WebkitBackdropFilter: "blur(8px)",
       }}
     >
       <div
@@ -3272,17 +3270,15 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         maxWidth: "max(80px, calc(100% - 180px))",
         minWidth: 0,
         whiteSpace: "nowrap",
-        // Earned mild-glass chip: a panel veil over the terminal canvas so
-        // the label stays legible without baking white/black (which invert
-        // on the light themes).
+        // A panel veil over the terminal canvas keeps the label legible
+        // without baking white/black (which invert on the light themes). It
+        // is part of the pane, so it stays unblurred with glass on or off.
         background: "color-mix(in oklab, var(--panel-2) 82%, transparent)",
         // Glows live, calms when done: a working worker carries the accent
         // (edge + text + halo), a blocked one carries amber to flag it needs
         // you, and an idle / finished one drops to a neutral --rule border +
         // --ink-dim text + no glow so it stops reading as live.
         border: `1px solid ${frameEdge}`,
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
         color: frameColor,
         fontFamily: "var(--font-mono)",
         fontSize: 10,
