@@ -230,6 +230,7 @@ import {
   renderWorkerPrompt,
   shouldProvisionWorkerMailbox,
   shouldUsePeerComms,
+  workerMemoryContext,
 } from "./worker-prompt";
 import {
   detectFatalWorkerRuntimeError,
@@ -20864,13 +20865,29 @@ async function runPiWorkerSession({
   // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
   // them would otherwise leave the worker unable to write a valid report.
   const contractSections = workerContractSections(promptText);
-  const taskContract = () => [
-    task.description.trim(),
-    ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
-    ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
-    ...(contractSections ? [contractSections] : []),
-    ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
-  ].join("\n\n");
+  // Memory and the profile are pinned context: the compaction summary is told
+  // to leave them out, and this re-sends a fresh copy exactly once after
+  // each compaction, so the user's preferences survive a long run and
+  // anything learned meanwhile arrives too.
+  const pinnedMemory = (): string | null => {
+    if (runProjectPolicyMode(run) === "untrusted-pull-request") return null;
+    try {
+      return workerMemoryContext(run, task);
+    } catch {
+      return null;
+    }
+  };
+  const taskContract = () => {
+    const memory = pinnedMemory();
+    return [
+      task.description.trim(),
+      ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
+      ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+      ...(contractSections ? [contractSections] : []),
+      ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+      ...(memory ? [`Cora memory and profile (re-sent after compaction; they still apply):\n${memory}`] : []),
+    ].join("\n\n");
+  };
   // Outside the workspace, beside the report. Imported pull-request workers
   // have no scratchpad tool.
   const scratchpadPath =

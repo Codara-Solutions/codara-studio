@@ -5,7 +5,7 @@ interface CompactionClient {
   prompt(message: string): Promise<unknown>;
 }
 
-const HANDOFF = "Preserve the current user objective, exact requirements and identifiers, explicit prohibitions, permitted tools and paths, confirmed facts, completed work and verification, failures, pending tasks, and next actions. Keep a concise continuation handoff. Do not invent new requirements, broaden permissions, or retain stale exploration.";
+const HANDOFF = "Preserve the current user objective, exact requirements and identifiers, explicit prohibitions, permitted tools and paths, confirmed facts, completed work and verification, failures, pending tasks, and next actions. Keep any preference or correction the user stated during the task. Leave the CORA PROFILE, CORA MEMORY and CORA LEARNED MEMORY sections out: they are re-sent with the task contract. Keep a concise continuation handoff. Do not invent new requirements, broaden permissions, or retain stale exploration.";
 const CONTINUE = "Continue the original task from the compacted context under the same user constraints, tool restrictions, and permissions. Preserve completed work and prior tool effects; do not repeat successful actions. Complete only the remaining requested work, verify only as permitted by the original instructions, then submit the required result.";
 
 export class PiWorkerCompaction {
