@@ -93,6 +93,9 @@ function leaveNetworkOp(cwd: string, succeeded: boolean): void {
 // Single choke point for every git invocation. `credential.interactive=false`
 // + GIT_TERMINAL_PROMPT=0 make an auth-required network op fail fast instead
 // of blocking on a credential prompt that has nowhere to surface.
+// GIT_OPTIONAL_LOCKS=0 keeps the panel's background status reads from taking
+// the index lock a stash or a stage of the user's needs at the same moment;
+// locks a write requires are taken all the same.
 export async function runGit(
   cwd: string,
   args: string[],
@@ -119,6 +122,7 @@ export async function runGit(
         env: {
           ...(opts.env ?? process.env),
           GIT_TERMINAL_PROMPT: "0",
+          GIT_OPTIONAL_LOCKS: "0",
         },
       },
     );
