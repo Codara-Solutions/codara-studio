@@ -26,6 +26,17 @@ async function main() {
     );
     assert.ok(formatManualAgentStartup(parsed, "C:\\Program Files\\Codex\\codex.cmd", "cmd")
       .startsWith('"C:\\Program Files\\Codex\\codex.cmd" "resume"'));
+    // Codara's per-launch overrides go in front of the parsed arguments and
+    // carry quotes, spaces and backslashes.
+    const injected = {
+      ...parsed,
+      childArgv: [parsed.childArgv[0], "-c", `projects={'/a b/it"s'={trust_level='trusted'}}`, "-c", "C:\\dir\\", ...parsed.childArgv.slice(1)],
+    };
+    assert.ok(
+      formatManualAgentStartup(injected, "codex.cmd", "cmd")
+        .includes(`"-c" "projects={'/a b/it\\"s'={trust_level='trusted'}}" "-c" "C:\\dir\\\\" "resume"`),
+      formatManualAgentStartup(injected, "codex.cmd", "cmd"),
+    );
 
     if (process.platform !== "win32") {
       const binary = path.join(dir, "agent's tools $(false)", "codex");
@@ -34,7 +45,7 @@ async function main() {
       for (const family of ["sh", "bash", "zsh", "fish"]) {
         const shell = spawnSync("which", [family], { encoding: "utf8" }).stdout.trim();
         if (!shell) continue;
-        const command = formatManualAgentStartup(parsed, binary, family);
+        const command = formatManualAgentStartup(injected, binary, family);
         const args = family === "bash" ? ["--noprofile", "--norc", "-c", command]
           : family === "zsh" ? ["-f", "-c", command]
           : family === "fish" ? ["--no-config", "-c", command] : ["-c", command];
@@ -42,8 +53,8 @@ async function main() {
           env: { PATH: "/usr/bin:/bin", HOME: dir }, encoding: "utf8", timeout: 5000,
         });
         assert.equal(result.status, 0, result.stderr);
-        assert.deepEqual(result.stdout.trim().split("\n"), parsed.childArgv.slice(1));
-        console.log(`PASS ${family} launches the resolved executable and preserves resume arguments`);
+        assert.deepEqual(result.stdout.trim().split("\n"), injected.childArgv.slice(1));
+        console.log(`PASS ${family} launches the resolved executable and preserves injected and resume arguments`);
       }
     }
     console.log("PASS manual launch parsing and shell quoting");

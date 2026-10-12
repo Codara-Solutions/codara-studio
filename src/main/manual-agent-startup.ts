@@ -22,7 +22,11 @@ export function formatManualAgentStartup(
     return `& ${[binary, ...args].map(quote).join(" ")}`;
   }
   if (family === "cmd") {
-    return `"${binary}" ${args.map((arg) => `"${arg}"`).join(" ")}`;
+    // The child parses its command line with the C runtime's rules, so an
+    // embedded quote is escaped as \" and the backslashes before it doubled.
+    const quote = (value: string): string =>
+      `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
+    return `"${binary}" ${args.map(quote).join(" ")}`;
   }
   const quote = (value: string): string => family === "fish"
     ? `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
