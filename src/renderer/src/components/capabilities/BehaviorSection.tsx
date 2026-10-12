@@ -39,7 +39,8 @@ function AutoCompactRow({
         <span style={toggleDetailStyle}>
           When a conversation fills this much of the model's context window, Cora summarizes the older part and
           keeps working, even in the middle of a long task. It also applies to every worker Cora starts and to the
-          Claude and Codex terminals she opens. Lower keeps her faster and cheaper; higher keeps more history word
+          Codex terminals she opens; Claude terminals use it to compact earlier on models where Claude Code compacts
+          before the context limit. Lower keeps her faster and cheaper; higher keeps more history word
           for word. Now {autoCompactExample(value)}. Applies the next time Cora or a worker starts.
         </span>
       </span>

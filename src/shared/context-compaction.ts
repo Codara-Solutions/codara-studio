@@ -154,7 +154,12 @@ export const CODEX_CLI_CONTEXT_WINDOW_TOKENS = 272_000;
  * Value for CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (Claude Code reads it as a
  * percentage of its own effective window), or null to leave Claude on its own
  * default. Claude ignores values above its default threshold, so a high
- * percentage cannot delay compaction.
+ * percentage cannot delay compaction. Claude Code 2.1.296 also applies it only
+ * to sessions that compact before the model's context limit (native 1M models,
+ * the 200k-boundary ones, a configured autoCompactWindow); a session that
+ * compacts only at the limit keeps doing so. Codara does not set
+ * autoCompactWindow for it: that would lift the 200k boundary some models are
+ * billed at.
  */
 export function claudeAutoCompactPercentEnv(percent: number | null | undefined): string | null {
   const normalized = normalizeAutoCompactPercent(percent);
