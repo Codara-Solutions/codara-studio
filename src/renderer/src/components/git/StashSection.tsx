@@ -321,14 +321,22 @@ function StashRow({
       >
         {hover && !disabled ? (
           <>
-            <IconButton title="Apply stash (keep it in the list)" onClick={onApply} size={20}>
+            <IconButton title="Apply: restore the changes and keep this stash" onClick={onApply} size={20}>
               <ApplyStashIcon />
             </IconButton>
-            <IconButton title="Pop stash (apply then drop)" onClick={onPop} size={20}>
+            <IconButton
+              title="Pop: restore the changes and remove this stash if that succeeds"
+              onClick={onPop}
+              size={20}
+            >
               <PopStashIcon />
             </IconButton>
             <IconButton
-              title={confirmDrop ? "Click again to drop" : "Drop stash"}
+              title={
+                confirmDrop
+                  ? "Click again to delete this stash for good"
+                  : "Drop: delete this stash without restoring its changes"
+              }
               danger
               active={confirmDrop}
               size={20}
