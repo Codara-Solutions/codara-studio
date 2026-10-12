@@ -13,7 +13,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 80 },
       description:
-        "Capture the tab as a PNG. Also returns viewport (CSS pixels), imageSize, and scale: divide screenshot coordinates by scale before passing them to mouse tools.",
+        "Capture the tab as a PNG, also saved to the file in path. Returns viewport (CSS pixels), imageSize, and scale: divide screenshot coordinates by scale before passing them to mouse tools.",
       inputSchema: {
         type: "object",
         properties: { tabId: { type: "string" } },

@@ -986,7 +986,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
 
-    const geometry = { url: "http://127.0.0.1:4173/", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
+    const geometry = { url: "http://127.0.0.1:4173/", path: "/codara/workspace-data/ws/browser/screenshots/shot.png", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
     mockResult = { ...geometry, dataUrl: "data:image/png;base64,cGl4ZWxz" };
     const screenshot = await directBridge.callToolByName("codara_preview_screenshot", {});
     assert.strictEqual(screenshot.content[0].type, "image");

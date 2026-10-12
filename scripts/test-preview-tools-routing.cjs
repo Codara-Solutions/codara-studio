@@ -7,6 +7,8 @@
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
+const fs = require("node:fs");
+const os = require("node:os");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -43,8 +45,13 @@ async function loadPreviewTools(stubs) {
 (async () => {
   const calls = [];
   globalThis.__previewToolCalls = calls;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codara-routing-home-"));
   const tools = await loadPreviewTools({
-    "preview-bridge": `module.exports = { requestPreviewOp: async (op, params) => { globalThis.__previewToolCalls.push({ via: "renderer", op, params }); return { op }; } };`,
+    "preview-bridge": `module.exports = { requestPreviewOp: async (op, params) => {
+      globalThis.__previewToolCalls.push({ via: "renderer", op, params });
+      return op === "screenshot" ? { tabId: "tab-1", dataUrl: "data:image/png;base64,iVBORw0KGgo=" } : { op };
+    } };`,
+    "codara-home": `module.exports = { codaraHome: () => ${JSON.stringify(home)} };`,
     "preview-input": `module.exports = { handlePreviewInputOp: async (op, params) => { globalThis.__previewToolCalls.push({ via: "input", op, params }); return { op }; } };`,
     "preview-navigation": `module.exports = { waitForLoopbackPreviewServer: async () => true };`,
   });
@@ -94,6 +101,14 @@ async function loadPreviewTools(stubs) {
     /may not use tabs of your own browser/,
   );
   assert.equal(calls.length, reaching, "a refused Chrome call reaches no executor");
+
+  // A screenshot is also a file in the workspace's data folder, for agents
+  // that cannot read image content.
+  const shot = await tools.runPreviewTool("preview.screenshot", { callerPid: 7 }, host);
+  assert.ok(shot.path.startsWith(path.join(home, "workspace-data", "ws-caller", "browser", "screenshots")), shot.path);
+  assert.deepEqual(fs.readFileSync(shot.path), Buffer.from("iVBORw0KGgo=", "base64"));
+  assert.equal(shot.dataUrl, "data:image/png;base64,iVBORw0KGgo=");
+  fs.rmSync(home, { recursive: true, force: true });
   console.log(`preview tool routing: ${handled.size} socket methods, each named by a tool module`);
 })().catch((error) => {
   console.error(error);

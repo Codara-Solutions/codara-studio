@@ -2429,7 +2429,7 @@ async function callRunBatch(args, ctx = {}) {
 
 function screenshotMetadata(value) {
   return { url: value.url ?? null, ...Object.fromEntries(
-    ["tabId", "title", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
+    ["tabId", "title", "path", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
   ) };
 }
 

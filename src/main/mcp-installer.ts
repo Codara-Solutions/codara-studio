@@ -1101,7 +1101,7 @@ function builtinMeta(): SparkBuiltinMeta[] {
       serverName: SERVER_NAME,
       summary: "Drive the preview tab, open agent terminals, and orchestrate workers",
       detail:
-        "Codara's built-in MCP server. Codara passes it to the Claude Code and Codex sessions it starts, so verifier and worker agents can click, type, snapshot, screenshot and run JS against the exact <preview> DOM you see, and open and drive agent-owned terminal tabs. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build and run automations (looms). Your own Claude Code and Codex configuration is not changed.",
+        "Codara's built-in MCP server. Codara passes it to every agent session it starts (Claude Code, Codex, Grok and Cora), so agents can click, type, snapshot, screenshot and run JS against the exact browser tab you see, and open and drive agent-owned terminal tabs. Agents without MCP support reach the same tools from a Codara terminal with `cora tool`. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build and run automations (looms). Your own CLI configuration is not changed.",
       tools: builtinToolNames(),
     },
   ];
