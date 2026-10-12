@@ -78,10 +78,11 @@ See [accounts.md](./accounts.md) for how these fit together.
 - **Account.** One sign-in with Claude, ChatGPT or Grok. It has a Cora side
   (the subscription Cora uses) and a CLI side (the login Claude Code, Codex or
   Grok uses), which hold the same sign-in.
-- **Account 1.** Your own login in the CLI's usual home.
-- **Active account.** The account a CLI's terminals, and new Cora chats, use.
-  For Claude Code and Codex its login is the one in your own `~/.claude` or
-  `~/.codex`.
+- **System login.** Your own login in the CLI's usual home (`~/.claude`,
+  `~/.codex`, `~/.grok`). Codara reads who it is signed in as and never
+  changes it; added to Codara, it shows the badge "Your Claude Code login".
+- **Active account.** The account new Codara terminals and new Cora chats
+  use. With none Active, terminals use the System login.
 - **Credential mirror.** The process that keeps an account's two sides
   holding the same, newest login (`credential-mirror.ts`).
 

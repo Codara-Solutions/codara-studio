@@ -1,9 +1,9 @@
 # What Codara writes on your machine
 
-Codara Studio keeps almost everything in one folder, but it also touches a few
-files that belong to the agent CLIs, so that they can find the app and so that
-account switching works. This page lists all of it, so you can audit it or
-undo it. Paths are for macOS and Linux; on Windows `~` is your user profile
+Codara Studio keeps everything in one folder. It does not edit the agent
+CLIs' own config or logins unless you turn on **Codara tools in other apps**,
+and the few other places it writes are listed below, so you can audit them or
+undo them. Paths are for macOS and Linux; on Windows `~` is your user profile
 folder.
 
 ## Codara's own folder: `~/.codarastudio/`
@@ -25,31 +25,63 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |
 | `codex-hooks/` | A durable copy of the Codex notify script (`codara-codex-notify.py`), for the same reason. |
 | `builtin-mcp.json` | The CLIs you switched the Codara Studio MCP server off for. |
+| `integrations/` | What Codara passes to the Claude Code and Codex sessions it starts, rewritten at every start: `claude/settings.json` (the hooks, given with `--settings`), `claude/mcp-<mode>.json` (the `codara-studio` server, given with `--mcp-config`), `codex-notify.json` (your own Codex `notify`, which Codara's chains to), and `claude/args.txt`, `codex/args.txt` for the commands you type in a Codara pane. |
+| `global-config-cleanup.json`, `backups/global-config-cleanup/<time>/` | The one-time removal of what earlier versions wrote into your Claude Code and Codex config: a report, and a backup of every file it changed with a `manifest.json`. |
 | `pi-agent/` | Cora's Pi state: the Cora side of each account (`accounts/<id>/auth.json`), Cora's Pi sessions, the MCP bridge config of each running session and its `.status.json` connection report (no secrets), `skills/` for skills only Cora should load, and a `settings.json` holding Cora's provider retry budget (mode 0600; other keys you add there are kept). Cora never reads your own `~/.pi`. |
-| `claude-cli/`, `codex-cli/` | The saved logins of every Claude Code and Codex account that is not the Active one (mode 0600), and a record of which account's login is live in your `~/.claude` or `~/.codex`. |
-| `grok-cli/` | One private home per managed Grok account. |
-| `shell/active-cli-env` | Which Grok home running Studio shells should follow. |
+| `claude-cli/` | Claude Code accounts: each account's login (`accounts/<id>/login.json`, mode 0600) and the one slot every Codara terminal on a Codara account runs in (`live/home`, its `CLAUDE_CONFIG_DIR`). |
+| `codex-cli/`, `grok-cli/` | One private home per Codex or Grok account (`accounts/<id>/...`), its `CODEX_HOME` or `GROK_HOME`. |
+| `shell/active-cli-env` | Which account home running Studio shells should follow. |
 | `spark-remote-hosts.json`, `spark-known-hosts.json`, `spark-remote-secrets.json` | SSH workspaces: saved hosts, pinned host keys, and passwords or passphrases encrypted by the operating system (if encryption is unavailable, they are not saved). |
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
+
+## How Codara sessions get its tools
+
+Codara passes its hooks, the `codara-studio` MCP server and the Codex notify
+program on the command line of each Claude Code or Codex session it starts,
+so a session started anywhere else behaves as if Codara were not installed:
+
+- **Claude Code** gets `--settings ~/.codarastudio/integrations/claude/settings.json`
+  (the hooks) and `--mcp-config .../mcp-<mode>.json` (the server). Claude
+  keeps only the last `--settings` it is given, so if you pass your own,
+  yours wins and that session runs without Codara's hooks. Under
+  `--strict-mcp-config`, Codara adds no server.
+- **Codex** gets `-c mcp_servers.codara-studio={...}`, `-c notify=[...]` (which
+  runs your own `notify` afterwards with the same payload), and
+  `-c tui.notifications=true` when you left that unset. A Codex that Codara
+  itself starts in a folder (a worker or an autorun) also gets that folder
+  marked trusted for the session, with `-c projects=...`; your
+  `config.toml` is not edited.
+- **Commands you type** in a Codara pane get the same arguments: the shell
+  integration defines `claude` and `codex` functions for that pane only,
+  which read `integrations/<cli>/args.txt`. They are not defined if you have
+  your own alias or function of that name, and management commands
+  (`claude mcp`, `codex login` and the like) run untouched.
+- **Grok** has no such flags; its Codara account homes carry a copy of your
+  `config.toml` with the server added.
+
+The **Codara Studio** switch for each CLI in the Capability Center, MCP
+servers, turns the server off for the sessions Codara starts.
 
 ## Files owned by other tools that Codara edits
 
 | Path | What Codara does | How to turn it off |
 |---|---|---|
-| `~/.claude/settings.json` | Adds a `hooks` block that runs `codara-hook.py` for session, tool, subagent and notification events. Every Claude Code session reads it, but the hook exits at once unless it runs in a Codara pane. Dead entries from older versions are pruned. | No setting yet. Removing the entries whose command mentions `codara-hook.py` lasts until the next app start. |
-| `~/.claude.json` | Adds the `codara-studio` MCP server entry. | The Claude switch for the Codara Studio server in the Capability Center, MCP servers. |
-| `~/.codex/config.toml`, and Grok's `config.toml` | Adds a `[mcp_servers.codara-studio]` section. | The Codex or Grok switch in the same place. |
-| `~/.codex/config.toml`, the top-level `notify` key | Sets `notify` to run `codara-codex-notify.py`, followed by your previous `notify` command after a `--`. Codex runs it after every turn: inside a Codara pane it records the turn end for notifications, and in every case it then runs your previous command with the same payload, even if the script is deleted. Only that key changes, and a file that does not parse or a `notify` that is not a list is left alone. A launch whose Codara home is a temporary folder (a test run) never edits it. | Start Codara once with `SPARK_CODEX_NOTIFY=0`: it puts your previous `notify` back, or removes the key if there was none. |
+| `~/.claude.json`, `~/.codex/config.toml`, and Grok's `config.toml` | Only with **Codara tools in other apps** on (Settings, Behavior; off by default): adds the `codara-studio` MCP server so sessions outside Codara can use it. Turning it off removes the entries. | Leave the setting off. |
 | The MCP configs above and a project's `.mcp.json` or `.codex/config.toml` | Only when you add, edit, copy, sync or remove a server in the Capability Center. Writes are atomic, keep the file's permissions and the keys Codara does not edit. | Do not use those actions. |
-| Your Claude Code login (the `Claude Code-credentials` Keychain item on macOS, `~/.claude/.credentials.json` elsewhere) and `oauthAccount` in `~/.claude.json` | Switching the Active Claude account replaces only these sign-in keys and the account identity, the way `/login` as another account does. MCP sign-ins, settings, history and project trust are never touched. While Studio runs, Codara also renews this login before it expires. | Keep a single Claude account; the Active one is then your own login. |
-| `~/.codex/auth.json` | Switching the Active Codex account swaps this file. | Keep a single Codex account. |
-| Managed Grok homes under `~/.codarastudio/grok-cli/` | Link your personal `~/.grok` state into each account's home so a switch keeps your sessions. Credentials stay private to each account. | Remove the account in Settings, Agents. |
+| `~/.claude/settings.json`, `~/.claude.json`, `~/.codex/config.toml`, Grok's `config.toml` (once) | On the first start of a version that no longer writes them, Codara removes what earlier versions added: its hooks, its `codara-studio` entries (unless **Codara tools in other apps** is on) and its `notify`, putting your previous `notify` back. Each file is backed up first, and a file you changed in the meantime is left for the next start. Settings, About shows where the backup is. | Not needed: it runs once and touches only Codara's own entries. |
+| Your own CLI folders, through a Codara account's links | A Codara account's home links to your `~/.claude` (projects, sessions, skills, agents, commands, plugins, settings, history and the like), `~/.codex` (everything but the login and its caches) or `~/.grok`, so the CLI running in Codara reads and writes that shared state as it would at home. Codara does not write there on its own, and a link target that does not exist is not created. | Use your own login: new sessions then run in your own folder. |
 | Your global npm packages | **Install Pi** in Settings runs `npm install -g @earendil-works/pi-coding-agent@~0.85.1` (the Pi line Codara is tested against) once, when you click it. Codara never updates or removes it. | Install Pi yourself, or not at all: until Pi is installed, Cora runs on a Pi build bundled with the app. |
 | `~/.cache/spark/shell-integration/` | Staged copies of the shell integration files that Studio terminals source. Your `~/.zshrc`, `~/.bashrc` and PowerShell profile are never modified. | No setting yet; worker and agent panes already run without it (`SPARK_NO_SHELL_INTEGRATION=1`). |
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
 | Git refs in your workspace repository: `refs/spark/runs/<run>` and `refs/spark/undo/<run>` | Cora snapshots the workspace before each message so **Undo message and code** can restore it. That undo asks for a second click, puts back every file changed since the message (and removes files created since), and first saves the files as they were on `refs/spark/undo/<run>`, so an undo can be reversed with `git checkout refs/spark/undo/<run> -- <path>`. Neither ref moves a branch or HEAD. | Deleting the chat removes both refs. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |
+
+Your logins are never written: not the `Claude Code-credentials` Keychain
+item, `~/.claude/.credentials.json`, `oauthAccount` in `~/.claude.json`,
+`~/.codex/auth.json` or Grok's `auth.json`. Codara reads only who they are
+signed in as. Start Codara with `SPARK_CODEX_NOTIFY=0` to leave Codex's
+`notify` out of the sessions it starts.
 
 For Pi, Codara reads without editing: while a Pi pane runs, it lists the
 session files of that folder in `~/.pi/agent/sessions/` (names and
@@ -77,7 +109,8 @@ CLIs, hooks and the MCP server, and keep the legacy `SPARK_` prefix.
 | `SPARK_MCP_MODE`, `SPARK_RUN_ID`, `SPARK_NODE_ID`, `SPARK_AUTOMATION_ID` | In worker panes: which MCP tool set to expose, and which run, node or automation the worker belongs to. |
 | `SPARK_TERMINAL` | Marks a Studio terminal. |
 | `SPARK_NO_SHELL_INTEGRATION`, `SPARK_USER_ZDOTDIR`, `SPARK_FOLLOW_ACTIVE_ACCOUNT` | Shell integration controls. |
-| `GROK_HOME` | Points Grok at the Active managed account's home. |
+| `SPARK_AGENT_ARGS_DIR` | Where the pane's `claude` and `codex` functions find the arguments Codara adds (`~/.codarastudio/integrations`). |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME` | Point the CLI at the Active Codara account's home. Not set when you use your own login. |
 
 Terminals do not get the agent socket's token. Tools that call the app, such
 as the Codara Studio MCP server and the `cora` CLI, read its address and
@@ -85,9 +118,10 @@ token from `agent-socket.json`. Only Cora's processes for an imported pull
 request get `SPARK_AGENT_SOCKET` and `SPARK_AGENT_TOKEN`, with a token scoped
 to that run, and they are not terminals.
 
-Claude Code and Codex get no Codara-specific home variable: every account runs
-in your own `~/.claude` and `~/.codex` (or your own `CLAUDE_CONFIG_DIR` or
-`CODEX_HOME`, if you set one), exactly as in any other terminal.
+With your own login Active, Claude Code, Codex and Grok get no home variable
+from Codara and run in your own `~/.claude`, `~/.codex` and `~/.grok` (or
+your own `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`, if you set one),
+exactly as in any other terminal.
 
 ## Network
 

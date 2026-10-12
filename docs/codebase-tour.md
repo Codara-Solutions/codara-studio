@@ -64,9 +64,9 @@ Some files are very large. Search inside them rather than reading from the top:
 | Preview pages | the `<webview>` in `BrowserPane.tsx` | any web page, plus `src/preload/inspector-preload.ts` | None: they are untrusted. The renderer runs DOM actions in them with `executeJavaScript`, and main sends trusted input over the Chrome DevTools Protocol. |
 | Shells and agent CLIs | `pty-manager.ts` (node-pty) | your shell, `claude`, `codex`, `grok`, `pi` | Terminal bytes. Every PTY gets `SPARK_PANE_ID` and `SPARK_AGENT_PANE_ID`, but not the agent socket's token: tools that call the app read `agent-socket.json`. |
 | Pi (Cora's manager and workers) | `pi-rpc-client.ts` | the Pi package, run with `--mode rpc` and the extension in `resources/pi-cora/` | Pi's RPC protocol on stdin and stdout. The extension loads the MCP server's code in-process and calls the agent socket. |
-| `codara-studio` MCP server | Claude Code, Codex or Grok, from their MCP config | `resources/codara-studio-mcp/server.js` | HTTP JSON-RPC to the agent socket. `mcp-installer.ts` writes the config entry. |
+| `codara-studio` MCP server | Claude Code or Codex, from the flags Codara launches them with; Grok, from its Codara account home's config | `resources/codara-studio-mcp/server.js` | HTTP JSON-RPC to the agent socket. `agent-launch-integration.ts` builds the flags; `mcp-installer.ts` writes global entries only for the opt-in. |
 | `cora` CLI | you | `cli/cora.cjs` | HTTP JSON-RPC to the agent socket. Reads run files directly when the app is closed. |
-| Claude Code hook | Claude Code, from `~/.claude/settings.json` | `resources/claude-hooks/codara-hook.py` | Writes one JSON file per event under `~/.codarastudio/hooks/`. |
+| Claude Code hook | Claude Code, from the `--settings` file Codara launches it with | `resources/claude-hooks/codara-hook.py` | Writes one JSON file per event under `~/.codarastudio/hooks/`. |
 
 One more loopback server, `hook-rpc.ts`, lets an agent report its own state
 (`SPARK_HOOK_URL`). `preview-bridge.ts` and `terminal-bridge.ts` are IPC
@@ -303,9 +303,11 @@ the `remoteAccessEnabled` preference is on.
 
 ### 3.6 Claude Code hooks
 
-`hook-installer.ts` writes a `hooks` block into `~/.claude/settings.json`. It
-runs at boot and whenever a Claude pane starts. The hook command exits at
-once outside a Codara pane (no `SPARK_PANE_ID`). Inside one, it runs
+`hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`
+writes to `~/.codarastudio/integrations/claude/settings.json` at boot and
+passes to every Claude launch with `--settings` (typed commands get it
+through the pane's `claude` function). The hook command exits at once
+outside a Codara pane (no `SPARK_PANE_ID`). Inside one, it runs
 `codara-hook.py`, which writes a JSON file under `~/.codarastudio/hooks/`.
 `hook-watcher.ts` picks each file up and routes it to three places: the
 terminal notifier, the session registry, and the run store. It then moves the file to `processed/`. If you change the hook
@@ -369,8 +371,8 @@ Debugging:
   with its own home, as `docs/harness-lab/README.md` describes:
   `CODARA_HOME_DIR`, `SPARK_HOME_DIR` and `SPARK_USER_DATA_DIR` pointing at
   one directory outside the repository, plus `SPARK_ALLOW_MULTI=1` to lift
-  the single-instance lock. A dev build still edits the CLIs' own configs
-  (hooks in `~/.claude/settings.json`, the MCP entry); see
+  the single-instance lock. On its first start a build also removes what
+  earlier builds wrote into the CLIs' own configs, with a backup; see
   [on-your-machine.md](./on-your-machine.md).
 - **Talk to the running app.** `node cli/cora.cjs rpc <method> [params-json]`
   calls any agent-socket method. The `app.*` methods (`app.screenshot`,

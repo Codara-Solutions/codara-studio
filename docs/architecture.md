@@ -97,10 +97,13 @@ limited to a list of methods (`agent-socket-capabilities.ts`).
 `resources/codara-studio-mcp/server.js` holds the agent tools. It runs in
 two ways:
 
-- **As a stdio MCP server**, which Claude Code, Codex and Grok start from their
-  own config. `mcp-installer.ts` writes the `codara-studio` entry into
+- **As a stdio MCP server**, which Claude Code and Codex start because Codara
+  names it on their command line (see [Per-launch integration](#per-launch-integration)),
+  and Grok from the private `config.toml` of a Codara account home. Only the
+  opt-in **Codara tools in other apps** setting (`studioToolsInOtherApps`)
+  makes `mcp-installer.ts` write the `codara-studio` entry into
   `~/.claude.json`, `~/.codex/config.toml` and Grok's `config.toml`. You can
-  turn it off for each CLI in the Capability Center.
+  turn the server off for each CLI in the Capability Center.
 - **As a library inside Cora's Pi processes.** Pi has no MCP client, so the
   Pi extension `require`s the same file and registers its tools as Pi tools.
   One tool list and one call path therefore serve both.
@@ -118,16 +121,47 @@ The full list is in [mcp-tools.md](./mcp-tools.md). `cli/cora.cjs` speaks
 the same JSON-RPC (`cli/lib/rpc.cjs`). When the app is closed, it reads run
 files from disk instead (`cli/lib/store.cjs`).
 
+## Per-launch integration
+
+Codara never puts its hooks, MCP server or notify program into the user's
+own CLI config. `agent-launch-integration.ts` writes them under
+`~/.codarastudio/integrations/` at every start (paths of the running binary,
+so a moved app never leaves a stale one) and inserts them after the binary
+of every Claude Code and Codex launch `pty-manager.ts` makes:
+
+- Claude Code: `--settings integrations/claude/settings.json` (the hooks) and
+  `--mcp-config integrations/claude/mcp-<mode>.json`, one file per
+  `SPARK_MCP_MODE`. A user's own `--settings` wins, since Claude keeps the
+  last one, and `--strict-mcp-config` gets no server.
+- Codex: `-c mcp_servers.codara-studio={...}`, `-c notify=[...]` chaining the
+  user's own `notify`, `-c tui.notifications=true` only when the user left it
+  unset, and, for a folder Codara itself launches Codex in, an inline
+  `projects` trust entry instead of a write to `config.toml`. Values are
+  TOML literal strings, because cmd.exe and Windows PowerShell rewrite
+  double quotes and backslashes on the way to the child.
+
+Management subcommands (`claude mcp`, `codex login` and the like) get
+nothing. For a command typed in a pane, the shell integration
+(`resources/shell-integration/`) defines pane-scoped `claude` and `codex`
+functions when `SPARK_AGENT_ARGS_DIR` is set and the user has no function or
+alias of that name; they read `integrations/<cli>/args.txt`, one argument per
+line.
+
+`global-config-cleanup.ts` runs once per start and removes what earlier
+builds wrote globally (the hooks block, `_sparkManaged` MCP entries unless
+the opt-in is on, the Codex `notify` and its marker block). It backs every
+file up under `backups/global-config-cleanup/<time>/` with a manifest,
+re-reads each file right before writing and leaves it for the next start if
+it changed, and records a report that Settings, About shows.
+
 ## Claude Code hooks
 
-`hook-installer.ts` writes a hooks block into `~/.claude/settings.json` for
-SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop,
-SubagentStart, SubagentStop, SessionEnd, Notification and PreCompact.
-Claude Code reads that file for every session on the machine, including
-sessions in other terminal apps. The hook command therefore exits at once
-unless `SPARK_PANE_ID` is set, which Codara does in every PTY. Inside a
-Codara pane it runs `resources/claude-hooks/codara-hook.py`, which writes one
-JSON file per event under `~/.codarastudio/hooks/`. `hook-watcher.ts` watches
+The hooks block Codara passes with `--settings` covers SessionStart,
+PreToolUse, PostToolUse, UserPromptSubmit, Stop, SubagentStart,
+SubagentStop, SessionEnd, Notification and PreCompact. The hook command
+exits at once unless `SPARK_PANE_ID` is set, which Codara does in every PTY.
+Inside a Codara pane it runs `resources/claude-hooks/codara-hook.py`, which
+writes one JSON file per event under `~/.codarastudio/hooks/`. `hook-watcher.ts` watches
 that folder and passes each event to three places: the terminal notifier
 (for panes you opened), the session registry (so a pane can resume its
 session after a restart), and the run store (for panes that belong to a
@@ -284,6 +318,9 @@ user's own home from an allowlist; the login and everything account-scoped
 stays private. A name a CLI update invents stays private until someone
 classifies it.
 
+Managed Claude homes link `projects` and `sessions` too, because `/resume`
+and session pickers list `projects/*.jsonl` and read `sessions/*.json`.
+
 - **Claude Code** runs every managed account in one Codara-owned live slot,
   `claude-cli/live/home`, which is the `CLAUDE_CONFIG_DIR` of every managed
   launch. Each account's login waits in `claude-cli/accounts/<id>/login.json`.
@@ -331,7 +368,9 @@ own, the slower one ends up holding a spent token.
   socket (`accounts.anthropic.renew`). The caller must present the account's
   current refresh token, so the method hands out nothing the process does
   not already hold. Studio renews through the account's managed slot; a
-  Cora half that borrows the System login's grant is never refreshed.
+  Cora half that borrows the System login's grant is never refreshed, and
+  once its access token is spent the auth store records it as `none`, so the
+  card offers Connect Cora instead of a refresh that cannot succeed.
 - **Blanked logins are repaired.** Claude Code blanks its stored login after
   a refresh with a spent token. Codara repairs that login from the Cora half
   and never reads it as a sign-out.
