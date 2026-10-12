@@ -34,9 +34,15 @@ import { atomicWritePrivateFile } from "./native-cli-atomic-file";
 
 const MAX_CONFIG_BYTES = 32 * 1024 * 1024;
 
-/** ~/.claude entries a managed Claude home links to, when they exist. */
+/**
+ * ~/.claude entries a managed Claude home links to, when they exist.
+ * `projects` and `sessions` must be shared: `/resume` and session pickers
+ * list `projects/*.jsonl` and read `sessions/*.json` to mark the open ones,
+ * so without them a Codara terminal shows an empty or partial list.
+ */
 export const CLAUDE_SHARED_STATE_NAMES: readonly string[] = [
   "projects",
+  "sessions",
   "todos",
   "plans",
   "skills",

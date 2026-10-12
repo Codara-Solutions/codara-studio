@@ -90,6 +90,8 @@ async function main() {
   // The user's own homes.
   const claudeHome = path.join(HOME, ".claude");
   fs.mkdirSync(path.join(claudeHome, "projects", "-work"), { recursive: true });
+  writePrivate(path.join(claudeHome, "projects", "-work", "s1.jsonl"), "{}\n");
+  writePrivate(path.join(claudeHome, "sessions", "4242.json"), '{"sessionId":"s1"}');
   writePrivate(path.join(claudeHome, "settings.json"), '{"theme":"dark"}');
   writePrivate(path.join(claudeHome, "CLAUDE.md"), "# me\n");
   writePrivate(path.join(claudeHome, ".credentials.json"), '{"claudeAiOauth":{}}');
@@ -137,8 +139,16 @@ async function main() {
   });
   if (posix) {
     assert.equal(fs.statSync(claudeManaged).mode & 0o777, 0o700);
-    for (const name of ["projects", "settings.json", "CLAUDE.md"]) {
+    for (const name of ["projects", "sessions", "settings.json", "CLAUDE.md"]) {
       assert.equal(fs.readlinkSync(path.join(claudeManaged, name)), path.join(claudeHome, name), name);
+    }
+    // Session pickers and /resume see the same sessions inside Codara.
+    for (const dir of ["projects/-work", "sessions"]) {
+      assert.deepEqual(
+        fs.readdirSync(path.join(claudeManaged, dir)).sort(),
+        fs.readdirSync(path.join(claudeHome, dir)).sort(),
+        `${dir} lists the same entries`,
+      );
     }
     for (const name of ["todos", "plans", "skills", "history.jsonl"]) {
       assert.equal(fs.existsSync(path.join(claudeManaged, name)), false, `${name} is not created`);
