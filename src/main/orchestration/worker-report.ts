@@ -113,6 +113,7 @@ function normalizeWorkerReport(raw: Record<string, unknown>): WorkerReport {
     risks: normalizeStringList(raw.risks),
     followups: normalizeStringList(raw.followups),
     handoff: normalizeHandoffArtifacts(raw.handoff),
+    ...(Array.isArray(raw.lessons) ? { lessons: normalizeStringList(raw.lessons).slice(0, 5) } : {}),
     verifier: normalizeVerifierVerdict(raw.verifier),
   };
 }

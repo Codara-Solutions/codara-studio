@@ -267,6 +267,7 @@ import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { forgetRunMemory, formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { forgetRunLearning, learnFromCompletedRun, noteRunMessages } from "./memory-learning";
 import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
@@ -6444,6 +6445,9 @@ async function prepareManagerTurn(
     coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
       force: includeCanonicalReplay,
       profileId: prepared.coraProfileId,
+      // Learned items are ranked against what this turn is about: the new
+      // input, or the title when the turn has none (a resume or a nudge).
+      query: [prepared.title, ...inputMessages.map((message) => message.message)].join("\n").slice(0, 4_000),
     });
   } catch {
     coraMemory = null;
@@ -14918,8 +14922,10 @@ export async function deleteRun(runId: string): Promise<void> {
   }
   activeAutopilotPlans.delete(run.id);
   activeAutopilotReviews.delete(run.id);
-  // The chat's outcome record goes with it. Never throws.
+  // The chat's outcome record and its quotes in learned memory go with it;
+  // what the user taught (an active preference) stays. Both never throw.
   await forgetRunMemory(run);
+  await forgetRunLearning(run);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
@@ -18524,6 +18530,17 @@ async function commitRunChange(
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
     scheduleRunCompletionTail(run.id, result ?? undefined);
   }
+  // Every path that adds a user message (managed, direct, Talk, answers)
+  // commits here, so memory capture sees each message once it is durable,
+  // before any compaction can summarize it. A cheap id compare when nothing
+  // new arrived; the scan itself runs detached.
+  if (persisted && result) {
+    try {
+      noteRunMessages(result);
+    } catch {
+      // Learning never costs a commit.
+    }
+  }
   return result ?? (await requireRun(run.id));
 }
 
@@ -18641,6 +18658,10 @@ async function runCompletionTail(
     // memory file as [auto] bullets that later manager turns replay. Also
     // non-throwing.
     await recordRunLessons(completed, readReportOnce);
+    // Memory v3: worker lessons, ledger-backed procedures and, when the chat
+    // earned it, one throttled model review of the conversation. Detached
+    // from the turn like the rest of this tail, and non-throwing.
+    await learnFromCompletedRun(completed, readReportOnce);
   } catch (err) {
     console.error("[run-store] failed to record run memory", err);
   }

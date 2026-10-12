@@ -330,6 +330,7 @@ owns each file:
 | `agent-session-starts.json` | `agent-session-registry.ts` |
 | `pi-agent/` (Cora's logins, Pi sessions) | `pi-account-auth-store.ts`, `pi-runtime-electron.ts` (`codaraPiPaths`) |
 | `memory/` (Cora's memory) | `cora-memory.ts`, `cora-profiles.ts` |
+| `memory/learned/items.json`, `memory/profiles/<id>/learned/items.json` (what Cora learned by itself), `memory/learning.json` (its switches) | `memory-items.ts`, `memory-learning.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
 | `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
 | `codex-cli/` (one managed `CODEX_HOME` per account) | `codex-cli-account-profiles.ts`, `cli-account-homes.ts` |

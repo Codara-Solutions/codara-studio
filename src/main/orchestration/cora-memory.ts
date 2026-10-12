@@ -11,6 +11,8 @@ import {
   normalizeCoraProfileId,
   resolveCoraProfile,
 } from "./cora-profiles";
+import { containsSecret } from "@shared/memory-items";
+import { markMemoryItemsUsed, renderLearnedMemory, selectLearnedMemory } from "./memory-items";
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
 //
@@ -42,9 +44,15 @@ import {
 // one is curated semantic guidance. They serve different prompts and different
 // TTL/curation policies.
 //
-// This module imports only spark-home + fs-atomic, never run-store,
-// manager-protocol, or shared types, so there is no import cycle and no
-// cross-dependency on the IPC/tool-definition side.
+// This module imports only spark-home, fs-atomic, cora-profiles, the learned
+// item store (memory-items.ts, which never imports back) and the pure shared
+// memory helpers, never run-store or manager-protocol, so there is no import
+// cycle and no cross-dependency on the IPC/tool-definition side.
+//
+// Memory v3 adds learned items under these files. The files stay the
+// always-injected core; formatCoraMemoryForTurn appends the learned items
+// that matter for the turn, within a fixed budget, and sends each one at most
+// once per session.
 
 // ── constants ───────────────────────────────────────────────────────────────
 
@@ -491,6 +499,19 @@ function cleanBulletText(value: string): string {
   return `${collapsed.slice(0, MAX_BULLET_LENGTH - 1)}…`;
 }
 
+export function secretInMemoryError(index: number): string {
+  return (
+    `bullet ${index} looks like a password, token or key. Memory is pasted into every future prompt, ` +
+    `so it never stores secrets. Nothing was saved`
+  );
+}
+
+function assertNoSecrets(texts: string[]): void {
+  texts.forEach((text, index) => {
+    if (containsSecret(text)) throw new Error(secretInMemoryError(index + 1));
+  });
+}
+
 // codara_remember never truncates: a cut-off memory loses its actionable tail
 // while the tool reports success, so an overlong bullet fails the whole call
 // before anything is written and Cora retries with a shorter sentence.
@@ -772,11 +793,18 @@ function renderTier(path: string, now: number): RenderedTier | null {
   return { body, footer };
 }
 
-function renderMemorySections(
+interface RenderedMemory {
+  /** PROFILE plus the markdown tiers, or null when there is none. */
+  core: string | null;
+  globalEnabled: boolean;
+  workspaceEnabled: boolean;
+}
+
+function renderMemory(
   workspaceId: string,
   now: number,
   profileId = DEFAULT_CORA_PROFILE_ID,
-): string | null {
+): RenderedMemory {
   const state = readState();
   const sections: string[] = [];
   // The profile is identity, not memory: the memory switches never hide it.
@@ -784,7 +812,7 @@ function renderMemorySections(
   if (profileSection) sections.push(profileSection);
   // Global disabled is the master off switch for memory: no tier is injected.
   if (!tierEnabled(state, "global", workspaceId, profileId)) {
-    return sections.length > 0 ? sections.join("\n") : null;
+    return { core: sections.length > 0 ? sections.join("\n") : null, globalEnabled: false, workspaceEnabled: false };
   }
   const profile = resolveCoraProfile(profileId);
   const globalPath = globalMemoryPath(profileId);
@@ -799,7 +827,8 @@ function renderMemorySections(
       "[END CORA MEMORY GLOBAL]",
     );
   }
-  if (tierEnabled(state, "workspace", workspaceId, profileId)) {
+  const workspaceEnabled = tierEnabled(state, "workspace", workspaceId, profileId);
+  if (workspaceEnabled) {
     const workspacePath = workspaceMemoryPath(workspaceId, profileId);
     const workspaceTier = renderTier(workspacePath, now);
     if (workspaceTier) {
@@ -813,16 +842,36 @@ function renderMemorySections(
       );
     }
   }
-  return sections.length > 0 ? sections.join("\n") : null;
+  return { core: sections.length > 0 ? sections.join("\n") : null, globalEnabled: true, workspaceEnabled };
 }
 
-/** Read-only context for a temporary direct worker. Unlike manager injection,
- * this is not hash-gated because every worker starts with a fresh context. */
+/** Read-only context for a worker prompt (and its re-send after a worker
+ * compaction). Unlike manager injection it is not gated per session: every
+ * worker starts with a fresh context. `query` is the task text the learned
+ * items are ranked against. */
 export function formatCoraMemoryForWorker(
   workspaceId: string,
   profileId = DEFAULT_CORA_PROFILE_ID,
+  query = "",
 ): string | null {
-  return renderMemorySections(workspaceId, Date.now(), profileId);
+  const rendered = renderMemory(workspaceId, Date.now(), profileId);
+  let learned: string | null = null;
+  try {
+    const selection = selectLearnedMemory({
+      profileId,
+      workspaceId,
+      query,
+      includeGlobal: rendered.globalEnabled,
+      includeWorkspace: rendered.workspaceEnabled,
+      coreText: rendered.core ?? "",
+    });
+    learned = renderLearnedMemory(selection);
+    markMemoryItemsUsed(profileId, [...selection.core, ...selection.relevant].map((item) => item.id));
+  } catch {
+    learned = null;
+  }
+  const parts = [rendered.core, learned].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 // Injection is hash-gated once per run, not per turn: the section is injected
@@ -836,6 +885,9 @@ export function formatCoraMemoryForWorker(
 interface RunMemoryInjection {
   hash: string;
   prior?: string;
+  /** Learned item id -> text this session already carries. */
+  learned: Map<string, string>;
+  priorLearned?: Map<string, string>;
 }
 const runMemoryHashes = new Map<string, RunMemoryInjection>();
 const RUN_MEMORY_HASH_LIMIT = 64;
@@ -861,8 +913,8 @@ function touchInjectedHash(runId: string, entry: RunMemoryInjection): void {
 export function releaseCoraMemoryInjection(runId: string): void {
   const entry = runMemoryHashes.get(runId);
   if (!entry) return;
-  if (entry.prior === undefined) runMemoryHashes.delete(runId);
-  else runMemoryHashes.set(runId, { hash: entry.prior });
+  if (entry.prior === undefined && entry.priorLearned === undefined) runMemoryHashes.delete(runId);
+  else runMemoryHashes.set(runId, { hash: entry.prior ?? "", learned: entry.priorLearned ?? new Map() });
 }
 
 /**
@@ -885,26 +937,58 @@ export function resetCoraMemoryInjection(runId: string): void {
 export async function formatCoraMemoryForTurn(
   workspaceId: string,
   runId: string,
-  opts?: { force?: boolean; profileId?: string },
+  opts?: { force?: boolean; profileId?: string; query?: string },
 ): Promise<string | null> {
   await ensureMigrated();
-  const rendered = renderMemorySections(
-    workspaceId,
-    Date.now(),
-    opts?.profileId ?? DEFAULT_CORA_PROFILE_ID,
-  );
-  if (rendered === null) return null;
-  const hash = createHash("sha256").update(rendered).digest("hex");
+  const profileId = opts?.profileId ?? DEFAULT_CORA_PROFILE_ID;
+  const rendered = renderMemory(workspaceId, Date.now(), profileId);
   const existing = runMemoryHashes.get(runId);
-  if (existing?.hash === hash && !opts?.force) {
+  const force = opts?.force === true;
+  const carried = force ? new Map<string, string>() : new Map(existing?.learned ?? []);
+
+  // The learned block is a delta: each item reaches a session once (again
+  // only if its text changed), so a long chat does not re-paste the same
+  // memories every turn, and a compaction or replay (force) starts over.
+  let learnedBlock: string | null = null;
+  let learnedIds: string[] = [];
+  try {
+    const selection = selectLearnedMemory({
+      profileId,
+      workspaceId,
+      query: opts?.query ?? "",
+      includeGlobal: rendered.globalEnabled,
+      includeWorkspace: rendered.workspaceEnabled,
+      coreText: rendered.core ?? "",
+    });
+    const fresh = {
+      core: selection.core.filter((item) => carried.get(item.id) !== item.text),
+      relevant: selection.relevant.filter((item) => carried.get(item.id) !== item.text),
+    };
+    learnedBlock = renderLearnedMemory(fresh, { delta: carried.size > 0 });
+    for (const item of [...fresh.core, ...fresh.relevant]) carried.set(item.id, item.text);
+    learnedIds = [...fresh.core, ...fresh.relevant].map((item) => item.id);
+  } catch {
+    learnedBlock = null;
+  }
+
+  const hash = rendered.core === null ? "" : createHash("sha256").update(rendered.core).digest("hex");
+  const coreChanged = rendered.core !== null && (existing?.hash !== hash || force);
+  if (!coreChanged && learnedBlock === null) {
     // Already carried by this run's session. Refresh the LRU position only;
     // recording nothing keeps a later releaseCoraMemoryInjection able to roll
     // back the injection that actually happened.
-    touchInjectedHash(runId, existing);
+    if (existing) touchInjectedHash(runId, existing);
     return null;
   }
-  touchInjectedHash(runId, { hash, prior: existing?.hash });
-  return rendered;
+  touchInjectedHash(runId, {
+    hash: rendered.core === null ? existing?.hash ?? "" : hash,
+    prior: existing?.hash,
+    learned: carried,
+    priorLearned: existing ? new Map(existing.learned) : undefined,
+  });
+  markMemoryItemsUsed(profileId, learnedIds);
+  const parts = [coreChanged ? rendered.core : null, learnedBlock].filter((part): part is string => Boolean(part));
+  return parts.join("\n");
 }
 
 // ── write paths ─────────────────────────────────────────────────────────────
@@ -965,6 +1049,7 @@ export async function rememberAdd(
     throw new Error(memoryDisabledError(scope));
   }
   assertBulletsFit(bullets);
+  assertNoSecrets(bullets);
   return withPathLock(tierPath(scope, workspaceId, profileId), async () => {
     const file = loadForWrite(scope, workspaceId, profileId);
     const date = todayStamp();
@@ -1064,6 +1149,7 @@ export async function rememberReplace(
       }
     }
     assertBulletsFit(newBullets);
+    assertNoSecrets(newBullets);
 
     if (mintedNonBullets.length > 0) {
       throw new Error(
