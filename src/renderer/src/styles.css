@@ -8398,7 +8398,7 @@ button.st-list__row:hover,
   border: 1px solid var(--st-line);
   border-radius: 12px;
   background: color-mix(in oklab, var(--ink) 4%, var(--st-surface));
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .st-about__text {
   display: flex;
@@ -9929,7 +9929,7 @@ button.st-list__row:hover,
   border-radius: 14px;
   background: color-mix(in oklch, var(--accent) 12%, var(--panel-2));
   border: 1px solid color-mix(in oklch, var(--accent) 26%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .nc-empty-title { font-size: 13px; font-weight: 650; color: var(--ink); }
 .nc-empty-body { max-width: 290px; font-size: 12px; line-height: 1.45; color: var(--muted); }
@@ -9956,7 +9956,7 @@ button.st-list__row:hover,
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: 650 11.5px var(--font-sans);
   cursor: default;
 }
