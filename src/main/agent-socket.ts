@@ -1545,6 +1545,14 @@ async function scopePreviewToCaller(params: Record<string, unknown>): Promise<vo
 const PREVIEW_TOOL_HOST: PreviewToolHost = {
   scopeToCaller: scopePreviewToCaller,
   getRun: async (runId) => (await getRunStore()).getRun(runId),
+  // The user's own browser carries their logged-in sessions: content from an
+  // imported pull request must never steer it.
+  mayUseUserBrowser: async (params) => {
+    const runId = stringParam(params, "runId");
+    if (!runId) return true;
+    const run = await (await getRunStore()).getRun(runId);
+    return !run || runProjectPolicyMode(run) !== "untrusted-pull-request";
+  },
 };
 
 async function handlePreviewToolRpc(

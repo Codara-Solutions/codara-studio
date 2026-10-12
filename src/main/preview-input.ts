@@ -26,6 +26,7 @@ import { ipcMain, webContents, type WebContents } from "electron";
 import { createPreviewDOM } from "../shared/preview-dom";
 import type { CdpSession } from "./browser/cdp-session";
 import { bindPreviewTabGuest, previewCdpSession } from "./browser/preview-cdp";
+import { resolvePreviewGuest, type PreviewGuestInfo } from "./browser/preview-guest";
 import { consoleRing } from "./browser/recorders/console";
 import { clearNetwork, networkRing } from "./browser/recorders/network";
 import { previewKeyEvents } from "./preview-keyboard";
@@ -92,52 +93,9 @@ export function registerPreviewInput(): void {
 // Guest resolution
 // ---------------------------------------------------------------------------
 
-interface GuestInfo {
-  webContentsId: number;
-  tabId: string;
-  url: string | null;
-  viewport: { width: number; height: number } | null;
-  devicePixelRatio: number;
-}
-
-async function resolveGuest(
-  params: Record<string, unknown>,
-  focus = false,
-): Promise<{ wc: WebContents; info: GuestInfo }> {
-  const tabId = typeof params.tabId === "string" ? params.tabId : null;
-  // Forward the caller's run identity: without an explicit tabId the renderer
-  // scopes its pick to the tabs that run owns, so trusted-input ops resolve the
-  // same guest the DOM ops would, never the user's own preview tab. A caller
-  // with no run is scoped the same way by the pane it runs in.
-  const runId = typeof params.runId === "string" ? params.runId : null;
-  const info = (await requestPreviewOp("get_web_contents_id", {
-    tabId,
-    runId,
-    workspaceId: params.workspaceId,
-    callerPaneId: params.callerPaneId,
-    focus,
-  })) as GuestInfo;
-  const wcId = info?.webContentsId;
-  if (typeof wcId !== "number") {
-    throw new Error("preview tab is not ready (no web contents id yet)");
-  }
-  const wc = webContents.fromId(wcId);
-  if (!wc || wc.isDestroyed()) {
-    throw new Error("preview tab web contents is gone; reopen the preview tab and retry");
-  }
-  // The webContentsId arrives over the preview bridge, whose response is only
-  // correlated by reqId. Even though that response channel is now sender-gated,
-  // NEVER drive CDP / executeJavaScript / DOM.setFileInputFiles against an id we
-  // have not proven is a real <webview> guest of the trusted main window: that
-  // is the difference between "steer the agent's preview tab" and "attach the
-  // DevTools protocol to an arbitrary webContents and push local file paths into
-  // a file input". Reject anything that is not a genuine preview guest.
-  if (!isTrustedPreviewGuest(wc)) {
-    throw new Error("preview target is not a preview guest of this window");
-  }
-  if (typeof info.tabId === "string" && info.tabId) bindPreviewTabGuest(info.tabId, wc);
-  return { wc, info };
-}
+// The guest, its tab and viewport metrics (browser/preview-guest.ts).
+const resolveGuest = resolvePreviewGuest;
+type GuestInfo = PreviewGuestInfo;
 
 // Resolve a click point in the guest's CSS-pixel viewport space. Accepts
 // explicit { x, y } or a CSS { selector } whose on-screen center we probe.

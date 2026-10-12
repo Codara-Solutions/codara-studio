@@ -6,12 +6,14 @@
 // The MCP side mirrors this layout: resources/codara-studio-mcp/tools/ holds
 // one module per area and names the method each tool calls here.
 
+import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { capturePreviewTools } from "./capture";
+import { chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
 import { devtoolsPreviewTools } from "./devtools";
 import { inputPreviewTools } from "./input";
-import type { PreviewToolEntry, PreviewToolHost, PreviewToolTable } from "./types";
+import { PreviewToolParamsError, type PreviewToolEntry, type PreviewToolHost, type PreviewToolTable } from "./types";
 
 export { PreviewToolParamsError, type PreviewToolHost } from "./types";
 
@@ -34,6 +36,8 @@ function mergeTables(tables: readonly PreviewToolTable[]): Map<string, PreviewTo
 }
 
 const HANDLERS = mergeTables(TABLES);
+// Chrome-tab versions of "preview"-only methods, used when tabId is chrome:.
+const CHROME_HANDLERS = mergeTables([chromeTargetTools]);
 
 export function hasPreviewTool(method: string): boolean {
   return HANDLERS.has(method);
@@ -56,5 +60,22 @@ export async function runPreviewTool(
     await host.scopeToCaller(params);
     await scopePreviewWorkspace(params, host.getRun);
   }
-  return entry.run(params, method);
+  let ref;
+  try {
+    ref = parseTabRef(params.tabId);
+  } catch (error) {
+    if (error instanceof BrowserTabRefError) throw new PreviewToolParamsError(error.message);
+    throw error;
+  }
+  if (ref?.kind === "preview") params.tabId = ref.tabId;
+  if (ref?.kind !== "chrome") return entry.run(params, method);
+  if (!(await host.mayUseUserBrowser(params))) {
+    throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
+  }
+  if (entry.targets === "any") return entry.run(params, method);
+  const chrome = CHROME_HANDLERS.get(method);
+  if (chrome) return chrome.run(params, method);
+  throw new PreviewToolParamsError(
+    `${method.replace(/^preview\./, "codara_preview_")} cannot drive a Chrome tab yet. Use a Codara browser tab for it.`,
+  );
 }

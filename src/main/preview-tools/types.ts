@@ -7,6 +7,11 @@ export interface PreviewToolHost {
   /** Stamps the caller's workspace and pane from callerPid / callerPaneId (no run). */
   scopeToCaller(params: Record<string, unknown>): Promise<void>;
   getRun(runId: string): Promise<{ workspaceId?: string | null } | null>;
+  /**
+   * Whether this caller may drive a tab of the user's own browser, with its
+   * logged-in sessions. False for an imported pull-request run.
+   */
+  mayUseUserBrowser(params: Record<string, unknown>): Promise<boolean>;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string) => Promise<unknown>;
@@ -19,6 +24,13 @@ export interface PreviewToolEntry {
    * workspace is gone is refused. "none" passes the params through untouched.
    */
   scope?: "browser" | "none";
+  /**
+   * Which tabs the handler can drive. "preview" (the default) handlers only
+   * know Codara's own tabs; a `chrome:` tabId then goes to the Chrome table
+   * (chrome.ts) or is refused. "any" handlers resolve their tab with
+   * resolveBrowserTarget() and work on both.
+   */
+  targets?: "preview" | "any";
 }
 
 export type PreviewToolTable = Readonly<Record<string, PreviewToolHandler | PreviewToolEntry>>;

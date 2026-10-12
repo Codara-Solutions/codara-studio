@@ -62,6 +62,7 @@ async function loadPreviewTools(stubs) {
   const host = {
     async scopeToCaller(params) { scoped.push({ ...params }); params.workspaceId ??= "ws-caller"; },
     async getRun(runId) { return runId === "run-live" ? { workspaceId: "ws-run" } : null; },
+    async mayUseUserBrowser(params) { return params.runId !== "run-live"; },
   };
   await tools.runPreviewTool("preview.snapshot", { callerPid: 7 }, host);
   assert.equal(calls.at(-1).params.workspaceId, "ws-caller", "a caller without a run works in its pane's workspace");
@@ -77,6 +78,22 @@ async function loadPreviewTools(stubs) {
   assert.equal(calls.length, before);
   assert.equal(scoped.length, 3);
   assert.equal(tools.hasPreviewTool("terminal.run"), false);
+
+  // Tab ids: preview:<id> is the bare id, chrome:<id> reaches only handlers
+  // that can drive a Chrome tab, and only for callers allowed to.
+  await tools.runPreviewTool("preview.snapshot", { tabId: "preview:tab-9" }, host);
+  assert.equal(calls.at(-1).params.tabId, "tab-9");
+  const reaching = calls.length;
+  await assert.rejects(
+    tools.runPreviewTool("preview.snapshot", { tabId: "chrome:12" }, host),
+    (error) => error instanceof tools.PreviewToolParamsError && /cannot drive a Chrome tab yet/.test(error.message),
+  );
+  await assert.rejects(tools.runPreviewTool("preview.click", { tabId: "chrome:twelve" }, host), /not a Chrome tab id/);
+  await assert.rejects(
+    tools.runPreviewTool("preview.click", { tabId: "chrome:12", runId: "run-live" }, host),
+    /may not use tabs of your own browser/,
+  );
+  assert.equal(calls.length, reaching, "a refused Chrome call reaches no executor");
   console.log(`preview tool routing: ${handled.size} socket methods, each named by a tool module`);
 })().catch((error) => {
   console.error(error);

@@ -46,6 +46,7 @@ import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { registerPreviewCdpSessions } from "./browser/preview-cdp";
+import { registerPreviewTargets } from "./browser/preview-target";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
@@ -1163,6 +1164,7 @@ app.whenReady().then(async () => {
   // network recording) as Chromium attaches it; the computer-use executor
   // binds announced guests to their tabs.
   registerPreviewCdpSessions();
+  registerPreviewTargets();
   registerPreviewInput();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
