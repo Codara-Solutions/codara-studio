@@ -79,7 +79,10 @@ click; nothing asks you to close anything. What a switch reaches:
 
 - **Claude Code.** Every Codara terminal on a Codara account runs in one
   Codara-owned slot, and Claude Code reads its login there on every request.
-  Running Claude Code sessions switch on their next request.
+  Running Claude Code sessions switch on their next request
+  (`npm run smoke:claude-hotswap` checks this against the installed
+  `claude`; it has not been run on macOS yet, where the login sits in the
+  Keychain).
 - **Codex.** Codex loads its login once when it starts, so each Codex account
   has its own folder. New Codex sessions use the new account. Running ones
   keep theirs.

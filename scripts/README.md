@@ -304,6 +304,7 @@ None of these are in the registry.
 |---|---|
 | `smoke-pi-live.cjs`, `smoke-pi-worker-live.cjs`, `profile-pi-subagent-lifecycle.cjs` (`npm run smoke:pi-live`, `smoke:pi-worker-live`, `profile:pi-subagent-lifecycle`) | Real inference on your subscription. They refuse to run unless `CODARA_ALLOW_LIVE_PI_SMOKE=1` is set. |
 | `smoke-cora-*.cjs`, `smoke-harness-comparison.cjs`, `smoke-browser-reference.cjs`, `smoke-preview-dom.cjs` | A running development Studio, reached over the agent socket through `cli/lib/rpc.cjs`. Most also need variables naming a separate lab home and an output file, such as `CODARA_CONTEXT_SMOKE_HOME` and `CODARA_CONTEXT_SMOKE_OUTPUT`. See [docs/harness-lab/README.md](../docs/harness-lab/README.md) for how to set up that instance. |
+| `smoke-claude-live-slot-hotswap.cjs` (`npm run smoke:claude-hotswap`) | `claude` on `PATH`. No subscription or network: it runs a real Claude Code session against a local mock API, switches Codara's live slot from one account to another between two turns, and checks that the next request carries the new account's token. On macOS it creates and then deletes one Keychain item named after its temporary slot. |
 | `live-github-push-watch-probe.cjs` | Network access and a signed-in `gh`. |
 | `remote-access-e2e.mjs` with `remote-test-client.mjs` (`npm run test:remote-access-e2e`) | Nothing extra. It starts the real remote-access service over a temp home and drives it the way the phone does. |
 

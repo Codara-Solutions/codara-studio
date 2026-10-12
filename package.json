@@ -75,6 +75,7 @@
     "test:repeat-guard": "node scripts/test-repeat-guard.cjs",
     "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
     "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",
+    "smoke:claude-hotswap": "node scripts/smoke-claude-live-slot-hotswap.cjs",
     "profile:pi-subagent-lifecycle": "node scripts/profile-pi-subagent-lifecycle.cjs",
     "inspect-run": "node scripts/inspect-run.cjs",
     "test:worktrees": "node scripts/test-worktrees.cjs",
