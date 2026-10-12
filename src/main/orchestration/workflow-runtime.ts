@@ -168,6 +168,7 @@ export class WorkflowRuntime {
   private running = 0;
   private liveLaunched = 0;
   private refused = 0;
+  private readonly carriedAbandoned: JournalUsage[] = [];
   private replayer: JournalReplayer | null;
   private replaying: boolean;
   private divergedAtSeq: number | null = null;
@@ -185,6 +186,11 @@ export class WorkflowRuntime {
     const replayEntries = options.replay ?? [];
     this.replayer = replayEntries.length > 0 ? new JournalReplayer(replayEntries) : null;
     this.replaying = Boolean(this.replayer?.hasEntries);
+    for (const entry of replayEntries) {
+      if (entry.t !== "abandoned") continue;
+      this.carriedAbandoned.push(entry.usage);
+      this.addSettled(entry.usage);
+    }
     for (const phase of options.phases ?? []) this.notePhase(phase.title);
   }
 
@@ -201,6 +207,7 @@ export class WorkflowRuntime {
       defaults: this.options.defaults,
       generation,
     });
+    for (const usage of this.carriedAbandoned) this.options.journal.append({ t: "abandoned", usage });
     if (!this.replaying && this.replayer) this.endReplay(null);
     const promise = new Promise<WorkflowRuntimeOutcome>((resolve) => {
       this.resolveOutcome = resolve;
@@ -506,6 +513,7 @@ export class WorkflowRuntime {
         this.dispatchLive(call);
       }
     }
+    for (const done of this.replayer.unmatchedDones()) this.abandon(done.usage);
     this.changed();
   }
 
@@ -713,7 +721,7 @@ export class WorkflowRuntime {
         if (controller.signal.reason === "skip") {
           this.answer(call, { ...outcome, status: "skipped", value: null, note: "skipped by the user" });
         } else {
-          this.settleAborted(call, "stop");
+          this.settleAborted(call, "stop", outcome.usage);
         }
         return;
       }
@@ -744,12 +752,22 @@ export class WorkflowRuntime {
 
   // Stopped calls get no journal entry, so a resume runs them again; the
   // guest is gone and is not answered either.
-  private settleAborted(call: CallState, reason: WorkflowAbortReason): void {
+  private settleAborted(call: CallState, reason: WorkflowAbortReason, usage?: JournalUsage): void {
     if (reason === "skip") {
-      this.answer(call, { status: "skipped", usage: call.liveUsage ?? NO_USAGE, note: "skipped by the user" });
+      this.answer(call, { status: "skipped", usage: usage ?? call.liveUsage ?? NO_USAGE, note: "skipped by the user" });
       return;
     }
     if (!call.answered) {
+      // What the stopped attempt used was paid for even though no result
+      // records it; without this a stopped run under-reports its spend and
+      // a resumed one can run past its ceiling.
+      const spent = usage ?? call.liveUsage;
+      call.liveUsage = undefined;
+      if (spent) {
+        this.abandon(spent);
+        call.tree.tokens = spent.in + spent.out;
+        call.tree.costUsd = spent.usd;
+      }
       call.tree.status = "queued";
       call.tree.waiting = undefined;
       call.tree.note = "stopped before it finished; runs again on resume";
@@ -851,6 +869,12 @@ export class WorkflowRuntime {
     this.spentSettled.in += usage.in;
     this.spentSettled.out += usage.out;
     this.spentSettled.usd += usage.usd;
+  }
+
+  private abandon(usage: JournalUsage): void {
+    if (!(usage.in > 0 || usage.out > 0 || usage.usd > 0)) return;
+    this.addSettled(usage);
+    this.options.journal.append({ t: "abandoned", usage: { in: usage.in, out: usage.out, usd: usage.usd } });
   }
 
   // ── Endings ─────────────────────────────────────────────────────────────

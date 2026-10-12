@@ -3,7 +3,8 @@
 // failing agent resolving null instead of failing the run, skip and stop,
 // exact resume from the journal (zero agents for an unchanged finished run,
 // the recorded completion order reproduced under concurrency, divergence at
-// the first changed call), and the guards against a script that awaits nothing, retries refused calls forever
+// the first changed call), spend that survives Stop and Resume, and the
+// guards against a script that awaits nothing, retries refused calls forever
 // or floods main with notes.
 //
 //   node scripts/test-workflow-runtime.cjs
@@ -268,6 +269,43 @@ async function main() {
     const resumed = await runScript(body, { replay: journal.entries, executor });
     check("resume of an unchanged script completes", resumed.outcome.status === "complete", resumed.outcome);
     check("the call stopped last runs again", executor.log.runs.length === 1 && executor.log.runs[0].prompt === "delay=1500 second", executor.log.runs.map((r) => r.prompt));
+  }
+
+  {
+    // What a stopped agent used is part of the run's spend, before and after
+    // a resume, and so is a recorded result an edited script can no longer use.
+    const body = `const a = await agent("tokens=100 first");
+       const b = await agent("delay=5000 tokens=40 second");
+       return [a, b];`;
+    const journal = memoryJournal();
+    let runtimeRef;
+    await runScript(body, {
+      journal,
+      async during(runtime) {
+        runtimeRef = runtime;
+        await sleep(400);
+        await runtime.stop();
+      },
+    });
+    const stopped = runtimeRef.spent;
+    check("a stopped agent's usage stays in the run's spend", stopped.inputTokens === 140, stopped);
+    check("the stopped row shows what it used", runtimeRef.snapshot().phases[0].calls[1].tokens === 40);
+    check("the stopped agent's usage is journaled", journal.entries.some((e) => e.t === "abandoned" && e.usage.in === 40), journal.entries);
+    const executor = fakeExecutor();
+    const second = memoryJournal();
+    const resumed = await runScript(body.replace("delay=5000", "delay=5"), { replay: journal.entries, executor, journal: second });
+    check(
+      "a resumed run counts the earlier stopped agent too",
+      resumed.outcome.status === "complete" && resumed.runtime.spent.inputTokens === 180,
+      resumed.runtime.spent,
+    );
+    check("the new generation carries the abandoned usage forward", second.entries.some((e) => e.t === "abandoned" && e.usage.in === 40));
+    const edited = await runScript(`return await agent("tokens=7 other");`, { replay: second.entries, executor: fakeExecutor() });
+    check(
+      "results an edited script cannot reuse still count",
+      edited.outcome.status === "complete" && edited.runtime.spent.inputTokens === 187,
+      edited.runtime.spent,
+    );
   }
 
   // ── Determinism and caching ──────────────────────────────────────────────

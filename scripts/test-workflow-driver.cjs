@@ -257,6 +257,11 @@ return [a, b];
   const firstRow = resumed.workflow.tree.phases[0].calls.find((c) => c.label === "first");
   check("the replayed call shows as cached", firstRow?.cached === true, firstRow);
   check("a second journal generation was written", fs.existsSync(path.join(base, "runs", sr.id, "workflow", "journal-1.jsonl")));
+  check(
+    "the run's spend includes the agent Stop cut off",
+    Math.abs(resumed.workflow.spent.usd - 0.03) < 1e-9 && resumed.workflow.spent.inputTokens === 300,
+    resumed.workflow.spent,
+  );
 
   // ── Restart recovery ───────────────────────────────────────────────────
   const beforeRestart = store.calls.launches.length;

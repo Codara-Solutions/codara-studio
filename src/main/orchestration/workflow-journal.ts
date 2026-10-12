@@ -52,6 +52,12 @@ export type JournalEntry =
       note?: string;
       cached?: boolean;
     }
+  /**
+   * Usage no delivered result accounts for: an agent stopped mid-flight, or a
+   * recorded result a resume could not reuse. Each generation carries the
+   * previous one's forward, so the run's spend survives Stop and Resume.
+   */
+  | { t: "abandoned"; usage: JournalUsage }
   | { t: "log"; msg: string }
   | { t: "phase"; title: string }
   | { t: "child"; name: string }
@@ -203,6 +209,11 @@ export class JournalReplayer {
     this.cursor += 1;
     this.delivered.add(newSeq);
     return { kind: "deliver", newSeq, done: entry };
+  }
+
+  /** Recorded results of calls the new run never matched; they are not delivered. */
+  unmatchedDones(): DoneEntry[] {
+    return this.stream.filter((entry): entry is DoneEntry => entry.t === "done" && !this.matched.has(entry.seq));
   }
 
   /**
