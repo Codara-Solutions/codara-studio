@@ -37,6 +37,7 @@ import { installCodexNotify, uninstallCodexNotify } from "./codex-notify-install
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
+import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
@@ -795,8 +796,8 @@ function createWindow(): void {
     app.quit();
   });
 
-  const openBrowserUrlInSpark = (url: string) => {
-    mainWindow?.webContents.send("app:open-browser-url", url);
+  const openLinkFromMainWindow = (url: string) => {
+    void openLinkFromApp(url, mainWindow?.webContents);
   };
 
   // Navigation guard for the privileged main window. The allowlist is derived
@@ -804,7 +805,8 @@ function createWindow(): void {
   // an unpackaged build, and the packaged renderer entry file. Only those two
   // targets may become the document of this webContents (which carries the
   // window.spark preload); everything else is prevented and handed to the
-  // in-app browser instead. Applied to every navigation-ish event, including
+  // link opener instead, which follows the linkOpenTarget preference.
+  // Applied to every navigation-ish event, including
   // subframes via will-frame-navigate, so a hostile iframe cannot navigate the
   // top frame to an attacker origin. This does NOT govern preview <webview>
   // guests: they are separate webContents and do not fire these events on the
@@ -818,7 +820,7 @@ function createWindow(): void {
   const guardNavigation = (details: Electron.Event, url: string) => {
     if (isAllowedMainWindowUrl(url, navAllowlistConfig)) return;
     details.preventDefault();
-    openBrowserUrlInSpark(url);
+    openLinkFromMainWindow(url);
   };
   mainWindow.webContents.on("will-navigate", (details, url) => guardNavigation(details, url));
   mainWindow.webContents.on("will-redirect", (details, url) => guardNavigation(details, url));
@@ -876,7 +878,7 @@ function createWindow(): void {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    openBrowserUrlInSpark(url);
+    openLinkFromMainWindow(url);
     return { action: "deny" };
   });
 

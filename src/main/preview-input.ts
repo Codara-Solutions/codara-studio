@@ -150,9 +150,16 @@ async function resolveGuest(
   const tabId = typeof params.tabId === "string" ? params.tabId : null;
   // Forward the caller's run identity: without an explicit tabId the renderer
   // scopes its pick to the tabs that run owns, so trusted-input ops resolve the
-  // same guest the DOM ops would — never the user's own preview tab.
+  // same guest the DOM ops would, never the user's own preview tab. A caller
+  // with no run is scoped the same way by the pane it runs in.
   const runId = typeof params.runId === "string" ? params.runId : null;
-  const info = (await requestPreviewOp("get_web_contents_id", { tabId, runId, workspaceId: params.workspaceId, focus })) as GuestInfo;
+  const info = (await requestPreviewOp("get_web_contents_id", {
+    tabId,
+    runId,
+    workspaceId: params.workspaceId,
+    callerPaneId: params.callerPaneId,
+    focus,
+  })) as GuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {
     throw new Error("preview tab is not ready (no web contents id yet)");
@@ -375,7 +382,7 @@ export async function handlePreviewInputOp(
 }
 
 async function showCursor(info: GuestInfo, params: Record<string, unknown>, action: string, point?: { x: number; y: number }): Promise<void> {
-  await requestPreviewOp("activity", { tabId: info.tabId, workspaceId: params.workspaceId, runId: params.runId, action, ...point });
+  await requestPreviewOp("activity", { tabId: info.tabId, workspaceId: params.workspaceId, runId: params.runId, callerPaneId: params.callerPaneId, action, ...point });
 }
 
 async function opScroll(params: Record<string, unknown>): Promise<unknown> {
@@ -564,6 +571,7 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
       tabId: (params.tabId as string) ?? null,
       runId: typeof params.runId === "string" ? params.runId : null,
       workspaceId: params.workspaceId,
+      callerPaneId: params.callerPaneId,
       key,
       selector: (params.selector as string) ?? null,
     });

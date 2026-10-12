@@ -138,7 +138,7 @@ Open Settings with `Mod+,`. The tabs, top to bottom:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers), Agent sessions (resume on relaunch), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees). |
+| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser), Agent sessions (resume on relaunch), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -148,6 +148,26 @@ Open Settings with `Mod+,`. The tabs, top to bottom:
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
 | About | Version and links. A development build shows the nearest release tag plus the commits since it. |
+
+**Open links in** decides where a link you click opens: **Default browser**
+(the default) hands it to your machine's browser, **Codara browser** opens it
+in a browser tab of the current workspace. It covers links in terminals
+(plain URLs and OSC 8 hyperlinks), Cora chat and markdown previews, the GitHub
+panels, onboarding and Settings, and links the app window itself opens. Some
+links keep a fixed destination whatever the setting says:
+
+- Local `file:` links always open in Codara, because handing a file to the
+  system would run it.
+- **Open in Codara browser** actions (the file tree, **New browser tab**,
+  dev-server auto-open) always use a Codara tab, and the browser toolbar's
+  **Open externally** always uses your default browser.
+- Links and `window.open` inside a page that is already in the Codara browser
+  open a new Codara tab in that page's own workspace. Sign-in popups stay
+  small windows attached to Codara.
+- Agent browser tools (`codara_preview_*`) always drive Codara tabs.
+- Sign-in flows (Pi subscription login) and URLs that a CLI in a terminal
+  opens by itself (`gh auth login`, `xdg-open`, `open`) use your default
+  browser.
 
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.

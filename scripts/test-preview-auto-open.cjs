@@ -151,6 +151,28 @@ function testCoraPreviewLifetime() {
   console.log("PASS Cora browsers persist as workspace tabs");
 }
 
+// Auto-open is a preview feature with its own toggle, not a link click: it
+// always opens a background Codara tab in the source pane's workspace and never
+// follows the linkOpenTarget preference to the system browser.
+function testAutoOpenIgnoresLinkTarget() {
+  const appSource = fs.readFileSync(
+    path.join(ROOT, "src/renderer/src/App.tsx"),
+    "utf8",
+  );
+  const start = appSource.indexOf("const handleDetectedUrl = useCallback(");
+  assert.ok(start >= 0, "handleDetectedUrl not found");
+  const body = appSource.slice(start, appSource.indexOf("\n  );\n", start));
+  assert.match(body, /preferencesRef\.current\.autoOpenPreview !== true/);
+  assert.match(
+    body,
+    /newPreviewTab\(url, \{ runId: ownerRunId, workspaceId: sourceWorkspaceId, focus: false \}\)/,
+  );
+  assert.doesNotMatch(body, /openExternal|linkOpenTarget/);
+  // A link click's same-origin reuse never takes over a run's browser tab.
+  assert.match(appSource, /t\.kind === "preview" && !t\.runId && \(t\.url === url \|\| sameOrigin\(t\.url, url\)\)/);
+  console.log("PASS auto-open stays a background Codara tab whatever the link setting");
+}
+
 async function testLivenessProbe(isLoopbackPreviewServerUp) {
   const server = net.createServer((socket) => socket.end());
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -191,6 +213,7 @@ async function main() {
   testReplayTracker(createReplayTracker);
   testBootSelection(resolveBootActiveTabId);
   testCoraPreviewLifetime();
+  testAutoOpenIgnoresLinkTarget();
   await testLivenessProbe(isLoopbackPreviewServerUp);
 
   console.log("all preview auto-open checks passed");

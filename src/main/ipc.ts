@@ -57,6 +57,7 @@ import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
+import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
 import { systemResourceSnapshot } from "./system-metrics";
 import {
@@ -3712,10 +3713,10 @@ export function registerIpc(): void {
     // file: URLs are deliberately NOT handed to shell.openExternal — on
     // Windows that executes the file with its default handler (e.g. a .bat),
     // so a malicious file:// URL would be remote code execution. Instead
-    // reveal the target in the OS file manager (never run it). The preload's
-    // openExternal already routes file:// to Codara's in-app browser, so this
-    // branch only fires for callers (openInSystemBrowser) that hit the channel
-    // directly.
+    // reveal the target in the OS file manager (never run it). Plain link
+    // clicks go through app:openLink, which opens file:// in Codara's viewer,
+    // so this branch only fires for callers (openInSystemBrowser) that hit the
+    // channel directly.
     if (/^file:/i.test(url)) {
       try {
         const filePath = fileURLToPath(url);
@@ -3725,16 +3726,16 @@ export function registerIpc(): void {
       }
       return;
     }
-    // Electron's shell.openExternal accepts http(s) and a few extra schemes by
-    // default; reject anything else so a malicious URL detected on the PTY
-    // stream cannot launch arbitrary handlers.
-    const safe = /^(https?:|mailto:)/i.test(url);
-    if (!safe) return;
-    try {
-      await shell.openExternal(url);
-    } catch {
-      /* shell.openExternal rejects when no handler is registered; ignore. */
-    }
+    // openInSystemBrowser accepts only http(s) and mailto, so a malicious URL
+    // detected on the PTY stream cannot launch arbitrary handlers.
+    await openInSystemBrowser(url);
+  });
+
+  // A plain link click. The user's linkOpenTarget preference decides whether
+  // it opens in the default browser or a Codara browser tab.
+  handle("app:openLink", async (event, url: string): Promise<void> => {
+    if (typeof url !== "string" || url.length === 0) return;
+    await openLinkFromApp(url, event.sender);
   });
 
   // Auto-updater: renderer's "Restart and install" button calls this after

@@ -12,8 +12,10 @@ import {
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
   LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS,
+  LINK_OPEN_TARGETS,
   type AppPreferences,
   type EditorThemeId,
+  type LinkOpenTarget,
   type NotificationChannelsPref,
   type PrefKey,
   type ThemePref,
@@ -257,6 +259,9 @@ function normalize(
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview
         : DEFAULT_PREFERENCES.autoOpenPreview,
+    linkOpenTarget: (LINK_OPEN_TARGETS as readonly unknown[]).includes(src.linkOpenTarget)
+      ? (src.linkOpenTarget as LinkOpenTarget)
+      : DEFAULT_PREFERENCES.linkOpenTarget,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),

@@ -13,7 +13,13 @@ import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions";
-import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
+import {
+  ensurePreviewTab,
+  findReusablePreviewTab,
+  listPreviewTabs,
+  pickPreviewTab,
+  showPreviewControl,
+} from "./registry";
 
 type PreviewOpName =
   | "whiteboard_inspect"
@@ -77,7 +83,7 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return inspectWhiteboard(req.params.board as CoraWhiteboard, req.params.nodeIds as string[] | undefined);
     }
     case "list":
-      return { tabs: listPreviewTabs(readString(req.params, "workspaceId")) };
+      return { tabs: listPreviewTabs(readString(req.params, "workspaceId"), readString(req.params, "callerPaneId")) };
     case "activity": {
       const tab = requireTab(req.params);
       showPreviewControl(tab, { action: readString(req.params, "action") ?? "Working", runId: readString(req.params, "runId"), ...(typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : {}) });
@@ -112,10 +118,17 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 
 // Implicit tab picking is scoped to the calling run: params.runId is stamped by
 // the MCP server from SPARK_RUN_ID, so an agent op with no explicit tabId only
-// ever lands on a tab that run opened. An explicit tabId is still honored.
+// ever lands on a tab that run opened. An agent with no run is scoped to the
+// workspace of the pane it runs in (params.callerPaneId, resolved by main). An
+// explicit tabId is still honored inside that workspace.
 function requireTab(params: Record<string, unknown>) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
-  const tab = pickPreviewTab(readString(params, "tabId"), runId, readString(params, "workspaceId"));
+  const tab = pickPreviewTab(
+    readString(params, "tabId"),
+    runId,
+    readString(params, "workspaceId"),
+    readString(params, "callerPaneId"),
+  );
   if (!tab) {
     if (runId && !params.tabId) {
       throw new Error(
@@ -161,15 +174,23 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   let tab;
   let opened = false;
   if (params.tabId) {
-    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null, null, readString(params, "workspaceId"));
+    tab = pickPreviewTab(
+      typeof params.tabId === "string" ? params.tabId : null,
+      null,
+      readString(params, "workspaceId"),
+      readString(params, "callerPaneId"),
+    );
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
   } else {
     // runId is the calling run's identity, stamped by the MCP server; the
-    // reused-or-opened tab must belong to that run, not the selected one and
-    // never one the user opened.
+    // reused-or-opened tab must belong to that run (or, with no run, to the
+    // calling agent's pane), not the selected one and never one the user
+    // opened.
     const runId = readString(params, "runId");
-    const before = pickPreviewTab(null, runId, readString(params, "workspaceId"));
-    tab = await ensurePreviewTab(url, runId, readString(params, "workspaceId"));
+    const workspaceId = readString(params, "workspaceId");
+    const callerPaneId = readString(params, "callerPaneId");
+    const before = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+    tab = await ensurePreviewTab(url, runId, workspaceId, callerPaneId);
     opened = !before;
   }
   // ensurePreviewTab created the tab with the target URL, so loadURL is a
