@@ -376,12 +376,55 @@ async function main() {
   assert.equal(readJson(liveFile)?.claudeAiOauth, undefined);
   pass("delete purges both halves, tombstones the account and never hands the slot to another account");
 
+  // An interrupted delete: emptying the live slot throws, so the Claude Code
+  // store still lists the half and the slot still holds its login. The
+  // tombstone wins anyway: no terminal-only card, and the next boot finishes.
+  const flakyIdentity = { fingerprint: fingerprintOf("f1111111-1111-4111-8111-111111111111"), email: "flaky@example.com" };
+  networkIdentity = flakyIdentity;
+  const flaky = await connectCora("Flaky", 11, flakyIdentity);
+  const flakyCli = await service.ensureCliHalf(flaky.id, H.claudeCodec.canonicalFromPi(piCredential(11)), flakyIdentity);
+  await service.useAccount(flaky.id);
+  assert.equal(await liveId(), flakyCli);
+  const releaseActive = service.adapter.releaseActive;
+  service.adapter.releaseActive = async () => {
+    throw new Error("slot busy");
+  };
+  const interrupted = await service.deleteAccount(flaky.id);
+  service.adapter.releaseActive = releaseActive;
+  assert.deepEqual(interrupted, { deleted: true, purgePending: true });
+  assert.ok((await claudeStore.snapshot()).profiles.some((entry) => entry.id === flakyCli), "the throw left the store entry");
+  assert.equal(await liveId(), flakyCli, "the throw left the login in the slot");
+  assert.equal((await service.listAccounts()).terminalOnly.some((card) => card.cliProfileId === flakyCli), false,
+    "a half queued for purge is never offered as a terminal-only card");
+
+  // The same when deleting the store entry itself throws.
+  const shakyIdentity = { fingerprint: fingerprintOf("e2222222-2222-4222-8222-222222222222"), email: "shaky@example.com" };
+  networkIdentity = shakyIdentity;
+  const shaky = await connectCora("Shaky", 12, shakyIdentity);
+  const shakyCli = await service.ensureCliHalf(shaky.id, H.claudeCodec.canonicalFromPi(piCredential(12)), shakyIdentity);
+  const deleteProfile = claudeStore.deleteProfile;
+  claudeStore.deleteProfile = async () => {
+    throw new Error("store locked");
+  };
+  assert.equal((await service.deleteAccount(shaky.id)).purgePending, true);
+  claudeStore.deleteProfile = deleteProfile;
+  assert.ok((await claudeStore.snapshot()).profiles.some((entry) => entry.id === shakyCli));
+  assert.equal((await service.listAccounts()).terminalOnly.some((card) => card.cliProfileId === shakyCli), false);
+  pass("an interrupted delete leaves no terminal-only card behind");
+
   // --- Restart: nothing comes back --------------------------------------------
   service.stop();
   service = makeService();
   await service.clearDanglingLinks();
   await service.reprojectDefaults();
   await service.purgePending();
+  const cliIds = (await claudeStore.snapshot()).profiles.map((entry) => entry.id);
+  assert.equal(cliIds.includes(flakyCli), false, "the boot purge removes the store entry an interrupted delete left");
+  assert.equal(cliIds.includes(shakyCli), false);
+  assert.equal(await liveId(), null, "and empties the slot that still held the deleted login");
+  assert.equal(fs.existsSync(path.dirname(vaultFile(flakyCli))), false);
+  assert.equal(fs.existsSync(path.dirname(vaultFile(shakyCli))), false);
+  assert.deepEqual((await piStore.registry.snapshot()).pendingPurge, [], "nothing stays queued once it is done");
   const ids = (await piStore.registry.listProfiles()).map((profile) => profile.id).sort();
   assert.deepEqual(ids, [fragile.id, system.id].sort(), "deleted accounts stay deleted across a restart");
   await assert.rejects(

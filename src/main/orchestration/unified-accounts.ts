@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type {
   AccountIdentity,
@@ -461,9 +461,13 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         terminal: connection ? terminalStatusFrom(connection, sessions(connection.id)) : null,
       });
     }
+    // A half queued for purge belongs to a deleted account, even while an
+    // interrupted delete still leaves it in the CLI store.
+    const queued = new Set(inspection.snapshot.pendingPurge.map((entry) => resolve(entry.path)));
     const terminalOnly: UnifiedTerminalOnlyView[] = [];
     for (const connection of cli ?? []) {
       if (!connection.managed || linked.has(connection.id)) continue;
+      if (queued.has(resolve(this.adapter.managedHome(connection.id).path))) continue;
       terminalOnly.push({
         coraProfileId: null,
         cliProfileId: connection.id,
@@ -672,6 +676,11 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     const previousCliDefault = (await this.store.snapshot()).defaultProfileId;
     await this.store.setDefaultProfile(target);
     if (target === this.systemId || !this.adapter.activate) return;
+    // The switch saves the slot's outgoing login into its profile's vault, so
+    // a deleted account still named there must be released first.
+    await this.dropQueuedHalves().catch((error) => {
+      this.log(`[accounts] the queued deletes could not be read: ${errorText(error)}`);
+    });
     try {
       await this.adapter.activate(target);
     } catch (error) {
@@ -957,18 +966,66 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   /**
-   * Purge the managed homes of deleted accounts whose terminals have exited.
-   * Runs at boot and whenever a terminal of this CLI releases its lease.
+   * What an interrupted delete can leave of a queued half outside its
+   * directory: Claude's live slot still holding its login, and its entry in
+   * the CLI store, which would list it as a terminal-only card and let the
+   * next switch save the login back. Only a managed profile whose home is the
+   * queued path and that no row links is touched. Throws so the entry stays
+   * queued for the next try.
+   */
+  private async dropQueuedHalf(entry: PiAccountPendingPurge, linked: ReadonlySet<string>): Promise<void> {
+    const owns = (id: string): boolean =>
+      this.adapter.isManagedProfileId(id) &&
+      !linked.has(id) &&
+      resolve(this.adapter.managedHome(id).path) === resolve(entry.path);
+    const live = await this.adapter.activeCliProfileId?.();
+    if (live && owns(live)) await this.adapter.releaseActive?.(live);
+    const cli = await this.store.snapshot();
+    const stored = cli.profiles.find((profile) => owns(profile.id));
+    if (!stored) return;
+    if (cli.defaultProfileId === stored.id) await this.store.setDefaultProfile(this.systemId);
+    await this.store.deleteProfile(stored.id, { keepDirectory: true });
+  }
+
+  /** dropQueuedHalf for every queued half of this CLI; answers the paths it could not finish. */
+  private async dropQueuedHalves(): Promise<Set<string>> {
+    const snapshot = await this.piStore.registry.snapshot();
+    const accountsRoot = this.adapter.managedAccountsRoot();
+    const linked = new Set(
+      snapshot.profiles.flatMap((profile) => (profile.cli.kind === "managed" ? [profile.cli.profileId] : [])),
+    );
+    const unfinished = new Set<string>();
+    for (const entry of snapshot.pendingPurge) {
+      if (!isPathInside(entry.path, accountsRoot)) continue;
+      try {
+        await this.dropQueuedHalf(entry, linked);
+      } catch (error) {
+        unfinished.add(entry.path);
+        this.log(
+          `[accounts] the deleted ${this.adapter.labels.cliLabel} profile at ${entry.path} is still listed: ${errorText(error)}`,
+        );
+      }
+    }
+    return unfinished;
+  }
+
+  /**
+   * Finish what the deletes of accounts left queued: the CLI store entry and
+   * live-slot reference of each half, then its managed home once no terminal
+   * runs in it. Runs at boot and whenever a terminal of this CLI releases its
+   * lease; an entry stays queued until every step of it succeeded.
    */
   async purgePending(): Promise<string[]> {
     return this.withMutation(async () => {
       const snapshot = await this.piStore.registry.snapshot();
       if (snapshot.pendingPurge.length === 0) return [];
       const accountsRoot = this.adapter.managedAccountsRoot();
+      const unfinished = await this.dropQueuedHalves();
       this.sweepLeases();
       const done: string[] = [];
       for (const entry of snapshot.pendingPurge) {
         if (!isPathInside(entry.path, accountsRoot)) continue;
+        if (unfinished.has(entry.path)) continue;
         if (this.leases.isLeased(basename(entry.path))) continue;
         try {
           await purgeManagedPath(entry.path, accountsRoot);
