@@ -12,6 +12,7 @@ import type {
   SparkBuiltinMcpId,
   SparkBuiltinMcpStatus,
   SparkBuiltinRuntime,
+  WorkerModelCatalog,
 } from "@shared/types";
 import { CORA_WORKER_MODEL_CHOICES } from "@shared/worker-model-roster";
 import {
@@ -127,7 +128,7 @@ const TAB_DESCRIPTION: Record<CapabilityTab, string> = {
   skills: "Instructions an agent loads when a task needs them, like a release checklist.",
   profiles: "Separate Coras, each with its own instructions and memory, picked per chat.",
   memory: "What Cora remembers between chats, as markdown files you can edit.",
-  workers: "The models Cora may hand implementation and verification work to.",
+  workers: "Every model your signed-in providers offer. Switch on the ones Cora may hand work to.",
   policy: "How Cora works on your requests and how workers are briefed.",
 };
 
@@ -138,7 +139,7 @@ const STANDING_NOTE: Record<CapabilityTab, string> = {
   skills: "Changes apply as you make them. New Cora chats and workers load the skills switched on.",
   profiles: "Changes apply as you make them. A started chat keeps the profile it began with.",
   memory: "Memory changes apply immediately.",
-  workers: "Changes apply as you make them, from the next worker Cora starts.",
+  workers: "Changes apply from the next worker Cora starts. New models arrive switched off.",
   policy: "Changes apply as you make them, for every workspace.",
 };
 
@@ -206,6 +207,11 @@ export default function AgentCapabilitiesDialog({
   const [documentBusy, setDocumentBusy] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [openRouterVerified, setOpenRouterVerified] = useState<boolean | null>(null);
+  const [workerCatalog, setWorkerCatalog] = useState<WorkerModelCatalog | null>(null);
+  const [workerCatalogLoading, setWorkerCatalogLoading] = useState(true);
+  const [workerCatalogRefreshing, setWorkerCatalogRefreshing] = useState(false);
+  const [workerCatalogError, setWorkerCatalogError] = useState<string | null>(null);
+  const [workerSearch, setWorkerSearch] = useState("");
   const deferredMcpSearch = useDeferredValue(mcpSearch);
   const deferredSkillSearch = useDeferredValue(skillSearch);
   const navRef = useRef<HTMLElement | null>(null);
@@ -320,6 +326,24 @@ export default function AgentCapabilitiesDialog({
     // Only the three inputs of the verification hash matter.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.openRouterApiKey, view.openRouterVerifiedKeyHash, view.openRouterCoraModels]);
+
+  const loadWorkerCatalog = useCallback((force: boolean) => {
+    if (force) setWorkerCatalogRefreshing(true);
+    return window.spark.workerModels
+      .catalog(force)
+      .then((catalog) => {
+        setWorkerCatalog(catalog);
+        setWorkerCatalogError(null);
+      })
+      .catch((err: unknown) => setWorkerCatalogError(errorText(err)))
+      .finally(() => {
+        setWorkerCatalogLoading(false);
+        if (force) setWorkerCatalogRefreshing(false);
+      });
+  }, []);
+  useEffect(() => {
+    void loadWorkerCatalog(false);
+  }, [loadWorkerCatalog]);
 
   useEffect(() => {
     let cancelled = false;
@@ -459,15 +483,18 @@ export default function AgentCapabilitiesDialog({
   const disabledSkills = useMemo(() => new Set(view.agentDisabledSkillIds), [view.agentDisabledSkillIds]);
   const coraAssigned = useMemo(() => new Set(view.agentMcpCoraManagerIds), [view.agentMcpCoraManagerIds]);
   const workerAssigned = useMemo(() => new Set(view.agentMcpPiWorkerIds), [view.agentMcpPiWorkerIds]);
+  // The discovered catalog, in its own order, once it lands; the shipped
+  // roster until then. Switched-on ids and OpenRouter favorites always stay
+  // listed so they can be switched off.
   const workerChoices = useMemo(
     () => [
       ...new Set([
-        ...CORA_WORKER_MODEL_CHOICES,
+        ...(workerCatalog ? workerCatalog.models.map((model) => model.id) : CORA_WORKER_MODEL_CHOICES),
         ...view.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
         ...view.coraWorkerModels.map((id) => id.trim()).filter(Boolean),
       ]),
     ],
-    [view.coraWorkerModels, view.openRouterCoraModels],
+    [workerCatalog, view.coraWorkerModels, view.openRouterCoraModels],
   );
   const usableWorkers = useMemo(
     () => usableWorkerModels(view, openRouterVerified ?? true),
@@ -1429,10 +1456,17 @@ export default function AgentCapabilitiesDialog({
 
               {renderedTab === "workers" ? (
                 <WorkerModelsSection
+                  catalog={workerCatalog}
+                  loading={workerCatalogLoading}
+                  refreshing={workerCatalogRefreshing}
+                  loadError={workerCatalogError}
+                  onRefresh={() => void loadWorkerCatalog(true)}
                   choices={workerChoices}
                   enabled={view.coraWorkerModels}
                   usable={usableWorkers}
                   openRouterVerified={openRouterVerified}
+                  search={workerSearch}
+                  onSearch={setWorkerSearch}
                   onToggle={toggleWorkerModel}
                 />
               ) : null}

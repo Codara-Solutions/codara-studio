@@ -276,4 +276,13 @@ export function inspectPiModelCatalog(force = false): Promise<PiCatalogModel[]> 
 /** Drop the cache so the next read is live — used after connect/disconnect. */
 export function invalidatePiModelCatalogCache(): void {
   cached = null;
+  for (const listener of invalidationListeners) listener();
+}
+
+const invalidationListeners = new Set<() => void>();
+
+/** Run `listener` whenever the cache above is dropped: the worker model
+ * catalog builds on this one and must forget a signed-out provider too. */
+export function onPiModelCatalogInvalidated(listener: () => void): void {
+  invalidationListeners.add(listener);
 }

@@ -131,6 +131,7 @@ import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
   PiCatalogModel,
+  WorkerModelCatalog,
   PiSubscriptionDeleteAccountInput,
   PiSubscriptionShareLoginInput,
   PiSubscriptionMakeDefaultInput,
@@ -381,6 +382,10 @@ const api = {
       ipcRenderer.on("pi-runtime:install-event", listener);
       return () => ipcRenderer.off("pi-runtime:install-event", listener);
     },
+  },
+  workerModels: {
+    catalog: (force = false): Promise<WorkerModelCatalog> =>
+      ipcRenderer.invoke("worker-models:catalog", { force }),
   },
   usageAnalytics: {
     // Scans the provider CLIs' on-disk transcripts. Cold scans take seconds on

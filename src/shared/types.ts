@@ -928,6 +928,43 @@ export interface PiCatalogModel {
   thinkingLevels: string[];
 }
 
+/** Where a worker model was seen: Pi's catalog, the provider's own model
+ * list for the signed-in account, or a cache a CLI keeps on disk. */
+export type WorkerModelSource = "pi" | "provider" | "cli";
+
+export interface WorkerCatalogModel {
+  id: string;
+  /** Curated name, else the vendor's, else Pi's, else the raw id. */
+  label: string;
+  provider: PiSubscriptionProvider;
+  premium: boolean;
+  /** First seen after the catalog's baseline, within the last two weeks. */
+  isNew: boolean;
+  /** Null when Cora can launch it now, else a short reason it cannot. */
+  unavailable: string | null;
+  sources: WorkerModelSource[];
+  reasoning: boolean;
+  contextWindow?: number;
+  thinkingLevels: string[];
+  firstSeenAt: string;
+}
+
+export interface WorkerModelProviderState {
+  provider: PiSubscriptionProvider;
+  signedIn: boolean;
+  /** How the list for this provider was built on the last refresh. */
+  listedFrom: "provider" | "cli" | "pi";
+  /** One short sentence when the provider's own list could not be read. */
+  note: string | null;
+  checkedAt: string | null;
+}
+
+export interface WorkerModelCatalog {
+  models: WorkerCatalogModel[];
+  providers: WorkerModelProviderState[];
+  refreshedAt: string | null;
+}
+
 export type PiUsageWindowScope =
   | { kind: "general" }
   | { kind: "code_review" }

@@ -1005,9 +1005,16 @@ export function registerIpc(): void {
     const { readUsageSummary } = await import("./usage-analytics");
     return readUsageSummary(input);
   });
+  // The chat and manager pickers read the same discovered list as the worker
+  // models page, so a model the provider lists for the account is pickable
+  // everywhere at once.
   handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
-    const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
-    return inspectPiModelCatalog(input?.force === true);
+    const { inspectUnifiedPiModelCatalog } = await import("./orchestration/worker-model-catalog");
+    return inspectUnifiedPiModelCatalog(input?.force === true);
+  });
+  handle("worker-models:catalog", async (_event, input?: { force?: unknown }) => {
+    const { inspectWorkerModelCatalog } = await import("./orchestration/worker-model-catalog");
+    return inspectWorkerModelCatalog(input?.force === true);
   });
 
   // Remote access imports agent-sync directly, so its trash and Pi wiring must

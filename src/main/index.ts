@@ -1376,6 +1376,15 @@ app.whenReady().then(async () => {
       logMain("github-push-watch", `failed to start: ${String(err)}`);
     });
 
+  // Re-reads the providers' model lists every few hours so a model released
+  // while Codara runs appears in the worker list, switched off. Its first pass
+  // waits out the launch.
+  void import("./orchestration/worker-model-catalog")
+    .then((m) => m.startWorkerModelCatalogRefresh())
+    .catch((err) => {
+      logMain("worker-model-catalog", `failed to start: ${String(err)}`);
+    });
+
   // Arm automations (cron / interval / folder-watch triggers) and resume any
   // queue items left mid-flight by a previous session. This stays fire-and-
   // forget after window creation: delaying scheduler registration until paint

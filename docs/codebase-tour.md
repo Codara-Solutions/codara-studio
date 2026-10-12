@@ -216,6 +216,23 @@ start is skipped in favor of the bundled build. `resolveCodaraPiLibrary` is that
 bundled copy, which main also uses as a library for credential storage,
 sign-in flows and the model catalog.
 
+**Which models Cora can pick.** `orchestration/worker-model-catalog.ts`
+unions Pi's catalog (`pi-model-catalog.ts`), each signed-in provider's own
+model list read with the stored token (never refreshed), and the model
+caches the Codex CLI and Claude Code keep on disk, which it only reads. It
+caches the result in `<codara home>/worker-model-catalog.json` (first-seen
+times for the New badge) and re-reads every six hours. The Worker models
+page (`worker-models:catalog`) and the chat and manager pickers
+(`pi-models:catalog`) read the same list; a newly found model stays off
+until the user switches it on in `settings.coraWorkerModels`.
+
+**Codara's own skills and MCP servers.** "Add skill" and "Add MCP server"
+in the Capability Center write only to `<codara home>/skills` and
+`<codara home>/mcp-servers.json` (`skill-import.ts`, `agent-sync.ts`).
+Cora and Pi workers load them per launch through `listPiSkillPaths` and
+`listPiMcpServers`; no CLI reads them, and importing from a CLI's MCP
+config copies the entry without writing that config.
+
 **Automations and looms** start runs without a chat message: `scheduler.ts`
 arms triggers (cron, interval, folder, git and others),
 `automation-loop.ts` starts one iteration after another, and

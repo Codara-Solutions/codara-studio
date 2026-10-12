@@ -564,9 +564,14 @@ async function getCapabilitiesForRemote(input: {
   const { listCoraProfiles } = await import("../orchestration/cora-profiles");
   const cwd = await workspaceCwdForRemote(input.workspaceId);
   const enabled = new Set(settings.coraWorkerModels.map((id) => id.trim()).filter(Boolean));
+  const discovered = await import("../orchestration/worker-model-catalog")
+    .then((catalog) => catalog.inspectWorkerModelCatalog())
+    .then((catalog) => catalog.models.filter((model) => model.sources.length > 0).map((model) => model.id))
+    .catch(() => [] as string[]);
   const choices = [
     ...new Set([
       ...CORA_WORKER_MODEL_CHOICES,
+      ...discovered,
       ...settings.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
       ...enabled,
     ]),
@@ -810,7 +815,10 @@ async function listCoraModelsForRemote(): Promise<RemoteCoraModel[]> {
   // user's verified OpenRouter favourites after them. One function builds
   // both menus, so a model that appears on the desktop appears on the phone.
   const [live, settings] = await Promise.all([
-    inspectPiModelCatalog().catch(() => [] as PiCatalogModel[]),
+    import("../orchestration/worker-model-catalog")
+      .then((catalog) => catalog.inspectUnifiedPiModelCatalog())
+      .catch(() => inspectPiModelCatalog())
+      .catch(() => [] as PiCatalogModel[]),
     loadSettings(),
   ]);
   const groups = buildVisibleGroups({
