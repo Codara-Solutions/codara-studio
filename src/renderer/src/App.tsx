@@ -63,6 +63,7 @@ import {
   clearPreviewControl,
   findPreviewTabByWebContentsId,
   inheritPreviewTabOwner,
+  isAgentOwnedPreviewTab,
   setLocatePaneWorkspaceFn,
   setOpenPreviewTabFn,
 } from "./components/Preview/registry";
@@ -271,9 +272,12 @@ function entryFromPath(path: string): FsEntry {
   return { name, path, isDir: false, ext };
 }
 
+// Every file: URL (and other opaque ones) has the origin "null", which says
+// nothing about two pages being the same site.
 function sameOrigin(a: string, b: string): boolean {
   try {
-    return new URL(a).origin === new URL(b).origin;
+    const origin = new URL(a).origin;
+    return origin !== "null" && origin === new URL(b).origin;
   } catch {
     return a === b;
   }
@@ -4795,10 +4799,14 @@ export default function App() {
         newPreviewTab(url, options.background ? { focus: false } : undefined);
         return;
       }
-      // A run's browser tab is the run's to drive; a link click never takes
-      // it over.
+      // A run's browser tab is the run's to drive, and one a terminal agent
+      // opened is that agent's; a link click never takes either over.
       const existing = tabs.tabs.find(
-        (t) => t.kind === "preview" && !t.runId && (t.url === url || sameOrigin(t.url, url)),
+        (t) =>
+          t.kind === "preview" &&
+          !t.runId &&
+          !isAgentOwnedPreviewTab(t.id) &&
+          (t.url === url || sameOrigin(t.url, url)),
       );
       if (existing) {
         setPreviewUrl(existing.id, url);

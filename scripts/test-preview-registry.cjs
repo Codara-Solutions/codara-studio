@@ -72,12 +72,18 @@ async function main() {
   assert.equal(r.pickPreviewTab(null, null, null, null).id, "user-pb");
   console.log("an agent with no run stays in its pane's workspace and on its own tabs");
 
+  assert.equal(r.isAgentOwnedPreviewTab("agent-pa"), true, "a link click could take over the agent's tab");
+  assert.equal(r.isAgentOwnedPreviewTab("user-pa"), false);
+  assert.equal(r.isAgentOwnedPreviewTab("run-pa"), false);
+
   assert.equal(r.findPreviewTabByWebContentsId(14).id, "agent-pa");
   assert.equal(r.findPreviewTabByWebContentsId(99), null);
   r.registerPreviewTab({ id: "popup-pa", workspaceId: "pa", url: "u", handle: guestHandle(15) });
   r.inheritPreviewTabOwner("popup-pa", "agent-pa");
   r.unregisterPreviewTab("agent-pa");
   assert.equal(r.findReusablePreviewTab(null, null, "pane-a").id, "popup-pa", "a tab the agent's page opened stays the agent's");
+  assert.equal(r.isAgentOwnedPreviewTab("popup-pa"), true);
+  assert.equal(r.isAgentOwnedPreviewTab("agent-pa"), false, "a closed tab keeps no owner");
   assert.equal(r.pickPreviewTab(null, null, null, "pane-a2").id, "user-pa");
   console.log("tabs a page opens map back to their source tab and owner");
 }

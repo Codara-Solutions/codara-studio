@@ -192,6 +192,11 @@ export function findPreviewTabByWebContentsId(webContentsId: number): RegistryEn
   return null;
 }
 
+/** A tab a terminal agent with no run opened and may still be driving. */
+export function isAgentOwnedPreviewTab(tabId: string): boolean {
+  return agentPaneOwners.has(tabId);
+}
+
 // A tab a page opened belongs to whoever owned the page's tab.
 export function inheritPreviewTabOwner(tabId: string, sourceTabId: string): void {
   const paneId = agentPaneOwners.get(sourceTabId);

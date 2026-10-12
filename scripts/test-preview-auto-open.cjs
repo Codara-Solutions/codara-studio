@@ -168,8 +168,13 @@ function testAutoOpenIgnoresLinkTarget() {
     /newPreviewTab\(url, \{ runId: ownerRunId, workspaceId: sourceWorkspaceId, focus: false \}\)/,
   );
   assert.doesNotMatch(body, /openExternal|linkOpenTarget/);
-  // A link click's same-origin reuse never takes over a run's browser tab.
-  assert.match(appSource, /t\.kind === "preview" && !t\.runId && \(t\.url === url \|\| sameOrigin\(t\.url, url\)\)/);
+  // A link click's same-origin reuse never takes over a run's browser tab,
+  // nor one a terminal agent opened, and file: URLs share no origin.
+  assert.match(
+    appSource,
+    /t\.kind === "preview" &&\s+!t\.runId &&\s+!isAgentOwnedPreviewTab\(t\.id\) &&\s+\(t\.url === url \|\| sameOrigin\(t\.url, url\)\)/,
+  );
+  assert.match(appSource, /return origin !== "null" && origin === new URL\(b\)\.origin;/);
   console.log("PASS auto-open stays a background Codara tab whatever the link setting");
 }
 
