@@ -29,7 +29,8 @@ export function startNetworkRecorder(session: CdpSession): void {
   indexes.set(session, byId);
   const track = (entry: NetworkEntry) => {
     const dropped = ring.push(entry);
-    if (dropped) byId.delete(dropped.requestId);
+    // A redirect's hops share one request id; only the newest hop is indexed.
+    if (dropped && byId.get(dropped.requestId) === dropped) byId.delete(dropped.requestId);
     byId.set(entry.requestId, entry);
   };
   session.on("Network.requestWillBeSent", (params) => {

@@ -120,13 +120,59 @@ async function sessionLogic(lib) {
   const other = new lib.CdpSession("tab-1-next", fakeTransport());
   other.ring("console", 3).push(0);
   other.adoptRings(session.ringsSnapshot());
-  assert.deepEqual(other.ring("console", 3).toArray(), [3, 4, 5], "a replaced guest keeps the tab's history, still bounded");
+  assert.deepEqual(other.ring("console", 3).toArray(), [4, 5, 0], "a replaced guest keeps the tab's history before its own entries, still bounded");
+  assert.equal(other.ring("console", 3).dropped, 3);
 
   session.dispose();
   assert.equal(transport.attached, false, "disposing detaches");
   await assert.rejects(session.send("Runtime.evaluate", {}), /tab closed/);
   transport.emit("Page.loadEventFired", { timestamp: 2 });
   assert.deepEqual(seen, [1], "no events after dispose");
+}
+
+async function attachRecovery(lib) {
+  // The first attach fails (another client holds the tab): the recorders'
+  // domains fail with it, and the call that finally attaches brings them back.
+  const transport = fakeTransport();
+  transport.failAttach = "Another debugger is already attached";
+  const session = new lib.CdpSession("tab-2", transport, { reattachDelayMs: 5 });
+  lib.startNetworkRecorder(session);
+  lib.startConsoleRecorder(session);
+  await tick(10);
+  assert.equal(transport.sent.length, 0);
+  transport.failAttach = null;
+  await session.send("Runtime.evaluate", { expression: "1" });
+  await tick(10);
+  const enabled = transport.sent.map(([m]) => m).filter((m) => m.endsWith(".enable")).sort();
+  assert.deepEqual(enabled, ["Log.enable", "Network.enable", "Runtime.enable"], "held domains come back once a later call attaches");
+  assert.deepEqual(transport.sent.find(([m]) => m === "Network.enable")[1], { maxTotalBufferSize: 20_000_000, maxResourceBufferSize: 5_000_000 });
+
+  // The user dismissed the browser's debugging bar: no attaching behind their back.
+  transport.reattachAfter = (reason) => reason !== "canceled_by_user";
+  transport.sent.length = 0;
+  transport.drop("canceled_by_user");
+  await tick(30);
+  assert.equal(transport.attached, false, "no automatic re-attach after the user cancelled");
+  await session.send("Runtime.evaluate", { expression: "2" });
+  assert.ok(transport.sent.some(([m]) => m === "Network.enable"), "the next call attaches and restores what is held");
+  transport.drop("target crashed");
+  await tick(30);
+  assert.equal(transport.attached, true, "other detaches still re-attach on their own");
+  session.dispose();
+
+  // Redirect hops share a request id; evicting the first hop keeps the last one indexed.
+  const netTransport = fakeTransport();
+  const net = new lib.CdpSession("tab-3", netTransport);
+  lib.startNetworkRecorder(net);
+  const request = (requestId, url) => netTransport.emit("Network.requestWillBeSent", { requestId, request: { url, method: "GET" } });
+  request("r", "http://x/old");
+  for (let i = 0; i < lib.NETWORK_RING_CAP - 2; i++) request(`f${i}`, `http://x/${i}`);
+  request("r", "http://x/new");
+  request("last", "http://x/last");
+  netTransport.emit("Network.responseReceived", { requestId: "r", response: { status: 200, mimeType: "text/html" } });
+  const hops = lib.networkRing(net).toArray().filter((entry) => entry.requestId === "r");
+  assert.deepEqual(hops.map((entry) => [entry.url, entry.status]), [["http://x/new", 200]], "the surviving hop still gets its response");
+  net.dispose();
 }
 
 async function recordersAgainstChromium(lib) {
@@ -192,6 +238,7 @@ async function recordersAgainstChromium(lib) {
 (async () => {
   const lib = await loadBrowserModules();
   await sessionLogic(lib);
+  await attachRecovery(lib);
   await recordersAgainstChromium(lib);
   console.log("browser cdp session: shared domains, re-attach, bounded buffers, console and network from the first request");
 })().catch((error) => {

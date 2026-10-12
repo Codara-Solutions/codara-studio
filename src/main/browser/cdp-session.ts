@@ -26,6 +26,13 @@ export interface CdpTransport {
   onEvent(listener: (method: string, params: Record<string, unknown>) => void): () => void;
   /** The transport lost its client (target closed, another client took over, crash). */
   onDetach(listener: (reason: string) => void): () => void;
+  /**
+   * Whether the session may attach again on its own after this detach. When
+   * the user dismissed the browser's debugging bar, attaching again would
+   * undo their choice, so a transport answers false and the next call that
+   * needs the protocol decides instead. Omitted means always.
+   */
+  reattachAfter?(reason: string): boolean;
 }
 
 /** A bounded, insertion-ordered buffer; the oldest entries fall off. */
@@ -60,9 +67,16 @@ export class RingBuffer<T> {
     this.droppedCount = 0;
   }
 
-  /** Carry another buffer's entries over (a tab whose page process was replaced). */
+  /**
+   * Carry another buffer's entries over (a tab whose page process was
+   * replaced). They are older than anything recorded here, so they go first
+   * and are the first to fall off.
+   */
   adopt(other: RingBuffer<T>): void {
-    for (const item of other.items) this.push(item);
+    const merged = [...other.items, ...this.items];
+    const excess = Math.max(0, merged.length - this.capacity);
+    this.items = merged.slice(excess);
+    this.droppedCount += other.droppedCount + excess;
   }
 }
 
@@ -226,11 +240,15 @@ export class CdpSession {
       try {
         await this.transport.attach();
         this.lastAttachError = null;
-        return true;
       } catch (error) {
         this.lastAttachError = error instanceof Error ? error.message : String(error);
         return false;
       }
+      // Whatever path attached (the re-attach timer or a call after a failed
+      // attempt), the held domains must be enabled again, or the recorders
+      // stay silent on a session that looks healthy.
+      this.restoreDomains();
+      return true;
     })();
     this.attaching = attempt;
     void attempt.finally(() => {
@@ -267,9 +285,11 @@ export class CdpSession {
     if (this.disposed) return;
     for (const listener of this.detachListeners) listener(reason);
     for (const state of this.domains.values()) state.enabled = null;
+    if (this.reattachTimer) clearTimeout(this.reattachTimer);
+    this.reattachTimer = null;
+    if (this.transport.reattachAfter?.(reason) === false) return;
     // A target that is still alive lost its client (a crash, another
     // debugger taking over): attach again and restore what consumers hold.
-    if (this.reattachTimer) clearTimeout(this.reattachTimer);
     this.reattachTimer = setTimeout(() => {
       this.reattachTimer = null;
       void this.restore();
@@ -280,7 +300,11 @@ export class CdpSession {
   }
 
   private async restore(): Promise<void> {
-    if (this.disposed || !(await this.tryAttach()) || this.disposed) return;
+    if (!this.disposed) await this.tryAttach();
+  }
+
+  private restoreDomains(): void {
+    if (this.disposed) return;
     for (const [domain, state] of this.domains) {
       if ((state.count > 0 || this.sticky.has(domain)) && !state.enabled) {
         state.enabled = this.sendEnable(domain, state).catch(() => {});
