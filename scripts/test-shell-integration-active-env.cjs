@@ -53,10 +53,21 @@ for (const dir of [HOME, path.dirname(POINTER), CLAUDE_A, CLAUDE_B, CLAUDE_C, GR
 }
 // A user's own DEBUG trap (bash-preexec, iTerm2, Starship all install one)
 // must keep firing after the follow trap is chained in front of it. The body
-// carries a single quote so the `trap -p` unquoting is exercised too.
+// carries a single quote so the `trap -p` unquoting is exercised too. Like
+// bash-preexec, the user's setup then replaces the DEBUG trap again from the
+// first prompt, after the rcfile ran, so the follow must win the trap back.
+const userTrap = (counter) => `trap '${counter}=$((${counter}+1)); __USER_DEBUG_QUOTE="it'"'"'s"' DEBUG`;
 fs.writeFileSync(
   path.join(HOME, ".bashrc"),
-  "trap '__USER_DEBUG_COUNT=$((__USER_DEBUG_COUNT+1)); __USER_DEBUG_QUOTE=\"it'\"'\"'s\"' DEBUG\n",
+  [
+    userTrap("__USER_DEBUG_COUNT"),
+    "__user_late_install() {",
+    `  ${userTrap("__USER_LATE_COUNT")}`,
+    '  PROMPT_COMMAND="${PROMPT_COMMAND//trap - DEBUG; __user_late_install/:}"',
+    "}",
+    'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }trap - DEBUG; __user_late_install"',
+    "",
+  ].join("\n"),
 );
 
 let passes = 0;
@@ -252,6 +263,11 @@ async function followScenario(shell) {
   };
   try {
     await expect(CLAUDE_A, "unset", "spawn-time selector survives the first prompt");
+    let lateAtStart = 0;
+    if (shell.exe.endsWith("bash")) {
+      driver.send("printf '@@late:%s@@\\n' \"${__USER_LATE_COUNT-0}\"");
+      lateAtStart = Number((await driver.waitFor(/@@late:(\d+)@@/))[1]);
+    }
 
     writePointer({});
     await expect("unset", "unset", "a personal default unsets the spawn-time selector");
@@ -293,11 +309,15 @@ async function followScenario(shell) {
 
     if (shell.exe.endsWith("bash")) {
       driver.send(
-        "printf '@@dbg:%s|%s@@\\n' \"${__USER_DEBUG_COUNT-unset}\" \"${__USER_DEBUG_QUOTE-unset}\"",
+        "printf '@@dbg:%s|%s|%s@@\\n' \"${__USER_DEBUG_COUNT-unset}\" \"${__USER_LATE_COUNT-unset}\" \"${__USER_DEBUG_QUOTE-unset}\"",
       );
-      const dbg = await driver.waitFor(/@@dbg:([^@%]*)\|([^@%]*)@@/);
+      const dbg = await driver.waitFor(/@@dbg:([^@%|]*)\|([^@%|]*)\|([^@%]*)@@/);
       assert.ok(Number(dbg[1]) > 5, `${shell.label}: the user's own DEBUG trap must keep firing (count ${dbg[1]})`);
-      assert.equal(dbg[2], "it's", `${shell.label}: the chained trap body keeps its quotes`);
+      assert.ok(
+        Number(dbg[2]) >= lateAtStart + 10,
+        `${shell.label}: the trap the user's setup installs later must keep firing (count ${lateAtStart} -> ${dbg[2]})`,
+      );
+      assert.equal(dbg[3], "it's", `${shell.label}: the chained trap body keeps its quotes`);
     }
   } finally {
     await driver.close();
@@ -561,8 +581,15 @@ function sourcePins() {
     "zshrc.zsh follows the pointer in preexec",
   );
   assert.ok(
-    /trap "_spark_follow_active_account\$\{__spark_trap_body:\+;\$__spark_trap_body\}" DEBUG/.test(scripts["bashrc.bash"]),
+    /_spark_follow_trap_hit\(\) \{\n\s*__SPARK_FOLLOW_TRAP_HIT=1\n\s*_spark_follow_active_account/.test(scripts["bashrc.bash"]) &&
+      scripts["bashrc.bash"].includes('__SPARK_FOLLOW_TRAP="_spark_follow_trap_hit \\"\\$_\\"${body:+;$body}"'),
     "bashrc.bash follows the pointer from a chained DEBUG trap",
+  );
+  assert.ok(
+    scripts["bashrc.bash"].includes(
+      '}__SPARK_FOLLOW_TRAP_HIT=; [ -n \\"\\$__SPARK_FOLLOW_TRAP_HIT\\" ] || { _spark_follow_trap_for \\"\\$(trap -p DEBUG)\\";',
+    ),
+    "bashrc.bash re-chains its DEBUG trap from the prompt when another hook replaced it",
   );
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(pty.includes('env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"'), "pty-manager exports the flag");

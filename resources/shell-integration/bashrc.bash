@@ -247,27 +247,50 @@ fi
 # hook that runs in the shell before the fork. An existing DEBUG trap (a
 # user's bash-preexec, iTerm2 or Starship integration) is chained after
 # ours, never replaced: `trap -p` prints it as a reusable trap command and
-# the body is unquoted with builtin expansions only. Without functrace the
-# trap never fires inside functions, so the hook itself stays cheap.
+# the body is unquoted with builtin expansions only. Ours passes "$_" as its
+# last argument, so the chained body still reads the user's $_ (bash-preexec
+# does), and the chained body runs last, so its status is the trap's.
+# Without functrace the trap never fires inside functions, so the hook
+# itself stays cheap.
 #
-# Installed at top level on purpose: when a DEBUG trap is already set, bash
-# saves it on function entry and restores it on return, so a `trap` issued
-# inside a function would be silently discarded.
-if [ "${SPARK_FOLLOW_ACTIVE_ACCOUNT-}" = "1" ]; then
-  __spark_prev_trap="$(trap -p DEBUG)"
-  __spark_trap_body=""
-  if [ -n "$__spark_prev_trap" ]; then
-    __spark_q="'"
-    __spark_esc="'\\''"
-    __spark_trap_body="${__spark_prev_trap#trap -- $__spark_q}"
-    __spark_trap_body="${__spark_trap_body%$__spark_q DEBUG}"
-    __spark_trap_body="${__spark_trap_body//"$__spark_esc"/$__spark_q}"
-    unset __spark_q __spark_esc
+# The trap is only ever set at top level, here and from PROMPT_COMMAND: when
+# a DEBUG trap is already set, bash saves it on function entry and restores
+# it on return, so a `trap` issued inside a function can be silently
+# discarded.
+_spark_follow_trap_hit() {
+  __SPARK_FOLLOW_TRAP_HIT=1
+  _spark_follow_active_account
+}
+
+# The trap command body that puts the hook in front of the trap `trap -p
+# DEBUG` printed ($1), in __SPARK_FOLLOW_TRAP; empty when it is there already.
+_spark_follow_trap_for() {
+  local body="" q="'" esc="'\\''"
+  if [ -n "${1-}" ]; then
+    body="${1#trap -- $q}"
+    body="${body%$q DEBUG}"
+    body="${body//"$esc"/$q}"
   fi
-  case "$__spark_trap_body" in
-    *_spark_follow_active_account*) ;;
-    *) trap "_spark_follow_active_account${__spark_trap_body:+;$__spark_trap_body}" DEBUG ;;
+  case "$body" in
+    *_spark_follow_trap_hit*) __SPARK_FOLLOW_TRAP="" ;;
+    *) __SPARK_FOLLOW_TRAP="_spark_follow_trap_hit \"\$_\"${body:+;$body}" ;;
   esac
-  unset __spark_prev_trap __spark_trap_body
+}
+
+# bash-preexec (loaded by WezTerm, iTerm2 and Atuin) installs at the first
+# prompt, after this file ran, and replaces the DEBUG trap with its own; the
+# switch would then reach a command only after its prompt, one command late.
+# The last PROMPT_COMMAND entry clears the hit mark and the DEBUG trap fires
+# before the test that follows, so a mark still clear means another hook
+# owns the trap. Only then does the entry pay a fork to read and re-chain it.
+# `trap -p` is read at top level because inside a function it prints nothing.
+if [ "${SPARK_FOLLOW_ACTIVE_ACCOUNT-}" = "1" ]; then
+  _spark_follow_trap_for "$(trap -p DEBUG)"
+  [ -n "$__SPARK_FOLLOW_TRAP" ] && trap -- "$__SPARK_FOLLOW_TRAP" DEBUG
+  case "${PROMPT_COMMAND:-}" in
+    *__SPARK_FOLLOW_TRAP_HIT=*) ;;
+    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND
+}__SPARK_FOLLOW_TRAP_HIT=; [ -n \"\$__SPARK_FOLLOW_TRAP_HIT\" ] || { _spark_follow_trap_for \"\$(trap -p DEBUG)\"; [ -n \"\$__SPARK_FOLLOW_TRAP\" ] && trap -- \"\$__SPARK_FOLLOW_TRAP\" DEBUG; }" ;;
+  esac
 fi
 :
