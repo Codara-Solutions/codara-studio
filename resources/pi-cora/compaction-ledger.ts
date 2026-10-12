@@ -24,6 +24,8 @@ export const DURABLE_STATE_MAX_CHARS = 20_000;
 
 const MAX_INSTRUCTIONS = 24;
 const MAX_INSTRUCTION_CHARS = 3_000;
+const MAX_CARRIED_CHARS = 8_000;
+const MIN_CARRIED_CHARS = 2_000;
 const MAX_FILES = 80;
 const MAX_ERRORS = 16;
 const MAX_ARTIFACTS = 12;
@@ -62,6 +64,10 @@ export interface DurableLedger {
   workers: { spawned: string | null; status: string | null };
   artifacts: string[];
   conclusions: string[];
+  /** The user's messages from before the newest conversation cutover, as
+   * that cutover's note recorded them (run-store rebuilds the list from the
+   * run record at every cutover, so the newest one is complete). */
+  carried?: string | null;
 }
 
 export function emptyLedger(): DurableLedger {
@@ -75,6 +81,7 @@ export function emptyLedger(): DurableLedger {
     workers: { spawned: null, status: null },
     artifacts: [],
     conclusions: [],
+    carried: null,
   };
 }
 
@@ -142,6 +149,20 @@ function clip(text: string, max: number): string {
   return `${trimmed.slice(0, max - 20).trimEnd()} [... ${trimmed.length - max + 20} chars trimmed]`;
 }
 
+/**
+ * Keeps the opening and the end of an over-long text. A long request usually
+ * states the task first and closes with its requirements and prohibitions, so
+ * clipping only the tail would drop exactly the part that must survive.
+ */
+export function clipMiddle(text: string, max: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  const marker = `\n[... ${trimmed.length - max} chars trimmed ...]\n`;
+  const keep = Math.max(0, max - marker.length);
+  const head = Math.ceil(keep / 2);
+  return `${trimmed.slice(0, head).trimEnd()}${marker}${trimmed.slice(trimmed.length - (keep - head)).trimStart()}`;
+}
+
 function firstLines(text: string, max: number): string {
   return clip(text.replace(/\s+\n/g, "\n").split("\n").filter((line) => line.trim()).slice(0, 4).join(" | "), max);
 }
@@ -180,6 +201,30 @@ export function stripCodaraSections(text: string): string {
 
 const CODARA_TAIL_RE = /^(?:CORA (?:MEMORY|PROFILE)\b|OUTCOME-CONDITIONED PRIOR RUNS|Subscription headroom:)/m;
 
+/** Same strings as src/main/orchestration/conversation-compaction.ts: the
+ *  cutover note's user-message list and the sections that may follow it. */
+export const CUTOVER_USER_MESSAGES_HEADER = "User messages, verbatim and in order";
+const CUTOVER_SECTION_END_RE = /\n\n(?:Workers(?::| \(newest)|Newest exchange, verbatim:|\[END CODARA DURABLE STATE\])/;
+
+/**
+ * The user's earlier messages from a conversation cutover replayed into this
+ * turn, or null. stripCodaraSections drops the replay as a whole, and after a
+ * cutover the replay is the only place the user's earlier requirements live,
+ * so they are lifted out before the replay is discarded.
+ */
+export function cutoverUserMessages(text: string): string | null {
+  const replay = text.search(/^\[CORA CONVERSATION REPLAY\b/m);
+  if (replay < 0) return null;
+  const rest = text.slice(replay);
+  const start = rest.indexOf(`\n${CUTOVER_USER_MESSAGES_HEADER}`);
+  const replayEnd = rest.search(/^\[END CORA CONVERSATION REPLAY\]/m);
+  if (start < 0 || (replayEnd >= 0 && start > replayEnd)) return null;
+  const section = rest.slice(start + 1, replayEnd >= 0 ? replayEnd : undefined);
+  const end = section.search(CUTOVER_SECTION_END_RE);
+  const body = (end < 0 ? section : section.slice(0, end)).trim();
+  return body.length > CUTOVER_USER_MESSAGES_HEADER.length ? body : null;
+}
+
 function isContinuation(text: string): boolean {
   return CONTINUATION_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
@@ -215,6 +260,7 @@ function cloneLedger(ledger: DurableLedger): DurableLedger {
     workers: { ...ledger.workers },
     artifacts: [...ledger.artifacts],
     conclusions: [...ledger.conclusions],
+    carried: ledger.carried ?? null,
   };
 }
 
@@ -262,6 +308,7 @@ export function ledgerFromDetails(details: unknown): DurableLedger | null {
     },
     artifacts: strings(ledger.artifacts),
     conclusions: strings(ledger.conclusions),
+    carried: typeof ledger.carried === "string" ? ledger.carried : null,
   };
 }
 
@@ -313,9 +360,12 @@ export function updateLedger(
 
   for (const message of messages) {
     if (message.role === "user" && includeInstructions) {
-      const text = stripCodaraSections(textOf(message.content));
+      const raw = textOf(message.content);
+      const carried = cutoverUserMessages(raw);
+      if (carried) ledger.carried = clipMiddle(carried, MAX_CARRIED_CHARS);
+      const text = stripCodaraSections(raw);
       if (!text || isContinuation(text)) continue;
-      const instruction = clip(text, MAX_INSTRUCTION_CHARS);
+      const instruction = clipMiddle(text, MAX_INSTRUCTION_CHARS);
       if (!ledger.instructions.includes(instruction)) ledger.instructions.push(instruction);
       continue;
     }
@@ -418,6 +468,7 @@ export function mergeLedgers(a: DurableLedger | null, b: DurableLedger | null): 
   };
   merged.artifacts = dedupeNewest([...merged.artifacts, ...b.artifacts], MAX_ARTIFACTS);
   merged.conclusions = dedupeNewest([...merged.conclusions, ...b.conclusions], MAX_CONCLUSIONS);
+  merged.carried = b.carried ?? merged.carried ?? null;
   return capLedger(merged);
 }
 
@@ -463,10 +514,16 @@ export function renderLedger(ledger: DurableLedger, maxChars: number = DURABLE_S
   let conclusionLimit = ledger.conclusions.length;
   let artifactLimit = ledger.artifacts.length;
   let workerChars = MAX_WORKER_CHARS;
+  let carriedChars = ledger.carried ? ledger.carried.length : 0;
 
   const build = () =>
     [
       header,
+      ledger.carried
+        ? section("Earlier user messages, carried from the last conversation cutover (verbatim)", [
+            clipMiddle(ledger.carried, carriedChars),
+          ])
+        : "",
       section("User instructions and constraints (verbatim, oldest first)", instructions),
       ledger.plan ? section("Plan (latest codara_plan_update)", [ledger.plan]) : "",
       section("Workers", [
@@ -491,6 +548,10 @@ export function renderLedger(ledger: DurableLedger, maxChars: number = DURABLE_S
     () => (artifactLimit > 3 ? (artifactLimit -= 3, true) : false),
     () => (fixedLimit > 0 ? (fixedLimit = Math.floor(fixedLimit / 2), true) : false),
     () => (workerChars > 600 ? (workerChars = Math.floor(workerChars / 2), true) : false),
+    () =>
+      carriedChars > MIN_CARRIED_CHARS
+        ? (carriedChars = Math.max(MIN_CARRIED_CHARS, Math.floor(carriedChars / 2)), true)
+        : false,
     () => {
       // Middle instructions go before the first (original request) and the newest.
       if (instructions.length <= 2) return false;
@@ -502,7 +563,7 @@ export function renderLedger(ledger: DurableLedger, maxChars: number = DURABLE_S
     while (text.length > maxChars && shrink()) text = build();
   }
   if (text.length > maxChars) {
-    instructions = instructions.map((line) => clip(line, Math.max(400, Math.floor(maxChars / 8))));
+    instructions = instructions.map((line) => clipMiddle(line, Math.max(400, Math.floor(maxChars / 8))));
     text = build();
   }
   return text;
@@ -540,7 +601,7 @@ export function deterministicCompactionSummary(input: {
   const previous = input.previousSummary?.trim();
   const parts = [
     "## Goal",
-    input.ledger.instructions[0] ? clip(input.ledger.instructions[0], 1_500) : "(see the durable state below)",
+    input.ledger.instructions[0] ? clipMiddle(input.ledger.instructions[0], 1_500) : "(see the durable state below)",
     "## Note",
     "Codara compacted this context without a model summary because the summarizer was unavailable. The previous summary is carried forward unchanged, followed by Codara's durable state and an outline of the work this compaction folded away.",
     ...(previous ? ["## Previous summary (carried forward verbatim)", clip(previous, Math.floor(maxChars / 2))] : []),

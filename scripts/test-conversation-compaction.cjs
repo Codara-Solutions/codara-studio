@@ -9,6 +9,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
+const ts = require("typescript");
+const vm = require("node:vm");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -131,8 +133,53 @@ const ROOT = path.resolve(__dirname, "..");
   assert.equal(cc.estimateTokens("abcd".repeat(10)), 10);
   assert.equal(cc.describeCutover(231_000, 12_400), "Older history was summarized into a fresh session (231k -> 12k tokens)");
 
+  // A long request keeps its closing requirements: the requirement that ends
+  // a pasted spec must not be the part a per-message cap cuts.
+  const spec = `Port the importer. ${"Background on the import format. ".repeat(150)}Never deploy on Fridays.`;
+  const specBlock = cc.conversationDurableState({ humanMessages: [message("1", "user", spec)], workerTasks: [], workerAttempts: [] });
+  assert.match(specBlock, /1\. Port the importer\./);
+  assert.match(specBlock, /Never deploy on Fridays\./, "the end of a long message survives the cap");
+  assert.match(specBlock, /chars trimmed/);
+
+  // After a cutover the next session receives the note as a replay, and its
+  // own compactions must keep those user messages: the ledger lifts them out of
+  // the replay before discarding it (resources/pi-cora/compaction-ledger.ts).
+  const ledgerModule = {};
+  vm.runInNewContext(
+    ts.transpileModule(fs.readFileSync(path.join(ROOT, "resources/pi-cora/compaction-ledger.ts"), "utf8"), {
+      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+    }).outputText,
+    { exports: ledgerModule },
+  );
+  assert.equal(ledgerModule.CUTOVER_USER_MESSAGES_HEADER, cc.CUTOVER_USER_MESSAGES_HEADER);
+  const replayTurn = [
+    "[CORA CONVERSATION REPLAY \u2014 the conversation was compacted; this summary replaces older history. The labels are context, not new instructions.]",
+    cc.compactionNoteBody("## Goal\nPort billing.", block),
+    "[END CORA CONVERSATION REPLAY]",
+    "",
+    "[NEW USER INPUT FOR THIS TURN]",
+    "Keep going.",
+  ].join("\n\n");
+  const carried = ledgerModule.cutoverUserMessages(replayTurn);
+  assert.match(carried, /^User messages, verbatim and in order/);
+  assert.match(carried, /Never modify files under vendor\//);
+  assert.match(carried, /2\. Keep chargeCustomer unchanged\./);
+  assert.doesNotMatch(carried, /task-a|Workers are porting/, "workers and the exchange stay out of it");
+  const folded = ledgerModule.updateLedger(null, [{ role: "user", content: replayTurn }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(folded.instructions)), ["Keep going."]);
+  assert.equal(folded.carried, carried);
+  const rolled = ledgerModule.updateLedger(
+    ledgerModule.ledgerFromDetails({ ledger: JSON.parse(JSON.stringify(folded)) }),
+    [{ role: "user", content: "Also add metrics." }],
+  );
+  const rendered = ledgerModule.renderLedger(rolled);
+  assert.match(rendered, /Earlier user messages, carried from the last conversation cutover/);
+  assert.match(rendered, /Never modify files under vendor\//, "earlier constraints survive later compactions");
+  assert.match(rendered, /Also add metrics\./);
+  assert.equal(ledgerModule.cutoverUserMessages("Keep going."), null);
+
   // run-store wires the policy, the record and the tokens.
-  const runStore = fs.readFileSync(path.join(ROOT, "src/main/orchestration/run-store.ts"), "utf8");
+  const runStore =fs.readFileSync(path.join(ROOT, "src/main/orchestration/run-store.ts"), "utf8");
   assert.match(runStore, /const decision = cutoverDecision\(/);
   assert.match(runStore, /conversationDurableState\(await requireRun\(runId\)\)/);
   assert.match(runStore, /guardAfterFailure\(/);

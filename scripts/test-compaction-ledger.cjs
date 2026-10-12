@@ -128,4 +128,19 @@ assert.match(summary, /FAILED bash pnpm test/);
 assert.match(summary, /without a model summary/);
 assert.ok(summary.length <= 24_000);
 
+// A long request keeps its end: the requirements that close a pasted spec
+// are what the ledger exists to carry.
+const spec = `Migrate the importer. ${"Context about the old format. ".repeat(200)}Never modify files under vendor/.`;
+const specLedger = L.updateLedger(null, [user(spec)]);
+assert.match(specLedger.instructions[0], /^Migrate the importer\./);
+assert.match(specLedger.instructions[0], /Never modify files under vendor\/\.$/);
+assert.ok(specLedger.instructions[0].length <= 3_000, `clipped to ${specLedger.instructions[0].length}`);
+assert.match(L.renderLedger(specLedger), /Never modify files under vendor\//);
+assert.equal(L.clipMiddle("short", 100), "short");
+const clipped = L.clipMiddle(`head ${"m".repeat(500)} tail`, 120);
+assert.ok(clipped.length <= 120, `clipMiddle stays within its budget (${clipped.length})`);
+assert.match(clipped, /^head m/);
+assert.match(clipped, /m tail$/);
+assert.match(clipped, /chars trimmed/);
+
 console.log("Compaction ledger checks passed.");

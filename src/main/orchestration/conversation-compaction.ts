@@ -42,7 +42,12 @@ export const CONVERSATION_COMPACTION_PROMPT = [
   "Reply only with the handoff; call no tools.",
 ].join(" ");
 
-const DURABLE_HEADER = "[CODARA DURABLE STATE: built from the run record at this compaction; authoritative where the summary above disagrees.]";
+/** resources/pi-cora/compaction-ledger.ts finds the user's earlier messages in
+ *  a replayed note by this exact text, so a session compacted after a cutover
+ *  keeps them word for word. */
+export const CUTOVER_USER_MESSAGES_HEADER = "User messages, verbatim and in order";
+
+const DURABLE_HEADER ="[CODARA DURABLE STATE: built from the run record at this compaction; authoritative where the summary above disagrees.]";
 const DURABLE_FOOTER = "[END CODARA DURABLE STATE]";
 
 export const DURABLE_STATE_MAX_CHARS = 24_000;
@@ -63,6 +68,17 @@ export function estimateTokens(text: string): number {
 function clip(text: string, max: number): string {
   const trimmed = text.trim();
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 20).trimEnd()} [...truncated]`;
+}
+
+/** A long request usually closes with its requirements and prohibitions, so
+ *  an over-long user message keeps its opening and its end. */
+function clipMiddle(text: string, max: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  const marker = `\n[... ${trimmed.length - max} chars trimmed ...]\n`;
+  const keep = Math.max(0, max - marker.length);
+  const head = Math.ceil(keep / 2);
+  return `${trimmed.slice(0, head).trimEnd()}${marker}${trimmed.slice(trimmed.length - (keep - head)).trimStart()}`;
 }
 
 function oneLine(text: string | undefined, max: number): string {
@@ -89,7 +105,7 @@ function userMessagesSection(messages: HumanRunMessage[]): string[] {
   const users = messages.filter((message) => message.author === "user" && isDialogue(message));
   if (users.length === 0) return [];
   const render = (message: HumanRunMessage, index: number) =>
-    `${index + 1}. ${clip(message.message, USER_MESSAGE_MAX_CHARS)}`;
+    `${index + 1}. ${clipMiddle(message.message, USER_MESSAGE_MAX_CHARS)}`;
   const first = render(users[0], 0);
   const kept: string[] = [];
   let used = first.length;
@@ -102,7 +118,7 @@ function userMessagesSection(messages: HumanRunMessage[]): string[] {
   }
   const elided = index;
   return [
-    "User messages, verbatim and in order (later messages supersede earlier ones where they conflict):",
+    `${CUTOVER_USER_MESSAGES_HEADER} (later messages supersede earlier ones where they conflict):`,
     first,
     ...(elided > 0 ? [`[${elided} earlier message${elided === 1 ? "" : "s"} omitted for length]`] : []),
     ...kept,

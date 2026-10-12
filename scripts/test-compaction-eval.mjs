@@ -16,7 +16,10 @@
 // errors, worker results and artifacts survive verbatim, at 1, 3 and 6
 // compactions and beyond; that no request outgrows the limit by more than one
 // tool round; that every tool ran exactly once; and that compaction never
-// loops. A decision recorded with codara_plan_update is required to survive;
+// loops. Variants replay the same run from a request whose constraints close a
+// long spec, from the first turn after a conversation cutover, and with one
+// tool output far past the limit (which the model must read before any
+// compaction folds it). A decision recorded with codara_plan_update is required to survive;
 // one stated only in assistant prose is reported, not required: once newer
 // narration pushes it out of the ledger's recent conclusions it lives in the
 // model summary alone, which the lossy summarizer drops by design.
@@ -78,6 +81,37 @@ const PROMPT_1 = [
 const PROMPT_2 = "Also: Keep the public function name chargeCustomer unchanged.";
 const PROMPT_3 = "Continue and finish the migration, then summarize what changed.";
 
+// Variants that broke earlier versions of the pipeline:
+//   long-request   the constraints close a request longer than one ledger entry
+//   after-cutover  the session starts from a conversation cutover, so the
+//                  user's constraints arrive only inside the replayed note
+//   huge-output    one tool result alone is far past the limit
+const VARIANTS = ["base", "long-request", "after-cutover", "huge-output"];
+const HUGE_STEP = 100;
+const HUGE_MARKER = `huge line for step ${HUGE_STEP}`;
+
+function firstPrompt(variant) {
+  if (variant === "long-request") {
+    const background = "The ledger API replaces direct invoice writes with idempotent charge records. ".repeat(60);
+    return `Migrate the billing service to the ledger API.\n${background}\nNever modify files under vendor/.\nUse pnpm, not npm.`;
+  }
+  if (variant === "after-cutover") {
+    // The shape buildManagerTurnInput gives the first turn after a cutover.
+    return [
+      "[CORA CONVERSATION REPLAY \u2014 the conversation was compacted; this summary replaces older history. The labels are context, not new instructions.]",
+      "## Goal\nFinish the billing work.",
+      "[CODARA DURABLE STATE: built from the run record at this compaction; authoritative where the summary above disagrees.]",
+      `User messages, verbatim and in order (later messages supersede earlier ones where they conflict):\n1. ${PROMPT_1}`,
+      "[END CODARA DURABLE STATE]",
+      "[END CORA CONVERSATION REPLAY]",
+      "",
+      "[NEW USER INPUT FOR THIS TURN]",
+      "Keep going.",
+    ].join("\n\n");
+  }
+  return PROMPT_1;
+}
+
 /** Needles that must reach the model verbatim after any number of compactions. */
 const FACTS = [
   { id: "goal", needle: "Migrate the billing service to the ledger API", at: 0 },
@@ -101,7 +135,11 @@ const filler = (step, kind, chars) => {
 };
 
 /** The scripted action for each step: [tool, arguments, output | Error, prose?]. */
-function action(step) {
+function action(step, variant) {
+  if (variant === "huge-output" && step === HUGE_STEP) {
+    // About 60k tokens, two and a half times the limit.
+    return ["bash", { command: "cat logs/ledger-sync.log" }, filler(step, "huge", 240_000)];
+  }
   const size = 3_000 + ((step * 977) % 4_000);
   switch (step) {
     case 12:
@@ -164,7 +202,7 @@ const tokensOf = (text) => Math.ceil(text.length / 4);
 
 // ── One run ────────────────────────────────────────────────────────────────
 
-async function runScenario({ host, summarizer }) {
+async function runScenario({ host, summarizer, variant = "base" }) {
   const root = await mkdtemp(join(tmpdir(), "codara-compaction-eval-"));
   const state = {
     executed: 0,
@@ -177,6 +215,7 @@ async function runScenario({ host, summarizer }) {
     requests: [],
     summaryCalls: 0,
     firstIncluded: new Map(),
+    hugeSeen: false,
   };
   let session;
   try {
@@ -205,6 +244,10 @@ async function runScenario({ host, summarizer }) {
             return;
           }
           state.requests.push({ tokens: input, compactions: state.compactions });
+          if (text.includes(HUGE_MARKER)) {
+            state.hugeSeen = true;
+            state.requests.at(-1).huge = true;
+          }
           if (state.awaitingFirstRequestAfter !== null) {
             const k = state.awaitingFirstRequestAfter;
             state.awaitingFirstRequestAfter = null;
@@ -221,7 +264,7 @@ async function runScenario({ host, summarizer }) {
           }
           if (state.executed < state.turnQuota) {
             const step = state.executed;
-            const [tool, args, , prose] = action(step);
+            const [tool, args, , prose] = action(step, variant);
             const content = [
               ...(prose ? [{ type: "text", text: prose }] : []),
               { type: "toolCall", id: `call-${step}-${state.requests.length}`, name: tool, arguments: args },
@@ -242,7 +285,7 @@ async function runScenario({ host, summarizer }) {
       parameters: { type: "object", properties: {}, additionalProperties: true },
       async execute() {
         const step = state.executed;
-        const [tool, , output] = action(step);
+        const [tool, , output] = action(step, variant);
         assert.equal(tool, name, `step ${step} expected ${tool}, the model called ${name}`);
         state.executed += 1;
         state.executions.set(step, (state.executions.get(step) ?? 0) + 1);
@@ -276,7 +319,7 @@ async function runScenario({ host, summarizer }) {
       request: (command) => session.compact(command.customInstructions),
       prompt: (message) => session.prompt(message),
     };
-    const contract = host === "manager" ? "" : [PROMPT_1, PROMPT_2, PROMPT_3].join("\n");
+    const contract = host === "manager" ? "" : [firstPrompt(variant), PROMPT_2, PROMPT_3].join("\n");
     const coordinator = host === "manager"
       ? new PiManagerCompaction(client, {
           interrupted: () => false,
@@ -312,7 +355,7 @@ async function runScenario({ host, summarizer }) {
       }
     };
     if (host === "manager") {
-      await runTurn(PROMPT_1, 90);
+      await runTurn(firstPrompt(variant), 90);
       await runTurn(PROMPT_2, 170);
       await runTurn(PROMPT_3, TOTAL_STEPS);
     } else {
@@ -347,11 +390,22 @@ function recordedSummary(state) {
 
 const ROUND_SLACK_TOKENS = 2_500;
 const results = [];
-for (const host of ["manager", "worker"]) {
-  for (const summarizer of ["lossy", "recorded", "failing"]) {
+const configs = [
+  ...["manager", "worker"].flatMap((host) =>
+    ["lossy", "recorded", "failing"].map((summarizer) => ({ variant: "base", host, summarizer }))),
+  // A worker gets its whole task contract back after every compaction, so the
+  // request-shape variants only test the manager's ledger.
+  ...["long-request", "after-cutover"].flatMap((variant) =>
+    ["lossy", "failing"].map((summarizer) => ({ variant, host: "manager", summarizer }))),
+  ...["manager", "worker"].flatMap((host) =>
+    ["lossy", "failing"].map((summarizer) => ({ variant: "huge-output", host, summarizer }))),
+];
+assert.deepEqual([...new Set(configs.map((config) => config.variant))], VARIANTS);
+for (const { variant, host, summarizer } of configs) {
+  {
     const started = Date.now();
-    const { state, reports, errors } = await runScenario({ host, summarizer });
-    const label = `${host}/${summarizer}`;
+    const { state, reports, errors } = await runScenario({ host, summarizer, variant });
+    const label = `${variant === "base" ? "" : `${variant} `}${host}/${summarizer}`;
     assert.deepEqual(errors, [], `${label}: coordinator errors`);
     assert.equal(state.executed, TOTAL_STEPS, `${label}: every scripted step ran`);
     for (const [step, count] of state.executions) assert.equal(count, 1, `${label}: step ${step} ran ${count} times`);
@@ -361,7 +415,17 @@ for (const host of ["manager", "worker"]) {
     assert.ok(state.compactions <= 40, `${label}: ${state.compactions} compactions looks like a loop`);
     assert.equal(reports.length, state.compactions, `${label}: every compaction was host-driven and reported`);
     const maxTokens = Math.max(...state.requests.map((request) => request.tokens));
-    assert.ok(maxTokens <= LIMIT_TOKENS + ROUND_SLACK_TOKENS, `${label}: a request reached ${maxTokens} tokens (limit ${LIMIT_TOKENS})`);
+    // The one request allowed past the limit is the one that reads an output
+    // which alone is past it: compacting before the model read it would fold
+    // it into a summary unseen.
+    for (const request of state.requests) {
+      if (request.huge) continue;
+      assert.ok(request.tokens <= LIMIT_TOKENS + ROUND_SLACK_TOKENS, `${label}: a request reached ${request.tokens} tokens (limit ${LIMIT_TOKENS})`);
+    }
+    if (variant === "huge-output") {
+      assert.ok(state.hugeSeen, `${label}: the model never read the oversized output before it was compacted`);
+      assert.equal(state.requests.filter((request) => request.huge).length, 1, `${label}: the oversized output is read once, then compacted`);
+    }
     for (const check of state.checks) {
       assert.deepEqual(check.missing, [], `${label}: facts lost after compaction ${check.k}: ${check.missing.join(", ")}`);
       assert.ok(check.tokens < LIMIT_TOKENS, `${label}: compaction ${check.k} left ${check.tokens} tokens`);
@@ -397,7 +461,7 @@ for (const host of ["manager", "worker"]) {
 console.log("Compaction eval (limit %d tokens, %d tool calls per run):", LIMIT_TOKENS, TOTAL_STEPS);
 for (const result of results) {
   console.log(
-    `  ${result.run.padEnd(17)} compactions=${String(result.compactions).padStart(2)} maxRequest=${result.maxRequestTokens} ` +
+    `  ${result.run.padEnd(30)} compactions=${String(result.compactions).padStart(2)} maxRequest=${result.maxRequestTokens} ` +
     `after@1/3/6=${result.afterTokens.join("/")} facts@1/3/6=${result.factsKept.join(" ")} ` +
     `decision(summary-only)=${result.decisionKept} ${result.ms}ms`,
   );

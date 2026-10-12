@@ -14,7 +14,8 @@
 //
 // Hosted sessions pause at a tool-round boundary (turn_end, after every tool
 // result of the round is in the transcript), so a compaction never lands in
-// the middle of a tool call or a worker handoff. The host then compacts and
+// the middle of a tool call or a worker handoff, and never before the model
+// has read the round that crossed the limit. The host then compacts and
 // resumes the same task. Managers pause mid-turn the same way, so a long tool
 // loop cannot outgrow the limit before its answer.
 //
@@ -66,9 +67,16 @@ export const REARM_GROWTH_FRACTION = 0.1;
  *  twice; pi-compaction-pipeline.ts holds the same string. */
 export const DETERMINISTIC_COMPACTION_MARKER = "[codara:deterministic-compaction]";
 
-/** Tools whose round ends the manager's task: pausing after them would only
- *  delay the closing message. */
-const MANAGER_TURN_ENDING_TOOLS = new Set(["codara_complete"]);
+/** Tools whose round ends the manager's turn. Pausing after one would hand
+ *  the turn a "continue the work" prompt: after a question to the user, a
+ *  handed-off iteration or opened terminals, that invites work the user has
+ *  not approved yet. agent_end compacts these turns once they settle. */
+export const MANAGER_TURN_ENDING_TOOLS = new Set([
+  "codara_complete",
+  "codara_ask_user",
+  "codara_request_next_iteration",
+  "codara_spawn_terminals",
+]);
 
 /** Guidance appended to Pi's summary prompt (after Pi's own structured
  * format). The host sends the same text for the compactions it drives
@@ -149,6 +157,9 @@ export function shouldCompactNow(input: {
   percent?: number | null;
   /** Set after a compaction or a failed attempt: wait for growth past it. */
   rearmAt?: number | null;
+  /** Tokens of the tool results the model has not read yet (the round that
+   *  just finished). */
+  unreadTokens?: number;
 }): boolean {
   if (input.compactionInFlight) return false;
   const usage = input.usage;
@@ -156,7 +167,32 @@ export function shouldCompactNow(input: {
   const { tokens } = usage;
   if (typeof tokens !== "number" || !Number.isFinite(tokens)) return false;
   if (typeof input.rearmAt === "number" && tokens < input.rearmAt) return false;
-  return tokens > effectiveCompactAtTokens(usage.contextWindow, input.thresholdTokens, input.percent ?? null);
+  const limit = effectiveCompactAtTokens(usage.contextWindow, input.thresholdTokens, input.percent ?? null);
+  if (tokens <= limit) return false;
+  // Pi keeps only a recent tail verbatim. When the limit was crossed by
+  // results the model has not read, compacting now would fold output it never
+  // saw into the summary, and a model that still needs it reruns the tool
+  // straight into the same compaction. It reads them first; that request runs
+  // one round past the limit.
+  const unread = input.unreadTokens ?? 0;
+  return !(unread > 0 && tokens - unread <= limit);
+}
+
+/** Pi's own estimate (characters / 4) of the tool results a round produced. */
+export function unreadToolResultTokens(results: ReadonlyArray<{ content?: unknown }>): number {
+  let chars = 0;
+  for (const result of results) {
+    if (typeof result.content === "string") {
+      chars += result.content.length;
+      continue;
+    }
+    if (!Array.isArray(result.content)) continue;
+    for (const block of result.content) {
+      const record = block as { type?: unknown; text?: unknown };
+      if (record?.type === "text" && typeof record.text === "string") chars += record.text.length;
+    }
+  }
+  return Math.ceil(chars / 4);
 }
 
 interface PreparationLike {
@@ -218,9 +254,9 @@ export function registerContextCompaction(
     rearmAt = usage.tokens > lastLimit ? rearmAtTokens(usage.tokens, lastLimit) : null;
   };
 
-  const decide = (usage: CompactionUsage | undefined): boolean => {
+  const decide = (usage: CompactionUsage | undefined, unreadTokens = 0): boolean => {
     observe(usage);
-    return shouldCompactNow({ usage, thresholdTokens, compactionInFlight, percent, rearmAt });
+    return shouldCompactNow({ usage, thresholdTokens, compactionInFlight, percent, rearmAt, unreadTokens });
   };
 
   const requestPause = (usage: CompactionUsage | undefined, phase: "mid-turn" | "settled"): void => {
@@ -312,7 +348,7 @@ export function registerContextCompaction(
     pi.on("turn_end", (event, ctx) => {
       if (!event.toolResults.length || event.toolResults.some((result) => result.toolName === "submit_result")) return;
       const usage = ctx.getContextUsage();
-      if (!decide(usage)) return;
+      if (!decide(usage, unreadToolResultTokens(event.toolResults))) return;
       // Every tool result is durable at turn_end. The host waits for the
       // resulting agent_settled before compacting and resuming this session.
       requestPause(usage, "mid-turn");
@@ -327,7 +363,7 @@ export function registerContextCompaction(
       if (!event.toolResults.length) return;
       if (event.toolResults.some((result) => MANAGER_TURN_ENDING_TOOLS.has(result.toolName))) return;
       const usage = ctx.getContextUsage();
-      if (!decide(usage)) return;
+      if (!decide(usage, unreadToolResultTokens(event.toolResults))) return;
       requestPause(usage, "mid-turn");
       ctx.abort();
     });
