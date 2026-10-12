@@ -156,7 +156,13 @@ async function startCdpChromium() {
       }
       child.kill("SIGKILL");
       await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
-      fs.rmSync(profile, { recursive: true, force: true });
+      // Chromium's helper processes outlive the browser by a moment and can
+      // still be writing the profile; a busy machine made rmSync race them.
+      try {
+        fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      } catch {
+        /* a leftover temp profile must not fail the suite */
+      }
     },
   };
 }
