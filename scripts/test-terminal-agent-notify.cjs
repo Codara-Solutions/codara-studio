@@ -1056,6 +1056,24 @@ async function main() {
   check("codex: the held screen finish still arrives", finished("g-bash"));
   mod.noteCodexNotifyInstalled(false);
 
+  // Claude clears its progress bar between two tool calls of one turn and
+  // sets it again moments later; only a clear that holds ends the turn.
+  mod.syncTerminalNotifyPanes({ workspaceId: "ws-progress", panes: [
+    { paneId: "progress", tabId: "tp", tabTitle: "claude", excluded: false, runtimeHint: "claude" },
+  ] });
+  const beforeProgress = alertCount();
+  mod.noteTerminalUserInput("progress", "read the parser\r");
+  feed("progress", "\x1b]9;4;1;50\x07");
+  feed("progress", "\x1b]9;4;0\x07");
+  await sleep(200);
+  check("claude: a progress clear between tools is not a finish", alertCount() === beforeProgress);
+  feed("progress", "\x1b]9;4;1;60\x07");
+  await sleep(1100);
+  check("claude: progress set again cancels the pending finish", alertCount() === beforeProgress);
+  feed("progress", "\x1b]9;4;0\x07");
+  await sleep(1200);
+  check("claude: a progress clear that holds announces the finish once", alertCount() === beforeProgress + 1);
+
   mod.disposeAllTerminalAgentWatchers();
   check("explicit watcher disposal detaches every tap", T.taps.size === 0);
   console.log(`\nAll ${pass} terminal-agent-notify checks passed.`);

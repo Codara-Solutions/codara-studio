@@ -88,6 +88,10 @@ const TURN_QUIET_STALL_MS = 15_000;
 // (audit 2026-10-11: 51 of 68 false "finished" alerts came from that frame,
 // each followed by a working frame 1 to 3 ms later).
 const HEURISTIC_IDLE_CONFIRM_MS = 1_500;
+// Claude's structured busy signals (the ConEmu progress bar, the tab status)
+// also drop to idle between two tool calls of one turn and come back within
+// moments; an idle report is announced only once it has held this long.
+const STRUCTURED_IDLE_SETTLE_MS = 1_000;
 // A Stop hook is followed by nothing when the turn is really over. A Stop
 // hook that blocks makes Claude continue, which shows up as a new tool call
 // or prompt within this window and cancels the pending announcement.
@@ -1572,7 +1576,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       for (const m of newMatches(OSC9_PROGRESS_G, text, carryLen)) {
         const state = m[1] ?? "";
         if (state === "" || state === "0") {
-          heuristicIdle(w, now, "progress cleared", 0);
+          heuristicIdle(w, now, "progress cleared", 0, STRUCTURED_IDLE_SETTLE_MS);
         } else {
           w.codexAwaitingIdle = false;
           enterWorking(w, now);
@@ -1588,7 +1592,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         } else if (/waiting/i.test(status) && w.runtime === "claude") {
           if (!hookOwned || w.pendingToolCalls > 0) needsYou(w, now, w.lastToolDetail ? `Permission for ${w.lastToolDetail}` : null, "tab status waiting");
         } else if (/idle/i.test(status)) {
-          heuristicIdle(w, now, "tab status idle", 0);
+          heuristicIdle(w, now, "tab status idle", 0, STRUCTURED_IDLE_SETTLE_MS);
         }
       }
     }
@@ -1705,7 +1709,9 @@ function hookScreenIdle(w: PaneWatcher, now: number): void {
 
 // A screen or stream signal that the turn is over, in a pane with no trusted
 // source. The idle state must hold for `confirmMs` without a working frame.
-function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: number): void {
+// `confirmMs` both delays the announcement and requires a real working phase
+// first; `settleMs` only delays it, and resumed work cancels it meanwhile.
+function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: number, settleMs = 0): void {
   if (w.teammatesActive > 0) {
     tanLog(`pane=${w.paneId} ${why} held: ${w.teammatesActive} teammate(s) running`);
     // A blocked chip stays blocked; a pending prompt is the actionable cue.
@@ -1726,7 +1732,7 @@ function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: numb
     closeTurnSilently(w, now, "interrupted by the user");
     return;
   }
-  requestDone(w, { origin: "heuristic", delayMs: confirmMs });
+  requestDone(w, { origin: "heuristic", delayMs: Math.max(confirmMs, settleMs) });
 }
 
 // The foreground agent handed control back to the shell, seen either in the
