@@ -146,7 +146,7 @@ export interface SettingsSearchEntry {
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "general", title: "Setup and guided tour", desc: "Set up local tools, connect an account and take the tour.", section: "Getting started", keywords: "onboarding tour welcome install guide help" },
   { tab: "general", title: "Theme", desc: "The colors of the whole app, dark or light.", section: "Appearance", keywords: "dark light mode colors palette appearance dracula catppuccin github rose pine one dark daylight" },
-  { tab: "general", title: "Liquid glass", desc: "Translucent glass for the frame, tabs, buttons, composer, menus, dialogs and toasts.", section: "Appearance", keywords: "transparency translucent frosted blur opaque glass solid", toggle: "glassEffects" },
+  { tab: "general", title: "Liquid glass", desc: "Translucent glass for menus, popovers, toasts and dialogs.", section: "Appearance", keywords: "transparency translucent frosted blur opaque glass solid", toggle: "glassEffects" },
   { tab: "general", title: "Fine-tune glass", desc: "Tint, blur, refraction and fringe of the glass material.", section: "Appearance", keywords: "tint blur refraction chromatic fringe tuning strength sliders adjust" },
   { tab: "general", title: "Tint", label: "Glass tint", desc: "How tinted the glass is. Lower is clearer.", section: "Appearance", keywords: "glass veil clear opacity slider", reveal: "Fine-tune glass" },
   { tab: "general", title: "Blur", label: "Glass blur", desc: "Frost behind floating surfaces.", section: "Appearance", keywords: "glass frost blurry slider", reveal: "Fine-tune glass" },

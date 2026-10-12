@@ -606,7 +606,8 @@ function ZoomControl({
 }) {
   return (
     <div
-      className="spark-glass"
+      // Solid: the zoom control is part of the Runs canvas, and glass
+      // belongs only to the layers that open above the window.
       style={{
         position: "absolute",
         left: 14,
@@ -617,6 +618,9 @@ function ZoomControl({
         gap: 2,
         padding: 3,
         borderRadius: 9,
+        background: "var(--panel-2)",
+        border: "1px solid var(--rule)",
+        boxShadow: "var(--shadow-2)",
       }}
     >
       <ZoomButton title="Zoom out" onClick={onOut}>

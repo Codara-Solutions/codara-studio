@@ -92,6 +92,74 @@ async function main() {
   const styles = source("styles.css");
   assert.match(styles, /html:not\(\[data-glass="off"\]\) \.spark-toast[\s\S]*?backdrop-filter:/);
 
+  // Glass is only for the layers that open above the window. A rule that
+  // frosts must name one of them, and no glass rule may restyle the window
+  // itself, which looks the same with glass on or off.
+  const overlayClasses = [
+    "spark-glass",
+    "spark-glass--strong",
+    "spark-glass--faint",
+    "spark-menu",
+    "spark-toast",
+    "spark-backdrop-glass",
+    "spark-overlay-surface",
+    "worker-session-surface",
+    "spark-tabbar-picker",
+    "settings-dialog-surface",
+    "agent-capabilities-surface",
+    "nc-panel",
+    "spark-board-lightbox",
+  ];
+  const baseClasses = [
+    "spark-shell",
+    "spark-titlebar",
+    "spark-statusbar",
+    "spark-rail",
+    "spark-rail-float",
+    "spark-tabbar",
+    "spark-tab",
+    "spark-tab--active",
+    "spark-inner-strip",
+    "spark-section-header",
+    "spark-scroll-under",
+    "spark-resize-gutter",
+    "spark-btn",
+    "spark-segmented-item",
+    "system-meters-pill",
+    "spark-pane-toolbar",
+    "runs-header",
+    "automations-list-head",
+    "spark-board__toolbar",
+    "spark-board-lane__head",
+    "cora-jump-latest",
+    "cora-chat-panel",
+    "cora-composer-dock",
+    "cora-board-inspector",
+    "cora-board-editor",
+    "loom-flow",
+  ];
+  const rules = styles.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g);
+  for (const [, selectorText, body] of rules) {
+    const selectors = selectorText.trim().split(/\s*,\s*/);
+    const classesOf = (selector) => [...selector.matchAll(/\.([\w-]+)/g)].map((m) => m[1]);
+    if (/(?:^|[;\s])backdrop-filter:\s*(?!none\b)\S/.test(body)) {
+      for (const selector of selectors) {
+        assert.ok(
+          classesOf(selector).some((name) => overlayClasses.includes(name)),
+          `${selector} frosts something that is not an overlay`,
+        );
+      }
+    }
+    for (const selector of selectors) {
+      if (!/:not\(\[data-glass="off"\]\)/.test(selector)) continue;
+      const base = classesOf(selector).filter((name) => baseClasses.includes(name));
+      assert.deepEqual(base, [], `${selector} restyles the window under glass`);
+    }
+  }
+  assert.doesNotMatch(styles, /--glass-ambient|--glass-band|--capsule-|--scroll-edge-inset|--cora-composer-overlap/);
+  assert.equal(fs.existsSync(renderer("lib", "scroll-edge.ts")), false);
+  assert.doesNotMatch(source("tabs", "TerminalStack.tsx"), /spark-glass[\w-]* spark-pane-toolbar/);
+
   const selectRows = await loadRunSelector();
   const workspaces = [
     { id: "ws-a", name: "Alpha" },

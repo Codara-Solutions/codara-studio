@@ -84,10 +84,12 @@ function StatusBar({ workspace, gitStatus, defaultShell, platform, workerCount }
   ];
   return (
     <div
-      className="spark-statusbar"
       style={{
         flex: "0 0 auto",
         height: 24,
+        background: "var(--bg)",
+        borderTop: "1px solid var(--rule)",
+        boxShadow: "var(--lift-hi)",
         display: "flex",
         alignItems: "stretch",
         color: "var(--ink-dim)",

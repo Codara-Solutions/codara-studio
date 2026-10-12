@@ -148,6 +148,18 @@ check("with glass on, only the frame frosts and the reading pane stays opaque", 
   assert.ok(gate > 0, "the glass face must sit behind the reduced-transparency gate");
 });
 
+check("account cards are solid inside the glass face, never glass on glass", () => {
+  for (const selector of ["\\.st-acct", "\\.st-acct\\.is-active"]) {
+    const rule = new RegExp(`\\n${selector} \\{([^}]*)\\}`).exec(styles);
+    assert.ok(rule, `${selector} must have a rule`);
+    const background = /background:([^;]*);/.exec(rule[1]);
+    assert.ok(background, `${selector} must set its fill`);
+    assert.doesNotMatch(background[1], /transparent\)+\s*$/, `${selector} must not mix into transparency`);
+    assert.match(background[1], /var\(--st-surface/);
+    assert.doesNotMatch(rule[1], /backdrop-filter/);
+  }
+});
+
 check("no em or en dashes in the new Settings files", () => {
   for (const { name, source } of settingsParts) {
     assert.doesNotMatch(source, /[\u2013\u2014]/, `${name} contains a dash`);

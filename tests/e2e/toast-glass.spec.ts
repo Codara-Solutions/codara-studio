@@ -106,6 +106,16 @@ test("a run toast is the app's glass material, and falls back cleanly with glass
     expect(glass.shadow).toContain("inset");
     // edge-hi + edge-lo + bloom + drop, on top of the stripe.
     expect(glass.shadow.split(", ").length).toBeGreaterThanOrEqual(5);
+    // The toast is the only glass on screen: the window behind it is solid.
+    const frostedElsewhere = await page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLElement>("*"))
+        .filter((el) => {
+          const filter = getComputedStyle(el).backdropFilter || "none";
+          return filter !== "none" && !el.closest(".spark-toast") && !el.querySelector(".spark-toast");
+        })
+        .map((el) => `${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 2).join(".")}`),
+    );
+    expect(frostedElsewhere).toEqual([]);
 
     // Glass off (user preference / reduced transparency) must land on the
     // opaque card, tone intact.

@@ -4,17 +4,20 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The rules the liquid glass material must keep everywhere it reaches:
+// Where liquid glass may go, and the rules it keeps there:
+//   - only the layers that open above the window frost: menus, popovers,
+//     the notification center, toasts, palettes and dialogs
+//   - the window itself (frame, rails, headers, tabs, status bar, chat,
+//     composer, terminals) looks exactly the same with glass on or off
 //   - one level of glass: nothing that frosts its backdrop sits inside
 //     another element that does
 //   - terminals stay opaque, and nothing frosts over them
 //   - the Liquid glass setting and the OS reduced-transparency setting each
 //     remove every backdrop filter, pseudo-elements included
-//   - toggling glass is paint only: nothing on screen moves
 // It drives the real renderer in a temp Codara home, with a terminal, a
-// Cora chat scrolled under its header, Settings and the notification center.
+// scrolled Cora chat, a workspace menu, the notification center and Settings.
 
-test("glass is one level deep, never over a terminal, fully off when asked, and moves nothing", async () => {
+test("glass is only on the layers that open above the window, one level deep, and fully off when asked", async () => {
   test.setTimeout(150_000);
   const root = await mkdtemp(join(tmpdir(), "codara-glass-material-"));
   let app: ElectronApplication | null = null;
@@ -33,75 +36,72 @@ test("glass is one level deep, never over a terminal, fully off when asked, and 
     expect(terminal.panes).toBeGreaterThan(0);
     expect(terminal.translucent, "terminal pane backgrounds").toEqual([]);
     expect(terminal.frostedAncestors, "backdrop filters around a terminal").toEqual([]);
+    await page.locator(".spark-terminal-pane:visible").first().hover();
+    expect(await backdropFilters(page), "backdrop filters on the terminal's toolbar").toEqual([]);
 
     await openSeededChat(page, fixture.workspaceDir);
-    // Scrolled, the conversation passes under the header's frosted edge.
     await page.evaluate(() => {
       const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
       if (scroller) scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 300);
     });
-    await expect(page.locator('.spark-scroll-under[data-scrolled="true"]').first()).toBeAttached();
     await expect(page.locator(".cora-jump-latest")).toBeVisible();
+    await page.mouse.move(1, 450);
 
-    const onLayout = await layout(page);
-    const onFilters = await backdropFilters(page);
-    expect(onFilters.length, "glass on frosts something").toBeGreaterThan(0);
-    expect(nested(onFilters), "glass inside glass in the chat").toEqual([]);
-
-    // Off through the real preference: every filter goes and nothing moves.
+    // The resting window holds no glass, and glass changes none of it.
+    expect(await backdropFilters(page), "backdrop filters on the resting window").toEqual([]);
+    const onLook = await windowLook(page);
     await setGlass(page, false);
-    expect(await backdropFilters(page), "backdrop filters with glass off").toEqual([]);
-    expect(await layout(page)).toEqual(onLayout);
+    expect(diffLook(onLook, await windowLook(page)), "the window with glass off").toEqual([]);
     await setGlass(page, true);
-    expect(await layout(page)).toEqual(onLayout);
+
+    // A menu opened from the rail is glass, and nothing under it is.
+    await page.getByTitle("Workspace actions").first().click({ force: true });
+    const menu = page.getByRole("menu").first();
+    await expect(menu).toBeVisible();
+    const withMenu = await backdropFilters(page);
+    expect(withMenu.length, "the open menu frosts").toBeGreaterThan(0);
+    expect(nested(withMenu), "glass inside glass with a rail menu open").toEqual([]);
+    expect(await frostedOutside(page, '[role="menu"]'), "frost outside the open menu").toEqual([]);
+    await setGlass(page, false);
+    expect(await backdropFilters(page), "backdrop filters on a menu with glass off").toEqual([]);
+    await setGlass(page, true);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
 
     // Reduced transparency wins over the preference.
+    await page.getByTitle("Workspace actions").first().click({ force: true });
+    await expect(page.getByRole("menu").first()).toBeVisible();
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("Emulation.setEmulatedMedia", {
       features: [{ name: "prefers-reduced-transparency", value: "reduce" }],
     });
     await expect.poll(() => page.evaluate(() => matchMedia("(prefers-reduced-transparency: reduce)").matches)).toBe(true);
     expect(await backdropFilters(page), "backdrop filters under reduced transparency").toEqual([]);
-    expect(await layout(page)).toEqual(onLayout);
     await cdp.send("Emulation.setEmulatedMedia", { features: [] });
     await cdp.detach();
-
-    // The composer is glass, so the model menu it opens must not frost
-    // inside it.
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent("spark:open-model-picker")));
-    await expect(page.locator(".spark-menu, [role='menu'], [role='listbox']").first()).toBeVisible();
-    expect(nested(await backdropFilters(page)), "glass inside glass with the model menu open").toEqual([]);
-    await page.keyboard.press("Escape");
-
-    // A compact window floats the rails over the workbench as glass sheets;
-    // a scrolled list inside one must not frost again.
-    await page.setViewportSize({ width: 1000, height: 700 });
-    await page.getByTitle("Toggle workspaces").first().click({ force: true });
-    await expect(page.locator('[data-responsive-panel="left"]')).toBeVisible();
-    await page.locator(".spark-workspace-list").first().evaluate((node) => {
-      node.dataset.scrolled = "true";
-    });
-    expect(nested(await backdropFilters(page)), "glass inside glass in the overlay rail").toEqual([]);
-    await page.getByTitle("Workspace actions").first().click({ force: true });
-    await expect(page.getByRole("menu").first()).toBeVisible();
-    expect(nested(await backdropFilters(page)), "glass inside glass with a rail menu open").toEqual([]);
     await page.keyboard.press("Escape");
     await expect(page.getByRole("menu")).toHaveCount(0);
-    await page.getByTitle("Toggle workspaces").first().click({ force: true });
-    await expect(page.locator('[data-responsive-panel="left"]')).toHaveCount(0);
-    await page.setViewportSize({ width: 1400, height: 900 });
 
     await page.locator('button[title="Notifications"]').first().click({ force: true });
-    await expect(page.getByRole("dialog", { name: "Notifications" })).toBeVisible();
-    expect(nested(await backdropFilters(page)), "glass inside glass in the notification center").toEqual([]);
+    const center = page.getByRole("dialog", { name: "Notifications" });
+    await expect(center).toBeVisible();
+    const withCenter = await backdropFilters(page);
+    expect(withCenter.length, "the notification center frosts").toBeGreaterThan(0);
+    expect(nested(withCenter), "glass inside glass in the notification center").toEqual([]);
+    expect(await frostedOutside(page, ".nc-panel"), "frost outside the notification center").toEqual([]);
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Notifications" })).toHaveCount(0);
+    await expect(center).toHaveCount(0);
 
     await page.getByTitle("Settings").first().click({ force: true });
     const settings = page.getByRole("dialog", { name: "Settings" });
     await expect(settings).toBeVisible();
     await settings.locator(".st-content").first().evaluate((node) => node.scrollTo(0, 400));
-    expect(nested(await backdropFilters(page)), "glass inside glass in Settings").toEqual([]);
+    const withSettings = await backdropFilters(page);
+    expect(withSettings.length, "the Settings face frosts").toBeGreaterThan(0);
+    expect(nested(withSettings), "glass inside glass in Settings").toEqual([]);
+    expect(await frostedOutside(page, ".settings-dialog-surface"), "frost outside Settings").toEqual([]);
+    const pane = await settings.locator(".st-content").first().evaluate((node) => getComputedStyle(node).backgroundColor);
+    expect(pane, "the Settings reading pane is opaque").not.toMatch(/\/\s*0?\.\d+\)$|rgba\(/);
     await setGlass(page, false);
     expect(await backdropFilters(page), "backdrop filters in Settings with glass off").toEqual([]);
     await page.keyboard.press("Escape");
@@ -172,34 +172,61 @@ async function backdropFilters(page: Page): Promise<Frosted[]> {
   });
 }
 
-// The boxes that would move if glass changed layout: the frame bands, the
-// rails, the chat's header, first rows, jump button and composer.
-async function layout(page: Page): Promise<Record<string, string[]>> {
+// How every visible element of the window paints. Glass must change none of
+// it while nothing is open over the window.
+async function windowLook(page: Page): Promise<Record<string, string>> {
   return page.evaluate(() => {
-    const selectors = [
-      ".spark-titlebar",
-      ".spark-statusbar",
-      ".spark-rail",
-      ".spark-section-header",
-      ".spark-workspace-list",
-      ".spark-resize-gutter",
-      "[data-message-author]",
-      ".cora-jump-latest",
-      ".composer-shell",
-      ".spark-terminal-pane",
-    ];
-    const out: Record<string, string[]> = {};
-    for (const selector of selectors) {
-      out[selector] = Array.from(document.querySelectorAll(selector))
-        .filter((el) => (el as HTMLElement).offsetParent !== null)
-        .slice(0, 6)
-        .map((el) => {
-          const r = el.getBoundingClientRect();
-          return `${Math.round(r.x)},${Math.round(r.y)} ${Math.round(r.width)}x${Math.round(r.height)}`;
-        });
+    const pathOf = (el: Element) => {
+      const parts: string[] = [];
+      for (let node: Element | null = el; node && node !== document.body; node = node.parentElement) {
+        const parent = node.parentElement;
+        const index = parent ? Array.prototype.indexOf.call(parent.children, node) : 0;
+        parts.unshift(`${node.tagName.toLowerCase()}${index}`);
+      }
+      return parts.join(">");
+    };
+    const out: Record<string, string> = {};
+    for (const el of Array.from(document.body.querySelectorAll<HTMLElement>("*"))) {
+      if (el.closest(".xterm")) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const cs = getComputedStyle(el);
+      if (cs.visibility === "hidden") continue;
+      out[pathOf(el)] = [
+        el.className && typeof el.className === "string" ? el.className.split(" ").slice(0, 2).join(".") : "",
+        cs.backgroundColor,
+        cs.backgroundImage,
+        cs.boxShadow,
+        cs.borderTopColor,
+        cs.color,
+        cs.backdropFilter,
+      ].join(" | ");
     }
     return out;
   });
+}
+
+function diffLook(a: Record<string, string>, b: Record<string, string>): string[] {
+  const out: string[] = [];
+  for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if (a[key] !== b[key]) out.push(`${a[key] ?? "(missing)"}  =>  ${b[key] ?? "(missing)"}`);
+  }
+  return out.slice(0, 20);
+}
+
+// Frosted elements that are not inside the open layer.
+async function frostedOutside(page: Page, layer: string): Promise<string[]> {
+  return page.evaluate((selector) => {
+    const out: string[] = [];
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>("*"))) {
+      const cs = getComputedStyle(el);
+      const filter = cs.backdropFilter || "none";
+      if (filter === "none" || filter === "") continue;
+      if (el.closest(selector) || el.querySelector(selector)) continue;
+      out.push(`${el.tagName.toLowerCase()}.${Array.from(el.classList).slice(0, 2).join(".")}`);
+    }
+    return out;
+  }, layer);
 }
 
 async function terminalSurfaces(page: Page) {
@@ -278,7 +305,6 @@ async function openSeededChat(page: Page, cwd: string): Promise<void> {
   await page.getByRole("button", { name: "Open chat history" }).last().dispatchEvent("click");
   await page.getByRole("option").filter({ hasText: "Glass material" }).first().dispatchEvent("click");
   await expect(page.locator("[data-message-author]").last()).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator('.cora-chat-panel[data-composer-float="true"]')).toBeAttached();
 }
 
 async function prepareFixture(root: string) {

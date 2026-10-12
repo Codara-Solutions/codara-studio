@@ -399,14 +399,12 @@ export default function AutomationsPage({
       }}
     >
       <div
-        // The rule and fill live on .automations-list-head, so glass can
-        // make the header a bar.
-        className="automations-list-head"
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
           padding: "9px 10px 9px 12px",
+          borderBottom: "1px solid var(--rule)",
         }}
       >
         <span

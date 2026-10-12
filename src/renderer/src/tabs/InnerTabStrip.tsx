@@ -81,13 +81,14 @@ export default function InnerTabStrip({
   return (
     <div
       role="tablist"
-      className="spark-inner-strip"
       style={{
         flex: "0 0 auto",
         display: "flex",
         alignItems: "center",
         gap: 4,
         padding: "4px 10px",
+        borderBottom: "1px solid var(--rule-soft)",
+        background: "var(--panel)",
       }}
     >
       <Pill label="Chat" active={chatActive} onClick={onChatClick} />

@@ -445,18 +445,8 @@ export default function ChatConversation({
             // activity while the last response sat fully in view.
             atBottomThreshold={72}
             // Holds the last message's hover line (MESSAGE_META_GAP) so it
-            // never lands under the composer edge. The composer floats over
-            // the conversation's tail by --cora-composer-overlap, so the
-            // footer grows by that much and the last row still clears it.
-            components={{
-              // The scroll edge's inset: the conversation starts under the
-              // header, so the first row needs the header's height above it
-              // to rest in view.
-              Header: () => <div style={{ height: "var(--scroll-edge-inset, 0px)" }} />,
-              Footer: () => (
-                <div style={{ height: `calc(${MESSAGE_META_GAP}px + var(--cora-composer-overlap, 0px))` }} />
-              ),
-            }}
+            // never lands under the composer edge.
+            components={{ Footer: () => <div style={{ height: MESSAGE_META_GAP }} /> }}
           />
         )}
         <ConversationMinimap

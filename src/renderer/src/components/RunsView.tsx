@@ -224,13 +224,14 @@ function RunHeader({ run }: { run: RunState }) {
 
   return (
     <header
-      // Fill, rule and top light live on .runs-header, so glass can make
-      // the strip a bar.
       className="runs-header"
       style={{
         flex: "0 0 auto",
         position: "relative",
         overflow: "hidden",
+        background: "var(--panel)",
+        borderBottom: "1px solid var(--rule)",
+        boxShadow: "var(--lift-hi)",
         padding: "14px 20px 15px",
         display: "grid",
         gridTemplateColumns: "minmax(235px, 1fr) minmax(0, 1fr)",

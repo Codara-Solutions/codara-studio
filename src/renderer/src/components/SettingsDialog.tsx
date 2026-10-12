@@ -1179,7 +1179,7 @@ function GeneralSettings({
         {hydrated ? (
           <ToggleRow
             title="Liquid glass"
-            desc="Translucent frame, tabs, buttons, composer, menus, dialogs and toasts. Off gives a solid, opaque look. Always off when the system reduces transparency."
+            desc="Translucent menus, popovers, toasts and dialogs that open above the window. The window itself stays solid. Off makes them opaque too. Always off when the system reduces transparency."
             {...bindToggle("glassEffects", preferences, setPreference)}
           />
         ) : null}

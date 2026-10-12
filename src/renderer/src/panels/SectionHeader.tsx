@@ -61,9 +61,6 @@ export function SectionHeader({
   const leadSlots = !(compactLead && !draggable && !collapsible);
   return (
     <div
-      // Fill, rule and depth live on .spark-section-header so the glass
-      // material can restyle the band without fighting inline values.
-      className="spark-section-header"
       style={{
         flex: `0 0 ${PANEL_HEADER_H}px`,
         height: PANEL_HEADER_H,
@@ -75,6 +72,17 @@ export function SectionHeader({
         alignItems: "center",
         gap: 6,
         padding: leadSlots ? "0 7px 0 5px" : "0 10px 0 20px",
+        borderBottom: "1px solid var(--rule-soft)",
+        background: hover
+          ? "color-mix(in oklab, var(--ink) 3%, var(--panel))"
+          : "var(--panel)",
+        // 1px top highlight lifts the band; the soft recessed --well cue gives
+        // the body its sunk-below depth without a hand-rolled ink cast (the old
+        // 28% drop shadow banded where headers stacked). --lift-hi + --well are
+        // both token-driven so they re-tint per theme instead of reading as
+        // soot on bright paper.
+        boxShadow: "var(--lift-hi), var(--well)",
+        transition: "background var(--motion-fast) var(--ease-out)",
         userSelect: "none",
       }}
       onMouseEnter={() => setHover(true)}
