@@ -583,6 +583,41 @@ async function main() {
     assert.deepEqual(unseen.details.nestedRepositories, [clone]);
     fs.rmSync(path.join(hidden.path, "node_modules"), { recursive: true, force: true });
 
+    // The scan has no depth limit: a clone five folders down is still found.
+    const deepClone = path.join(hidden.path, "dist", "a", "b", "c", "d", "deep-clone");
+    execFileSync("git", ["init", "-q", "-b", "main", deepClone]);
+    unseen = await blocked(hidden.workspaceId, "WORKTREE_NESTED_REPOSITORY", "a clone deep in an ignored folder");
+    assert.deepEqual(unseen.details.nestedRepositories, [deepClone]);
+    fs.rmSync(path.join(hidden.path, "dist"), { recursive: true, force: true });
+
+    // A walk that runs out of budget proves nothing, so it blocks instead of
+    // reporting the worktree clean, and names the folder it gave up on.
+    for (let i = 0; i < 6; i += 1) fs.mkdirSync(path.join(hidden.path, "node_modules", `pkg-${i}`, "lib"), { recursive: true });
+    const tightDeps = { ...deps, nestedScanMaxDirs: 4 };
+    const unfinished = await aw.removeAgentWorktree(
+      terminalAgent,
+      { workspaceId: hidden.workspaceId, discardIgnoredFiles: true },
+      tightDeps,
+    );
+    assert.equal(unfinished.ok, false, JSON.stringify(unfinished));
+    assert.ok(unfinished.blockers.includes("WORKTREE_NESTED_SCAN_INCOMPLETE"), JSON.stringify(unfinished.blockers));
+    assert.equal(unfinished.code, "WORKTREE_NESTED_SCAN_INCOMPLETE");
+    assert.equal(unfinished.details.unscannedFolder, "node_modules/");
+    assert.match(unfinished.error, /node_modules\/ is too large or unreadable/);
+    assert.ok(fs.existsSync(hidden.path), "the refused removal left the worktree in place");
+    const tightList = await aw.listAgentWorktrees(terminalAgent, {}, tightDeps);
+    const listedHidden = tightList.worktrees.find((item) => item.workspaceId === hidden.workspaceId);
+    assert.equal(listedHidden.removable, false);
+    assert.ok(listedHidden.blockers.includes("WORKTREE_NESTED_SCAN_INCOMPLETE"), JSON.stringify(listedHidden.blockers));
+    const enough = await aw.removeAgentWorktree(
+      terminalAgent,
+      { workspaceId: hidden.workspaceId, discardIgnoredFiles: true, dryRun: true },
+      { ...deps, nestedScanMaxDirs: 13 },
+    );
+    assert.equal(enough.dryRun, true);
+    assert.ok(!enough.blockers.includes("WORKTREE_NESTED_SCAN_INCOMPLETE"), JSON.stringify(enough.blockers));
+    fs.rmSync(path.join(hidden.path, "node_modules"), { recursive: true, force: true });
+
     // A nested repository committed as a bare gitlink: git refuses to remove
     // the worktree, so list and dry run must not call it removable.
     const vendored = path.join(hidden.path, "vendored");

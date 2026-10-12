@@ -188,7 +188,13 @@ the `blockers` and a `hint`:
   for the repository in Settings); `discardIgnoredFiles: true` deletes the
   rest;
 - no submodule or nested repository is checked out in it, and no other
-  checkout or worktree sits inside it, ignored folders included;
+  checkout or worktree sits inside it, ignored folders included. The search
+  through ignored folders visits at most 50,000 folders; when it runs out,
+  or a folder cannot be read, removal is refused with
+  `WORKTREE_NESTED_SCAN_INCOMPLETE` and the folder it gave up on, because an
+  unfinished search cannot rule a nested checkout out. The agent can delete
+  that folder itself if it only holds build output or dependencies, such as
+  `node_modules/`, and try again;
 - no terminal, active Cora run or process uses it, and the caller is not
   inside it.
 

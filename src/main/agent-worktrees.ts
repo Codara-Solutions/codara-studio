@@ -99,6 +99,7 @@ export type WorktreeCode =
   | "WORKTREE_IGNORED_FILES"
   | "WORKTREE_SUBMODULES"
   | "WORKTREE_NESTED_REPOSITORY"
+  | "WORKTREE_NESTED_SCAN_INCOMPLETE"
   | "WORKTREE_NOT_MERGED"
   | "WORKTREE_TARGET_NOT_FOUND"
   | "WORKTREE_RUNNING_PANES"
@@ -176,6 +177,9 @@ export interface AgentWorktreeDeps {
   // Runs between the unlocked verification and the locked re-check of a
   // removal. Tests use it to change the worktree in that window.
   afterVerify?(): Promise<void>;
+  // How many ignored directories the nested-checkout scan may visit. Tests
+  // lower it to reach the limit without building a huge tree.
+  nestedScanMaxDirs?: number;
 }
 
 const AGENT_WORKTREE_LIMIT = 20;
@@ -250,6 +254,8 @@ const MESSAGES: Record<WorktreeCode, string> = {
   WORKTREE_IGNORED_FILES: "the worktree has ignored files that cannot be regenerated",
   WORKTREE_SUBMODULES: "initialized submodules block removal",
   WORKTREE_NESTED_REPOSITORY: "another git checkout or worktree is nested inside this worktree",
+  WORKTREE_NESTED_SCAN_INCOMPLETE:
+    "an ignored folder is too large or unreadable to check for nested checkouts",
   WORKTREE_NOT_MERGED: "the branch is not merged",
   WORKTREE_TARGET_NOT_FOUND: "the merge target was not found",
   WORKTREE_RUNNING_PANES: "terminals use the worktree",
@@ -275,6 +281,8 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_IGNORED_FILES: "move them, or pass discardIgnoredFiles:true",
   WORKTREE_SUBMODULES: "ask the user",
   WORKTREE_NESTED_REPOSITORY: "move or remove the nested checkout first, or ask the user",
+  WORKTREE_NESTED_SCAN_INCOMPLETE:
+    "delete that folder yourself if it only holds build output or dependencies, then retry; otherwise ask the user",
   WORKTREE_NOT_MERGED: "push and merge it (PR), or ask the user to delete it from the workspace rail",
   WORKTREE_TARGET_NOT_FOUND: "pass target: the branch it was merged into, such as main",
   WORKTREE_RUNNING_PANES:
@@ -483,41 +491,69 @@ export function isRegenerableIgnored(entry: string, extra: readonly string[] = [
   return false;
 }
 
-const NESTED_SCAN_MAX_DEPTH = 3;
-const NESTED_SCAN_MAX_DIRS = 2_000;
+const NESTED_SCAN_MAX_DIRS = 50_000;
+const NESTED_SCAN_CONCURRENCY = 16;
+
+interface NestedScan {
+  found: string[];
+  // The ignored folder the walk could not finish, or null when it saw every
+  // directory under them all.
+  incomplete: string | null;
+}
 
 // Checkouts (a .git file or directory) inside git-ignored directories, where
-// the worktree's own status never looks. The walk is bounded and visits the
-// directories that are not regenerable first, so a large node_modules/ cannot
-// use up the budget before a hand-made ignored folder is checked.
+// the worktree's own status never looks. The walk has no depth limit, only a
+// directory budget, and visits the directories that are not regenerable
+// first so a large node_modules/ cannot use up the budget before a hand-made
+// ignored folder is checked. A walk cut short by the budget or an unreadable
+// directory proves nothing, so the caller must treat it as a block.
 async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
-): Promise<string[]> {
+  maxDirs = NESTED_SCAN_MAX_DIRS,
+): Promise<NestedScan> {
   const found: string[] = [];
-  let budget = NESTED_SCAN_MAX_DIRS;
-  const visit = async (relative: string, depth: number): Promise<void> => {
-    if (budget <= 0 || found.length >= MAX_LISTED_PATHS) return;
-    budget -= 1;
+  let incomplete: string | null = null;
+  let budget = maxDirs;
+  const visit = async (relative: string): Promise<string[] | null> => {
     const absolute = join(root, relative);
     if (existsSync(join(absolute, ".git"))) {
       found.push(resolve(absolute));
-      return;
+      return [];
     }
-    if (depth >= NESTED_SCAN_MAX_DEPTH) return;
-    const children = await fsp.readdir(absolute, { withFileTypes: true }).catch(() => []);
-    for (const child of children) {
-      if (child.isDirectory()) await visit(`${relative}${child.name}/`, depth + 1);
-    }
+    const children = await fsp
+      .readdir(absolute, { withFileTypes: true })
+      .catch((err: NodeJS.ErrnoException) => (err?.code === "ENOENT" || err?.code === "ENOTDIR" ? [] : null));
+    if (!children) return null;
+    return children.filter((child) => child.isDirectory()).map((child) => `${relative}${child.name}/`);
   };
   const directories = entries.filter((entry) => entry.endsWith("/"));
   const ordered = [
     ...directories.filter((entry) => !isRegenerableIgnored(entry, extra)),
     ...directories.filter((entry) => isRegenerableIgnored(entry, extra)),
   ];
-  for (const entry of ordered) await visit(entry, 0);
-  return found;
+  for (const entry of ordered) {
+    let level = [entry];
+    while (level.length > 0 && !incomplete && found.length < MAX_LISTED_PATHS) {
+      const next: string[] = [];
+      for (let i = 0; i < level.length && !incomplete; i += NESTED_SCAN_CONCURRENCY) {
+        const batch = level.slice(i, i + NESTED_SCAN_CONCURRENCY);
+        if (batch.length > budget) {
+          incomplete = entry;
+          break;
+        }
+        budget -= batch.length;
+        for (const children of await Promise.all(batch.map(visit))) {
+          if (children === null) incomplete = entry;
+          else next.push(...children);
+        }
+      }
+      level = next;
+    }
+    if (incomplete || found.length >= MAX_LISTED_PATHS) break;
+  }
+  return { found, incomplete };
 }
 
 function dateStamp(date: Date): string {
@@ -1330,12 +1366,21 @@ export async function verifyRemovable(
   }
   // discardIgnoredFiles never covers these: a nested checkout can hold
   // commits and changes of its own that no status of this worktree shows.
+  // A scan that could not see every ignored directory blocks as well, so a
+  // nested checkout blocks removal even where the walk gave up.
   const nested: string[] = [];
   for (const entry of ctx.registrations) {
     const real = await realpathOrResolve(entry.path);
     if (real !== realPath && isAtOrUnder(real, realPath)) nested.push(real);
   }
-  if (ignored) nested.push(...(await checkoutsInIgnored(realPath, ignored, extra)));
+  if (ignored) {
+    const scan = await checkoutsInIgnored(realPath, ignored, extra, deps.nestedScanMaxDirs);
+    nested.push(...scan.found);
+    if (scan.incomplete) {
+      block("WORKTREE_NESTED_SCAN_INCOMPLETE");
+      verdict.details.unscannedFolder = scan.incomplete;
+    }
+  }
   if (nested.length) {
     block("WORKTREE_NESTED_REPOSITORY");
     verdict.details.nestedRepositories = [...new Set(nested)].slice(0, MAX_LISTED_PATHS);
@@ -1496,6 +1541,8 @@ function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
         : `merge target '${verdict.target}' not found`;
     case "WORKTREE_NESTED_REPOSITORY":
       return `a git checkout or worktree is nested inside this worktree: ${(d.nestedRepositories as string[]).join(", ")}`;
+    case "WORKTREE_NESTED_SCAN_INCOMPLETE":
+      return `the ignored folder ${String(d.unscannedFolder)} is too large or unreadable to check for nested checkouts`;
     case "WORKTREE_RUNNING_PANES":
       return `${verdict.running.paneIds.length} terminals use the worktree`;
     case "WORKTREE_ACTIVE_RUNS":
