@@ -174,7 +174,7 @@ assert.match(toast, /window\.addEventListener\("spark:local-toast", handler\)/);
 // user is looking at would produce no visible feedback at all.
 assert.match(
   toast,
-  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, activeView, toast\.kind\)/,
+  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, (?:view|activeView), toast\.kind\)/,
 );
 // A local toast is clickable only when it was emitted with a target.
 assert.match(
