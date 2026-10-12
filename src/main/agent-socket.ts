@@ -5578,7 +5578,7 @@ async function handleWorkflowResume(
         id,
         question:
           `Cora wants to resume the workflow run "${target.run.title}" with the newer saved version of ` +
-          `"${latest.name}": ${latest.description}\nAgents whose prompts are unchanged keep their results; ` +
+          `"${latest.name}" and the workflows it calls: ${latest.description}\nAgents whose prompts are unchanged keep their results; ` +
           "the rest run again under the new script.\n\nResume with the new version?",
         denyMessage:
           `The user declined, so the workflow run was not resumed with the new version of "${latest.name}". ` +

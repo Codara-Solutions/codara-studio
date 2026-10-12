@@ -13,7 +13,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, promises as fs } fr
 import os from "node:os";
 import { basename, join } from "node:path";
 
+import { MIN_COMPACT_AT_TOKENS } from "@shared/context-compaction";
 import { contextWindowForModel } from "@shared/context-window";
+import { fastModeSupportFor } from "@shared/fast-mode";
 import { DEFAULT_LOOM_WORKER_MODEL } from "@shared/model-catalog";
 import type { AgentEffortLevel, RunState } from "@shared/types";
 import {
@@ -95,6 +97,8 @@ export interface WorkflowModelPolicy {
   /** Null when the model may be used, otherwise why not. */
   check(model: string): string | null;
   connected(model: string): boolean;
+  /** Whether an agent on this model inherits fast mode, which bills a premium. */
+  fastMode?(model: string): boolean;
 }
 
 export interface WorkflowDriverEnv {
@@ -238,13 +242,41 @@ function defaultCaps(meta: WorkflowMeta): WorkflowCaps {
   );
 }
 
-async function childScripts(cwd: string | undefined, ownName: string): Promise<Record<string, { name: string; body: string }>> {
+type ChildScripts = Record<string, { name: string; body: string }>;
+
+async function childScripts(cwd: string | undefined, ownName: string): Promise<ChildScripts> {
   const children = await nestedWorkflowScripts(driverEnv().registryDirs(), cwd).catch(() => ({}));
-  const out: Record<string, { name: string; body: string }> = {};
+  const out: ChildScripts = {};
   for (const [name, child] of Object.entries(children)) {
     if (name !== ownName) out[name] = child;
   }
   return out;
+}
+
+// The saved workflows a script can call with workflow() run as part of it,
+// so the source the user approves is the script and those children together.
+// Without children this is the plain text hash, as it always was.
+function workflowSourceHash(text: string, children: ChildScripts): string {
+  if (Object.keys(children).length === 0) return sha256(text);
+  const bodies = Object.fromEntries(Object.entries(children).map(([name, child]) => [name, child.body]));
+  return sha256(canonicalJson({ text, children: bodies }));
+}
+
+function childrenFingerprint(children: ChildScripts): string {
+  return sha256(canonicalJson(Object.fromEntries(Object.entries(children).map(([name, child]) => [name, child.body]))));
+}
+
+// A run executes the children it started with, on every resume, unless the
+// user approves switching to the latest saved versions (use_latest_script).
+// Runs from before the snapshot read the registry as they always did.
+const CHILDREN_FILE = "children.json";
+
+async function runChildScripts(runId: string, info: WorkflowRunInfo): Promise<ChildScripts> {
+  try {
+    return JSON.parse(await fs.readFile(join(workflowDir(runId), CHILDREN_FILE), "utf8")) as ChildScripts;
+  } catch {
+    return childScripts(info.cwd, info.name);
+  }
 }
 
 // ── Saved workflows ────────────────────────────────────────────────────────
@@ -293,14 +325,16 @@ export async function checkWorkflow(input: {
   if (argsProblem) errors.push({ message: argsProblem });
   const models = await driverEnv().models();
   const caps = clampWorkflowCaps(input.caps, defaultCaps(resolved.meta));
+  const children = await childScripts(input.cwd, resolved.meta.name);
   const estimate = await estimateWorkflow({
     body: resolved.body,
     args: input.args ?? null,
-    children: await childScripts(input.cwd, resolved.meta.name),
+    children,
     caps,
     defaults: { model: models.defaultModel, effort: models.defaultEffort },
     phases: resolved.meta.phases,
     connected: (model) => models.connected(model),
+    fastMode: (model) => models.fastMode?.(model) ?? false,
     startSandbox: driverEnv().startSandbox,
   });
   if (estimate.error) errors.push({ line: lineOf(estimate.error), message: estimate.error });
@@ -310,7 +344,7 @@ export async function checkWorkflow(input: {
     errors,
     warnings: estimate.warnings,
     estimate,
-    sourceHash: sha256(resolved.text),
+    sourceHash: workflowSourceHash(resolved.text, children),
   };
 }
 
@@ -327,9 +361,11 @@ function errorMessage(err: unknown): string {
 
 export async function startWorkflowRun(input: StartWorkflowRunInput): Promise<RunState> {
   const resolved = await resolveSource({ workflow: input.workflow, source: input.source, cwd: input.cwd });
+  const children = await childScripts(input.cwd, resolved.meta.name);
   // A saved workflow is read again here, after the user approved what the
-  // check showed; anything (an agent, an editor) may have rewritten it since.
-  if (input.expectedSourceHash && sha256(resolved.text) !== input.expectedSourceHash) {
+  // check showed; anything (an agent, an editor) may have rewritten it, or a
+  // workflow it calls, since.
+  if (input.expectedSourceHash && workflowSourceHash(resolved.text, children) !== input.expectedSourceHash) {
     throw new Error(`Workflow ${resolved.meta.name} changed after it was checked; check it again before running it.`);
   }
   const argsProblem = checkArgs(resolved.meta, input.args);
@@ -368,6 +404,7 @@ export async function startWorkflowRun(input: StartWorkflowRunInput): Promise<Ru
   const dir = workflowDir(run.id);
   mkdirSync(join(dir, "results"), { recursive: true });
   writeFileSync(join(dir, "script.js"), resolved.text, "utf8");
+  writeFileSync(join(dir, CHILDREN_FILE), JSON.stringify(children), "utf8");
   writeFileSync(join(dir, "args.json"), JSON.stringify(args, null, 2), "utf8");
   let replay: JournalEntry[] | undefined;
   if (input.seedFromRunId) replay = await seedFrom(input.seedFromRunId, run.id);
@@ -478,7 +515,7 @@ async function executeRun(active: ActiveRun, generation: number, replay: Journal
     body: parsed.body,
     args,
     scriptHash: info.scriptHash,
-    children: await childScripts(info.cwd, info.name),
+    children: await runChildScripts(runId, info),
     caps: info.caps,
     defaults: info.defaults,
     phases: parsed.meta.phases ?? info.phases,
@@ -574,12 +611,14 @@ interface AgentContext {
   baseCommit(): Promise<string>;
 }
 
+// The extension applies no floor to a token limit, so the one the
+// percentage setting has is applied here: Pi keeps about 20k tokens verbatim
+// through a compaction, and a smaller limit would compact on every tool round.
 function compactAtTokens(request: WorkflowAgentRequest): number | undefined {
   if (request.compactAt === undefined) return undefined;
-  if (request.compactAt <= 1) {
-    return Math.round(contextWindowForModel(request.model).tokens * request.compactAt);
-  }
-  return Math.round(request.compactAt);
+  const window = contextWindowForModel(request.model).tokens;
+  const wanted = request.compactAt <= 1 ? window * request.compactAt : request.compactAt;
+  return Math.max(Math.round(wanted), Math.min(MIN_COMPACT_AT_TOKENS, window));
 }
 
 async function runAgent(
@@ -649,6 +688,7 @@ async function runAgent(
         control.started({ workerTaskId: info.workerTaskId, attemptId: info.attemptId });
         if (control.signal.aborted || timedOut) stopAttempt();
       },
+      onUsage: (live) => control.usage(live),
     });
     usage = result.usage;
     if (worktree) finished = await finishWorkflowWorktree(worktree, `workflow ${context.name}: ${request.label}`);
@@ -836,11 +876,14 @@ export async function latestWorkflowScript(
   const run = await store.getRun(runId);
   if (!run?.workflow || run.workflow.ref.source === "inline" || !run.workflow.ref.name) return null;
   const latest = await resolveSource({ workflow: `${run.workflow.ref.source}:${run.workflow.ref.name}`, cwd: run.workflow.cwd });
+  const children = await childScripts(run.workflow.cwd, latest.meta.name);
+  const pinned = await runChildScripts(runId, run.workflow);
   return {
     name: latest.meta.name,
     description: latest.meta.description,
-    changed: sha256(latest.body) !== run.workflow.scriptHash,
-    sourceHash: sha256(latest.text),
+    changed:
+      sha256(latest.body) !== run.workflow.scriptHash || childrenFingerprint(children) !== childrenFingerprint(pinned),
+    sourceHash: workflowSourceHash(latest.text, children),
   };
 }
 
@@ -858,10 +901,12 @@ async function resumeWorkflowRunInner(
   const patch: Partial<WorkflowRunInfo> = { state: "running", error: undefined, finishedAt: undefined };
   if (options.useLatestScript && run.workflow.ref.source !== "inline" && run.workflow.ref.name) {
     const latest = await resolveSource({ workflow: `${run.workflow.ref.source}:${run.workflow.ref.name}`, cwd: run.workflow.cwd });
-    if (options.expectedSourceHash && sha256(latest.text) !== options.expectedSourceHash) {
+    const children = await childScripts(run.workflow.cwd, latest.meta.name);
+    if (options.expectedSourceHash && workflowSourceHash(latest.text, children) !== options.expectedSourceHash) {
       throw new Error(`Workflow ${latest.meta.name} changed after it was approved; ask again before resuming with it.`);
     }
     writeFileSync(join(dir, "script.js"), latest.text, "utf8");
+    writeFileSync(join(dir, CHILDREN_FILE), JSON.stringify(children), "utf8");
     patch.scriptHash = sha256(latest.body);
     patch.phases = latest.meta.phases;
   }
@@ -1089,10 +1134,12 @@ async function defaultModelPolicy(): Promise<WorkflowModelPolicy> {
     catalog = null;
   }
   const isConnected = (model: string) => connected.has(model) || (catalog?.has(model) ?? false);
+  const fast = settings.openAiFastMode === true;
   return {
     defaultModel: availability.connected[0] ?? enabled[0] ?? DEFAULT_LOOM_WORKER_MODEL,
     defaultEffort,
     connected: (model) => catalog === null || isConnected(model),
+    fastMode: (model) => fast && fastModeSupportFor(model).supported,
     check: (model) => {
       if (catalog === null || isConnected(model)) return null;
       if (disconnected.has(model)) return `model ${model} has no connected account`;

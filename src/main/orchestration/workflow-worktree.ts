@@ -65,13 +65,25 @@ export async function createWorkflowWorktree(input: {
   seq: number;
   base: string;
 }): Promise<WorkflowWorktree> {
-  const name = `${slug(input.label)}-${input.seq}`;
-  const branch = `${workflowBranchPrefix(input.runId)}/${name}`;
-  const path = join(input.root, name);
+  const stem = `${slug(input.label)}-${input.seq}`;
+  let name = stem;
+  let branch = `${workflowBranchPrefix(input.runId)}/${name}`;
   // Creation serializes per repository with every other worktree operation;
   // parallel `git worktree add` calls race on the repository's index lock.
   await withRepoLock(input.repoCwd, async () => {
+    // Seq numbering restarts with every resume, so an edited script can
+    // reach this name again after an earlier agent committed to it. `-B`
+    // would reset that branch to the base and leave its work only in the
+    // reflog; a branch with commits of its own is kept, and this call takes
+    // the next free name.
+    for (let n = 2; n < 100; n += 1) {
+      const tip = await branchTip(input.repoCwd, branch);
+      if (tip === null || tip === input.base) break;
+      name = `${stem}-${n}`;
+      branch = `${workflowBranchPrefix(input.runId)}/${name}`;
+    }
     mkdirSync(input.root, { recursive: true });
+    const path = join(input.root, name);
     if (existsSync(path)) {
       // A leftover from a stopped run: start this call over from the base.
       await runGit(input.repoCwd, ["worktree", "remove", "--force", path]).catch(() => undefined);
@@ -80,7 +92,15 @@ export async function createWorkflowWorktree(input: {
     }
     await runGit(input.repoCwd, ["worktree", "add", "-B", branch, path, input.base]);
   });
-  return { repoCwd: input.repoCwd, path, branch, base: input.base };
+  return { repoCwd: input.repoCwd, path: join(input.root, name), branch, base: input.base };
+}
+
+async function branchTip(repoCwd: string, branch: string): Promise<string | null> {
+  try {
+    return (await readGitText(repoCwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])) || null;
+  } catch {
+    return null;
+  }
 }
 
 async function commitAll(path: string, message: string): Promise<void> {

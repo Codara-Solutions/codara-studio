@@ -2070,7 +2070,14 @@ export interface WorkflowAgentLaunchInput {
   verifier: boolean;
   call: WorkflowCallMarker;
   onStarted?: (info: { workerTaskId: string; attemptId: string }) => void;
+  /** Running usage of the attempt after each model response, for the run's ceilings. */
+  onUsage?: (usage: { in: number; out: number; usd: number }) => void;
 }
+
+// Live usage listeners of workflow attempts, by attempt id. The Pi worker
+// session reports into it as responses arrive, so a workflow's ceilings see
+// what a running agent spends instead of only what a finished one spent.
+const workflowAttemptUsage = new Map<string, (usage: { in: number; out: number; usd: number }) => void>();
 
 export interface WorkflowAgentLaunchResult {
   workerTaskId: string;
@@ -2140,9 +2147,11 @@ export async function launchWorkflowAgentTask(input: WorkflowAgentLaunchInput): 
   if (!task) throw new Error("Workflow worker task creation failed.");
   const envelope = await prepareWorkerTask({ runId: input.runId, workerTaskId: task.id, cwd: input.cwd });
   input.onStarted?.({ workerTaskId: task.id, attemptId: envelope.attemptId });
+  if (input.onUsage) workflowAttemptUsage.set(envelope.attemptId, input.onUsage);
   try {
     run = await launchWorkerAttempt({ runId: input.runId, attemptId: envelope.attemptId });
   } catch (err) {
+    workflowAttemptUsage.delete(envelope.attemptId);
     run = await requireRun(input.runId);
     const failed = run.workerAttempts.find((item) => item.id === envelope.attemptId);
     return {
@@ -2155,6 +2164,7 @@ export async function launchWorkflowAgentTask(input: WorkflowAgentLaunchInput): 
       usage: { in: 0, out: 0, usd: 0 },
     };
   }
+  workflowAttemptUsage.delete(envelope.attemptId);
   const attempt = run.workerAttempts.find((item) => item.id === envelope.attemptId);
   let report: Record<string, unknown> | null = null;
   if (attempt?.finalReportPath) {
@@ -21838,6 +21848,15 @@ async function runPiWorkerSession({
           if (gauge > 0) lastContextTokens = gauge;
           reportedContextWindowTokens =
             piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
+          try {
+            workflowAttemptUsage.get(attemptId)?.({
+              in: usageTotals.input + usageTotals.cacheRead + usageTotals.cacheWrite,
+              out: usageTotals.output,
+              usd: resolvedPiCostUsd(),
+            });
+          } catch {
+            // A listener failure must not end the worker's session.
+          }
         }
         const failure = piWorkerEventFailure(event);
         const fastFallback = failure ? fastModeFallbackNote(failure) : null;

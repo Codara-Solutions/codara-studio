@@ -1,9 +1,11 @@
 // Per-launch auto-compact limits for the Claude Code and Codex terminals Cora
 // opens. Codara never edits a CLI's own config for this: Codex takes a `-c`
 // override on its command line, and Claude takes a `--settings` file that
-// lives in Codara's home and only carries this one environment variable.
+// lives in Codara's home and carries this one environment variable on top of
+// Codara's own hooks.
 
-import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -21,8 +23,12 @@ export function claudeAutoCompactSettings(percent: number | null | undefined): R
 
 /**
  * The `--settings` file for a Claude terminal at this limit, written on demand
- * and named by its value so concurrent launches share one immutable file.
+ * and named by its content so concurrent launches share one immutable file.
  * Null when the limit is Auto.
+ *
+ * Claude keeps only the last `--settings` it is given, and a launch that
+ * already carries one gets no hooks file from Codara, so this file must carry
+ * the hooks itself or the pane never reports its state.
  */
 export async function ensureClaudeAutoCompactSettingsFile(
   percent: number | null | undefined,
@@ -30,11 +36,35 @@ export async function ensureClaudeAutoCompactSettingsFile(
 ): Promise<string | null> {
   const settings = claudeAutoCompactSettings(percent);
   if (!settings) return null;
+  const hooks = await codaraClaudeHookSettings(home);
+  const merged = hooks
+    ? { ...hooks, env: { ...asRecord(hooks.env), ...(settings.env as Record<string, string>) } }
+    : settings;
+  const text = `${JSON.stringify(merged, null, 2)}\n`;
+  const value = claudeAutoCompactPercentEnv(percent);
+  const name = hooks
+    ? `claude-autocompact-${value}-${createHash("sha256").update(text).digest("hex").slice(0, 12)}.json`
+    : `claude-autocompact-${value}.json`;
   const dir = join(home, "cli-launch");
-  const file = join(dir, `claude-autocompact-${claudeAutoCompactPercentEnv(percent)}.json`);
+  const file = join(dir, name);
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFileAtomic(file, `${JSON.stringify(settings, null, 2)}\n`);
+  await writeFileAtomic(file, text);
   return file;
+}
+
+// The hooks file writeIntegrationFiles keeps under <home>/integrations; absent
+// when hooks are off (no Python), in which case only the limit is sent.
+async function codaraClaudeHookSettings(home: string): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(home, "integrations", "claude", "settings.json"), "utf8"));
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 /** Everything buildStandingTerminalCommand needs for one batch of panes. */

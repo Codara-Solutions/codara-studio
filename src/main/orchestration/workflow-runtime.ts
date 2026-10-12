@@ -8,6 +8,7 @@
 // Electron-free and run-store-free on purpose; the suite drives it with a
 // fake executor and the real sandbox.
 
+import { MIN_COMPACT_AT_TOKENS } from "@shared/context-compaction";
 import type { AgentEffortLevel } from "@shared/types";
 import {
   WORKFLOW_HARD_LIMITS,
@@ -78,7 +79,7 @@ export interface WorkflowAgentOutcome {
   worktree?: JournalWorktree;
 }
 
-export type WorkflowAbortReason = "skip" | "stop";
+export type WorkflowAbortReason = "skip" | "stop" | "ceiling";
 
 export interface WorkflowAgentControl {
   signal: AbortSignal;
@@ -140,6 +141,8 @@ interface CallState {
   controller?: AbortController;
   liveUsage?: JournalUsage;
   ticketCancel?: () => void;
+  /** The ceiling that cut this call off while it ran. */
+  cutOff?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -576,6 +579,11 @@ export class WorkflowRuntime {
       if (typeof opts.compactAt !== "number" || !(opts.compactAt > 0)) {
         return { error: "agent(): compactAt must be a fraction of the context window (0..1) or a token count" };
       }
+      if (opts.compactAt > 1 && opts.compactAt < MIN_COMPACT_AT_TOKENS) {
+        return {
+          error: `agent(): compactAt as a token count must be at least ${MIN_COMPACT_AT_TOKENS}; use a fraction (0..1) for a share of the context window`,
+        };
+      }
       compactAt = opts.compactAt;
     }
     return {
@@ -608,6 +616,22 @@ export class WorkflowRuntime {
       return `workflow USD ceiling reached ($${usdCeiling})`;
     }
     return null;
+  }
+
+  // The ceilings bound what agents spend while they run, not only which
+  // agents may start: once settled plus live usage crosses one, every agent
+  // still running or waiting for a slot is cut off and resolves null.
+  // Checking only at launch let each running agent finish, so a run could
+  // overshoot by up to `concurrency` whole agents.
+  private enforceCeilings(): void {
+    if (this.finished || this.stopping) return;
+    const ceiling = this.ceilingProblem();
+    if (!ceiling) return;
+    for (const call of this.calls.values()) {
+      if (call.answered || !call.controller || call.controller.signal.aborted) continue;
+      call.cutOff = `cut off: ${ceiling}`;
+      call.controller.abort("ceiling");
+    }
   }
 
   private dispatchLive(call: CallState): void {
@@ -708,6 +732,7 @@ export class WorkflowRuntime {
             call.tree.tokens = usage.in + usage.out;
             call.tree.costUsd = usage.usd;
             this.changed();
+            this.enforceCeilings();
           },
         });
       } catch (err) {
@@ -720,6 +745,8 @@ export class WorkflowRuntime {
       if (controller.signal.aborted) {
         if (controller.signal.reason === "skip") {
           this.answer(call, { ...outcome, status: "skipped", value: null, note: "skipped by the user" });
+        } else if (controller.signal.reason === "ceiling") {
+          this.answer(call, { ...outcome, status: "null", value: null, note: call.cutOff });
         } else {
           this.settleAborted(call, "stop", outcome.usage);
         }
@@ -755,6 +782,10 @@ export class WorkflowRuntime {
   private settleAborted(call: CallState, reason: WorkflowAbortReason, usage?: JournalUsage): void {
     if (reason === "skip") {
       this.answer(call, { status: "skipped", usage: usage ?? call.liveUsage ?? NO_USAGE, note: "skipped by the user" });
+      return;
+    }
+    if (reason === "ceiling") {
+      this.answer(call, { status: "null", usage: usage ?? call.liveUsage ?? NO_USAGE, note: call.cutOff });
       return;
     }
     if (!call.answered) {
@@ -796,6 +827,7 @@ export class WorkflowRuntime {
     call.request = undefined;
     const usage = outcome.usage ?? NO_USAGE;
     this.addSettled(usage);
+    this.enforceCeilings();
     const value = outcome.status === "ok" ? (outcome.value === undefined ? null : outcome.value) : null;
 
     const statusMap: Record<typeof outcome.status, WorkflowCallStatus> = {

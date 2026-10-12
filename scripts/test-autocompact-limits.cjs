@@ -109,6 +109,35 @@ async function bundle(entry, name) {
   assert.equal(file, path.join(home, "cli-launch", "claude-autocompact-75.json"));
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "75" } });
   assert.equal(await cli.ensureClaudeAutoCompactSettingsFile(75, home), file, "the same limit reuses its file");
+  // With Codara's hooks on, the one --settings a pane gets must still carry
+  // them: Claude keeps only the last --settings, and a launch that has one
+  // gets no hooks file of its own.
+  const hookedHome = path.join(TMP, "codara-home-hooked");
+  const hookSettings = {
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "python3 /h/codara-hook.py" }] }] },
+    env: { KEEP_ME: "1" },
+  };
+  fs.mkdirSync(path.join(hookedHome, "integrations", "claude"), { recursive: true });
+  fs.writeFileSync(path.join(hookedHome, "integrations", "claude", "settings.json"), JSON.stringify(hookSettings));
+  const hooked = await cli.ensureClaudeAutoCompactSettingsFile(75, hookedHome);
+  assert.equal(path.dirname(hooked), path.join(hookedHome, "cli-launch"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(hooked, "utf8")), {
+    hooks: hookSettings.hooks,
+    env: { KEEP_ME: "1", CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "75" },
+  });
+  assert.equal(await cli.ensureClaudeAutoCompactSettingsFile(75, hookedHome), hooked, "unchanged hooks reuse the file");
+  fs.writeFileSync(
+    path.join(hookedHome, "integrations", "claude", "settings.json"),
+    JSON.stringify({ hooks: { Stop: [] } }),
+  );
+  assert.notEqual(
+    await cli.ensureClaudeAutoCompactSettingsFile(75, hookedHome),
+    hooked,
+    "changed hooks never rewrite a file a running pane may still read",
+  );
+  const integration = fs.readFileSync(path.join(ROOT, "src/main/agent-launch-integration.ts"), "utf8");
+  assert.match(integration, /const dir = integrationsDir\(home\);[\s\S]*const claudeSettingsPath = join\(dir, "claude", "settings\.json"\);/);
+  assert.match(integration, /return resolve\(join\(home, "integrations"\)\);/);
   // The settings file lives in Codara's home, never in a CLI home.
   const guard = await bundle("src/main/outside-write-guard.ts", "outside-write-guard.cjs");
   for (const cliHome of [".claude", ".codex"]) {

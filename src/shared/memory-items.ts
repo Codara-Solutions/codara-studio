@@ -234,11 +234,56 @@ export function memoryQuoteSupport(text: string, quote: string): { coverage: num
 const QUOTE_MIN_COVERAGE = 0.5;
 const QUOTE_MAX_UNSUPPORTED_WORDS = 3;
 
-/** Whether `quote` is enough to stand behind `text` as the user's own words. */
-export function memorySupportedByQuote(text: string, quote: string | undefined): boolean {
-  if (!quote) return false;
+const NEGATORS = new Set<string>([
+  "not", "no", "never", "dont", "stop", "avoid", "without", "nunca", "jamas", "sin", "evita",
+  "evitar", "pas", "jamais", "nicht", "nie", "kein", "keine", "nao",
+]);
+
+/**
+ * Whether a sentence negates an odd number of times. Token coverage drops
+ * polarity words, so "Push to main without asking first." covers every word
+ * of "never push to main without asking me first"; only the count of
+ * negations tells the two apart. A ", not Y" tail names the rejected value of
+ * a preference ("use pnpm, not npm") and does not negate the sentence.
+ */
+export function memoryNegatesOddly(text: string): boolean {
+  const normalized = normalizeMemoryText(text)
+    .replace(/n't\b/g, " not")
+    .replace(/\bdeja de\b/g, " stop ")
+    .replace(/,\s*(?:not|no)\b/g, ",");
+  let count = 0;
+  for (const raw of normalized.split(/[^a-z0-9]+/)) if (NEGATORS.has(raw)) count += 1;
+  return count % 2 === 1;
+}
+
+function quoteCovers(text: string, quote: string): boolean {
   const { coverage, unsupported } = memoryQuoteSupport(text, quote);
   return coverage >= QUOTE_MIN_COVERAGE && unsupported <= QUOTE_MAX_UNSUPPORTED_WORDS;
+}
+
+/**
+ * Whether `quote` is enough to stand behind `text` as the user's own words:
+ * its words, and the same "do" or "don't".
+ */
+export function memorySupportedByQuote(text: string, quote: string | undefined): boolean {
+  if (!quote) return false;
+  return quoteCovers(text, quote) && memoryNegatesOddly(text) === memoryNegatesOddly(quote);
+}
+
+const RETRACTION_PATTERN =
+  /\b(?:forget|no longer|anymore|any more|olvida|olvidate|ya no|oublie|vergiss|nicht mehr)\b/;
+
+/**
+ * Whether the user's quote takes `text` back: it contradicts the memory,
+ * says the opposite about the same words, or asks to forget it. Restating
+ * the memory is no reason to archive it.
+ */
+export function memoryRetractedByQuote(text: string, quote: string | undefined): boolean {
+  if (!quote) return false;
+  if (memoriesContradict(text, quote)) return true;
+  if (!quoteCovers(text, quote)) return false;
+  return memoryNegatesOddly(text) !== memoryNegatesOddly(quote) ||
+    RETRACTION_PATTERN.test(normalizeMemoryText(quote));
 }
 
 function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {

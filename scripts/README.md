@@ -207,6 +207,7 @@ its first send (`run-store.ts`).
 | `test-board-store`, `test-board-agent-writes`, `test-board-nudge` | The board of each chat (`board-store.ts`, `board-nudge.ts`). |
 | `test-workflow-sandbox`, `test-workflow-runtime`, `test-workflow-prelude`, `test-workflow-meta`, `test-workflow-schema` | The workflow script sandbox (no escape), the script API, journal replay and resume caching, and schema checks. |
 | `test-workflow-driver`, `test-workflow-admission`, `test-workflow-registry`, `test-workflow-worktree`, `test-pi-worker-workflow-result` | Workflow runs (`workflow-driver.ts`): caps, a failed agent as `null`, stop, resume and restart recovery, saved workflows, worktree isolation, and the result a worker reports. |
+| `test-workflow-agent-memory` | Workflow agents and automation workers run on their prompt alone: no saved Cora memory is pinned into them. |
 | `test-workflow-mcp-roster` | Who may run workflows: the `codara_workflow_*` roster, the socket's untrusted and mid-compaction guards, and consent before `workflow.run` and `workflow.save`. |
 
 ### Terminals and agent detection

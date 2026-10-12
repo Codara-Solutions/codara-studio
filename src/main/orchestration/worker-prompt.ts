@@ -88,9 +88,16 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
   return lines;
 }
 
-/** The memory a worker prompt carries, also re-sent after a worker compaction. */
-export function workerMemoryContext(run: RunState, task: Pick<WorkerTask, "title" | "description">): string | null {
-  if (run.automationId) return null;
+/**
+ * The memory a worker prompt carries, also re-sent after a worker compaction.
+ * A workflow agent gets none, before or after a compaction: its prompt is its
+ * whole input, and a resumed run trusts a cached answer to the same prompt.
+ */
+export function workerMemoryContext(
+  run: RunState,
+  task: Pick<WorkerTask, "title" | "description" | "workflowCall">,
+): string | null {
+  if (run.automationId || task.workflowCall) return null;
   return formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId, `${task.title}\n${task.description}`);
 }
 

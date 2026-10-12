@@ -7,7 +7,9 @@ import type { HumanRunMessage, RunState, WorkerReport } from "@shared/types";
 import {
   DEFAULT_MEMORY_LEARNING_SETTINGS,
   MEMORY_ITEM_MAX_CHARS,
+  memoryNegatesOddly,
   memoryPolarity,
+  memoryRetractedByQuote,
   memorySupportedByQuote,
   memoryTokens,
   normalizeMemoryText,
@@ -118,16 +120,34 @@ function scopeEnabled(run: LearnableRun, scope: MemoryItemScope): boolean {
   return isMemoryEnabled(scope, run.workspaceId, profileOf(run));
 }
 
-/** User-authored conversation messages, without the synthetic notes Codara writes as "user". */
+/**
+ * Whether an answer is one of the options of the question it answers. A
+ * clicked option submits text Cora wrote (steerable by a page or file it
+ * read), so it is the user's choice for that one question, never their words.
+ */
+function pickedOption(message: HumanRunMessage, messages: readonly HumanRunMessage[]): boolean {
+  if (message.kind !== "answer" || !message.answersMessageId) return false;
+  const question = messages.find((entry) => entry.id === message.answersMessageId);
+  const typed = message.message.trim();
+  return (question?.questionOptions ?? []).some((option) =>
+    option.answer.trim() === typed || option.label.trim() === typed);
+}
+
+/**
+ * User-authored conversation messages, without the synthetic notes Codara
+ * writes as "user" and without answers that only picked one of Cora's options.
+ */
 function userMessages(run: Pick<RunState, "humanMessages">): HumanRunMessage[] {
-  return (run.humanMessages ?? []).filter((message) =>
+  const messages = run.humanMessages ?? [];
+  return messages.filter((message) =>
     message.author === "user" &&
     !message.boardNote &&
     !message.resumeNote &&
     !message.compaction &&
     !message.loomNodeId &&
     typeof message.message === "string" &&
-    message.message.trim().length > 0);
+    message.message.trim().length > 0 &&
+    !pickedOption(message, messages));
 }
 
 // ── 1. capture ──────────────────────────────────────────────────────────────
@@ -334,10 +354,10 @@ export async function learnFromCompletedRun(
             kind: "lesson",
             text: lesson,
             source: "worker",
-            // A worker's claim about the environment is tool content: it
-            // becomes active only when a verifier confirmed the run's work,
-            // and never from an automation, whose runs nobody watches.
-            status: verified && !run.automationId ? "active" : "proposed",
+            // A worker's claim is tool content: it can repeat a README or a
+            // fetched page, and a verifier checks the work, not the lesson.
+            // It waits as a suggestion until the user approves it.
+            status: "proposed",
             confidence: verified ? 0.6 : 0.45,
             evidence: { runId: run.id, quote: lesson },
           });
@@ -568,9 +588,9 @@ async function reflect(
   );
   if (!claimed) return [];
   pendingSignals.delete(run.id);
+  const userIds = new Set(users.map((message) => message.id));
   const conversation = (run.humanMessages ?? []).filter((message) =>
-    (message.author === "user" && userMessages({ humanMessages: [message] }).length === 1) ||
-    (message.author === "spark" && message.kind === "note"));
+    userIds.has(message.id) || (message.author === "spark" && message.kind === "note"));
   const query = users.slice(-6).map((message) => message.message).join("\n");
   const related = searchMemoryItems(profileId, run.workspaceId, query, 12);
   const core = listMemoryItems(profileId, { workspaceId: run.workspaceId })
@@ -593,12 +613,21 @@ async function reflect(
 }
 
 /**
+ * An update never flips a memory between "do" and "don't": that is a new
+ * memory, which goes through the add path and retires the old one as
+ * contradicted. Checked on every update, grounded or not, because the quote
+ * gate alone reads a restatement of the user's rule as backing its opposite.
+ */
+function keepsPolarity(previous: string, next: string): boolean {
+  return memoryPolarity(previous) === memoryPolarity(next) &&
+    memoryNegatesOddly(previous) === memoryNegatesOddly(next);
+}
+
+/**
  * An update usually keeps the old memory's words and adds the user's new
- * ones, so it is grounded when every word it adds comes from the quote and
- * it does not flip the memory between "do" and "don't".
+ * ones, so it is grounded when every word it adds comes from the quote.
  */
 function revisionGrounded(previous: string, next: string, quote: string): boolean {
-  if (memoryPolarity(previous) !== memoryPolarity(next)) return false;
   const kept = new Set(memoryTokens(previous));
   const quoted = new Set(memoryTokens(quote));
   const added = memoryTokens(next).filter((token) => !kept.has(token));
@@ -647,13 +676,18 @@ export async function applyReflection(
     // What the user typed on the Memory page or pinned is theirs to change.
     if (!existing || existing.status === "archived" || existing.source === "manual" || existing.pinned) continue;
     if (operation.op === "delete") {
-      // The user's words have to be about this memory, not any sentence of theirs.
-      if (!memorySupportedByQuote(existing.text, operation.evidence)) continue;
+      // The user's words have to take this memory back, not merely be about
+      // it: restating a rule is no evidence against it.
+      if (!memoryRetractedByQuote(existing.text, operation.evidence)) continue;
       const archived = await archiveMemoryItem(profileId, existing.id, "contradicted");
       if (archived) outcomes.push({ action: "superseded", superseded: [archived] });
       continue;
     }
-    if (operation.text && (grounded || revisionGrounded(existing.text, operation.text, operation.evidence ?? ""))) {
+    if (
+      operation.text &&
+      keepsPolarity(existing.text, operation.text) &&
+      (grounded || revisionGrounded(existing.text, operation.text, operation.evidence ?? ""))
+    ) {
       outcomes.push(await reviseMemoryItem(profileId, existing.id, clip(operation.text, MEMORY_ITEM_MAX_CHARS), {
         runId: run.id,
         ...(operation.evidence ? { quote: operation.evidence } : {}),

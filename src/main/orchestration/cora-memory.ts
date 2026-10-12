@@ -11,7 +11,7 @@ import {
   normalizeCoraProfileId,
   resolveCoraProfile,
 } from "./cora-profiles";
-import { containsSecret, isCoreMemoryItem } from "@shared/memory-items";
+import { containsSecret, isCoreMemoryItem, type CoraMemoryItem } from "@shared/memory-items";
 import { listMemoryItems, markMemoryItemsUsed, renderLearnedMemory, selectLearnedMemory } from "./memory-items";
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
@@ -976,14 +976,46 @@ export async function formatCoraMemoryForTurn(
           (item.scope === "global" ? rendered.globalEnabled : rendered.workspaceEnabled))
         .map((item) => [item.id, item]),
     );
+    // Consolidation is housekeeping, not the user taking anything back: a
+    // merged item hands over to the survivor that says the same thing, and a
+    // stale one (idle, or evicted over the cap) stays with the session that
+    // has it. Only a deletion, a replacement or memory switched off withdraws.
+    const stored = new Map(
+      listMemoryItems(profileId, { workspaceId, includeArchived: true }).map((item) => [item.id, item]),
+    );
+    const tierOn = (item: { scope: string }) =>
+      item.scope === "global" ? rendered.globalEnabled : rendered.workspaceEnabled;
+    const send = (item: CoraMemoryItem) => {
+      (isCoreMemoryItem(item) ? fresh.core : fresh.relevant).push(item);
+      resent.add(item.id);
+    };
     const retracted: Array<{ id: string; text: string }> = [];
     for (const [id, text] of carried) {
       if (resent.has(id)) continue;
       const current = inForce.get(id);
       if (current?.text === text) continue;
       if (current) {
-        (isCoreMemoryItem(current) ? fresh.core : fresh.relevant).push(current);
+        send(current);
         continue;
+      }
+      const archived = stored.get(id);
+      if (archived?.status === "archived" && tierOn(archived)) {
+        if (archived.archivedReason === "stale") {
+          carried.delete(id);
+          continue;
+        }
+        if (archived.archivedReason === "merged") {
+          let survivor: CoraMemoryItem | undefined = archived;
+          for (let hop = 0; hop < 8 && survivor?.archivedReason === "merged" && survivor.supersededBy; hop += 1) {
+            survivor = stored.get(survivor.supersededBy);
+          }
+          const live = survivor ? inForce.get(survivor.id) : undefined;
+          if (live) {
+            carried.delete(id);
+            if (!resent.has(live.id) && carried.get(live.id) !== live.text) send(live);
+            continue;
+          }
+        }
       }
       retracted.push({ id, text });
       carried.delete(id);

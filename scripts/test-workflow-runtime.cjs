@@ -25,7 +25,8 @@ function sleep(ms) {
 
 // Agents answer from their prompt: "fail:" throws inside the executor,
 // "null:" ends without a result, "delay=N" waits N ms, "tokens=N" reports
-// usage. Everything else echoes the prompt.
+// usage, "live=N" reports N tokens while still running. Everything else
+// echoes the prompt.
 function fakeExecutor(log = {}) {
   log.runs = log.runs ?? [];
   log.maxLive = log.maxLive ?? 0;
@@ -38,9 +39,12 @@ function fakeExecutor(log = {}) {
       log.maxLive = Math.max(log.maxLive, live);
       try {
         control.started({ workerTaskId: `task-${request.seq}`, attemptId: `att-${request.seq}` });
+        const liveTokens = Number(/live=(\d+)/.exec(request.prompt)?.[1] ?? 0);
+        if (liveTokens > 0) control.usage({ in: liveTokens, out: 0, usd: 0 });
         const delay = Number(/delay=(\d+)/.exec(request.prompt)?.[1] ?? 5);
         const tokens = Number(/tokens=(\d+)/.exec(request.prompt)?.[1] ?? 10);
         await new Promise((resolve) => {
+          if (control.signal.aborted) return resolve();
           const timer = setTimeout(resolve, delay);
           control.signal.addEventListener("abort", () => {
             clearTimeout(timer);
@@ -193,6 +197,21 @@ async function main() {
     check("token ceiling: the next call throws", /token ceiling reached/.test(outcome.value?.out.at(-1)), outcome.value);
     check("budget.spent() sees the delivered usage", outcome.value?.spent === 120, outcome.value);
     check("budget.total exposes the ceiling", outcome.value?.total === 100);
+  }
+  {
+    const started = Date.now();
+    const { outcome, executor, runtime } = await runScript(
+      `return await parallel([1, 2, 3].map((i) => () => agent("live=60 tokens=60 delay=8000 agent " + i)));`,
+      { caps: { tokenCeiling: 100 } },
+    );
+    check("token ceiling: running agents count toward it", executor.log.runs.length === 2, executor.log.runs.length);
+    check(
+      "token ceiling: agents still running when it is crossed are cut off",
+      outcome.status === "complete" && Date.now() - started < 6_000 && outcome.value?.every((v) => v === null),
+      { outcome, ms: Date.now() - started },
+    );
+    const notes = runtime.snapshot().phases.flatMap((p) => p.calls).map((c) => c.note ?? "");
+    check("token ceiling: a cut-off agent says why", notes.filter((n) => /cut off: workflow token ceiling reached/.test(n)).length === 2, notes);
   }
   {
     const admission = new admissionMod.WorkflowAdmission({ machineSlots: 2, heavySlots: 1 });

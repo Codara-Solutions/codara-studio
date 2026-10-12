@@ -371,6 +371,74 @@ return [a, b];
     source: `export const meta = { name: "t", description: "t" };\nconst x = null;\nx.y = 1;\n`,
   });
   check("a script that throws fails the check", !thrower.ok, thrower);
+
+  // ── Fast mode on the estimate ──────────────────────────────────────────
+  {
+    const source = `export const meta = { name: "fast", description: "fast" };\nreturn await agent("plain");\n`;
+    const plain = await next.checkWorkflow({ source });
+    check("no fast-mode note when fast mode is off", !plain.warnings.some((w) => /Fast mode/.test(w)), plain.warnings);
+    next.configureWorkflowDriver({
+      ...makeEnv(),
+      models: async () => ({ ...(await makeEnv().models()), fastMode: (model) => model === "test-model" }),
+    });
+    const fast = await next.checkWorkflow({ source });
+    check("the estimate names fast mode first, before approval", /^Fast mode is on.*test-model.*costs more/.test(fast.warnings[0] ?? ""), fast.warnings);
+    next.configureWorkflowDriver(makeEnv());
+  }
+
+  // ── compactAt floor ────────────────────────────────────────────────────
+  {
+    const before = store.calls.launches.length;
+    const small = await next.startWorkflowRun({
+      workspaceId: "ws",
+      cwd: base,
+      source: `export const meta = { name: "small", description: "small compactAt" };\nreturn await agent("plain", { label: "tiny", compactAt: 0.01 });\n`,
+    });
+    await next.waitForWorkflowRun(small.id, { timeoutMs: 20_000, pollMs: 25 });
+    const launch = store.calls.launches[before];
+    check("a tiny compactAt fraction is raised to the 48k floor", launch?.call.compactAtTokens === 48_000, launch?.call);
+    const raw = await next.checkWorkflow({
+      source: `export const meta = { name: "raw", description: "raw" };\nreturn await agent("plain", { compactAt: 1.5 });\n`,
+    });
+    check("a token compactAt below the floor is a script error", !raw.ok && /at least 48000/.test(raw.errors.map((e) => e.message).join(" ")), raw.errors);
+  }
+
+  // ── Nested workflows run the version the user approved ─────────────────
+  {
+    const childFile = path.join(dirs.userDir, "child.js");
+    const childSource = (v) => `export const meta = { name: "child", description: "child" };\nreturn await agent("child ${v}");\n`;
+    fs.writeFileSync(childFile, childSource("v1"));
+    fs.writeFileSync(
+      path.join(dirs.userDir, "parent.js"),
+      `export const meta = { name: "parent", description: "parent" };\nreturn await workflow("child");\n`,
+    );
+    const checkedParent = await next.checkWorkflow({ workflow: "parent", cwd: base });
+    fs.writeFileSync(childFile, childSource("v2"));
+    let startError = "";
+    try {
+      await next.startWorkflowRun({ workspaceId: "ws", cwd: base, workflow: "parent", expectedSourceHash: checkedParent.sourceHash });
+    } catch (err) {
+      startError = err.message;
+    }
+    check("a child edited after the check stops the start", /changed after it was checked/.test(startError), startError);
+
+    fs.writeFileSync(childFile, childSource("v1"));
+    const parentRun = await next.startWorkflowRun({ workspaceId: "ws", cwd: base, workflow: "parent", expectedSourceHash: checkedParent.sourceHash });
+    await next.waitForWorkflowRun(parentRun.id, { timeoutMs: 20_000, pollMs: 25 });
+    store.runs.get(parentRun.id).workflow.state = "failed";
+    check("an unedited child is not a change", (await next.latestWorkflowScript(parentRun.id))?.changed === false);
+    fs.writeFileSync(childFile, childSource("v2"));
+    check("an edited child is reported as a change", (await next.latestWorkflowScript(parentRun.id))?.changed === true);
+    const before = store.calls.launches.length;
+    await next.resumeWorkflowRun(parentRun.id);
+    const resumed = await next.waitForWorkflowRun(parentRun.id, { timeoutMs: 20_000, pollMs: 25 });
+    check("a plain resume runs the child the run started with", resumed.result === "summary of child v1", resumed.result);
+    check(
+      "a plain resume never runs the edited child",
+      !store.calls.launches.slice(before).some((launch) => /v2/.test(launch.prompt)),
+      store.calls.launches.slice(before).map((launch) => launch.prompt),
+    );
+  }
 }
 
 main()

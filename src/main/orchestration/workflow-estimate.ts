@@ -6,6 +6,7 @@
 // table; the card labels them as rough.
 
 import type { AgentEffortLevel } from "@shared/types";
+import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
 import { loomRuntimeForModel } from "@shared/model-catalog";
 import { runtimeForWorkerModelId } from "@shared/worker-model-roster";
 import type { WorkflowCaps, WorkflowEstimate, WorkflowPhaseMeta } from "@shared/workflow";
@@ -38,6 +39,8 @@ export interface WorkflowEstimateInput {
   phases?: WorkflowPhaseMeta[];
   /** Models with a usable account; the rest are flagged on the card. */
   connected?: (model: string) => boolean;
+  /** Models whose agents inherit fast mode; the card warns before approval. */
+  fastMode?: (model: string) => boolean;
   startSandbox?: (options: WorkflowSandboxOptions) => WorkflowSandbox;
 }
 
@@ -121,6 +124,15 @@ export async function estimateWorkflow(input: WorkflowEstimateInput): Promise<Wo
 
   const warnings: string[] = [];
   const agents = requests.length;
+  // Workers inherit the fast-mode setting, and the price table has no fast
+  // rate. First, so the consent card's short list of notes always shows it.
+  const fastModels = [...new Set([...modelCounts.values()].map((entry) => entry.model))]
+    .filter((model) => input.fastMode?.(model));
+  if (fastModels.length > 0) {
+    warnings.push(
+      `Fast mode is on, so agents on ${fastModels.join(", ")} run fast and cost more than this estimate. ${FAST_MODE_COST_NOTE}`,
+    );
+  }
   if (unbounded) {
     warnings.push(`The dry run did not finish; the run will stop at maxAgents (${input.caps.maxAgents}).`);
   } else if (agents > input.caps.maxAgents) {

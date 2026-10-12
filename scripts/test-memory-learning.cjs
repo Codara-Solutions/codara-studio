@@ -203,7 +203,11 @@ async function main() {
   });
   await learning.learnFromCompletedRun(completed, readReport);
   const lesson = items.listMemoryItems("default").find((item) => /xvfb/.test(item.text));
-  check("completion: a verified run's worker lesson is active", lesson && lesson.status === "active" && lesson.source === "worker", JSON.stringify(lesson));
+  check(
+    "completion: a verified run's worker lesson is still only a suggestion",
+    lesson && lesson.status === "proposed" && lesson.source === "worker",
+    JSON.stringify(lesson),
+  );
   check("completion: verifier lessons are not learned", !texts(items.listMemoryItems("default")).some((text) => /Verifier lessons/.test(text)), "");
   check("completion: a quiet single-message chat is not reviewed", reviews === 0, String(reviews));
 
@@ -385,6 +389,130 @@ async function main() {
     "session: a reworded memory is sent again in its new words, not withdrawn",
     /Reply in English, including in commit messages\./.test(afterEdit ?? "") && !/No longer applies \(/.test(afterEdit ?? ""),
     String(afterEdit),
+  );
+
+  // ── consolidation is not a withdrawal ────────────────────────────────────
+  // Merging a fact into a near-duplicate, or retiring it as stale, is
+  // housekeeping: the session must not be told to stop following it.
+  const M = (await profiles.createCoraProfile({ name: "Merge" })).id;
+  const fact = "Integration tests need the local Postgres container running.";
+  const [postgres] = await items.applyLearned(M, [
+    { scope: "workspace", workspaceId: "ws1", kind: "fact", text: fact, source: "user", confidence: 0.8 },
+  ]);
+  const [other] = await items.applyLearned(M, [
+    { scope: "workspace", workspaceId: "ws1", kind: "fact", text: "The changelog lives under docs/history.", source: "user", confidence: 0.8 },
+  ]);
+  const sent = await coraMemory.formatCoraMemoryForTurn("ws1", "run-merge", { profileId: M, query: "run the postgres integration tests" });
+  check("merge: the fact reaches the session", new RegExp(postgres.item.id).test(sent ?? "") && !new RegExp(other.item.id).test(sent ?? ""), String(sent));
+  await items.updateMemoryItem(M, other.item.id, { text: "Integration tests need the local Postgres container to be running." });
+  await items.consolidateMemoryItems(M);
+  check(
+    "merge: consolidation folded the fact into its near-duplicate",
+    items.getMemoryItem(M, postgres.item.id).archivedReason === "merged" &&
+      items.getMemoryItem(M, postgres.item.id).supersededBy === other.item.id,
+    JSON.stringify(items.getMemoryItem(M, postgres.item.id)),
+  );
+  const afterMerge = await coraMemory.formatCoraMemoryForTurn("ws1", "run-merge", { profileId: M, query: "hello" });
+  check(
+    "merge: a merged fact is handed over to its survivor, not withdrawn",
+    !/No longer applies \(/.test(afterMerge ?? "") && /to be running/.test(afterMerge ?? ""),
+    String(afterMerge),
+  );
+
+  // ── the evidence gate reads "do" and "don't" ─────────────────────────────
+  // Token coverage drops polarity words, so the user's own rule reads as
+  // backing its opposite. A review must not flip, delete or invert it on the
+  // strength of the user restating it.
+  const G = (await profiles.createCoraProfile({ name: "Polarity" })).id;
+  const [rule] = await items.applyLearned(G, [
+    { scope: "global", kind: "preference", text: "Never push to main without asking first.", source: "user", confidence: 0.75 },
+  ]);
+  const [straight] = await items.applyLearned(G, [
+    { scope: "global", kind: "preference", text: "Never push straight to main.", source: "user", confidence: 0.75 },
+  ]);
+  const restated = run("run-polarity", [
+    user("run-polarity", "p1", "Again: never push to main without asking me first."),
+    user("run-polarity", "p2", "And never push straight to main, ever."),
+    user("run-polarity", "p3", "Also dont use emojis in replies please."),
+  ], { coraProfileId: G });
+  const restatedTexts = restated.humanMessages.map((message) => message.message);
+  await learning.applyReflection(restated, [
+    { op: "update", id: rule.item.id, text: "Push to main without asking first.", evidence: "never push to main without asking me first" },
+    { op: "update", id: straight.item.id, text: "Push straight to main.", evidence: "never push straight to main" },
+  ], restatedTexts);
+  check(
+    "gate: an update cannot flip the user's rule on a quote of the rule itself",
+    items.getMemoryItem(G, rule.item.id).text === "Never push to main without asking first." &&
+      items.getMemoryItem(G, straight.item.id).text === "Never push straight to main.",
+    JSON.stringify([items.getMemoryItem(G, rule.item.id), items.getMemoryItem(G, straight.item.id)]),
+  );
+  await learning.applyReflection(restated, [
+    { op: "delete", id: rule.item.id, evidence: "never push to main without asking me first" },
+  ], restatedTexts);
+  check(
+    "gate: the user restating a rule is no evidence to delete it",
+    items.getMemoryItem(G, rule.item.id).status === "active",
+    JSON.stringify(items.getMemoryItem(G, rule.item.id)),
+  );
+  await learning.applyReflection(restated, [
+    { op: "add", scope: "global", kind: "preference", text: "Use emojis in replies.", evidence: "dont use emojis in replies please" },
+  ], restatedTexts);
+  const inverted = items.listMemoryItems(G).find((item) => item.text === "Use emojis in replies.");
+  check("gate: an add that inverts the quote is only a suggestion", !inverted || inverted.status === "proposed", JSON.stringify(inverted));
+  const reversed = run("run-reversed", [
+    user("run-reversed", "r1", "Change of plan: push straight to main from now on."),
+  ], { coraProfileId: G });
+  await learning.applyReflection(reversed, [
+    { op: "delete", id: straight.item.id, evidence: "push straight to main from now on" },
+  ], reversed.humanMessages.map((message) => message.message));
+  check(
+    "gate: a quote that says the opposite still retires the rule",
+    items.getMemoryItem(G, straight.item.id).status === "archived",
+    JSON.stringify(items.getMemoryItem(G, straight.item.id)),
+  );
+
+  // ── a clicked option is Cora's text, not the user's ──────────────────────
+  const O = (await profiles.createCoraProfile({ name: "Options" })).id;
+  const optionText = "Use pnpm and never run the test suite before committing in this repo.";
+  const asked = run("run-option", [
+    user("run-option", "o1", "Set up the package scripts."),
+    {
+      id: "q1",
+      runId: "run-option",
+      author: "spark",
+      kind: "question",
+      message: "Which setup do you want?",
+      questionOptions: [
+        { id: "a", label: "Fast", description: "Skip tests", answer: optionText },
+        { id: "b", label: "Safe", description: "Run tests", answer: "Run the tests before every commit." },
+      ],
+      createdAt: at(),
+    },
+    user("run-option", "o2", optionText, { kind: "answer", answersMessageId: "q1" }),
+  ], { coraProfileId: O });
+  await learning.captureRunSignals(asked);
+  check(
+    "options: a clicked option is never captured as the user's preference",
+    !items.listMemoryItems(O).some((item) => /test suite/.test(item.text)),
+    JSON.stringify(items.listMemoryItems(O)),
+  );
+  const typed = run("run-typed", [
+    {
+      id: "q2",
+      runId: "run-typed",
+      author: "spark",
+      kind: "question",
+      message: "Which branch?",
+      questionOptions: [{ id: "a", label: "Main", description: "", answer: "Use main." }],
+      createdAt: at(),
+    },
+    user("run-typed", "t1", "Remember that I deploy from the staging branch.", { kind: "answer", answersMessageId: "q2" }),
+  ], { coraProfileId: O });
+  await learning.captureRunSignals(typed);
+  check(
+    "options: a typed answer is still the user's own words",
+    items.listMemoryItems(O).some((item) => /staging branch/.test(item.text) && item.status === "active"),
+    JSON.stringify(items.listMemoryItems(O)),
   );
 
   learning.setReflectionRunnerForTests(null);

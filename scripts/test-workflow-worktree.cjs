@@ -2,7 +2,8 @@
 // (src/main/orchestration/workflow-worktree.ts) against throwaway git
 // repositories: an unchanged agent leaves nothing behind, a changed one
 // leaves exactly one commit on its branch and no checkout, parallel creation
-// does not race git, a non-git workspace refuses isolation, run cleanup
+// does not race git, a branch an earlier agent committed to is never reset,
+// a non-git workspace refuses isolation, run cleanup
 // deletes only merged branches, and checkouts an app restart left behind are
 // removed with their edits kept on their branches.
 //
@@ -70,6 +71,19 @@ async function main() {
     check("parallel creation gives every agent its checkout", created.every((c) => fs.existsSync(c.path)));
     await Promise.all(created.map((c) => wt.finishWorkflowWorktree(c, "par")));
     check("parallel finish removes every checkout", created.every((c) => !fs.existsSync(c.path)));
+  }
+  {
+    // A resume renumbers calls from 0, so an edited script can reach a
+    // label and seq whose branch an earlier agent already committed to.
+    const reused = await wt.createWorkflowWorktree({ repoCwd: repo, root, runId, label: "fix", seq: 1, base });
+    const earlier = git(repo, "rev-parse", "codara/wf/abcdef12/fix-1");
+    check("a branch with an earlier agent's commits is not reset", earlier !== base && reused.branch !== "codara/wf/abcdef12/fix-1", reused.branch);
+    check("the new agent takes the next free name", reused.branch === "codara/wf/abcdef12/fix-1-2", reused.branch);
+    check("the earlier agent's commit is still on its branch", git(repo, "show", "codara/wf/abcdef12/fix-1:b.txt") === "new");
+    await wt.finishWorkflowWorktree(reused, "workflow test: reused");
+    const again = await wt.createWorkflowWorktree({ repoCwd: repo, root, runId, label: "read only: look", seq: 0, base });
+    check("a free name is used as is", again.branch === "codara/wf/abcdef12/read-only-look-0", again.branch);
+    await wt.finishWorkflowWorktree(again, "workflow test: look again");
   }
   {
     const plain = path.join(tempDir(), "plain");
