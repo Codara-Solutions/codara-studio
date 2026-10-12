@@ -72,10 +72,11 @@ const harnessPlugin = {
         // Unified notify pipeline: record publishes/rearms for assertions.
         return {
           contents:
-            "globalThis.__NOTIFY ??= { published: [], rearms: [] };\n" +
+            "globalThis.__NOTIFY ??= { published: [], rearms: [], settledJobs: [] };\n" +
             "export const automationSourceKey = (id) => `automation:${id}`;\n" +
             "export function publish(e){ globalThis.__NOTIFY.published.push(e); }\n" +
-            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n",
+            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n" +
+            "export function settleAutomationQuestions(id){ globalThis.__NOTIFY.settledJobs.push(id); }\n",
           loader: "js",
         };
       }
@@ -442,6 +443,10 @@ async function main() {
     st = await getState(job.id);
     ok("stopJob finalizes (user-stop)", st.status === "stopped" && st.lastStopReason === "user-stop");
     ok("stopJob force-paused the live run", (L.forcePaused ?? 0) >= 1);
+    ok(
+      "stopJob settles the questions its iterations asked",
+      globalThis.__NOTIFY.settledJobs.includes(job.id),
+    );
   }
 
   // ── 7) state + history persist to scheduler.json; legacy job normalizes ──

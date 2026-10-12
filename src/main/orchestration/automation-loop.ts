@@ -24,7 +24,7 @@ import {
   SPARK_LOOP_DONE,
 } from "@shared/types";
 import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
-import { automationSourceKey, publish, rearm } from "../notify";
+import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
 import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
 import { resolveInlineNodes, stepNoteMessage, type Projection } from "./loom-resolve";
@@ -1645,6 +1645,9 @@ async function finalize(
   });
   const finalJob = await getJob(id);
   void emitIteration(id, finalJob?.state.iteration ?? 0, undefined, "stopped");
+  // Every stop, user-stop included: a stopped loop can no longer take the
+  // answer an iteration was waiting on.
+  settleAutomationQuestions(id);
 
   // Loop-level completion alert — once per finalize, never per iteration.
   // user-stop is skipped: the user clicked stop themselves; pinging them

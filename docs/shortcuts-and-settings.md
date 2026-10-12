@@ -228,8 +228,9 @@ and muted sources do not light it.
   have read or muted is still open but no longer pinned: it stays in its day
   with a **Waiting** tag and a quiet button, and the header says how many
   (for example "Needs you 6 · 9 seen"). A question stops waiting once its
-  source moves on: the agent resumes, the run continues, the pane closes or
-  the run is deleted. It then reads **Resolved**, or **Pane closed** when
+  source moves on: the agent resumes, the run continues, finishes, is
+  stopped, cancelled or deleted, the automation stops, or the pane closes.
+  It then reads **Resolved**, or **Pane closed** when
   its pane is gone, and leaves the unread count. A terminal prompt from
   before a restart no longer counts.
 - Below it the history is grouped by day, or by workspace with the folder

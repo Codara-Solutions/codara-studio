@@ -318,6 +318,29 @@ test("settling a source marks its questions read and settled, nothing else", () 
   assert.equal(M.settleSource(list, "run:r1"), false);
 });
 
+test("settling a stopped automation settles its iteration questions, nothing else", () => {
+  const loom = (id, jobId, fields = {}) =>
+    row({
+      id,
+      kind: "automation.blocked",
+      sourceKey: `run:${id}`,
+      target: { type: "automation", jobId, runId: id, workspaceId: "w1" },
+      ...fields,
+    });
+  const list = [
+    loom("i1", "job1"),
+    loom("i2", "job1"),
+    loom("i3", "job2"),
+    row({ id: "fin", kind: "automation.finished", sourceKey: "automation:job1", target: { type: "automation", jobId: "job1" } }),
+  ];
+  assert.equal(M.settleJob(list, "job1"), true);
+  assert.deepEqual(
+    list.map((e) => [e.id, e.settled === true, e.read]),
+    [["i1", true, true], ["i2", true, true], ["i3", false, false], ["fin", false, false]],
+  );
+  assert.equal(M.settleJob(list, "job1"), false);
+});
+
 test("terminal prompts from a previous session are settled at launch", () => {
   const list = [row({ id: "p", kind: "terminal.agent.needs-input" }), row({ id: "r", kind: "run.blocked", sourceKey: "run:r" })];
   assert.equal(M.settleTerminalQuestions(list), true);

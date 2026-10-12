@@ -306,6 +306,21 @@ export function settleSource(list: NotificationCenterEntry[], sourceKey: string)
   return changed;
 }
 
+// An automation stopped: every question one of its iterations asked can no
+// longer be answered. Iteration questions carry their run's source key, so
+// only the target's job id ties them to the loop.
+export function settleJob(list: NotificationCenterEntry[], jobId: string): boolean {
+  let changed = false;
+  for (const entry of list) {
+    if (entry.target.type !== "automation" || entry.target.jobId !== jobId) continue;
+    if (!isOpenQuestion(entry)) continue;
+    entry.settled = true;
+    entry.read = true;
+    changed = true;
+  }
+  return changed;
+}
+
 // Questions whose pane, run or workspace the renderer can no longer find.
 export function settleIds(list: NotificationCenterEntry[], ids: readonly string[]): boolean {
   const wanted = new Set(ids);

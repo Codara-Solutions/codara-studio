@@ -115,10 +115,11 @@ const harnessPlugin = {
         // Unified notify pipeline: record publishes/rearms for assertions.
         return {
           contents:
-            "globalThis.__NOTIFY ??= { published: [], rearms: [] };\n" +
+            "globalThis.__NOTIFY ??= { published: [], rearms: [], settledJobs: [] };\n" +
             "export const automationSourceKey = (id) => `automation:${id}`;\n" +
             "export function publish(e){ globalThis.__NOTIFY.published.push(e); }\n" +
-            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n",
+            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n" +
+            "export function settleAutomationQuestions(id){ globalThis.__NOTIFY.settledJobs.push(id); }\n",
           loader: "js",
         };
       }

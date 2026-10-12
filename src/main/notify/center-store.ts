@@ -26,6 +26,7 @@ import {
   sanitizeMutes,
   setRead,
   settleIds,
+  settleJob,
   settleMissingWorkspaces,
   settleSource,
   settleTerminalQuestions,
@@ -269,6 +270,10 @@ export function markCenterViewed(view: NotificationViewSnapshot): Promise<void> 
 
 export function settleCenterSource(sourceKey: string): Promise<void> {
   return enqueue(() => commit({ entries: settleSource(entries, sourceKey) }));
+}
+
+export function settleCenterJob(jobId: string): Promise<void> {
+  return enqueue(() => commit({ entries: settleJob(entries, jobId) }));
 }
 
 // The renderer found these questions' panes or runs gone. Main has no view

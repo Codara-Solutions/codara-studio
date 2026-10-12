@@ -23,6 +23,7 @@ import {
   loadNotificationCenter,
   noteCenterWorkspaces,
   recordToCenter,
+  settleCenterJob,
   settleCenterSource,
 } from "./center-store";
 import {
@@ -155,7 +156,21 @@ export function publish(input: PublishInput): void {
 // in the center stop counting toward the badge.
 export function rearm(sourceKey: string): void {
   policyRearm(state, sourceKey);
+  settleSource(sourceKey);
+}
+
+function settleSource(sourceKey: string): void {
   void settleCenterSource(sourceKey).catch((err) => {
+    console.warn("[notify] center settle failed:", err);
+  });
+}
+
+// An automation stopped for good. Its iteration questions are keyed by run,
+// so the loop's own finish alert (automation:<jobId>) would settle none of
+// them; a stopped loop can no longer take an answer.
+export function settleAutomationQuestions(jobId: string): void {
+  settleSource(automationSourceKey(jobId));
+  void settleCenterJob(jobId).catch((err) => {
     console.warn("[notify] center settle failed:", err);
   });
 }
@@ -207,9 +222,7 @@ function handleRunEvent(event: SparkEvent): void {
   // answered, so its question stops counting. Run-scoped automation
   // questions share the run's source key and settle with it.
   if (event.type === "run.deleted" && event.runId) {
-    void settleCenterSource(runSourceKey(event.runId)).catch((err) => {
-      console.warn("[notify] center settle failed:", err);
-    });
+    settleSource(runSourceKey(event.runId));
     return;
   }
   // Only run-level status transitions alert; worker events fire many times
@@ -261,9 +274,20 @@ function handleRunEvent(event: SparkEvent): void {
       }
     } else {
       // paused/idle: allow a future re-entry into the same terminal status
-      // to alert again, but keep the completion guard armed.
+      // to alert again, but keep the completion guard armed. Pausing abandons
+      // the run's open question (a resume asks again), so the old row must
+      // stop waiting even though no alert follows.
       clearLastAlerted(state, sourceKey);
+      settleSource(sourceKey);
     }
+    return;
+  }
+
+  // A cancelled run publishes nothing, but its question can no longer be
+  // answered.
+  if (status === "cancelled") {
+    runActiveSince.delete(runId);
+    settleSource(sourceKey);
     return;
   }
 
@@ -314,8 +338,12 @@ function handleRunEvent(event: SparkEvent): void {
     // ping would spam the user, so suppress it here (the runActiveSince cleanup
     // above still runs, so no per-run duration state leaks). The loop-level
     // automation.finished/failed published once per finalize by
-    // automation-loop.ts is the truthful end-of-automation alert.
-    if (automationId) return;
+    // automation-loop.ts is the truthful end-of-automation alert. That alert
+    // has the loop's source key, so this iteration's question settles here.
+    if (automationId) {
+      settleSource(sourceKey);
+      return;
+    }
     const ok = status === "complete";
     let body =
       event.message?.trim() ||
