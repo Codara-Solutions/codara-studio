@@ -5,14 +5,7 @@ import type {
   NavigationTarget,
   ResolvedRunQuestion,
 } from "@shared/types";
-import {
-  countCenter,
-  countsAsNeedsYou,
-  mutedBy,
-  sourceMuteKey,
-  targetWorkspaceId,
-  workspaceMuteKey,
-} from "@shared/notify-center";
+import { countCenter, countsAsNeedsYou, mutedBy } from "@shared/notify-center";
 import { NotifyGlyphSvg } from "../components/Toast";
 import { accentVar, kindMeta } from "./kinds";
 import { GONE_LABEL, type NavigateTo, type NotifyTargetStatus } from "./routing";
@@ -26,9 +19,10 @@ import {
   foldSummary,
   fullTime,
   isWaiting,
+  muteChoices,
   remainingLabel,
   rowTime,
-  sourceLabel,
+  stackMoreLabel,
   stackTitle,
   untilTomorrowMs,
   workspaceOf,
@@ -57,6 +51,10 @@ type AppRegionStyle = React.CSSProperties & {
 
 const LIVE: NotifyTargetStatus = { state: "live" };
 const HOUR_MS = 60 * 60_000;
+// A renderer that has just booted, or just closed a tab, can briefly hold a
+// layout that does not yet list every pane. A question has to stay gone this
+// long before main is told to settle it.
+const SETTLE_GONE_MS = 2_000;
 const FILTER_KEY = "spark.notify.filter";
 const GROUPING_KEY = "spark.notify.grouping";
 
@@ -112,18 +110,28 @@ interface RowActions {
   toggleMenu: (entryId: string | null) => void;
   mute: (entryId: string, key: string, label: string, durationMs: number) => void;
   unmute: (entryId: string, key: string) => void;
-  answer: (entry: NotificationCenterEntry, runId: string, questionMessageId: string, message: string) => Promise<void>;
+  answer: (entry: NotificationCenterEntry, runId: string, questionMessageId: string, message: string) => void;
 }
+
+type AnswerState = { phase: "idle" } | { phase: "sending" } | { phase: "sent" } | { phase: "error"; message: string };
+
+const IDLE: AnswerState = { phase: "idle" };
+const SENDING: AnswerState = { phase: "sending" };
+const SENT: AnswerState = { phase: "sent" };
 
 interface RowView {
   status: NotifyTargetStatus;
   muted: NotificationMute | null;
   time: string;
   workspace: { id: string | null; name: string | null; color?: string };
-  // "pinned": an open question the user has not seen; "seen": still open,
-  // but read or muted, so it sits quietly in its day.
+  // "pinned": an open question the user has not seen, or one answered while
+  // the panel is open; "seen": still open, but read or muted, so it sits
+  // quietly in its day.
   waiting: "pinned" | "seen" | null;
   question: ResolvedRunQuestion | null;
+  // Held by the panel, not the row: an answered row can move between
+  // sections, and React would rebuild it there from scratch.
+  answer: AnswerState;
   // The head of a collapsed stack speaks for the whole stack.
   stackTitle: string | null;
 }
@@ -148,6 +156,8 @@ export default function NotificationCenter({
   const bellRef = useRef<HTMLButtonElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const center = useNotificationCenter(open);
+  const centerRef = useRef(center);
+  centerRef.current = center;
   const [dnd, setDnd] = useState(false);
   const [filter, setFilterState] = useState<CenterFilter>(() =>
     readStored(FILTER_KEY, ["all", "needs-you", "unread"], "all"),
@@ -161,6 +171,10 @@ export default function NotificationCenter({
   const menuForRef = useRef(menuFor);
   menuForRef.current = menuFor;
   const [now, setNow] = useState(() => Date.now());
+  // Inline answers sent while the panel is open, by entry id. Cleared on
+  // close; the epoch drops a reply that lands after the panel closed.
+  const [answers, setAnswers] = useState<ReadonlyMap<string, AnswerState>>(() => new Map());
+  const panelEpoch = useRef(0);
 
   const setFilter = (next: CenterFilter) => {
     setFilterState(next);
@@ -199,6 +213,8 @@ export default function NotificationCenter({
   const close = useCallback((restoreFocus: boolean) => {
     setOpen(false);
     setMenuFor(null);
+    panelEpoch.current += 1;
+    setAnswers((current) => (current.size === 0 ? current : new Map()));
     if (restoreFocus) bellRef.current?.focus();
   }, []);
 
@@ -269,6 +285,39 @@ export default function NotificationCenter({
     (entry: NotificationCenterEntry) => statusOf(entry).state === "gone",
     [statusOf],
   );
+  const isGoneRef = useRef(isGone);
+  isGoneRef.current = isGone;
+
+  // A question whose pane, run or workspace is gone can never be answered.
+  // Only main can settle it, and only this window can see that it is gone,
+  // so the window says so once the target has stayed gone a moment. Until
+  // the workspace list arrives every target would look gone.
+  // Rows arrive all the time in a busy session, so each question keeps the
+  // moment it was first seen gone rather than restarting a debounce.
+  const knowsWorkspaces = (workspaces?.length ?? 0) > 0;
+  const goneSince = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (!center.loaded || !knowsWorkspaces) return;
+    const at = Date.now();
+    const since = goneSince.current;
+    const gone = new Set<string>();
+    for (const e of center.entries) {
+      if (!isWaiting(e) || !isGone(e)) continue;
+      gone.add(e.id);
+      if (!since.has(e.id)) since.set(e.id, at);
+    }
+    for (const id of [...since.keys()]) if (!gone.has(id)) since.delete(id);
+    if (gone.size === 0) return;
+    const first = Math.min(...[...gone].map((id) => since.get(id) ?? at));
+    const timer = window.setTimeout(() => {
+      const due = Date.now() - SETTLE_GONE_MS;
+      const ids = centerRef.current.entries
+        .filter((e) => isWaiting(e) && isGoneRef.current(e) && (goneSince.current.get(e.id) ?? Infinity) <= due)
+        .map((e) => e.id);
+      centerRef.current.settle(ids);
+    }, Math.max(0, first + SETTLE_GONE_MS - at));
+    return () => window.clearTimeout(timer);
+  }, [center.loaded, center.entries, knowsWorkspaces, isGone]);
 
   // One count for the badge, the Needs you tab and the pinned header, from
   // one rule (countsAsNeedsYou). `now` matters only for mutes, which tick
@@ -282,6 +331,7 @@ export default function NotificationCenter({
   }, [center.loaded, center.summary, center.entries, center.mutes, center.muteClock, isGone, now]);
 
   const nowMinute = Math.floor(now / 60_000);
+  const held = useMemo(() => new Set(answers.keys()), [answers]);
   const sections = useMemo(
     () =>
       open
@@ -292,18 +342,17 @@ export default function NotificationCenter({
             mutes: center.mutes,
             workspaces: workspaceMap,
             isGone,
+            held,
           })
         : [],
     // nowMinute, not now: sections only move across day boundaries.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [open, center.entries, center.mutes, center.muteClock, filter, grouping, nowMinute, workspaceMap, isGone],
+    [open, center.entries, center.mutes, center.muteClock, filter, grouping, nowMinute, workspaceMap, isGone, held],
   );
 
   const clearable = useMemo(() => clearableIds(center.entries, isGone), [center.entries, isGone]);
   const keeps = center.entries.length - clearable.length;
 
-  const centerRef = useRef(center);
-  centerRef.current = center;
   const navigateRef = useRef(navigateTo);
   navigateRef.current = navigateTo;
 
@@ -330,11 +379,26 @@ export default function NotificationCenter({
         setMenuFor(null);
         window.requestAnimationFrame(() => focusRow(listRef.current, entryId));
       },
-      answer: async (entry, runId, questionMessageId, message) => {
-        await window.spark.orchestration.answerRunQuestion({ runId, questionMessageId, message });
-        // Answering is reading. The row stays until the run resumes and
-        // settles it, so a failed resume is still visible here.
-        if (!entry.read) centerRef.current.setRead([entry.id], true);
+      answer: (entry, runId, questionMessageId, message) => {
+        const epoch = panelEpoch.current;
+        const put = (state: AnswerState) => {
+          if (epoch !== panelEpoch.current) return;
+          setAnswers((current) => new Map(current).set(entry.id, state));
+        };
+        put(SENDING);
+        window.spark.orchestration.answerRunQuestion({ runId, questionMessageId, message }).then(
+          () => {
+            put(SENT);
+            // Answering is reading. The row stays in the history until the
+            // run resumes and settles it, so a failed resume still shows.
+            if (!entry.read) centerRef.current.setRead([entry.id], true);
+          },
+          (err: unknown) => {
+            const reason =
+              err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : "";
+            put({ phase: "error", message: reason || "The answer did not reach the run." });
+          },
+        );
       },
     }),
     [close],
@@ -351,14 +415,17 @@ export default function NotificationCenter({
   const viewOf = (entry: NotificationCenterEntry, withDay: boolean, stack: string | null): RowView => {
     const status = statusOf(entry);
     const open = isWaiting(entry) && status.state !== "gone";
+    const answer = answers.get(entry.id) ?? IDLE;
     const runId = open ? questionRunId(entry) : null;
     return {
       status,
       muted: mutedBy(entry, center.mutes, now),
       time: rowTime(entry.createdAt, now, withDay),
       workspace: workspaceOf(entry, workspaceMap),
-      waiting: !open ? null : countsAsNeedsYou(entry, center.mutes, now) ? "pinned" : "seen",
+      waiting:
+        answer !== IDLE ? "pinned" : !open ? null : countsAsNeedsYou(entry, center.mutes, now) ? "pinned" : "seen",
       question: runId && resolveQuestion ? resolveQuestion(runId) : null,
+      answer,
       stackTitle: stack,
     };
   };
@@ -452,9 +519,7 @@ export default function NotificationCenter({
           onClick={() => toggleKey(`stack:${item.key}`)}
         >
           <span className="nc-stack-layers" aria-hidden />
-          {expanded
-            ? "Show less"
-            : `${item.entries.length === 2 ? "Show both" : `Show all ${item.entries.length}`}${unread > 0 ? ` · ${unread} unread` : ""}`}
+          {expanded ? "Show less" : `${stackMoreLabel(item.entries)}${unread > 0 ? ` · ${unread} unread` : ""}`}
         </button>
       </div>
     );
@@ -697,7 +762,7 @@ export default function NotificationCenter({
   );
 }
 
-type AnswerState = { phase: "idle" } | { phase: "sending" } | { phase: "sent" } | { phase: "error"; message: string };
+type MuteSpan = "hour" | "morning";
 
 const CenterRow = memo(function CenterRow({
   entry,
@@ -707,7 +772,7 @@ const CenterRow = memo(function CenterRow({
   actions,
 }: RowProps) {
   const meta = kindMeta(entry.kind);
-  const tone = accentVar(entry.kind, entry.tone ?? meta.tone);
+  const tone = view.answer.phase === "sent" ? "var(--ok)" : accentVar(entry.kind, entry.tone ?? meta.tone);
   const text = displayText(entry);
   const title = view.stackTitle ?? text.title;
   const context = view.stackTitle && text.context ? `Latest in ${text.context}` : text.context;
@@ -716,23 +781,25 @@ const CenterRow = memo(function CenterRow({
   const count = view.stackTitle || fold ? 1 : entryCount(entry);
   const gone = view.status.state === "gone" ? view.status.reason : null;
   const canFallback = gone === "pane" || gone === "run";
-  const workspaceId = targetWorkspaceId(entry.target);
   const openable = !gone || canFallback;
-  const sourceKey = sourceMuteKey(entry.sourceKey);
-  const wsKey = workspaceId ? workspaceMuteKey(workspaceId) : null;
   const showWorkspace = Boolean(view.workspace.name) && !hideWorkspace;
   const earlier = useMemo(() => earlierBodies(entry), [entry]);
 
   const [answerOpen, setAnswerOpen] = useState(false);
   const [showEarlier, setShowEarlier] = useState(false);
   const [draft, setDraft] = useState("");
-  const [answerState, setAnswerState] = useState<AnswerState>({ phase: "idle" });
+  const [muteSpan, setMuteSpan] = useState<MuteSpan>("hour");
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
+  const answer = view.answer;
+  const answered = answer.phase === "sent";
+  const sending = answer.phase === "sending";
   const question = view.question;
-  const runId = question ? questionRunId(entry) : null;
-  const answerable = Boolean(question && runId && view.waiting);
-  const showAnswer = answerable && (view.waiting === "pinned" || answerOpen || answerState.phase !== "idle");
+  const runId = questionRunId(entry);
+  const answerable = Boolean(question && runId && view.waiting) && !answered;
+  const showForm = answerable && (view.waiting === "pinned" || answerOpen || answer.phase !== "idle");
 
   // Only a question that can still be answered gets a button; any other row
   // opens with a click on the row itself.
@@ -740,7 +807,7 @@ const CenterRow = memo(function CenterRow({
   if (view.waiting) {
     if (entry.target.type === "terminal") {
       primary = { label: "Reply in terminal", run: () => actions.open(entry) };
-    } else if (answerable && !showAnswer) {
+    } else if (answerable && !showForm) {
       primary = { label: "Answer", run: () => setAnswerOpen(true) };
     } else {
       primary = {
@@ -750,31 +817,31 @@ const CenterRow = memo(function CenterRow({
     }
   }
   // An inline answer is the main action, so the way out to the run is quiet.
-  const primaryQuiet = view.waiting === "seen" || showAnswer;
+  const primaryQuiet = view.waiting === "seen" || showForm || answer.phase !== "idle";
 
   useEffect(() => {
     if (!menuOpen) return;
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
   }, [menuOpen]);
 
+  // A failed send hands the reply field back, text intact.
+  useEffect(() => {
+    if (answer.phase === "error") inputRef.current?.focus({ preventScroll: true });
+  }, [answer.phase]);
+
   const send = (message: string) => {
-    const text = message.trim();
-    if (!text || !runId || !question || answerState.phase === "sending") return;
-    setAnswerState({ phase: "sending" });
-    actions.answer(entry, runId, question.questionMessageId, text).then(
-      () => {
-        setDraft("");
-        setAnswerState({ phase: "sent" });
-      },
-      (err: unknown) => {
-        const reason = err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") : "";
-        setAnswerState({ phase: "error", message: reason || "The answer did not reach the run." });
-      },
-    );
+    const reply = message.trim();
+    if (!reply || !runId || !question || sending) return;
+    // The control that sent is about to be disabled or replaced, which would
+    // drop focus to the document; the row keeps it instead.
+    rowRef.current?.focus({ preventScroll: true });
+    actions.answer(entry, runId, question.questionMessageId, reply);
   };
 
   const onMenuKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"], [role="menuitemradio"]') ?? [],
+    );
     const at = items.indexOf(document.activeElement as HTMLElement);
     let next = -1;
     if (e.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % items.length;
@@ -791,20 +858,30 @@ const CenterRow = memo(function CenterRow({
   };
 
   const showMeta =
-    showWorkspace || Boolean(context) || Boolean(fold) || Boolean(gone) || entry.settled || Boolean(view.muted) || Boolean(view.waiting) || Boolean(primary);
+    showWorkspace ||
+    Boolean(context) ||
+    Boolean(fold) ||
+    Boolean(gone) ||
+    entry.settled ||
+    Boolean(view.muted) ||
+    Boolean(view.waiting) ||
+    Boolean(primary);
+  const state = answered ? ", answered" : view.waiting ? ", waiting on you" : "";
 
   return (
     <div
+      ref={rowRef}
       className="nc-row"
       role="article"
       data-nc-nav
       data-entry-id={entry.id}
       data-unread={!entry.read}
       data-waiting={view.waiting ?? undefined}
+      data-answer={answer.phase === "idle" ? undefined : answer.phase}
       data-gone={Boolean(gone)}
       data-menu={menuOpen}
       tabIndex={-1}
-      aria-label={`${title}${view.workspace.name ? `, ${view.workspace.name}` : ""}${view.waiting ? ", waiting on you" : ""}${entry.read ? "" : ", unread"}${gone ? `, ${GONE_LABEL[gone].toLowerCase()}` : ""}`}
+      aria-label={`${title}${view.workspace.name ? `, ${view.workspace.name}` : ""}${state}${entry.read ? "" : ", unread"}${gone ? `, ${GONE_LABEL[gone].toLowerCase()}` : ""}`}
       style={{ ["--nc-tone" as string]: tone }}
       onClick={(e) => {
         if (!openable || (e.target as Element).closest("button, input, .nc-answer, .nc-menu, .nc-earlier-list")) return;
@@ -822,7 +899,7 @@ const CenterRow = memo(function CenterRow({
       }}
     >
       <span className="nc-icon" aria-hidden>
-        <NotifyGlyphSvg glyph={meta.glyph} size={13} />
+        <NotifyGlyphSvg glyph={answered ? "check" : meta.glyph} size={13} />
       </span>
       <div className="nc-main">
         <div className="nc-line1">
@@ -872,12 +949,17 @@ const CenterRow = memo(function CenterRow({
                 {view.muted && <BellOffIcon size={10} />} Waiting
               </span>
             )}
+            {answered && (
+              <span className="nc-tag" data-kind="answered">
+                Answered
+              </span>
+            )}
             {gone && (
               <span className="nc-tag" data-kind="gone">
                 {GONE_LABEL[gone]}
               </span>
             )}
-            {entry.settled && !gone && <span className="nc-tag">Resolved</span>}
+            {entry.settled && !gone && !answered && <span className="nc-tag">Resolved</span>}
             {view.muted && view.waiting !== "seen" && (
               <span className="nc-tag" title={`Muted: ${view.muted.label}`}>
                 <BellOffIcon size={10} /> Muted
@@ -917,62 +999,67 @@ const CenterRow = memo(function CenterRow({
             )}
           </div>
         )}
-        {showAnswer && question && (
+        {answered && (
           <div className="nc-answer">
-            {answerState.phase === "sent" ? (
-              <div className="nc-answer-note" role="status">
-                <CheckIcon /> Answer sent. Cora picks it up from here.
-              </div>
-            ) : (
-              <>
-                {question.options.length > 0 && (
-                  <div className="nc-options" role="group" aria-label="Answers">
-                    {question.options.map((option) => (
-                      <button
-                        key={option.id}
-                        type="button"
-                        className="nc-option"
-                        data-recommended={option.recommended === true}
-                        title={option.description || option.answer}
-                        disabled={answerState.phase === "sending"}
-                        onClick={() => send(option.answer || option.label)}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                <form
-                  className="nc-reply"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    send(draft);
-                  }}
-                >
-                  <input
-                    type="text"
-                    value={draft}
-                    placeholder={question.options.length > 0 ? "Or reply in your own words..." : "Reply..."}
-                    aria-label="Reply to Cora"
-                    disabled={answerState.phase === "sending"}
-                    onChange={(e) => setDraft(e.target.value)}
-                  />
+            <div className="nc-answer-note" role="status">
+              <CheckIcon /> Answer sent. Cora picks it up from here.
+            </div>
+          </div>
+        )}
+        {!answered && showForm && question && (
+          <div className="nc-answer">
+            {question.options.length > 0 && (
+              <div className="nc-options" role="group" aria-label="Answers">
+                {question.options.map((option) => (
                   <button
-                    type="submit"
-                    className="nc-reply-send"
-                    aria-label="Send reply"
-                    title="Send (Enter)"
-                    disabled={!draft.trim() || answerState.phase === "sending"}
+                    key={option.id}
+                    type="button"
+                    className="nc-option"
+                    data-recommended={option.recommended === true}
+                    title={option.description || option.answer}
+                    disabled={sending}
+                    onClick={() => send(option.answer || option.label)}
                   >
-                    <SendIcon />
+                    {option.label}
                   </button>
-                </form>
-                {answerState.phase === "error" && (
-                  <div className="nc-answer-error" role="alert">
-                    {answerState.message}
-                  </div>
-                )}
-              </>
+                ))}
+              </div>
+            )}
+            <form
+              className="nc-reply"
+              onSubmit={(e) => {
+                e.preventDefault();
+                send(draft);
+              }}
+            >
+              <input
+                ref={inputRef}
+                type="text"
+                value={draft}
+                placeholder={question.options.length > 0 ? "Or reply in your own words..." : "Reply..."}
+                aria-label="Reply to Cora"
+                disabled={sending}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="nc-reply-send"
+                aria-label="Send reply"
+                title="Send (Enter)"
+                disabled={!draft.trim() || sending}
+              >
+                <SendIcon />
+              </button>
+            </form>
+            {sending && (
+              <div className="nc-answer-pending" role="status">
+                Sending...
+              </div>
+            )}
+            {answer.phase === "error" && (
+              <div className="nc-answer-error" role="alert">
+                {answer.message}
+              </div>
             )}
           </div>
         )}
@@ -1026,40 +1113,48 @@ const CenterRow = memo(function CenterRow({
             </button>
           ) : (
             <>
-              <div className="nc-menu-label">Mute for 1 hour</div>
-              <button
-                type="button"
-                role="menuitem"
-                tabIndex={-1}
-                onClick={() => actions.mute(entry.id, sourceKey, sourceLabel(entry), HOUR_MS)}
-              >
-                {sourceLabel(entry)}
-              </button>
-              {wsKey && view.workspace.name && (
+              <div className="nc-menu-head">
+                <span className="nc-menu-label">Mute</span>
+                <div className="nc-menu-span" role="group" aria-label="For how long">
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    tabIndex={-1}
+                    aria-checked={muteSpan === "hour"}
+                    onClick={() => setMuteSpan("hour")}
+                  >
+                    1 hour
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitemradio"
+                    tabIndex={-1}
+                    aria-checked={muteSpan === "morning"}
+                    title="Until 8:00 tomorrow"
+                    onClick={() => setMuteSpan("morning")}
+                  >
+                    Until morning
+                  </button>
+                </div>
+              </div>
+              {muteChoices(entry, view.workspace, Boolean(gone)).map((choice) => (
                 <button
+                  key={choice.key}
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
-                  onClick={() => actions.mute(entry.id, wsKey, view.workspace.name!, HOUR_MS)}
+                  onClick={() =>
+                    actions.mute(
+                      entry.id,
+                      choice.key,
+                      choice.label,
+                      muteSpan === "hour" ? HOUR_MS : untilTomorrowMs(Date.now()),
+                    )
+                  }
                 >
-                  Everything in {view.workspace.name}
+                  {choice.label}
                 </button>
-              )}
-              {wsKey && view.workspace.name && (
-                <>
-                  <div className="nc-menu-label">Until tomorrow morning</div>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    tabIndex={-1}
-                    onClick={() =>
-                      actions.mute(entry.id, wsKey, view.workspace.name!, untilTomorrowMs(Date.now()))
-                    }
-                  >
-                    Everything in {view.workspace.name}
-                  </button>
-                </>
-              )}
+              ))}
             </>
           )}
         </div>
@@ -1090,6 +1185,7 @@ function sameRow(a: RowProps, b: RowProps): boolean {
     a.view.time === b.view.time &&
     a.view.waiting === b.view.waiting &&
     a.view.stackTitle === b.view.stackTitle &&
+    a.view.answer === b.view.answer &&
     a.view.question?.questionMessageId === b.view.question?.questionMessageId &&
     a.view.question?.options.length === b.view.question?.options.length &&
     a.view.muted?.key === b.view.muted?.key &&

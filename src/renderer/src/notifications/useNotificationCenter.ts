@@ -32,6 +32,7 @@ export interface NotificationCenterApi {
   // Bumps when a mute lapses, so counts that depend on mutes recompute.
   muteClock: number;
   setRead: (ids: string[], read: boolean) => void;
+  settle: (ids: string[]) => void;
   markAllRead: () => void;
   dismiss: (ids: string[]) => void;
   clear: (ids: string[]) => void;
@@ -134,6 +135,16 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     void window.spark.notifications.setRead(ids, read).catch(() => undefined);
   }, []);
 
+  const settle = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    bumpLocal();
+    const wanted = new Set(ids);
+    setEntries((current) =>
+      current.map((e) => (wanted.has(e.id) && !e.settled ? { ...e, settled: true, read: true } : e)),
+    );
+    void window.spark.notifications.settle(ids).catch(() => undefined);
+  }, []);
+
   const markAllRead = useCallback(() => {
     bumpLocal();
     setEntries((current) => current.map((e) => (e.read ? e : { ...e, read: true })));
@@ -216,6 +227,7 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     mutes,
     muteClock,
     setRead,
+    settle,
     markAllRead,
     dismiss,
     clear,

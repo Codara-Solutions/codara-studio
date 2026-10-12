@@ -580,6 +580,15 @@ for (const scenario of SCENARIOS) {
         await page.waitForTimeout(150);
         await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-unread-panel.png") });
         await setFilter(page, "All");
+        // A collapsed stack, then the same stack opened.
+        const stack = panel(page).locator(".nc-stack").first();
+        await stack.evaluate((el) => el.scrollIntoView({ block: "center" }));
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-stack-panel.png") });
+        await stack.locator(".nc-stack-more").click();
+        await stack.evaluate((el) => el.scrollIntoView({ block: "start" }));
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "many150-1400x900-dark-stack-open-panel.png") });
       }
 
       if (scenario.name === "needs-you" || scenario.name === "few") {
@@ -630,6 +639,26 @@ for (const scenario of SCENARIOS) {
         await page.waitForTimeout(250);
         await page.screenshot({ path: join(dir, "needs-you-1400x900-dark-muted.png") });
         await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-muted-panel.png") });
+        // The agent-level choices in the mute menu of a terminal question.
+        const codex = rows(page).filter({ hasText: "Codex needs you" }).first();
+        await codex.hover();
+        await codex.getByRole("button", { name: "Mute" }).click();
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-agent-menu-panel.png") });
+        await page.keyboard.press("Escape");
+        // Answer the blocked run in place. The real path resumes the run on a
+        // backend this home does not have, so main's handler is stubbed.
+        await app.evaluate(({ ipcMain }) => {
+          ipcMain.removeHandler("orchestration:answerRunQuestion");
+          ipcMain.handle("orchestration:answerRunQuestion", async () => ({}));
+        });
+        await rows(page).filter({ hasText: "Cora needs you" }).first().getByRole("button", { name: "Drop it now" }).click();
+        await page.mouse.move(10, 400);
+        await page.waitForTimeout(400);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-dark-answered-panel.png") });
+        await setTheme(page, "codara-daylight");
+        await page.waitForTimeout(150);
+        await panel(page).screenshot({ path: join(dir, "needs-you-1400x900-light-answered-panel.png") });
       }
 
       if (scenario.name === "few") {
@@ -648,7 +677,10 @@ for (const scenario of SCENARIOS) {
       }
 
       if (scenario.name === "closed-targets") {
+        // A question whose pane is gone is settled once it stays gone.
+        await page.waitForTimeout(2_500);
         await darkWide(page);
+        await panel(page).screenshot({ path: join(dir, "closed-targets-1400x900-dark-settled-panel.png") });
         const before = await rows(page).count();
         // A pane that was closed: the click lands on its workspace and says so.
         await rows(page).first().click();

@@ -267,12 +267,15 @@ export function evictToCap(list: NotificationCenterEntry[], cap = CENTER_CAP): b
   return changed;
 }
 
-// Age limits: read rows go after a week, anything after a month.
+// Age limits: read rows go after a week, anything after a month. A question
+// still open stays the month even once read: it is still waiting on the user,
+// and a row that vanished would make it look handled.
 export function pruneByAge(list: NotificationCenterEntry[], now: number): boolean {
   let changed = false;
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    const age = now - timeOf(list[i].createdAt);
-    if (age > MAX_AGE_MS || (list[i].read && age > READ_MAX_AGE_MS)) {
+    const entry = list[i];
+    const age = now - timeOf(entry.createdAt);
+    if (age > MAX_AGE_MS || (entry.read && age > READ_MAX_AGE_MS && !isOpenQuestion(entry))) {
       list.splice(i, 1);
       changed = true;
     }
@@ -286,6 +289,19 @@ export function settleSource(list: NotificationCenterEntry[], sourceKey: string)
   let changed = false;
   for (const entry of list) {
     if (entry.sourceKey !== sourceKey || entry.settled || !isNeedsYouKind(entry.kind)) continue;
+    entry.settled = true;
+    entry.read = true;
+    changed = true;
+  }
+  return changed;
+}
+
+// Questions whose pane, run or workspace the renderer can no longer find.
+export function settleIds(list: NotificationCenterEntry[], ids: readonly string[]): boolean {
+  const wanted = new Set(ids);
+  let changed = false;
+  for (const entry of list) {
+    if (!wanted.has(entry.id) || !isOpenQuestion(entry)) continue;
     entry.settled = true;
     entry.read = true;
     changed = true;

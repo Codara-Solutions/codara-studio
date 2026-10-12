@@ -9,8 +9,9 @@ import { join } from "node:path";
 // same rows through mutes and closed panes; pinned rows keep their workspace
 // when grouped by workspace; Escape peels the mute menu, then the panel, and
 // returns focus to the bell; Delete is undoable; closing a pane drops its
-// question from the badge. Nothing here reads or writes the real
-// ~/.codarastudio.
+// question from the badge. A blocked Cora run answered in place keeps its
+// card, its confirmation and the focus until the panel closes. Nothing here
+// reads or writes the real ~/.codarastudio.
 
 const MINUTE = 60_000;
 const WORKSPACES = [
@@ -77,11 +78,67 @@ const DISK_ROWS: Entry[] = [
   }),
 ];
 
+const BLOCKED_RUN = "run-blocked-1";
+const QUESTION_ID = `question-${BLOCKED_RUN}`;
+
+const RUN_QUESTION: Entry = entry("q-run", 3, {
+  kind: "run.blocked",
+  sourceKey: `run:${BLOCKED_RUN}`,
+  title: "Codara Studio \u2014 needs you",
+  workspaceName: "api-server",
+  body: "Should the migration drop the unused `legacy_sessions` table?",
+  target: { type: "run", runId: BLOCKED_RUN, workspaceId: "ws-api" },
+});
+
+// A persisted run blocked on one open question with two options.
+async function seedBlockedRun(home: string, cwd: string): Promise<void> {
+  const runDir = join(home, "runs", BLOCKED_RUN);
+  await mkdir(runDir, { recursive: true });
+  const at = new Date(Date.now() - 10 * MINUTE).toISOString();
+  const run = {
+    id: BLOCKED_RUN,
+    workspaceId: "ws-api",
+    title: "Session store migration",
+    status: "blocked",
+    settingsSnapshot: { workspaceCwd: cwd },
+    artifactDir: runDir,
+    createdAt: at,
+    updatedAt: at,
+    conversationEpoch: 0,
+    plans: [],
+    steps: [],
+    workerTasks: [],
+    workerAttempts: [],
+    checkpoints: [],
+    assumptions: [],
+    sparkCalls: [],
+    humanMessages: [
+      {
+        id: QUESTION_ID,
+        runId: BLOCKED_RUN,
+        author: "spark",
+        kind: "question",
+        message: "Should the migration drop the unused `legacy_sessions` table?",
+        questionOptions: [
+          { id: "drop", label: "Drop it now", answer: "Drop legacy_sessions in this migration.", recommended: true },
+          { id: "keep", label: "Keep one more release", answer: "Keep legacy_sessions for one more release." },
+        ],
+        createdAt: at,
+      },
+    ],
+    chatBackend: "pi",
+    chatMode: "auto",
+  };
+  await writeFile(join(runDir, "run.json"), JSON.stringify(run), "utf8");
+}
+
 function terminalTab(id: string, title: string, paneId: string, cwd: string) {
   return { id, kind: "terminal", title, activePaneId: paneId, root: { kind: "leaf", paneId, cwd } };
 }
 
-async function launch(): Promise<{ app: ElectronApplication; page: Page; root: string }> {
+async function launch(
+  opts: { disk?: Entry[]; live?: Entry[]; blockedRun?: boolean } = {},
+): Promise<{ app: ElectronApplication; page: Page; root: string }> {
   const root = await mkdtemp(join(tmpdir(), "codara-ncenter-"));
   const home = join(root, "codara-home");
   const userHome = join(root, "user-home");
@@ -94,8 +151,9 @@ async function launch(): Promise<{ app: ElectronApplication; page: Page; root: s
     workspaces.push({ ...ws, cwd, workers: [] });
   }
   await writeFile(join(home, "spark-state.json"), JSON.stringify({ workspaces, activeWorkspaceId: "ws-api" }), "utf8");
-  await writeFile(join(home, "notifications.json"), JSON.stringify(DISK_ROWS), "utf8");
+  await writeFile(join(home, "notifications.json"), JSON.stringify(opts.disk ?? DISK_ROWS), "utf8");
   const cwd = join(root, "projects");
+  if (opts.blockedRun) await seedBlockedRun(home, cwd);
   const layouts = {
     "ws-api": {
       v: 6,
@@ -136,7 +194,7 @@ async function launch(): Promise<{ app: ElectronApplication; page: Page; root: s
   await page.reload();
   await page.waitForLoadState("domcontentloaded");
   await ready();
-  await page.evaluate((rows) => window.spark.notifications.restore(rows as never), LIVE_ROWS);
+  await page.evaluate((rows) => window.spark.notifications.restore(rows as never), opts.live ?? LIVE_ROWS);
   return { app, page, root };
 }
 
@@ -189,6 +247,7 @@ test("notification center counts, keyboard, undo and closed panes", async () => 
       const menu = panel(page).getByRole("menu", { name: "Mute" });
       await expect(menu).toBeVisible();
       await expect(menu.getByRole("menuitem").first()).toBeFocused();
+      await expect(menu.getByRole("menuitem", { name: "Codex everywhere" })).toBeVisible();
       await page.keyboard.press("ArrowDown");
       await expect(menu.getByRole("menuitem").nth(1)).toBeFocused();
       await page.keyboard.press("Escape");
@@ -245,6 +304,68 @@ test("notification center counts, keyboard, undo and closed panes", async () => 
       await expect(page.locator(".spark-tab", { hasText: "agent" })).toHaveCount(0);
       await expectCounts(page, 1);
       await expect(row(page, "q-api")).toContainText("Pane closed");
+    });
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("answering a pinned question in place keeps the card and the focus", async () => {
+  test.setTimeout(120_000);
+  const { app, page, root } = await launch({ disk: [RUN_QUESTION], live: [], blockedRun: true });
+  try {
+    // The real answer path resumes the run on a backend this throwaway home
+    // does not have. The stub records the call and answers after a beat, so
+    // the sending state is on screen for a moment, as it is for real.
+    await app.evaluate(({ ipcMain }) => {
+      const calls: unknown[] = [];
+      (globalThis as { __answerCalls?: unknown[] }).__answerCalls = calls;
+      ipcMain.removeHandler("orchestration:answerRunQuestion");
+      ipcMain.handle("orchestration:answerRunQuestion", async (_e, input: unknown) => {
+        calls.push(input);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return {};
+      });
+    });
+    const card = row(page, "q-run");
+    const pinned = panel(page).locator('section[data-tone="needs-you"]');
+
+    await test.step("the question offers its answers in place", async () => {
+      await expectCounts(page, 1);
+      await expect(card.getByRole("button", { name: "Drop it now" })).toBeVisible({ timeout: 10_000 });
+      await expect(card.getByRole("textbox", { name: "Reply to Cora" })).toBeVisible();
+    });
+
+    await test.step("the answer is confirmed on the same card, which keeps focus", async () => {
+      await card.getByRole("button", { name: "Drop it now" }).click();
+      await expect(card).toContainText("Answer sent. Cora picks it up from here.");
+      await expect(card).toBeFocused();
+      await expect(pinned.locator('[data-entry-id="q-run"]')).toHaveCount(1);
+      await expect(card).toHaveAttribute("data-answer", "sent");
+      await expect(card.getByRole("button", { name: "Answer" })).toHaveCount(0);
+      await expect(badge(page)).toHaveCount(0);
+      await expect(needsYouTab(page).locator(".nc-filter-count")).toHaveText("");
+      const calls = await app.evaluate(() => (globalThis as { __answerCalls?: unknown[] }).__answerCalls ?? []);
+      expect(calls).toEqual([
+        { runId: BLOCKED_RUN, questionMessageId: QUESTION_ID, message: "Drop legacy_sessions in this migration." },
+      ]);
+    });
+
+    await test.step("a settle from main does not move it while the panel is open", async () => {
+      await page.evaluate(() => window.spark.notifications.settle(["q-run"]));
+      await page.waitForTimeout(400);
+      await expect(pinned.locator('[data-entry-id="q-run"]')).toHaveCount(1);
+      await expect(card).toContainText("Answer sent");
+    });
+
+    await test.step("reopened, it sits in its day as resolved", async () => {
+      await page.keyboard.press("Escape");
+      await expect(panel(page)).toBeHidden();
+      await openPanel(page);
+      await expect(pinned).toHaveCount(0);
+      await expect(card).toContainText("Resolved");
+      await expect(card).not.toHaveAttribute("data-waiting", /.+/);
     });
   } finally {
     await app.close();

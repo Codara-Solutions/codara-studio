@@ -1,9 +1,14 @@
 import type { NotificationCenterEntry, NotificationMute } from "@shared/types";
 import {
+  agentMuteKey,
+  agentOf,
   countsAsNeedsYou,
   isOpenQuestion,
+  jobMuteKey,
   mutedBy,
+  sourceMuteKey,
   targetWorkspaceId,
+  workspaceMuteKey,
   type IsGone,
 } from "@shared/notify-center";
 import { kindMeta } from "./kinds";
@@ -107,8 +112,12 @@ const FILLER = [
   /^Click to jump to the terminal\.$/i,
 ];
 
+// Producers join a message and its detail with a spaced dash ("... ran 18m",
+// "1 commit to main, Retry once"); the list joins facts with a middle dot.
+const SPACED_DASH = /\s+[\u2014\u2013]\s+/g;
+
 export function displayBody(entry: NotificationCenterEntry): string | null {
-  const body = (entry.body || "").trim();
+  const body = (entry.body || "").trim().replace(SPACED_DASH, " \u00b7 ");
   if (!body || !entry.kind.startsWith("terminal.agent.")) return body || null;
   const parts = body
     .replace(/\s*Click to jump to the terminal\.\s*$/i, "")
@@ -145,6 +154,7 @@ export function workspaceOf(
 
 // What a mute of this row's source would silence, in words.
 export function sourceLabel(entry: NotificationCenterEntry): string {
+  if (entry.kind.startsWith("automation.")) return automationName(entry) ?? "This automation";
   const { title, context } = displayText(entry);
   const key = entry.sourceKey || "";
   if (entry.kind.startsWith("terminal.agent.")) {
@@ -159,23 +169,96 @@ export function sourceLabel(entry: NotificationCenterEntry): string {
     const match = /#(\d+)$/.exec(key);
     return match ? `Pull request #${match[1]}` : "This pull request";
   }
-  if (entry.kind.startsWith("automation.")) return "This automation";
   if (entry.kind.startsWith("run.")) return "This Cora run";
   return title;
 }
 
+// An automation's own name: the title of a loom "Notify" step, or the quoted
+// name an outcome body starts with.
+function automationName(entry: NotificationCenterEntry): string | null {
+  if (entry.kind === "automation.step") return entry.title.trim() || null;
+  const quoted = /^\u201c([^\u201d]{1,60})\u201d/.exec((entry.body || "").trim());
+  return quoted ? quoted[1] : null;
+}
+
+export interface MuteChoice {
+  key: string;
+  // What the footer lists while the mute lasts.
+  label: string;
+}
+
+// What a row's mute menu offers, narrowest first: the source itself (this
+// pane, run, automation or repository), the agent everywhere, then the whole
+// workspace. A source that can never notify again (a closed pane, a finished
+// or deleted run) is left out; muting it would silence nothing.
+export function muteChoices(
+  entry: NotificationCenterEntry,
+  workspace: { id: string | null; name: string | null },
+  gone: boolean,
+): MuteChoice[] {
+  const out: MuteChoice[] = [];
+  const target = entry.target;
+  if (target.type === "automation" && target.jobId) {
+    out.push({ key: jobMuteKey(target.jobId), label: sourceLabel(entry) });
+  } else if (!gone && !(entry.kind === "run.complete" || entry.kind === "run.failed")) {
+    out.push({ key: sourceMuteKey(entry.sourceKey), label: sourceLabel(entry) });
+  }
+  const agent = agentOf(entry);
+  if (agent) {
+    const label =
+      agent.id === "cora" ? "All Cora runs" : agent.id === "automations" ? "All automations" : `${agent.label} everywhere`;
+    out.push({ key: agentMuteKey(agent.id), label });
+  }
+  if (workspace.id && workspace.name) {
+    out.push({ key: workspaceMuteKey(workspace.id), label: `Everything in ${workspace.name}` });
+  }
+  return out;
+}
+
+function prNumber(entry: NotificationCenterEntry): number | null {
+  const match = /#(\d+)$/.exec(entry.sourceKey || "") ?? /#(\d+)\b/.exec(entry.title || "");
+  return match ? Number(match[1]) : null;
+}
+
 // The head of a folded stack speaks for all of it: "Claude Code finished 7×
-// in api-server". The workspace is left out where a header already names it.
+// in api-server", "Pull requests #41, #42 in api-server". The workspace is
+// left out where a header already names it.
 export function stackTitle(
   entries: readonly NotificationCenterEntry[],
   workspace: string | null,
 ): string {
   const head = entries[0];
-  const total = entries.reduce((n, e) => n + entryCount(e), 0);
+  const where = workspace ? ` in ${workspace}` : "";
   if (head.kind === "git.pull-request") {
-    return `${entries.length} pull requests${workspace ? ` in ${workspace}` : ""}`;
+    const numbers = [...new Set(entries.map(prNumber).filter((n): n is number => n !== null))].sort((a, b) => a - b);
+    if (numbers.length === 0) return `${entries.length} pull requests${where}`;
+    const shown = numbers.slice(0, 3).map((n) => `#${n}`).join(", ");
+    const more = numbers.length > 3 ? ` +${numbers.length - 3}` : "";
+    return `Pull requests ${shown}${more}${where}`;
   }
-  return `${displayText(head).title} ${total}×${workspace ? ` in ${workspace}` : ""}`;
+  const total = entries.reduce((n, e) => n + entryCount(e), 0);
+  return `${displayText(head).title} ${total}×${where}`;
+}
+
+// The control that unfolds a stack counts what it reveals in the unit the
+// rows are: panes for an agent, runs for Cora. The title above it counts
+// events ("finished 7×"), so the two never read as the same number gone
+// wrong.
+export function stackMoreLabel(entries: readonly NotificationCenterEntry[]): string {
+  const n = entries.length;
+  const sources = new Set(entries.map((e) => e.sourceKey)).size;
+  const kind = entries[0].kind;
+  const noun =
+    sources !== n
+      ? "notifications"
+      : kind.startsWith("terminal.")
+        ? "panes"
+        : kind.startsWith("run.")
+          ? "runs"
+          : kind === "git.pull-request"
+            ? "pull requests"
+            : "notifications";
+  return n === 2 ? `Show both ${noun}` : `Show ${n} ${noun}`;
 }
 
 // "now", "5m", "3h" within today. Older rows show the clock time when a day
@@ -270,16 +353,26 @@ export interface CenterContext {
   isGone?: IsGone;
 }
 
+function heldIn(held: ReadonlySet<string> | undefined): (entry: NotificationCenterEntry) => boolean {
+  return held && held.size > 0 ? (entry) => held.has(entry.id) : () => false;
+}
+
 export function buildSections(
   entries: readonly NotificationCenterEntry[],
   opts: CenterContext & {
     filter: CenterFilter;
     grouping: CenterGrouping;
     workspaces: ReadonlyMap<string, NotifyWorkspaceMeta>;
+    // Questions answered while the panel is open. They keep their place in
+    // the pinned section until it closes, read or settled, so the card under
+    // the pointer (and its "Answer sent") does not jump to its day. They do
+    // not count: the header says how many still need the user.
+    held?: ReadonlySet<string>;
   },
 ): CenterSection[] {
   const { filter, grouping, now, mutes, workspaces } = opts;
   const isGone = opts.isGone ?? (() => false);
+  const isHeld = heldIn(opts.held);
   const counts = (entry: NotificationCenterEntry) => countsAsNeedsYou(entry, mutes, now, isGone);
   const open = (entry: NotificationCenterEntry) => isWaiting(entry) && !isGone(entry);
   const sections: CenterSection[] = [];
@@ -287,20 +380,24 @@ export function buildSections(
   // Questions the user has not seen sit above everything else, whatever the
   // grouping. A question already read, or muted, is still open but no longer
   // asks for attention: it stays in its day with a Waiting tag.
-  const pinned = entries.filter(counts);
-  const seen = entries.filter((e) => open(e) && !counts(e));
+  const pinned = entries.filter((e) => counts(e) || isHeld(e));
+  const counted = pinned.filter(counts).length;
+  const seen = entries.filter((e) => open(e) && !counts(e) && !isHeld(e));
   if (pinned.length > 0) {
     const muted = seen.filter((e) => mutedBy(e, mutes, now)).length;
     const read = seen.length - muted;
-    const note = [read > 0 ? `${read} seen` : "", muted > 0 ? `${muted} muted` : ""].filter(Boolean).join(" · ");
+    const note =
+      counted === 0
+        ? "All answered"
+        : [read > 0 ? `${read} seen` : "", muted > 0 ? `${muted} muted` : ""].filter(Boolean).join(" · ");
     sections.push({
       key: "needs-you",
       label: "Needs you",
       tone: "needs-you",
       items: pinned.map((entry) => ({ type: "row", entry })),
-      rows: pinned.length,
-      note: filter === "all" && note ? note : undefined,
-      showCount: true,
+      rows: counted,
+      note: (filter === "all" || counted === 0) && note ? note : undefined,
+      showCount: counted > 0,
       limit: filter === "needs-you" ? undefined : limitFor(pinned.length, PINNED_LIMIT),
     });
   }

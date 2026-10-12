@@ -27,6 +27,7 @@ import {
   setStatusSender,
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
+import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   RemoteAuthPromptAnswer,
@@ -137,6 +138,7 @@ import {
   restoreCenterEntries,
   setAttention,
   setCenterRead,
+  settleCenterEntries,
   unmuteCenterSource,
 } from "./notify";
 import {
@@ -3365,6 +3367,10 @@ export function registerIpc(): void {
       if (ids.length > 0) await removeCenterEntries(ids);
     }
   });
+  handle("notify:settle", async (_e, ids: unknown): Promise<void> => {
+    const list = notifyIdsFromIpc(ids);
+    if (list.length > 0) await settleCenterEntries(list);
+  });
   handle("notify:clear", async (): Promise<void> => {
     await clearCenter();
   });
@@ -3387,7 +3393,7 @@ export function registerIpc(): void {
       input: { key?: unknown; label?: unknown; durationMs?: unknown } | null,
     ): Promise<void> => {
       const key = typeof input?.key === "string" ? input.key.slice(0, 512) : "";
-      if (!/^(workspace|source):./.test(key)) return;
+      if (!MUTE_KEY_PATTERN.test(key)) return;
       const durationMs = typeof input?.durationMs === "number" ? input.durationMs : 60 * 60_000;
       if (!Number.isFinite(durationMs)) return;
       const label = typeof input?.label === "string" ? input.label.slice(0, 200) : key;

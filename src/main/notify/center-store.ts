@@ -8,7 +8,7 @@ import type {
   NotificationViewSnapshot,
   NotifyEvent,
 } from "@shared/types";
-import { activeMutes, mutedBy } from "@shared/notify-center";
+import { activeMutes, mutedBy, type MuteEvent } from "@shared/notify-center";
 import { writeFileAtomic } from "../fs-atomic";
 import { getPreferenceCached } from "../preferences-store";
 import { codaraHome } from "../codara-home";
@@ -25,6 +25,7 @@ import {
   sanitizeEntries,
   sanitizeMutes,
   setRead,
+  settleIds,
   settleMissingWorkspaces,
   settleSource,
   settleTerminalQuestions,
@@ -196,7 +197,7 @@ export function loadNotificationCenter(): Promise<void> {
 
 // Synchronous so publish() can consult it before deciding delivery. Until the
 // mutes file is read this reports nothing muted.
-export function isEventMuted(event: Pick<NotifyEvent, "sourceKey" | "target">): boolean {
+export function isEventMuted(event: MuteEvent): boolean {
   return mutedBy(event, mutes, Date.now()) !== null;
 }
 
@@ -240,6 +241,13 @@ export function markCenterViewed(view: NotificationViewSnapshot): Promise<void> 
 
 export function settleCenterSource(sourceKey: string): Promise<void> {
   return enqueue(() => commit({ entries: settleSource(entries, sourceKey) }));
+}
+
+// The renderer found these questions' panes or runs gone. Main has no view
+// of panes, so without this a question whose pane closed outside the normal
+// disposal path would keep the dock badge up for good.
+export function settleCenterEntries(ids: readonly string[]): Promise<void> {
+  return enqueue(() => commit({ entries: settleIds(entries, ids) }));
 }
 
 export function removeCenterEntry(id: string): Promise<void> {

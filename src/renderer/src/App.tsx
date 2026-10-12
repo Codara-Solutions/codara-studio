@@ -11,6 +11,7 @@ import type {
   InAppNotificationKind,
   NavigationTarget,
   PtyExitInfo,
+  ResolvedRunQuestion,
   RunState,
   RuntimeState,
   ShellInfo,
@@ -3046,17 +3047,33 @@ export default function App() {
 
   // Shared by the toast cards and the notification center: resolve the exact
   // linked open question for inline answers. Main owns blocker clearing and the
-  // resume strategy, including direct Loom behavior.
-  const resolveRunQuestion = useCallback(
-    (runId: string) => {
-      const run = globalRuns.runsRef.current.find((r) => r.id === runId);
-      const question = run ? findOpenQuestion(run) : null;
-      if (!question) return null;
+  // resume strategy, including direct Loom behavior. The map is derived from
+  // the run list, not read from a ref, so a question that arrives after its
+  // notification (the run list refreshes later than the center) re-renders
+  // the surfaces showing it. It keeps its identity while the open questions
+  // stay the same, so ordinary run updates do not re-render them.
+  const openRunQuestionsRef = useRef<{ key: string; map: ReadonlyMap<string, ResolvedRunQuestion> }>({
+    key: "",
+    map: new Map(),
+  });
+  const openRunQuestions = useMemo(() => {
+    const map = new Map<string, ResolvedRunQuestion>();
+    for (const run of globalRuns.runs) {
+      if (run.status !== "blocked" && !run.blockedOn) continue;
+      const question = findOpenQuestion(run);
       // The question's message id rides along so answer surfaces can link
       // their answer to it (consent gates only accept linked answers).
-      return { questionMessageId: question.id, options: question.questionOptions ?? [] };
-    },
-    [globalRuns.runsRef],
+      if (question) map.set(run.id, { questionMessageId: question.id, options: question.questionOptions ?? [] });
+    }
+    const key = [...map]
+      .map(([runId, q]) => `${runId}\t${q.questionMessageId}\t${q.options.map((o) => o.id).join(",")}`)
+      .join("\n");
+    if (key !== openRunQuestionsRef.current.key) openRunQuestionsRef.current = { key, map };
+    return openRunQuestionsRef.current.map;
+  }, [globalRuns.runs]);
+  const resolveRunQuestion = useCallback(
+    (runId: string) => openRunQuestions.get(runId) ?? null,
+    [openRunQuestions],
   );
   // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
   // React setters, so these can carry empty dep arrays and stay referentially

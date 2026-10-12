@@ -56,6 +56,7 @@ export {
   removeCenterEntry,
   restoreCenterEntries,
   setCenterRead,
+  settleCenterEntries,
   unmuteCenterSource,
 } from "./center-store";
 export type { PublishInput } from "./types";

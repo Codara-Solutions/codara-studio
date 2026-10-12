@@ -564,6 +564,9 @@ const api = {
     // opening or viewing a row marks it read and keeps it.
     remove: (id: string | string[]): Promise<void> => ipcRenderer.invoke("notify:remove", id),
     clear: (): Promise<void> => ipcRenderer.invoke("notify:clear"),
+    // Settle open questions whose pane, run or workspace this window can no
+    // longer find, so main stops counting them toward the dock badge.
+    settle: (ids: string[]): Promise<void> => ipcRenderer.invoke("notify:settle", ids),
     restore: (entries: NotificationCenterEntry[]): Promise<void> =>
       ipcRenderer.invoke("notify:restore", entries),
     // Mark read every row whose target is the surface now on screen.

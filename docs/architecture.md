@@ -369,7 +369,11 @@ automations:
   (the terminal notifier re-arms the pane) and when its run is deleted (the
   run adapter settles on `run.deleted`). Each window also holds the rows and
   applies the same rule with its own view of closed panes and missing runs,
-  so the bell, the **Needs you** tab and the pinned header always agree.
+  so the bell, the **Needs you** tab and the pinned header always agree. A
+  question the window finds gone for two seconds is settled in main too
+  (`notify:settle`), so the dock badge never counts a question the bell
+  does not. Mutes match by source, workspace, agent (`agent:claude-code`,
+  `agent:cora`, from the event's kind and title) and automation job.
 
 Phone delivery goes through `remote-access/phone-notify.ts`.
 

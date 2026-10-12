@@ -52,19 +52,53 @@ export function targetWorkspaceId(target: NavigationTarget): string | undefined 
 
 export const workspaceMuteKey = (workspaceId: string): string => `workspace:${workspaceId}`;
 export const sourceMuteKey = (sourceKey: string): string => `source:${sourceKey}`;
+export const agentMuteKey = (agentId: string): string => `agent:${agentId}`;
+export const jobMuteKey = (jobId: string): string => `job:${jobId}`;
+// The mute keys main accepts from a renderer.
+export const MUTE_KEY_PATTERN = /^(?:workspace|source|agent|job):./;
+
+export type MuteEvent = Pick<NotifyEvent, "kind" | "sourceKey" | "target" | "title">;
+
+// Terminal titles read "<agent> <status>[ · <tab>]", from the terminal
+// notifier and codara_notify_user alike; older builds put a dash before the
+// status.
+const AGENT_STATUS = /\s+(?:[\u2014\u2013-]\s+)?(?:finished\b.*|needs (?:you|input)\b.*|stopped\b.*|failed\b.*|is waiting\b.*)$/i;
+
+// Who raised an event, across panes and workspaces: the agent CLI in a
+// terminal, Cora for runs, the automation loop for automations. Null when a
+// title names no agent (a bare "Agent" from an unknown runtime).
+export function agentOf(event: Pick<NotifyEvent, "kind" | "title">): { id: string; label: string } | null {
+  if (event.kind.startsWith("run.")) return { id: "cora", label: "Cora runs" };
+  if (event.kind.startsWith("automation.")) return { id: "automations", label: "Automations" };
+  if (!event.kind.startsWith("terminal.agent.")) return null;
+  const head = (event.title || "").split(" \u00b7 ")[0].trim();
+  const label = head.replace(AGENT_STATUS, "").trim();
+  if (!label || label === head || /^agent$/i.test(label)) return null;
+  const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return id ? { id, label } : null;
+}
 
 export function activeMutes(mutes: readonly NotificationMute[], now: number): NotificationMute[] {
   return mutes.filter((mute) => mute.until > now);
 }
 
+export function muteKeysFor(event: MuteEvent): string[] {
+  const keys = [sourceMuteKey(event.sourceKey)];
+  const workspaceId = targetWorkspaceId(event.target);
+  if (workspaceId) keys.push(workspaceMuteKey(workspaceId));
+  const agent = agentOf(event);
+  if (agent) keys.push(agentMuteKey(agent.id));
+  if (event.target.type === "automation" && event.target.jobId) keys.push(jobMuteKey(event.target.jobId));
+  return keys;
+}
+
 export function mutedBy(
-  event: Pick<NotifyEvent, "sourceKey" | "target">,
+  event: MuteEvent,
   mutes: readonly NotificationMute[],
   now: number,
 ): NotificationMute | null {
-  const workspaceId = targetWorkspaceId(event.target);
-  const keys = new Set([sourceMuteKey(event.sourceKey)]);
-  if (workspaceId) keys.add(workspaceMuteKey(workspaceId));
+  if (mutes.length === 0) return null;
+  const keys = new Set(muteKeysFor(event));
   return mutes.find((mute) => mute.until > now && keys.has(mute.key)) ?? null;
 }
 

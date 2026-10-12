@@ -195,28 +195,38 @@ and muted sources do not light it.
 - **Needs you** sits on top: the unseen questions, each with its action on
   the card (**Reply in terminal**, **Open run**, **Open automation**). A
   blocked Cora run or automation shows its answer options as buttons and a
-  reply field, so you can answer without leaving what you are doing. A
-  question you have read or muted is still open but no longer pinned: it
-  stays in its day with a **Waiting** tag and a quiet button, and the header
-  says how many (for example "Needs you 6 · 9 seen"). A question stops
-  waiting once its source moves on: the agent resumes, the run continues,
-  the pane closes or the run is deleted. A terminal prompt from before a
-  restart no longer counts.
+  reply field, so you can answer without leaving what you are doing. An
+  answered card stays where it is, turns green and says "Answer sent" until
+  you close the panel; it no longer counts toward the badge. A question you
+  have read or muted is still open but no longer pinned: it stays in its day
+  with a **Waiting** tag and a quiet button, and the header says how many
+  (for example "Needs you 6 · 9 seen"). A question stops waiting once its
+  source moves on: the agent resumes, the run continues, the pane closes or
+  the run is deleted. It then reads **Resolved**, or **Pane closed** when
+  its pane is gone, and leaves the unread count. A terminal prompt from
+  before a restart no longer counts.
 - Below it the history is grouped by day, or by workspace with the folder
   button. Repeats from one source fold into one row: a prompt between two
   finished turns does not restart the count, and the last three distinct
   messages stay on the row (a bot's row reads "52 pushes to main,
   feature/sync" with **3 earlier** to expand). The same alert from several
   panes stacks under one heading such as "Claude Code finished 7× in
-  api-server".
+  api-server", which counts finished turns; the control under it counts the
+  rows it opens ("Show 3 panes · 1 unread"). Pull requests stack as "Pull
+  requests #41, #42 in api-server".
 - Filters: **All**, **Needs you** and **Unread**. The filter and grouping are
   remembered.
 - Clicking a row opens its exact pane, run or automation and marks it read.
   If the pane was closed or the run is no longer available, the row says so
   and opening it lands on its workspace instead; rows of a removed workspace
   open nothing. Opening the pane or run yourself also marks its alerts read.
-- Hover a row for **Mark read** or **Mark unread**, **Mute** (this source or
-  its whole workspace, for an hour or until 08:00 tomorrow) and **Dismiss**.
+- Hover a row for **Mark read** or **Mark unread**, **Mute** and
+  **Dismiss**; they take the place of the time while the pointer is there.
+  The mute menu picks how long first (**1 hour** or **Until morning**, which
+  is 08:00 tomorrow), then what: this pane, run, automation or repository;
+  the agent everywhere (**Claude Code everywhere**, **All Cora runs**, **All
+  automations**); or everything in the workspace. A source that can never
+  notify again, such as a closed pane or a finished run, is not offered.
   Muted sources still land in the history, silently; the footer lists active
   mutes with **Unmute**. **Clear all** removes everything except the
   questions still waiting, and says how many it keeps. **Clear all** and
@@ -230,7 +240,8 @@ and muted sources do not light it.
 
 The history keeps 200 rows. When it is full the oldest read row goes first,
 and an open question goes last. Read rows are dropped after 7 days and any
-row after 30 days. It is saved in `notifications.json` and the mutes in
+row after 30 days; a question still waiting on you keeps the 30 days even
+once read. It is saved in `notifications.json` and the mutes in
 `notification-mutes.json` (see [on-your-machine.md](./on-your-machine.md)).
 
 ## The Capability Center

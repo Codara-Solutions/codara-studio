@@ -213,6 +213,31 @@ test("age limits: read rows after a week, anything after a month", () => {
   assert.deepEqual(list.map((e) => e.id), ["unread-8d", "read-1d"]);
 });
 
+test("a read question still open keeps the month; a settled one goes after a week", () => {
+  const ask = (fields) => ({ ...row({ kind: "run.blocked", ...fields }), read: true });
+  const list = [
+    ask({ id: "open-8d", sourceKey: "run:a", createdAt: iso(NOW - 8 * DAY) }),
+    { ...ask({ id: "settled-8d", sourceKey: "run:b", createdAt: iso(NOW - 8 * DAY) }), settled: true },
+    ask({ id: "open-31d", sourceKey: "run:c", createdAt: iso(NOW - 31 * DAY) }),
+  ];
+  assert.equal(M.pruneByAge(list, NOW), true);
+  assert.deepEqual(list.map((e) => e.id), ["open-8d"]);
+});
+
+test("settling by id touches only open questions among those ids", () => {
+  const list = [
+    row({ id: "q1", kind: "terminal.agent.needs-input", sourceKey: "pane:a" }),
+    row({ id: "q2", kind: "run.blocked", sourceKey: "run:b" }),
+    row({ id: "done", sourceKey: "pane:c" }),
+  ];
+  assert.equal(M.settleIds(list, ["q1", "done"]), true);
+  assert.deepEqual(
+    list.map((e) => [e.id, e.settled === true, e.read]),
+    [["q1", true, true], ["q2", false, false], ["done", false, false]],
+  );
+  assert.equal(M.settleIds(list, ["q1"]), false);
+});
+
 test("sanitize drops rows a renderer could not show and bounds the rest", () => {
   const list = M.sanitizeEntries([
     row({ id: "ok", title: 42, body: null }),
@@ -346,8 +371,25 @@ test("the badge counts unread open questions that are not muted", () => {
   assert.deepEqual(summary.mutes.map((m) => m.key), ["workspace:w2"]);
 });
 
-test("a mute matches the event's source or its workspace until it lapses", () => {
-  const e = { sourceKey: "pane:p1", target: { type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1" } };
+test("a mute matches the event's source, workspace or agent until it lapses", () => {
+  const e = {
+    kind: "terminal.agent.done",
+    title: "Claude Code finished · server",
+    sourceKey: "pane:p1",
+    target: { type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1" },
+  };
+  assert.ok(S.mutedBy(e, [{ key: "agent:claude-code", label: "", until: NOW + 1 }], NOW));
+  assert.equal(S.mutedBy({ ...e, title: "Codex finished" }, [{ key: "agent:claude-code", label: "", until: NOW + 1 }], NOW), null);
+  const run = { kind: "run.blocked", title: "Codara Studio \u2014 needs you", sourceKey: "run:r1", target: { type: "run", runId: "r1" } };
+  assert.ok(S.mutedBy(run, [{ key: "agent:cora", label: "", until: NOW + 1 }], NOW));
+  const loom = {
+    kind: "automation.blocked",
+    title: "Automation \u2014 needs you",
+    sourceKey: "run:r2",
+    target: { type: "automation", jobId: "j1", runId: "r2" },
+  };
+  assert.ok(S.mutedBy(loom, [{ key: "job:j1", label: "", until: NOW + 1 }], NOW));
+  assert.ok(S.mutedBy(loom, [{ key: "agent:automations", label: "", until: NOW + 1 }], NOW));
   assert.ok(S.mutedBy(e, [{ key: "source:pane:p1", label: "", until: NOW + 1 }], NOW));
   assert.ok(S.mutedBy(e, [{ key: "workspace:w1", label: "", until: NOW + 1 }], NOW));
   assert.equal(S.mutedBy(e, [{ key: "workspace:w1", label: "", until: NOW }], NOW), null);
@@ -397,6 +439,21 @@ test("the badge rule: unread, open, not muted, not gone", () => {
   assert.equal(S.countsAsNeedsYou(q, [{ key: "workspace:w1", label: "", until: NOW + 1 }], NOW), false);
   assert.equal(S.countsAsNeedsYou(q, [], NOW, () => true), false);
   assert.equal(S.countsAsNeedsYou(row({}), [], NOW), false);
+});
+
+test("the agent behind an event, named the same across panes", () => {
+  const term = (title) => S.agentOf({ kind: "terminal.agent.done", title });
+  assert.deepEqual(term("Claude Code finished · server"), { id: "claude-code", label: "Claude Code" });
+  assert.deepEqual(term("Codex needs you"), { id: "codex", label: "Codex" });
+  assert.deepEqual(term("Grok finished background work · tests"), { id: "grok", label: "Grok" });
+  assert.deepEqual(term("Claude Code \u2014 finished"), { id: "claude-code", label: "Claude Code" });
+  assert.equal(term("Agent finished"), null);
+  assert.equal(term("Something else"), null);
+  assert.equal(S.agentOf({ kind: "git.teammate-push", title: "bob pushed" }), null);
+  assert.equal(S.agentOf({ kind: "run.complete", title: "" }).id, "cora");
+  assert.ok(S.MUTE_KEY_PATTERN.test("agent:codex"));
+  assert.ok(S.MUTE_KEY_PATTERN.test("job:loom-1"));
+  assert.ok(!S.MUTE_KEY_PATTERN.test("everything"));
 });
 
 test("state vocabulary: needs-you, failed, done, info", () => {

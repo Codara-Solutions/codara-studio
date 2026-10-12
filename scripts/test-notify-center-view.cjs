@@ -106,6 +106,8 @@ test("a terminal body drops the filler its title already says", () => {
   );
   assert.equal(V.displayBody(row({ kind: "terminal.agent.needs-input", body: "Waiting for your answer." })), null);
   assert.equal(V.displayBody(question({ body: "Finished its turn." })), "Finished its turn.");
+  assert.equal(V.displayBody(question({ body: "Updated 14 tests \u2014 ran 18m" })), "Updated 14 tests · ran 18m");
+  assert.equal(V.displayBody(question({ body: "well-known pre-release" })), "well-known pre-release");
 });
 
 test("relative times: now, minutes, hours, then a day or a clock time", () => {
@@ -173,6 +175,23 @@ test("the badge, the Needs you tab and the pinned header always agree", () => {
   assert.equal(S.summarizeCenter(entries.filter((e) => !isGone(e)), mutes, NOW).needsYou, badge);
 });
 
+test("an answered question keeps its pinned place while the panel is open", () => {
+  const answered = question({ read: true });
+  const waiting = question({});
+  const entries = [row({}), answered, waiting];
+  const sections = build(entries, { held: new Set([answered.id]) });
+  assert.equal(sections[0].key, "needs-you");
+  assert.deepEqual(sections[0].items.map((i) => i.entry.id), [answered.id, waiting.id]);
+  // It does not count: the header says how many still need the user.
+  assert.equal(sections[0].rows, 1);
+  assert.ok(!sections[1].items.some((i) => i.type === "row" && i.entry.id === answered.id));
+  const settled = { ...answered, settled: true };
+  const alone = build([settled], { held: new Set([settled.id]) });
+  assert.deepEqual(alone.map((s) => [s.key, s.rows, s.showCount, s.note]), [["needs-you", 0, false, "All answered"]]);
+  const filtered = build([settled, question({ read: true })], { filter: "needs-you", held: new Set([settled.id]) });
+  assert.deepEqual(filtered.map((s) => [s.key, s.items.length]), [["needs-you", 1], ["seen", 1]]);
+});
+
 test("a pinned list shows whole unless at least three would hide", () => {
   const five = Array.from({ length: 5 }, () => question({}));
   assert.equal(build(five)[0].limit, undefined);
@@ -201,6 +220,18 @@ test("the same agent finishing in several panes stacks under the newest", () => 
   assert.equal(today.rows, 4);
   assert.equal(V.stackTitle(today.items[0].entries, "api"), "Claude Code finished 7× in api");
   assert.equal(V.stackTitle(today.items[0].entries, null), "Claude Code finished 7×");
+  // The control counts rows in their own unit, so "7×" and "3 panes" agree.
+  assert.equal(V.stackMoreLabel(today.items[0].entries), "Show 3 panes");
+  assert.equal(V.stackMoreLabel(today.items[0].entries.slice(0, 2)), "Show both panes");
+  const samePane = [row({ sourceKey: "pane:x" }), row({ sourceKey: "pane:x" }), row({})];
+  assert.equal(V.stackMoreLabel(samePane), "Show 3 notifications");
+});
+
+test("a stack of pull requests names them", () => {
+  const pr = (n) => row({ kind: "git.pull-request", sourceKey: `github-pr:acme/api#${n}`, title: `sam opened PR #${n}` });
+  assert.equal(V.stackTitle([pr(42), pr(41)], "api"), "Pull requests #41, #42 in api");
+  assert.equal(V.stackTitle([pr(5), pr(4), pr(3), pr(2), pr(1)], null), "Pull requests #1, #2, #3 +2");
+  assert.equal(V.stackMoreLabel([pr(42), pr(41)]), "Show both pull requests");
 });
 
 test("a folded push names its branches", () => {
@@ -257,6 +288,29 @@ test("mute labels name what would go quiet", () => {
   assert.equal(V.sourceLabel(row({ kind: "git.teammate-push", sourceKey: "github-push:acme/api" })), "Pushes to api");
   assert.equal(V.sourceLabel(row({ kind: "git.pull-request", sourceKey: "github-pr:acme/api#12" })), "Pull request #12");
   assert.equal(V.sourceLabel(question({})), "This Cora run");
+  assert.equal(
+    V.sourceLabel(row({ kind: "automation.finished", body: "\u201cNightly sweep\u201d finished after 3 iterations." })),
+    "Nightly sweep",
+  );
+});
+
+test("the mute menu offers the source, the agent everywhere, then the workspace", () => {
+  const ws = { id: "w1", name: "api" };
+  const keys = (entry, gone = false) => V.muteChoices(entry, ws, gone).map((c) => [c.key, c.label]);
+  assert.deepEqual(keys(row({ sourceKey: "pane:p7" })), [
+    ["source:pane:p7", "Claude Code in server"],
+    ["agent:claude-code", "Claude Code everywhere"],
+    ["workspace:w1", "Everything in api"],
+  ]);
+  // A closed pane will never notify again: nothing to mute at the source.
+  assert.deepEqual(keys(row({ sourceKey: "pane:p7" }), true).map(([k]) => k), ["agent:claude-code", "workspace:w1"]);
+  // A finished run will not either; a blocked one still can.
+  const done = row({ kind: "run.complete", title: "Codara Studio \u2014 done", sourceKey: "run:r1", target: { type: "run", runId: "r1", workspaceId: "w1" } });
+  assert.deepEqual(keys(done).map(([k]) => k), ["agent:cora", "workspace:w1"]);
+  assert.deepEqual(keys(question({ sourceKey: "run:r2" })).map(([, l]) => l), ["This Cora run", "All Cora runs", "Everything in api"]);
+  // An automation mutes by job, so every run it starts goes quiet.
+  const loom = row({ kind: "automation.blocked", title: "Automation \u2014 needs you", sourceKey: "run:r3", target: { type: "automation", jobId: "j1", runId: "r3" } });
+  assert.deepEqual(V.muteChoices(loom, { id: null, name: null }, false).map((c) => c.key), ["job:j1", "agent:automations"]);
 });
 
 test("until tomorrow morning means the next 08:00", () => {

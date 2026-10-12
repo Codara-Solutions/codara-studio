@@ -7244,18 +7244,21 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .nc-row:hover { background: var(--hover); }
 .nc-row:focus-visible { background: var(--hover); box-shadow: var(--focus-ring); }
-.nc-row[data-waiting="pinned"] { background: color-mix(in oklch, var(--warn) 7%, transparent); }
-.nc-row[data-waiting="pinned"]:hover { background: color-mix(in oklch, var(--warn) 11%, transparent); }
+/* A pinned question is marked by its rule, its icon and its dot. A tint on
+   top of those turned a stack of them into beige warning banners in the
+   light theme. */
 .nc-row[data-waiting="pinned"]::before {
   content: "";
   position: absolute;
   left: 0;
   top: 10px;
   bottom: 10px;
-  width: 3px;
+  width: 2.5px;
   border-radius: 0 3px 3px 0;
   background: var(--warn);
+  transition: background var(--motion-fast) var(--ease-out);
 }
+.nc-row[data-answer="sent"]::before { background: var(--ok); }
 .nc-row[data-waiting="pinned"] + .nc-row[data-waiting="pinned"] { margin-top: 3px; }
 /* content-visibility implies paint containment, which would clip the mute
    menu; the row with an open menu also has to paint above its neighbours
@@ -7395,6 +7398,10 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border-color: color-mix(in oklch, var(--warn) 45%, transparent);
   color: color-mix(in oklch, var(--warn) 70%, var(--ink-dim));
 }
+.nc-tag[data-kind="answered"] {
+  border-color: color-mix(in oklch, var(--ok) 45%, transparent);
+  color: color-mix(in oklch, var(--ok) 75%, var(--ink-dim));
+}
 .nc-tag svg { vertical-align: -1px; }
 .nc-meta-text { flex: 0 1 auto; }
 
@@ -7419,15 +7426,15 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   margin-left: auto;
   height: 21px;
   padding: 0 9px;
-  border: 1px solid color-mix(in oklch, var(--nc-tone, var(--accent)) 45%, transparent);
+  border: 1px solid color-mix(in oklch, var(--nc-tone, var(--accent)) 55%, transparent);
   border-radius: var(--radius-control, 7px);
-  background: color-mix(in oklch, var(--nc-tone, var(--accent)) 16%, transparent);
-  color: color-mix(in oklch, var(--nc-tone, var(--accent)) 75%, var(--ink));
+  background: transparent;
+  color: color-mix(in oklch, var(--nc-tone, var(--accent)) 72%, var(--ink));
   font: 600 11px var(--font-sans);
   cursor: default;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
-.nc-primary:hover { background: color-mix(in oklch, var(--nc-tone, var(--accent)) 26%, transparent); }
+.nc-primary:hover { background: color-mix(in oklch, var(--nc-tone, var(--accent)) 18%, transparent); }
 .nc-primary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .nc-primary[data-quiet="true"] {
   border-color: var(--rule);
@@ -7556,18 +7563,18 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   font-size: 11.5px;
   font-weight: 550;
 }
+.nc-answer-pending { color: var(--muted); font-size: 11.5px; }
 .nc-answer-error { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
 
+/* The row tools take the place of the time and the unread dot on the title
+   line, which make room for them, so nothing is drawn over text and the
+   meta line's button stays clear. */
 .nc-actions {
   position: absolute;
-  top: 4px;
+  top: 6px;
   right: 6px;
   display: flex;
   gap: 1px;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--panel);
-  box-shadow: 0 0 0 1px var(--rule-soft), 0 2px 8px oklch(0 0 0 / 0.18);
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
@@ -7579,6 +7586,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   opacity: 1;
   pointer-events: auto;
 }
+.nc-row:is(:hover, :focus-visible, :has(:focus-visible), [data-menu="true"]) .nc-line1 { padding-right: 76px; }
+.nc-row:is(:hover, :focus-visible, :has(:focus-visible), [data-menu="true"]) :is(.nc-time, .nc-unread-dot) { display: none; }
 .nc-action {
   appearance: none;
   display: grid;
@@ -7609,6 +7618,34 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border-radius: 10px;
   background: var(--panel);
   box-shadow: var(--shadow-2);
+}
+.nc-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 4px 0;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.nc-menu-span {
+  display: inline-flex;
+  margin-left: auto;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+}
+.nc-menu .nc-menu-span button {
+  width: auto;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+}
+.nc-menu .nc-menu-span button[aria-checked="true"] {
+  background: var(--panel-2);
+  color: var(--ink);
+  box-shadow: var(--lift-hi), 0 1px 2px oklch(0 0 0 / 0.16);
 }
 .nc-menu-label {
   padding: 4px 8px 3px;
@@ -7720,10 +7757,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   align-items: center;
   gap: 8px;
   margin: 0 8px 8px;
-  padding: 6px 6px 6px 12px;
+  padding: 5px 5px 5px 12px;
+  border: 1px solid var(--rule);
   border-radius: 9px;
-  background: var(--ink);
-  color: var(--bg);
+  background: color-mix(in oklab, var(--panel) 92%, var(--ink));
+  box-shadow: var(--lift-hi, none), 0 6px 18px oklch(0 0 0 / 0.22);
+  color: var(--ink);
   font-size: 12px;
   font-weight: 550;
 }
@@ -7733,12 +7772,13 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   padding: 3px 10px;
   border: none;
   border-radius: 6px;
-  background: color-mix(in oklab, var(--bg) 18%, transparent);
-  color: var(--bg);
+  background: transparent;
+  color: var(--accent);
   font: 650 11.5px var(--font-sans);
   cursor: default;
 }
-.nc-undo button:hover { background: color-mix(in oklab, var(--bg) 28%, transparent); }
+.nc-undo button:hover { background: color-mix(in oklch, var(--accent) 14%, transparent); }
+.nc-undo button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 .nc-foot {
   flex: 0 0 auto;
