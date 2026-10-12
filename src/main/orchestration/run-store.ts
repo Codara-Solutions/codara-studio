@@ -112,7 +112,7 @@ import { effectiveChatMode } from "@shared/chat-policy";
 import { contextWindowForModel } from "@shared/context-window";
 import {
   chatContextCapacityTokens,
-  resolveCompactAtTokens,
+  compactAtOverrideTokens,
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
@@ -268,6 +268,19 @@ import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-r
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
 import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
 import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
+import {
+  compactionNoteBody,
+  CONVERSATION_COMPACTION_PROMPT,
+  conversationDurableState,
+  conversationSummaryProblem,
+  cutoverDecision,
+  type CutoverGuard,
+  describeCutover,
+  estimateTokens,
+  guardAfterCutover,
+  guardAfterFailure,
+  observeCutoverBaseline,
+} from "./conversation-compaction";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
@@ -15015,32 +15028,15 @@ interface ConversationRewindTarget {
 // new session whose canonical replay is the stored summary instead of the raw
 // last-N-messages window (see buildManagerTurnInput / compactionReplaySummary).
 
-/**
- * Fraction of the model's context window at which a completed manager turn
- * triggers automatic compaction. 0.8 leaves headroom for the summarize turn
- * itself while cutting over before long-context quality degradation.
- * Hardcoded in v1 — no settings UI.
- */
-const AUTO_COMPACTION_CONTEXT_RATIO = 0.8;
-
 /** Header of the compaction note; stripped again when the summary is replayed
  * into the next epoch's first turn. */
 const AUTO_COMPACTION_NOTE_PREFIX =
   "**Conversation compacted.** Older history was summarized to stay within the model's context window:\n\n";
 
-const AUTO_COMPACTION_SUMMARY_PROMPT = [
-  "Create a dense handoff for a fresh Cora session. Preserve the newest user intent;",
-  "requirements and preferences; decisions and rationale; exact files, symbols, commands,",
-  "IDs and configuration that matter; work completed with verification; current workspace",
-  "and process state; failures, blockers, pending work, and the next concrete actions.",
-  "Drop greetings, repetition, and obsolete exploration unless it explains the current state.",
-  "Do not invent. Use concise structured Markdown. Reply only with the handoff; call no tools.",
-].join(" ");
-
-/** A compaction summary shorter than this is a refusal, an error string, or a
- * throwaway reply — not a usable replacement for the conversation history.
- * Reject it and leave the conversation untouched. */
-const MIN_AUTO_COMPACTION_SUMMARY_CHARS = 200;
+/** Per run: the growth a failed or just-applied cutover waits for before the
+ *  trigger may fire again. In memory only; a restart simply allows one
+ *  fresh attempt. */
+const conversationCutoverGuards = new Map<string, CutoverGuard>();
 
 /** Runs currently summarizing/cutting over. Both the trigger and
  * performAutoCompaction itself bail on re-entry. */
@@ -15111,12 +15107,16 @@ async function maybeAutoCompactConversation(
         typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
           ? call.contextWindowTokens
           : contextWindowForModel(call.model).tokens,
-      // Same env override the Pi session was stamped with. Resolving it here
-      // keeps the summary trigger aligned with the extension: without it, an
-      // override below ~204.8k would silently disable this summary pass.
-      compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+      // Same override and percentage the Pi session was launched with, so this
+      // summary pass runs before the extension's own compaction.
+      compactAtTokens: compactAtOverrideTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+      percent: (await loadSettings().catch(() => null))?.coraAutoCompactPercent,
     });
-    if (contextTokens / windowTokens < AUTO_COMPACTION_CONTEXT_RATIO) return;
+    const epoch = call.conversationEpoch ?? 0;
+    const guard = observeCutoverBaseline(conversationCutoverGuards.get(runId), epoch, contextTokens, windowTokens);
+    if (guard) conversationCutoverGuards.set(runId, guard);
+    const decision = cutoverDecision({ contextTokens, capacityTokens: windowTokens, epoch, guard });
+    if (decision !== "compact") return;
     if (runsMidAutoCompaction.has(runId)) return;
     if (run.executionMode === "direct") return;
     if (
@@ -15143,7 +15143,7 @@ async function maybeAutoCompactConversation(
       "retry_queued",
     ]);
     if (run.workerTasks.some((task) => pendingTaskStatuses.has(task.status))) return;
-    await performAutoCompaction(runId, cwd);
+    await performAutoCompaction(runId, cwd, { contextTokens, capacityTokens: windowTokens });
   } catch (err) {
     console.warn("[run-store] auto-compaction failed:", err);
   }
@@ -15155,7 +15155,20 @@ async function settleAutoCompactionCall(
   callId: string,
   epoch: number,
   error: string,
+  trigger?: { contextTokens: number; capacityTokens: number },
 ): Promise<void> {
+  if (trigger) {
+    const guard = guardAfterFailure(
+      conversationCutoverGuards.get(runId),
+      epoch,
+      trigger.contextTokens,
+      trigger.capacityTokens,
+    );
+    conversationCutoverGuards.set(runId, guard);
+    console.warn(
+      `[cora-compaction] run=${runId} cutover failed (attempt ${guard.failures}); next try at ${guard.rearmAtTokens} tokens: ${error}`,
+    );
+  }
   const run = await getRun(runId);
   if (!run) return;
   await commitRunChange(run, {
@@ -15180,7 +15193,11 @@ async function settleAutoCompactionCall(
  * conversation, session ids and queued input are left exactly as they were,
  * and the summarize call is settled as failed for the audit trail.
  */
-async function performAutoCompaction(runId: string, cwd: string): Promise<void> {
+async function performAutoCompaction(
+  runId: string,
+  cwd: string,
+  trigger?: { contextTokens: number; capacityTokens: number },
+): Promise<void> {
   if (runsMidAutoCompaction.has(runId)) return;
   runsMidAutoCompaction.add(runId);
   try {
@@ -15266,8 +15283,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
           ? { ...chatConfig, sessionUuid: undefined, sessionMode: undefined }
           : { ...chatConfig },
         prompt: directConversation
-          ? directCompactionInput(compactionSource, AUTO_COMPACTION_SUMMARY_PROMPT)
-          : AUTO_COMPACTION_SUMMARY_PROMPT,
+          ? directCompactionInput(compactionSource, CONVERSATION_COMPACTION_PROMPT)
+          : CONVERSATION_COMPACTION_PROMPT,
         inputMessageIds: [],
         conversationEpoch: epoch,
       });
@@ -15278,6 +15295,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         callId,
         epoch,
         `Compaction summary call failed: ${error}`,
+        trigger,
       );
       return;
     }
@@ -15286,17 +15304,27 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       !result.turnFailed && !result.turnAborted
         ? result.decision.chatReply?.trim()
         : undefined;
-    if (!summary || summary.length < MIN_AUTO_COMPACTION_SUMMARY_CHARS) {
+    const problem = conversationSummaryProblem(summary);
+    if (!summary || problem) {
       const reason = result.turnAborted
         ? "Compaction summary turn was interrupted."
         : !summary
-          ? result.notice ?? "Compaction summary turn produced no summary text."
-          : `Compaction summary too short to replace the conversation (${summary.length} chars).`;
+          ? result.notice ?? problem ?? "Compaction summary turn produced no summary text."
+          : problem ?? "Compaction summary rejected.";
       console.warn(`[run-store] auto-compaction aborted for run ${runId}: ${reason}`);
-      await settleAutoCompactionCall(runId, callId, epoch, reason);
+      await settleAutoCompactionCall(runId, callId, epoch, reason, result.turnAborted ? undefined : trigger);
       return;
     }
 
+    // Built from the record as it stands at the cutover, not from the
+    // snapshot the summarizer saw: a worker that finished meanwhile counts.
+    const noteBody = compactionNoteBody(
+      summary,
+      conversationDurableState(await requireRun(runId)),
+    );
+    const beforeTokens =
+      trigger?.contextTokens ?? (typeof result.promptTokens === "number" ? result.promptTokens : null);
+    const afterTokens = estimateTokens(`${AUTO_COMPACTION_NOTE_PREFIX}${noteBody}`);
     const noteId = makeId("msg");
     let compacted = false;
     await commitRunChange(await requireRun(runId), {
@@ -15308,6 +15336,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         oldEpoch: epoch,
         newEpoch: epoch + 1,
         summaryMessageId: noteId,
+        tokensBefore: beforeTokens,
+        estimatedTokensAfter: afterTokens,
       },
       mutate: (draft, timestamp) => {
         const call = draft.sparkCalls.find((entry) => entry.id === callId);
@@ -15338,6 +15368,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         call.status = "completed";
         call.completedAt = timestamp;
         call.durationMs = durationMs;
+        if (beforeTokens) call.compactedFromTokens = beforeTokens;
+        call.compactedToTokens = afterTokens;
         if (result.model) call.model = result.model;
         call.accountProfileId = preserveFrozenPiAccountProfileId(
           call.accountProfileId,
@@ -15359,7 +15391,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
           author: "spark",
           kind: "note",
           compaction: true,
-          message: `${AUTO_COMPACTION_NOTE_PREFIX}${summary}`,
+          message: `${AUTO_COMPACTION_NOTE_PREFIX}${noteBody}`,
           intent: "answer",
           deliveryState: "acknowledged",
           targetTurnId: callId,
@@ -15386,6 +15418,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       );
       return;
     }
+    conversationCutoverGuards.set(runId, guardAfterCutover(epoch + 1));
+    console.info(`[cora-compaction] run=${runId} ${describeCutover(beforeTokens, afterTokens)}`);
     // The epoch barrier is durable, so stale provider callbacks are already
     // blocked; disposing the outgoing sessions is best-effort cleanup, same as
     // the rewind path.

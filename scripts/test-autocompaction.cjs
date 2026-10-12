@@ -222,7 +222,7 @@ async function main() {
   // The trigger must actually resolve the override, not just accept one.
   check(
     "run-store's trigger resolves the env override for its capacity",
-    /compactAtTokens: resolveCompactAtTokens\(process\.env\.CODARA_PI_COMPACT_AT_TOKENS\)/.test(
+    /compactAtTokens: compactAtOverrideTokens\(process\.env\.CODARA_PI_COMPACT_AT_TOKENS\),\s*percent: \(await loadSettings\(\)[^\n]*\)\?\.coraAutoCompactPercent/.test(
       fs.readFileSync(
         path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
         "utf8",

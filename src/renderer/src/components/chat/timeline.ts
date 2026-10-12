@@ -800,7 +800,9 @@ function sparkCallTimelineItem(
       : compaction
         ? live
           ? "Summarizing the conversation to stay within the model's context window"
-          : "Older history was summarized into a fresh session"
+          : call.compactedFromTokens && call.compactedToTokens
+            ? `Older history was summarized into a fresh session (${formatCount(call.compactedFromTokens)} -> ${formatCount(call.compactedToTokens)} tokens)`
+            : "Older history was summarized into a fresh session"
         : live
           ? awaiting
             ? "The turn is on hold and picks back up when you answer"

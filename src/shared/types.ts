@@ -4185,6 +4185,10 @@ export interface SparkCall {
    * decision, and the timeline styles it as maintenance rather than a reply.
    */
   purpose?: "compaction";
+  /** A completed compaction call: the conversation's context before the
+   *  cutover, and the estimated size of the summary note that replaced it. */
+  compactedFromTokens?: number;
+  compactedToTokens?: number;
   contextPacketId?: string;
   requestPath?: string;
   responsePath?: string;
