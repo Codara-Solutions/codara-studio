@@ -57,6 +57,10 @@ const FAKE_HOME = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "remote
 const FAKE_CWD = path.join(FAKE_HOME, "workspace");
 fs.mkdirSync(FAKE_CWD);
 process.on("exit", () => fs.rmSync(FAKE_HOME, { recursive: true, force: true }));
+// Codara's own server list is discovered too, and Codara exports
+// SPARK_HOME_DIR, so the Codara home must be the fake one as well.
+process.env.CODARA_HOME_DIR = path.join(FAKE_HOME, ".codarastudio");
+process.env.SPARK_HOME_DIR = path.join(FAKE_HOME, ".codarastudio");
 const core = loadTypeScriptModule(path.join(__dirname, "../src/main/agent-sync.ts"));
 const remote = loadTypeScriptModule(path.join(__dirname, "../src/main/remote-capabilities.ts"));
 const context = { cwd: FAKE_CWD, settings: {
@@ -118,6 +122,16 @@ async function main() {
   await assert.rejects(remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId: grokTarget, server: http }), /cannot carry request headers/);
   await remote.updateRemoteAgentAsset(context, { action: "saveMcp", targetId, server: http });
   assert.deepEqual(remote.readRemoteMcpEditor(context, assetId("web")).detail.server.headers, http.headers);
+  // The phone edits an SSE server as HTTP; saving it must keep it SSE.
+  fs.writeFileSync(physical, JSON.stringify({ ...config(), mcpServers: { ...config().mcpServers, events: { type: "sse", url: "https://example.test/sse" } } }));
+  const sseEditor = remote.readRemoteMcpEditor(context, assetId("events"));
+  assert.equal(sseEditor.detail.server.transport, "http");
+  await remote.updateRemoteAgentAsset(context, {
+    action: "saveMcp", targetId, replaceId: sseEditor.detail.assetId, revision: sseEditor.detail.revision,
+    server: { ...sseEditor.detail.server, headers: { Authorization: "Bearer ${EVENTS_TOKEN}" } },
+  });
+  assert.equal(config().mcpServers.events.type, "sse");
+  assert.equal(config().mcpServers.events.headers.Authorization, "Bearer ${EVENTS_TOKEN}");
   await remote.updateRemoteAgentAsset(context, { action: "install", assetId: assetId("first"), runtime: "grok" });
   assert.match(fs.readFileSync(path.join(FAKE_HOME, ".grok/config.toml"), "utf8"), /mcp_servers.first/);
   await remote.updateRemoteAgentAsset(context, { action: "remove", assetId: assetId("second") });

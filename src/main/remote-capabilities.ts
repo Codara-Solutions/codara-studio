@@ -53,7 +53,12 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
     // file is not an offered destination for newly created entries.
     const targetId = target?.id ?? (detail && remoteCapabilityId(detail.targetId) === input.targetId ? detail.targetId : null);
     if (!targetId) throw new Error("This configuration location is no longer available. Reload the form.");
-    const result = await saveMcpServer({ cwd: context.cwd, targetId, server: input.server,
+    // The phone shows an SSE server as HTTP (readRemoteMcpEditor), so its
+    // "http" means "a URL" and must not turn the server into streamable HTTP.
+    const server = detail?.transport === "sse" && input.server.transport === "http"
+      ? { ...input.server, transport: "sse" as const }
+      : input.server;
+    const result = await saveMcpServer({ cwd: context.cwd, targetId, server,
       ...(previous ? { replaceId: previous.id, expectedRevision: input.revision } : {}) });
     if (!result.ok) throw new Error(result.error ?? "Could not save this server.");
     return `${result.name ?? input.server.name} was saved. Assign it to Cora or workers to use it in new sessions.`;
