@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import { build as esbuild } from "esbuild";
+import type { Plugin } from "vite";
 import packageJson from "./package.json";
 
 function developmentVersion(): string {
@@ -19,6 +21,35 @@ function developmentVersion(): string {
   return `${packageJson.version}-dev`;
 }
 
+// The workflow sandbox thread starts from source text (`eval: true`), so its
+// file must be one self-contained CommonJS bundle with QuickJS inside: a
+// relative require or a rollup chunk would not resolve from an eval'd worker.
+// It is built beside the main bundle with esbuild instead of as a rollup input.
+function workflowSandboxWorkerPlugin(): Plugin {
+  let outDir = resolve(__dirname, "out/main");
+  return {
+    name: "codara-workflow-sandbox-worker",
+    apply: "build",
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    async writeBundle() {
+      await esbuild({
+        entryPoints: [resolve(__dirname, "src/main/orchestration/workflow-sandbox-worker.ts")],
+        outfile: resolve(outDir, "workflow-sandbox-worker.js"),
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        target: "node22",
+        minify: true,
+        legalComments: "none",
+        logLevel: "warning",
+        alias: { "@shared": resolve(__dirname, "src/shared") },
+      });
+    },
+  };
+}
+
 export default defineConfig(({ command }) => ({
   main: {
     // electron-updater is BUNDLED (not externalized): electron-builder's
@@ -27,7 +58,7 @@ export default defineConfig(({ command }) => ({
     // sax, ...), which broke every update check in the packaged app with
     // "Cannot find module 'debug'". Bundling it into the main chunk removes
     // the runtime dependency on asar node_modules resolution entirely.
-    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] }), workflowSandboxWorkerPlugin()],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),
