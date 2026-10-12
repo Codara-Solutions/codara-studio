@@ -69,6 +69,7 @@ cora auth list
 cora auth add anthropic "Work Claude"
 cora auth login anthropic "Work Claude"       # reconnect
 cora auth use anthropic "Work Claude"         # Active for Cora and Claude Code
+cora auth use anthropic system                # back to your own Claude Code login
 cora auth rename anthropic "Work Claude" "Team Claude"
 cora auth remove anthropic "Team Claude"
 
@@ -82,12 +83,12 @@ Every printed `#1`, `#2`, and so on is selectable, so the short form
 
 Sign-in opens the provider page and finishes in the invoking terminal. Add
 `--default` to make a reconnected account Active once it succeeds;
-destructive commands confirm unless `--yes` is present. Cora runs already
-going keep the account they started with. Claude Code runs every account in
-your own `~/.claude`, so an open Claude Code terminal, in Studio or any other
-terminal app, moves to the new account on its next request. A Codex switch
-stops and reports the open Codex sessions; close them (or switch from the
-account card, which offers to) and run it again.
+destructive commands confirm unless `--yes` is present. Accounts live in
+Codara's own folder; your `~/.claude` and `~/.codex` logins are never
+changed. Cora runs already going keep the account they started with. Claude
+Code terminals that Codara opened switch on their next request; new Codex
+sessions use the new account and running ones keep theirs. Switching to or
+from `system` (the CLI's own login on this computer) applies to new sessions.
 
 ## The live dashboard
 
