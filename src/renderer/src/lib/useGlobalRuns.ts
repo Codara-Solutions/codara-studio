@@ -24,9 +24,13 @@ import type { RunState } from "@shared/types";
 export function useGlobalRuns(booted: boolean): {
   runs: RunState[];
   runsRef: React.MutableRefObject<RunState[]>;
+  // True once the first list arrived. Until then an absent run id proves
+  // nothing, so the notification center must not call that run deleted.
+  loaded: boolean;
   refresh: () => Promise<void>;
 } {
   const [runs, setRuns] = useState<RunState[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   // Mirror the runs list through a ref so the window-focus digest can read the
   // latest runs without re-subscribing whenever the list changes.
@@ -40,6 +44,7 @@ export function useGlobalRuns(booted: boolean): {
     try {
       const next = await window.spark.orchestration.listRuns();
       setRuns(next);
+      setLoaded(true);
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
     }
@@ -91,5 +96,5 @@ export function useGlobalRuns(booted: boolean): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booted]);
 
-  return { runs, runsRef, refresh };
+  return { runs, runsRef, loaded, refresh };
 }

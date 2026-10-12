@@ -358,6 +358,22 @@ automations:
   notification center. A chime within 1.5 s of the previous one of the same
   kind is dropped.
 - `attention.ts` tracks what you are looking at.
+- `center-store.ts` owns the notification center's history and mutes, and
+  pushes a summary (unread, needs-you, mutes) to every window after each
+  change. The list operations (folding repeats per source, eviction, age
+  limits, settling answered questions) are pure functions in
+  `center-model.ts`; the badge rule (`countsAsNeedsYou`) and the "is this
+  target on screen" rule live in `src/shared/notify-center.ts` so main and
+  the renderer agree. Main cannot see panes, so a question stops counting
+  there by being settled: when its source resumes, when its pane is disposed
+  (the terminal notifier re-arms the pane) and when its run is deleted (the
+  run adapter settles on `run.deleted`). Each window also holds the rows and
+  applies the same rule with its own view of closed panes and missing runs,
+  so the bell, the **Needs you** tab and the pinned header always agree. A
+  question the window finds gone for two seconds is settled in main too
+  (`notify:settle`), so the dock badge never counts a question the bell
+  does not. Mutes match by source, workspace, agent (`agent:claude-code`,
+  `agent:cora`, from the event's kind and title) and automation job.
 
 Phone delivery goes through `remote-access/phone-notify.ts`.
 

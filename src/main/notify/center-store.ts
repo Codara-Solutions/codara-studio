@@ -1,186 +1,328 @@
-import { app } from "electron";
+import { app, BrowserWindow } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type {
   NotificationCenterEntry,
   NotificationCenterSummary,
+  NotificationMute,
+  NotificationViewSnapshot,
   NotifyEvent,
 } from "@shared/types";
+import { activeMutes, mutedBy, type MuteEvent } from "@shared/notify-center";
 import { writeFileAtomic } from "../fs-atomic";
 import { getPreferenceCached } from "../preferences-store";
 import { codaraHome } from "../codara-home";
-import { activeWindow } from "./deliver";
+import {
+  clearExceptOpen,
+  coalesceEntries,
+  evictToCap,
+  insertEntry,
+  markViewed,
+  pruneByAge,
+  removeIds,
+  removeWorkspaces,
+  restoreEntries,
+  sanitizeEntries,
+  sanitizeMutes,
+  setRead,
+  settleIds,
+  settleMissingWorkspaces,
+  settleSource,
+  settleTerminalQuestions,
+  summarize,
+} from "./center-model";
 
-// Notification-center history: a newest-first ring buffer of every recorded
-// NotifyEvent (delivered, watching-suppressed, or DND-muted), persisted to
-// codaraHome()/notifications.json with debounced atomic writes. The renderer
-// bell reads it via notify:* IPC and tracks unread through the
-// "notify:center-updated" summary push. The macOS dock badge mirrors the
-// unread count (the old per-alert unseen counter cleared on focus; the badge
-// now clears when notifications are read instead).
+// Notification-center history: a newest-first list of recorded NotifyEvents
+// (delivered, watching-suppressed, DND-muted or source-muted), persisted to
+// codaraHome()/notifications.json with debounced atomic writes. The list
+// operations themselves are pure (center-model.ts); this module owns the
+// state, the per-source mutes (notification-mutes.json), persistence and the
+// "notify:center-updated" summary push. The bell badge and the macOS dock
+// badge both show the summary's needsYou count.
 
 const CENTER_FILE = "notifications.json";
-const CAP = 200;
+const MUTES_FILE = "notification-mutes.json";
 const WRITE_DEBOUNCE_MS = 500;
+const MAX_MUTE_MS = 7 * 24 * 60 * 60_000;
 
-let entries: NotificationCenterEntry[] | null = null;
-let loadPromise: Promise<NotificationCenterEntry[]> | null = null;
+let entries: NotificationCenterEntry[] = [];
+let mutes: NotificationMute[] = [];
+let loadPromise: Promise<void> | null = null;
+// Every read and mutation runs on this chain, after the initial load, so an
+// alert raised while the file is still being read lands in the loaded list
+// instead of being overwritten by it, and a quit-time flush can wait for all
+// of them.
+let chain: Promise<unknown> = Promise.resolve();
 let persistTimer: NodeJS.Timeout | null = null;
+let dirtyEntries = false;
+let dirtyMutes = false;
 let writing: Promise<void> = Promise.resolve();
+let version = 0;
+let knownWorkspaceIds: Set<string> | null = null;
 
 function centerPath(): string {
   return join(codaraHome(), CENTER_FILE);
 }
 
-function sanitizeEntry(raw: unknown): NotificationCenterEntry | null {
-  if (!raw || typeof raw !== "object") return null;
-  const e = raw as NotificationCenterEntry;
-  if (typeof e.id !== "string" || typeof e.kind !== "string") return null;
-  if (!e.target || typeof e.target !== "object") return null;
-  return { ...e, read: e.read === true };
+function mutesPath(): string {
+  return join(codaraHome(), MUTES_FILE);
 }
 
-async function ensureLoaded(): Promise<NotificationCenterEntry[]> {
-  if (entries) return entries;
-  loadPromise ??= (async () => {
-    try {
-      const raw = await fs.readFile(centerPath(), "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      entries = Array.isArray(parsed)
-        ? parsed.map(sanitizeEntry).filter((e): e is NotificationCenterEntry => e !== null).slice(0, CAP)
-        : [];
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.warn("[notify] center history read failed, starting empty:", err);
-      }
-      entries = [];
+async function readJson(path: string, label: string): Promise<unknown> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn(`[notify] ${label} read failed:`, err);
     }
-    return entries;
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    // The next write would replace the file, so keep the unreadable copy
+    // beside it instead of discarding the user's history silently.
+    const backup = `${path}.corrupt-${Date.now()}`;
+    console.warn(`[notify] ${label} is not valid JSON, keeping it as ${backup}:`, err);
+    await fs.rename(path, backup).catch(() => undefined);
+    return null;
+  }
+}
+
+function load(): Promise<void> {
+  loadPromise ??= (async () => {
+    const now = Date.now();
+    const [rawEntries, rawMutes] = await Promise.all([
+      readJson(centerPath(), "center history"),
+      readJson(mutesPath(), "center mutes"),
+    ]);
+    entries = sanitizeEntries(rawEntries);
+    const coalesced = coalesceEntries(entries);
+    const pruned = pruneByAge(entries, now);
+    const settled = settleTerminalQuestions(entries);
+    if (evictToCap(entries) || coalesced || pruned || settled) dirtyEntries = true;
+    mutes = sanitizeMutes(rawMutes, now);
+    scheduleMuteExpiry();
   })();
   return loadPromise;
+}
+
+function enqueue<T>(fn: () => T): Promise<T> {
+  const run = chain.then(async () => {
+    await load();
+    return fn();
+  });
+  chain = run.catch((err) => {
+    console.warn("[notify] center operation failed:", err);
+  });
+  return run;
+}
+
+function commit(changed: { entries?: boolean; mutes?: boolean }): void {
+  if (!changed.entries && !changed.mutes) return;
+  if (changed.entries) dirtyEntries = true;
+  if (changed.mutes) dirtyMutes = true;
+  version += 1;
+  schedulePersist();
+  pushSummary();
+}
+
+function writeDirty(): void {
+  if (dirtyEntries) {
+    dirtyEntries = false;
+    const snapshot = JSON.stringify(entries);
+    writing = writing.then(() => writeFileAtomic(centerPath(), snapshot)).catch((err) => {
+      console.warn("[notify] center history write failed:", err);
+    });
+  }
+  if (dirtyMutes) {
+    dirtyMutes = false;
+    const snapshot = JSON.stringify(mutes);
+    writing = writing.then(() => writeFileAtomic(mutesPath(), snapshot)).catch((err) => {
+      console.warn("[notify] center mutes write failed:", err);
+    });
+  }
 }
 
 function schedulePersist(): void {
   if (persistTimer) return;
   persistTimer = setTimeout(() => {
     persistTimer = null;
-    const snapshot = entries ? JSON.stringify(entries, null, 2) : null;
-    if (snapshot === null) return;
-    writing = writing
-      .then(() => writeFileAtomic(centerPath(), snapshot))
-      .catch((err) => {
-        console.warn("[notify] center history write failed:", err);
-      });
+    writeDirty();
   }, WRITE_DEBOUNCE_MS);
   persistTimer.unref();
 }
 
-// Drain the debounced write on quit so the last notifications survive.
+// Drain pending operations and the debounced write on quit so the last
+// notifications survive, including one recorded before the initial load
+// finished.
 export async function flushNotificationCenter(): Promise<void> {
+  await chain;
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
-    if (entries) {
-      const snapshot = JSON.stringify(entries, null, 2);
-      writing = writing
-        .then(() => writeFileAtomic(centerPath(), snapshot))
-        .catch((err) => {
-          console.warn("[notify] center history write failed:", err);
-        });
-    }
   }
+  writeDirty();
   await writing;
 }
 
-function unreadCount(): number {
-  return entries ? entries.reduce((n, e) => n + (e.read ? 0 : 1), 0) : 0;
+export function centerSummarySync(): NotificationCenterSummary {
+  return { ...summarize(entries, mutes, Date.now()), version };
 }
 
-// Push the {unread} summary to the renderer bell and mirror it on the macOS
-// dock badge (gated by the osCues channel preference).
+// A mute lapses on its own, with no mutation to announce it, and the dock
+// badge would keep the count it had while the mute held. Push once more when
+// the soonest mute ends.
+let muteTimer: NodeJS.Timeout | null = null;
+
+function scheduleMuteExpiry(): void {
+  if (muteTimer) clearTimeout(muteTimer);
+  muteTimer = null;
+  const live = activeMutes(mutes, Date.now());
+  if (live.length === 0) return;
+  const soonest = Math.min(...live.map((mute) => mute.until));
+  muteTimer = setTimeout(
+    () => {
+      muteTimer = null;
+      pushSummary();
+    },
+    Math.min(Math.max(0, soonest - Date.now()) + 50, 2 ** 31 - 1),
+  );
+  muteTimer.unref();
+}
+
+// Every window shows a bell, so every window gets the summary.
 function pushSummary(): void {
-  const summary: NotificationCenterSummary = { unread: unreadCount() };
-  try {
-    activeWindow()?.webContents.send("notify:center-updated", summary);
-  } catch {
-    /* best-effort */
+  scheduleMuteExpiry();
+  const summary = centerSummarySync();
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      if (!win.isDestroyed()) win.webContents.send("notify:center-updated", summary);
+    } catch {
+      /* best-effort */
+    }
   }
   if (process.platform === "darwin") {
     try {
       const osCues = getPreferenceCached("notificationChannels").osCues;
-      app.setBadgeCount(osCues ? summary.unread : 0);
+      app.setBadgeCount(osCues ? summary.needsYou : 0);
     } catch {
       /* badge is best-effort */
     }
   }
 }
 
-export async function recordToCenter(
+// Read the history early so mutes apply to the first alerts after launch,
+// and put its count on the dock badge, which nothing else would set until
+// the next change. Launch-time clean-up is written back the same way.
+export function loadNotificationCenter(): Promise<void> {
+  return enqueue(() => {
+    if (dirtyEntries) schedulePersist();
+    pushSummary();
+  });
+}
+
+// Synchronous so publish() can consult it before deciding delivery. Until the
+// mutes file is read this reports nothing muted.
+export function isEventMuted(event: MuteEvent): boolean {
+  return mutedBy(event, mutes, Date.now()) !== null;
+}
+
+export function recordToCenter(
   event: NotifyEvent,
   opts: { read: boolean; suppressed?: string },
 ): Promise<void> {
-  const list = await ensureLoaded();
-  // A busy manual agent can finish dozens of turns in one afternoon. Keep
-  // only its latest terminal state instead of letting one pane dominate the
-  // center. A new completion also replaces a stale "needs input" entry, and
-  // vice versa, so the center never claims a pane still needs attention after
-  // it has resumed.
-  if (event.kind.startsWith("terminal.agent.")) {
-    const prior = list.findIndex((entry) => entry.sourceKey === event.sourceKey);
-    if (prior >= 0) list.splice(prior, 1);
-  }
-  list.unshift({ ...event, read: opts.read, suppressed: opts.suppressed });
-  if (list.length > CAP) list.length = CAP;
-  schedulePersist();
-  pushSummary();
+  return enqueue(() => {
+    const now = Date.now();
+    pruneByAge(entries, now);
+    insertEntry(entries, event, opts, now);
+    commit({ entries: true });
+  });
 }
 
-export async function listCenterEntries(): Promise<NotificationCenterEntry[]> {
-  return [...(await ensureLoaded())];
+export function listCenterEntries(): Promise<NotificationCenterEntry[]> {
+  return enqueue(() => entries.map((entry) => ({ ...entry })));
 }
 
-export async function markCenterRead(id: string): Promise<void> {
-  const list = await ensureLoaded();
-  const entry = list.find((e) => e.id === id);
-  if (!entry || entry.read) return;
-  entry.read = true;
-  schedulePersist();
-  pushSummary();
+export function centerSummary(): Promise<NotificationCenterSummary> {
+  return enqueue(() => centerSummarySync());
 }
 
-// Remove a single entry after the user visits its origin or otherwise acts on
-// it. Callers mark it read first for consistent acknowledgement semantics, then
-// remove it for every notification kind. This no-ops when the id is already
-// gone, which keeps concurrent view and click cleanup race-safe. It persists
-// and pushes the unread summary through the same debounced writer as the other
-// mutations.
-export async function removeCenterEntry(id: string): Promise<void> {
-  const list = await ensureLoaded();
-  const index = list.findIndex((e) => e.id === id);
-  if (index === -1) return;
-  list.splice(index, 1);
-  schedulePersist();
-  pushSummary();
+export function markCenterRead(id: string): Promise<void> {
+  return setCenterRead([id], true);
 }
 
-export async function markCenterAllRead(): Promise<void> {
-  const list = await ensureLoaded();
-  let changed = false;
-  for (const entry of list) {
-    if (!entry.read) {
-      entry.read = true;
-      changed = true;
-    }
-  }
-  if (!changed) return;
-  schedulePersist();
-  pushSummary();
+export function setCenterRead(ids: readonly string[], read: boolean): Promise<void> {
+  return enqueue(() => commit({ entries: setRead(entries, ids, read) }));
 }
 
-export async function clearCenter(): Promise<void> {
-  const list = await ensureLoaded();
-  if (list.length === 0) return;
-  list.length = 0;
-  schedulePersist();
-  pushSummary();
+export function markCenterAllRead(): Promise<void> {
+  return enqueue(() =>
+    commit({ entries: setRead(entries, entries.map((entry) => entry.id), true) }),
+  );
+}
+
+export function markCenterViewed(view: NotificationViewSnapshot): Promise<void> {
+  return enqueue(() => commit({ entries: markViewed(entries, view) }));
+}
+
+export function settleCenterSource(sourceKey: string): Promise<void> {
+  return enqueue(() => commit({ entries: settleSource(entries, sourceKey) }));
+}
+
+// The renderer found these questions' panes or runs gone. Main has no view
+// of panes, so without this a question whose pane closed outside the normal
+// disposal path would keep the dock badge up for good.
+export function settleCenterEntries(ids: readonly string[]): Promise<void> {
+  return enqueue(() => commit({ entries: settleIds(entries, ids) }));
+}
+
+export function removeCenterEntry(id: string): Promise<void> {
+  return removeCenterEntries([id]);
+}
+
+export function removeCenterEntries(ids: readonly string[]): Promise<void> {
+  return enqueue(() => commit({ entries: removeIds(entries, ids) }));
+}
+
+export function clearCenter(): Promise<void> {
+  return enqueue(() => commit({ entries: clearExceptOpen(entries) }));
+}
+
+export function restoreCenterEntries(raw: unknown): Promise<void> {
+  return enqueue(() => commit({ entries: restoreEntries(entries, raw) }));
+}
+
+export function muteCenterSource(key: string, label: string, durationMs: number): Promise<void> {
+  return enqueue(() => {
+    const now = Date.now();
+    const until = now + Math.min(Math.max(durationMs, 60_000), MAX_MUTE_MS);
+    mutes = [...activeMutes(mutes, now).filter((mute) => mute.key !== key), { key, label, until }];
+    commit({ mutes: true });
+  });
+}
+
+export function unmuteCenterSource(key: string): Promise<void> {
+  return enqueue(() => {
+    const before = mutes.length;
+    mutes = mutes.filter((mute) => mute.key !== key);
+    commit({ mutes: mutes.length !== before });
+  });
+}
+
+// Called with the full workspace set whenever app state is saved. Only ids
+// that were present before and are gone now count as deletions: a first save,
+// or a transiently empty set, must never wipe the history. The first save
+// only settles questions from workspaces deleted in an earlier session, so
+// they stop counting toward the badge; their rows stay, marked gone.
+export function noteCenterWorkspaces(workspaceIds: readonly string[]): Promise<void> {
+  const next = new Set(workspaceIds);
+  const previous = knownWorkspaceIds;
+  if (next.size === 0) return Promise.resolve();
+  knownWorkspaceIds = next;
+  if (!previous) return enqueue(() => commit({ entries: settleMissingWorkspaces(entries, next) }));
+  const removed = new Set([...previous].filter((id) => !next.has(id)));
+  if (removed.size === 0) return Promise.resolve();
+  return enqueue(() => commit({ entries: removeWorkspaces(entries, removed) }));
 }

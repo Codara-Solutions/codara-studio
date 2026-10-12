@@ -8,6 +8,7 @@ import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import type { NavigateTo } from "../notifications/routing";
 import {
   isNotificationTargetViewed,
+  notificationViewKey,
   type ActiveNotificationView,
 } from "../notifications/viewed";
 
@@ -25,9 +26,10 @@ import {
 // early. Click anywhere else on the card routes the event's NavigationTarget
 // through navigateTo — this lets a "needs you" alert deep-link the user
 // straight to the chat, terminal pane, or loom that needs them. Acting on the
-// card acknowledges and removes its notification-center entry. Visiting a
-// matching run, pane, or Automations hub does the same. The close button and
-// visual timeout only hide the card, so missed entries remain in the center.
+// card marks its notification-center row read; visiting the matching run or
+// pane does the same. The row itself stays in the center's history. The
+// close button and visual timeout only hide the card, so a missed alert
+// stays unread in the bell.
 
 // Fallback when the host passes no preference (matches DEFAULT_TOAST_DURATION_MS).
 const AUTO_DISMISS_MS = 6_000;
@@ -65,16 +67,11 @@ export interface ToastHostProps {
   dismissMs?: number;
 }
 
-async function markReadThenRemove(id: string): Promise<void> {
+async function markRead(id: string): Promise<void> {
   try {
     await window.spark.notifications.markRead(id);
   } catch {
-    // Removal is still worth attempting if the read update raced or failed.
-  }
-  try {
-    await window.spark.notifications.remove(id);
-  } catch {
-    // Notification cleanup is best-effort.
+    // Best-effort: the row stays unread in the bell, which is recoverable.
   }
 }
 
@@ -93,7 +90,7 @@ export default function ToastHost({
   const acknowledge = useCallback((id: string) => {
     if (acknowledgingIds.current.has(id)) return;
     acknowledgingIds.current.add(id);
-    void markReadThenRemove(id).finally(() => {
+    void markRead(id).finally(() => {
       acknowledgingIds.current.delete(id);
     });
   }, []);
@@ -154,9 +151,8 @@ export default function ToastHost({
           ...current,
           {
             id,
-            // Only the glyph is read off `kind` (a neutral bell here); the
-            // title/body below are always supplied, so the kind's own label
-            // never surfaces.
+            // Nothing is read off `kind`: a local card always shows the
+            // neutral bell, and its title and body are always supplied.
             kind: "app.update-ready",
             sourceKey: id,
             title,
@@ -178,27 +174,23 @@ export default function ToastHost({
     return () => window.removeEventListener("spark:local-toast", handler);
   }, []);
 
+  // Once per real change of the surface on screen (keyed, not per render):
+  // hide cards for what is now visible, and let main mark the matching center
+  // rows read in one call. Main applies the same matcher to its own list, so
+  // the renderer never fetches the history for this.
+  const activeViewKey = notificationViewKey(activeView);
   useEffect(() => {
+    const view = activeViewRef.current;
     const matchingVisible = toastsRef.current.filter(
-      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, activeView, toast.kind),
+      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, view, toast.kind),
     );
     if (matchingVisible.length > 0) {
       const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
       setToasts((current) => current.filter((toast) => !matchingIds.has(toast.id)));
-      for (const toast of matchingVisible) acknowledge(toast.id);
     }
-
-    void window.spark.notifications
-      .list()
-      .then((entries) => {
-        for (const entry of entries) {
-          if (isNotificationTargetViewed(entry.target, activeView, entry.kind)) {
-            acknowledge(entry.id);
-          }
-        }
-      })
-      .catch(() => undefined);
-  }, [activeView, acknowledge]);
+    if (!view.visibleRunId && !view.terminal) return;
+    void window.spark.notifications.markViewed(view).catch(() => undefined);
+  }, [activeViewKey]);
 
   useEffect(() => {
     const timers = dismissTimers.current;
@@ -359,11 +351,10 @@ function ToastCard({
       role={tone === "danger" ? "alert" : "status"}
       data-lifted={hover && clickable ? "true" : undefined}
       onClick={() => {
-        if (!clickable) return;
-        navigateTo?.(toast.target);
-        // Routing acts on every notification kind. Acknowledge first, then
-        // remove the center entry. The X button and visual timeout do neither.
-        onAcknowledge();
+        if (!clickable || !navigateTo) return;
+        // Opening marks the center row read, unless nothing could be opened
+        // (its workspace is gone). The X button and visual timeout do neither.
+        if (navigateTo(toast.target) !== "gone") onAcknowledge();
         onClose();
       }}
       onMouseEnter={() => setHover(true)}
@@ -421,7 +412,7 @@ function ToastCard({
           }}
         />
       )}
-      <ToastIcon glyph={meta.glyph} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
+      <ToastIcon glyph={isLocalToast(toast) ? "bell" : meta.glyph} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
       <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
         <div
           style={{
@@ -592,6 +583,26 @@ export function NotifyGlyphSvg({ glyph, size = 13 }: { glyph: NotifyGlyph; size?
               geometry as the app's reload icon (gap + arrowhead reads clockwise). */}
           <path d="M11 7 A4 4 0 1 1 9.6 3.9" />
           <path d="M11.2 1.8 L11.2 4.2 L8.8 4.2" />
+        </>
+      ) : glyph === "commit" ? (
+        <>
+          <circle cx="7" cy="7" r="2.3" />
+          <path d="M1.5 7 H4.7 M9.3 7 H12.5" />
+        </>
+      ) : glyph === "pr" ? (
+        <>
+          <circle cx="3.8" cy="3.3" r="1.4" />
+          <circle cx="3.8" cy="10.7" r="1.4" />
+          <circle cx="10.2" cy="10.7" r="1.4" />
+          <path d="M3.8 4.7 V9.3" />
+          <path d="M10.2 9.3 V5.6 a1.8 1.8 0 0 0 -1.8 -1.8 H6.4" />
+          <path d="M7.6 2.6 L6.4 3.8 L7.6 5" />
+        </>
+      ) : glyph === "download" ? (
+        <>
+          <path d="M7 2 V9" />
+          <path d="M4.2 6.4 L7 9.2 L9.8 6.4" />
+          <path d="M2.5 11.8 H11.5" />
         </>
       ) : (
         <path d="M3 7.5 L6 10.5 L11 4" />

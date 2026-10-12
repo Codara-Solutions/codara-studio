@@ -18,7 +18,13 @@ import {
   registerDeliveryWindow,
   signalTerminalAttention,
 } from "./deliver";
-import { recordToCenter } from "./center-store";
+import {
+  isEventMuted,
+  loadNotificationCenter,
+  noteCenterWorkspaces,
+  recordToCenter,
+  settleCenterSource,
+} from "./center-store";
 import {
   clearLastAlerted,
   createPolicyState,
@@ -37,12 +43,21 @@ import { publishDeliveredNotification } from "./subscribers";
 
 export { setAttention } from "./attention";
 export {
+  centerSummary,
   clearCenter,
   flushNotificationCenter,
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  markCenterViewed,
+  muteCenterSource,
+  noteCenterWorkspaces,
+  removeCenterEntries,
   removeCenterEntry,
+  restoreCenterEntries,
+  setCenterRead,
+  settleCenterEntries,
+  unmuteCenterSource,
 } from "./center-store";
 export type { PublishInput } from "./types";
 
@@ -92,18 +107,19 @@ export function publish(input: PublishInput): void {
   }
   const watching = watchingTarget(input);
   const dnd = getPreferenceCached("notificationsDnd") === true;
+  const muted = isEventMuted(event);
   const decision = decide(
     { kind: event.kind, sourceKey: event.sourceKey },
-    { watching, dnd },
+    { watching, dnd, muted },
     state,
   );
   // Persistent audit trail (<codaraHome>/logs/main.log): one line per
-  // publish, delivered or not. Center entries get auto-acknowledged and
-  // removed the moment the user views the target, so without this line a
-  // background chime leaves no evidence of what raised it.
+  // publish, delivered or not. Center rows fold repeats and get dismissed, so
+  // without this line a background chime can leave no evidence of what
+  // raised it.
   logMain(
     "notify",
-    `${decision.deliver ? "DELIVER" : "skip"} kind=${event.kind} source=${event.sourceKey} reason=${decision.reason} watching=${watching} dnd=${dnd} title="${event.title}" body="${event.body.replace(/\s+/g, " ").slice(0, 120)}"`,
+    `${decision.deliver ? "DELIVER" : "skip"} kind=${event.kind} source=${event.sourceKey} reason=${decision.reason} watching=${watching} dnd=${dnd} muted=${muted} title="${event.title}" body="${event.body.replace(/\s+/g, " ").slice(0, 120)}"`,
   );
   if (decision.record) {
     void recordToCenter(event, {
@@ -134,9 +150,14 @@ export function publish(input: PublishInput): void {
 // Real new activity on a source — clears the no-change memory + completion
 // guard so its next alert delivers. Producers call this where work resumes
 // (terminal working phase, automation iteration start); the run adapter
-// below calls it on active status transitions.
+// below calls it on active status transitions. Resumed work also means any
+// question the source asked was answered or abandoned, so its needs-you rows
+// in the center stop counting toward the badge.
 export function rearm(sourceKey: string): void {
   policyRearm(state, sourceKey);
+  void settleCenterSource(sourceKey).catch((err) => {
+    console.warn("[notify] center settle failed:", err);
+  });
 }
 
 export function registerMainWindow(win: BrowserWindow): void {
@@ -182,6 +203,15 @@ function formatDuration(ms: number): string {
 }
 
 function handleRunEvent(event: SparkEvent): void {
+  // A deleted run (by the user or the retention sweep) can never be
+  // answered, so its question stops counting. Run-scoped automation
+  // questions share the run's source key and settle with it.
+  if (event.type === "run.deleted" && event.runId) {
+    void settleCenterSource(runSourceKey(event.runId)).catch((err) => {
+      console.warn("[notify] center settle failed:", err);
+    });
+    return;
+  }
   // Only run-level status transitions alert; worker events fire many times
   // per run and would be pure noise.
   if (event.type !== "run.status_updated") return;
@@ -315,8 +345,12 @@ export function startNotifications(): void {
   if (started) return;
   started = true;
   // Warm the preference cache so getPreferenceCached("notificationsDnd")
-  // reflects disk state from the first publish.
+  // reflects disk state from the first publish, and the center so its mutes
+  // do too.
   void loadPreferences().catch(() => undefined);
+  void loadNotificationCenter().catch(() => undefined);
+  const workspaces = cachedState()?.workspaces;
+  if (workspaces) void noteCenterWorkspaces(workspaces.map((w) => w.id)).catch(() => undefined);
   subscribeToEvents((event) => {
     try {
       handleRunEvent(event);

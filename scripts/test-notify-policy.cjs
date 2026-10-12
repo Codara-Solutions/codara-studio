@@ -27,7 +27,7 @@ const sharedAliasPlugin = {
 };
 
 // Each case runs against a fresh PolicyState. Steps:
-//   { kind, sourceKey?, watching?, dnd?, expect: { deliver, record?, read?, reason? } }
+//   { kind, sourceKey?, watching?, dnd?, muted?, expect: { deliver, record?, read?, reason? } }
 //   { rearm: sourceKey } | { clearLastAlerted: sourceKey }
 // sourceKey defaults to "run:r1"; watching/dnd default false.
 const CASES = [
@@ -198,6 +198,39 @@ const CASES = [
     ],
   },
   {
+    name: "a muted source records unread without delivering",
+    steps: [
+      {
+        kind: "run.blocked",
+        muted: true,
+        expect: { deliver: false, record: true, read: false, reason: "muted" },
+      },
+    ],
+  },
+  {
+    name: "watching a muted source still records it pre-read",
+    steps: [
+      {
+        kind: "run.complete",
+        watching: true,
+        muted: true,
+        expect: { deliver: false, record: true, read: true, reason: "watching" },
+      },
+    ],
+  },
+  {
+    name: "a muted terminal alert while watching is not recorded at all",
+    steps: [
+      {
+        kind: "terminal.agent.done",
+        sourceKey: "pane:p1",
+        watching: true,
+        muted: true,
+        expect: { deliver: false, record: false, reason: "watching" },
+      },
+    ],
+  },
+  {
     name: "DND-muted event still sets the dedup state",
     steps: [
       { kind: "run.blocked", dnd: true, expect: { deliver: false, reason: "dnd" } },
@@ -322,7 +355,7 @@ async function main() {
       }
       const decision = P.decide(
         { kind: step.kind, sourceKey: step.sourceKey ?? "run:r1" },
-        { watching: step.watching === true, dnd: step.dnd === true },
+        { watching: step.watching === true, dnd: step.dnd === true, muted: step.muted === true },
         state,
       );
       for (const [key, want] of Object.entries(step.expect)) {

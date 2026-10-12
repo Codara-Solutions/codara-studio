@@ -41,7 +41,7 @@ const harnessPlugin = {
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], writes: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], writes: [], rearmed: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
       if (args.path === "./agent-session-registry") {
         return {
           contents: init + "export function latestSessionStart(id){ return globalThis.__TAN.sessions?.get(id) ?? null; }\n",
@@ -95,7 +95,7 @@ const harnessPlugin = {
           'import { createPolicyState, decide, rearm as policyRearm, terminalAlertWatched } from "./policy";\n' +
           "const state = createPolicyState();\n" +
           "export const paneSourceKey = (paneId) => `pane:${paneId}`;\n" +
-          "export function rearm(sourceKey){ policyRearm(state, sourceKey); }\n" +
+          "export function rearm(sourceKey){ globalThis.__TAN.rearmed.push(sourceKey); policyRearm(state, sourceKey); }\n" +
           "export function emitTerminalAgentState(payload){ globalThis.__TAN.chips.push(payload); }\n" +
           "export function publish(event){\n" +
           "  const T = globalThis.__TAN;\n" +
@@ -631,11 +631,15 @@ async function main() {
   const beforeIntentionalClose = alertCount();
   feed("p7", "\x1b]633;E;claude\x07Claude Code v2.1.209\r\n");
   mod.noteTerminalWillDispose("p7");
+  T.rearmed.length = 0;
   T.exits.get("p7")?.({ exitCode: 9 });
   check(
     "intentional pane disposal never masquerades as an agent crash",
     alertCount() === beforeIntentionalClose,
   );
+  // rearm settles the pane's open question in the notification center, so
+  // a closed pane's prompt stops counting toward the bell badge.
+  check("a disposed pane's source is re-armed, settling its question", T.rearmed.includes("pane:p7"));
 
   // ── Scenario 11: unexpected exit preserves same-id respawn monitoring ──
   T.exits.get("p1")?.({ exitCode: 0 });

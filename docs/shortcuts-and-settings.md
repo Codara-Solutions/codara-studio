@@ -181,6 +181,72 @@ reports, and Codex's notify program and session file (see
 [on-your-machine.md](./on-your-machine.md) for what Codara adds to your
 config). Agents without those fall back to reading the screen.
 
+### The notification center
+
+The bell in the title bar keeps every alert, including the ones you did not
+see because you were watching, Do Not Disturb was on, or the source was
+muted. Its badge counts the questions you have not seen yet that are still
+waiting on you (a Cora run, a terminal agent or an automation that needs you),
+leaving out muted sources and questions whose pane or run is gone. The
+**Needs you** tab and the pinned section count exactly the same rows. When
+there are none, a dot means there are other unread alerts; teammate pushes
+and muted sources do not light it.
+
+- **Needs you** sits on top: the unseen questions, each with its action on
+  the card (**Reply in terminal**, **Open run**, **Open automation**). A
+  blocked Cora run or automation shows its answer options as buttons and a
+  reply field, so you can answer without leaving what you are doing. An
+  answered card stays where it is, turns green and says "Answer sent" until
+  you close the panel; it no longer counts toward the badge. A question you
+  have read or muted is still open but no longer pinned: it stays in its day
+  with a **Waiting** tag and a quiet button, and the header says how many
+  (for example "Needs you 6 · 9 seen"). A question stops waiting once its
+  source moves on: the agent resumes, the run continues, the pane closes or
+  the run is deleted. It then reads **Resolved**, or **Pane closed** when
+  its pane is gone, and leaves the unread count. A terminal prompt from
+  before a restart no longer counts.
+- Below it the history is grouped by day, or by workspace with the folder
+  button. Repeats from one source fold into one row: a prompt between two
+  finished turns does not restart the count, and the last three distinct
+  messages stay on the row (a bot's row reads "52 pushes to main,
+  feature/sync" with **3 earlier** to expand). The same alert from several
+  panes stacks under one heading such as "Claude Code finished 7× in
+  api-server", which counts finished turns; the control under it counts the
+  rows it opens ("Show 3 panes · 1 unread"). Pull requests stack as "Pull
+  requests #41, #42 in api-server"; pushes stack only when the same people
+  pushed to the same repository.
+- Filters: **All**, **Needs you** and **Unread**. The filter and grouping are
+  remembered.
+- Clicking a row opens its exact pane, run or automation and marks it read.
+  If the pane was closed or the run is no longer available, the row says so
+  and opening it lands on its workspace instead; rows of a removed workspace
+  open nothing. Opening the pane or run yourself also marks its alerts read.
+- Hover a row for **Mark read** or **Mark unread**, **Mute** and
+  **Dismiss**; they take the place of the time while the pointer is there.
+  The mute menu picks how long first (**1 hour** or **Until morning**, the
+  next 08:00), then what: this pane, run, automation or repository;
+  the agent everywhere (**Claude Code everywhere**, **All Cora runs**, **All
+  automations**); or everything in the workspace. A source that can never
+  notify again, such as a closed pane or a finished run, is not offered.
+  Muted sources still land in the history, silently; the footer lists active
+  mutes with **Unmute**. **Clear all** removes everything except the
+  questions still waiting, and says how many it keeps. **Clear all** and
+  **Dismiss** can be undone for a few seconds; removals made while the undo
+  bar shows are undone together.
+- Keys, with the list focused: Up and Down (or J and K), Home and End, Enter
+  to open, R to toggle read, M to open the mute menu (arrows move in it,
+  Enter picks, Tab leaves it), Delete to dismiss, Right and Left to show or
+  hide earlier messages. Escape closes the menu, then leaves a reply field, then closes
+  the panel and returns focus to the bell.
+
+The history keeps 200 rows. When it is full the oldest read row goes first,
+and an open question goes last, even once read. A question superseded by a
+newer alert from the same source (the run failed, the pane asked again)
+reads **Resolved**. Read rows are dropped after 7 days and any
+row after 30 days; a question still waiting on you keeps the 30 days even
+once read. It is saved in `notifications.json` and the mutes in
+`notification-mutes.json` (see [on-your-machine.md](./on-your-machine.md)).
+
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your

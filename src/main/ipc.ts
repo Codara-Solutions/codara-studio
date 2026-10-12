@@ -27,6 +27,7 @@ import {
   setStatusSender,
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
+import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   RemoteAuthPromptAnswer,
@@ -124,12 +125,21 @@ import {
   listWorkerSessions,
 } from "./worker-sessions";
 import {
+  centerSummary,
   clearCenter,
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  markCenterViewed,
+  muteCenterSource,
+  noteCenterWorkspaces,
+  removeCenterEntries,
   removeCenterEntry,
+  restoreCenterEntries,
   setAttention,
+  setCenterRead,
+  settleCenterEntries,
+  unmuteCenterSource,
 } from "./notify";
 import {
   noteTerminalWillDispose,
@@ -419,6 +429,8 @@ import type {
   GitRemoteUpdatedPayload,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
+  NotificationCenterSummary,
+  NotificationViewSnapshot,
   LiveWorkerActivity,
   RenameRunInput,
   ResumeRunInput,
@@ -673,6 +685,28 @@ function handleOpen(channel: string, listener: InvokeListener): void {
 }
 void handleOpen;
 
+function notifyIdsFromIpc(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 500);
+}
+
+function notifyViewFromIpc(
+  raw: Partial<NotificationViewSnapshot> | null | undefined,
+): NotificationViewSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const str = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  const terminal = raw.terminal;
+  const workspaceId = str(terminal?.workspaceId);
+  const tabId = str(terminal?.tabId);
+  const paneId = str(terminal?.paneId);
+  return {
+    workspaceId: str(raw.workspaceId),
+    visibleRunId: str(raw.visibleRunId),
+    terminal: workspaceId && tabId && paneId ? { workspaceId, tabId, paneId } : null,
+  };
+}
+
 export function registerIpc(): void {
   handle("onboarding:load", () => loadOnboardingProgress());
   handle("onboarding:save", (_event, value: unknown) => saveOnboardingProgress(value));
@@ -735,6 +769,7 @@ export function registerIpc(): void {
       .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
       .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
     setAllowedRoots(roots);
+    void noteCenterWorkspaces(state.workspaces.map((w) => w.id)).catch(() => undefined);
   });
 
   handle("settings:load", async (): Promise<AppSettings> => {
@@ -3308,17 +3343,65 @@ export function registerIpc(): void {
     "notify:list",
     async (): Promise<NotificationCenterEntry[]> => listCenterEntries(),
   );
+  handle(
+    "notify:summary",
+    async (): Promise<NotificationCenterSummary> => centerSummary(),
+  );
   handle("notify:markRead", async (_e, id: string): Promise<void> => {
     if (typeof id === "string") await markCenterRead(id);
   });
+  handle(
+    "notify:setRead",
+    async (_e, input: { ids?: unknown; read?: unknown } | null): Promise<void> => {
+      const ids = notifyIdsFromIpc(input?.ids);
+      if (ids.length > 0) await setCenterRead(ids, input?.read !== false);
+    },
+  );
   handle("notify:markAllRead", async (): Promise<void> => {
     await markCenterAllRead();
   });
-  handle("notify:remove", async (_e, id: string): Promise<void> => {
+  handle("notify:remove", async (_e, id: unknown): Promise<void> => {
     if (typeof id === "string") await removeCenterEntry(id);
+    else {
+      const ids = notifyIdsFromIpc(id);
+      if (ids.length > 0) await removeCenterEntries(ids);
+    }
+  });
+  handle("notify:settle", async (_e, ids: unknown): Promise<void> => {
+    const list = notifyIdsFromIpc(ids);
+    if (list.length > 0) await settleCenterEntries(list);
   });
   handle("notify:clear", async (): Promise<void> => {
     await clearCenter();
+  });
+  // Undo for Dismiss and Clear all: the renderer hands back the rows it just
+  // removed. The store sanitizes them like a persisted file.
+  handle("notify:restore", async (_e, rows: unknown): Promise<void> => {
+    if (Array.isArray(rows)) await restoreCenterEntries(rows.slice(0, 500));
+  });
+  handle(
+    "notify:markViewed",
+    async (_e, view: Partial<NotificationViewSnapshot> | null): Promise<void> => {
+      const snapshot = notifyViewFromIpc(view);
+      if (snapshot) await markCenterViewed(snapshot);
+    },
+  );
+  handle(
+    "notify:mute",
+    async (
+      _e,
+      input: { key?: unknown; label?: unknown; durationMs?: unknown } | null,
+    ): Promise<void> => {
+      const key = typeof input?.key === "string" ? input.key.slice(0, 512) : "";
+      if (!MUTE_KEY_PATTERN.test(key)) return;
+      const durationMs = typeof input?.durationMs === "number" ? input.durationMs : 60 * 60_000;
+      if (!Number.isFinite(durationMs)) return;
+      const label = typeof input?.label === "string" ? input.label.slice(0, 200) : key;
+      await muteCenterSource(key, label, durationMs);
+    },
+  );
+  handle("notify:unmute", async (_e, key: unknown): Promise<void> => {
+    if (typeof key === "string") await unmuteCenterSource(key);
   });
 
   handle("window:minimize", async (e): Promise<void> => {
