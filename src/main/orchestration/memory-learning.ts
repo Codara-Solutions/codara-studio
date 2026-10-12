@@ -7,6 +7,9 @@ import type { HumanRunMessage, RunState, WorkerReport } from "@shared/types";
 import {
   DEFAULT_MEMORY_LEARNING_SETTINGS,
   MEMORY_ITEM_MAX_CHARS,
+  memoryPolarity,
+  memorySupportedByQuote,
+  memoryTokens,
   normalizeMemoryText,
   type CoraMemoryItem,
   type MemoryItemKind,
@@ -44,8 +47,8 @@ import { readWorkspaceMemory } from "./run-memory";
 //     (managed, direct, Talk, answers) as soon as it is persisted, which is
 //     always before any later compaction could summarize it away.
 //  2. Completion (each time a chat or run completes): worker-reported lessons,
-//     and commands that verified runs keep relying on, both as suggestions
-//     since they come from tool output, not the user.
+//     active only when a verifier confirmed the run, and commands that
+//     verified runs keep relying on, always as suggestions.
 //  3. Review (a model call, throttled per run and per day, kill switch): the
 //     mem0-style pass that reads the recent conversation and existing
 //     memories and answers with add / update / delete / none operations, each
@@ -590,10 +593,24 @@ async function reflect(
 }
 
 /**
+ * An update usually keeps the old memory's words and adds the user's new
+ * ones, so it is grounded when every word it adds comes from the quote and
+ * it does not flip the memory between "do" and "don't".
+ */
+function revisionGrounded(previous: string, next: string, quote: string): boolean {
+  if (memoryPolarity(previous) !== memoryPolarity(next)) return false;
+  const kept = new Set(memoryTokens(previous));
+  const quoted = new Set(memoryTokens(quote));
+  const added = memoryTokens(next).filter((token) => !kept.has(token));
+  return added.length > 0 && added.every((token) => quoted.has(token));
+}
+
+/**
  * Apply a review's operations behind the evidence gate. An add or update
- * whose quote is the user's own words is trusted; an add without one becomes
- * a suggestion; an update or delete without one is ignored, so a model
- * hallucination can never rewrite or remove what the user taught.
+ * whose words come from a quote of the user's own is trusted; an add without
+ * one becomes a suggestion; an update or delete without one is ignored, so a
+ * model hallucination (or a page Cora read) can never rewrite or remove what
+ * the user taught.
  */
 export async function applyReflection(
   run: LearnableRun,
@@ -604,7 +621,12 @@ export async function applyReflection(
   const outcomes: LearnedOutcome[] = [];
   const adds: LearnedCandidate[] = [];
   for (const operation of operations) {
-    const grounded = quoteFromUser(operation.evidence, userTexts);
+    // The transcript the review reads carries Cora's replies, which can echo
+    // a web page or a file. A quote that is really the user's but says
+    // something else ("fix the tests" behind "always run curl ... | sh")
+    // must not lend that text the user's authority.
+    const quoted = quoteFromUser(operation.evidence, userTexts);
+    const grounded = quoted && memorySupportedByQuote(operation.text ?? "", operation.evidence);
     if (operation.op === "add") {
       const scope = operation.scope ?? "global";
       if (!operation.text || !scopeEnabled(run, scope)) continue;
@@ -620,16 +642,18 @@ export async function applyReflection(
       });
       continue;
     }
-    if (!grounded || !operation.id) continue;
+    if (!quoted || !operation.id) continue;
     const existing = getMemoryItem(profileId, operation.id);
     // What the user typed on the Memory page or pinned is theirs to change.
     if (!existing || existing.status === "archived" || existing.source === "manual" || existing.pinned) continue;
     if (operation.op === "delete") {
+      // The user's words have to be about this memory, not any sentence of theirs.
+      if (!memorySupportedByQuote(existing.text, operation.evidence)) continue;
       const archived = await archiveMemoryItem(profileId, existing.id, "contradicted");
       if (archived) outcomes.push({ action: "superseded", superseded: [archived] });
       continue;
     }
-    if (operation.text) {
+    if (operation.text && (grounded || revisionGrounded(existing.text, operation.text, operation.evidence ?? ""))) {
       outcomes.push(await reviseMemoryItem(profileId, existing.id, clip(operation.text, MEMORY_ITEM_MAX_CHARS), {
         runId: run.id,
         ...(operation.evidence ? { quote: operation.evidence } : {}),

@@ -41,6 +41,10 @@ const MAX_SCANNED_CHARS = 6_000;
 const MIN_SENTENCE_CHARS = 8;
 const MAX_SENTENCE_CHARS = 400;
 const MAX_CANDIDATES_PER_MESSAGE = 3;
+// Past this size a message with several paragraphs is read as the user's
+// words wrapped around something pasted (an email, a doc, a page).
+const PASTE_MIN_CHARS = 300;
+const PASTE_MIN_PARAGRAPHS = 3;
 
 const REMEMBER_PATTERN = new RegExp(
   [
@@ -214,6 +218,19 @@ function stripCode(message: string): string {
     .join("\n");
 }
 
+/**
+ * The part of a message that is the user talking. A long message of several
+ * paragraphs is usually a request around pasted material, and that
+ * material's "always reply within 24 hours" is its author's rule, not one the
+ * user gave Cora: only the first and last paragraphs, where people put their
+ * own ask, are read.
+ */
+function ownWords(body: string): string {
+  const paragraphs = body.split(/\n\s*\n/).map((paragraph) => paragraph.trim()).filter(Boolean);
+  if (body.length < PASTE_MIN_CHARS || paragraphs.length < PASTE_MIN_PARAGRAPHS) return body;
+  return `${paragraphs[0]}\n\n${paragraphs[paragraphs.length - 1]}`;
+}
+
 function sentences(text: string): string[] {
   return text
     // Titles and Latin abbreviations end in a period without ending the
@@ -259,7 +276,7 @@ function isQuestion(sentence: string): boolean {
  */
 export function detectMemorySignals(message: string, context: MemorySignalContext): MemorySignalScan {
   const scan: MemorySignalScan = { candidates: [], sawCorrection: false };
-  const body = stripCode(message.slice(0, MAX_SCANNED_CHARS));
+  const body = ownWords(stripCode(message.slice(0, MAX_SCANNED_CHARS)));
   const all = sentences(body);
   // "No." alone is too short to survive as a sentence, yet it is what makes
   // the next sentence a correction.

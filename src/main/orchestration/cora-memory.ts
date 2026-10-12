@@ -11,8 +11,8 @@ import {
   normalizeCoraProfileId,
   resolveCoraProfile,
 } from "./cora-profiles";
-import { containsSecret } from "@shared/memory-items";
-import { markMemoryItemsUsed, renderLearnedMemory, selectLearnedMemory } from "./memory-items";
+import { containsSecret, isCoreMemoryItem } from "@shared/memory-items";
+import { listMemoryItems, markMemoryItemsUsed, renderLearnedMemory, selectLearnedMemory } from "./memory-items";
 
 // Cora memory v2: curated semantic guidance, two markdown tiers.
 //
@@ -964,7 +964,31 @@ export async function formatCoraMemoryForTurn(
       core: selection.core.filter((item) => carried.get(item.id) !== item.text),
       relevant: selection.relevant.filter((item) => carried.get(item.id) !== item.text),
     };
-    learnedBlock = renderLearnedMemory(fresh, { delta: carried.size > 0 });
+    const resent = new Set([...fresh.core, ...fresh.relevant].map((item) => item.id));
+    // A delta only adds, so an item the session already carries keeps
+    // applying until it is withdrawn in so many words: one the user deleted,
+    // one a newer statement replaced, or every item once memory is switched
+    // off. Without this a deleted memory stays in force until the next
+    // compaction. One the user reworded is sent again in its new words.
+    const inForce = new Map(
+      listMemoryItems(profileId, { workspaceId })
+        .filter((item) => item.status === "active" &&
+          (item.scope === "global" ? rendered.globalEnabled : rendered.workspaceEnabled))
+        .map((item) => [item.id, item]),
+    );
+    const retracted: Array<{ id: string; text: string }> = [];
+    for (const [id, text] of carried) {
+      if (resent.has(id)) continue;
+      const current = inForce.get(id);
+      if (current?.text === text) continue;
+      if (current) {
+        (isCoreMemoryItem(current) ? fresh.core : fresh.relevant).push(current);
+        continue;
+      }
+      retracted.push({ id, text });
+      carried.delete(id);
+    }
+    learnedBlock = renderLearnedMemory(fresh, { delta: carried.size > 0 || retracted.length > 0, retracted });
     for (const item of [...fresh.core, ...fresh.relevant]) carried.set(item.id, item.text);
     learnedIds = [...fresh.core, ...fresh.relevant].map((item) => item.id);
   } catch {

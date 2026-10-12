@@ -6614,18 +6614,19 @@ async function handleOrchestratorRecall(
   const workspaceOn = isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId);
   const profileId = run.coraProfileId ?? "default";
   const { markMemoryItemsUsed, searchMemoryItems } = await import("./orchestration/memory-items");
-  const found = searchMemoryItems(profileId, run.workspaceId, query, limit * 2)
-    .filter((item) => workspaceOn || item.scope === "global")
+  // Suggestions stay out: they are tool output (a worker's lesson, a review
+  // the user's words did not back) that the user has not approved, and the
+  // model reads whatever this returns as guidance.
+  const found = searchMemoryItems(profileId, run.workspaceId, query, limit * 3)
+    .filter((item) => item.status === "active" && (workspaceOn || item.scope === "global"))
     .slice(0, limit);
-  markMemoryItemsUsed(profileId, found.filter((item) => item.status === "active").map((item) => item.id));
+  markMemoryItemsUsed(profileId, found.map((item) => item.id));
   return successResponse(id, {
     memories: found.map((item) => ({
       id: item.id,
       scope: item.scope,
       kind: item.kind,
       text: item.text,
-      // A suggestion is not yet approved by the user: context, not instruction.
-      status: item.status === "proposed" ? "suggestion (unconfirmed)" : "active",
       learned: item.createdAt.slice(0, 10),
     })),
     message: found.length === 0 ? "Nothing relevant remembered." : `${found.length} memories.`,

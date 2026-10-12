@@ -210,6 +210,37 @@ export function memoryRetrievalTokens(text: string): string[] {
   return [...tokens, ...tags];
 }
 
+/**
+ * How well a quote backs a memory written from it: the share of the memory's
+ * retrieval tokens the quote carries, and how many content words it adds
+ * that the quote never said. A review answer can cite a real sentence of the
+ * user's and still write anything into `text`, so the quote existing is not
+ * enough; the words have to come from it. Concept tags bridge a paraphrase
+ * across languages ("Answer in Spanish." from "respóndeme en español").
+ */
+export function memoryQuoteSupport(text: string, quote: string): { coverage: number; unsupported: number } {
+  const quoted = new Set(memoryRetrievalTokens(quote));
+  const tokens = [...new Set(memoryRetrievalTokens(text))];
+  if (tokens.length === 0) return { coverage: 0, unsupported: 0 };
+  let shared = 0;
+  let unsupported = 0;
+  for (const token of tokens) {
+    if (quoted.has(token)) shared += 1;
+    else if (!token.startsWith("#")) unsupported += 1;
+  }
+  return { coverage: shared / tokens.length, unsupported };
+}
+
+const QUOTE_MIN_COVERAGE = 0.5;
+const QUOTE_MAX_UNSUPPORTED_WORDS = 3;
+
+/** Whether `quote` is enough to stand behind `text` as the user's own words. */
+export function memorySupportedByQuote(text: string, quote: string | undefined): boolean {
+  if (!quote) return false;
+  const { coverage, unsupported } = memoryQuoteSupport(text, quote);
+  return coverage >= QUOTE_MIN_COVERAGE && unsupported <= QUOTE_MAX_UNSUPPORTED_WORDS;
+}
+
 function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   if (a.size === 0 || b.size === 0) return 0;
   let shared = 0;

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "../fs-atomic";
@@ -13,6 +13,7 @@ import {
   memoryItemLabel,
   memoryLastTouched,
   memorySimilarity,
+  normalizeMemoryText,
   rankMemoryItems,
   type CoraMemoryItem,
   type MemoryDigestEntry,
@@ -43,6 +44,8 @@ const MAX_LIVE_ITEMS = 400;
 const MAX_ARCHIVED_ITEMS = 200;
 const ARCHIVE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
 const TOMBSTONE_RETENTION_MS = 180 * 24 * 60 * 60 * 1000;
+const MAX_TOMBSTONES = 300;
+const SAME_EVIDENCE_SIMILARITY = 0.4;
 const MAX_EVIDENCE_PER_ITEM = 4;
 const MAX_QUOTE_CHARS = 300;
 const MAX_SCANNED_RUNS = 500;
@@ -138,8 +141,12 @@ function validItem(value: unknown): value is CoraMemoryItem {
 }
 
 function readStore(profileId: string): ItemStore {
+  return loadStore(profileId).store;
+}
+
+function loadStore(profileId: string): { store: ItemStore; corrupt: boolean } {
   const path = itemsPath(profileId);
-  if (!existsSync(path)) return emptyStore();
+  if (!existsSync(path)) return { store: emptyStore(), corrupt: false };
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<ItemStore>;
     const store = emptyStore();
@@ -161,12 +168,11 @@ function readStore(profileId: string): ItemStore {
       store.reflectionBudget = { day: raw.reflectionBudget.day, count: Number(raw.reflectionBudget.count) || 0 };
     }
     if (typeof raw.lastConsolidatedAt === "string") store.lastConsolidatedAt = raw.lastConsolidatedAt;
-    return store;
+    return { store, corrupt: false };
   } catch {
-    // A corrupt store must not cost a turn. It is left on disk untouched
-    // until the next write replaces it, so nothing is silently truncated
-    // by a read.
-    return emptyStore();
+    // A corrupt store must not cost a turn: reads see an empty one, and the
+    // first write sets the damaged file aside before replacing it.
+    return { store: emptyStore(), corrupt: true };
   }
 }
 
@@ -190,6 +196,12 @@ async function writeStore(profileId: string, store: ItemStore): Promise<void> {
   const path = itemsPath(profileId);
   await mkdir(dirname(path), { recursive: true });
   await writeFileAtomic(path, `${JSON.stringify(store)}\n`);
+}
+
+async function setAsideCorruptStore(profileId: string): Promise<void> {
+  const path = itemsPath(profileId);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await copyFile(path, join(dirname(path), `items.corrupt-${stamp}.json`)).catch(() => undefined);
 }
 
 type ChangeListener = (profileId: string) => void;
@@ -218,9 +230,12 @@ async function mutateStore<T>(
 ): Promise<T> {
   const id = normalizeCoraProfileId(profileId);
   return withStoreLock(id, async () => {
-    const store = readStore(id);
+    const { store, corrupt } = loadStore(id);
     const { result, changed, itemsChanged } = mutate(store, Date.now());
     if (changed) {
+      // The scan cursor is written after every user message, so without this
+      // copy one unreadable byte would cost the user everything Cora learned.
+      if (corrupt) await setAsideCorruptStore(id);
       await writeStore(id, store);
       if (itemsChanged !== false) emitChanged(id);
     }
@@ -280,6 +295,20 @@ function addEvidence(item: CoraMemoryItem, evidence: MemoryItemEvidence | undefi
   }
 }
 
+function quoteKey(text: string): string {
+  return normalizeMemoryText(text).replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function sameEvidence(item: CoraMemoryItem, evidence: MemoryItemEvidence): boolean {
+  return item.evidence.some((entry) => {
+    if (evidence.messageId && entry.messageId === evidence.messageId) return true;
+    if (!evidence.quote || !entry.quote || entry.runId !== evidence.runId) return false;
+    const a = quoteKey(entry.quote);
+    const b = quoteKey(evidence.quote);
+    return a.length >= 8 && b.length >= 8 && (a.includes(b) || b.includes(a));
+  });
+}
+
 function enforceCaps(store: ItemStore, now: number): void {
   store.items = store.items.filter((item) => {
     if (item.status !== "archived") return true;
@@ -309,6 +338,9 @@ function enforceCaps(store: ItemStore, now: number): void {
     const at = Date.parse(entry.at);
     return !Number.isFinite(at) || now - at <= TOMBSTONE_RETENTION_MS;
   });
+  if (store.tombstones.length > MAX_TOMBSTONES) {
+    store.tombstones.splice(0, store.tombstones.length - MAX_TOMBSTONES);
+  }
   const runs = Object.entries(store.scanned);
   if (runs.length > MAX_SCANNED_RUNS) {
     runs.sort((a, b) => a[1].at.localeCompare(b[1].at));
@@ -358,12 +390,6 @@ function applyCandidate(store: ItemStore, candidate: LearnedCandidate, now: numb
       }
     : undefined;
   const automatic = candidate.source !== "manual";
-  if (automatic && store.tombstones.some((entry) =>
-    entry.scope === candidate.scope &&
-    (candidate.scope === "global" || entry.workspaceId === candidate.workspaceId) &&
-    memorySimilarity(entry.text, text) >= MEMORY_DUPLICATE_SIMILARITY)) {
-    return { action: "skipped", reason: "the user deleted this before" };
-  }
   const confidence = clampConfidence(candidate.confidence);
   const status = candidate.status ?? "active";
   const live = store.items.filter((item) =>
@@ -380,6 +406,12 @@ function applyCandidate(store: ItemStore, candidate: LearnedCandidate, now: numb
     }
   }
   if (duplicate) {
+    // The review re-reads messages capture already learned from. The same
+    // sentence read twice is one statement, not a repeat, so it confirms
+    // nothing and cannot lift a one-off correction to always-on.
+    if (evidence && sameEvidence(duplicate, evidence)) {
+      return { action: "skipped", reason: "already learned from these words" };
+    }
     duplicate.confirmations += 1;
     duplicate.lastConfirmedAt = nowIso;
     duplicate.updatedAt = nowIso;
@@ -401,7 +433,26 @@ function applyCandidate(store: ItemStore, candidate: LearnedCandidate, now: numb
     addEvidence(duplicate, evidence);
     return { action: "confirmed", item: duplicate };
   }
+  // The review paraphrases more freely than the duplicate threshold allows.
+  // A rewording of an item learned from the very same sentence is that item,
+  // not a second, more confident one that would put a one-off correction in
+  // every prompt.
+  if (evidence && live.some((item) =>
+    sameEvidence(item, evidence) &&
+    memorySimilarity(item.text, text) >= SAME_EVIDENCE_SIMILARITY &&
+    !memoriesContradict(item.text, text))) {
+    return { action: "skipped", reason: "already learned from these words" };
+  }
 
+  // Checked after the duplicate search: a deleted wording must not block
+  // confirming a live item the user kept. A deletion holds in every scope it
+  // could come back through: a review may re-file a deleted global
+  // preference under the workspace, or the reverse.
+  if (automatic && store.tombstones.some((entry) =>
+    (entry.scope === "global" || candidate.scope === "global" || entry.workspaceId === candidate.workspaceId) &&
+    memorySimilarity(entry.text, text) >= MEMORY_DUPLICATE_SIMILARITY)) {
+    return { action: "skipped", reason: "the user deleted this before" };
+  }
   const contradicted = live.filter((item) => memoriesContradict(item.text, text));
   const item: CoraMemoryItem = {
     id: newItemId(),
@@ -493,6 +544,16 @@ export async function updateMemoryItem(
         throw new Error(`A memory is at most ${MEMORY_ITEM_MAX_CHARS} characters.`);
       }
       if (containsSecret(text)) throw new Error("That looks like a password or key. Memory never stores secrets.");
+      // A rewrite is the user rejecting the old wording: learning from the
+      // chat it came from must not bring it back beside the new one.
+      if (memorySimilarity(item.text, text) < MEMORY_DUPLICATE_SIMILARITY) {
+        store.tombstones.push({
+          text: item.text,
+          scope: item.scope,
+          ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}),
+          at: nowIso,
+        });
+      }
       item.text = text;
       // The user wrote these words now, so they are the user's.
       item.source = "manual";
@@ -845,12 +906,13 @@ export const LEARNED_MEMORY_FOOTER = "[END CORA LEARNED MEMORY]";
 /** The prompt block for a selection, or null when it is empty. */
 export function renderLearnedMemory(
   selection: LearnedSelection,
-  opts: { delta?: boolean } = {},
+  opts: { delta?: boolean; retracted?: ReadonlyArray<{ id: string; text: string }> } = {},
 ): string | null {
-  if (selection.core.length === 0 && selection.relevant.length === 0) return null;
+  const retracted = opts.retracted ?? [];
+  if (selection.core.length === 0 && selection.relevant.length === 0 && retracted.length === 0) return null;
   const lines = [
     opts.delta
-      ? `${LEARNED_MEMORY_HEADER}. Additions since the last block in this session; earlier ones still apply:`
+      ? `${LEARNED_MEMORY_HEADER}. Changes since the last block in this session; earlier items still apply unless listed under "No longer applies":`
       : LEARNED_MEMORY_HEADER,
   ];
   if (selection.core.length > 0) {
@@ -859,11 +921,17 @@ export function renderLearnedMemory(
   if (selection.relevant.length > 0) {
     lines.push("Relevant to this request:", ...selection.relevant.map(renderItemLine));
   }
+  if (retracted.length > 0) {
+    lines.push(
+      "No longer applies (deleted, replaced or switched off by the user since it was sent; stop following it):",
+      ...retracted.map((entry) => `- ${entry.text} [${entry.id}]`),
+    );
+  }
   lines.push(LEARNED_MEMORY_FOOTER);
   return lines.join("\n");
 }
 
-/** codara_recall: search everything active (and suggestions, marked) by relevance. */
+/** Everything not archived, suggestions included, by relevance. codara_recall keeps only the active ones. */
 export function searchMemoryItems(
   profileId: string,
   workspaceId: string | null,
