@@ -360,7 +360,7 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
   // Long worker sessions compact on Codara's token budget, not on Pi's
   // window-sized default.
   registerContextCompaction(pi);
-  // Workers obey the same service-tier policy as the manager.
+  // Workers inherit fast mode from the same setting the manager reads.
   registerServiceTierPolicy(pi);
   pi.on("tool_call", (event) => studioBrowserOnlyDecision(event.toolName, event.input));
 

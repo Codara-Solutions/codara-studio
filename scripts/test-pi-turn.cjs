@@ -275,6 +275,29 @@ assert.equal(extensionFailed.result().failure, "bridge unavailable");
   assert.ok(notes.some((event) => event.kind === "system_note" && /retrying \(2\/6\) in 4s/.test(event.message)));
 }
 
+// A provider that declined fast mode is retried at standard speed by the Pi
+// extension; the user sees that, not a "provider is busy" note, and a
+// successful retry clears the provisional failure.
+{
+  const notes = [];
+  const fallback = new PiTurnAccumulator((event) => notes.push(event));
+  const errorMessage =
+    "[codara-fast-fallback] claude-opus-4-7 declined fast mode (HTTP 400); it runs at standard speed for this session, so you can retry your request.";
+  fallback.consume({ type: "message_start", message: { role: "assistant", timestamp: 1 } });
+  fallback.consume({ type: "message_end", message: { role: "assistant", timestamp: 1, stopReason: "error", errorMessage, content: [] } });
+  fallback.consume({ type: "auto_retry_start", attempt: 1, maxAttempts: 6, delayMs: 2000, errorMessage });
+  const note = notes.find((event) => event.kind === "system_note");
+  assert.equal(
+    note?.message,
+    "claude-opus-4-7 declined fast mode (HTTP 400); it runs at standard speed for this session. Retrying now.",
+  );
+  assert.equal(notes.some((event) => /provider is busy/.test(event.message ?? "")), false);
+  fallback.consume({ type: "message_start", message: { role: "assistant", timestamp: 2 } });
+  fallback.consume({ type: "message_end", message: { role: "assistant", timestamp: 2, stopReason: "stop", content: [{ type: "text", text: "Done." }] } });
+  assert.equal(fallback.result().failure, null);
+  assert.equal(fallback.result().finalText, "Done.");
+}
+
 // Compaction holds the reply back; say so instead of going silent.
 {
   const notes = [];

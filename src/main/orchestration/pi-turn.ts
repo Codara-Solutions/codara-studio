@@ -1,6 +1,7 @@
 import type { ChatStreamHandler } from "./agent-backend";
 import type { PiRpcEvent } from "./pi-rpc-client";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
+import { fastModeFallbackNote } from "@shared/fast-mode";
 
 export interface PiTurnToolCall {
   toolName: string;
@@ -357,6 +358,11 @@ export class PiTurnAccumulator {
 
     if (event.type === "auto_retry_start") {
       this.providerRetried = true;
+      const fallback = fastModeFallbackNote(event.errorMessage);
+      if (fallback) {
+        this.onStream?.({ kind: "system_note", message: fallback });
+        return;
+      }
       const attempt = finiteCount(event.attempt);
       const maxAttempts = finiteCount(event.maxAttempts);
       const seconds = Math.max(1, Math.round(finiteCount(event.delayMs) / 1000));

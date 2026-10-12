@@ -159,7 +159,7 @@ export default function codaraPiExtension(pi: ExtensionAPI) {
   // Keep the manager's context inside Codara's token budget instead of Pi's
   // window-sized default.
   registerContextCompaction(pi);
-  // OpenAI fast tier only when Settings asked for it; Anthropic never.
+  // Fast mode only when Settings asked for it, on models that support it.
   registerServiceTierPolicy(pi);
   // Browser automation is confined to Codara's own Browser webview. The
   // native shell must not become a side door into Safari/Chrome/Edge.

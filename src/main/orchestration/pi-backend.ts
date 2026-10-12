@@ -391,7 +391,7 @@ async function ensureSession(
         // Fast mode reaches the runtime only as launch-time env, so a session
         // launched under the other value cannot be reused: resolve it here,
         // match on it below, and hand the SAME value to the launch plan.
-        resolveCodaraPiFastMode(provider),
+        resolveCodaraPiFastMode(provider, model),
       ]);
   const settling = SESSIONS.get(runId)?.interruptSettling;
   const abortedIdle = settling ? await settling : false;
@@ -450,7 +450,7 @@ async function ensureSession(
     ...(openRouterApiKey ? { apiKey: openRouterApiKey } : {}),
     accountProfileId: account.accountProfileId,
     resolvedAccount: account,
-    openAiFastMode: fastMode,
+    fastMode,
     runId,
     sessionId,
     cwd: input.cwd,

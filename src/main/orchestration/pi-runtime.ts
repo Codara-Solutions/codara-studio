@@ -138,13 +138,13 @@ export interface PiManagerLaunchOptions {
   retainBuiltinToolsForUntrustedWorker?: boolean;
   codaraHomeDir?: string;
   /**
-   * The composer's fast-mode toggle (AppSettings.openAiFastMode). Applies the faster (and
-   * pricier) OpenAI service tier to this session. Anthropic sessions ignore
-   * it entirely: the bundled extension strips any tier for that provider no
-   * matter what this says. Defaults to off so a missing setting can never
-   * silently buy the 2x tier.
+   * The composer's fast-mode toggle (AppSettings.openAiFastMode), already
+   * narrowed to whether this provider and model can run fast. The bundled
+   * extension applies OpenAI's priority tier or Anthropic's `speed: "fast"`
+   * per request. Defaults to off so a missing setting can never silently buy
+   * the pricier mode.
    */
-  openAiFastMode?: boolean;
+  fastMode?: boolean;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -648,12 +648,11 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   env.CODARA_PI_COMPACT_AT_TOKENS = String(
     resolvePiCompactAtTokens(options.baseEnv ?? process.env),
   );
-  // Service-tier policy inputs. The extension's before_provider_request hook
-  // is the only seam Pi 0.85.1 gives us for the request body, and it needs to
-  // know which provider this process talks to and whether Settings enabled the
-  // faster OpenAI tier. Fast mode is stamped only for OpenAI providers: an
-  // Anthropic plan never carries the flag at all, which is the first of the
-  // two places that guarantee Anthropic can never run a priority tier.
+  // Fast-mode policy inputs. The extension's before_provider_request hook is
+  // the only seam Pi 0.85.1 gives us for the request body, and it needs to
+  // know which provider this process talks to and whether Settings enabled
+  // fast mode. OpenRouter never carries the flag: its upstream pricing for a
+  // fast tier is unknown to Codara.
   env.CODARA_PI_PROVIDER = options.provider;
   // A Claude process asks Studio to renew its login (the bundled extension's
   // anthropic-refresh.ts), so it names the account it runs as. An imported-PR
@@ -661,11 +660,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   if (options.provider === "anthropic" && options.accountProfileId) {
     env.CODARA_PI_ACCOUNT_PROFILE_ID = options.accountProfileId;
   }
-  if (
-    options.openAiFastMode === true &&
-    options.provider !== "anthropic" &&
-    options.provider !== "openrouter"
-  ) {
+  if (options.fastMode === true && options.provider !== "openrouter") {
     env.CODARA_PI_FAST_MODE = "1";
   }
   // Both names or neither: a half-configured bridge would leave the extension

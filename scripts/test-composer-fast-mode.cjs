@@ -7,10 +7,10 @@
 //
 // Fast mode is one GLOBAL setting (AppSettings.openAiFastMode) whose control
 // moved out of Settings > Agents and onto the composer, next to the model it
-// applies to. Two invariants are worth pinning: it is offered ONLY for OpenAI
-// models (Anthropic has no priority tier and must never appear to have one),
-// and it is not a per-chat flag — the retired chatFastMode write path stays
-// dead. The timeline's "Technical details" disclosure is gone in the same
+// applies to. Invariants worth pinning: it is offered for every model that has
+// a fast mode (OpenAI GPT and Claude Opus 5.5 / 5 / 4.8), explained and
+// disabled for the rest, it states its cost, and it is not a per-chat flag:
+// the retired chatFastMode write path stays dead. The timeline's "Technical details" disclosure is gone in the same
 // pass: system notes stay in the run record, they simply never render.
 
 const assert = require("node:assert/strict");
@@ -32,18 +32,24 @@ const piRuntimeElectron = read("src/main/orchestration/pi-runtime-electron.ts");
 // ── The composer owns the control ──────────────────────────────────────────
 assert.match(composer, /import FastModeToggle from "\.\/composer\/FastModeToggle"/);
 assert.match(composer, /const fastMode = useOpenAiFastMode\(\)/);
-// Provider gating, not backend gating: the button exists only for a gpt-* model.
-assert.match(composer, /const fastModeAvailable = chatModelIsOpenAi\(activeChatModelId\)/);
+// Model gating: the button always renders, and a model without fast mode
+// passes its reason so the button can say why it is unavailable.
+assert.match(composer, /const fastModeSupport = fastModeSupportFor\(activeChatModelId\)/);
 assert.match(
   composer,
-  /\{fastModeAvailable && \(\s*<FastModeToggle enabled=\{fastMode\.enabled\} onToggle=\{fastMode\.toggle\} \/>\s*\)\}/,
+  /<FastModeToggle\s+enabled=\{fastMode\.enabled\}\s+onToggle=\{fastMode\.toggle\}\s+unavailableReason=\{fastModeSupport\.supported \? undefined : fastModeSupport\.reason\}\s+\/>/,
 );
+assert.doesNotMatch(composer, /chatModelIsOpenAi/);
 // It writes the global setting; the per-chat flag stays dead.
 assert.doesNotMatch(composer, /chatFastMode/);
 
-// Sentence-case tooltips, both states.
-assert.match(fastToggle, /"Fast mode on — OpenAI responses use the faster tier"/);
-assert.match(fastToggle, /"Fast mode off"/);
+// Tooltips carry the cost note in both states, and an unavailable model
+// explains itself. While the setting is on, the button stays clickable even
+// for such a model so workers can still be switched back to standard speed.
+assert.match(fastToggle, /`Fast mode on for Cora and her workers\. \$\{FAST_MODE_COST_NOTE\}`/);
+assert.match(fastToggle, /`Fast mode off\. \$\{FAST_MODE_COST_NOTE\}`/);
+assert.match(fastToggle, /`Fast mode unavailable\. \$\{unavailableReason\}`/);
+assert.match(fastToggle, /const disabled = Boolean\(unavailableReason\) && !enabled;/);
 assert.match(fastToggle, /aria-pressed=\{enabled\}/);
 // Filled when on, outline when off.
 assert.match(fastToggle, /fill=\{filled \? "currentColor" : "none"\}/);
@@ -74,19 +80,25 @@ assert.match(conversation, /primary\.length === 0 && noteCount === 0 && !window/
 // ── The toggle reaches the next manager turn ───────────────────────────────
 // Launch-time env can only apply at launch, so the value the composer wrote is
 // resolved once per turn, compared as session identity, and handed to the plan.
-assert.match(piBackend, /resolveCodaraPiFastMode\(provider\)/);
+assert.match(piBackend, /resolveCodaraPiFastMode\(provider, model\)/);
 assert.match(piBackend, /sessionId,\s*\n\s*fastMode,/);
-assert.match(piBackend, /openAiFastMode: fastMode,/);
 assert.match(piRuntimeElectron, /export async function resolveCodaraPiFastMode\(/);
+assert.match(piRuntimeElectron, /if \(provider === "openrouter"\) return false;/);
 assert.match(
   piRuntimeElectron,
-  /if \(provider === "anthropic" \|\| provider === "openrouter"\) return false;/,
+  /if \(provider === "anthropic" && !anthropicModelSupportsFastMode\(model\)\) return false;/,
+);
+// Workers resolve fast mode from the same setting, for their own model: that
+// is how a sub agent inherits the manager's fast mode.
+assert.match(
+  piRuntimeElectron,
+  /fastMode: await resolveCodaraPiFastMode\(options\.provider, options\.model\),/,
 );
 
-// ── The shared provider gate ───────────────────────────────────────────────
-async function loadChatPolicy() {
+// ── The shared model gate ──────────────────────────────────────────────────
+async function loadModule(relativePath) {
   const out = await esbuild.build({
-    entryPoints: [path.join(ROOT, "src/shared/chat-policy.ts")],
+    entryPoints: [path.join(ROOT, relativePath)],
     bundle: true,
     format: "cjs",
     platform: "node",
@@ -105,30 +117,41 @@ async function loadChatPolicy() {
 }
 
 async function main() {
-  const policy = await loadChatPolicy();
-  for (const model of ["gpt-5.6-sol", "gpt-5.6-terra", "GPT-5.6-Luna", " gpt-5.6-sol "]) {
-    assert.equal(policy.chatModelIsOpenAi(model), true, `${model} is an OpenAI model`);
-  }
+  const fast = await loadModule("src/shared/fast-mode.ts");
   for (const model of [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "GPT-5.6-Luna",
+    " gpt-5.6-sol ",
+    "claude-opus-5-5",
     "claude-opus-5",
-    "claude-fable-5",
-    "claude-opus-5-1m",
-    "",
-    undefined,
+    "claude-opus-4-8",
+    "claude-opus-5:1m",
   ]) {
-    assert.equal(
-      policy.chatModelIsOpenAi(model),
-      false,
-      `${model} must never be offered fast mode`,
-    );
+    assert.deepEqual(fast.fastModeSupportFor(model), { supported: true }, `${model} offers fast mode`);
   }
+  for (const model of ["claude-sonnet-5", "claude-fable-5", "claude-opus-4-7", "claude-haiku-5-5"]) {
+    const support = fast.fastModeSupportFor(model);
+    assert.equal(support.supported, false, `${model} has no fast mode`);
+    assert.match(support.reason, /Opus 5\.5, Opus 5 and Opus 4\.8/);
+  }
+  for (const model of ["grok-4.6", "google/gemini-flash-latest", "openai/gpt-5", "", undefined]) {
+    const support = fast.fastModeSupportFor(model);
+    assert.equal(support.supported, false, `${model} has no fast mode`);
+    assert.equal(support.reason, "This model has no fast mode.");
+  }
+  assert.match(fast.FAST_MODE_COST_NOTE, /costs more/);
+  assert.doesNotMatch(fast.FAST_MODE_COST_NOTE, /\u2014/);
+
   // Fast mode was never a chat feature flag and must not become one again:
   // the per-chat flag machinery is gone from chat-policy entirely.
+  const policy = await loadModule("src/shared/chat-policy.ts");
   assert.equal(policy.normalizeChatFeatureFlags, undefined);
   assert.equal(policy.effectiveChatFastMode, undefined);
+  assert.equal(policy.chatModelIsOpenAi, undefined);
 
   console.log(
-    "PASS composer fast-mode toggle (OpenAI-only, global setting, session identity) and no Technical details section",
+    "PASS composer fast-mode toggle (OpenAI + Claude Opus, explained when unavailable, global setting, session identity) and no Technical details section",
   );
 }
 
