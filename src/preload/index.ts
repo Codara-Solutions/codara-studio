@@ -37,6 +37,14 @@ import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-lef
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
+  SavedWorkflow,
+  SavedWorkflowSummary,
+  StartWorkflowRunInput,
+  WorkflowCaps,
+  WorkflowCheckResult,
+  WorkflowRunStatus,
+} from "@shared/workflow";
+import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
   CancelQueuedMessageInput,
@@ -1038,6 +1046,34 @@ const api = {
       ipcRenderer.invoke("automations:listActiveWorkers"),
     testStep: (input: TestStepInput): Promise<LoomStepResult> =>
       ipcRenderer.invoke("automations:testStep", input),
+  },
+  // Workflows: saved scripts and their runs (src/main/orchestration/workflow-driver.ts).
+  workflows: {
+    list: (cwd?: string): Promise<SavedWorkflowSummary[]> => ipcRenderer.invoke("workflows:list", cwd),
+    get: (ref: string, cwd?: string): Promise<SavedWorkflow | null> =>
+      ipcRenderer.invoke("workflows:get", { ref, cwd }),
+    check: (input: {
+      workflow?: string;
+      source?: string;
+      args?: unknown;
+      caps?: Partial<WorkflowCaps>;
+      cwd?: string;
+    }): Promise<WorkflowCheckResult> => ipcRenderer.invoke("workflows:check", input),
+    start: (input: StartWorkflowRunInput): Promise<RunState> => ipcRenderer.invoke("workflows:start", input),
+    status: (runId: string): Promise<WorkflowRunStatus> => ipcRenderer.invoke("workflows:status", runId),
+    listRuns: (workspaceId?: string): Promise<RunState[]> => ipcRenderer.invoke("workflows:listRuns", workspaceId),
+    stop: (runId: string): Promise<void> => ipcRenderer.invoke("workflows:stop", runId),
+    resume: (runId: string, useLatestScript = false): Promise<void> =>
+      ipcRenderer.invoke("workflows:resume", { runId, useLatestScript }),
+    cancel: (runId: string): Promise<void> => ipcRenderer.invoke("workflows:cancel", runId),
+    skip: (runId: string, seq: number): Promise<boolean> => ipcRenderer.invoke("workflows:skip", { runId, seq }),
+    save: (input: {
+      sourceText: string;
+      scope: "user" | "project";
+      cwd?: string;
+      overwrite?: boolean;
+    }): Promise<SavedWorkflowSummary> => ipcRenderer.invoke("workflows:save", input),
+    remove: (ref: string, cwd?: string): Promise<boolean> => ipcRenderer.invoke("workflows:delete", { ref, cwd }),
   },
   pty: {
     spawn: (args: {

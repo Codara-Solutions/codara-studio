@@ -70,6 +70,14 @@ import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
 import { listEvents, subscribeToEvents } from "./orchestration/event-log";
+import type {
+  SavedWorkflow,
+  SavedWorkflowSummary,
+  StartWorkflowRunInput,
+  WorkflowCaps,
+  WorkflowCheckResult,
+  WorkflowRunStatus,
+} from "@shared/workflow";
 import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
@@ -2685,6 +2693,72 @@ export function registerIpc(): void {
   handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
     const { listActiveAutomationWorkers } = await import("./orchestration/direct-worker");
     return listActiveAutomationWorkers();
+  });
+
+  // Workflows: the hub's saved workflows, run form and progress tree. Running
+  // from here is the user acting, so there is no consent card.
+  handle("workflows:list", async (_e, cwd?: string): Promise<SavedWorkflowSummary[]> => {
+    const { listWorkflows } = await import("./orchestration/workflow-driver");
+    return listWorkflows(cwd || undefined);
+  });
+  handle("workflows:get", async (_e, input: { ref: string; cwd?: string }): Promise<SavedWorkflow | null> => {
+    const { getWorkflow } = await import("./orchestration/workflow-driver");
+    return getWorkflow(input.ref, input.cwd || undefined);
+  });
+  handle(
+    "workflows:check",
+    async (
+      _e,
+      input: { workflow?: string; source?: string; args?: unknown; caps?: Partial<WorkflowCaps>; cwd?: string },
+    ): Promise<WorkflowCheckResult> => {
+      const { checkWorkflow } = await import("./orchestration/workflow-driver");
+      return checkWorkflow(input);
+    },
+  );
+  handle("workflows:start", async (_e, input: StartWorkflowRunInput): Promise<RunState> => {
+    const { startWorkflowRun } = await import("./orchestration/workflow-driver");
+    return startWorkflowRun(input);
+  });
+  handle("workflows:status", async (_e, runId: string): Promise<WorkflowRunStatus> => {
+    const { workflowRunStatus } = await import("./orchestration/workflow-driver");
+    return workflowRunStatus(runId, { includeResult: true });
+  });
+  handle("workflows:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
+    const { listWorkflowRuns } = await import("./orchestration/workflow-driver");
+    return listWorkflowRuns(workspaceId || undefined);
+  });
+  handle("workflows:stop", async (_e, runId: string): Promise<void> => {
+    const { stopWorkflowRun } = await import("./orchestration/workflow-driver");
+    await stopWorkflowRun(runId, "Stopped by the user");
+  });
+  handle(
+    "workflows:resume",
+    async (_e, input: { runId: string; useLatestScript?: boolean }): Promise<void> => {
+      const { resumeWorkflowRun } = await import("./orchestration/workflow-driver");
+      await resumeWorkflowRun(input.runId, { useLatestScript: input.useLatestScript === true });
+    },
+  );
+  handle("workflows:cancel", async (_e, runId: string): Promise<void> => {
+    const { cancelWorkflowRun } = await import("./orchestration/workflow-driver");
+    await cancelWorkflowRun(runId, "Cancelled by the user");
+  });
+  handle("workflows:skip", async (_e, input: { runId: string; seq: number }): Promise<boolean> => {
+    const { skipWorkflowCall } = await import("./orchestration/workflow-driver");
+    return skipWorkflowCall(input.runId, input.seq);
+  });
+  handle(
+    "workflows:save",
+    async (
+      _e,
+      input: { sourceText: string; scope: "user" | "project"; cwd?: string; overwrite?: boolean },
+    ): Promise<SavedWorkflowSummary> => {
+      const { saveWorkflow } = await import("./orchestration/workflow-driver");
+      return saveWorkflow(input);
+    },
+  );
+  handle("workflows:delete", async (_e, input: { ref: string; cwd?: string }): Promise<boolean> => {
+    const { deleteWorkflow } = await import("./orchestration/workflow-driver");
+    return deleteWorkflow(input.ref, input.cwd || undefined);
   });
 
   handle(

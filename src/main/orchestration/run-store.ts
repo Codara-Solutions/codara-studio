@@ -14851,6 +14851,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
       // a chat terminal tab.
       automationId: run.automationId,
       executionMode: run.executionMode,
+      ...(run.workflow ? { workflow: true } : {}),
     },
   });
   await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
