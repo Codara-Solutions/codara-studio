@@ -76,13 +76,13 @@ export async function runPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
-  if (ref?.kind !== "chrome") return entry.run(params, method);
+  if (ref?.kind !== "chrome") return entry.run(params, method, host);
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
-  if (entry.targets === "any") return entry.run(params, method);
+  if (entry.targets === "any") return entry.run(params, method, host);
   const chrome = CHROME_HANDLERS.get(method);
-  if (chrome) return chrome.run(params, method);
+  if (chrome) return chrome.run(params, method, host);
   throw new PreviewToolParamsError(
     `${method.replace(/^preview\./, "codara_preview_")} cannot drive a Chrome tab yet. Use a Codara browser tab for it.`,
   );

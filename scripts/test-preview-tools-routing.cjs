@@ -15,7 +15,11 @@ const ROOT = path.resolve(__dirname, "..");
 
 async function loadPreviewTools(stubs) {
   const out = await esbuild.build({
-    entryPoints: [path.join(ROOT, "src/main/preview-tools/index.ts")],
+    stdin: {
+      contents: `export * from "./index"; export { registerBrowserBackend } from "../browser/targets";`,
+      resolveDir: path.join(ROOT, "src/main/preview-tools"),
+      loader: "ts",
+    },
     bundle: true,
     write: false,
     platform: "node",
@@ -49,7 +53,7 @@ async function loadPreviewTools(stubs) {
   const tools = await loadPreviewTools({
     "preview-bridge": `module.exports = { requestPreviewOp: async (op, params) => {
       globalThis.__previewToolCalls.push({ via: "renderer", op, params });
-      return op === "screenshot" ? { tabId: "tab-1", dataUrl: "data:image/png;base64,iVBORw0KGgo=" } : { op };
+      return op === "screenshot" ? { tabId: "tab-1", dataUrl: "data:image/png;base64,iVBORw0KGgo=" } : op === "list" ? { op, tabs: [] } : { op };
     } };`,
     "codara-home": `module.exports = { codaraHome: () => ${JSON.stringify(home)} };`,
     "preview-input": `module.exports = { handlePreviewInputOp: async (op, params) => { globalThis.__previewToolCalls.push({ via: "input", op, params }); return { op }; } };`,
@@ -101,6 +105,18 @@ async function loadPreviewTools(stubs) {
     /may not use tabs of your own browser/,
   );
   assert.equal(calls.length, reaching, "a refused Chrome call reaches no executor");
+
+  // A connected Chrome adds its tabs to the list, for callers allowed to use them.
+  const unregister = tools.registerBrowserBackend({
+    kind: "chrome",
+    async resolve() { throw new Error("unused"); },
+    async list() { return [{ id: "chrome:12", kind: "chrome", title: "Mail", url: "https://mail.example/" }]; },
+  });
+  const listed = await tools.runPreviewTool("preview.list", { callerPid: 7 }, host);
+  assert.deepEqual(listed, { op: "list", tabs: [{ id: "chrome:12", kind: "chrome", title: "Mail", url: "https://mail.example/" }] });
+  const runListed = await tools.runPreviewTool("preview.list", { runId: "run-live" }, host);
+  assert.deepEqual(runListed.tabs, [], "a caller that may not use the user's browser does not see its tabs");
+  unregister();
 
   // A screenshot is also a file in the workspace's data folder, for agents
   // that cannot read image content.

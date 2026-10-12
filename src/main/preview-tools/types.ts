@@ -14,7 +14,7 @@ export interface PreviewToolHost {
   mayUseUserBrowser(params: Record<string, unknown>): Promise<boolean>;
 }
 
-export type PreviewToolHandler = (params: Record<string, unknown>, method: string) => Promise<unknown>;
+export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;
 
 export interface PreviewToolEntry {
   run: PreviewToolHandler;
