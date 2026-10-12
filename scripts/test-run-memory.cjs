@@ -148,10 +148,68 @@ async function main() {
   check("the global master switch hides prior runs too", hiddenByGlobal === null, String(hiddenByGlobal));
   await runMemory.recordRunMemory(makeRun("run-d", "Terminal renderer cursor blink fix"), readReport);
   check(
-    "recording continues while memory is off, so re-enabling loses nothing",
-    (runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).some((record) => record.runId === "run-d"),
-    "run-d missing",
+    "nothing is recorded while memory is off",
+    !(runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).some((record) => record.runId === "run-d"),
+    "run-d was recorded while memory was off",
   );
+  await coraMemory.setMemoryEnabled("global", null, true);
+
+  // ── trivial chats, direct keywords, profiles, deletion ────────────────────
+  await runMemory.recordRunMemory(
+    makeRun("run-hello", "hola"),
+    async () => ({ status: "complete", summary: "hi", filesChanged: [], commandsRun: [], tests: [] }),
+  );
+  check(
+    "a chat whose worker changed and ran nothing is not recorded",
+    !(runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).some((record) => record.runId === "run-hello"),
+    "run-hello recorded",
+  );
+  await runMemory.recordRunMemory(
+    makeRun("run-direct", "Chat", {
+      executionMode: "direct",
+      steps: [{
+        title: "Chat",
+        goal: "Execute the instruction directly and write an evidence-backed final report.",
+        acceptanceCriteria: ["The direct worker completed the instruction and reported its real results in final-report.json."],
+      }],
+      humanMessages: [{ author: "user", message: "Speed up the sqlite migration runner" }],
+    }),
+    readReport,
+  );
+  const directRecord = (runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).find((record) => record.runId === "run-direct");
+  check(
+    "a direct chat is fingerprinted by the user's words, not the synthetic step",
+    Boolean(directRecord) &&
+      directRecord.planKeywords.includes("sqlite") &&
+      !directRecord.planKeywords.some((word) => ["execute", "instruction", "directly", "evidence", "backed"].includes(word)),
+    JSON.stringify(directRecord?.planKeywords),
+  );
+  await runMemory.recordRunMemory(
+    makeRun("run-profile", "Refactor terminal renderer scrollback buffer again", { coraProfileId: "work" }),
+    readReport,
+  );
+  check(
+    "a named profile keeps its own ledger",
+    (runMemory.readWorkspaceMemory("ws-ledger", "work")?.records ?? []).length === 1 &&
+      !(runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).some((record) => record.runId === "run-profile"),
+    JSON.stringify(runMemory.readWorkspaceMemory("ws-ledger", "work")),
+  );
+  check(
+    "the default profile's history is not injected into a named profile's chat",
+    runMemory.formatPriorRunsSection(
+      makeRun("run-new-2", "Fix terminal renderer scrollback flicker", { workerTasks: [], workerAttempts: [], coraProfileId: "work" }),
+    )?.includes("Refactor terminal renderer scrollback buffer\n") !== true,
+    "default history leaked",
+  );
+  await runMemory.forgetRunMemory({ id: "run-a", workspaceId: "ws-ledger" });
+  check(
+    "deleting a chat removes its record",
+    !(runMemory.readWorkspaceMemory("ws-ledger")?.records ?? []).some((record) => record.runId === "run-a"),
+    "run-a still recorded",
+  );
+  check("the run history count reports the remaining records", runMemory.countRunHistory("ws-ledger") === 3, String(runMemory.countRunHistory("ws-ledger")));
+  await runMemory.clearRunHistory("ws-ledger");
+  check("clearing the run history empties it", runMemory.countRunHistory("ws-ledger") === 0, String(runMemory.countRunHistory("ws-ledger")));
 
   fs.rmSync(TMP_HOME, { recursive: true, force: true });
   if (failures > 0) {

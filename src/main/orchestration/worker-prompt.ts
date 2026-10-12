@@ -87,17 +87,22 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
   return lines;
 }
 
-function renderWorkerMemorySection(run: RunState): string[] {
-  if (run.automationId) return [];
-  const memory = formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId);
+/** The memory a worker prompt carries, also re-sent after a worker compaction. */
+export function workerMemoryContext(run: RunState, task: Pick<WorkerTask, "title" | "description">): string | null {
+  if (run.automationId) return null;
+  return formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId, `${task.title}\n${task.description}`);
+}
+
+function renderWorkerMemorySection(run: RunState, task: WorkerTask): string[] {
+  const memory = workerMemoryContext(run, task);
   if (!memory) return [];
   return [
     "",
     run.executionMode === "direct" ? "## CORA MEMORY" : "## READ-ONLY CORA CONTEXT",
     memory,
     run.executionMode === "direct"
-      ? "Use codara_remember for durable corrections or lessons. Do not edit memory files directly."
-      : "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+      ? "Follow these preferences. When the user corrects you or states a lasting preference, save it right away with codara_remember (global for the user's preferences, workspace for this repository). Do not edit memory files directly."
+      : "Follow these preferences. Do not edit these memory files. Put durable new lessons in the final report's `lessons` field so Cora can curate them.",
   ];
 }
 
@@ -664,7 +669,7 @@ function renderImplementationWorkerPrompt({
     "",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   );
 
   if (step) {
@@ -791,6 +796,7 @@ function renderImplementationWorkerPrompt({
     `When done, write valid JSON to ${paths.finalReportJson}.`,
     ...promptProfile.workerPrompt.finalReportIntro,
     "Required keys: `status` (`complete|partial|blocked|failed`), `summary`, `files_changed` (`path`,`reason`), `commands_run` (`command`,`exitCode`,`summary`), `tests` (`command`,`result`,`details`), `proof`, `risks`, `followups`, and `handoff` (`path`,`description`,`reuse`). Use empty arrays when none. List only workspace files in `files_changed`; use absolute paths for reusable handoffs.",
+    "Optional `lessons`: up to 3 one-sentence durable lessons about this repository or environment that a later task would otherwise pay to rediscover (a command that really works, a gotcha you hit). Never task status, never secrets. Cora reviews them before they become memory.",
   );
 
   return lines.join("\n");
@@ -829,7 +835,7 @@ function renderDirectTaskPrompt({
     "## TASK",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   ];
 
   const projectPolicy = renderRunProjectPolicy(run);
@@ -919,7 +925,7 @@ function renderVerifierWorkerPrompt({
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
     ...renderPriorVerifierRoundSection(priorVerifierRound),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   );
 
   if (step) {

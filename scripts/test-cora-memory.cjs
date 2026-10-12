@@ -51,6 +51,9 @@ async function expectThrow(name, fn, match) {
 const harness = {
   name: "cora-memory-harness",
   setup(build) {
+    build.onResolve({ filter: /^@shared\// }, (args) => ({
+      path: path.join(__dirname, "..", "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+    }));
     build.onResolve({ filter: /\/codara-home$/ }, () => ({
       path: "codara-home-stub",
       namespace: "stub",

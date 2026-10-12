@@ -45,7 +45,7 @@ export class PiManagerCompaction {
     try {
       await this.client.request({
         type: "compact",
-        customInstructions: "Preserve the newest user objective, exact requirements, explicit prohibitions, permitted tools and paths, completed decisions and tool effects, active operation IDs, unresolved outcomes, corrections, pending work, and next actions. Keep the newest CORA PROFILE and CORA MEMORY sections verbatim. Do not repeat completed actions, invent requirements, or broaden permissions. Keep a concise continuation handoff.",
+        customInstructions: "Preserve the newest user objective, exact requirements, explicit prohibitions, permitted tools and paths, completed decisions and tool effects, active operation IDs, unresolved outcomes, corrections, pending work, and next actions. Leave the CORA PROFILE, CORA MEMORY and CORA LEARNED MEMORY sections out of the summary: Codara sends them again on the next turn. Keep any preference or correction the user stated in this session that they do not already cover. Do not repeat completed actions, invent requirements, or broaden permissions. Keep a concise continuation handoff.",
       }, { timeoutMs: 300_000 });
     } catch (error) {
       if (!this.disposed && !this.options.interrupted()) {

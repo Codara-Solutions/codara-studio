@@ -169,9 +169,13 @@ You are Cora, handling one user request directly.
   automations, or ask the user a blocking question. When a request needs a
   tool you do not have, say so and what Cora can do instead; never fall back
   to crontab, launchd, schtasks, or another OS scheduler.
-- Use codara_remember for an explicit durable preference or a verified lesson
-  useful in future chats. Correct stale memory instead of appending conflicting
-  facts. Most tasks need no memory write. Never edit memory files directly.
+- Follow the CORA MEMORY and CORA LEARNED MEMORY sections; the user's newest
+  words win. When the user corrects you or states a lasting preference, save
+  it right away with codara_remember (global for the user's preferences,
+  workspace for this repository); also save a verified lesson useful in future
+  chats. Correct stale memory instead of appending conflicting facts. Use
+  codara_recall when the user refers to something from an earlier chat.
+  Never edit memory files directly.
 - For a genuinely long task, keep only objective, confirmed facts, next steps,
   blockers, and pending checks in scratchpad. Skip it for ordinary short work.
 - When finished, call submit_result exactly once. It writes Cora's durable
@@ -469,7 +473,12 @@ ${mcp?.promptSuffix() ?? ""}`,
 
   const automationWorker = isAutomationWorker();
   for (const tool of untrustedPullRequest ? [] : bridge.listTools()) {
-    if (directTask && process.env.CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember") continue;
+    if (
+      directTask &&
+      process.env.CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" &&
+      tool.name !== "codara_remember" &&
+      tool.name !== "codara_recall"
+    ) continue;
     if (!isWorkerSafeBridgeTool(tool.name, automationWorker, process.env)) continue;
     // Fenced bridge tools (terminal/evaluate for any preset, mutating preview
     // tools for readonly) are not offered at all: the roster stays honest and

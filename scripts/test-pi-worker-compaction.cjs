@@ -16,6 +16,11 @@ for (const [type, key] of [["message_end", "message"], ["compaction_end", "resul
 assert.equal(usageExports.piWorkerMessageUsage({ type: "compaction_end", aborted: true }), null);
 const runStore = fs.readFileSync(require.resolve("../src/main/orchestration/run-store.ts"), "utf8");
 assert.match(runStore, /event.type === "message_end" \|\| event.type === "compaction_end"/);
+// Memory is pinned context: the summary leaves it out and the continuation
+// re-sends a fresh copy with the task contract, so it is carried once.
+assert.match(source, /Leave the CORA PROFILE, CORA MEMORY and CORA LEARNED MEMORY sections out/);
+assert.match(runStore, /Cora memory and profile \(re-sent after compaction; they still apply\)/);
+assert.match(runStore, /const taskContract = \(\) => \{\n    const memory = pinnedMemory\(\);/);
 const { PiWorkerCompaction } = exportsObject;
 const pause = { type: "entry_appended", entry: { type: "custom", customType: "codara-context-pause", data: { reason: "threshold" } } };
 const settled = { type: "agent_settled" };

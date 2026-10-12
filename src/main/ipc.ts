@@ -118,6 +118,15 @@ import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-lef
 import * as mcpInstaller from "./mcp-installer";
 import { setSparkBuiltinInstalled } from "./builtin-mcp-actions";
 import * as coraMemory from "./orchestration/cora-memory";
+import * as memoryItems from "./orchestration/memory-items";
+import type {
+  CoraMemoryItem,
+  MemoryItemKind,
+  MemoryItemPatch,
+  MemoryItemScope,
+  MemoryItemsView,
+  MemoryLearningSettings,
+} from "@shared/memory-items";
 import {
   deleteWorkerSession,
   listAllWorkerSessions,
@@ -1238,6 +1247,115 @@ export function registerIpc(): void {
         resolveCoraProfile(input.profileId).id,
       );
       return readMemoryStatus(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  // Learned memory (memory v3): the items Cora learned by itself, under the
+  // two files. Every channel resolves to the fresh view so the Memory page
+  // never re-reads after a change, and every store write is announced on
+  // "memory:items-changed" so an open chat can update its chips.
+  memoryItems.onMemoryItemsChanged((profileId) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      const contents = window.webContents;
+      if (contents.isDestroyed()) continue;
+      try {
+        contents.send("memory:items-changed", { profileId });
+      } catch {
+        // A closing window must not fail the write that already landed.
+      }
+    }
+  });
+
+  handle(
+    "memory:items",
+    async (_e, input?: { workspaceId?: string | null; profileId?: string }): Promise<MemoryItemsView> =>
+      readMemoryItemsView(input?.workspaceId ?? null, input?.profileId),
+  );
+
+  handle(
+    "memory:items:update",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; id: string; patch: MemoryItemPatch },
+    ): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      await memoryItems.updateMemoryItem(profileId, String(input.id), sanitizeMemoryPatch(input.patch), input.workspaceId ?? null);
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:items:delete",
+    async (_e, input: { workspaceId?: string | null; profileId?: string; id: string }): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      await memoryItems.deleteMemoryItem(profileId, String(input.id));
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:items:add",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; scope: MemoryItemScope; kind?: MemoryItemKind; text: string },
+    ): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      const scope: MemoryItemScope = input.scope === "workspace" ? "workspace" : "global";
+      if (scope === "workspace" && !input.workspaceId) throw new Error("Open a workspace to add a workspace memory.");
+      await memoryItems.addManualMemoryItem(profileId, {
+        scope,
+        workspaceId: input.workspaceId ?? null,
+        kind: MEMORY_KINDS.has(input.kind as MemoryItemKind) ? (input.kind as MemoryItemKind) : "preference",
+        text: String(input.text ?? ""),
+      });
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:learning:set",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; patch: Partial<MemoryLearningSettings> },
+    ): Promise<MemoryItemsView> => {
+      const { writeMemoryLearningSettings } = await import("./orchestration/memory-learning");
+      const patch: Partial<MemoryLearningSettings> = {};
+      for (const key of ["capture", "reflection", "consolidation"] as const) {
+        if (typeof input.patch?.[key] === "boolean") patch[key] = input.patch[key];
+      }
+      await writeMemoryLearningSettings(patch);
+      return readMemoryItemsView(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  handle(
+    "memory:runHistory:clear",
+    async (_e, input: { workspaceId: string; profileId?: string }): Promise<MemoryItemsView> => {
+      if (!input.workspaceId) throw new Error("Open a workspace first.");
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      const { clearRunHistory } = await import("./orchestration/run-memory");
+      await clearRunHistory(input.workspaceId, profileId);
+      return readMemoryItemsView(input.workspaceId, profileId);
+    },
+  );
+
+  // What one chat taught memory, for the "Remembered" chips under its
+  // messages. Resolved from the run so the renderer cannot ask for another
+  // profile's items through a chat it does not show, and so Undo deletes in
+  // the profile the item was learned in rather than the default one.
+  handle(
+    "memory:runItems",
+    async (_e, input: { runId: string }): Promise<{ profileId: string; items: CoraMemoryItem[] }> => {
+      const { getRun } = await import("./orchestration/run-store");
+      const run = await getRun(String(input.runId));
+      if (!run) return { profileId: "default", items: [] };
+      const profileId = await resolveMemoryProfileId(run.coraProfileId);
+      return {
+        profileId,
+        items: memoryItems
+          .listMemoryItems(profileId, { workspaceId: run.workspaceId })
+          .filter((item) => item.evidence.some((entry) => entry.runId === run.id)),
+      };
     },
   );
 
@@ -3721,6 +3839,40 @@ export function registerIpc(): void {
     const { checkForUpdatesNow } = await import("./auto-updater");
     return checkForUpdatesNow();
   });
+}
+
+const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);
+
+async function resolveMemoryProfileId(profileId?: string): Promise<string> {
+  const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+  return resolveCoraProfile(profileId).id;
+}
+
+function sanitizeMemoryPatch(raw: MemoryItemPatch | undefined): MemoryItemPatch {
+  const patch: MemoryItemPatch = {};
+  if (!raw || typeof raw !== "object") return patch;
+  if (typeof raw.text === "string") patch.text = raw.text;
+  if (typeof raw.pinned === "boolean") patch.pinned = raw.pinned;
+  if (raw.scope === "global" || raw.scope === "workspace") patch.scope = raw.scope;
+  if (MEMORY_KINDS.has(raw.kind as MemoryItemKind)) patch.kind = raw.kind;
+  if (raw.status === "active" || raw.status === "archived") patch.status = raw.status;
+  if (raw.feedback === 1 || raw.feedback === -1) patch.feedback = raw.feedback;
+  return patch;
+}
+
+async function readMemoryItemsView(workspaceId: string | null, profileReference?: string): Promise<MemoryItemsView> {
+  const profileId = await resolveMemoryProfileId(profileReference);
+  const [{ readMemoryLearningSettings }, { countRunHistory }] = await Promise.all([
+    import("./orchestration/memory-learning"),
+    import("./orchestration/run-memory"),
+  ]);
+  return {
+    profileId,
+    items: memoryItems.listMemoryItems(profileId, { workspaceId }),
+    digest: memoryItems.memoryDigest(profileId, workspaceId),
+    settings: readMemoryLearningSettings(),
+    runHistoryCount: countRunHistory(workspaceId, profileId),
+  };
 }
 
 // cora-memory keys the workspace tier by workspaceId and sanitizes whatever it

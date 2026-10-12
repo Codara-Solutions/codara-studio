@@ -34,6 +34,14 @@ import type {
   GitSplitPlanResult,
 } from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type {
+  CoraMemoryItem,
+  MemoryItemKind,
+  MemoryItemPatch,
+  MemoryItemScope,
+  MemoryItemsView,
+  MemoryLearningSettings,
+} from "@shared/memory-items";
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
@@ -506,6 +514,40 @@ const api = {
       profileId?: string,
     ): Promise<string> =>
       ipcRenderer.invoke("memory:ensureFile", { scope, workspaceId, profileId }),
+    // What Cora learned by itself, under the two files. Each mutation
+    // resolves to the fresh view.
+    items: (workspaceId: string | null, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items", { workspaceId, profileId }),
+    updateItem: (
+      workspaceId: string | null,
+      id: string,
+      patch: MemoryItemPatch,
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:update", { workspaceId, id, patch, profileId }),
+    deleteItem: (workspaceId: string | null, id: string, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:delete", { workspaceId, id, profileId }),
+    addItem: (
+      workspaceId: string | null,
+      input: { scope: MemoryItemScope; kind?: MemoryItemKind; text: string },
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:add", { workspaceId, profileId, ...input }),
+    setLearning: (
+      workspaceId: string | null,
+      patch: Partial<MemoryLearningSettings>,
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:learning:set", { workspaceId, patch, profileId }),
+    clearRunHistory: (workspaceId: string, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:runHistory:clear", { workspaceId, profileId }),
+    runItems: (runId: string): Promise<{ profileId: string; items: CoraMemoryItem[] }> =>
+      ipcRenderer.invoke("memory:runItems", { runId }),
+    onItemsChanged: (handler: (event: { profileId: string }) => void): (() => void) => {
+      const listener = (_event: unknown, payload: { profileId: string }) => handler(payload);
+      ipcRenderer.on("memory:items-changed", listener);
+      return () => ipcRenderer.off("memory:items-changed", listener);
+    },
   },
   coraProfiles: {
     onChanged: (handler: () => void): (() => void) => {

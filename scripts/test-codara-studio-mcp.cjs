@@ -73,6 +73,7 @@ const EXECUTE_TOOLS = [
   "codara_name_chat",
   "codara_plan_update",
   "codara_remember",
+  "codara_recall",
   "codara_request_next_iteration",
   "codara_get_worker_status",
   "codara_wait_for_workers",
@@ -387,12 +388,13 @@ function sortedEqual(actual, expected, label) {
     }
 
     const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", ...WORKTREE_TOOLS], "direct Cora roster mismatch");
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
     const untrustedDirect = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
     assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
+    assert.ok(!untrustedDirect.tools.includes("codara_recall"), "untrusted PRs cannot read memory");
     assert.ok(
       !untrustedDirect.tools.some((name) => name.startsWith("codara_worktree_")),
       "untrusted PRs cannot create or remove worktrees",

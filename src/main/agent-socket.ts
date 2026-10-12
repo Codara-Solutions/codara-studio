@@ -68,6 +68,7 @@ import {
   findLiveVerifierFeedbackRetry,
 } from "./orchestration/step-lifecycle";
 import {
+  isMemoryEnabled,
   MAX_BULLETS_ADDED_PER_RUN,
   MAX_REMEMBER_CALLS_PER_RUN,
   rememberAdd,
@@ -580,6 +581,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "agent.notify",
   "orchestrator.spawn_terminals",
   "orchestrator.remember",
+  "orchestrator.recall",
   "worktree.create",
   "worktree.list",
   "worktree.remove",
@@ -814,6 +816,8 @@ async function dispatch(
         return await handleOrchestratorBoardUpdate(params, id);
       case "orchestrator.remember":
         return await handleOrchestratorRemember(params, id);
+      case "orchestrator.recall":
+        return await handleOrchestratorRecall(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -6640,6 +6644,46 @@ async function handleOrchestratorRemember(
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
+}
+
+// orchestrator.recall, the codara_recall tool: a read-only search over the
+// run's profile's learned items (memory-items.ts), scoped to the run's
+// workspace. Honors the memory switches like injection does.
+async function handleOrchestratorRecall(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const query = stringParam(params, "query");
+  if (!query) return errorResponse(id, ERR_INVALID_PARAMS, "query is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  if (!isMemoryEnabled("global", run.workspaceId, run.coraProfileId)) {
+    return successResponse(id, { memories: [], message: "Memory is switched off for this profile." });
+  }
+  const limit = Math.min(20, Math.max(1, Math.floor(optionalNumberParam(params, "limit") ?? 8)));
+  const workspaceOn = isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId);
+  const profileId = run.coraProfileId ?? "default";
+  const { markMemoryItemsUsed, searchMemoryItems } = await import("./orchestration/memory-items");
+  // Suggestions stay out: they are tool output (a worker's lesson, a review
+  // the user's words did not back) that the user has not approved, and the
+  // model reads whatever this returns as guidance.
+  const found = searchMemoryItems(profileId, run.workspaceId, query, limit * 3)
+    .filter((item) => item.status === "active" && (workspaceOn || item.scope === "global"))
+    .slice(0, limit);
+  markMemoryItemsUsed(profileId, found.map((item) => item.id));
+  return successResponse(id, {
+    memories: found.map((item) => ({
+      id: item.id,
+      scope: item.scope,
+      kind: item.kind,
+      text: item.text,
+      learned: item.createdAt.slice(0, 10),
+    })),
+    message: found.length === 0 ? "Nothing relevant remembered." : `${found.length} memories.`,
+  });
 }
 
 function successResponse(id: JsonRpcId, result: unknown): JsonRpcResponse {

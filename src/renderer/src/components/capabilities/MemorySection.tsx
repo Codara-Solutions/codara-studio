@@ -16,6 +16,7 @@ import {
 } from "./controls";
 import { shortPath } from "./McpSection";
 import CustomSelect from "../settings/CustomSelect";
+import LearnedMemoryPanel from "./LearnedMemoryPanel";
 
 export default function MemorySection({
   profiles,
@@ -26,6 +27,7 @@ export default function MemorySection({
   onRetry,
   busy,
   workspaceAvailable,
+  workspaceId,
   onToggle,
   onOpen,
   onClear,
@@ -38,6 +40,8 @@ export default function MemorySection({
   onRetry: () => void;
   busy: CoraMemoryScope | null;
   workspaceAvailable: boolean;
+  /** The open workspace, for the learned items of this workspace. */
+  workspaceId?: string | null;
   onToggle: (scope: CoraMemoryScope, enabled: boolean) => void;
   onOpen: (scope: CoraMemoryScope) => void;
   onClear: (scope: CoraMemoryScope, includeUserLines: boolean) => void;
@@ -53,7 +57,7 @@ export default function MemorySection({
           <div style={{ minWidth: 0 }}>
             <div style={rowNameStyle}>Profile</div>
             <div style={{ ...rowNoteStyle, marginTop: 3 }}>
-              Each profile has its own memory. Cora reads it at the start of a chat and adds lessons as it works.
+              Each profile has its own memory. Cora reads it in every chat, learns from what you tell it, and gets more tailored the more you use it.
             </div>
           </div>
           <CustomSelect
@@ -101,6 +105,11 @@ export default function MemorySection({
           onClear={onClear}
         />
       </div>
+      <LearnedMemoryPanel
+        profileId={viewedProfileId ?? memory?.profile.id ?? null}
+        workspaceId={workspaceAvailable ? workspaceId ?? null : null}
+        disabled={globalOff}
+      />
     </section>
   );
 }

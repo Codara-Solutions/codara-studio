@@ -12,9 +12,12 @@ import type {
 } from "@shared/types";
 import { classifyOutcomeMemory } from "@shared/outcome-memory";
 import { isMemoryEnabled } from "./cora-memory";
+import { coraProfileRoot, DEFAULT_CORA_PROFILE_ID, normalizeCoraProfileId } from "./cora-profiles";
 
 // Per-workspace persistent orchestration memory. One distilled JSON ledger per
-// workspaceId under ~/.SparkAgent/memory. The writer (recordRunMemory) runs
+// workspaceId and Cora profile: the default profile keeps the legacy
+// ~/.codarastudio/memory/<workspace>.json, a named profile keeps its own under
+// memory/profiles/<id>/runs/, so a profile never plans from another's history. The writer (recordRunMemory) runs
 // best-effort on a run's non-complete -> complete transition; the synchronous
 // reader (formatPriorRunsSection) is folded into the manager's plan_analysis
 // prompt so it can learn this repo's task shapes, which runtimes survived
@@ -41,7 +44,10 @@ const MAX_ORACLE_EVIDENCE = 6;
 const VERIFIED_COMMAND_MAX_LENGTH = 120;
 
 // Common English + code stopwords dropped from the keyword fingerprint so the
-// Jaccard ranker scores on meaningful task vocabulary, not boilerplate.
+// Jaccard ranker scores on meaningful task vocabulary, not boilerplate. The
+// tail is the vocabulary of the synthetic direct-chat step and its acceptance
+// line, which every direct chat shares and which used to dominate their
+// fingerprints.
 const STOPWORDS = new Set<string>([
   "the", "and", "for", "with", "that", "this", "from", "into", "onto", "over",
   "under", "your", "you", "are", "was", "were", "has", "have", "had", "but",
@@ -54,6 +60,8 @@ const STOPWORDS = new Set<string>([
   "tests", "build", "fix", "fixes", "fixed", "change", "changes", "changed",
   "update", "updates", "updated", "implement", "implements", "implementing",
   "create", "creates", "creating", "support", "supports", "supported",
+  "execute", "instruction", "directly", "write", "evidence", "backed", "final",
+  "report", "worker", "completed", "reported", "real", "results", "json", "direct",
 ]);
 
 function memoryRoot(): string {
@@ -68,8 +76,11 @@ function sanitize(workspaceId: string): string {
   return cleaned.length > 0 ? cleaned.slice(0, 200) : "_unknown";
 }
 
-function ledgerPath(workspaceId: string): string {
-  return join(memoryRoot(), `${sanitize(workspaceId)}.json`);
+function ledgerPath(workspaceId: string, profileId = DEFAULT_CORA_PROFILE_ID): string {
+  const id = normalizeCoraProfileId(profileId);
+  return id === DEFAULT_CORA_PROFILE_ID
+    ? join(memoryRoot(), `${sanitize(workspaceId)}.json`)
+    : join(coraProfileRoot(id), "runs", `${sanitize(workspaceId)}.json`);
 }
 
 // Lowercase, split on non-alphanumerics, drop stopwords + short tokens, dedupe.
@@ -135,6 +146,16 @@ function truncate(value: string, maxLength: number): string {
 // leans on the plan + allowedPaths only).
 function planKeywordsFromRun(run: RunState): string[] {
   const parts: Array<string | undefined> = [run.title];
+  if (run.executionMode === "direct") {
+    // A direct chat's steps are synthetic wrappers around the user's words,
+    // so the words themselves are the fingerprint.
+    for (const message of run.humanMessages ?? []) {
+      if (message.author === "user" && !message.boardNote && !message.resumeNote && !message.compaction) {
+        parts.push(message.message.slice(0, 600));
+      }
+    }
+    return dedupeCap(tokenizeKeywords(parts), MAX_PLAN_KEYWORDS);
+  }
   for (const step of run.steps) {
     parts.push(step.title, step.goal);
     for (const criterion of step.acceptanceCriteria) parts.push(criterion);
@@ -177,8 +198,11 @@ function coerceLedger(value: unknown, workspaceId: string): WorkspaceMemoryLedge
  * unavailable"). Validates loosely — records must be an array — and coerces the
  * rest to the ledger type.
  */
-export function readWorkspaceMemory(workspaceId: string): WorkspaceMemoryLedger | null {
-  const path = ledgerPath(workspaceId);
+export function readWorkspaceMemory(
+  workspaceId: string,
+  profileId = DEFAULT_CORA_PROFILE_ID,
+): WorkspaceMemoryLedger | null {
+  const path = ledgerPath(workspaceId, profileId);
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, "utf8");
@@ -239,10 +263,9 @@ function renderRecordEntry(record: WorkspaceRunMemoryRecord): string {
  */
 export function formatPriorRunsSection(run: RunState): string | null {
   // Workspace memory switched off (directly or through the global master
-  // switch) hides this history too. Writes continue, so switching memory back
-  // on does not lose the outcomes recorded meanwhile.
+  // switch) hides this history, and recordRunMemory stops adding to it.
   if (!isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId)) return null;
-  const ledger = readWorkspaceMemory(run.workspaceId);
+  const ledger = readWorkspaceMemory(run.workspaceId, run.coraProfileId);
   if (!ledger) return null;
   const others = ledger.records.filter((record) => record.runId !== run.id);
   if (others.length === 0) return null;
@@ -453,13 +476,21 @@ export async function recordRunMemory(
     // ran a worker has no outcome to learn from; both would only crowd the
     // ledger with records that look similar and teach nothing.
     if (run.automationId) return;
+    // Memory off means off: the user switched it off to stop Cora keeping
+    // anything about this workspace, run outcomes included.
+    if (!isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId)) return;
     const attemptReports = await gatherAttemptReports(run, readReport);
     if (attemptReports.length === 0) return;
+    // A chat whose workers changed nothing and ran nothing (a greeting, a
+    // question answered from memory) has no outcome worth planning from.
+    const didWork = attemptReports.some(({ report }) =>
+      report.filesChanged.length > 0 || report.commandsRun.length > 0 || report.tests.length > 0);
+    if (!didWork) return;
     const record = distillRecord(run, attemptReports);
 
-    const path = ledgerPath(run.workspaceId);
+    const path = ledgerPath(run.workspaceId, run.coraProfileId);
     await withLedgerLock(path, async () => {
-      const existing = readWorkspaceMemory(run.workspaceId);
+      const existing = readWorkspaceMemory(run.workspaceId, run.coraProfileId);
       const ledger: WorkspaceMemoryLedger = existing ?? {
         version: LEDGER_VERSION,
         workspaceId: run.workspaceId,
@@ -476,10 +507,42 @@ export async function recordRunMemory(
       // module's synchronous reader observe a half-written file; the tmp+rename
       // in fs-atomic hands the reader the old ledger or the new one, never a
       // torn one.
-      await mkdir(memoryRoot(), { recursive: true });
+      await mkdir(join(path, ".."), { recursive: true });
       await writeFileAtomic(path, JSON.stringify(ledger));
     });
   } catch (err) {
     console.warn("[run-memory] failed to record run memory:", err);
   }
+}
+
+/** A deleted chat takes its outcome record with it. Never throws. */
+export async function forgetRunMemory(
+  run: Pick<RunState, "id" | "workspaceId" | "coraProfileId">,
+): Promise<void> {
+  try {
+    const path = ledgerPath(run.workspaceId, run.coraProfileId);
+    await withLedgerLock(path, async () => {
+      const ledger = readWorkspaceMemory(run.workspaceId, run.coraProfileId);
+      if (!ledger || !ledger.records.some((record) => record.runId === run.id)) return;
+      ledger.records = ledger.records.filter((record) => record.runId !== run.id);
+      await writeFileAtomic(path, JSON.stringify(ledger));
+    });
+  } catch (err) {
+    console.warn("[run-memory] failed to forget run memory:", err);
+  }
+}
+
+export function countRunHistory(workspaceId: string | null, profileId = DEFAULT_CORA_PROFILE_ID): number {
+  if (!workspaceId) return 0;
+  return readWorkspaceMemory(workspaceId, profileId)?.records.length ?? 0;
+}
+
+/** The Memory page's "Clear" for one workspace's run history. */
+export async function clearRunHistory(workspaceId: string, profileId = DEFAULT_CORA_PROFILE_ID): Promise<void> {
+  const path = ledgerPath(workspaceId, profileId);
+  await withLedgerLock(path, async () => {
+    if (!existsSync(path)) return;
+    const ledger: WorkspaceMemoryLedger = { version: LEDGER_VERSION, workspaceId, records: [] };
+    await writeFileAtomic(path, JSON.stringify(ledger));
+  });
 }

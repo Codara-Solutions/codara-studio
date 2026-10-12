@@ -231,6 +231,7 @@ import {
   renderWorkerPrompt,
   shouldProvisionWorkerMailbox,
   shouldUsePeerComms,
+  workerMemoryContext,
 } from "./worker-prompt";
 import {
   detectFatalWorkerRuntimeError,
@@ -267,7 +268,8 @@ import {
 import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
-import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { forgetRunMemory, formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { forgetRunLearning, learnFromCompletedRun, noteRunMessages } from "./memory-learning";
 import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
@@ -6445,6 +6447,9 @@ async function prepareManagerTurn(
     coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
       force: includeCanonicalReplay,
       profileId: prepared.coraProfileId,
+      // Learned items are ranked against what this turn is about: the new
+      // input, or the title when the turn has none (a resume or a nudge).
+      query: [prepared.title, ...inputMessages.map((message) => message.message)].join("\n").slice(0, 4_000),
     });
   } catch {
     coraMemory = null;
@@ -14919,6 +14924,10 @@ export async function deleteRun(runId: string): Promise<void> {
   }
   activeAutopilotPlans.delete(run.id);
   activeAutopilotReviews.delete(run.id);
+  // The chat's outcome record and its quotes in learned memory go with it;
+  // what the user taught (an active preference) stays. Both never throw.
+  await forgetRunMemory(run);
+  await forgetRunLearning(run);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
@@ -18523,6 +18532,17 @@ async function commitRunChange(
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
     scheduleRunCompletionTail(run.id, result ?? undefined);
   }
+  // Every path that adds a user message (managed, direct, Talk, answers)
+  // commits here, so memory capture sees each message once it is durable,
+  // before any compaction can summarize it. A cheap id compare when nothing
+  // new arrived; the scan itself runs detached.
+  if (persisted && result) {
+    try {
+      noteRunMessages(result);
+    } catch {
+      // Learning never costs a commit.
+    }
+  }
   return result ?? (await requireRun(run.id));
 }
 
@@ -18640,6 +18660,10 @@ async function runCompletionTail(
     // memory file as [auto] bullets that later manager turns replay. Also
     // non-throwing.
     await recordRunLessons(completed, readReportOnce);
+    // Memory v3: worker lessons, ledger-backed procedures and, when the chat
+    // earned it, one throttled model review of the conversation. Detached
+    // from the turn like the rest of this tail, and non-throwing.
+    await learnFromCompletedRun(completed, readReportOnce);
   } catch (err) {
     console.error("[run-store] failed to record run memory", err);
   }
@@ -20842,13 +20866,29 @@ async function runPiWorkerSession({
   // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
   // them would otherwise leave the worker unable to write a valid report.
   const contractSections = workerContractSections(promptText);
-  const taskContract = () => [
-    task.description.trim(),
-    ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
-    ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
-    ...(contractSections ? [contractSections] : []),
-    ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
-  ].join("\n\n");
+  // Memory and the profile are pinned context: the compaction summary is told
+  // to leave them out, and this re-sends a fresh copy exactly once after
+  // each compaction, so the user's preferences survive a long run and
+  // anything learned meanwhile arrives too.
+  const pinnedMemory = (): string | null => {
+    if (runProjectPolicyMode(run) === "untrusted-pull-request") return null;
+    try {
+      return workerMemoryContext(run, task);
+    } catch {
+      return null;
+    }
+  };
+  const taskContract = () => {
+    const memory = pinnedMemory();
+    return [
+      task.description.trim(),
+      ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
+      ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+      ...(contractSections ? [contractSections] : []),
+      ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+      ...(memory ? [`Cora memory and profile (re-sent after compaction; they still apply):\n${memory}`] : []),
+    ].join("\n\n");
+  };
   // Outside the workspace, beside the report. Imported pull-request workers
   // have no scratchpad tool.
   const scratchpadPath =

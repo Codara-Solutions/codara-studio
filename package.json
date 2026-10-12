@@ -73,6 +73,7 @@
     "test:failure-taxonomy": "node scripts/test-failure-taxonomy.cjs",
     "test:late-failure-preservation": "node scripts/test-late-failure-preservation.cjs",
     "test:repeat-guard": "node scripts/test-repeat-guard.cjs",
+    "eval:memory": "node scripts/test-cora-memory-eval.cjs",
     "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
     "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",
     "smoke:claude-hotswap": "node scripts/smoke-claude-live-slot-hotswap.cjs",

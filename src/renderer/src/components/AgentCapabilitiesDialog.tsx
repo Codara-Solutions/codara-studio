@@ -1252,6 +1252,7 @@ export default function AgentCapabilitiesDialog({
                   onRetry={() => setMemoryReload((current) => current + 1)}
                   busy={memoryBusy}
                   workspaceAvailable={workspaceId !== null}
+                  workspaceId={workspaceId}
                   onToggle={toggleMemory}
                   onOpen={openMemoryFile}
                   onClear={clearMemory}

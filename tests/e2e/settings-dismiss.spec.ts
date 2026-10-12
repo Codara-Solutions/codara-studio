@@ -64,6 +64,17 @@ test("a click outside Settings or the Capability Center never closes them", asyn
     await capabilities.getByText("Capability Center", { exact: true }).first().click();
     await expect(page.getByRole("listbox")).toHaveCount(0);
     await expect(capabilities).toBeVisible();
+
+    // The Memory page also lists what Cora learned; a hand-added memory
+    // shows there and can be pinned without leaving the dialog.
+    const learned = capabilities.getByTestId("learned-memory");
+    await learned.getByRole("textbox", { name: "New memory" }).fill("Answer in Spanish.");
+    await learned.getByRole("button", { name: "Remember", exact: true }).click();
+    const row = learned.locator("[data-memory-item]").filter({ hasText: "Answer in Spanish." });
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: "Pin", exact: true }).click();
+    await expect(row.getByRole("button", { name: "Unpin", exact: true })).toBeVisible();
+    await expect(capabilities).toBeVisible();
     await clickOutside(page, capabilities);
     await expect(capabilities).toBeVisible();
     await page.keyboard.press("Escape");

@@ -228,6 +228,61 @@ test("plain conversational Cora turns omit empty technical disclosures", async (
   }
 });
 
+test("a memory learned from a message shows under it and Undo forgets it", async () => {
+  const fixture = await prepareFixture("codara-memory-chip-");
+  const runId = "run-memory-chip-e2e";
+  await seedPersistedConversationOnlyRun(fixture.userDataDir, fixture.workspaceDir, runId);
+  const learnedDir = join(fixture.userDataDir, "memory", "learned");
+  const itemsFile = join(learnedDir, "items.json");
+  const at = "2026-07-13T09:30:01.000Z";
+  await mkdir(learnedDir, { recursive: true });
+  await writeFile(itemsFile, JSON.stringify({
+    version: 1,
+    items: [{
+      id: "m_e2e0000001", scope: "global", kind: "preference", text: "Always answer in Spanish.",
+      source: "user", status: "active", confidence: 0.9, createdAt: at, updatedAt: at,
+      useCount: 0, confirmations: 1, evidence: [{ runId, messageId: "msg-hello", quote: "Hello", at }],
+    }],
+    tombstones: [], scanned: {}, reflected: {},
+  }), "utf8");
+  const userHome = join(fixture.root, "home");
+  await mkdir(userHome, { recursive: true });
+  await writeFile(join(userHome, ".zshrc"), "PS1='%~ %# '\n", "utf8");
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        HOME: userHome,
+        ZDOTDIR: userHome,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+        CODARA_DISABLE_KEYCHAIN: "1",
+        CLAUDE_CONFIG_DIR: join(fixture.root, "claude-home"),
+        CODEX_HOME: join(fixture.root, "codex-home"),
+        GROK_HOME: join(fixture.root, "grok-home"),
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Conversation only", runId);
+
+    const chips = page.getByTestId("memory-learned-chips");
+    await expect(chips).toContainText("Remembered");
+    await expect(chips).toContainText("Always answer in Spanish.");
+    await chips.getByRole("button", { name: "Forget: Always answer in Spanish." }).click();
+    await expect(chips).toHaveCount(0);
+    await expect.poll(async () => JSON.parse(await readFile(itemsFile, "utf8")).items.length).toBe(0);
+  } finally {
+    await app?.close();
+  }
+});
+
 test("message roles stay explicit, explicit rewind works, and Stop preserves chat", async () => {
   // Waits on a real worker launch before steering, on top of the rewinds.
   test.setTimeout(60_000);

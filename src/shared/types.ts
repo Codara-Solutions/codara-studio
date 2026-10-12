@@ -4047,6 +4047,13 @@ export interface WorkerReport {
    */
   handoff?: WorkerHandoffArtifact[];
   /**
+   * Durable lessons about this repository or environment that a later task
+   * would otherwise pay to rediscover (a command that really works, a
+   * gotcha). Read at completion by memory-learning.ts, which offers them as
+   * memory suggestions; never task status.
+   */
+  lessons?: string[];
+  /**
    * Populated only by verifier-class workers. The 5-confidence-ladder verdict
    * the manager uses during worker_result_review to decide accept / retry-impl
    * with corrective_prompt / escalate-to-human.
