@@ -345,8 +345,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     expect(settingsGlass!.surfaceBackdrop).not.toContain("url(");
     expect(settingsGlass!.scrimBackdrop).toBe("none");
 
-    await clickAttached(page.getByRole("button", { name: "Agents" }));
-    await expect(page.getByText("Accounts", { exact: true })).toBeVisible();
+    await clickAttached(settingsNav(page).getByRole("button", { name: "Accounts", exact: true }));
+    await expect(page.locator('[data-settings-tab="agents"][aria-busy="false"]')).toBeVisible();
     // The synthetic auth.json above is a legacy single-account store, which the
     // account registry migrates into one Pi profile per provider named after
     // the provider's plan (defaultProfileLabel in pi-account-auth-store.ts).
@@ -355,8 +355,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     // account card in Settings. .first() keeps the assertion timing-proof.
     await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
-    // The Accounts section explainer, then one group per provider, each
-    // explaining how a switch moves Cora and that provider's CLI together.
+    // The runtime explainer, then one group per provider, each saying how a
+    // switch moves Cora and that provider's CLI together.
     await expect(page.getByText(/Each account keeps its own private sign-in/)).toBeVisible();
     await expect(page.getByText(/moves Cora and Claude Code together/)).toBeVisible();
     await expect(page.getByText(/moves Cora and Codex together/)).toBeVisible();
@@ -387,10 +387,11 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     await clickAttached(page.getByRole("button", { name: /After pause/ }));
     await expect(inlineWaitInput).toHaveValue("1500");
 
-    await clickAttached(page.getByRole("button", { name: "Default terminal" }));
-    const terminalButton = page.getByRole("button", { name: /Use .* as default terminal/ }).first();
-    await expect(terminalButton).toBeVisible();
-    await clickAttached(terminalButton);
+    await clickAttached(settingsNav(page).getByRole("button", { name: "Terminal", exact: true }));
+    await clickAttached(page.getByRole("button", { name: "Default shell", exact: true }));
+    const shellOption = page.getByRole("option").first();
+    await expect(shellOption).toBeVisible();
+    await clickAttached(shellOption);
 
     await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
@@ -426,10 +427,10 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
       })
       .toBe("google/gemini-3.5-flash:1500:true");
 
-    // The Capability Center has Settings' height and a wider fixed width, which
-    // its MCP table needs. Its shell must also
-    // paint without the SVG lens/full-screen blur combination that made
-    // opening and typing visibly trail the pointer.
+    // The Capability Center opens at Settings' exact size; its MCP table
+    // adapts to the pane instead. Its shell must also paint without the SVG
+    // lens/full-screen blur combination that made opening and typing visibly
+    // trail the pointer.
     const capabilityOpenLatencyMs = await page.getByRole("button", { name: "Tools, skills and memory" }).evaluate((button) => new Promise<number>((resolve) => {
       const startedAt = performance.now();
       const observer = new MutationObserver(() => {
@@ -457,8 +458,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         width: surface.getBoundingClientRect().width,
         height: surface.getBoundingClientRect().height,
         borderRadius: getComputedStyle(surface).borderRadius,
-        expectedWidth: Math.min(1120, window.innerWidth - 44),
-        expectedHeight: Math.min(760, window.innerHeight - 44),
+        expectedWidth: Math.min(920, window.innerWidth - 48),
+        expectedHeight: Math.min(780, window.innerHeight - 48),
       };
     });
     expect(capabilityGlass).not.toBeNull();
@@ -474,9 +475,9 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
     }
-    // Four tabs (MCP servers, Skills, Memory, Policy) beside one content pane.
-    // MCP is the tab that opens first, so its section heading is on screen —
-    // the nav button of the same name is a button, not a heading.
+    // The tabs sit beside one content pane. MCP is the tab that opens first,
+    // so the title bar names it; the nav button of the same name is a tab,
+    // not a heading.
     await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
     const capabilitySearch = page.getByPlaceholder("Filter servers");
     await capabilitySearch.fill("playwright");
@@ -630,6 +631,10 @@ async function clickButton(page: Page, name: string): Promise<void> {
   const button = page.getByRole("button", { name, exact: true });
   await expect(button).toBeEnabled();
   await button.dispatchEvent("click");
+}
+
+function settingsNav(page: Page): Locator {
+  return page.getByRole("dialog", { name: "Settings" }).locator("nav");
 }
 
 async function clickAttached(locator: Locator): Promise<void> {

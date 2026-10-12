@@ -16,7 +16,7 @@ import { isOpenRouterModelId, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-
 export type CapabilityTab = "mcp" | "skills" | "profiles" | "memory" | "workers" | "policy";
 
 export const CAPABILITY_TABS: { id: CapabilityTab; label: string }[] = [
-  { id: "mcp", label: "Tools (MCP servers)" },
+  { id: "mcp", label: "MCP servers" },
   { id: "skills", label: "Skills" },
   { id: "profiles", label: "Profiles" },
   { id: "memory", label: "Memory" },

@@ -1,5 +1,5 @@
 import type { AppSettings } from "@shared/types";
-import { SectionHead, ToggleRow, sectionStyle, toggleListStyle } from "./controls";
+import { ToggleRow, sectionStyle, toggleListStyle } from "./controls";
 
 // Global switches about how agents are briefed and what Codara keeps
 // installed. The settings keys stay as they are (the phone reads them under
@@ -13,11 +13,7 @@ export default function BehaviorSection({
 }) {
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        title="Behavior"
-        detail="How Cora works on your requests, how Codara briefs Claude and Codex workers, and what it keeps installed. These apply to all workspaces."
-      />
-      <div style={toggleListStyle}>
+      <div className="st-rows" style={toggleListStyle}>
         <ToggleRow
           title="Always verify edits with a worker"
           detail="Off: Cora makes small, low-risk edits (one to three files) herself and replies directly. On: every change to your project goes through a worker and is checked by a verifier on another provider, which is slower. Applies the next time Cora starts in a chat."
@@ -55,7 +51,7 @@ export default function BehaviorSection({
         />
         <ToggleRow
           title="Keep Codara Studio tools installed in Claude, Codex and Grok"
-          detail="At launch, Codara refreshes its built-in server in each CLI where its switch under Tools is on. A CLI you switched it off for stays off."
+          detail="At launch, Codara refreshes its built-in server in each CLI where its switch under MCP servers is on. A CLI you switched it off for stays off."
           checked={view.playwrightMcpAutoInstall}
           onChange={(playwrightMcpAutoInstall) =>
             onChange(

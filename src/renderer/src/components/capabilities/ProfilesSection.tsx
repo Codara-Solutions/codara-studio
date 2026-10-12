@@ -1,8 +1,8 @@
+import type React from "react";
 import type { CoraProfile } from "@shared/types";
 import {
   ConfirmRemoveButton,
   Field,
-  SectionHead,
   formErrorStyle,
   listStyle,
   optionalStyle,
@@ -73,17 +73,6 @@ export default function ProfilesSection({
   const busy = operation !== null;
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        title="Profiles"
-        detail={
-          <>
-            A profile is a separate Cora with its own instructions and its own memory. Pick one for each
-            new chat from the profile menu in the Cora composer; a chat keeps the profile it started with.
-            The default is what new chats and automations use when you do not pick one.
-          </>
-        }
-      />
-
       <div className="agent-capability-list" style={listStyle} aria-busy={loading}>
         {profiles.map((profile) => (
           <ProfileRow
@@ -111,7 +100,8 @@ export default function ProfilesSection({
       </div>
 
       <form
-        style={panelStyle}
+        // The list's closing rule already divides the two.
+        style={{ ...panelStyle, borderTop: "none", paddingTop: 8 }}
         onSubmit={(event) => {
           event.preventDefault();
           onCreate();
@@ -119,7 +109,7 @@ export default function ProfilesSection({
         aria-label="Create a profile"
       >
         <div style={{ display: "grid", gap: 3 }}>
-          <strong style={{ color: "var(--ink)", fontSize: 12.5 }}>Make another Cora</strong>
+          <h3 style={formTitleStyle}>Make another Cora</h3>
           <span style={rowNoteStyle}>
             For example a careful reviewer, or a designer who only touches the UI. Its memory starts empty
             and stays separate from every other profile.
@@ -169,8 +159,7 @@ export default function ProfilesSection({
         <div>
           <button
             type="submit"
-            className="spark-btn is-primary"
-            style={smallBtnStyle}
+            className="spark-btn"
             disabled={busy || draft.name.trim().length === 0}
           >
             {operation === "creating" ? "Creating" : "Create profile"}
@@ -218,20 +207,25 @@ function ProfileRow({
       style={{
         ...rowStyle,
         gridTemplateColumns: "minmax(0, 1fr) auto",
-        background: highlighted ? "color-mix(in oklab, var(--accent) 7%, transparent)" : undefined,
+        boxShadow: highlighted ? "inset 2px 0 0 var(--accent)" : undefined,
+        paddingLeft: highlighted ? 12 : undefined,
       }}
     >
       <div style={{ minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={rowNameStyle}>{profile.name}</span>
           {profile.isDefault ? (
-            <span className="spark-badge is-accent" style={badgeStyle}>
-              default for new chats
+            <span
+              className="spark-badge is-accent"
+              style={badgeStyle}
+              title="New chats and automations use this profile unless you pick another in the composer"
+            >
+              Default for new chats
             </span>
           ) : null}
           {builtIn ? (
             <span className="spark-badge" style={badgeStyle}>
-              built in
+              Built in
             </span>
           ) : null}
         </div>
@@ -328,3 +322,11 @@ function ProfileRow({
     </div>
   );
 }
+
+const formTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: "var(--ink)",
+  fontSize: 13.5,
+  fontWeight: 600,
+  lineHeight: 1.35,
+};

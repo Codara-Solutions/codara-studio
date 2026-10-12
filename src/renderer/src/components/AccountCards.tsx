@@ -6,9 +6,7 @@ import type { AccountProviderDescriptor } from "../lib/account-provider-descript
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import {
   ActionButton,
-  BUTTON_STYLE,
   INPUT_STYLE,
-  PRIMARY_BUTTON_STYLE,
   SETTINGS_MENU_Z,
 } from "./AccountCardPrimitives";
 import AccountCard, {
@@ -24,10 +22,12 @@ import { RuntimeMark } from "./BrandMarks";
  */
 export interface AccountProviderView {
   descriptor: AccountProviderDescriptor;
-  /** Short plain-language summary shown under the provider name. */
+  /** One line under the provider name: what a switch moves. */
+  summary: string;
+  /** The full switching rules, shown under "How switching works". */
   detail: string;
   cards: AccountCardView[];
-  /** Muted line under the cards, e.g. the account count. */
+  /** Muted count beside the provider name, e.g. "2 of 4 ready". */
   footer?: string;
   /** Account actions are unavailable until the Pi runtime is installed. */
   disabled: boolean;
@@ -103,7 +103,7 @@ export function AccountAddPicker({
       <button
         ref={triggerRef}
         type="button"
-        className="spark-btn"
+        className="spark-btn st-acct-add"
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="Add an account"
@@ -116,13 +116,10 @@ export function AccountAddPicker({
           setSelectedProvider(null);
           setOpen(true);
         }}
-        style={{
-          ...PRIMARY_BUTTON_STYLE,
-          flex: "0 0 auto",
-          ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
-        }}
       >
-        <span aria-hidden style={{ fontSize: 15, lineHeight: 1 }}>+</span>
+        <svg aria-hidden width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
         Add account
       </button>
       {/* Portalled because Settings' scrolling pane clips in-place popovers. */}
@@ -138,50 +135,27 @@ export function AccountAddPicker({
         focusSignal={stage}
         zIndex={SETTINGS_MENU_Z}
       >
-        <div style={{ width: 388, display: "grid", gap: 8, padding: 5 }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: selectedProvider
-                ? "26px minmax(0, 1fr) 26px"
-                : "minmax(0, 1fr) 26px",
-              alignItems: "start",
-              gap: 7,
-              padding: "3px 3px 5px",
-            }}
-          >
+        <div className="st-acct-picker">
+          <div className="st-acct-picker__head">
             {selectedProvider ? (
               <button
                 type="button"
-                className="spark-btn"
+                className="spark-icon-btn st-icon-btn"
                 aria-label="Back"
                 onClick={back}
-                style={{ ...BUTTON_STYLE, width: 26, minHeight: 26, padding: 0 }}
               >
-                ←
+                <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 6l-6 6 6 6" />
+                </svg>
               </button>
             ) : null}
-            <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
-              <span
-                style={{
-                  color: "var(--ink)",
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 13,
-                  fontWeight: 700,
-                }}
-              >
+            <div className="st-acct-picker__titles">
+              <span className="st-acct-picker__title">
                 {!selectedView
                   ? "Choose an agent"
                   : `Sign in to ${selectedFamily?.displayName}`}
               </span>
-              <span
-                style={{
-                  color: "var(--muted)",
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 10.5,
-                  lineHeight: 1.4,
-                }}
-              >
+              <span className="st-acct-picker__sub">
                 {!selectedView
                   ? "Pick the account you want to connect."
                   : `Sign in once in your browser. Cora and ${selectedView.descriptor.cliLabel} both use it.`}
@@ -189,18 +163,13 @@ export function AccountAddPicker({
             </div>
             <button
               type="button"
-              className="spark-btn"
+              className="spark-icon-btn st-icon-btn"
               aria-label="Close account picker"
               onClick={close}
-              style={{
-                ...BUTTON_STYLE,
-                width: 26,
-                minHeight: 26,
-                padding: 0,
-                color: "var(--muted)",
-              }}
             >
-              ×
+              <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
             </button>
           </div>
 
@@ -208,7 +177,7 @@ export function AccountAddPicker({
             <div
               role="listbox"
               aria-label="Agent"
-              style={{ display: "grid", gap: 5 }}
+              className="st-acct-picker__list"
             >
               {providers.map((view) => {
                 const { runtime, provider, label, cliLabel, brand: brandRuntime } =
@@ -222,56 +191,29 @@ export function AccountAddPicker({
                     type="button"
                     role="option"
                     aria-selected="false"
-                    className="spark-menu-item"
+                    className="spark-menu-item st-acct-picker__option"
                     disabled={unavailable}
                     onClick={() => choose(view)}
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "38px minmax(0, 1fr) auto",
-                      alignItems: "center",
-                      gap: 10,
-                      minHeight: 54,
-                      padding: "8px 10px",
-                      textAlign: "left",
-                    }}
                   >
                     <span
                       aria-hidden
+                      className="st-acct-picker__mark"
                       style={{
-                        width: 36,
-                        height: 36,
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        borderRadius: 10,
                         color: brand,
-                        border: `1px solid color-mix(in oklch, ${brand} 34%, transparent)`,
                         background: `color-mix(in oklch, ${brand} 14%, transparent)`,
                       }}
                     >
-                      <RuntimeMark runtime={runtime} size={20} />
+                      <RuntimeMark runtime={runtime} size={18} />
                     </span>
-                    <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
-                      <span
-                        style={{
-                          color: "var(--ink)",
-                          fontSize: 12.5,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {family.displayName}
-                      </span>
-                      <span
-                        style={{
-                          color: "var(--muted)",
-                          fontSize: 10.5,
-                          lineHeight: 1.35,
-                        }}
-                      >
+                    <span className="st-acct-picker__option-text">
+                      <span className="st-acct-picker__option-name">{family.displayName}</span>
+                      <span className="st-acct-picker__option-sub">
                         {label} · Cora and {cliLabel}
                       </span>
                     </span>
-                    <span aria-hidden style={{ color: brand, fontSize: 18 }}>›</span>
+                    <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="st-chevron">
+                      <path d="M9 6l6 6-6 6" />
+                    </svg>
                   </button>
                 );
               })}
@@ -285,7 +227,7 @@ export function AccountAddPicker({
                 actions.onAdd(selectedView.descriptor.provider);
                 finish();
               }}
-              style={{ display: "grid", gap: 8, padding: "2px 3px 3px" }}
+              className="st-acct-picker__form"
             >
               <input
                 autoFocus
@@ -297,13 +239,7 @@ export function AccountAddPicker({
                 onChange={(event) => actions.onAddLabel(event.currentTarget.value)}
                 style={INPUT_STYLE}
               />
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "flex-end",
-                  gap: 6,
-                }}
-              >
+              <div className="st-acct-picker__buttons">
                 <ActionButton onClick={back}>Back</ActionButton>
                 <button
                   type="submit"
@@ -334,65 +270,27 @@ function AccountProviderGroup({
   return (
     <section
       aria-labelledby={`accounts-${descriptor.provider}-title`}
-      style={{
-        display: "grid",
-        gap: 8,
-      }}
+      className="st-provider"
+      data-setting-anchor={descriptor.label}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
-          flexWrap: "wrap",
-        }}
-      >
-        <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
-          <span
-            id={`accounts-${descriptor.provider}-title`}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              color: "var(--ink)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 14,
-              fontWeight: 700,
-            }}
-          >
-            <span aria-hidden style={{ display: "inline-flex", color: brand }}>
-              <RuntimeMark runtime={descriptor.runtime} size={16} />
-            </span>
-            {descriptor.label}
+      <div className="st-provider__head">
+        <span id={`accounts-${descriptor.provider}-title`} className="st-provider__title">
+          <span aria-hidden className="st-provider__mark" style={{ color: brand }}>
+            <RuntimeMark runtime={descriptor.runtime} size={16} />
           </span>
-          <span
-            style={{
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 11,
-              lineHeight: 1.4,
-            }}
-          >
-            {view.detail}
-          </span>
-        </div>
+          {descriptor.label}
+        </span>
+        {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
       </div>
+      <p className="st-provider__detail">{view.summary}</p>
 
       {view.cliError ? (
-        <div
-          role="alert"
-          style={{
-            color: "var(--danger)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-          }}
-        >
+        <div role="alert" className="st-acct-status st-acct-status--danger">
           The {descriptor.cliLabel} sign-in status could not be loaded. Try again.
         </div>
       ) : null}
 
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="st-list st-acct-list">
         {view.cards.map((card) => (
           <AccountCard
             key={card.key}
@@ -403,43 +301,27 @@ function AccountProviderGroup({
           />
         ))}
         {view.cards.length === 0 ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 10,
-              flexWrap: "wrap",
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 11,
-              padding: "4px 2px",
-            }}
-          >
-            <span>No {descriptor.label} account yet.</span>
+          <div className="st-acct-empty">
+            <span aria-hidden className="st-acct-empty__mark" style={{ color: brand }}>
+              <RuntimeMark runtime={descriptor.runtime} size={18} />
+            </span>
+            <span className="st-acct-empty__text">
+              <span className="st-acct-empty__title">No {descriptor.label} account yet.</span>
+              <span className="st-acct-empty__body">
+                Sign in once and Cora and {descriptor.cliLabel} both use it.
+              </span>
+            </span>
             {/* view.busy covers any sign-in in flight, for every provider:
                 only one browser login may run at a time. */}
-            <ActionButton
-              compact
-              primary
-              tone={brand}
-              disabled={view.disabled || view.busy}
-              onClick={() => actions.onAdd(descriptor.provider)}
-            >
-              Sign in to {descriptor.label}
-            </ActionButton>
-          </div>
-        ) : null}
-        {view.footer ? (
-          <div
-            style={{
-              color: "var(--muted-2, var(--muted))",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10.5,
-              padding: "0 2px",
-            }}
-          >
-            {view.footer}
+            <span className="st-acct__actions">
+              <ActionButton
+                disabled={view.disabled || view.busy}
+                onClick={() => actions.onAdd(descriptor.provider)}
+              >
+                Sign in to {descriptor.label}
+              </ActionButton>
+              <span aria-hidden className="st-acct__menu-slot" />
+            </span>
           </div>
         ) : null}
       </div>
@@ -455,7 +337,7 @@ export default function AccountCards({
   actions: AccountActions;
 }) {
   return (
-    <div style={{ display: "grid", gap: 18 }}>
+    <div className="st-providers">
       {providers.map((view) => (
         <AccountProviderGroup
           key={view.descriptor.provider}

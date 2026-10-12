@@ -116,23 +116,21 @@ assert.match(descriptors, /grok: \{\s*cliLabel: "Grok",\s*loginHint: "grok login
 assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1, "only Codex closes sessions on a switch");
 assert.equal((descriptors.match(/sessionsFollowLiveLogin: true/g) ?? []).length, 1, "only Claude runs every session on the live login");
 assert.match(descriptors, /export function accountProviderDetail\(/);
+// The explainer says what one account is once; each provider then adds the
+// one rule that differs.
 assert.ok(
   descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`",
+    "`A ${descriptor.cliLabel} session that is already running keeps its account until it exits.`",
   ),
 );
+assert.ok(descriptors.includes('"MCP sign-ins, settings and history stay shared by every account."'));
 assert.ok(
   descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`",
+    "`${descriptor.cliLabel} keeps one sign-in for every terminal, which is why a switch has to close its sessions.`",
   ),
 );
 // A Claude card never offers to close terminals to delete an account.
 assert.match(settings, /const closeSessionsCount = descriptor\.sessionsFollowLiveLogin\s*\? 0/);
-assert.ok(
-  descriptors.includes(
-    "`One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`",
-  ),
-);
 assert.match(descriptors, /if \(descriptor\.switchClosesSessions\) \{/);
 
 // ---------------------------------------------------------------------------
@@ -173,14 +171,21 @@ assert.doesNotMatch(
   /nativeCliAccounts\.(?:create|setDefault|prepareLogin|cancelLogin|logout)\(/,
   "no sign-in, switch or sign-out may go through the native CLI account store",
 );
-// The footer counts accounts, not the signed-out Account 1 instruction slot,
-// and is omitted when there are none.
-assert.match(settings, /card\.coraProfileId \|\| card\.terminal\?\.connected/);
-assert.match(settings, /\.\.\.\(count > 0 \? \{ footer: `\$\{count\} \$\{count === 1 \? "account" : "accounts"\}` \} : \{\}\)/);
-// The section copy says what one account is.
+// The footer applies one rule to every provider: an account is ready when
+// its row would offer Switch or show Active, so "2 of 4 ready" always agrees
+// with the rows. A row whose Cora half reports an error offers a fix
+// instead, so it is not ready. It is omitted when there are none.
+assert.match(settings, /const ready = cards\.filter\(accountCardReady\)\.length;/);
+assert.match(
+  card,
+  /export function accountCardReady\(card: AccountCardView\): boolean \{\s*const state = accountCardState\(card\);\s*return \(state === "active" \|\| state === "signed-in"\) && !card\.cora\?\.error;/,
+);
+assert.match(settings, /const footer = cards\.length === 0 \? null : `\$\{ready\} of \$\{cards\.length\} ready`;/);
+assert.match(settings, /\.\.\.\(footer \? \{ footer \} : \{\}\)/);
+// The switching explainer says what one account is.
 assert.ok(
   settings.includes(
-    "The sign-ins Cora and the terminal tools run on. Every account is one sign-in for both Cora and its terminal tool: Claude Code, Codex, or Grok.",
+    "Every account is one sign-in for both Cora and its terminal tool. Account 1 is your own command-line login.",
   ),
 );
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);
@@ -260,7 +265,7 @@ assert.match(card, /const brand = agentBrandColor\(descriptor\.brand\);/);
 // Provider words live in the descriptor, never in a string the card renders.
 assert.doesNotMatch(card, /agentBrandColor\("claude"\)|["`][^"`\n]*(?:Claude Code|Codex|Grok|claude login)/);
 for (const label of [
-  '"Use this account"',
+  '"Switch to this account"',
   'label: "Reconnect"',
   "label: `Share with ${descriptor.cliLabel}`",
   'label: "Share with Cora"',
@@ -285,14 +290,26 @@ for (const copy of [
   assert.ok(card.includes(copy), `${copy} must be the card's copy`);
 }
 assert.match(card, /card\.cora\?\.error && state !== "account-one-signed-out"/);
-assert.match(card, /<UsingChip label="Using" color=\{brand\} \/>/);
-// Active shows the badge and no Use button.
-assert.match(card, /case "active":\s*case "account-one-signed-out":\s*return undefined;/);
+assert.match(card, /\{card\.active \? <ActiveBadge label="Active" \/> : null\}/);
+// Active shows the badge and no Use button. A signed-out Account 1 offers
+// its login command; an errored Account 1 does too, and any other errored
+// row offers Reconnect, never Switch.
+assert.match(card, /case "active":\s*return undefined;/);
+assert.match(card, /case "account-one-signed-out":\s*return terminalUsable\(card\) \? undefined : copyLogin;/);
+assert.match(card, /if \(status\.danger && state !== "terminal-only"\) \{\s*if \(card\.builtIn\) return copyLogin;/);
+// The button names the outcome; the command is in its tooltip.
+assert.match(card, /label: "Copy sign-in command",\s*title: `Copies \$\{descriptor\.loginHint\} to run in a terminal`,/);
+assert.match(card, /title=\{action\.title\}/);
+// Every row keeps the menu's slot, so the buttons end on one edge.
+assert.match(card, /<span aria-hidden className="st-acct__menu-slot" \/>/);
+// Every row action is the same secondary button; the Active badge is the
+// only accent in the list.
+assert.doesNotMatch(card, /<ActionButton[^>]*\bprimary\b/);
 // A Codex switch main refused arms the same button to close the sessions
 // and switch; the card never invents the count, so Anthropic and Grok
 // never show it.
 assert.match(card, /const switchCount = card\.switchCloseSessionsCount \?\? 0;/);
-assert.match(card, /\? `Close \$\{sessions\(switchCount\)\} and switch`\s*: "Use this account"/);
+assert.match(card, /\? `Close \$\{sessions\(switchCount\)\} and switch`\s*: "Switch to this account"/);
 assert.match(card, /run: \(\) => actions\.onUse\(card, \{ closeSessions: switchCount > 0 \}\)/);
 assert.match(card, /onUse: \(card: AccountCardView, options: \{ closeSessions: boolean \}\) => void;/);
 // Delete is two-step inside the menu; the second step closes the terminals
@@ -317,8 +334,11 @@ assert.match(
 );
 assert.equal((card.match(/<CardOverflowMenu/g) ?? []).length, 1);
 assert.doesNotMatch(card, /nativeCliAccounts|piSubscriptions/);
-assert.match(card, /inset 2px 0 0 \$\{brand\}/);
+// The active row is marked by the row itself as well as the badge.
+assert.match(card, /className=\{`st-acct\$\{card\.active \? " is-active" : ""\}/);
 assert.match(card, /\{card\.email\}/);
+// A row without an email still says why, instead of leaving a blank line.
+assert.match(card, /\{signedOut \? "Not signed in" : "Email not reported"\}/);
 assert.match(card, /\{card\.plan\} plan/);
 
 // The two-facet card and every piece of its machinery are gone.

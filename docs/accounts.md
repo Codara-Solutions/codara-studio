@@ -48,7 +48,7 @@ installing Codara, that login is Account 1.
 
 ## Choosing the Active account
 
-Click **Use this account** on an account card, or run:
+Click **Switch to this account** on an account card, or run:
 
 ```sh
 cora auth list                          # every account, with a number

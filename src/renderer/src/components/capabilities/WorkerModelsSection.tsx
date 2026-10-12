@@ -7,7 +7,6 @@ import {
   workerModelSubscription,
 } from "@shared/worker-model-roster";
 import {
-  SectionHead,
   SwitchTrack,
   WarnGlyph,
   noticeStyle,
@@ -64,15 +63,6 @@ export default function WorkerModelsSection({
     usableSubscriptions !== null && runnable.length > 0 && runnable.every(signedOutModel);
   return (
     <section style={sectionStyle}>
-      <SectionHead
-        title="Worker models"
-        detail={
-          <>
-            The models Cora may hand implementation and verification work to. Cora picks among the ones
-            switched on. A change applies to the next worker that starts; running workers keep their model.
-          </>
-        }
-      />
       {usable.length === 0 ? (
         <div style={noticeStyle} role="alert">
           <WarnGlyph />
@@ -93,7 +83,7 @@ export default function WorkerModelsSection({
                 window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "agents" } }))
               }
             >
-              Sign in under Settings &gt; Agents
+              Open Accounts
             </button>
           </span>
         </div>
@@ -102,25 +92,27 @@ export default function WorkerModelsSection({
         {groups.map((group) => (
           <div key={group.label} role="group" aria-label={`${group.label} worker models`}>
             <div style={groupLabelStyle}>{group.label}</div>
-            {group.models.map((modelId) => {
-              const on = enabled.includes(modelId);
-              const unusable = on && !usableSet.has(modelId)
-                ? isOpenRouterModelId(modelId)
-                  ? "Not usable: the OpenRouter key is not verified, or this model is no longer a Cora favorite in Settings, API and model."
-                  : "Not usable right now."
-                : null;
-              const signedOut = signedOutModel(modelId);
-              return (
-                <WorkerModelRow
-                  key={modelId}
-                  modelId={modelId}
-                  checked={on}
-                  unusable={unusable}
-                  signedOut={signedOut}
-                  onToggle={() => onToggle(modelId)}
-                />
-              );
-            })}
+            <div className="st-rows">
+              {group.models.map((modelId) => {
+                const on = enabled.includes(modelId);
+                const unusable = on && !usableSet.has(modelId)
+                  ? isOpenRouterModelId(modelId)
+                    ? "Not usable: the OpenRouter key is not verified, or this model is no longer a Cora favorite in Settings, API and model."
+                    : "Not usable right now."
+                  : null;
+                const signedOut = signedOutModel(modelId);
+                return (
+                  <WorkerModelRow
+                    key={modelId}
+                    modelId={modelId}
+                    checked={on}
+                    unusable={unusable}
+                    signedOut={signedOut}
+                    onToggle={() => onToggle(modelId)}
+                  />
+                );
+              })}
+            </div>
           </div>
         ))}
       </div>
@@ -191,8 +183,11 @@ function WorkerModelRow({
   signedOut: boolean;
   onToggle: () => void;
 }) {
-  const { hover, focus, pressed, handlers } = useInteractive();
+  const { focus, handlers } = useInteractive();
   const model = workerModelPresentation(modelId);
+  // Switched on but out of reach: the row says why in plain text and the
+  // switch dims, so "on" never reads as "running".
+  const idle = checked && (signedOut || unusable !== null);
   return (
     <button
       type="button"
@@ -205,8 +200,7 @@ function WorkerModelRow({
       {...handlers}
       style={{
         ...toggleRowStyle,
-        padding: "8px 8px",
-        background: pressed ? "var(--press)" : hover ? "var(--hover)" : "transparent",
+        padding: "11px 0",
         boxShadow: withFocusRing(undefined, focus),
       }}
     >
@@ -214,9 +208,10 @@ function WorkerModelRow({
         <span
           style={{
             ...labelStyle,
-            // Off rows dim their label so the enabled set pops at a glance;
-            // the switch remains the authoritative state indicator.
-            color: checked && !unusable ? "var(--ink)" : "var(--muted)",
+            // Only "on but out of reach" dims. An off row keeps full
+            // contrast, as Settings rows do, so the two states never look
+            // alike; the switch says which rows are off.
+            color: idle ? "var(--st-desc)" : "var(--ink)",
           }}
         >
           {model.label}
@@ -227,34 +222,29 @@ function WorkerModelRow({
           </span>
         ) : null}
         {unusable ? (
-          <span className="spark-badge is-warn" style={tierStyle}>
-            Not usable
-          </span>
-        ) : null}
-        {signedOut ? (
+          <span style={stateNoteStyle}>Not usable right now</span>
+        ) : signedOut ? (
           <span
-            className="spark-badge is-warn"
-            style={tierStyle}
-            title="No account for this provider is signed in, so Cora will not use this model. Sign in under Settings > Agents."
+            style={stateNoteStyle}
+            title="No account for this provider is signed in, so Cora will not use this model. Sign in under Settings, Accounts."
           >
-            Not signed in
+            Not signed in, so Cora skips it
           </span>
         ) : null}
-        <span style={idStyle}>{modelId}</span>
       </span>
-      <SwitchTrack checked={checked} />
+      <SwitchTrack checked={checked} disabled={idle} />
     </button>
   );
 }
 
 // The source heading over each cluster: Claude, Codex, Grok, OpenRouter.
+// Drawn like a Settings section title.
 const groupLabelStyle: React.CSSProperties = {
-  padding: "12px 8px 3px",
-  fontSize: 10,
-  fontWeight: 650,
-  letterSpacing: "0.07em",
-  textTransform: "uppercase",
-  color: "var(--muted-2)",
+  padding: "18px 0 10px",
+  color: "var(--ink)",
+  fontSize: 13.5,
+  fontWeight: 600,
+  lineHeight: 1.35,
 };
 
 const nameCellStyle: React.CSSProperties = {
@@ -268,27 +258,19 @@ const nameCellStyle: React.CSSProperties = {
 
 const labelStyle: React.CSSProperties = {
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 500,
   transition: "color var(--motion-fast) var(--ease-out)",
 };
 
 // The exact model id, always visible: it is the value that persists and that
 // run-store enforces at spawn, so it must be copy-checkable at a glance.
-const idStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10.5,
-  color: "var(--muted-2)",
+const stateNoteStyle: React.CSSProperties = {
+  flex: "0 0 auto",
+  color: "var(--st-faint)",
+  fontSize: 12,
 };
 
 const tierStyle: React.CSSProperties = {
   alignSelf: "center",
   flex: "0 0 auto",
-  padding: "1px 5px",
-  fontSize: 8.5,
-  fontWeight: 650,
-  letterSpacing: "0.04em",
 };
