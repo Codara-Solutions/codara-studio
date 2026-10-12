@@ -171,6 +171,9 @@ async function main() {
     platform: "linux",
   });
   const wrapper = path.join(dir, "codara-pane");
+  assert.equal(paneHelper.resolveCoraCliScript(), path.join(ROOT, "cli", "cora.cjs"), "a checkout's CLI is found from the app path");
+  const cora = path.join(dir, "cora");
+  assert.match(fs.readFileSync(cora, "utf8"), /cli\/cora\.cjs' "\$@"\n$/, "panes also get `cora`, for agents without MCP");
   assert.equal(fs.statSync(wrapper).mode & 0o777, 0o755, "the wrapper is executable");
   assert.match(fs.readFileSync(wrapper, "utf8"), /^#!\/bin\/sh\n/);
   assert.match(paneHelper.windowsPaneHelperWrapper("C:\\a\\node.exe", "C:\\b\\codara-pane.cjs"), /setlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"C:\\a\\node.exe" "C:\\b\\codara-pane.cjs" %\*/);
@@ -198,6 +201,9 @@ async function main() {
     assert.match(run.out, /codara-pane overlay/);
     const outside = spawnSync(wrapper, ["overlay", "--", "x"], { encoding: "utf8", env: { PATH: process.env.PATH } });
     assert.equal(outside.status, 3, "the installed wrapper reports 'not in a pane' outside Codara");
+    const tools = spawnSync(cora, ["tool", "list"], { encoding: "utf8", env: { PATH: process.env.PATH, CODARA_HOME_DIR: TMP } });
+    assert.equal(tools.status, 0, tools.stderr);
+    assert.match(tools.stdout, /^codara_preview_snapshot +Read the page/m, "`cora tool list` lists the browser tools");
   }
 
   const env2 = { PATH: ["/usr/bin", dir, "/bin"].join(path.delimiter) };

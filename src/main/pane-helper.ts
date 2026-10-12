@@ -1,5 +1,6 @@
-import { promises as fs } from "node:fs";
-import { delimiter, join } from "node:path";
+import { app } from "electron";
+import { existsSync, promises as fs } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
 
 import { agentArgsDir } from "./agent-launch-integration";
 import { resolveBundledResourcePath } from "./bundled-resources";
@@ -16,6 +17,28 @@ import { writeFileAtomic } from "./fs-atomic";
  */
 
 export const PANE_HELPER_NAME = "codara-pane";
+/**
+ * The `cora` CLI, so an agent without MCP support can call the same tools
+ * from its shell (`cora tool list`). Same folder, same rewrite at boot.
+ */
+export const CORA_CLI_NAME = "cora";
+
+/** The CLI entry: packaged under resources/cora-cli, in a checkout at cli/. */
+export function resolveCoraCliScript(): string | null {
+  if (app.isPackaged) {
+    const packaged = join(process.resourcesPath, "cora-cli", "cora.cjs");
+    return existsSync(packaged) ? packaged : null;
+  }
+  let current = app.getAppPath();
+  for (let depth = 0; depth <= 4; depth += 1) {
+    const candidate = join(current, "cli", "cora.cjs");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
 
 export function paneHelperBinDir(integrations: string = agentArgsDir()): string {
   return join(integrations, "bin");
@@ -49,21 +72,29 @@ export function windowsPaneHelperWrapper(nodePath: string, scriptPath: string): 
 
 /** Boot: write the wrappers for this Codara's binary. Returns their folder. */
 export async function writePaneHelperFiles(
-  options: { dir?: string; nodePath?: string; scriptPath?: string; platform?: NodeJS.Platform } = {},
+  options: {
+    dir?: string;
+    nodePath?: string;
+    scriptPath?: string;
+    /** null leaves `cora` out (no CLI shipped with this build). */
+    coraScriptPath?: string | null;
+    platform?: NodeJS.Platform;
+  } = {},
 ): Promise<string> {
   const dir = options.dir ?? paneHelperBinDir();
   const nodePath = options.nodePath ?? process.execPath;
   const scriptPath =
     options.scriptPath ?? resolveBundledResourcePath("shell-integration", `${PANE_HELPER_NAME}.cjs`);
+  const coraScriptPath = options.coraScriptPath === undefined ? resolveCoraCliScript() : options.coraScriptPath;
+  const wrappers: [string, string][] = [[PANE_HELPER_NAME, scriptPath]];
+  if (coraScriptPath) wrappers.push([CORA_CLI_NAME, coraScriptPath]);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  if ((options.platform ?? process.platform) === "win32") {
-    await writeIfChanged(
-      join(dir, `${PANE_HELPER_NAME}.cmd`),
-      windowsPaneHelperWrapper(nodePath, scriptPath),
-      0o600,
-    );
-  } else {
-    await writeIfChanged(join(dir, PANE_HELPER_NAME), posixPaneHelperWrapper(nodePath, scriptPath), 0o755);
+  for (const [name, script] of wrappers) {
+    if ((options.platform ?? process.platform) === "win32") {
+      await writeIfChanged(join(dir, `${name}.cmd`), windowsPaneHelperWrapper(nodePath, script), 0o600);
+    } else {
+      await writeIfChanged(join(dir, name), posixPaneHelperWrapper(nodePath, script), 0o755);
+    }
   }
   return dir;
 }
