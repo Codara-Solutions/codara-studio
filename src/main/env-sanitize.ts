@@ -19,7 +19,7 @@
 // via CliSessionOptions.env / SpawnOptions.env) are applied AFTER this strip,
 // so they always survive.
 
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 // Exact-name nesting markers that don't share the CLAUDE_CODE_ prefix.
 const NESTED_AGENT_ENV_EXACT = new Set([
@@ -164,6 +164,50 @@ export function sanitizeAppImageLaunchEnv(env: Record<string, string | undefined
   for (const key of APPIMAGE_LAUNCH_ENV) delete env[key];
 }
 
+// electron-builder's AppRun puts the mount in front of these lists before it
+// starts Codara: the mount itself and usr/sbin on PATH, usr/lib (its bundled
+// libnotify, libXss, libgconf and friends) on LD_LIBRARY_PATH, usr/share on
+// XDG_DATA_DIRS and the glib schemas. A pane's programs then load Codara's old
+// copies ahead of the system's. Codara's own children that run its binary as
+// Node (the codara-studio server, Pi) link none of those libraries.
+const APPRUN_SEARCH_PATH_ENV = ["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS", "GSETTINGS_SCHEMA_DIR"];
+
+function isInsideDir(entry: string, dir: string): boolean {
+  if (!isAbsolute(entry)) return false;
+  const target = resolve(entry);
+  return target === dir || target.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+}
+
+/**
+ * Remove the entries inside `appDir` from the search paths AppRun extended,
+ * in place, leaving every other entry as it was. A list left empty goes.
+ */
+export function stripAppImageSearchPaths(env: Record<string, string | undefined>, appDir: string | undefined): void {
+  // AppRun writes the entries from $APPDIR as it is, so no realpath.
+  if (!appDir || !isAbsolute(appDir)) return;
+  const dir = resolve(appDir);
+  for (const key of APPRUN_SEARCH_PATH_ENV) {
+    const value = env[key];
+    if (value === undefined) continue;
+    const entries = value.split(delimiter);
+    const kept = entries.filter((entry) => !isInsideDir(entry, dir));
+    if (kept.length === entries.length) continue;
+    if (kept.length === 0) delete env[key];
+    else env[key] = kept.join(delimiter);
+  }
+}
+
+/**
+ * Remove Codara's AppImage launch from a child's `env`, in place: AppRun's
+ * search path entries, then the launch variables. Once boot has dropped an
+ * inherited launch (appimage-launch.ts), an APPDIR still in process.env is
+ * the mount this Codara runs from.
+ */
+export function sanitizeAppImageChildEnv(env: Record<string, string | undefined>): void {
+  stripAppImageSearchPaths(env, env.APPDIR);
+  sanitizeAppImageLaunchEnv(env);
+}
+
 /**
  * A copy of process.env without electron-vite's dev wiring, for a child that
  * runs the user's own commands outside pty-manager (automation steps and
@@ -173,7 +217,7 @@ export function processEnvWithoutElectronViteDev(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
-  sanitizeAppImageLaunchEnv(env);
+  sanitizeAppImageChildEnv(env);
   return env;
 }
 

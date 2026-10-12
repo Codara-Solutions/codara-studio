@@ -384,6 +384,7 @@ async function main() {
     OWD: "/home/user",
     ARGV0: "Codara.AppImage",
     APPIMAGE_EXTRACT_AND_RUN: "1",
+    LD_LIBRARY_PATH: "/tmp/.mount_CodaraAb12Cd/usr/lib:/opt/user/lib",
   }, "/tmp/codara-pi-config", "/tmp/codara-pi-sessions");
   assert.equal(sanitized.ANTHROPIC_API_KEY, undefined);
   assert.equal(sanitized.OPENAI_API_KEY, undefined);
@@ -405,6 +406,7 @@ async function main() {
   // Nor an installed AppImage's description of Codara's own launch.
   for (const key of ["APPIMAGE", "APPDIR", "OWD", "ARGV0"]) assert.equal(sanitized[key], undefined, key);
   assert.equal(sanitized.APPIMAGE_EXTRACT_AND_RUN, "1");
+  assert.equal(sanitized.LD_LIBRARY_PATH, "/opt/user/lib", "AppRun's library path into the mount");
   assert.equal(
     runtime.buildPiSubscriptionEnvironment(
       { NODE_ENV: "production", NODE_ENV_ELECTRON_VITE: "development" },

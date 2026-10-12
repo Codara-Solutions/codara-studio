@@ -217,6 +217,7 @@ async function main() {
       OWD: "/home/user",
       ARGV0: "Codara.AppImage",
       APPIMAGE_EXTRACT_AND_RUN: "1",
+      XDG_DATA_DIRS: "/tmp/.mount_CodaraAb12Cd/usr/share/:/usr/share/",
     };
     const keys = Object.keys(launch);
     const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -231,7 +232,7 @@ async function main() {
         ctx(),
       );
       assert.strictEqual(r.ok, true, r.error);
-      assert.strictEqual(r.output, "-|-|-|-|1");
+      assert.strictEqual(r.output, "-|-|-|-|1|/usr/share/");
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[key];

@@ -9,7 +9,7 @@ import type {
 import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
 import { resolveCompactAtTokens } from "@shared/context-compaction";
 import { isRemotePath } from "@shared/remote";
-import { sanitizeAppImageLaunchEnv, sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
+import { sanitizeAppImageChildEnv, sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 /**
@@ -538,7 +538,7 @@ export function buildPiSubscriptionEnvironment(
   // project, so a dev app's wiring would reach their builds and test runs.
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
-  sanitizeAppImageLaunchEnv(env);
+  sanitizeAppImageChildEnv(env);
   env.ELECTRON_RUN_AS_NODE = "1";
   env.PI_CODING_AGENT_DIR = resolve(configDir);
   env.PI_CODING_AGENT_SESSION_DIR = resolve(sessionDir);

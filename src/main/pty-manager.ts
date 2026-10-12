@@ -15,7 +15,7 @@ import type {
 import { isRemotePath, parseRemotePath } from "@shared/remote";
 import {
   restoreUserZdotdir,
-  sanitizeAppImageLaunchEnv,
+  sanitizeAppImageChildEnv,
   sanitizeElectronViteDevEnv,
   sanitizeHostTerminalEnv,
   sanitizeNestedAgentEnv,
@@ -1298,7 +1298,6 @@ function doSpawn(
   sanitizeNpmRunScriptEnv(env);
   restoreUserZdotdir(env);
   sanitizeHostTerminalEnv(env);
-  sanitizeAppImageLaunchEnv(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.
@@ -1318,6 +1317,9 @@ function doSpawn(
   // cache is warmed in src/main/index.ts; on a cold call we just see the
   // process.env PATH fallback, which is no worse than today.
   injectEnrichedPath(env);
+  // After the PATH above: the enriched PATH keeps the process's own entries,
+  // AppRun's mount among them. See env-sanitize.ts.
+  sanitizeAppImageChildEnv(env);
 
   // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
   // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing

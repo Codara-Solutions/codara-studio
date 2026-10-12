@@ -67,6 +67,23 @@ function realEnvSanitize() {
   };
 }
 
+// The harness stubs injectEnrichedPath to a no-op; this one hands the pane
+// the PATH a test sets, as the real one hands it the login shell's merged
+// with the process's own.
+function enrichedPathStub() {
+  return {
+    name: "enriched-path-stub",
+    setup(build) {
+      build.onResolve({ filter: /^\.\/path-reconstruction$/ }, () => ({ path: "path-reconstruction", namespace: "enriched-path" }));
+      build.onLoad({ filter: /.*/, namespace: "enriched-path" }, () => ({
+        contents:
+          "export function injectEnrichedPath(env) { if (globalThis.__codaraEnrichedPath) env.PATH = globalThis.__codaraEnrichedPath; }",
+        loader: "js",
+      }));
+    },
+  };
+}
+
 function materializeIntegration(dir) {
   fs.mkdirSync(dir, { recursive: true });
   for (const [source, target] of [
@@ -115,6 +132,13 @@ const APPIMAGE_LAUNCH = {
   APPIMAGE_EXIT_AFTER_INSTALL: "true",
 };
 const USER_APPIMAGE_KNOB = { APPIMAGE_EXTRACT_AND_RUN: "1" };
+// What electron-builder's AppRun exports before it starts Codara.
+const MOUNT = APPIMAGE_LAUNCH.APPDIR;
+const APPRUN_SEARCH_PATHS = {
+  LD_LIBRARY_PATH: `${MOUNT}/usr/lib:/opt/user/lib`,
+  XDG_DATA_DIRS: `${MOUNT}/usr/share/:/usr/share/gnome:/usr/local/share/:/usr/share/`,
+  GSETTINGS_SCHEMA_DIR: `${MOUNT}/usr/share/glib-2.0/schemas`,
+};
 
 const INHERITED_KEYS = [
   "ELECTRON_RENDERER_URL",
@@ -129,6 +153,7 @@ const INHERITED_KEYS = [
   ...Object.keys(HOST_TERMINAL),
   ...Object.keys(APPIMAGE_LAUNCH),
   ...Object.keys(USER_APPIMAGE_KNOB),
+  ...Object.keys(APPRUN_SEARCH_PATHS),
 ];
 
 const PROBE =
@@ -194,7 +219,7 @@ async function main() {
       platform: "node",
       format: "cjs",
       outfile,
-      plugins: [realEnvSanitize(), stubPlugin()],
+      plugins: [realEnvSanitize(), enrichedPathStub(), stubPlugin()],
       logLevel: "silent",
     });
     const controller = createController();
@@ -310,6 +335,40 @@ async function main() {
         const seen = /@@(.*?)@@/.exec(`${result.stdout ?? ""}${result.stderr ?? ""}`)?.[1];
         check(`zsh in ${kind} pane sees no APPIMAGE, APPDIR, OWD or ARGV0`, seen === "[unset][unset][unset][unset]", seen);
       }
+    }
+
+    // --- AppRun's search paths into the mount ------------------------------
+    try {
+      // The enriched PATH keeps the process's own entries, AppRun's among them.
+      globalThis.__codaraEnrichedPath = `/usr/local/bin:/usr/bin:${MOUNT}:${MOUNT}/usr/sbin:${MOUNT}Other/bin`;
+      const call = await spawnPane({ ...APPIMAGE_LAUNCH, ...APPRUN_SEARCH_PATHS });
+      const env = call.options.env;
+      check(
+        "a pane's PATH loses the mount and keeps every other entry",
+        env.PATH === `/usr/local/bin:/usr/bin:${MOUNT}Other/bin`,
+        env.PATH,
+      );
+      check("a pane's LD_LIBRARY_PATH loses the mount's usr/lib", env.LD_LIBRARY_PATH === "/opt/user/lib", env.LD_LIBRARY_PATH);
+      check(
+        "a pane's XDG_DATA_DIRS keeps the rest exactly as AppRun left it",
+        env.XDG_DATA_DIRS === "/usr/share/gnome:/usr/local/share/:/usr/share/",
+        env.XDG_DATA_DIRS,
+      );
+      check(
+        "a search path left empty goes",
+        !("GSETTINGS_SCHEMA_DIR" in env),
+        env.GSETTINGS_SCHEMA_DIR,
+      );
+      // An unpacked build that inherited a launch had it dropped at boot, so
+      // without APPDIR nothing is taken for a mount.
+      const unpacked = await spawnPane({ LD_LIBRARY_PATH: `${MOUNT}/usr/lib:/opt/user/lib` });
+      check(
+        "without APPDIR, LD_LIBRARY_PATH is left alone",
+        unpacked.options.env.LD_LIBRARY_PATH === `${MOUNT}/usr/lib:/opt/user/lib`,
+        unpacked.options.env.LD_LIBRARY_PATH,
+      );
+    } finally {
+      delete globalThis.__codaraEnrichedPath;
     }
 
     // --- nested instance: ZDOTDIR inherited from an outer Codara pane -------
