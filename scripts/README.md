@@ -84,12 +84,14 @@ failure.
   `CODARA_DISABLE_KEYCHAIN=1`. This is a test seam in
   `src/main/orchestration/claude-cli-credentials.ts`: with it set, the real
   credential backend never runs `/usr/bin/security`, so no macOS Keychain
-  item is read or written. Ten suites use it: `test-anthropic-accounts`,
-  `test-anthropic-account-identity`, `test-anthropic-account-migration`,
-  `test-anthropic-credential-mirror`, `test-claude-cli-account-profiles`,
-  `test-claude-cli-credentials`, `test-claude-cli-live-login`,
-  `test-claude-login-keeper`, `test-pi-subscription-refresh` and
-  `test-unified-account-migration`. A new suite that reaches that module
+  item is read or written. These suites use it: `test-anthropic-accounts`,
+  `test-anthropic-account-identity`, `test-anthropic-credential-mirror`,
+  `test-account-tombstones`, `test-accounts-no-global-writes`,
+  `test-accounts-v2-migration`, `test-cli-account-homes`,
+  `test-claude-cli-account-profiles`, `test-claude-cli-credentials`,
+  `test-claude-cli-live-login`, `test-claude-login-keeper`,
+  `test-pi-subscription-refresh` and `test-unified-account-migration`. A new
+  suite that reaches that module
   must set it too. The same variable keeps `storage.ts` from encrypting the
   OpenRouter key with Electron `safeStorage`, which uses the Keychain;
   `test-storage-openrouter-key` replaces `safeStorage` with a fake keyring
@@ -173,10 +175,11 @@ calls.
 
 | Suites | Covers |
 |---|---|
-| `test-claude-cli-live-login`, `test-claude-login-keeper`, `test-claude-cli-credentials`, `test-claude-cli-account-profiles`, `test-claude-cli-profile-execution`, `test-transcript-repair` | Claude Code accounts in one home: the live login and saved logins, the one refresher, the Keychain or file credential store. |
-| `test-codex-cli-*` (account-profiles, auth-selector, profile-execution), `test-codex-accounts`, `test-codex-account-migration`, `test-codex-credential-codec`, `test-codex-home-routing` | Codex accounts: swapping `auth.json`, the saved logins, converting credentials. |
-| `test-grok-accounts`, `test-grok-account-migration`, `test-grok-credential-codec`, `test-native-cli-shared-state` | Grok accounts: one `GROK_HOME` per managed account, with shared state linked to the personal home. |
-| `test-anthropic-*` (accounts, account-identity, account-migration, credential-mirror), `test-unified-account-migration`, `test-account-selection-lock` | `unified-accounts.ts`, `credential-mirror.ts`, the startup migration, and the lock that makes switches take turns across processes. |
+| `test-accounts-no-global-writes`, `test-outside-write-guard`, `test-system-cli-login`, `test-cli-account-homes` | The user's CLI homes stay untouched: a whole account lifecycle leaves them byte-identical, every write helper refuses them, the System login is read for its identity only, and managed homes link only allowlisted shared state. |
+| `test-claude-cli-live-login`, `test-claude-login-keeper`, `test-claude-cli-credentials`, `test-claude-cli-account-profiles`, `test-claude-cli-profile-execution`, `test-transcript-repair` | Claude Code accounts: Codara's live slot and the saved logins, the one refresher, the Keychain or file credential store. |
+| `test-codex-cli-*` (account-profiles, profile-execution), `test-codex-accounts`, `test-codex-credential-codec`, `test-codex-home-routing` | Codex accounts: one `CODEX_HOME` per managed account, converting credentials. |
+| `test-grok-accounts`, `test-grok-credential-codec` | Grok accounts: one `GROK_HOME` per managed account, with shared state linked to the user's home. |
+| `test-anthropic-*` (accounts, account-identity, credential-mirror), `test-account-tombstones`, `test-accounts-v2-migration`, `test-unified-account-migration`, `test-account-selection-lock` | `unified-accounts.ts`, `credential-mirror.ts`, deletes that stay deleted, the v1 to v2 migration, the startup pass, and the lock that makes switches take turns across processes. |
 | `test-native-cli-*` (accounts, account-wiring, process-shutdown, shell-defaults, terminal-removal), `test-active-cli-env-pointer`, `test-shell-integration-active-env`, `test-cli-custom-homes`, `test-login-return-focus` | How terminals follow the Active account, custom CLI homes, and returning to the app after a browser sign-in. |
 
 ### Cora memory and profiles

@@ -241,27 +241,24 @@ explains the model. The code path of a switch:
    apply it.
 3. **What the adapter does.**
    - Claude: `activateClaudeCliAccount` in `claude-cli-live-login.ts` saves
-     the live login into the outgoing account's vault file and copies the
-     incoming one into `~/.claude`. Only the sign-in keys and the
-     `oauthAccount` identity move.
-   - Codex: `activateCodexCliAccount` in `codex-cli-auth-selector.ts` swaps
-     `~/.codex/auth.json`.
-   - Grok: new terminals get the account's own `GROK_HOME`
-     (`grok-cli-account-profiles.ts`). Running shells follow through the
+     the live slot's login into the outgoing account's vault file and puts
+     the incoming one into Codara's live slot (`claude-cli/live/home`). The
+     System login moves nothing: new terminals simply get no
+     `CLAUDE_CONFIG_DIR`.
+   - Codex and Grok: new terminals get the account's own `CODEX_HOME` or
+     `GROK_HOME` (`cli-account-homes.ts`). Running shells follow through the
      pointer file written by `active-cli-env-pointer.ts`.
 4. **Keeping the halves in sync.** `credential-mirror.ts` watches both halves
    and copies the newer token across. `claude-login-keeper.ts` refreshes the
    live Claude login before it expires. Cora's Pi processes ask Studio for a
    fresh Claude token over the agent socket (`accounts.anthropic.renew`,
    `resources/pi-cora/anthropic-refresh.ts`).
-5. **Sign-ins made in a terminal.** `followNativeLogins` in
-   `unified-account-migration.ts` runs once a minute and on wake. It calls
-   `UnifiedAccountService.followNativeLogin`, so a `/login` or `codex login`
-   as a known account makes that account the Active one.
+5. **Nothing outside Codara's home.** `outside-write-guard.ts` refuses
+   every write into the user's CLI homes; the System login is read for its
+   identity only (`system-cli-login.ts`).
 
-Startup: `startUnifiedAccountMigration` (the one-time layout migration),
-`startStudioClaudeLoginKeeper` and `startNativeLoginFollower` are all called
-from `index.ts`.
+Startup: `startUnifiedAccountMigration` (the accounts v2 migration and the
+startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
 
 ### 3.4 The preview browser
 
@@ -332,9 +329,10 @@ owns each file:
 | `pi-agent/` (Cora's logins, Pi sessions) | `pi-account-auth-store.ts`, `pi-runtime-electron.ts` (`codaraPiPaths`) |
 | `memory/` (Cora's memory) | `cora-memory.ts`, `cora-profiles.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
-| `claude-cli/` (saved Claude logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts` |
-| `codex-cli/` (saved Codex logins, `active-auth.json`) | `codex-cli-auth-selector.ts`, `codex-cli-account-profiles.ts` |
-| `grok-cli/` (managed Grok homes) | `grok-cli-account-profiles.ts`, `native-cli-shared-state.ts` |
+| `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `codex-cli/` (one managed `CODEX_HOME` per account) | `codex-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `grok-cli/` (one managed `GROK_HOME` per account) | `grok-cli-account-profiles.ts`, `cli-account-homes.ts` |
+| `backups/accounts-v2/` (the v1 archive and its journal) | `accounts-v2-migration.ts` |
 | `shell/active-cli-env` | `active-cli-env-pointer.ts` |
 | `builtin-mcp.json` (the MCP server turned off for some CLIs) | `mcp-installer.ts` |
 | `remote/` (identity, paired devices, ledger) | `remote-access/` |
@@ -400,7 +398,7 @@ Debugging:
 | What workers are told or allowed to do | `src/main/orchestration/worker-prompt.ts` (`renderWorkerPrompt`) | `resources/pi-cora/worker.ts`, `worker-policy.ts` |
 | Run states, pause and resume, recovery | `run-store.ts` | `run-lifecycle.ts`, `step-lifecycle.ts`, `manager-turn-policy.ts`; the regression suites in [scripts/README.md](../scripts/README.md#cora-runs-the-run-store-and-the-manager) |
 | How Pi is found or started | `pi-runtime-electron.ts`, `pi-runtime.ts` | `pi-backend.ts`, `pi-rpc-client.ts` |
-| Accounts | `unified-accounts.ts` and the adapter in `account-adapters/` | `claude-cli-live-login.ts`, `claude-login-keeper.ts`, `codex-cli-auth-selector.ts`, `credential-mirror.ts`; `components/AccountCards.tsx` |
+| Accounts | `unified-accounts.ts` and the adapter in `account-adapters/` | `claude-cli-live-login.ts`, `claude-login-keeper.ts`, `cli-account-homes.ts`, `credential-mirror.ts`, `outside-write-guard.ts`; `components/AccountCards.tsx` |
 | Terminal rendering or input | `components/Terminal/useTerminalSession.ts` | `pty-manager.ts` on the main side |
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |
