@@ -125,6 +125,18 @@ async function loadPreviewTools(stubs) {
   assert.deepEqual(fs.readFileSync(shot.path), Buffer.from("iVBORw0KGgo=", "base64"));
   assert.equal(shot.dataUrl, "data:image/png;base64,iVBORw0KGgo=");
   fs.rmSync(home, { recursive: true, force: true });
+
+  // A handler that runs commands marks itself trustedRunsOnly, and the
+  // socket's imported pull-request gate refuses it without an edit there.
+  assert.equal(tools.previewToolMethods().some((method) => tools.previewToolRefusesUntrustedRuns(method)), false);
+  const flagged = await loadPreviewTools({
+    servers: `module.exports = { serverTools: { "servers.start": { run: async () => ({}), scope: "none", trustedRunsOnly: true } } };`,
+  });
+  assert.equal(flagged.previewToolRefusesUntrustedRuns("servers.start"), true);
+  assert.equal(flagged.previewToolRefusesUntrustedRuns("preview.snapshot"), false);
+  const socket = fs.readFileSync(path.join(ROOT, "src/main/agent-socket.ts"), "utf8");
+  const gate = /function isUntrustedPullRequestBlockedMethod[\s\S]*?\n}\n/.exec(socket);
+  assert.ok(gate && gate[0].includes("previewToolRefusesUntrustedRuns(method)"), "the socket's imported pull-request gate asks the preview tools");
   console.log(`preview tool routing: ${handled.size} socket methods, each named by a tool module`);
 })().catch((error) => {
   console.error(error);

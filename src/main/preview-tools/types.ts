@@ -31,6 +31,12 @@ export interface PreviewToolEntry {
    * resolveBrowserTarget() and work on both.
    */
   targets?: "preview" | "any";
+  /**
+   * Refused for an imported pull-request run at the socket, before any
+   * handler runs, like terminal execution. Set it on anything that runs
+   * commands, starts processes or writes outside the browser tab.
+   */
+  trustedRunsOnly?: boolean;
 }
 
 export type PreviewToolTable = Readonly<Record<string, PreviewToolHandler | PreviewToolEntry>>;

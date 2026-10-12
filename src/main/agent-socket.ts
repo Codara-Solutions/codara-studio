@@ -8,7 +8,13 @@ import * as pty from "./pty-manager";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp } from "./preview-bridge";
-import { hasPreviewTool, PreviewToolParamsError, runPreviewTool, type PreviewToolHost } from "./preview-tools";
+import {
+  hasPreviewTool,
+  PreviewToolParamsError,
+  previewToolRefusesUntrustedRuns,
+  runPreviewTool,
+  type PreviewToolHost,
+} from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
 import { processChain } from "./owned-process-tree";
 import { requestTerminalOp } from "./terminal-bridge";
@@ -603,7 +609,8 @@ function isUntrustedPullRequestBlockedMethod(method: string): boolean {
   return (
     UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) ||
     method.startsWith("automation.") ||
-    method.startsWith("workflow.")
+    method.startsWith("workflow.") ||
+    previewToolRefusesUntrustedRuns(method)
   );
 }
 

@@ -51,6 +51,11 @@ export function hasPreviewTool(method: string): boolean {
   return HANDLERS.has(method);
 }
 
+/** Whether the socket refuses this method for an imported pull-request run. */
+export function previewToolRefusesUntrustedRuns(method: string): boolean {
+  return HANDLERS.get(method)?.trustedRunsOnly === true;
+}
+
 /** The socket methods this folder answers, for tests and capability lists. */
 export function previewToolMethods(): string[] {
   return [...HANDLERS.keys()];
