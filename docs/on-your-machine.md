@@ -34,6 +34,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `spark-remote-hosts.json`, `spark-known-hosts.json`, `spark-remote-secrets.json` | SSH workspaces: saved hosts, pinned host keys, and passwords or passphrases encrypted by the operating system (if encryption is unavailable, they are not saved). |
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
+| `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
 
 ## How Codara sessions get its tools
 
@@ -73,6 +74,7 @@ servers, turns the server off for the sessions Codara starts.
 | Your own CLI folders, through a Codara account's links | A Codara account's home links to your `~/.claude` (projects, sessions, skills, agents, commands, plugins, settings, history and the like), `~/.codex` (everything but the login and its caches) or `~/.grok`, so the CLI running in Codara reads and writes that shared state as it would at home. Codara does not write there on its own, and a link target that does not exist is not created. | Use your own login: new sessions then run in your own folder. |
 | Your global npm packages | **Install Pi** in Settings runs `npm install -g @earendil-works/pi-coding-agent@~0.85.1` (the Pi line Codara is tested against) once, when you click it. Codara never updates or removes it. | Install Pi yourself, or not at all: until Pi is installed, Cora runs on a Pi build bundled with the app. |
 | `~/.cache/spark/shell-integration/` | Staged copies of the shell integration files that Studio terminals source. Your `~/.zshrc`, `~/.bashrc` and PowerShell profile are never modified. | No setting yet; worker and agent panes already run without it (`SPARK_NO_SHELL_INTEGRATION=1`). |
+| Your repositories' refs under `refs/codara/removed-worktrees/` | When an agent removes a merged worktree, its last commit is saved there first, named by date and workspace, so the worktree can be restored. Refs older than 30 days are deleted at the next removal. | Turn off **Let agents create and remove worktrees** in Settings, General. |
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
 | Git refs in your workspace repository: `refs/spark/runs/<run>` and `refs/spark/undo/<run>` | Cora snapshots the workspace before each message so **Undo message and code** can restore it. That undo asks for a second click, puts back every file changed since the message (and removes files created since), and first saves the files as they were on `refs/spark/undo/<run>`, so an undo can be reversed with `git checkout refs/spark/undo/<run> -- <path>`. Neither ref moves a branch or HEAD. | Deleting the chat removes both refs. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |

@@ -163,6 +163,7 @@ import type {
   UpdateScheduledJobInput,
   WorkerReport,
   WorkerTaskEnvelope,
+  AgentWorktreeEvent,
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
@@ -254,6 +255,15 @@ const api = {
       const listener = (_event: Electron.IpcRendererEvent, state: AppState) => handler(state);
       ipcRenderer.on("state:changed", listener);
       return () => ipcRenderer.off("state:changed", listener);
+    },
+  },
+  workspace: {
+    // An agent created or removed a worktree through the Codara Studio MCP.
+    // The rail itself follows state:changed; this only carries the toast.
+    onAgentEvent: (handler: (event: AgentWorktreeEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: AgentWorktreeEvent) => handler(payload);
+      ipcRenderer.on("workspace:agentEvent", listener);
+      return () => ipcRenderer.off("workspace:agentEvent", listener);
     },
   },
   settings: {

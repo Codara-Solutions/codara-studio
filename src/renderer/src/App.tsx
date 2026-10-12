@@ -95,6 +95,10 @@ import {
 } from "./notifications/routing";
 import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
 import { emitLocalToast } from "./notifications/local-toast";
+import {
+  AGENT_WORKTREE_TOAST_GAP_MS,
+  agentWorktreeToast,
+} from "./notifications/agent-worktree-toast";
 import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import {
   agentTerminalAnchor,
@@ -1445,8 +1449,15 @@ export default function App() {
   // changes activeWorkspaceId only for executable sessions whose visible
   // worker PTYs must belong to that workspace; Talk/Plan starts preserve the
   // existing active id. Mirror that authoritative selection here.
+  const disposeWorkspaceResourcesRef = useRef<((id: string) => void) | null>(null);
   useEffect(() => {
     const off = window.spark.state.onChanged?.((state) => {
+      const kept = new Set(state.workspaces.map((workspace) => workspace.id));
+      for (const workspace of workspacesRef.current) {
+        if (kept.has(workspace.id)) continue;
+        disposeWorkspaceResourcesRef.current?.(workspace.id);
+        for (const worker of workspace.workers) void window.spark.pty.dispose(worker.id);
+      }
       const coloredGroups = ensureWorkspaceGroupColors(state.workspaceGroups ?? []);
       setWorkspaces(applyWorkspaceGroupShades(state.workspaces, coloredGroups));
       setWorkspaceGroups(coloredGroups);
@@ -1454,6 +1465,19 @@ export default function App() {
       const next = state.activeWorkspaceId;
       activeIdRef.current = next;
       setActiveId(next);
+    });
+    return () => off?.();
+  }, []);
+
+  useEffect(() => {
+    const lastToastAt = new Map<string, number>();
+    const off = window.spark.workspace?.onAgentEvent?.((event) => {
+      const now = Date.now();
+      const key = `${event.kind}:${event.workspaceId}`;
+      if (now - (lastToastAt.get(key) ?? 0) < AGENT_WORKTREE_TOAST_GAP_MS) return;
+      lastToastAt.set(key, now);
+      const toast = agentWorktreeToast(event);
+      emitLocalToast(toast.title, toast.body, "success", toast.target);
     });
     return () => off?.();
   }, []);
@@ -3364,7 +3388,12 @@ export default function App() {
     applyWorkspaceAccent(color);
   }, []);
 
-  const removeWorkspaceFromState = useCallback((id: string) => {
+  // Everything the renderer holds for a workspace besides its row. Shared by
+  // a delete from the rail and a workspace the main process dropped (an
+  // agent removed its worktree), which arrives through state:changed. Must
+  // run while activeIdRef still names the old active workspace, because
+  // that decides whether its panes live in the mounted tabs or on disk.
+  const disposeWorkspaceResources = useCallback((id: string) => {
     delete activeRunIdsByWorkspaceRef.current[id];
     pendingSpawnTerminalsRef.current.delete(id);
     runRefreshPendingRef.current.delete(id);
@@ -3378,6 +3407,11 @@ export default function App() {
     } catch {
       /* best-effort cleanup only */
     }
+  }, []);
+  disposeWorkspaceResourcesRef.current = disposeWorkspaceResources;
+
+  const removeWorkspaceFromState = useCallback((id: string) => {
+    disposeWorkspaceResources(id);
     setWorkspaces((ws) => {
       const removed = ws.find((w) => w.id === id);
       const filtered = ws.filter((w) => w.id !== id);
@@ -3397,7 +3431,7 @@ export default function App() {
       return next;
     });
     setEditingId(null);
-  }, []);
+  }, [disposeWorkspaceResources]);
 
   const deleteWs = useCallback(
     (id: string) => {
@@ -6545,6 +6579,10 @@ export default function App() {
               branch={pendingCopyDelete.copyBranch.branch}
               busy={copyDeleteBusy}
               error={copyDeleteError}
+              defaultDeleteBranch={
+                pendingCopyDelete.copyBranch.createdBy?.kind === "agent" &&
+                pendingCopyDelete.copyBranch.mode !== "checkout"
+              }
               onCancel={() => {
                 if (!copyDeleteBusy) {
                   setPendingCopyDelete(null);

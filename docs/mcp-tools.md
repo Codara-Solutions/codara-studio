@@ -61,13 +61,14 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration and automation management |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management and the worktree tools |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember`, with the whiteboard and board read-only. Requests to draw
+`codara_remember` and the worktree tools, with the whiteboard and board
+read-only. Cora's chat workers and Talk chats do not get the worktree tools. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
 those tools. The whiteboard and board belong to a chat, so they are only
@@ -78,8 +79,8 @@ untrusted source, it only gets the orchestration tools that spawn, wait for,
 and message workers, ask you, name the chat and complete the run: no browser,
 terminal, memory or automation tools.
 
-Inside Cora's own runtime (Pi), the browser, terminal, whiteboard, board and
-automation tools start inactive in the orchestrating chat and are loaded on
+Inside Cora's own runtime (Pi), the browser, terminal, whiteboard, board,
+automation and worktree tools start inactive in the orchestrating chat and are loaded on
 demand with `codara_tools`, which also returns how to use them. A request that
 plainly needs a family loads it on the first turn. This keeps every request
 smaller. Cora and her workers also have `fetch_url`, which reads one web page
@@ -152,6 +153,52 @@ Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
 | Tool | What it does |
 |---|---|
 | `codara_notify_user` | Sends a Codara notification from the agent's own pane: `done` when it finished a long task, `needs_input` when it is blocked on you. Clicking it opens the pane, and nothing shows while you are already looking at that pane. When Codara already reads the agent's own turn signals in that pane (Claude Code hooks or status reports, the Codex notify program or its session file), the call returns `published: false` with `reason: "announced_by_codara"`, because an alert sent mid-turn would arrive before the real end and displace the exact one. Otherwise it shares the pane's notification key with Codara's own end-of-turn alert, so the two arrive as one. At most one per kind every 5 seconds. An agent outside a Codara terminal, or with Codara closed, gets `published: false` back rather than an error. |
+
+## Worktrees
+
+In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
+directly. An agent gets a separate checkout of its own repository on its own
+branch, which you see in the rail under the repository, and removes it once
+the branch is merged. The repository is always the one the agent runs in: its
+terminal pane or its Cora chat decides, never a tool argument. SSH workspaces
+are not supported yet.
+
+| Tool | What it does |
+|---|---|
+| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. The repository's copy-branch setup command comes back as `setupCommand` to run in a terminal there. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
+| `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. |
+| `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
+
+`codara_worktree_remove` never forces anything. It removes a worktree only
+when all of these hold, and otherwise returns an error result with a `code`,
+the `blockers` and a `hint`:
+
+- an agent created it, unless you turned on **Let agents remove worktrees I
+  created** in Settings > General; GitHub issue and pull-request workspaces
+  are removed from the rail only;
+- its exact last commit is merged into the target (its base, or `target`):
+  the target contains it, a merged pull request from the same repository has
+  it as head, or merging it into the target changes nothing (a squash merge).
+  A `target` the agent names must be another local or remote-tracking
+  branch, never the worktree's own branch, its pushed copy or a commit id;
+- it has no uncommitted or untracked files (edits hidden by
+  `assume-unchanged` or `skip-worktree` count), no merge or rebase in
+  progress, and no ignored files beyond build output and caches
+  (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
+  for the repository in Settings); `discardIgnoredFiles: true` deletes the
+  rest;
+- no submodule or nested repository is checked out in it, and no other
+  checkout or worktree sits inside it, ignored folders included;
+- no terminal, active Cora run or process uses it, and the caller is not
+  inside it.
+
+Before deleting anything Codara saves the last commit as
+`refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
+the result carries `recoverWith`, the command that restores the worktree. The
+branch is deleted only if it still points at the commit that was checked.
+Every create and removal, refused or not, is logged to
+`~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
+worktrees** in Settings turns creating and removing off; listing still works.
 
 ## Whiteboard and board
 

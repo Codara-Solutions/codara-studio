@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { BrowserWindow } from "electron";
 import {
   GITHUB_ISSUE_MAX_NUMBER,
   selectGitHubIssueBranchName,
@@ -22,7 +21,8 @@ import {
   type StartAutopilotInput,
   type Workspace,
 } from "@shared/types";
-import { setAllowedRoots } from "./fs-sandbox";
+import { insertCopyWorkspace, rollbackCreatedWorktree } from "./workspace-state-edits";
+import { publishState } from "./workspace-state-publish";
 import { listBranches } from "./git-branches";
 import { createGitHubCliAdapter } from "./github-cli";
 import {
@@ -93,18 +93,7 @@ function productionDependencies(): GitHubIssueWorkspaceDependencies {
     listRuns,
     startAutopilot,
     worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
-    publishState: (state) => {
-      setAllowedRoots(state.workspaces.map((workspace) => workspace.cwd));
-      for (const window of BrowserWindow.getAllWindows()) {
-        const contents = window.webContents;
-        if (contents.isDestroyed()) continue;
-        try {
-          contents.send("state:changed", state);
-        } catch {
-          // A renderer may close between enumeration and send.
-        }
-      }
-    },
+    publishState,
   };
 }
 
@@ -310,7 +299,7 @@ async function createOrResumeIssueWorkspace(
   let persistedState: AppState;
   try {
     persistedState = await dependencies.updateState((state) =>
-      insertIssueWorkspace(state, source.id, workspace),
+      insertCopyWorkspace(state, source.id, workspace),
     );
   } catch (cause) {
     const rolledBack = await rollbackCreatedWorktree(source.cwd, created, dependencies);
@@ -511,80 +500,6 @@ function canonicalRepositoryIssueKey(
   } catch {
     return null;
   }
-}
-
-function insertIssueWorkspace(
-  state: AppState,
-  sourceWorkspaceId: string,
-  workspace: Workspace,
-): AppState {
-  const workspaces = state.workspaces.slice();
-  const sourceIndex = workspaces.findIndex(
-    (candidate) => candidate.id === sourceWorkspaceId,
-  );
-  let insertAt = sourceIndex < 0 ? workspaces.length : sourceIndex + 1;
-  while (
-    insertAt < workspaces.length &&
-    workspaces[insertAt].copyBranch?.repoCwd === workspace.copyBranch?.repoCwd
-  ) {
-    insertAt += 1;
-  }
-  workspaces.splice(insertAt, 0, workspace);
-
-  let workspaceRailOrder = state.workspaceRailOrder;
-  if (!workspace.groupId) {
-    const currentRail =
-      state.workspaceRailOrder ??
-      state.workspaces
-        .filter((candidate) => !candidate.groupId)
-        .map((candidate) => candidate.id);
-    workspaceRailOrder = currentRail.filter(
-      (id) => id !== workspace.id,
-    );
-    const sourceRailIndex = workspaceRailOrder.indexOf(sourceWorkspaceId);
-    let railInsertAt =
-      sourceRailIndex < 0 ? workspaceRailOrder.length : sourceRailIndex + 1;
-    const workspaceById = new Map(
-      workspaces.map((candidate) => [candidate.id, candidate]),
-    );
-    while (railInsertAt < workspaceRailOrder.length) {
-      const next = workspaceById.get(workspaceRailOrder[railInsertAt]);
-      if (next?.copyBranch?.repoCwd !== workspace.copyBranch?.repoCwd) break;
-      railInsertAt += 1;
-    }
-    workspaceRailOrder.splice(railInsertAt, 0, workspace.id);
-  }
-
-  return {
-    ...state,
-    workspaces,
-    // Keep an ungrouped issue worktree visibly nested beside the source and
-    // its existing copies. Grouped workspaces remain represented by the
-    // parent group rather than as duplicate top-level rail entries.
-    workspaceRailOrder,
-    activeWorkspaceId: state.activeWorkspaceId,
-  };
-}
-
-async function rollbackCreatedWorktree(
-  repoCwd: string,
-  created: Extract<GitCopyWorktreeResult, { ok: true }>,
-  dependencies: GitHubIssueWorkspaceDependencies,
-): Promise<boolean> {
-  const removed = await dependencies.removeCopyWorktree({
-    repoCwd,
-    worktreePath: created.path,
-    branch: created.branch,
-    force: true,
-    deleteBranch: true,
-  }).catch(() => ({ ok: false as const, error: "cleanup failed" }));
-  if (removed.ok) return true;
-  // Nothing ran in this transaction-owned worktree, so a branch left after
-  // successful directory removal is safe to force-delete.
-  const branch = await dependencies
-    .forceDeleteBranch(repoCwd, created.branch)
-    .catch(() => ({ ok: false as const, error: "branch cleanup failed" }));
-  return branch.ok;
 }
 
 function issueClientMessageId(origin: GitHubIssueOrigin): string {

@@ -777,6 +777,9 @@ async function main() {
       }],
       ["automation.list", { runId: "run-untrusted-pr" }],
       ["automation.create", { runId: "run-untrusted-pr" }],
+      ["worktree.create", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.list", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.remove", { runId: "run-untrusted-pr", callerRole: "manager", workspaceId: "ws-x" }],
     ]) {
       const denied = await rpc(handshake, method, params);
       check(
@@ -785,6 +788,22 @@ async function main() {
         JSON.stringify(denied).slice(0, 180),
       );
     }
+    // Worktree methods: a malformed request is a JSON-RPC error, a refusal is
+    // an ordinary {ok:false, code} result the MCP server hands the agent.
+    const bothTargets = await rpc(handshake, "worktree.remove", { workspaceId: "ws-a", path: "/tmp/x" });
+    check("worktree.remove needs exactly one target", bothTargets.error?.code === -32602, JSON.stringify(bothTargets).slice(0, 180));
+    const badType = await rpc(handshake, "worktree.create", { checkout: "yes" });
+    check("worktree.create checks parameter types", badType.error?.code === -32602, JSON.stringify(badType).slice(0, 180));
+    const fromWorker = await rpc(handshake, "worktree.list", { callerRole: "worker" });
+    check("a worker cannot manage worktrees", fromWorker.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromWorker).slice(0, 180));
+    const fromTalk = await rpc(handshake, "worktree.create", { callerRole: "talk", runId: "run-socket-test" });
+    check("a chat worker's run id grants nothing", fromTalk.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromTalk).slice(0, 180));
+    const placelessWorktree = await rpc(handshake, "worktree.list", { callerRole: "studio", callerPid: 1 });
+    check(
+      "a caller outside any Codara pane has no repository",
+      placelessWorktree.result?.code === "WORKTREE_NO_WORKSPACE" && placelessWorktree.result?.ok === false,
+      JSON.stringify(placelessWorktree).slice(0, 180),
+    );
     const listed = await rpc(handshake, "terminal.list", {});
     check(
       "terminal.list answers with the studio's panes",

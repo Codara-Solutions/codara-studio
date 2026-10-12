@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   InAppNotificationTone,
+  NavigationTarget,
   NotifyEvent,
   ResolvedRunQuestion,
 } from "@shared/types";
@@ -42,11 +43,26 @@ type Toast = NotifyEvent;
 
 // Renderer-local toasts (see the `spark:local-toast` listener below) are
 // tagged by their sourceKey. They never came from the notify pipeline, so
-// they have no center entry to acknowledge and no target to navigate to.
+// they have no center entry to acknowledge, and only those emitted with a
+// workspace target (an agent's new worktree) navigate anywhere.
 const LOCAL_SOURCE_PREFIX = "local:";
+const LOCAL_NAVIGABLE_PREFIX = "local:nav:";
 
 function isLocalToast(toast: Toast): boolean {
   return toast.sourceKey.startsWith(LOCAL_SOURCE_PREFIX);
+}
+
+function isNavigableLocalToast(toast: Toast): boolean {
+  return toast.sourceKey.startsWith(LOCAL_NAVIGABLE_PREFIX);
+}
+
+function localWorkspaceTarget(value: unknown): NavigationTarget | null {
+  const candidate = value as { type?: unknown; workspaceId?: unknown } | null;
+  return candidate?.type === "workspace" &&
+    typeof candidate.workspaceId === "string" &&
+    candidate.workspaceId
+    ? { type: "workspace", workspaceId: candidate.workspaceId }
+    : null;
 }
 
 let localToastSeq = 0;
@@ -136,6 +152,7 @@ export default function ToastHost({
           title?: unknown;
           body?: unknown;
           tone?: unknown;
+          target?: unknown;
         }>
       ).detail;
       const title = typeof detail?.title === "string" ? detail.title : "";
@@ -145,7 +162,8 @@ export default function ToastHost({
           ? detail.tone
           : "success";
       localToastSeq += 1;
-      const id = `${LOCAL_SOURCE_PREFIX}${localToastSeq}`;
+      const target = localWorkspaceTarget(detail?.target);
+      const id = `${target ? LOCAL_NAVIGABLE_PREFIX : LOCAL_SOURCE_PREFIX}${localToastSeq}`;
       setToasts((current) => {
         const next = [
           ...current,
@@ -161,9 +179,9 @@ export default function ToastHost({
             // Unused for local toasts — nothing in this component plays audio;
             // the sound policy lives on the notify pipeline these bypass.
             soundKind: "done",
-            // Never matches a real run, so the viewed-suppression sweep below
-            // leaves local toasts alone.
-            target: { type: "run", runId: id },
+            // Without a workspace target this never matches a real run, and
+            // the viewed-suppression sweep below skips local toasts anyway.
+            target: target ?? { type: "run", runId: id },
             createdAt: new Date().toISOString(),
           } satisfies Toast,
         ];
@@ -338,9 +356,10 @@ function ToastCard({
     title: toast.title || `Cora — ${meta.label.toLowerCase()}`,
   };
 
-  // A local toast has no real navigation target (and no center entry), so it
-  // renders as a plain, non-interactive card.
-  const clickable = Boolean(navigateTo) && !isLocalToast(toast);
+  // A local toast has no center entry, and only one emitted with a target
+  // has anywhere to go; the rest render as plain, non-interactive cards.
+  const clickable =
+    Boolean(navigateTo) && (!isLocalToast(toast) || isNavigableLocalToast(toast));
 
   return (
     <div
@@ -353,8 +372,10 @@ function ToastCard({
       onClick={() => {
         if (!clickable || !navigateTo) return;
         // Opening marks the center row read, unless nothing could be opened
-        // (its workspace is gone). The X button and visual timeout do neither.
-        if (navigateTo(toast.target) !== "gone") onAcknowledge();
+        // (its workspace is gone). A local toast has no center row. The X
+        // button and visual timeout do neither.
+        const outcome = navigateTo(toast.target);
+        if (!isLocalToast(toast) && outcome !== "gone") onAcknowledge();
         onClose();
       }}
       onMouseEnter={() => setHover(true)}

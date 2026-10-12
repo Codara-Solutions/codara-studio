@@ -16,7 +16,13 @@
 // outside Pi. The browser family's snapshot workflow lives in prompt.ts
 // (workers share it), so index.ts appends it to the browser guidance.
 
-export type StudioToolFamily = "browser" | "terminal" | "whiteboard" | "board" | "automations";
+export type StudioToolFamily =
+  | "browser"
+  | "terminal"
+  | "whiteboard"
+  | "board"
+  | "automations"
+  | "worktrees";
 
 export const STUDIO_TOOL_FAMILIES: readonly StudioToolFamily[] = [
   "browser",
@@ -24,6 +30,7 @@ export const STUDIO_TOOL_FAMILIES: readonly StudioToolFamily[] = [
   "whiteboard",
   "board",
   "automations",
+  "worktrees",
 ];
 
 export const STUDIO_TOOL_LOADER_NAME = "codara_tools";
@@ -34,6 +41,7 @@ export function studioToolFamily(name: string): StudioToolFamily | null {
   if (name.startsWith("codara_whiteboard_")) return "whiteboard";
   if (name.startsWith("codara_board_")) return "board";
   if (/^codara_[a-z_]*automation/.test(name)) return "automations";
+  if (name.startsWith("codara_worktree_")) return "worktrees";
   return null;
 }
 
@@ -49,6 +57,7 @@ const FAMILY_SIGNALS: Record<StudioToolFamily, RegExp> = {
   board: /\b(?:board|kanban|cards?)\b|codara_board_/i,
   automations:
     /\b(?:automations?|loom|schedul(?:e|ed|ing)|cron|recurring|nightly|daily|hourly|weekly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i,
+  worktrees: /\bwork ?trees?\b|codara_worktree_/i,
 };
 
 interface BranchEntryLike {
@@ -177,4 +186,11 @@ updates before signaling) so each pass continues instead of starting over.
 Get the user's agreement in prose before creating or enabling anything
 recurring; mutations ask for consent in chat. Never fall back to crontab,
 launchd, or schtasks.`,
+  worktrees: `Worktrees: codara_worktree_create gives an isolated checkout of this
+chat's repository on its own branch, listed in the user's rail. Your cwd does
+not change: hand workers the returned path (they work there with absolute
+paths or git -C) and run setupCommand there when it is set. Once the branch
+is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or
+in use and never forces; act on its code and hint, and ask the user rather
+than deleting work yourself. codara_worktree_list shows what is removable.`,
 };

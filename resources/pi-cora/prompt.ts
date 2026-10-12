@@ -224,6 +224,10 @@ const SURFACES = `Codara Studio surfaces:
 - Web research: to find sources use web_search, falling back to deep_search
   when it fails; to read a specific URL use fetch_url. Cite what you used.`;
 
+const WORKTREES = `- Worktrees: load the worktrees family for an isolated checkout of this
+  repository on its own branch (shown in the user's rail), and remove it with
+  codara_worktree_remove once the branch is merged.`;
+
 const MEMORY = `- Memory: you have codara_remember. When a run teaches you something durable
   and non-obvious about this workspace (a build quirk, a fragile area, a
   convention, a decision and its reason), save ONE short workspace-scoped
@@ -415,9 +419,17 @@ export function buildCoraPiSystemPrompt(
 ): string {
   // The automation roster has no codara_remember, and an untrusted pull
   // request's manager has none of the studio, web, or memory tools.
+  // Only a managing chat's roster carries the worktree tools; Codara refuses
+  // them from Talk and Automation chats.
   const surfaces = options.untrusted
     ? []
-    : [mode === "automation" ? SURFACES : `${SURFACES}\n${MEMORY}`];
+    : [
+        mode === "automation"
+          ? SURFACES
+          : mode === "talk"
+            ? `${SURFACES}\n${MEMORY}`
+            : `${SURFACES}\n${WORKTREES}\n${MEMORY}`,
+      ];
   const shared = [SHARED_INTRO, VOICE, EVIDENCE, SAFETY, ...surfaces].join("\n\n");
 
   if (mode === "talk") {

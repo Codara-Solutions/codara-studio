@@ -339,6 +339,7 @@ owns each file:
 | `builtin-mcp.json` (the MCP server turned off for some CLIs) | `mcp-installer.ts` |
 | `remote/` (identity, paired devices, ledger) | `remote-access/` |
 | `logs/main.log` | `file-log.ts` (`logMain`) |
+| `logs/worktree-audit.jsonl` (agent worktree changes) | `agent-worktrees.ts` (`createWorktreeAuditLog`) |
 
 The renderer also keeps each workspace's tab layout in `localStorage`
 (`tabs/useTabs.ts`). The `spark-` prefixes and `SPARK_*` variables come from
@@ -409,6 +410,7 @@ Debugging:
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
+| Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |
 | Shell integration | `resources/shell-integration/` | `src/main/shell-init.ts` |

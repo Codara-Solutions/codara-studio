@@ -51,6 +51,7 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
   }
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { workspaceAllowedRoots } from "./workspace-state-edits";
 import { loadOnboardingProgress, saveOnboardingProgress, setupService } from "./onboarding";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
@@ -732,16 +733,15 @@ export function registerIpc(): void {
     // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
     // channel can widen readable roots. It is gated to the trusted renderer by
     // default via handle() (see the sender-gating section above).
-    await saveState(state);
+    // A save that crossed a main-process workspace edit in flight is
+    // reconciled with it, so roots come from what was stored.
+    const saved = await saveState(state, { fromRenderer: true });
     // Refresh the fs sandbox allowlist whenever workspaces change. The
     // renderer also pushes via ui:setAllowedRoots, but updating here means a
     // newly-added workspace is reachable the instant it's persisted, even
     // before the renderer effect that calls setAllowedRoots fires.
-    const roots = state.workspaces
-      .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
-      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
-    setAllowedRoots(roots);
-    void noteCenterWorkspaces(state.workspaces.map((w) => w.id)).catch(() => undefined);
+    setAllowedRoots(workspaceAllowedRoots(saved));
+    void noteCenterWorkspaces(saved.workspaces.map((w) => w.id)).catch(() => undefined);
   });
 
   handle("settings:load", async (): Promise<AppSettings> => {

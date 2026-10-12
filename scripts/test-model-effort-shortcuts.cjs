@@ -176,7 +176,11 @@ assert.match(
   toast,
   /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, activeView, toast\.kind\)/,
 );
-assert.match(toast, /const clickable = Boolean\(navigateTo\) && !isLocalToast\(toast\)/);
+// A local toast is clickable only when it was emitted with a target.
+assert.match(
+  toast,
+  /const clickable =\s*Boolean\(navigateTo\) && \(!isLocalToast\(toast\) \|\| isNavigableLocalToast\(toast\)\)/,
+);
 
 // ── The routing rules themselves ───────────────────────────────────────────
 async function loadChordTarget() {

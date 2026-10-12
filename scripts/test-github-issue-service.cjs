@@ -18,8 +18,7 @@ async function loadService() {
   mkdirSync(cache, { recursive: true });
   const servicePath = path.join(ROOT, "src", "main", "github-issue-workspace.ts");
   const stubs = new Set([
-    "electron",
-    "./fs-sandbox",
+    "./workspace-state-publish",
     "./git-branches",
     "./github-cli",
     "./git-worktrees",
@@ -46,11 +45,8 @@ async function loadService() {
           return undefined;
         });
         build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
-          if (args.path === "electron") {
-            return { contents: "export const BrowserWindow = { getAllWindows: () => [] };" };
-          }
           const exports = {
-            "./fs-sandbox": ["setAllowedRoots"],
+            "./workspace-state-publish": ["publishState"],
             "./git-branches": ["listBranches", "deleteBranch"],
             "./github-cli": ["createGitHubCliAdapter"],
             "./git-worktrees": [

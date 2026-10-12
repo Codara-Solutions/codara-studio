@@ -115,7 +115,9 @@ test("a view change hides matching cards and marks rows read once, in main", () 
 
 test("toast clicks mark read unless nothing could be opened", () => {
   const clickSection = section(toastSource, "onClick={() => {", "onMouseEnter={() => setHover(true)}");
-  assert.match(clickSection, /navigateTo\(toast\.target\) !== "gone"\) onAcknowledge\(\)/);
+  assert.match(clickSection, /const outcome = navigateTo\(toast\.target\);/);
+  // A renderer-local toast (an agent's new worktree) has no center row.
+  assert.match(clickSection, /if \(!isLocalToast\(toast\) && outcome !== "gone"\) onAcknowledge\(\)/);
   assert.doesNotMatch(clickSection, /isCompletionKind|toast\.kind/);
 });
 

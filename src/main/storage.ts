@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   DEFAULT_COMMIT_MESSAGE_MODEL,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  normalizeCopyBranchCreator,
   normalizeGitHubOrigin,
   normalizeTerminalScrollbackLineLimit,
   type AppSettings,
@@ -15,6 +16,7 @@ import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { writeFileAtomic } from "./fs-atomic";
+import { removeWorkspaceFromAppState } from "./workspace-state-edits";
 import { normalizeWorkspaceColor } from "@shared/workspace-colors";
 import { ALLOWED_WORKER_MODELS, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
@@ -254,6 +256,7 @@ function normalize(w: Workspace): Workspace {
     typeof cb.createdAt === "string"
   ) {
     const origin = normalizeGitHubOrigin(cb.origin);
+    const createdBy = normalizeCopyBranchCreator(cb.createdBy);
     normalized.copyBranch = {
       repoCwd: cb.repoCwd,
       branch: cb.branch,
@@ -263,6 +266,7 @@ function normalize(w: Workspace): Workspace {
       ...(cb.mode === "fork" || cb.mode === "checkout" ? { mode: cb.mode } : {}),
       ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
       ...(origin ? { origin } : {}),
+      ...(createdBy ? { createdBy } : {}),
     };
   }
   // SSH remote workspaces: carry the host pointer through, and never let the
@@ -430,19 +434,10 @@ export async function loadState(): Promise<AppState> {
   return cache;
 }
 
-export async function saveState(state: AppState): Promise<void> {
-  // Accept pre-folder renderer/CLI payloads during rolling upgrades while
-  // keeping the in-memory state on the current shape after it is durable.
-  const normalizedState: AppState = {
-    ...state,
-    workspaces: state.workspaces.map(normalizeWorkspaceGitHubOrigin),
-    workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
-    workspaceRailOrder: normalizeWorkspaceRailOrder(
-      state.workspaceRailOrder,
-      state.workspaces,
-      state.workspaceGroups,
-    ),
-  };
+export async function saveState(
+  state: AppState,
+  options: { fromRenderer?: boolean } = {},
+): Promise<AppState> {
   // Serialize writes to avoid races. Cache publication and listeners belong
   // inside the same queued slot and happen only AFTER the atomic rename
   // succeeds. A failed save must leave loadState() and subscribers on the last
@@ -452,7 +447,115 @@ export async function saveState(state: AppState): Promise<void> {
   // Keep two handles on the chain: `write` (which rejects on disk failure) is
   // awaited so the IPC caller learns the save never hit disk, while `writing`
   // swallows the rejection so one failure does not poison later queued saves.
-  await enqueueStateWrite(async () => normalizedState);
+  //
+  // A renderer save is reconciled inside its queued slot, after every main
+  // edit queued before it has landed; that is the only point where "stale"
+  // is well defined.
+  return enqueueStateWrite(async () =>
+    normalizeAppState(options.fromRenderer ? reconcileMainWorkspaceEdits(state, Date.now()) : state),
+  );
+}
+
+// Accept pre-folder renderer/CLI payloads during rolling upgrades while
+// keeping the in-memory state on the current shape after it is durable.
+function normalizeAppState(state: AppState): AppState {
+  return {
+    ...state,
+    workspaces: state.workspaces.map(normalizeWorkspaceGitHubOrigin),
+    workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
+    workspaceRailOrder: normalizeWorkspaceRailOrder(
+      state.workspaceRailOrder,
+      state.workspaces,
+      state.workspaceGroups,
+    ),
+  };
+}
+
+// Workspaces the main process added or removed through updateState (an agent
+// worktree, an issue workspace, a `cora start` registration), kept until a
+// renderer save agrees with them. A renderer state:save already in flight when
+// main edits the state carries the older workspace list; written as is, it
+// would undo the edit on disk until the renderer heard state:changed and saved
+// again, and a crash in that window would lose it for good.
+const MAIN_WORKSPACE_EDIT_TTL_MS = 30_000;
+
+type MainWorkspaceEdit =
+  | {
+      op: "add";
+      workspace: Workspace;
+      // Neighbours to restore it next to: null for the first slot; railAfter
+      // undefined when the workspace sits in a group, not in the rail order.
+      after: string | null;
+      railAfter: string | null | undefined;
+      at: number;
+    }
+  | { op: "remove"; fallbackActiveId: string | null; at: number };
+
+const pendingMainWorkspaceEdits = new Map<string, MainWorkspaceEdit>();
+
+function noteMainWorkspaceEdits(before: AppState, after: AppState, now: number): void {
+  const beforeIds = new Set(before.workspaces.map((workspace) => workspace.id));
+  const afterIds = new Set(after.workspaces.map((workspace) => workspace.id));
+  const rail = after.workspaceRailOrder ?? [];
+  after.workspaces.forEach((workspace, index) => {
+    if (beforeIds.has(workspace.id)) return;
+    const railIndex = rail.indexOf(workspace.id);
+    pendingMainWorkspaceEdits.set(workspace.id, {
+      op: "add",
+      workspace: cloneJson(workspace),
+      after: index > 0 ? after.workspaces[index - 1].id : null,
+      railAfter: railIndex < 0 ? undefined : railIndex > 0 ? rail[railIndex - 1] : null,
+      at: now,
+    });
+  });
+  for (const id of beforeIds) {
+    if (afterIds.has(id)) continue;
+    pendingMainWorkspaceEdits.set(id, {
+      op: "remove",
+      fallbackActiveId: after.activeWorkspaceId ?? null,
+      at: now,
+    });
+  }
+}
+
+function insertIdAfter<T>(list: T[], item: T, anchorIndex: number | null): T[] {
+  const next = list.slice();
+  const at = anchorIndex === null ? 0 : anchorIndex < 0 ? next.length : anchorIndex + 1;
+  next.splice(at, 0, item);
+  return next;
+}
+
+function reconcileMainWorkspaceEdits(state: AppState, now: number): AppState {
+  let next = state;
+  for (const [id, edit] of pendingMainWorkspaceEdits) {
+    const present = next.workspaces.some((workspace) => workspace.id === id);
+    const agrees = edit.op === "add" ? present : !present;
+    if (agrees || now - edit.at > MAIN_WORKSPACE_EDIT_TTL_MS) {
+      pendingMainWorkspaceEdits.delete(id);
+      continue;
+    }
+    if (edit.op === "remove") {
+      next = removeWorkspaceFromAppState(next, id, edit.fallbackActiveId);
+      continue;
+    }
+    const after = edit.after;
+    const workspaces = insertIdAfter(
+      next.workspaces,
+      cloneJson(edit.workspace),
+      after === null ? null : next.workspaces.findIndex((workspace) => workspace.id === after),
+    );
+    let workspaceRailOrder = next.workspaceRailOrder;
+    if (edit.railAfter !== undefined && workspaceRailOrder) {
+      const railAfter = edit.railAfter;
+      workspaceRailOrder = insertIdAfter(
+        workspaceRailOrder.filter((railId) => railId !== id),
+        id,
+        railAfter === null ? null : workspaceRailOrder.indexOf(railAfter),
+      );
+    }
+    next = { ...next, workspaces, ...(workspaceRailOrder ? { workspaceRailOrder } : {}) };
+  }
+  return next;
 }
 
 /**
@@ -463,20 +566,17 @@ export async function saveState(state: AppState): Promise<void> {
 export async function updateState(
   mutator: (current: AppState) => AppState | Promise<AppState>,
 ): Promise<AppState> {
-  return enqueueStateWrite(async () => {
-    const current = cache ?? await readFromDisk();
-    const candidate = await mutator(cloneAppState(current));
-    return {
-      ...candidate,
-      workspaces: candidate.workspaces.map(normalizeWorkspaceGitHubOrigin),
-      workspaceGroups: normalizeWorkspaceGroups(candidate.workspaceGroups),
-      workspaceRailOrder: normalizeWorkspaceRailOrder(
-        candidate.workspaceRailOrder,
-        candidate.workspaces,
-        candidate.workspaceGroups,
-      ),
-    };
-  });
+  let before: AppState | null = null;
+  return enqueueStateWrite(
+    async () => {
+      const current = cache ?? await readFromDisk();
+      before = current;
+      return normalizeAppState(await mutator(cloneAppState(current)));
+    },
+    (next) => {
+      if (before) noteMainWorkspaceEdits(before, next, Date.now());
+    },
+  );
 }
 
 export function onStateSaved(listener: (state: AppState) => void): () => void {
@@ -486,11 +586,14 @@ export function onStateSaved(listener: (state: AppState) => void): () => void {
 
 async function enqueueStateWrite(
   produce: () => Promise<AppState>,
+  // Runs once the write is durable, before the next queued write starts.
+  durable?: (next: AppState) => void,
 ): Promise<AppState> {
   const operation = writing.then(async () => {
     const next = await produce();
     await writeToDisk(next);
     cache = next;
+    durable?.(next);
     for (const listener of stateSavedListeners) {
       try {
         listener(next);
@@ -510,15 +613,22 @@ async function enqueueStateWrite(
 }
 
 function cloneAppState(state: AppState): AppState {
-  return JSON.parse(JSON.stringify(state)) as AppState;
+  return cloneJson(state);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function normalizeWorkspaceGitHubOrigin(workspace: Workspace): Workspace {
   if (!workspace.copyBranch) return workspace;
   const origin = normalizeGitHubOrigin(workspace.copyBranch.origin);
+  const createdBy = normalizeCopyBranchCreator(workspace.copyBranch.createdBy);
   const copyBranch: Workspace["copyBranch"] = { ...workspace.copyBranch };
   delete copyBranch.origin;
+  delete copyBranch.createdBy;
   if (origin) copyBranch.origin = origin;
+  if (createdBy) copyBranch.createdBy = createdBy;
   return { ...workspace, copyBranch };
 }
 

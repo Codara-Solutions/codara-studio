@@ -313,6 +313,8 @@ async function main() {
       "pre-existing branch must survive worktree removal",
     );
 
+    await agentWorktreeProbes(wt);
+
     console.log("PASS: git-worktrees");
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -324,6 +326,182 @@ async function main() {
     } catch {
       /* ignore */
     }
+  }
+}
+
+function gitFails(cwd, args) {
+  try {
+    execFileSync("git", ["-C", cwd, ...args], { stdio: "ignore" });
+  } catch {
+    return;
+  }
+  throw new Error(`expected git ${args.join(" ")} to fail`);
+}
+
+// The read-only probes agent-worktrees.ts combines into a removal verdict:
+// start points, merge proofs for every way a branch lands, registrations and
+// leftover local work. Its own repository, with a repo-local identity.
+async function agentWorktreeProbes(wt) {
+  const scratch = realpathSync(mkdtempSync(path.join(os.tmpdir(), "spark-proofs-")));
+  try {
+    const repo = path.join(scratch, "repo");
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    git(repo, ["config", "user.name", "Test"]);
+    git(repo, ["config", "user.email", "test@example.com"]);
+    git(repo, ["config", "commit.gpgsign", "false"]);
+    const commit = (cwd, name, content, message) => {
+      writeFileSync(path.join(cwd, name), content);
+      git(cwd, ["add", name]);
+      git(cwd, ["commit", "-q", "-m", message]);
+      return git(cwd, ["rev-parse", "HEAD"]);
+    };
+    const main = () => git(repo, ["rev-parse", "main"]);
+    commit(repo, ".gitignore", "node_modules/\n.env.local\n", "ignore");
+    commit(repo, "shared.txt", "one\ntwo\nthree\n", "init");
+    const root = path.join(scratch, "wts");
+    const fork = async (branch) => {
+      const made = await wt.createCopyWorktree({
+        repoCwd: repo,
+        worktreesRoot: root,
+        baseBranch: "main",
+        startPoint: main(),
+        newBranch: branch,
+      });
+      assert.ok(made.ok, `fork ${branch}: ${made.ok ? "" : made.error}`);
+      return made;
+    };
+
+    // A commit start point records the base name and sets no upstream.
+    const started = await fork("agent/start");
+    assert.strictEqual(started.baseBranch, "main");
+    gitFails(started.path, ["rev-parse", "--abbrev-ref", "@{u}"]);
+    // A zero-commit branch is an ancestor of its base already.
+    assert.strictEqual(await wt.isAncestor(repo, git(started.path, ["rev-parse", "HEAD"]), main()), true);
+
+    // Merge commit.
+    const merged = await fork("agent/merged");
+    const mergedTip = commit(merged.path, "m.txt", "m\n", "m");
+    assert.strictEqual(await wt.isAncestor(repo, mergedTip, main()), false);
+    git(repo, ["merge", "-q", "--no-ff", "-m", "merge m", "agent/merged"]);
+    assert.strictEqual(await wt.isAncestor(repo, mergedTip, main()), true);
+    assert.strictEqual(await wt.aheadCount(repo, main(), mergedTip), 0);
+
+    // Squash merge: the content is in the target although the tip is not.
+    const squash = await fork("agent/squash");
+    commit(squash.path, "s1.txt", "s1\n", "s1");
+    const squashTip = commit(squash.path, "s2.txt", "s2\n", "s2");
+    assert.strictEqual(await wt.contentInTarget(repo, squashTip, main()), false, "unmerged work is not in the target");
+    assert.strictEqual(await wt.aheadCount(repo, main(), squashTip), 2);
+    assert.deepStrictEqual(await wt.commitSubjectsBetween(repo, main(), squashTip), ["s2", "s1"]);
+    git(repo, ["merge", "-q", "--squash", "agent/squash"]);
+    git(repo, ["commit", "-q", "-m", "squash s"]);
+    assert.strictEqual(await wt.isAncestor(repo, squashTip, main()), false);
+    assert.strictEqual(await wt.contentInTarget(repo, squashTip, main()), true, "a squash merge holds the content");
+
+    // Rebase merge: the same change as a new commit on the target.
+    const rebased = await fork("agent/rebased");
+    const rebasedTip = commit(rebased.path, "r.txt", "r\n", "r");
+    git(repo, ["cherry-pick", rebasedTip]);
+    assert.strictEqual(await wt.contentInTarget(repo, rebasedTip, main()), true, "a rebase merge holds the content");
+
+    // Squash, then a revert in the target: the proof fails, the safe way.
+    const reverted = await fork("agent/reverted");
+    const revertedTip = commit(reverted.path, "v.txt", "v\n", "v");
+    git(repo, ["merge", "-q", "--squash", "agent/reverted"]);
+    git(repo, ["commit", "-q", "-m", "squash v"]);
+    git(repo, ["revert", "--no-edit", "HEAD"]);
+    assert.strictEqual(await wt.contentInTarget(repo, revertedTip, main()), false, "a revert undoes the proof");
+
+    // Squash, then the target rewrites the same lines: no proof either.
+    const rewritten = await fork("agent/rewritten");
+    const rewrittenTip = commit(rewritten.path, "shared.txt", "one\nTWO\nthree\n", "upper two");
+    git(repo, ["merge", "-q", "--squash", "agent/rewritten"]);
+    git(repo, ["commit", "-q", "-m", "squash two"]);
+    commit(repo, "shared.txt", "one\nzwei\nthree\n", "rewrite two");
+    assert.strictEqual(await wt.contentInTarget(repo, rewrittenTip, main()), false, "a later rewrite undoes the proof");
+
+    // Registrations carry the branch, lock and detached state.
+    git(repo, ["worktree", "lock", merged.path]);
+    git(started.path, ["checkout", "-q", "--detach"]);
+    const registrations = await wt.listWorktreeRegistrations(repo);
+    const mergedEntry = registrations.find((entry) => entry.path === merged.path);
+    assert.strictEqual(mergedEntry.locked, true);
+    assert.strictEqual(mergedEntry.branch, "refs/heads/agent/merged");
+    const startedEntry = registrations.find((entry) => entry.path === started.path);
+    assert.strictEqual(startedEntry.detached, true);
+    assert.strictEqual(startedEntry.branch, undefined);
+    git(repo, ["worktree", "unlock", merged.path]);
+    assert.strictEqual(await wt.branchWorktreePath(repo, "agent/merged"), merged.path);
+    assert.strictEqual(await wt.isRegisteredWorktree(repo, merged.path), true);
+
+    // In-progress operations, read from each worktree's own git dir.
+    assert.strictEqual(await wt.inProgressOperation(merged.path), null);
+    const midMerge = await fork("agent/mid-merge");
+    commit(midMerge.path, "shared.txt", "one\nmine\nthree\n", "mine");
+    commit(repo, "shared.txt", "one\ntheirs\nthree\n", "theirs");
+    gitFails(midMerge.path, ["merge", "main"]);
+    assert.strictEqual(await wt.inProgressOperation(midMerge.path), "merge");
+    const midRebase = await fork("agent/mid-rebase");
+    git(midRebase.path, ["reset", "-q", "--hard", "HEAD~1"]);
+    commit(midRebase.path, "shared.txt", "one\nours\nthree\n", "ours");
+    gitFails(midRebase.path, ["rebase", "main"]);
+    assert.strictEqual(await wt.inProgressOperation(midRebase.path), "rebase");
+    assert.strictEqual(await wt.inProgressOperation(repo), null, "the main checkout has its own git dir");
+
+    // Ignored files: a wholly ignored directory collapses to one entry.
+    mkdirSync(path.join(merged.path, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(merged.path, "node_modules", "pkg", "index.js"), "\n");
+    writeFileSync(path.join(merged.path, ".env.local"), "TOKEN=1\n");
+    assert.deepStrictEqual((await wt.ignoredEntries(merged.path)).sort(), [".env.local", "node_modules/"]);
+
+    // Edits git status hides: assume-unchanged and skip-worktree files that
+    // differ from the index. An absent skip-worktree file holds no edit.
+    const hidden = await fork("agent/hidden");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), []);
+    git(hidden.path, ["update-index", "--assume-unchanged", "shared.txt"]);
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a flag alone is no edit");
+    writeFileSync(path.join(hidden.path, "shared.txt"), "edited where status cannot see\n");
+    assert.strictEqual(git(hidden.path, ["status", "--porcelain"]), "");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), ["shared.txt"]);
+    git(hidden.path, ["update-index", "--no-assume-unchanged", "shared.txt"]);
+    git(hidden.path, ["checkout", "--", "shared.txt"]);
+    git(hidden.path, ["update-index", "--skip-worktree", "shared.txt"]);
+    writeFileSync(path.join(hidden.path, "shared.txt"), "edited where status cannot see\n");
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), ["shared.txt"]);
+    rmSync(path.join(hidden.path, "shared.txt"));
+    assert.deepStrictEqual(await wt.hiddenLocalChanges(hidden.path), [], "a sparse, absent file is no edit");
+
+    // A nested repository committed as a bare gitlink, with no .gitmodules,
+    // is a populated submodule to git's worktree removal.
+    const vendoring = await fork("agent/vendoring");
+    const vendored = path.join(vendoring.path, "vendored");
+    execFileSync("git", ["init", "-q", "-b", "main", vendored]);
+    git(vendored, ["config", "user.name", "Test"]);
+    git(vendored, ["config", "user.email", "test@example.com"]);
+    commit(vendored, "only-copy.txt", "nowhere else\n", "only copy");
+    git(vendoring.path, ["add", "vendored"]);
+    git(vendoring.path, ["commit", "-q", "-m", "vendor"]);
+    assert.deepStrictEqual(await wt.populatedSubmodules(vendoring.path), ["vendored"]);
+    assert.deepStrictEqual(await wt.populatedSubmodules(merged.path), []);
+
+    // Reached through a symlinked root, the worktree's path does not match
+    // git's canonical listing, so it reads as unregistered. git refuses the
+    // removal over the submodule; removeOrphanDir:false must keep that a
+    // failure rather than delete the tree recursively.
+    const linkedRoot = path.join(scratch, "linked-wts");
+    symlinkSync(root, linkedRoot, "dir");
+    const viaLink = path.join(linkedRoot, path.basename(vendoring.path));
+    assert.strictEqual(await wt.isRegisteredWorktree(repo, viaLink), false);
+    const refused = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: viaLink,
+      branch: "agent/vendoring",
+      removeOrphanDir: false,
+    });
+    assert.ok(!refused.ok && /submodule/i.test(refused.error), JSON.stringify(refused));
+    assert.ok(existsSync(path.join(vendored, "only-copy.txt")), "the nested repository's only copy survives");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 

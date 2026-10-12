@@ -1080,6 +1080,24 @@ function GeneralSettings({
             />
           </SettingsSection>
 
+          <SettingsSection
+            title="Agent worktrees"
+            description="Claude Code, Codex and Cora can create git worktrees of their own repository through the Codara Studio tools and remove them once merged. Every change is logged in ~/.codarastudio/logs/worktree-audit.jsonl."
+          >
+            <ToggleRow
+              title="Let agents create and remove worktrees"
+              desc="Removal needs proof the branch is merged, no local changes and nothing running in the worktree. It never forces, and the last commit stays recoverable for 30 days. When off, agents can still list worktrees."
+              checked={preferences.agentWorktreesEnabled !== false}
+              onChange={(v) => void setPreference("agentWorktreesEnabled", v)}
+            />
+            <ToggleRow
+              title="Let agents remove worktrees I created"
+              desc="When off, agents only remove worktrees an agent created. The same merge and safety checks apply either way."
+              checked={preferences.agentsMayRemoveUserWorktrees === true}
+              onChange={(v) => void setPreference("agentsMayRemoveUserWorktrees", v)}
+            />
+          </SettingsSection>
+
           <SettingsSection title="Tabs">
             <ToggleRow
               title="Middle-click to close tabs"
@@ -1193,6 +1211,7 @@ function GeneralSettings({
             ) : null}
             <GithubWebhookSettings />
             {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
+            {workspaceCwd ? <AgentWorktreeIgnoredField workspaceCwd={workspaceCwd} /> : null}
           </SettingsSection>
         </>
       ) : null}
@@ -1354,6 +1373,57 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
         value={text}
         spellCheck={false}
         placeholder="For example pnpm install"
+        onChange={(e) => setText(e.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            commit();
+            e.currentTarget.blur();
+          }
+        }}
+      />
+    </SettingRow>
+  );
+}
+
+// Ignored files an agent may delete with a merged worktree for this repo, on
+// top of the built-in build output and caches (node_modules/, dist/, ...).
+// Anything else ignored, such as .env.local, blocks an agent's removal.
+function AgentWorktreeIgnoredField({ workspaceCwd }: { workspaceCwd: string }) {
+  const { preferences, hydrated, setPreference } = usePreferences();
+  const stored = preferences.agentWorktreeRegenerableIgnoredByRepo?.[workspaceCwd] ?? [];
+  const [text, setText] = useState<string>(stored.join(", "));
+
+  useEffect(() => {
+    setText((preferences.agentWorktreeRegenerableIgnoredByRepo?.[workspaceCwd] ?? []).join(", "));
+  }, [workspaceCwd, preferences.agentWorktreeRegenerableIgnoredByRepo]);
+
+  if (!hydrated) return null;
+
+  const commit = () => {
+    const patterns = text
+      .split(/[,\n]/)
+      .map((pattern) => pattern.trim())
+      .filter(Boolean);
+    const next = { ...(preferences.agentWorktreeRegenerableIgnoredByRepo ?? {}) };
+    if (patterns.length === 0) delete next[workspaceCwd];
+    else next[workspaceCwd] = patterns;
+    void setPreference("agentWorktreeRegenerableIgnoredByRepo", next);
+  };
+
+  return (
+    <SettingRow
+      title="Agent worktrees: also regenerable"
+      desc="Ignored files an agent may delete with a merged worktree, besides build output and caches. Anything else ignored blocks removal. Saved for this repository."
+      stacked
+    >
+      <input
+        className="spark-input spark-mono"
+        aria-label="Also regenerable"
+        type="text"
+        value={text}
+        spellCheck={false}
+        placeholder="For example .gradle-cache/, *.log"
         onChange={(e) => setText(e.currentTarget.value)}
         onBlur={commit}
         onKeyDown={(e) => {

@@ -34,8 +34,23 @@ import {
 } from "./agent-terminal-lifecycle";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
-import { loadSettings, loadState, saveState } from "./storage";
+import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
+import {
+  createAgentWorktree,
+  createWorktreeAuditLog,
+  listAgentWorktrees,
+  removeAgentWorktree,
+  scanProcessesUnderCwd,
+  type AgentWorktreeDeps,
+  type AgentWorktreeEvent,
+  type WorktreeCaller,
+  type WorktreeCallerRole,
+} from "./agent-worktrees";
+import { managedWorktreesRoot } from "./git-worktrees";
+import { invalidateGitCache } from "./git-ops";
+import { createGitHubCliAdapter } from "./github-cli";
+import { publishState } from "./workspace-state-publish";
 import {
   detectWorkerAssignableRuntimes,
   isWorkerAssignable,
@@ -540,6 +555,8 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "automation.stop",
   "automation.delete",
   "automation.name_chat",
+  "worktree.create",
+  "worktree.remove",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -557,6 +574,9 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "agent.notify",
   "orchestrator.spawn_terminals",
   "orchestrator.remember",
+  "worktree.create",
+  "worktree.list",
+  "worktree.remove",
 ]);
 
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
@@ -659,6 +679,10 @@ async function dispatch(
         return await handleChatResume(params, id);
       case "workspace.prune":
         return await handleWorkspacePrune(params, id);
+      case "worktree.create":
+      case "worktree.list":
+      case "worktree.remove":
+        return await handleWorktree(method, params, id);
       case "accounts.list":
         return await handleAccountsList(id);
       case "accounts.anthropic.renew":
@@ -1690,6 +1714,182 @@ async function handleWorkspacePrune(
     return successResponse(id, {
       removed: removed.map((workspace) => ({ id: workspace.id, name: workspace.name, cwd: workspace.cwd })),
     });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ── Agent worktrees ─────────────────────────────────────────────────────────
+// The policy lives in agent-worktrees.ts; this adapter supplies the app and
+// resolves who is calling. Refusals are ordinary results ({ok:false, code})
+// so the MCP server can hand the agent its code and hint; only a malformed
+// request is a JSON-RPC error.
+
+const WORKTREE_CALLER_ROLES = new Set<WorktreeCallerRole>([
+  "manager",
+  "studio",
+  "talk",
+  "worker",
+  "automation",
+]);
+
+let worktreeAudit: ((entry: Parameters<AgentWorktreeDeps["audit"]>[0]) => Promise<void>) | null = null;
+
+function worktreeDeps(): AgentWorktreeDeps {
+  const github = createGitHubCliAdapter();
+  worktreeAudit ??= createWorktreeAuditLog(join(codaraHome(), "logs", "worktree-audit.jsonl"));
+  return {
+    loadState,
+    updateState,
+    loadPreferences,
+    publishState,
+    invalidateGitCache,
+    getRun: async (runId) => (await getRunStore()).getRun(runId),
+    listRuns: async () => (await getRunStore()).listRuns(),
+    paneWorkspaceId: async (paneId) => {
+      const watched = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId);
+      if (watched) return watched.workspaceId;
+      const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+      return listed?.workspaceId ?? null;
+    },
+    sessionCwd: (paneId) => pty.sessionCwd(paneId),
+    sessionsUnderCwd: (dir) => pty.sessionsUnderCwd(dir),
+    listRendererTerminals: async () => {
+      try {
+        return await listStudioTerminals();
+      } catch {
+        return null;
+      }
+    },
+    processesUnderCwd: (dir) =>
+      scanProcessesUnderCwd(dir, { appPid: process.pid, sessionPids: pty.sessionPids() }),
+    github: {
+      listPullRequestsForHead: (cwd, branch) =>
+        github.listPullRequestsForHead
+          ? github.listPullRequestsForHead(cwd, branch)
+          : Promise.reject(new Error("GitHub CLI unavailable")),
+      listMergedPullRequests: (cwd, limit) =>
+        github.listMergedPullRequests
+          ? github.listMergedPullRequests(cwd, limit)
+          : Promise.reject(new Error("GitHub CLI unavailable")),
+    },
+    sendAgentEvent: (event: AgentWorktreeEvent) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        const wc = window.webContents;
+        if (wc.isDestroyed()) continue;
+        try {
+          wc.send("workspace:agentEvent", event);
+        } catch {
+          /* A window may disappear between enumeration and send. */
+        }
+      }
+    },
+    audit: (entry) => worktreeAudit!(entry),
+    worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
+    now: () => new Date(),
+    randomId: () => randomBytes(8).toString("hex"),
+  };
+}
+
+async function worktreeCaller(params: Record<string, unknown>): Promise<WorktreeCaller> {
+  const rawRole = stringParam(params, "callerRole");
+  const role: WorktreeCallerRole =
+    rawRole && WORKTREE_CALLER_ROLES.has(rawRole as WorktreeCallerRole)
+      ? (rawRole as WorktreeCallerRole)
+      : "studio";
+  const runId = stringParam(params, "runId") ?? undefined;
+  // A run's manager speaks from a chat, not a pane; its workspace comes from
+  // the run. Everyone else is placed by the pane the call came from.
+  const paneId = runId ? undefined : (await resolveCallerPaneId(params)) ?? undefined;
+  return {
+    role,
+    client: (stringParam(params, "callerClient") ?? "agent").slice(0, 40),
+    ...(runId ? { runId } : {}),
+    ...(paneId ? { paneId } : {}),
+  };
+}
+
+function optionalTypedParam(
+  params: Record<string, unknown>,
+  key: string,
+  type: "string" | "boolean",
+): string | null {
+  const value = params[key];
+  if (value === undefined || value === null || typeof value === type) return null;
+  return `${key} must be a ${type}`;
+}
+
+async function handleWorktree(
+  method: "worktree.create" | "worktree.list" | "worktree.remove",
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const checks: Array<[string, "string" | "boolean"]> =
+    method === "worktree.create"
+      ? [["branch", "string"], ["base", "string"], ["checkout", "boolean"], ["purpose", "string"], ["title", "string"], ["fetch", "boolean"]]
+      : method === "worktree.list"
+        ? [["checkMerge", "boolean"]]
+        : [
+            ["workspaceId", "string"],
+            ["path", "string"],
+            ["target", "string"],
+            ["deleteBranch", "boolean"],
+            ["discardIgnoredFiles", "boolean"],
+            ["dryRun", "boolean"],
+          ];
+  for (const [key, type] of checks) {
+    const problem = optionalTypedParam(params, key, type);
+    if (problem) return errorResponse(id, ERR_INVALID_PARAMS, problem);
+  }
+  const bool = (key: string): boolean | undefined =>
+    typeof params[key] === "boolean" ? (params[key] as boolean) : undefined;
+  const str = (key: string): string | undefined => stringParam(params, key) ?? undefined;
+  try {
+    const caller = await worktreeCaller(params);
+    const deps = worktreeDeps();
+    if (method === "worktree.list") {
+      return successResponse(id, await listAgentWorktrees(caller, { checkMerge: bool("checkMerge") }, deps));
+    }
+    if (method === "worktree.create") {
+      return successResponse(
+        id,
+        await createAgentWorktree(
+          caller,
+          {
+            branch: str("branch"),
+            base: str("base"),
+            checkout: bool("checkout"),
+            purpose: str("purpose"),
+            title: str("title"),
+            fetch: bool("fetch"),
+          },
+          deps,
+        ),
+      );
+    }
+    const workspaceId = str("workspaceId");
+    const path = str("path");
+    if (Boolean(workspaceId) === Boolean(path)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "pass exactly one of workspaceId or path");
+    }
+    if (path && !isAbsolute(path)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
+    }
+    return successResponse(
+      id,
+      await removeAgentWorktree(
+        caller,
+        {
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(path ? { path } : {}),
+          target: str("target"),
+          deleteBranch: bool("deleteBranch"),
+          discardIgnoredFiles: bool("discardIgnoredFiles"),
+          dryRun: bool("dryRun"),
+        },
+        deps,
+      ),
+    );
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
   }

@@ -62,7 +62,7 @@ Most suites need only `npm install`. These are the exceptions:
 | A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs` | Install it with `npx playwright install chromium`. |
-| Real `git` | `test-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
+| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
@@ -264,7 +264,10 @@ in nested and symlinked folders reach the explorer),
 merging, reviews, pull request import, issues, push alerts, the work queue),
 `test-worktrees`, `test-worktree-delete-dialog`, `test-untrusted-pr-policy`
 (the checkout of an imported pull request stays untrusted, whatever path
-tricks it tries).
+tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
+through the MCP tools: merge proofs, every refusal, recovery refs, the audit
+log, the repository lock and the process scan, against throwaway
+repositories with a fake git config).
 
 ### Notifications
 
