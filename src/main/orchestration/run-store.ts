@@ -323,6 +323,7 @@ import {
   spawnedTerminalsTitle,
   standingTerminalTitle,
 } from "./standing-terminals";
+import { standingTerminalCompaction } from "./cli-autocompact";
 import {
   buildManagerTurnPrompt,
   isCheckpointJobCurrent,
@@ -9206,12 +9207,16 @@ async function applySpawnTerminalsDecision(
   decision: SparkManagerDecision,
 ): Promise<RunState> {
   const terminals: Array<{ runtime: string; title: string; command: string }> = [];
+  const compaction = await standingTerminalCompaction(
+    await loadSettings().then((settings) => settings.coraAutoCompactPercent ?? null).catch(() => null),
+    (decision.terminals ?? []).map((req) => req.runtime),
+  );
   for (const req of decision.terminals ?? []) {
     for (let i = 0; i < req.count; i++) {
       terminals.push({
         runtime: req.runtime,
         title: standingTerminalTitle(req.runtime, req.model),
-        command: buildStandingTerminalCommand(req.runtime, req.model, req.effort),
+        command: buildStandingTerminalCommand(req.runtime, req.model, req.effort, compaction),
       });
     }
   }

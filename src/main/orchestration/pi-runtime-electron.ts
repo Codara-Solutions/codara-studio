@@ -130,6 +130,15 @@ async function openAiFastModeEnabled(): Promise<boolean> {
   }
 }
 
+// An unreadable settings file means Auto, never a launch failure.
+async function autoCompactPercentSetting(): Promise<number | null> {
+  try {
+    return (await loadSettings()).coraAutoCompactPercent ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The fast mode a session for `provider` would actually launch with. Anthropic
  * is always false: it has no priority tier, and buildPiManagerLaunchPlan
@@ -711,6 +720,7 @@ export async function createCodaraPiLaunchPlan(
       thinking: options.thinking ?? "high",
       sessionName: options.sessionName,
       projectPolicyMode: options.projectPolicyMode,
+      autoCompactPercent: settings.coraAutoCompactPercent,
       codaraHomeDir: codaraHome(),
       processExecutable: electronAsNodeInterpreter(),
     });
@@ -870,6 +880,7 @@ export async function createCodaraPiWorkerLaunchPlan(
       apiKey: options.apiKey,
       accountProfileId: account.accountProfileId,
       openAiFastMode: await openAiFastModeEnabled(),
+      autoCompactPercent: await autoCompactPercentSetting(),
       configDir: paths.configDir,
       sessionDir: paths.sessionDir,
       sessionId,

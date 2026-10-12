@@ -315,6 +315,9 @@ export default function ChatComposer({
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
+  // The limit the live session reports with its usage: the owner's
+  // auto-compact percentage priced off this model's window.
+  const [compactBudget, setCompactBudget] = useState(DEFAULT_PI_COMPACT_AT_TOKENS);
   // Read by the run-change seed below, which must see the run being switched TO
   // without taking `run` as a dependency (that would re-seed on every snapshot
   // and stomp the live gauge mid-turn).
@@ -583,6 +586,11 @@ export default function ChatComposer({
     setTokensUsed(call?.promptTokens ?? 0);
   }, [run?.id, run?.conversationEpoch]);
 
+  // Another chat may run another model; its session reports its own limit.
+  useEffect(() => {
+    setCompactBudget(DEFAULT_PI_COMPACT_AT_TOKENS);
+  }, [run?.id]);
+
   // Track the latest live context gauge. Modern backends provide
   // contextTokens explicitly; older ones expose only inputTokens, which is
   // still a better estimate when treated as the latest snapshot rather than
@@ -609,6 +617,8 @@ export default function ChatComposer({
       // counts, and accepting it wiped the gauge to 0/256.0k. Compaction is
       // the only legitimate reset, handled above via run.conversation_compacted.
       if (value > 0) setTokensUsed(value);
+      const budget = payload.compactAtTokens;
+      if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) setCompactBudget(budget);
     });
     return off;
   }, [run?.id, run?.conversationEpoch]);
@@ -1607,7 +1617,7 @@ export default function ChatComposer({
           <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
-              budget={DEFAULT_PI_COMPACT_AT_TOKENS}
+              budget={compactBudget}
             />
             <CapabilitiesButton onOpen={openCapabilities} />
             {isPaused && !(isParkedTurn && failureCardOffersRetry) && (

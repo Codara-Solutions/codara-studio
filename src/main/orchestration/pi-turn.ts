@@ -1,6 +1,11 @@
 import type { ChatStreamHandler } from "./agent-backend";
 import type { PiRpcEvent } from "./pi-rpc-client";
-import { resolveCompactAtTokens } from "@shared/context-compaction";
+import {
+  autoCompactLimitTokens,
+  compactAtOverrideTokens,
+  normalizeAutoCompactPercent,
+} from "@shared/context-compaction";
+import { contextWindowForModel } from "@shared/context-window";
 
 export interface PiTurnToolCall {
   toolName: string;
@@ -212,6 +217,8 @@ export class PiTurnAccumulator {
   private providerRetried = false;
   private readonly providerResponseIds = new Set<string>();
   private settled = false;
+  private readonly launchEnv: NodeJS.ProcessEnv;
+  private readonly model: string | undefined;
   // Per running tool: when its last tail went out, and the newest tail held
   // back by the throttle (sent by a trailing timer so the final lines before a
   // quiet stretch are never lost).
@@ -222,10 +229,19 @@ export class PiTurnAccumulator {
 
   constructor(
     onStream?: ChatStreamHandler,
-    options: { captureCost?: boolean } = {},
+    options: {
+      captureCost?: boolean;
+      /** The Pi session's launch env: its compaction limit is the one the
+       *  extension enforces, not this process's. */
+      launchEnv?: NodeJS.ProcessEnv;
+      /** The session's model, for its catalog window until Pi reports one. */
+      model?: string;
+    } = {},
   ) {
     this.onStream = onStream;
     this.captureCost = options.captureCost === true;
+    this.launchEnv = options.launchEnv ?? process.env;
+    this.model = options.model;
   }
 
   consume(event: PiRpcEvent): void {
@@ -471,9 +487,24 @@ export class PiTurnAccumulator {
           : {}),
         // The ceiling this session will actually compact at. Only Pi sessions
         // carry it, which is exactly the set of chats the extension runs in.
-        compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+        compactAtTokens: this.compactAtTokens(),
       });
     }
+  }
+
+  /** The launch plan stamps CODARA_PI_COMPACT_AT_TOKENS on every session and
+   *  adds CODARA_PI_COMPACT_PERCENT only when no developer override exists,
+   *  so a percentage present here outranks the stamped token count, exactly
+   *  as the extension reads them. */
+  private compactAtTokens(): number {
+    const percent = normalizeAutoCompactPercent(this.launchEnv.CODARA_PI_COMPACT_PERCENT);
+    return autoCompactLimitTokens({
+      contextWindowTokens:
+        this.contextWindowTokens ?? (this.model ? contextWindowForModel(this.model).tokens : null),
+      percent,
+      overrideTokens:
+        percent === null ? compactAtOverrideTokens(this.launchEnv.CODARA_PI_COMPACT_AT_TOKENS) : null,
+    });
   }
 
   private ensureAssistant(message: Record<string, unknown>, begin = false): string {

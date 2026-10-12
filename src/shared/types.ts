@@ -682,6 +682,11 @@ export interface AppSettings {
   // change goes through a worker and its cross-provider verifier. Optional
   // only so renderer fallbacks need not list it; storage always normalizes it.
   coraAlwaysVerifyEdits?: boolean;
+  // When Cora and every sub agent compact their context, as a percentage of
+  // the model's context window (context-compaction.ts). null is Auto. Applied
+  // per launch to the manager, Pi workers and the Claude/Codex terminals Cora
+  // opens. Optional for the same reason as coraAlwaysVerifyEdits.
+  coraAutoCompactPercent?: number | null;
 }
 
 export interface OpenRouterValidationInput {

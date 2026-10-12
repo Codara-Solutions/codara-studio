@@ -715,6 +715,8 @@ async function requestPiDecision(
       // subscription models. Those are not an OpenRouter charge and must not
       // enter the chat cost pill or run budget.
       captureCost: session.provider === "openrouter",
+      launchEnv: session.plan.env,
+      model: session.plan.model,
     });
     turn = accumulator;
     const liveness: PiTurnLiveness = {
