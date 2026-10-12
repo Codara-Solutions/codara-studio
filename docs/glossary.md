@@ -53,6 +53,12 @@ that defines it (types are in `src/shared/types.ts` unless noted).
   at all.
 - **Pass.** One execution of a loom, that is, one iteration of an
   automation's loop. Each pass is a run.
+- **Workflow.** A script that fans work out to many agents with `agent`,
+  `parallel` and `pipeline` (`src/main/orchestration/workflow-*.ts`). A
+  workflow run is a `direct` run with a `workflow` block (`WorkflowRunInfo`).
+- **Workflow journal.** The record of every `agent` call a workflow run made
+  and what it returned (`workflow-journal.ts`). Resume replays it, so
+  finished agents are not run again.
 
 ## Workspace and interface
 

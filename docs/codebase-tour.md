@@ -222,6 +222,13 @@ arms triggers (cron, interval, folder, git and others),
 `loom-graph.ts`, `loom-resolve.ts` and `loom-steps.ts` walk a loom's graph.
 The UI is `components/automations/`.
 
+**Workflows** run a script that fans work out to agents.
+`workflow-driver.ts` owns workflow runs and launches each agent as a worker;
+`workflow-sandbox.ts` and `workflow-runtime.ts` run the script in a separate
+process and journal its calls for resume. The socket's `workflow.*` handlers
+serve Cora's `codara_workflow_*` tools and `cora workflow`, and the UI is
+`components/workflows/`, shown in the Automations hub's Workflows tab.
+
 ### 3.3 Accounts: switching and keeping logins in sync
 
 An account has a Cora half (a Pi login under
@@ -409,6 +416,7 @@ Debugging:
 | The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | `agent-socket.ts` preview handlers |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
+| Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |

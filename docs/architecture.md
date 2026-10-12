@@ -317,6 +317,33 @@ folder, git, manual, and others). `automation-loop.ts` starts iterations.
 workers, guards, merges and fixed steps (shell, script, HTTP, file,
 notification).
 
+**Workflows.** A workflow is a JavaScript file that fans work out to many
+agents: `agent(prompt, {schema, label, isolation, model})`, `parallel`,
+`pipeline`, `phase`, `log` and `args`, with a literal `meta` header.
+`workflow-sandbox.ts` runs the script in a separate Node process
+(`workflow-sandbox-worker.ts`, built to `out/main/`) with no `require`,
+filesystem, network, timers or randomness; every `agent` call becomes a
+message to the main process. `workflow-runtime.ts` journals each call's issue
+and result (`workflow-journal.ts`), so a resumed run replays the finished
+calls from the journal and runs only the rest; a script edited between runs
+replays up to the first call that differs. `workflow-driver.ts` owns runs: it
+creates a `direct` run with a `workflow` block, launches each agent as an
+ordinary worker attempt (`launchWorkflowAgentTask` in `run-store.ts`),
+validates schema results with ajv (`workflow-schema.ts`), and maps a failed
+or invalid agent to `null` so one failure never ends the script.
+`isolation: "worktree"` gives the agent its own checkout of `HEAD`
+(`workflow-worktree.ts`). Caps (agents, concurrency, token and dollar
+ceilings, machine slots) are checked when a call is issued and when it
+launches (`workflow-admission.ts`, `workflow-estimate.ts`), and
+`codara-heavy` serializes builds and test runs across agents under a memory
+cap. On boot `recoverWorkflowRuns` salvages finished reports and parks every
+live workflow run as paused; nothing restarts until the user resumes. Saved
+workflows come from the app's built-ins, the user's Codara home and
+`<repo>/.codara/workflows` (`workflow-registry.ts`). Cora proposes and runs
+them through `codara_workflow_*` (execute roster only; `workflow.run` and
+`workflow.save` ask the user first), and the Automations hub's Workflows tab
+shows saved workflows, runs and a progress tree with Stop and Resume.
+
 **Prompts.** Cora's system prompt is built by `buildCoraPiSystemPrompt` in
 `resources/pi-cora/prompt.ts`. Worker briefs come from `worker-prompt.ts`.
 `resources/orchestration/manager-profile.json` is the shipped prompt profile

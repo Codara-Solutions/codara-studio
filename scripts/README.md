@@ -197,6 +197,9 @@ its first send (`run-store.ts`).
 | `test-automations`, `test-automation-loop` | `scheduler.ts` (triggers) and `automation-loop.ts` (runs one iteration after another). |
 | `test-loom-graph`, `test-loom-predicates`, `test-loom-steps`, `test-step-live-stream`, `test-loom-model` | Loom graphs, guard nodes, fixed step nodes, and the flow editor's model. |
 | `test-board-store`, `test-board-agent-writes`, `test-board-nudge` | The board of each chat (`board-store.ts`, `board-nudge.ts`). |
+| `test-workflow-sandbox`, `test-workflow-runtime`, `test-workflow-prelude`, `test-workflow-meta`, `test-workflow-schema` | The workflow script sandbox (no escape), the script API, journal replay and resume caching, and schema checks. |
+| `test-workflow-driver`, `test-workflow-admission`, `test-workflow-registry`, `test-workflow-worktree`, `test-pi-worker-workflow-result` | Workflow runs (`workflow-driver.ts`): caps, a failed agent as `null`, stop, resume and restart recovery, saved workflows, worktree isolation, and the result a worker reports. |
+| `test-workflow-mcp-roster` | Who may run workflows: the `codara_workflow_*` roster, the socket's untrusted and mid-compaction guards, and consent before `workflow.run` and `workflow.save`. |
 
 ### Terminals and agent detection
 
