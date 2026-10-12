@@ -175,6 +175,15 @@ async function main() {
   assert.match(fs.readFileSync(wrapper, "utf8"), /^#!\/bin\/sh\n/);
   assert.match(paneHelper.windowsPaneHelperWrapper("C:\\a\\node.exe", "C:\\b\\codara-pane.cjs"), /setlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"C:\\a\\node.exe" "C:\\b\\codara-pane.cjs" %\*/);
 
+  // On macOS the main binary run as node raises a Dock tile per process; boot
+  // must hand the wrapper the same LSUIElement helper Cora's Pi processes use.
+  const indexSource = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+  assert.match(
+    indexSource,
+    /writePaneHelperFiles\(\{ nodePath: electronAsNodeInterpreter\(\) \}\)/,
+    "boot writes the wrapper for the Dock-free as-node interpreter",
+  );
+
   const quoted = paneHelper.posixPaneHelperWrapper("/opt/it's here/node", "/x/codara-pane.cjs");
   assert.match(quoted, /exec '\/opt\/it'\\''s here\/node' '\/x\/codara-pane.cjs' "\$@"/);
 

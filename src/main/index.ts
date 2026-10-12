@@ -1044,7 +1044,10 @@ app.whenReady().then(async () => {
         console.warn("[main] agent integration files failed:", err);
       }
       try {
-        await writePaneHelperFiles();
+        // The interpreter Cora's Pi processes use: on macOS the main binary
+        // run as node puts a Dock tile up for every `codara-pane` call.
+        const { electronAsNodeInterpreter } = await import("./orchestration/pi-runtime-electron");
+        await writePaneHelperFiles({ nodePath: electronAsNodeInterpreter() });
       } catch (err) {
         console.warn("[main] pane helper files failed:", err);
       }
