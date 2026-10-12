@@ -14,6 +14,25 @@ import React from "react";
  * the element carrying the same `data-setting-anchor`.
  */
 
+/**
+ * Publishes the title bar's live height on the dialog surface as
+ * --st-topbar-h. With glass on, the page scrolls up under the translucent
+ * title bar (the scroll edge), so the content pane needs the bar's height as
+ * its top inset, and the description under the title can wrap to two lines.
+ */
+export function useTopbarInset(surfaceRef: React.RefObject<HTMLElement | null>): void {
+  React.useLayoutEffect(() => {
+    const surface = surfaceRef.current;
+    const bar = surface?.querySelector<HTMLElement>(":scope > .st-topbar");
+    if (!surface || !bar) return;
+    const apply = () => surface.style.setProperty("--st-topbar-h", `${bar.offsetHeight}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, [surfaceRef]);
+}
+
 export function SettingsPage({ children }: { children: React.ReactNode }) {
   return <div className="st-page">{children}</div>;
 }

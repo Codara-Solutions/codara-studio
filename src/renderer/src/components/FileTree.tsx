@@ -99,7 +99,11 @@ const VirtuosoList = React.forwardRef<
   );
 });
 
-const LIST_COMPONENTS = { List: VirtuosoList };
+// The scroll edge's inset (see .spark-scroll-under): with glass on the tree
+// starts under the translucent Explorer header, so the first row needs the
+// header's height above it to rest in view.
+const ScrollEdgeInset = () => <div style={{ height: "var(--scroll-edge-inset, 0px)" }} />;
+const LIST_COMPONENTS = { List: VirtuosoList, Header: ScrollEdgeInset };
 
 function normalizePath(path: string): string {
   // fs.watch on Windows can produce mixed separators; normalize for set lookups.
@@ -1673,6 +1677,7 @@ export default function FileTree({
       */}
       <div
         ref={listViewportRef}
+        className="spark-scroll-under"
         data-fs-row-count={flat.length}
         // Programmatically focusable (not tab-reachable) so a tree press can
         // move keyboard focus here — that's what lets Cmd+C/X/V act on the
@@ -1705,7 +1710,14 @@ export default function FileTree({
         }}
       >
         {flat.length <= DIRECT_TREE_RENDER_LIMIT ? (
-          <div style={{ height: "100%", width: "100%", overflow: "auto", padding: "2px 0 8px" }}>
+          <div
+            style={{
+              height: "100%",
+              width: "100%",
+              overflow: "auto",
+              padding: "calc(2px + var(--scroll-edge-inset, 0px)) 0 8px",
+            }}
+          >
             {flat.map((row) => (
               <React.Fragment
                 key={

@@ -184,6 +184,9 @@ export default function ChatPanel({
       </Suspense>
     ) : null;
 
+  const conversationShown =
+    chatView === "chat" && Boolean(activeRun) && !collapsed && !(activeRun && isUnstartedChatRun(activeRun));
+
   return (
     <div
       ref={panelRef}
@@ -191,11 +194,7 @@ export default function ChatPanel({
       // Glass floats the composer over the conversation's tail only when a
       // conversation sits behind it; the welcome state and the other views
       // keep the composer in its own slot.
-      data-composer-float={
-        chatView === "chat" && activeRun && !collapsed && !isUnstartedChatRun(activeRun)
-          ? "true"
-          : undefined
-      }
+      data-composer-float={conversationShown ? "true" : undefined}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -251,7 +250,13 @@ export default function ChatPanel({
             // alt-screen frame. Stacking with visibility keeps both at
             // full size at all times — this matches Codara's original (pre-
             // 2d63dca) layout that worked cross-platform.
-            <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+            <div
+              // With glass on, the conversation scrolls up under the header
+              // (the scroll edge): see .spark-scroll-under in styles.css. The
+              // board and whiteboard keep their own top edge.
+              className={conversationShown ? "spark-scroll-under" : undefined}
+              style={{ position: "relative", flex: 1, minHeight: 0 }}
+            >
               <div
                 style={{
                   position: "absolute",

@@ -378,6 +378,9 @@ export default function AccountCard({
           <div className="st-acct__id">
             <div className="st-acct__name-line">
               <span className="st-acct__name">{card.label}</span>
+              {/* Every badge rides the name line, so the line under it is
+                  only the email. */}
+              {card.plan ? <span className="st-acct__plan">{card.plan} plan</span> : null}
               {card.builtIn ? (
                 <span className="st-acct-badge">{systemLoginBadge(descriptor)}</span>
               ) : null}
@@ -391,7 +394,6 @@ export default function AccountCard({
               ) : (
                 <span className="st-acct__email is-missing">Email not reported</span>
               )}
-              {card.plan ? <span className="st-acct__plan">{card.plan} plan</span> : null}
             </div>
           </div>
           <div className="st-acct__actions">

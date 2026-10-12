@@ -118,6 +118,11 @@ export default function ShortcutsDialog({ onClose }: ShortcutsDialogProps) {
             padding: "14px 18px 18px",
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+            // The sections clip (overflow: hidden), which drops their minimum
+            // height to zero, so auto rows would shrink to fit the scroller
+            // and the cards would overlap instead of scrolling.
+            gridAutoRows: "max-content",
+            alignContent: "start",
             alignItems: "start",
             gap: 12,
           }}

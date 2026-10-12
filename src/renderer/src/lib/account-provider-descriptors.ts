@@ -68,18 +68,10 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     ...CLI_WORDS[id],
   }));
 
-/** What a switch reaches for this provider, said under its name. */
-export function accountProviderSummary(descriptor: AccountProviderDescriptor): string {
-  const running = descriptor.runningSessionsSwitch
-    ? `Running ${descriptor.cliLabel} sessions switch on their next request.`
-    : `Running ${descriptor.cliLabel} sessions keep their account.`;
-  return `The Active account is used by new Codara terminals and new Cora chats. ${running}`;
-}
-
 /**
- * The rule the summary leaves out, shown under "How switching works": the
- * System login is never written to, so it cannot be swapped into a running
- * session.
+ * What a switch reaches for this provider, shown under "How switching works".
+ * The System login is never written to, so it cannot be swapped into a
+ * running session.
  */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
   const { cliLabel } = descriptor;

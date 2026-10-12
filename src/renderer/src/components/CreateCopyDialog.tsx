@@ -89,10 +89,12 @@ export default function CreateCopyDialog({
       role="dialog"
       aria-modal="true"
       aria-label={`Create copy of ${workspace.name}`}
+      // The dim lives on .create-copy-scrim so glass can give it the shared
+      // dialog scrim.
+      className="create-copy-scrim"
       style={{
         position: "absolute",
         inset: 0,
-        background: "color-mix(in oklch, var(--bg) 70%, transparent)",
         display: "grid",
         placeItems: "center",
         zIndex: 1200,

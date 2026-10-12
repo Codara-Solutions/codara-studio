@@ -745,8 +745,8 @@ function WorkspaceRail(props: RailProps) {
   // duration on, and it is dropped in the same commit that applies the new
   // order (see styles.css) so the settle is instant.
   const railListClassName = wsDragId || groupDragId
-    ? "spark-workspace-list spark-workspace-list--reordering"
-    : "spark-workspace-list";
+    ? "spark-workspace-list spark-workspace-list--reordering spark-scroll-under"
+    : "spark-workspace-list spark-scroll-under";
 
   // Shared tail of every rail dragstart. Callers set their id REF
   // synchronously (the first dragover needs it); this captures the item's
@@ -871,7 +871,9 @@ function WorkspaceRail(props: RailProps) {
                   flex: 1,
                   overflow: "auto",
                   minHeight: 0,
-                  padding: "6px 8px 10px",
+                  // --scroll-edge-inset is the header's height when glass
+                  // lets the list scroll up under it, and 0 otherwise.
+                  padding: "calc(6px + var(--scroll-edge-inset, 0px)) 8px 10px",
                   // Positioning context for the reorder ghost, which is placed
                   // in content coordinates and must scroll with the list.
                   position: "relative",

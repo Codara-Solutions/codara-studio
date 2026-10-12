@@ -55,7 +55,6 @@ import { accountCardReady, type AccountCardView } from "./AccountCard";
 import {
   ACCOUNT_PROVIDER_DESCRIPTORS,
   accountProviderDetail,
-  accountProviderSummary,
   type AccountProviderDescriptor,
 } from "../lib/account-provider-descriptors";
 import { stableAccountCardKeys } from "../lib/account-card-keys";
@@ -83,6 +82,7 @@ import {
   SettingsPage,
   SettingsSection,
   ToggleRow,
+  useTopbarInset,
   ValueRow,
 } from "./settings/SettingsPrimitives";
 import {
@@ -191,6 +191,8 @@ export default function SettingsDialog({
   const results = useMemo(() => searchSettings(query), [query]);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const surfaceRef = useRef<HTMLElement>(null);
+  useTopbarInset(surfaceRef);
   // A search result picked on another page: scrolled to once that page has
   // rendered the row carrying this anchor.
   const [pendingAnchor, setPendingAnchor] = useState<string | null>(null);
@@ -305,6 +307,7 @@ export default function SettingsDialog({
     <div className="st-overlay">
       <div className="spark-scrim settings-dialog-scrim" style={{ zIndex: 0 }} />
       <section
+        ref={surfaceRef}
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
@@ -2006,7 +2009,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
       const footer = cards.length === 0 ? null : `${ready} of ${cards.length} ready`;
       return {
         descriptor,
-        summary: accountProviderSummary(descriptor),
         detail: accountProviderDetail(descriptor),
         cards,
         ...(footer ? { footer } : {}),
@@ -2176,9 +2178,6 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
   return (
     <>
       <SettingsSection anchor="Accounts" plain>
-        <p className="st-provider__detail">
-          Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
-        </p>
         <div className="st-acct-toolbar">
           <Disclosure
             open={howSwitchingOpen}
@@ -2195,6 +2194,9 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
           <div className="st-acct-how">
             <p>
               Every account is one sign-in for Cora and its terminal tool. The Active account is used by new Codara terminals and new Cora chats.
+            </p>
+            <p>
+              Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
             </p>
             <dl>
               {providerViews.map((view) => (

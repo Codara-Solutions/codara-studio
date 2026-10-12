@@ -220,15 +220,32 @@
          strips and the status bar are translucent bands over one top-lit
          frame gradient on the app shell, so the frame reads as one sheet of
          glass. Nothing moves behind them, so they never need a backdrop
-         filter and cost nothing to composite. */
-  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(74% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-blur-read: calc(14px * var(--glass-blur-scale, 1));
+         filter and cost nothing to composite. The frame carries a faint
+         wash of the workspace accent, so the bands read as tinted glass
+         rather than a grey bevel.
+       --glass-bar / --glass-blur-bar: the scroll edge. A header over a DOM
+         list (chat, rail, Explorer, the Settings title bar) lets the list
+         scroll up under it and frosts what passes, the way an iOS bar does.
+         Never over a terminal or the editor.
+       --glass-bg-menu / --glass-blur-menu: menus that list rows. Enough
+         frost that the text behind a row turns into color, not words.
+       --glass-scrim: the one dim behind every dialog, per theme. */
+  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(88% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-read: calc(20px * var(--glass-blur-scale, 1));
+  --glass-bar: color-mix(in oklab, var(--panel) min(calc(58% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-bar: calc(20px * var(--glass-blur-scale, 1));
+  --glass-saturate-bar: 1.8;
+  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(44% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-menu: calc(20px * var(--glass-blur-scale, 1));
+  --glass-scrim: oklch(0 0 0 / 0.32);
   --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.075), oklch(1 0 0 / 0.018) 40%, transparent 64%);
   --glass-rim: inset 0 1px 0 oklch(1 0.008 90 / 0.13), inset 0 0 0 1px oklch(0.92 0.02 250 / 0.05), inset 0 -1px 0 oklch(0 0 0 / 0.20);
   --glass-depth: 0 1px 1px oklch(0 0 0 / 0.30), 0 6px 16px -6px oklch(0 0 0 / 0.45);
-  --glass-chrome: color-mix(in oklab, var(--panel) 58%, transparent);
+  --glass-chrome: color-mix(in oklab, var(--panel) 50%, transparent);
   --glass-chrome-edge: color-mix(in oklab, var(--ink) 8%, transparent);
   --glass-frame:
+    radial-gradient(75% 60% at 0% 0%, color-mix(in oklab, var(--accent) 24%, transparent), transparent 72%),
+    radial-gradient(60% 55% at 100% 100%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 70%),
     radial-gradient(120% 70% at 50% -20%, color-mix(in oklab, var(--ink) 10%, transparent), transparent 70%),
     linear-gradient(180deg, color-mix(in oklab, var(--ink) 5%, var(--panel)), var(--bg) 80%);
   /* Hooks for inline-styled controls (rail rows, strip pills) that cannot
@@ -237,8 +254,9 @@
   --capsule-sheen: none;
   --capsule-lift: var(--lift-hi);
   /* The floating composer's tint: a raised glass over the panel, so it reads
-     lighter than what it floats over, like dark glass does. */
-  --glass-bg-float: color-mix(in oklab, var(--panel-2) min(calc(76% * var(--glass-veil-scale, 1)), 98%), transparent);
+     lighter than what it floats over, like dark glass does. Thin enough that
+     the turns passing under it still show as soft color. */
+  --glass-bg-float: color-mix(in oklab, var(--panel-2) min(calc(58% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
@@ -254,16 +272,21 @@
   --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.30), transparent 30%);
   --glass-border: color-mix(in oklab, var(--ink) 12%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
-  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(80% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(90% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bar: color-mix(in oklab, var(--panel) min(calc(64% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-scrim: oklch(1 0 0 / 0.35);
   --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.55), oklch(1 0 0 / 0.14) 40%, transparent 64%);
   --glass-rim: inset 0 1px 0 oklch(1 0 0 / 0.80), inset 0 0 0 1px oklch(1 0 0 / 0.22), inset 0 -1px 0 oklch(0 0 0 / 0.06);
   --glass-depth: 0 1px 1px oklch(0 0 0 / 0.06), 0 6px 16px -6px oklch(0 0 0 / 0.16);
-  --glass-chrome: color-mix(in oklab, var(--panel) 62%, transparent);
+  --glass-chrome: color-mix(in oklab, var(--panel) 54%, transparent);
   --glass-chrome-edge: color-mix(in oklab, var(--ink) 9%, transparent);
   --glass-frame:
+    radial-gradient(75% 60% at 0% 0%, color-mix(in oklab, var(--accent) 18%, transparent), transparent 72%),
+    radial-gradient(60% 55% at 100% 100%, color-mix(in oklab, var(--accent) 11%, transparent), transparent 70%),
     radial-gradient(120% 70% at 50% -20%, oklch(1 0 0 / 0.85), transparent 70%),
     linear-gradient(180deg, var(--bg), var(--panel) 80%);
-  --glass-bg-float: color-mix(in oklab, var(--bg) min(calc(80% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-float: color-mix(in oklab, var(--bg) min(calc(66% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 :root[data-theme="codara-classic"] {
@@ -1216,6 +1239,13 @@ a { color: inherit; }
   color: var(--muted);
 }
 .spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }
+/* A wrapper still holding a filled opacity/transform animation is a backdrop
+   root, so the glass card inside it frosted only the empty wrapper and the
+   terminal behind showed through sharp. These wrappers let the animation go
+   once it ends, so the card samples the real workbench. */
+.spark-fade-in:has(> .spark-overlay-surface, > .worker-session-surface, > .spark-toast) {
+  animation-fill-mode: backwards;
+}
 
 /* Travelling dash on a live run-graph wire — see GraphWires.tsx. Slow and
    glow-free: the dash locates the live path without reading arcade. */
@@ -3936,12 +3966,15 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
        Strong fill — toasts land over busy terminals and must stay readable. */
     --notify-surface: var(--glass-bg-strong);
   }
+  /* Menus and popovers list rows of text over whatever they open on, so they
+     take the menu tier: the lens still bends the rim, and the frost turns the
+     words behind a row into color. */
   html:not([data-glass="off"]) .spark-glass,
   html:not([data-glass="off"]) .spark-menu {
-    background-color: var(--glass-bg);
+    background-color: var(--glass-bg-menu);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
@@ -3990,17 +4023,24 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
-  /* Scrim blur stays light: the dialog's own lens+blur does the frosting, and
-     a heavy scrim would pre-flatten the backdrop so the glass has nothing
-     left to refract. */
-  html:not([data-glass="off"]) .spark-scrim {
-    background: color-mix(in oklab, var(--bg) 32%, transparent);
-    /* Light on purpose, but still the shared material: scaled by the same
-       Appearance blur slider as everything else, so turning glass down turns
-       the scrim down with it rather than leaving one surface pinned at a
-       hardcoded 3px. */
-    -webkit-backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-    backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
+  /* One scrim behind every dialog, per theme (--glass-scrim). The dialog's
+     own glass does the frosting; a heavier scrim pre-flattened the window so
+     the glass had nothing to show, and each dialog dimming its own way made
+     the window look different behind every one. No blur: a full-window
+     backdrop filter re-rasterizes the terminal-sized workbench on every
+     change behind it (fast-overlays.spec.ts holds that line). */
+  html:not([data-glass="off"]) .spark-scrim,
+  html:not([data-glass="off"]) .worker-session-scrim,
+  html:not([data-glass="off"]) .settings-dialog-scrim,
+  html:not([data-glass="off"]) .agent-capabilities-scrim,
+  html:not([data-glass="off"]) .create-copy-scrim {
+    background: var(--glass-scrim);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+  /* Outranks the opaque light rules for the two large dialogs. */
+  :root[data-theme-mode="light"]:not([data-glass="off"]) :is(.settings-dialog-scrim, .agent-capabilities-scrim) {
+    background: var(--glass-scrim);
   }
   /* Settings and the Capability Center keep an opaque reading pane (see the
      Settings block below): both stay open over a live workbench while the
@@ -4011,7 +4051,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
      while the three-channel SVG lens re-rasterizes the whole dialog on top of
      a blurred full-window scrim. That is what made the session list feel
      laggy. Same compromise as the two panels above — one composited blur, no
-     lens, an unfiltered scrim, and `contain: paint` so a row repaint or a
+     lens, and `contain: paint` so a row repaint or a
      list scroll can't invalidate the workbench behind the dialog. */
   html:not([data-glass="off"]) .worker-session-surface {
     -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
@@ -4020,34 +4060,11 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   }
   /* Fast modal glass: keep the translucent fill, sheen, rim and one local
      frost layer on the card, but never run the SVG refraction lens over a
-     large scrolling dialog. Its sibling scrim is deliberately unfiltered so
-     opening a menu does not re-rasterize the terminal-sized workbench. */
+     large scrolling dialog. */
   html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
     -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     contain: paint;
-  }
-  html:not([data-glass="off"]) .spark-scrim.spark-scrim--clear {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background: color-mix(in oklab, var(--bg) 44%, transparent);
-  }
-  html:not([data-glass="off"]) .worker-session-scrim {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background: color-mix(in oklab, var(--bg) 44%, transparent);
-  }
-  /* The two large dialogs dim the workbench instead of veiling it in --bg:
-     a light veil left the terminals behind them readable enough to compete. */
-  html:not([data-glass="off"]) .settings-dialog-scrim,
-  html:not([data-glass="off"]) .agent-capabilities-scrim {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background: rgb(0 0 0 / 0.62);
-  }
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-scrim,
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-scrim {
-    background: rgb(24 22 16 / 0.52);
   }
   /* Menus nested in either opaque face match it rather than frost it: the
      face's `contain: paint` is a backdrop root, so a frosted menu inside it
@@ -4131,6 +4148,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   border: 1px solid var(--rule);
   background: var(--st-surface, var(--panel));
   box-shadow: 0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18);
+}
+.create-copy-scrim {
+  background: color-mix(in oklch, var(--bg) 70%, transparent);
+}
+.spark-quick-open__results {
+  background: var(--bg);
 }
 
 /* ── Liquid glass, everywhere ────────────────────────────────────────────────
@@ -4223,6 +4246,63 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   :root[data-theme-mode="light"]:not([data-glass="off"]) .spark-section-header {
     border-bottom-color: var(--glass-chrome-edge);
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.55);
+  }
+  /* The scroll edge. A header followed by a list marked .spark-scroll-under
+     (the chat, the workspace list, the Explorer) overlaps the list by its
+     own height, and the list starts --scroll-edge-inset lower, so at rest
+     nothing moves; scrolled, the rows pass under a frosted bar instead of
+     ending at a rule. 34px is PANEL_HEADER_H (usePanelLayout.ts). The lists
+     are DOM, never a terminal, so the frost only re-renders while a list
+     scrolls or streams. The frost lives on a pseudo-element: a
+     backdrop-filter on the header itself would become the containing block
+     of the position: fixed menus its actions open and push them off screen. */
+  html:not([data-glass="off"]) .spark-section-header:has(+ .spark-scroll-under) {
+    margin-bottom: -34px;
+    border-bottom-color: var(--glass-chrome-edge);
+    background: none;
+  }
+  html:not([data-glass="off"]) .spark-section-header:has(+ .spark-scroll-under)::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background-color: var(--glass-bar);
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    pointer-events: none;
+  }
+  /* The bar's lower edge dissolves into the list instead of cutting a line
+     of text in half as it passes under. */
+  html:not([data-glass="off"]) .spark-section-header:has(+ .spark-scroll-under)::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    height: 10px;
+    background: linear-gradient(to bottom, color-mix(in oklab, var(--panel) 50%, transparent), transparent);
+    pointer-events: none;
+  }
+  html:not([data-glass="off"]) .spark-section-header:has(+ .spark-scroll-under):hover::before {
+    background-color: color-mix(in oklab, var(--ink) 5%, var(--glass-bar));
+  }
+  /* isolation keeps the list's own z-indexed layers (fades, the jump
+     button, find highlights) under the header, which sits at z-index 1. */
+  html:not([data-glass="off"]) .spark-section-header + .spark-scroll-under {
+    --scroll-edge-inset: 34px;
+    scroll-padding-top: 34px;
+    isolation: isolate;
+  }
+  html:not([data-glass="off"]) .spark-section-header + .spark-scroll-under .cora-conversation-topfade {
+    display: none;
+  }
+  html:not([data-glass="off"]) .spark-section-header + .spark-scroll-under .cora-find-bar {
+    top: calc(10px + var(--scroll-edge-inset));
+  }
+  html:not([data-glass="off"]) .spark-section-header + .spark-scroll-under .cora-timeline-minimap {
+    top: calc(28px + var(--scroll-edge-inset));
+    bottom: calc(28px + var(--cora-composer-overlap, 0px));
   }
 
   /* 2. Capsules. A thin border only where the rim needs a body; the top
@@ -4325,41 +4405,91 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     background-image: none;
   }
   /* Overlay rails in a compact window slide over the workbench, so they are
-     the one place the frame really has content behind it. */
-  html:not([data-glass="off"]) .spark-rail-float > .spark-rail {
-    background-color: var(--glass-bg-read);
+     the one place the frame really has content behind it. As on the scroll
+     edge, the frost sits on a pseudo-element so the rail does not become the
+     containing block of the fixed context menus opened inside it. */
+  html:not([data-glass="off"]) .spark-rail-float > .spark-rail,
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .spark-rail-float > .spark-rail {
+    position: relative;
+    isolation: isolate;
+    background: none;
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo);
+  }
+  html:not([data-glass="off"]) .spark-rail-float > .spark-rail::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background-color: var(--glass-bg-float);
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    box-shadow: var(--glass-rim);
+    -webkit-backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    pointer-events: none;
+  }
+  html:not([data-glass="off"]) .spark-rail-float {
+    box-shadow: var(--glass-shadow) !important;
+  }
+  /* A faint dim over the workbench beside the open overlay rail, so the rail
+     reads as lifted above it. It takes no clicks: the workbench keeps its
+     own click-away handling. */
+  html:not([data-glass="off"]) .spark-rail-float::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 100vw;
+    background: oklch(0 0 0 / 0.18);
+    pointer-events: none;
+  }
+  html:not([data-glass="off"]) .spark-rail-float[data-responsive-panel="left"]::after {
+    left: 100%;
+  }
+  html:not([data-glass="off"]) .spark-rail-float[data-responsive-panel="right"]::after {
+    right: 100%;
+  }
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .spark-rail-float::after {
+    background: oklch(0 0 0 / 0.06);
   }
   /* The composer floats over the conversation's tail, so earlier turns pass
      under frosted glass instead of ending at a hard edge. The overlap is one
      shared length: the conversation's footer and the jump button read it too,
      so the newest row and the button always clear the composer. Its rim
      stays faint, since a bright top edge became the brightest line on the
-     screen the last time the composer was glass. */
+     screen the last time the composer was glass.
+     The fade starts 24px above the composer's top edge (the dock's 8px top
+     padding sits between the overlap and the shell), so a line dissolves
+     before it reaches the glass instead of being cut by it, and it stops at
+     a partial veil so the turns under the composer still show as color. */
   html:not([data-glass="off"]) .cora-chat-panel[data-composer-float="true"] {
-    --cora-composer-overlap: 44px;
+    --cora-composer-overlap: 64px;
   }
   html:not([data-glass="off"]) .cora-chat-panel[data-composer-float="true"] .cora-composer-dock {
     position: relative;
     z-index: 5;
     margin-top: calc(-1 * var(--cora-composer-overlap));
-    background: linear-gradient(to bottom, transparent 0, transparent 55%, color-mix(in oklab, var(--panel) 55%, transparent) 100%);
+    background: none;
   }
   html:not([data-glass="off"]) .cora-chat-panel[data-composer-float="true"] .cora-conversation-fade {
-    height: calc(var(--cora-composer-overlap) + 24px);
-    background: linear-gradient(to bottom, transparent, color-mix(in oklab, var(--panel) 40%, transparent));
+    height: calc(var(--cora-composer-overlap) - 8px + 24px);
+    background: linear-gradient(
+      to bottom,
+      transparent 0,
+      color-mix(in oklab, var(--panel) 45%, transparent) 24px,
+      color-mix(in oklab, var(--panel) 52%, transparent) 100%
+    );
   }
+  /* Off the reading line: beside the text column's right edge, or the pane's
+     right edge when the column fills the pane. */
   html:not([data-glass="off"]) .cora-chat-panel[data-composer-float="true"] .cora-jump-latest {
-    bottom: calc(var(--cora-composer-overlap) + 12px);
+    bottom: calc(var(--cora-composer-overlap) + 10px);
+    left: min(calc(50% + 384px + 14px), calc(100% - 64px));
+    transform: none;
   }
   html:not([data-glass="off"]) .composer-shell.spark-glass--strong {
     background-color: var(--glass-bg-float);
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
     border-color: var(--glass-border);
     box-shadow:
       inset 0 1px 0 oklch(1 0 0 / 0.07),
@@ -4377,8 +4507,12 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
       0 14px 34px -8px oklch(0 0 0 / 0.14);
   }
 
-  /* 4. Reading glass */
+  /* 4. Reading glass. Palettes and pickers that open over the workbench
+     (Quick Open, the run switcher, the new-tab menu) hold a legibility
+     floor: an 88-90% tint, so the terminal behind reads as color under the
+     rows even where the backdrop filter cannot sample its WebGL canvas. */
   html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface,
+  html:not([data-glass="off"]) .spark-tabbar-picker.spark-glass,
   html:not([data-glass="off"]) .cora-board-inspector {
     background-color: var(--glass-bg-read);
     background-image: var(--glass-specular);
@@ -4388,17 +4522,21 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
     contain: paint;
   }
+  html:not([data-glass="off"]) .spark-quick-open__results {
+    background: transparent;
+  }
   /* Settings and the Capability Center: the face is a glass frame (the nav
      column frosts the dimmed workbench) around an opaque reading pane, so
      long descriptions read on a solid tint while the window still feels like
      glass. The face is a backdrop root (contain: paint), which is also what
-     keeps the panes inside it from re-sampling the workbench. */
+     keeps the panes inside it from re-sampling the workbench. The nav tint
+     is thin and saturated so the window's own color comes through it. */
   html:not([data-glass="off"]) .settings-dialog-surface,
   html:not([data-glass="off"]) .agent-capabilities-surface {
-    --st-sidebar: color-mix(in oklab, var(--bg) min(calc(46% * var(--glass-veil-scale, 1)), 98%), transparent);
+    --st-sidebar: color-mix(in oklab, var(--bg) min(calc(35% * var(--glass-veil-scale, 1)), 98%), transparent);
     background: transparent;
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
     border-color: var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
   }
@@ -4413,21 +4551,33 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .agent-capabilities-surface .st-footer {
     background: var(--st-surface);
   }
+  /* The title bar is the dialog's scroll edge: the page scrolls up under it
+     and frosts there. useTopbarInset publishes the bar's height, which the
+     pane takes as its top inset so the page still starts below the bar. The
+     bar's blur samples only the face's interior (the face is a backdrop
+     root), so it re-renders with the page scroll and never the workbench. */
+  html:not([data-glass="off"]) :is(.settings-dialog-surface, .agent-capabilities-surface) > .st-content {
+    grid-row: 1 / 3;
+    padding-top: calc(10px + var(--st-topbar-h, 0px));
+    scroll-padding-top: var(--st-topbar-h, 0px);
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+  html:not([data-glass="off"]) :is(.settings-dialog-surface, .agent-capabilities-surface) > .st-topbar {
+    position: relative;
+    z-index: 2;
+    align-self: start;
+    background: color-mix(in oklab, var(--st-surface) 60%, transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+    backdrop-filter: blur(var(--glass-blur-bar)) saturate(var(--glass-saturate-bar));
+  }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-surface,
   :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-surface {
-    --st-sidebar: color-mix(in oklab, var(--panel) min(calc(58% * var(--glass-veil-scale, 1)), 98%), transparent);
+    --st-sidebar: color-mix(in oklab, var(--panel) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
   }
-  /* A lighter dim than the opaque face needed: the frame's own frost now
-     keeps the terminals behind it from competing, and a darker scrim left
-     the glass nothing to show. */
-  html:not([data-glass="off"]) .settings-dialog-scrim,
-  html:not([data-glass="off"]) .agent-capabilities-scrim {
-    background: rgb(0 0 0 / 0.46);
-  }
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-scrim,
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-scrim {
-    background: rgb(24 22 16 / 0.30);
+  :root[data-theme-mode="light"]:not([data-glass="off"]) :is(.settings-dialog-surface, .agent-capabilities-surface) > .st-topbar {
+    background: color-mix(in oklab, var(--st-surface) 66%, transparent);
   }
   html:not([data-glass="off"]) .st-pair-modal {
     background-image: var(--glass-specular);
@@ -8974,16 +9124,24 @@ button.st-list__row:hover,
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
-.st-provider__detail {
-  margin: 0 0 6px;
-  color: var(--st-faint);
+/* "Use your Codex login" is an action, so it keeps a button's body even
+   beside the muted count: a soft fill, no border, ink on hover. */
+.st-provider__head .spark-btn.st-btn-quiet {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink-dim);
   font-size: 12px;
-  line-height: 1.5;
+}
+.st-provider__head .spark-btn.st-btn-quiet:hover {
+  background: color-mix(in oklab, var(--ink) 11%, transparent);
+  color: var(--ink);
 }
 /* Each account is a card on one shared edge: the cards span the column, so
    every row's last control still ends on the same line as Add account. The
-   Active card carries the one accent in the list, a hairline and a faint
-   wash, together with the badge where the other cards offer Switch. */
+   Active card is marked twice and no more: a tinted hairline with a faint
+   wash, and the Active pill where the other cards offer Switch. */
 .st-acct-list.st-list {
   gap: 8px;
   border: 0;
@@ -9001,9 +9159,6 @@ button.st-list__row:hover,
 .st-acct.is-active {
   border-color: color-mix(in oklch, var(--accent) 42%, transparent);
   background: color-mix(in oklch, var(--accent) 5%, transparent);
-}
-.st-acct.is-active .st-acct__avatar {
-  box-shadow: 0 0 0 2px var(--st-surface), 0 0 0 3.5px var(--accent);
 }
 .st-acct-list > .st-acct-empty {
   padding: 14px 14px 14px 16px;
@@ -9061,6 +9216,9 @@ button.st-list__row:hover,
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.st-acct__meta:empty {
+  display: none;
 }
 .st-acct__meta {
   display: flex;
@@ -9387,7 +9545,9 @@ button.st-list__row:hover,
   display: block;
   height: 100%;
   border-radius: 99px;
-  background: color-mix(in oklch, var(--accent) 80%, transparent);
+  /* Ordinary use is neutral ink; color is kept for a limit that is near or
+     reached, so the eye only lands on a meter that needs it. */
+  background: color-mix(in oklab, var(--ink) 46%, transparent);
   transition: width 240ms ease;
 }
 .st-meter.is-warn .st-meter__fill { background: var(--warn); }

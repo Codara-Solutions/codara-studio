@@ -10,8 +10,10 @@ import { promisify } from "node:util";
 // liquid glass material can reach (window chrome, rail, tab strip, chat,
 // menus, toasts, the notification center, dialogs, palettes, the board,
 // automations and runs) at two window sizes, in a dark and a light theme,
-// with glass on and off, so the material can be judged on real pixels. It
-// only runs when SHOTS_DIR names where the PNGs go:
+// with glass on and off, so the material can be judged on real pixels. Each
+// on/off pair is shot from the same state by flipping html[data-glass] in
+// place, so the two frames differ only by the material. It only runs when
+// SHOTS_DIR names where the PNGs go:
 //
 //   SHOTS_DIR=/tmp/glass-shots SPARK_ALLOW_MULTI=1 \
 //     npx playwright test tests/e2e/zz-glass-shots.spec.ts
@@ -63,7 +65,7 @@ interface ShotContext {
   app: ElectronApplication;
   page: Page;
   fixture: Fixture;
-  shoot: (name: string) => Promise<void>;
+  shoot: (name: string, options?: { keepPointer?: boolean }) => Promise<void>;
 }
 
 const SURFACES: Surface[] = [
@@ -102,14 +104,28 @@ const SURFACES: Surface[] = [
     run: async ({ page, shoot }) => {
       await showTerminals(page);
       const row = page.getByText("README.md", { exact: true }).first();
+      // A compact window hides the right rail; open it as its overlay.
+      let opened = false;
       if (!(await row.isVisible().catch(() => false))) {
-        await page.getByRole("button", { name: /^Explorer/ }).first().click({ force: true });
+        const explorer = page.getByRole("button", { name: /^Explorer/ }).first();
+        if (await explorer.isVisible().catch(() => false)) {
+          await explorer.click({ force: true });
+        } else {
+          await page.getByTitle("Toggle right sidebar").first().click({ force: true });
+          opened = true;
+        }
       }
       await expect(row).toBeVisible({ timeout: 8_000 });
+      if (opened) await shoot("rail-overlay-right");
       await row.click({ button: "right" });
       await expect(page.locator(".spark-glass").filter({ hasText: "Rename" }).first()).toBeVisible();
-      await shoot("file-context-menu");
+      // Parking the pointer over the workbench closes a menu opened in an
+      // overlay rail, so this shot keeps it where the right click left it.
+      await shoot("file-context-menu", { keepPointer: true });
       await closeAll(page);
+      if (opened && (await page.locator('[data-responsive-panel="right"]').count())) {
+        await page.getByTitle("Toggle right sidebar").first().click({ force: true });
+      }
     },
   },
   {
@@ -125,10 +141,24 @@ const SURFACES: Surface[] = [
       await showChat(page);
       await page.evaluate(() => {
         const scroller = document.querySelector<HTMLElement>('[data-virtuoso-scroller="true"]');
-        if (scroller) scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 90);
+        // Far enough up that the last turns sit under the floating composer.
+        if (scroller) scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 150);
       });
       await page.waitForTimeout(400);
       await shoot("chat-scrolled");
+    },
+  },
+  {
+    name: "chat-minimap-tooltip",
+    run: async ({ page, shoot }) => {
+      await showChat(page);
+      const mark = page.locator(".cora-timeline-minimap__mark").nth(3);
+      if (!(await mark.count())) return;
+      await mark.hover({ force: true });
+      await expect(page.locator(".cora-timeline-minimap__preview").first()).toBeVisible();
+      await page.waitForTimeout(200);
+      await shoot("chat-minimap-tooltip", { keepPointer: true });
+      await page.mouse.move(2, 450);
     },
   },
   {
@@ -158,7 +188,8 @@ const SURFACES: Surface[] = [
     run: async ({ page, shoot }) => {
       await showChat(page);
       await page.evaluate(() => window.dispatchEvent(new CustomEvent("spark:open-cora-board")));
-      await page.waitForTimeout(700);
+      await expect(page.getByText("Redesign the Cora Board kanban view").first()).toBeVisible({ timeout: 10_000 });
+      await page.waitForTimeout(500);
       await shoot("board");
       const chat = page.getByRole("tab", { name: "Chat", exact: true }).first();
       if (await chat.count()) await chat.click({ force: true });
@@ -218,6 +249,8 @@ const SURFACES: Surface[] = [
       await showTerminals(page);
       await page.keyboard.press("Control+p");
       await page.waitForTimeout(500);
+      await page.waitForTimeout(400);
+      await shoot("quick-open-list");
       await page.keyboard.type("read");
       await page.waitForTimeout(500);
       await shoot("quick-open");
@@ -247,6 +280,11 @@ const SURFACES: Surface[] = [
         await appearance.scrollIntoViewIfNeeded();
         const adjust = dialog.getByRole("button", { name: "Adjust" });
         if (await adjust.count()) await adjust.click({ force: true });
+        // The fine-tune rows open under the switch; bring the last one into
+        // view so the shot holds every slider.
+        await dialog.locator('input[type="range"]').last().evaluate((node) => {
+          node.scrollIntoView({ block: "end" });
+        }).catch(() => undefined);
         await page.mouse.move(4, 4);
         await page.waitForTimeout(250);
         await shoot("settings-appearance");
@@ -323,14 +361,13 @@ const SURFACES: Surface[] = [
   {
     name: "whiteboard",
     run: async ({ page, shoot }) => {
-      await showTerminals(page);
-      await page.keyboard.press("Control+Shift+W");
-      await page.waitForTimeout(1_200);
+      await showChat(page);
+      await page.getByRole("tab", { name: "Whiteboard", exact: true }).first().click({ force: true });
+      await expect(page.getByText("Retry worker", { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+      await page.waitForTimeout(600);
       await shoot("whiteboard");
-      await page.keyboard.press("Control+w");
-      await page.waitForTimeout(300);
-      const discard = page.getByRole("button", { name: /^(Don.t save|Discard|Close without saving)/ });
-      if (await discard.count()) await discard.first().click({ force: true });
+      const chat = page.getByRole("tab", { name: "Chat", exact: true }).first();
+      if (await chat.count()) await chat.click({ force: true });
     },
   },
   {
@@ -369,28 +406,29 @@ for (const { mode, theme } of THEMES) {
       for (const size of SIZES) {
         if (ONLY_WIDTH && ONLY_WIDTH !== size.width) continue;
         await resizeWindow(app, page, size.width, size.height);
-        for (const glass of ["on", "off"] as const) {
-          if (ONLY_GLASS && ONLY_GLASS !== glass) continue;
-          await setGlass(page, glass === "on");
-          for (const surface of SURFACES) {
-            if (ONLY && !ONLY.test(surface.name)) continue;
-            const ctx: ShotContext = {
-              app,
-              page,
-              fixture,
-              shoot: async (name) => {
-                await page.mouse.move(2, 450);
+        for (const surface of SURFACES) {
+          if (ONLY && !ONLY.test(surface.name)) continue;
+          const ctx: ShotContext = {
+            app,
+            page,
+            fixture,
+            shoot: async (name, options) => {
+              if (!options?.keepPointer) await page.mouse.move(2, 450);
+              for (const glass of ["on", "off"] as const) {
+                if (ONLY_GLASS && ONLY_GLASS !== glass) continue;
+                await flipGlass(page, glass === "on");
                 await page.screenshot({
                   path: join(SHOTS_DIR, `${mode}-${size.width}x${size.height}-glass-${glass}-${name}.png`),
                 });
-              },
-            };
-            try {
-              await surface.run(ctx);
-            } catch (error) {
-              failures.push(`${mode} ${size.width}x${size.height} glass-${glass} ${surface.name}: ${String(error).split("\n")[0]}`);
-              await closeAll(page).catch(() => undefined);
-            }
+              }
+              await flipGlass(page, true);
+            },
+          };
+          try {
+            await surface.run(ctx);
+          } catch (error) {
+            failures.push(`${mode} ${size.width}x${size.height} ${surface.name}: ${String(error).split("\n")[0]}`);
+            await closeAll(page).catch(() => undefined);
           }
         }
       }
@@ -411,6 +449,17 @@ async function closeAll(page: Page): Promise<void> {
     await page.keyboard.press("Escape");
     await page.waitForTimeout(80);
   }
+}
+
+// Flips the material in place, without a preference write, so nothing else
+// on screen re-renders between the two frames of a pair. Two animation
+// frames let the restyle reach the compositor before the screenshot.
+async function flipGlass(page: Page, on: boolean): Promise<void> {
+  await page.evaluate(async (value) => {
+    document.documentElement.dataset.glass = value ? "on" : "off";
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }, on);
+  await page.waitForTimeout(120);
 }
 
 async function setGlass(page: Page, on: boolean): Promise<void> {
@@ -490,7 +539,13 @@ async function fillTerminal(page: Page): Promise<void> {
     "for i in $(seq 1 80); do echo \"[build] step $i/80 compiling src/modules/feature-$i/index.ts ... ok (${i}2ms)\"; done",
   );
   await page.keyboard.press("Enter");
-  await page.waitForTimeout(1_000);
+  await page.waitForTimeout(800);
+  // A second pane, so glass over the workbench has two live terminals behind it.
+  await page.keyboard.press("Control+d");
+  await page.waitForTimeout(800);
+  await page.keyboard.type("git log --oneline -n 3 && ls -la src | head -n 30");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(800);
 }
 
 async function seedChat(page: Page, cwd: string): Promise<void> {
@@ -531,6 +586,48 @@ async function seedChat(page: Page, cwd: string): Promise<void> {
         "All 48 billing tests pass, including 12 new ones for the dead letter path.",
       ].join("\n"),
     );
+
+    // Content for the board and the whiteboard, so their floating toolbars
+    // and minimaps sit over cards and not over an empty canvas.
+    const now = new Date().toISOString();
+    const board = await spark.board.get(run.id);
+    const card = (id: string, title: string, status: string, order = 1, extra: Record<string, unknown> = {}) => ({
+      id, title, status, order, createdAt: now, updatedAt: now, ...extra,
+    });
+    await spark.board.update({
+      runId: run.id,
+      baseRevision: board.revision,
+      workspaceCwd,
+      cards: [
+        card("c-idea-1", "Replay dead letters from the admin page", "idea"),
+        card("c-idea-2", "Alert when the dead letter table grows", "idea", 2),
+        card("c-queued-1", "Lease deliveries for 30 s", "queued"),
+        card("c-running-1", "Redesign the Cora Board kanban view", "running"),
+        card("c-blocked-1", "Pick the backoff cap", "blocked", 1, {
+          error: "Five attempts or seven? Stripe retries for three days.",
+        }),
+        card("c-review-1", "Jittered exponential backoff", "review"),
+        card("c-done-1", "Per-delivery timeout", "done"),
+        card("c-done-2", "Tests for the dead letter path", "done", 2),
+      ],
+    });
+    await spark.orchestration.updateWhiteboard({
+      runId: run.id,
+      action: "replace",
+      title: "Webhook retry flow",
+      summary: "How a slow Stripe response stops blocking the queue.",
+      nodes: [
+        { id: "stripe", kind: "topic", title: "Stripe webhook", body: "Arrives at /billing/webhook.", x: 60, y: 80 },
+        { id: "queue", kind: "flow", title: "Retry queue", body: "Leases each delivery for 30 s.", x: 380, y: 80 },
+        { id: "worker", kind: "flow", title: "Retry worker", body: "Runs each delivery under its own timeout.", x: 700, y: 80 },
+        { id: "dead", kind: "flow", title: "Dead letters", body: "Last error and body, replayable.", x: 380, y: 320 },
+      ],
+      edges: [
+        { id: "e1", from: "stripe", to: "queue", label: "enqueue", tone: "accent" },
+        { id: "e2", from: "queue", to: "worker", label: "lease" },
+        { id: "e3", from: "worker", to: "dead", label: "after 5 attempts" },
+      ],
+    });
   }, cwd);
 }
 
@@ -890,6 +987,10 @@ async function prepareFixture(theme: string): Promise<Fixture> {
     await writeFile(join(cwd, "README.md"), `# ${ws.name}\n`, "utf8");
     await writeFile(join(cwd, "package.json"), `{"name":"${ws.name}"}\n`, "utf8");
     await writeFile(join(cwd, "src", "index.ts"), "export {};\n", "utf8");
+    // Enough files that Quick Open shows a long list.
+    for (const name of ["billing", "webhooks", "retry-queue", "dead-letters", "stripe-client", "admin", "auth", "config", "logger", "metrics", "db", "server"]) {
+      await writeFile(join(cwd, "src", `${name}.ts`), "export {};\n", "utf8");
+    }
     workspaces.push({ ...ws, cwd, workers: [] });
   }
   const workspaceDir = workspaces[0].cwd;

@@ -47,6 +47,7 @@ import {
   type StatusMessage,
 } from "./capabilities/model";
 import { CloseButton } from "./capabilities/controls";
+import { useTopbarInset } from "./settings/SettingsPrimitives";
 import McpSection, { type ProbeState, type RemoveScope, type SyncState } from "./capabilities/McpSection";
 import McpServerForm from "./capabilities/McpServerForm";
 import SkillsSection from "./capabilities/SkillsSection";
@@ -158,6 +159,8 @@ export default function AgentCapabilitiesDialog({
   // As in Settings, the title bar grows a hairline only once the page
   // scrolls under it, and every page opens at its top.
   const contentRef = useRef<HTMLElement | null>(null);
+  const surfaceRef = useRef<HTMLElement | null>(null);
+  useTopbarInset(surfaceRef);
   const [scrolled, setScrolled] = useState(false);
   const [assets, setAssets] = useState<AgentAssetInventory | null>(null);
   const [assetsError, setAssetsError] = useState<string | null>(null);
@@ -1075,6 +1078,7 @@ export default function AgentCapabilitiesDialog({
           descriptions, which glass made fight the workbench behind it. */}
       <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
       <section
+        ref={surfaceRef}
         role="dialog"
         aria-modal="true"
         aria-label="Capability Center"

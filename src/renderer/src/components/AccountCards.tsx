@@ -22,8 +22,6 @@ import { RuntimeMark } from "./BrandMarks";
  */
 export interface AccountProviderView {
   descriptor: AccountProviderDescriptor;
-  /** One line under the provider name: what a switch moves. */
-  summary: string;
   /** The full switching rules, shown under "How switching works". */
   detail: string;
   cards: AccountCardView[];
@@ -314,7 +312,6 @@ function AccountProviderGroup({
           {view.footer ? <span className="st-provider__count">{view.footer}</span> : null}
         </span>
       </div>
-      <p className="st-provider__detail">{view.summary}</p>
 
       {view.systemOffer ? (
         <div className="st-acct-system-line" role="group" aria-label={`${descriptor.cliLabel} login on this computer`}>

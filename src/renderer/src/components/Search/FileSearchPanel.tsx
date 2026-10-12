@@ -399,10 +399,14 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
         </header>
 
         <div
+          className="spark-quick-open__results"
           style={{
-            height: "min(520px, calc(100vh - 170px))",
-            minHeight: 180,
-            background: "var(--bg)",
+            // Sized to the results, like Spotlight: a short list stays a short
+            // card instead of a tall panel with one row at the top.
+            height:
+              rows.length > 0 && cwd && !loading && !error
+                ? `min(${rows.length * RESULT_ROW_HEIGHT + 8}px, 520px, calc(100vh - 170px))`
+                : 150,
           }}
         >
           {error ? (
@@ -421,6 +425,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
             <Virtuoso
               ref={virtuosoRef}
               style={{ height: "100%", width: "100%" }}
+              fixedItemHeight={RESULT_ROW_HEIGHT}
               totalCount={rows.length}
               overscan={400}
               itemContent={(index) => {
@@ -469,6 +474,8 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   );
 }
 
+const RESULT_ROW_HEIGHT = 28;
+
 function FileResultRow({
   row,
   active,
@@ -492,8 +499,9 @@ function FileResultRow({
         display: "flex",
         alignItems: "center",
         gap: 8,
-        padding: "5px 14px 5px 11px",
-        minHeight: 28,
+        padding: "0 14px 0 11px",
+        height: RESULT_ROW_HEIGHT,
+        boxSizing: "border-box",
         borderLeft: active
           ? "3px solid var(--accent)"
           : "3px solid transparent",
