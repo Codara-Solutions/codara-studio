@@ -1392,9 +1392,9 @@ async function main() {
     // zeroes.
     "the run context gauge is delegated, omitted rather than zeroed, and optional on the contract",
     productionSource.includes(
-      'import { remoteCoraRunContext } from "./cora-run-context";',
+      'import { remoteCoraRunContext, type RemoteCoraRunContextLimits } from "./cora-run-context";',
     ) &&
-      productionSource.includes("const context = remoteCoraRunContext(run);") &&
+      productionSource.includes("const context = remoteCoraRunContext(run, contextLimits);") &&
       productionSource.includes("...(context ? { context } : {})") &&
       rpcSource.includes(
         "context?: { usedTokens: number; budgetTokens: number };",
