@@ -395,6 +395,18 @@ export class PiAccountAuthStore {
       const statuses = await Promise.all(
         snapshot.profiles.map((profile) => inspectProfileStatus(this.rootDir, profile)),
       );
+      // A borrowed grant has no refresh token, so once its access token is
+      // spent the row is not connected for Cora any more and says so; it is
+      // never refreshed from the System login it was copied from.
+      const spentBorrowed = snapshot.profiles.filter((profile) => {
+        if (profile.cora !== "borrowed") return false;
+        const status = statuses.find((entry) => entry.profileId === profile.id);
+        return !status?.connected || (status.expired && !status.canRefresh);
+      });
+      for (const profile of spentBorrowed) {
+        await this.registry.recordCoraHalf(profile.id, "none").catch(() => undefined);
+      }
+      if (spentBorrowed.length > 0) snapshot = await this.registry.snapshot();
       const missingCredentialProfileIds = statuses
         .filter((status) => !status.connected)
         .map((status) => status.profileId);

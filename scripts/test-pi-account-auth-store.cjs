@@ -438,6 +438,40 @@ async function main() {
       !JSON.stringify(withOrphan).includes("anthropic-access-must-never-leak"),
   );
 
+  // A migrated borrowed grant carries no refresh token; once it is spent the
+  // row reads as Cora-not-connected instead of failing every refresh.
+  const borrowedRoot = path.join(TMP, "borrowed");
+  fs.mkdirSync(borrowedRoot, { recursive: true, mode: 0o700 });
+  const borrowedRegistry = new Registry(borrowedRoot);
+  const borrowedStore = new PiAccountAuthStore(borrowedRoot, borrowedRegistry);
+  const borrowedRows = {};
+  for (const [name, expires] of [["spent", Date.now() - 60_000], ["live", Date.now() + 3_600_000]]) {
+    const { profile } = await borrowedRegistry.registerProfile({
+      provider: "anthropic",
+      label: `Borrowed ${name}`,
+      cora: "borrowed",
+    });
+    const paths = piAccountProfilePaths(borrowedRoot, profile.id);
+    fs.mkdirSync(paths.configDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(
+      paths.authFile,
+      JSON.stringify({ anthropic: { type: "oauth", access: `access-${name}`, refresh: "", expires } }),
+      { mode: 0o600 },
+    );
+    borrowedRows[name] = profile.id;
+  }
+  const borrowedInspection = await borrowedStore.inspect();
+  const coraOf = (id) => borrowedInspection.snapshot.profiles.find((profile) => profile.id === id)?.cora;
+  check(
+    "a spent borrowed grant becomes none and a live one stays borrowed",
+    coraOf(borrowedRows.spent) === "none" && coraOf(borrowedRows.live) === "borrowed",
+    JSON.stringify(borrowedInspection.snapshot.profiles),
+  );
+  check(
+    "the none transition is persisted in the registry",
+    (await borrowedRegistry.getProfile(borrowedRows.spent))?.cora === "none",
+  );
+
   const gate = new PiOAuthLoginGate();
   const release = gate.acquire("request-a");
   await expectThrows(

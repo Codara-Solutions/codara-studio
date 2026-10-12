@@ -5,8 +5,9 @@
 // does with accounts, the user's own CLI homes stay exactly as they were.
 // A fake HOME is seeded with ~/.claude, ~/.claude.json, ~/.codex and ~/.grok,
 // and then, with real stores, services, mirror and Pi AuthStorage, Codara
-// runs the v1 migration and the startup pass, adds a managed account for
-// every CLI, switches both ways, plans launches and plain shells, writes the
+// runs the v1 migration and the startup pass, adds the System login as a row,
+// switches to it and removes it, adds a managed account for every CLI,
+// switches both ways, plans launches and plain shells, writes the
 // shell pointer, runs a keeper tick and mirror reconciles, deletes the
 // Active accounts and boots again. Every entry of HOME outside Codara's own
 // directory must be byte-identical with the same mode and mtime, with no
@@ -299,6 +300,21 @@ async function main() {
   assert.deepEqual(await services["openai-codex"].systemOffer(), { email: "11111111@example.com" });
   assert.equal((await piStore.registry.listProfiles()).length, 1, "the offers registered nothing");
   pass("the migration and the startup pass ran");
+
+  // --- The System login: use it in Codara, switch to it, remove it ------------------
+  const codex = services["openai-codex"];
+  const codexSystemRow = await codex.addSystemAccount();
+  assert.equal(codexSystemRow.cli.kind, "system");
+  assert.equal(codexSystemRow.cora, "none", "Use in Codara gives Cora nothing of the System login");
+  assert.equal(await codex.systemOffer(), null, "an added System login is no longer offered");
+  await codex.useAccount(codexSystemRow.id);
+  await codex.useSystemLogin();
+  const removedSystem = await codex.deleteAccount(codexSystemRow.id);
+  assert.equal(removedSystem.deleted, true);
+  assert.equal(await codex.systemOffer(), null, "a removed System row stays dismissed");
+  await services.xai.dismissSystemOffer();
+  assert.equal(await services.xai.systemOffer(), null);
+  pass("the System login was added, made Active, removed and dismissed");
 
   // --- Add a managed account for every CLI --------------------------------------
   const connect = async (provider, label, fingerprint, credential) => {
