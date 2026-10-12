@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join, resolve } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
@@ -133,6 +133,20 @@ export interface PiAccountDismissedSystemOffer {
   identityFingerprint: string;
 }
 
+/**
+ * What a System login with no identity (an API-key Codex login, a Claude
+ * login whose config names no account) is dismissed under. Shaped like a
+ * fingerprint so a registry that holds one still parses in builds that
+ * predate it; no account identity hashes to it.
+ */
+export function unidentifiedSystemOfferFingerprint(
+  provider: PiSubscriptionProvider,
+  login: { apiKey?: boolean },
+): string {
+  const marker = login.apiKey ? "apiKey" : "unidentified";
+  return createHash("sha256").update(`codara:system-offer:${provider}:${marker}`).digest("hex");
+}
+
 export interface PiAccountPendingPurge {
   /** A managed home that a running terminal still held when its account was deleted. */
   path: string;
@@ -209,6 +223,11 @@ export interface DeletePiAccountProfileOptions {
   protectedProfileIds?: ReadonlySet<string> | readonly string[];
   /** Managed homes that could not be purged yet because a terminal holds them. */
   pendingPurge?: readonly PiAccountPendingPurge[];
+  /**
+   * The current System login's offer key, dismissed when the deleted row is
+   * a System row that carries no fingerprint of its own.
+   */
+  systemOfferFingerprint?: string;
 }
 
 export interface DeletePiAccountProfileResult {
@@ -1397,7 +1416,8 @@ export class PiAccountProfileRegistry {
    * Remove a row for good: its tombstone and its removal land in one write,
    * and an Active row leaves no default behind, so the provider falls back
    * to the System login rather than to another account. A System row's
-   * identity is also dismissed, so its offer does not come straight back.
+   * identity is also dismissed, so its offer does not come straight back;
+   * a row with no fingerprint is dismissed under the caller's offer key.
    */
   async deleteProfile(
     profileId: string,
@@ -1406,6 +1426,7 @@ export class PiAccountProfileRegistry {
     assertProfileId(profileId);
     const protectedIds = new Set(options.protectedProfileIds ?? []);
     if (protectedIds.has(profileId)) throw new PiAccountProfileProtectedError(profileId);
+    const systemOfferFingerprint = normalizeIdentityFingerprint(options.systemOfferFingerprint);
 
     return this.mutate(async (snapshot) => {
       const target = snapshot.profiles.find((profile) => profile.id === profileId);
@@ -1414,8 +1435,8 @@ export class PiAccountProfileRegistry {
       snapshot.profiles = snapshot.profiles.filter((profile) => profile.id !== profileId);
       if (snapshot.defaults[target.provider] === profileId) delete snapshot.defaults[target.provider];
       appendTombstone(snapshot, target, now);
-      if (target.cli.kind === "system" && target.identityFingerprint) {
-        const fingerprint = target.identityFingerprint;
+      const fingerprint = target.identityFingerprint ?? systemOfferFingerprint;
+      if (target.cli.kind === "system" && fingerprint) {
         if (
           !snapshot.dismissedSystemOffers.some(
             (entry) => entry.provider === target.provider && entry.identityFingerprint === fingerprint,

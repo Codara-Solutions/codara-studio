@@ -106,6 +106,8 @@ export interface DeletePiAccountCredentialProfileOptions {
   ownershipGuard?: PiAccountProfileOwnershipGuard;
   /** Managed homes a running terminal still holds, purged once it lets go. */
   pendingPurge?: readonly PiAccountPendingPurge[];
+  /** Dismissed for a System row that has no fingerprint of its own. */
+  systemOfferFingerprint?: string;
 }
 
 /** Process-local lease for OAuth implementations that bind fixed callback ports. */
@@ -606,6 +608,7 @@ export class PiAccountAuthStore {
         const result = await this.registry.deleteProfile(profileId, {
           protectedProfileIds: options.ownershipGuard ? [] : undefined,
           ...(options.pendingPurge ? { pendingPurge: options.pendingPurge } : {}),
+          ...(options.systemOfferFingerprint ? { systemOfferFingerprint: options.systemOfferFingerprint } : {}),
         });
         await fs.rm(staged, { recursive: true, force: true });
         return result.snapshot;

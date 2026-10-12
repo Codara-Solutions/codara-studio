@@ -185,7 +185,7 @@ async function main() {
   const logs = [];
   const liveOwners = new Set();
   let defaultsChanged = 0;
-  const makeService = () =>
+  const makeService = (readSystemLogin) =>
     new H.accounts.UnifiedAccountService(
       H.codexAdapter.createCodexAccountAdapter({
         store: codexStore,
@@ -211,6 +211,7 @@ async function main() {
           defaultsChanged += 1;
         },
         log: (message) => logs.push(message),
+        ...(readSystemLogin ? { readSystemLogin } : {}),
       },
     );
   let service = makeService();
@@ -403,6 +404,25 @@ async function main() {
   await service.deleteAccount(system.id);
   assert.equal(await service.systemOffer(), null, "a deleted System row's offer stays hidden");
   pass("deleting the System row only forgets it");
+
+  // --- A System login with no identity can be removed and dismissed ------------
+  let systemLogin = { provider: "openai-codex", home: systemHome, signedIn: true, apiKey: true };
+  service.stop();
+  service = makeService(async () => ({ ...systemLogin }));
+  assert.deepEqual(await service.systemOffer(), { apiKey: true });
+  const apiKeyRow = await service.addSystemAccount();
+  assert.equal(apiKeyRow.identityFingerprint, undefined);
+  await service.deleteAccount(apiKeyRow.id);
+  assert.equal(await service.systemOffer(), null, "a removed API-key System login came straight back");
+  systemLogin = { provider: "openai-codex", home: systemHome, signedIn: true };
+  assert.deepEqual(await service.systemOffer(), {}, "a different unidentified login is offered");
+  await service.dismissSystemOffer();
+  assert.equal(await service.systemOffer(), null, "Dismiss did nothing for a login with no fingerprint");
+  systemLogin = { provider: "openai-codex", home: systemHome, signedIn: true, identityFingerprint: fingerprintOf("acct-44444444-4444-4444-8444-444444444444"), email: "other@example.com" };
+  assert.deepEqual(await service.systemOffer(), { email: "other@example.com" }, "an identified login was hidden by those dismissals");
+  service.stop();
+  service = makeService();
+  pass("a System login with no fingerprint stays hidden once removed or dismissed");
 
   // --- The user's own Codex home -----------------------------------------------
   assert.deepEqual(snapshotTree(systemHome), ownBefore, "~/.codex is byte-for-byte unchanged");

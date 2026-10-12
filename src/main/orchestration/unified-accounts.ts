@@ -28,6 +28,7 @@ import {
 import {
   PiAccountProfileProtectedError,
   SYSTEM_CLI_PROFILE_ID,
+  unidentifiedSystemOfferFingerprint,
   type PiAccountCoraHalf,
   type PiAccountPendingPurge,
   type PiAccountProfile,
@@ -498,9 +499,19 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       if (await this.piStore.registry.isSystemOfferDismissed(this.provider, login.identityFingerprint)) {
         return null;
       }
-    } else if (login.email) {
-      const email = normalizeEmail(login.email);
-      if (rows.some((profile) => normalizeEmail(profile.accountEmail) === email)) return null;
+    } else {
+      if (login.email) {
+        const email = normalizeEmail(login.email);
+        if (rows.some((profile) => normalizeEmail(profile.accountEmail) === email)) return null;
+      }
+      if (
+        await this.piStore.registry.isSystemOfferDismissed(
+          this.provider,
+          unidentifiedSystemOfferFingerprint(this.provider, login),
+        )
+      ) {
+        return null;
+      }
     }
     return {
       ...(login.email ? { email: login.email } : {}),
@@ -511,9 +522,13 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   /** Hide the offer until a different identity signs in to the System login. */
   async dismissSystemOffer(): Promise<void> {
     const login = await this.readSystem();
-    if (!login.identityFingerprint) return;
-    await this.piStore.registry.dismissSystemOffer(this.provider, login.identityFingerprint);
+    if (!login.signedIn) return;
+    await this.piStore.registry.dismissSystemOffer(this.provider, this.systemOfferKey(login));
     this.broadcast();
+  }
+
+  private systemOfferKey(login: SystemLogin): string {
+    return login.identityFingerprint ?? unidentifiedSystemOfferFingerprint(this.provider, login);
   }
 
   /**
@@ -860,6 +875,13 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       const cliProfileId = profile.cli.kind === "managed" ? profile.cli.profileId : null;
       const held = cliProfileId !== null && this.homeHeld(cliProfileId);
       const guard = options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {};
+      // Removing the System login stops its offer too; a row recorded before
+      // Codara kept fingerprints is dismissed under the login as it reads now.
+      const systemLogin =
+        profile.cli.kind === "system" && !profile.identityFingerprint
+          ? await this.readSystem().catch(() => null)
+          : null;
+      const offer = systemLogin?.signedIn ? { systemOfferFingerprint: this.systemOfferKey(systemLogin) } : {};
       let purgePending = held;
       this.deleting.add(profile.id);
       try {
@@ -872,6 +894,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         try {
           await this.piStore.deleteProfile(profile.id, {
             ...guard,
+            ...offer,
             ...(held && cliProfileId ? { pendingPurge: [this.pendingPurgeFor(cliProfileId)] } : {}),
           });
         } catch (error) {
