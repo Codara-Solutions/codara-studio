@@ -37,6 +37,7 @@ import {
   waitForWorkersTaskIds,
 } from "./tool-labels";
 import { toolFileDiff, type ToolFileChange } from "./tool-file-diff";
+import { MemoryLearnedChips } from "./MemoryLearnedChip";
 import {
   useRunExecutionRecord,
   type ExecutionBlock,
@@ -1011,6 +1012,7 @@ const MessageTurn = React.memo(function MessageTurn({
               whole story: nothing has happened yet to undo. */}
           {checkpoint && !queued && <UndoControl runId={runId} checkpoint={checkpoint} />}
         </div>
+        {!queued && <MemoryLearnedChips runId={runId} messageId={item.id} text={item.text} />}
       </div>
     );
   }

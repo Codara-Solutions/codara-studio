@@ -8,6 +8,7 @@ import type {
   AppSettings,
   MemoryTierStatus,
 } from "@shared/types";
+import type { MemoryItemSource } from "@shared/memory-items";
 import { isOpenRouterModelId, DEFAULT_CORA_WORKER_MODELS } from "@shared/worker-model-roster";
 
 // Pure state and helpers behind the Capability Center. Nothing here touches the
@@ -553,6 +554,32 @@ export function formatMemoryBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const kb = bytes / 1024;
   return `${kb >= 10 ? Math.round(kb) : Math.round(kb * 10) / 10} KB`;
+}
+
+const MEMORY_SOURCE_LABEL: Record<MemoryItemSource, string> = {
+  user: "you said it",
+  correction: "your correction",
+  reflection: "from a chat review",
+  worker: "from a worker report",
+  ledger: "from verified runs",
+  manual: "added by you",
+};
+
+export function memorySourceLabel(source: MemoryItemSource): string {
+  return MEMORY_SOURCE_LABEL[source] ?? source;
+}
+
+// "today", "3 days ago": a memory's age matters at the scale of days.
+export function formatRelativeAge(iso: string, now = Date.now()): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "";
+  const days = Math.floor((now - at) / (24 * 60 * 60 * 1000));
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return months === 1 ? "a month ago" : `${months} months ago`;
+  return "over a year ago";
 }
 
 // Mirrors openRouterConfigurationHash in src/main/openrouter-config.ts, which
