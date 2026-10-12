@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { Checkpoint } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { gitChildEnv } from "../git-env";
 
 // Per-run workspace snapshots stored under refs/spark/runs/{runId}. The
 // snapshot is a low-level commit-tree pointing at a write-tree of the index
@@ -37,7 +38,7 @@ async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promis
       windowsHide: true,
       maxBuffer: MAX_BUFFER,
       timeout: TIMEOUT_MS,
-      env: env ?? { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: env ?? gitChildEnv(),
     },
   );
   return { stdout: stdout.toString(), stderr: stderr.toString() };
@@ -82,11 +83,7 @@ async function snapshotWorktreeTree(
   cwd: string,
   indexFile: string,
 ): Promise<{ tree: string; headSha: string | null }> {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_INDEX_FILE: indexFile,
-  };
+  const env: NodeJS.ProcessEnv = { ...gitChildEnv(), GIT_INDEX_FILE: indexFile };
   const headSha = await refSha(cwd, "HEAD");
   await seedTempIndex(cwd, indexFile, env, headSha);
   // -A picks up modifications, additions, and deletions, all relative to

@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
+import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
 
@@ -335,7 +336,7 @@ function gitApplyStdin(cwd: string, args: string[], patch: string): Promise<GitO
   return new Promise((resolve) => {
     const child = spawn("git", ["-C", cwd, "-c", "credential.interactive=false", ...args], {
       windowsHide: true,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: gitChildEnv(),
     });
     let stderr = "";
     child.stderr.on("data", (d) => {

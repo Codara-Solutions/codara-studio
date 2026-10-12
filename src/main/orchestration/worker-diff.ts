@@ -7,6 +7,7 @@ import { copyFile, cp, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { WorkerDiffFile, WorkerDiffSummary } from "@shared/types";
+import { gitChildEnv } from "../git-env";
 import { runGit } from "../git-exec";
 import { isRemotePath } from "@shared/remote";
 
@@ -204,7 +205,7 @@ function runNoIndexNumstat(beforeDir: string, afterDir: string): Promise<string 
     execFile(
       "git",
       ["diff", "--no-index", "--numstat", "--no-renames", "--", beforeDir, afterDir],
-      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
+      { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, env: gitChildEnv() },
       (error, stdout) => {
         const exitCode = typeof error?.code === "number" ? error.code : 0;
         // `git diff --no-index` uses 1 to mean "differences found".

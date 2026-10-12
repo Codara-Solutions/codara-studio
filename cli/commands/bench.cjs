@@ -42,6 +42,9 @@ const PROMPT_SURFACES = [
   "src/main/orchestration/worker-prompt.ts",
 ];
 const ROOT = path.join(__dirname, "..", "..");
+// The status reads below run beside the user's or the agent's own git work;
+// they must not take the index lock that work needs.
+const GIT_READ_ENV = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
 const DEFAULT_CONTROL_MODEL = "gpt-5.6-sol";
 const DEFAULT_CONTROL_EFFORT = "high";
 
@@ -53,7 +56,8 @@ function sourceHash(files) {
 
 function commandOutput(command, args, cwd = ROOT) {
   try {
-    return execFileSync(command, args, { cwd, encoding: "utf8" }).trim();
+    const env = command === "git" ? GIT_READ_ENV : process.env;
+    return execFileSync(command, args, { cwd, encoding: "utf8", env }).trim();
   } catch {
     return null;
   }
@@ -130,7 +134,7 @@ function probeGreen(dir, task, stageIndex = 0) {
   return new Promise((resolve) => {
     execFile(process.execPath, ["--input-type=commonjs", "-e", visibleSource(task, stageIndex)], { cwd: dir, timeout: 10_000 }, (err) => {
       if (err) return resolve(false);
-      execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: 10_000 }, (gitErr, out) => {
+      execFile("git", ["status", "--porcelain"], { cwd: dir, timeout: 10_000, env: GIT_READ_ENV }, (gitErr, out) => {
         const treeChanged = Boolean(gitErr) || String(out).trim().length > 0;
         if (!treeChanged) return resolve(false);
         try {
