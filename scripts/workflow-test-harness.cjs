@@ -36,8 +36,20 @@ function tempDir() {
   return tmpRoot;
 }
 
+// Bundles live under node_modules/.cache so an external such as `electron`
+// still resolves from the repository when a bundle requires it.
+let bundleRoot = null;
+function bundleDir() {
+  if (!bundleRoot) {
+    const cache = path.join(ROOT, "node_modules", ".cache");
+    fs.mkdirSync(cache, { recursive: true });
+    bundleRoot = fs.mkdtempSync(path.join(cache, "codara-workflow-test-"));
+  }
+  return bundleRoot;
+}
+
 async function bundleModule(entry, options = {}) {
-  const outfile = path.join(tempDir(), `${path.basename(entry, ".ts")}-${Math.random().toString(36).slice(2)}.cjs`);
+  const outfile = path.join(bundleDir(), `${path.basename(entry, ".ts")}-${Math.random().toString(36).slice(2)}.cjs`);
   await esbuild.build({
     entryPoints: [path.isAbsolute(entry) ? entry : path.join(ORCH_DIR, entry)],
     bundle: true,
@@ -73,7 +85,9 @@ async function loadSandboxWorkerCode() {
 
 function cleanup() {
   if (tmpRoot) fs.rmSync(tmpRoot, { recursive: true, force: true });
+  if (bundleRoot) fs.rmSync(bundleRoot, { recursive: true, force: true });
   tmpRoot = null;
+  bundleRoot = null;
 }
 
 let failures = 0;

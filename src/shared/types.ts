@@ -5,6 +5,7 @@ import type {
   SparkBuiltinRuntime as SparkBuiltinFamily,
   WorkerSessionRuntime as WorkerSessionFamily,
 } from "./agent-families";
+import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
 
 export type ShellId = string;
 
@@ -2987,6 +2988,12 @@ export interface RunState {
    */
   executionMode?: "managed" | "direct";
   /**
+   * Present on a workflow run: a direct run whose agents a workflow script
+   * issues (workflow-driver.ts). The driver owns its lifecycle, so the direct
+   * finalize, the direct conversation and the loom recovery all skip it.
+   */
+  workflow?: WorkflowRunInfo;
+  /**
    * Looms v2.5: the live state of ONE loom PASS over the node graph. Seeded by
    * automation-loop.startIteration from the job's graph (every node "pending"
    * with its topological layer index), advanced layer-by-layer as the autopilot
@@ -3758,6 +3765,8 @@ export interface WorkerTask {
    * a manager waiting on the implementation also waits on its verifier.
    */
   autoVerifierForTaskId?: string;
+  /** The workflow agent() call this task answers, on a workflow run only. */
+  workflowCall?: WorkflowCallMarker;
   /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs
@@ -4251,6 +4260,7 @@ export interface CreateRunInput {
   // the renderer can suppress tabs synchronously from the very first event.
   automationId?: string;
   executionMode?: "managed" | "direct";
+  workflow?: WorkflowRunInfo;
 }
 
 export interface UpdateRunStatusInput {
@@ -4558,6 +4568,7 @@ export interface CreateWorkerTaskInput {
   // Declared-at-spawn verification; thread onto the created WorkerTask.
   verifierBrief?: string;
   autoVerifierForTaskId?: string;
+  workflowCall?: WorkflowCallMarker;
 }
 
 export interface PrepareWorkerTaskInput {

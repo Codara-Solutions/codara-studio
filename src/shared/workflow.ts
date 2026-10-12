@@ -1,7 +1,7 @@
 // Workflows: a deterministic JavaScript script that fans work out to Cora
 // workers through agent(), parallel(), pipeline() and phase(). The script runs
 // in a QuickJS sandbox in main; every agent() call becomes an ordinary worker
-// task and attempt on a run whose executionMode is "workflow". These shapes
+// task and attempt on a direct run that carries a `workflow` block. These shapes
 // are shared by main, the renderer and the CLI, so they must stay free of Node
 // and Electron imports.
 
@@ -100,6 +100,8 @@ export interface WorkflowRunInfo {
   ref: WorkflowRef;
   name: string;
   description?: string;
+  /** The workspace folder agents work in and isolated agents fork from. */
+  cwd: string;
   scriptHash: string;
   argsHash: string;
   caps: WorkflowCaps;
@@ -130,6 +132,8 @@ export interface WorkflowCallMarker {
   heavy?: boolean;
   isolation?: "worktree";
   compactAtTokens?: number;
+  /** The script asked for the full envelope, not the bare result. */
+  envelope?: boolean;
 }
 
 export interface SavedWorkflowSummary {
