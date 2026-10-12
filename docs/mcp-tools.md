@@ -6,8 +6,9 @@ and whiteboard, and, for Cora, run workers and automations. This page explains
 who gets the server, which tool set each kind of agent sees, and what every
 tool does. The tool definitions are the source of truth: browser tools live
 in per-area modules under `resources/codara-studio-mcp/tools/`, the rest in
-`resources/codara-studio-mcp/server.js`. Update this page when a tool is
-added or renamed.
+`resources/codara-studio-mcp/server.js`. The Capability Center reads the
+server's own manifest (`toolManifest()`), so it never lists a stale set.
+Update this page when a tool is added or renamed.
 
 ## Who gets it
 

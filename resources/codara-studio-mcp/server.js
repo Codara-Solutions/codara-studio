@@ -2466,10 +2466,32 @@ function mkErr(code, message) {
 // tools without duplicating schemas or bypassing the authenticated agent socket.
 // Requiring this module is side-effect free; direct execution retains the stdio
 // MCP behavior used by Claude Code and Codex.
+// Every tool this server defines, by family, whatever roster this process
+// picked. The Capability Center reads it instead of keeping its own list.
+function toolManifest() {
+  // A name several rosters share (codara_name_chat, codara_remember) counts
+  // once, in the first family listed here.
+  const claimed = new Set();
+  const names = (tools) => tools.map((tool) => tool.name).filter((name) => !claimed.has(name) && claimed.add(name));
+  return {
+    ...Object.fromEntries(Object.entries(TOOL_REGISTRY.families).map(([family, list]) => [family, names(list.map((name) => ({ name })))])),
+    terminal: names(TERMINAL_TOOLS),
+    notify: names([NOTIFY_TOOL]),
+    worktree: names(WORKTREE_TOOLS),
+    whiteboard: names(WHITEBOARD_TOOLS),
+    board: names(BOARD_TOOLS),
+    memory: names([DIRECT_MEMORY_TOOL, RECALL_TOOL]),
+    orchestration: names(EXECUTE_TOOLS),
+    automation: names(AUTOMATION_TOOLS),
+    workflow: names(WORKFLOW_TOOLS),
+  };
+}
+
 module.exports = {
   listTools() {
     return TOOLS.map((tool) => ({ ...tool }));
   },
+  toolManifest,
   // Only Cora's Pi extension calls in this way; it never sends initialize.
   callToolByName(name, args, signal) {
     return callTool({ name, arguments: args }, signal ? { signal, client: "cora" } : { client: "cora" });
