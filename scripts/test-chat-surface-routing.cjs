@@ -321,12 +321,12 @@ async function main() {
     const anywhereSource = appSource.slice(anywhereStart, anywhereEnd);
     assert.match(
       anywhereSource,
-      /if \(route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      /if \(route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, runId\) : current,\s*\);\s*if \(target\?\.workflow\) requestWorkflowRunFocus\(runId\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
       "same-workspace automation routing must prune the routed run id",
     );
     assert.match(
       anywhereSource,
-      /if \(pending\.route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, pending\.runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      /if \(pending\.route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, pending\.runId\) : current,\s*\);\s*if \([^\n]*\?\.workflow\) \{\s*requestWorkflowRunFocus\(pending\.runId\);\s*\}\s*tabsRef\.current\.openAutomationsTab\(\);/,
       "cross-workspace automation replay must prune the routed run id",
     );
     assert.doesNotMatch(

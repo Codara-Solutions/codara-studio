@@ -165,7 +165,8 @@ function writeRun(run) {
     fs.mkdirSync(path.dirname(attempt.finalReportPath), { recursive: true });
     fs.writeFileSync(
       attempt.finalReportPath,
-      JSON.stringify({ status: "complete", summary: "did the thing", filesChanged: [], verification: [] }),
+      // The ledger skips runs whose workers changed and ran nothing.
+      JSON.stringify({ status: "complete", summary: "did the thing", filesChanged: [{ path: "src/thing.ts", summary: "the thing" }], verification: [] }),
     );
   }
   fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run, null, 2));

@@ -84,7 +84,7 @@ async function main() {
   assert.match(quickOpen, /!keyboardMoveRef\.current/);
 
   const app = source("App.tsx");
-  assert.match(app, /!r\.automationId && !isBoardCardRun\(r\)/);
+  assert.match(app, /!isHubOwnedRun\(r\) && !isBoardCardRun\(r\)/);
   assert.doesNotMatch(app, /!isBoardCardRun\(r\)\) \|\| r\.status === "blocked"/);
   const awayDigest = app.slice(app.indexOf("function AwayDigestCard"));
   assert.match(awayDigest, /className="spark-toast"/);

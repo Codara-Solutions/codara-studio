@@ -81,6 +81,8 @@ for (const name of [
   "WAIT_FOR_WORKERS_MAX_TIMEOUT_MS",
   "AUTOMATION_WAIT_DEFAULT_TIMEOUT_MS",
   "AUTOMATION_WAIT_MAX_TIMEOUT_MS",
+  "WORKFLOW_WAIT_DEFAULT_TIMEOUT_MS",
+  "WORKFLOW_WAIT_MAX_TIMEOUT_MS",
 ]) {
   const value = evaluate(socketSource, "agent-socket.ts", name);
   assert.ok(
@@ -130,7 +132,7 @@ assert.ok(longPollBlock, "server.js must declare LONG_POLL_RPCS");
 const longPollRpcs = [...longPollBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
 assert.deepEqual(
   longPollRpcs,
-  ["automation.wait", "orchestrator.ask_user", "orchestrator.wait_for_workers"],
+  ["automation.wait", "orchestrator.ask_user", "orchestrator.wait_for_workers", "workflow.wait"],
   "LONG_POLL_RPCS must list every blocking orchestration RPC and nothing else",
 );
 for (const rpc of longPollRpcs) {

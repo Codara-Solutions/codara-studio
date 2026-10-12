@@ -341,9 +341,10 @@ async function main() {
   );
   check(
     "run-store renders Cora memory through the hash-gated per-run seam",
-    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,[^}]*query:[^}]*inputMessages[^}]*\}/s.test(
-      runStoreSrc,
-    ),
+    /const memoryQuery = \[prepared\.title, \.\.\.inputMessages\.map/.test(runStoreSrc) &&
+      /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,\s*query:\s*memoryQuery,?\s*\}/s.test(
+        runStoreSrc,
+      ),
     "prepareManagerTurn no longer calls formatCoraMemoryForTurn",
   );
   check(

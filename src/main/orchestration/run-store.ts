@@ -11924,10 +11924,6 @@ function settleResumeInterruptedNotes(draft: RunState): boolean {
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
-  if (run.workflow && workflowRunControls) {
-    await workflowRunControls.resume(run.id);
-    return requireRun(run.id);
-  }
   // A run blocked on an open question resumes by ANSWERING it, never by a plain
   // resume. Plain-resuming it wedged the run: this function drops the blocker
   // and writes "running", but nothing is scheduled to drive it (an auto Pi
@@ -11939,6 +11935,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const blockingQuestion = resumeBlockingRunQuestion(run);
   if (blockingQuestion) {
     throw new Error(`Run is blocked on question ${blockingQuestion.id}. Answer it to resume.`);
+  }
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.resume(run.id);
+    return requireRun(run.id);
   }
   const queuedDirectMessages = queuedManagerInputMessages(run);
   if (
