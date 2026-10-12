@@ -1,11 +1,25 @@
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 const ts = require("typescript");
-const source = fs.readFileSync(require.resolve("../src/main/orchestration/pi-worker-compaction.ts"), "utf8");
-const exportsObject = {};
-vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports: exportsObject });
+// The coordinator imports its TypeScript siblings and nothing else.
+function loadTs(file, cache = new Map()) {
+  if (cache.has(file)) return cache.get(file);
+  const exportsObject = {};
+  cache.set(file, exportsObject);
+  const output = ts.transpileModule(fs.readFileSync(file, "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const localRequire = (id) => {
+    if (!id.startsWith("./")) throw new Error(`unexpected import ${id} from ${file}`);
+    return loadTs(path.join(path.dirname(file), `${id}.ts`), cache);
+  };
+  vm.runInNewContext(output, { exports: exportsObject, require: localRequire, Error });
+  return exportsObject;
+}
+const exportsObject = loadTs(require.resolve("../src/main/orchestration/pi-worker-compaction.ts"));
 const usageExports = {};
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(require.resolve("../src/main/orchestration/pi-worker-usage.ts"), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: usageExports });
 for (const [type, key] of [["message_end", "message"], ["compaction_end", "result"]]) {
@@ -19,16 +33,17 @@ assert.match(runStore, /event.type === "message_end" \|\| event.type === "compac
 const { PiWorkerCompaction } = exportsObject;
 const pause = { type: "entry_appended", entry: { type: "custom", customType: "codara-context-pause", data: { reason: "threshold" } } };
 const settled = { type: "agent_settled" };
-const tick = () => new Promise((resolve) => setImmediate(resolve));
+const tick = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
 function harness() {
   const calls = [], errors = [], prompts = [];
   let contract = "Use only read and write. Exact marker: original-42.";
+  const reports = [];
   let finish, reject, interrupted = false;
   const coordinator = new PiWorkerCompaction({
     request(command) { calls.push(command.type); return new Promise((resolve, fail) => { finish = resolve; reject = fail; }); },
     async prompt(message) { calls.push("prompt"); prompts.push(message); assert.match(message, /do not repeat successful actions/); },
-  }, { taskContract: () => contract, interrupted: () => interrupted, onError: (error) => errors.push(error.message) });
-  return { coordinator, calls, errors, prompts, steer: () => { contract += "\nLater steering: use marker corrected-99."; }, finish: () => finish({}), reject: () => reject(new Error("summary failed")), interrupt: () => { interrupted = true; } };
+  }, { taskContract: () => contract, interrupted: () => interrupted, onError: (error) => errors.push(error.message), onReport: (report) => reports.push(report) });
+  return { coordinator, calls, errors, prompts, reports, steer: () => { contract += "\nLater steering: use marker corrected-99."; }, finish: () => finish({}), reject: () => reject(new Error("summary failed")), interrupt: () => { interrupted = true; } };
 }
 (async () => {
   const h = harness();
@@ -46,14 +61,30 @@ function harness() {
   h.coordinator.consume(pause); h.coordinator.consume(settled); h.finish(); await tick();
   assert.ok(h.prompts[1].includes("Later steering: use marker corrected-99."), "each resume retains the newest steering verbatim");
   assert.deepEqual(h.calls, ["compact", "prompt", "compact", "prompt"], "later context pressure may compact again");
-  for (const method of ["interrupt", "dispose", "reject"]) {
+  for (const method of ["interrupt", "dispose"]) {
     const h = harness(); h.coordinator.consume(pause); h.coordinator.consume(settled);
     if (method === "interrupt") h.interrupt();
     if (method === "dispose") h.coordinator.dispose();
-    if (method === "reject") h.reject(); else h.finish();
+    h.finish();
     await tick();
     assert.deepEqual(h.calls, ["compact"], `${method} must prevent continuation`);
     assert.equal(h.errors.length, method === "dispose" ? 0 : 1);
+  }
+  // A summarizer that keeps failing walks the ladder (model, retry, the
+  // extension's model-free summary) and the worker still resumes: failing the
+  // attempt would throw its work away.
+  {
+    const h = harness(); h.coordinator.consume(pause); h.coordinator.consume(settled);
+    h.reject(); await tick(); h.reject(); await tick(); h.reject(); await tick();
+    assert.deepEqual(h.calls, ["compact", "compact", "compact", "prompt"]);
+    assert.equal(h.errors.length, 0);
+    assert.equal(h.reports[0].outcome, "failed");
+    assert.equal(h.reports[0].kind, "worker");
+    assert.equal(h.reports[0].phase, "mid-turn");
+    const recovered = harness(); recovered.coordinator.consume(pause); recovered.coordinator.consume(settled);
+    recovered.reject(); await tick(); recovered.finish(); await tick();
+    assert.deepEqual(recovered.calls, ["compact", "compact", "prompt"], "the retry rung recovers");
+    assert.equal(recovered.reports[0].mode, "retry");
   }
   const h2 = harness(); h2.interrupt(); h2.coordinator.consume(pause); h2.coordinator.consume(settled); await tick();
   assert.deepEqual(h2.calls, [], "a cancelled task cannot start compaction");

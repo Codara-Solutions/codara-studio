@@ -31,6 +31,7 @@ import {
 import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { PiTurnAccumulator } from "./pi-turn";
 import { PiManagerCompaction } from "./pi-manager-compaction";
+import { describeCompaction, logCompaction } from "./pi-compaction-pipeline";
 import { resetCoraMemoryInjection } from "./cora-memory";
 import {
   buildTalkReplyDecision,
@@ -730,10 +731,26 @@ async function requestPiDecision(
     let settled = armSettlement();
     let compactionFailure: string | undefined;
     const activeSession = session;
-    compaction = new PiManagerCompaction(session.client, {
+    compaction = new PiManagerCompaction({
+      request: (command, options) => activeSession.client.request(command, options),
+      // A mid-turn continuation is a prompt like any other: interruptChat must
+      // see it in flight to know the process cannot be trusted idle.
+      prompt: async (text) => {
+        activeSession.promptsInFlight += 1;
+        try {
+          return await activeSession.client.prompt(text);
+        } finally {
+          activeSession.promptsInFlight -= 1;
+        }
+      },
+    }, {
       interrupted: () => activeSession.interrupted || GENERATIONS.get(runId) !== turnGeneration,
       onSettled: () => settle(),
       onError: (error) => { compactionFailure = error.message; },
+      onReport: (report) => {
+        logCompaction(`run=${runId}`, report);
+        onStream?.({ kind: "system_note", message: describeCompaction(report) });
+      },
     });
     let failRuntime: (failure: PiRpcFailure) => void = () => undefined;
     const runtimeFailed = new Promise<never>((_, reject) => {
@@ -761,7 +778,9 @@ async function requestPiDecision(
         liveness.inFlightTools.delete(event.toolCallId);
       }
       accumulator.consume(event);
-      if (event.type === "agent_settled") agentSettledSeen = true;
+      // A settlement a mid-turn pause produced is not the end of the turn: the
+      // continuation still has to run, and a crash during it must fail the turn.
+      if (event.type === "agent_settled" && !compaction?.holdsTurnOpen()) agentSettledSeen = true;
       // A finished compaction (host-requested or Pi's native one) summarized
       // the turn that carried the memory sections, so the next turn re-sends them.
       if (event.type === "compaction_end" && event.result) resetCoraMemoryInjection(runId);

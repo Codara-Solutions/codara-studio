@@ -11,8 +11,17 @@ const sdkDir = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-cod
 const { AssistantMessageEventStream } = await import(pathToFileURL(join(sdkDir, "../node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js")).href);
 async function loadTs(file, imports = {}) {
   const exports = {};
-  const source = await readFile(new URL(file, import.meta.url), "utf8");
-  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, { exports, process, Error, require: name => {
+  const url = new URL(file, import.meta.url);
+  const source = await readFile(url, "utf8");
+  // TypeScript siblings ("./compaction-ledger") load the same way, up front,
+  // because the transpiled module requires them synchronously.
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const siblings = {};
+  for (const [, name] of output.matchAll(/require\("(\.\/[^"]+)"\)/g)) {
+    if (!(name in siblings)) siblings[name] = await loadTs(new URL(`${name}.ts`, url).href, imports);
+  }
+  vm.runInNewContext(output, { exports, process, Error, console, require: name => {
+    if (name in siblings) return siblings[name];
     if (!(name in imports)) throw new Error(`Unexpected runtime import: ${name}`);
     return imports[name];
   } });
@@ -21,7 +30,11 @@ async function loadTs(file, imports = {}) {
 const { registerContextCompaction } = await loadTs("../resources/pi-cora/compaction.ts");
 const { PiManagerCompaction } = await loadTs("../src/main/orchestration/pi-manager-compaction.ts");
 const shared = await loadTs("../src/shared/context-compaction.ts");
-const { PiTurnAccumulator } = await loadTs("../src/main/orchestration/pi-turn.ts", { "@shared/context-compaction": shared });
+const contextWindow = await loadTs("../src/shared/context-window.ts");
+const { PiTurnAccumulator } = await loadTs("../src/main/orchestration/pi-turn.ts", {
+  "@shared/context-compaction": shared,
+  "@shared/context-window": contextWindow,
+});
 const root = await mkdtemp(join(tmpdir(), "codara-pi-manager-compact-"));
 let session;
 try {

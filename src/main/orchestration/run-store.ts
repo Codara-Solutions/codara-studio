@@ -349,6 +349,7 @@ import {
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { describeCompaction, logCompaction, type CompactionReport } from "./pi-compaction-pipeline";
 import { workerContractSections, workerReportSection } from "./worker-contract-sections";
 import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
@@ -20658,7 +20659,7 @@ async function waitForPiWorkerTurn(
   prompt: string,
   onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
   interrupted: () => boolean = () => false,
-  onCompaction?: (phase: "compacting" | "resuming") => void,
+  onCompaction?: (phase: "compacting" | "resuming", report?: CompactionReport) => void,
   taskContract?: () => string,
   onWrapUp?: () => void,
   scratchpad?: () => Promise<string>,
@@ -20673,7 +20674,11 @@ async function waitForPiWorkerTurn(
         taskContract,
         scratchpad,
         onError: reject,
-        onProgress: onCompaction,
+        onProgress: (phase) => onCompaction?.(phase),
+        onReport: (report) => {
+          logCompaction("worker", report);
+          onCompaction?.("resuming", report);
+        },
       });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
@@ -21267,7 +21272,24 @@ async function runPiWorkerSession({
 
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
     backOutIfStopped();
-    const compactionProgress = (phase: "compacting" | "resuming") => {
+    const compactionProgress = (phase: "compacting" | "resuming", report?: CompactionReport) => {
+      if (report) {
+        const detail = describeCompaction(report);
+        reportActivity(detail);
+        paint(`\r\n  ${paneDim(detail)}\r\n`);
+        void appendEvent({
+          timestamp: new Date().toISOString(),
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: task.stepId,
+          workerTaskId: task.id,
+          attemptId,
+          type: "worker_attempt.context_compacted",
+          message: detail,
+          payload: { ...report },
+        }).catch(() => undefined);
+        return;
+      }
       const detail = phase === "compacting" ? "Compacting context…" : "Resuming after context compaction…";
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
