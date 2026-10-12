@@ -293,8 +293,10 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
   ([mcp-tools.md](./mcp-tools.md)). Each tool is defined in a module under
   `resources/codara-studio-mcp/tools/` (`browser-core.cjs`,
   `browser-input.cjs`, ...), which names the `preview.*` socket method it
-  calls; `tools/index.cjs` collects them for `server.js`. `agent-socket.ts`
-  sends each call to one of two executors:
+  calls; `tools/index.cjs` collects them for `server.js`. On the app side
+  `src/main/preview-tools/` holds one handler table per area, which
+  `agent-socket.ts` consults before its own switch. The handlers use one of
+  two executors:
   - DOM work (navigate, snapshot, click, type, evaluate, screenshot) goes
     through `preview-bridge.ts` to `components/Preview/previewRpc.ts` in the
     renderer, which uses `domActions.ts` and `domSnapshot.ts`.
@@ -433,7 +435,7 @@ Debugging:
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
-| The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | `agent-socket.ts` preview handlers |
+| The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | The socket handlers in `src/main/preview-tools/` (one table per area, merged in `index.ts`); `test-preview-tools-routing` |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |

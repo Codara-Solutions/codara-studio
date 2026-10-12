@@ -7,11 +7,10 @@ import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
-import { scopePreviewWorkspace } from "./preview-workspace";
-import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { requestPreviewOp } from "./preview-bridge";
+import { hasPreviewTool, PreviewToolParamsError, runPreviewTool, type PreviewToolHost } from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
 import { processChain } from "./owned-process-tree";
-import { waitForLoopbackPreviewServer } from "./preview-navigation";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
   cleanTerminalText,
@@ -32,7 +31,6 @@ import {
   quarantineLateAgentTerminal,
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
-import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
@@ -671,6 +669,8 @@ async function dispatch(
         );
       }
     }
+    // The browser and other studio tools, one module per area (preview-tools/).
+    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id);
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
@@ -771,33 +771,6 @@ async function dispatch(
         return await handleAppPrefsGet(params, id);
       case "app.prefs.set":
         return await handleAppPrefsSet(params, id);
-      case "preview.list":
-      case "preview.navigate":
-      case "preview.url":
-      case "preview.snapshot":
-      case "preview.evaluate":
-      case "preview.click":
-      case "preview.type":
-      case "preview.wait_for":
-      case "preview.screenshot":
-      case "preview.resize":
-        // Renderer-side ops: DOM probes, capture, and the webview-element
-        // resize all run in the renderer against the picked preview tab.
-        return await handlePreviewOp(method, params, id);
-      case "preview.scroll":
-      case "preview.hover":
-      case "preview.mouse":
-      case "preview.drag":
-      case "preview.upload":
-      case "preview.console":
-      case "preview.network":
-      case "preview.key":
-      case "preview.press_key":
-        // Computer-use ops: main drives the guest webContents directly with
-        // trusted input (sendInputEvent) + CDP. press_key lives here too so it
-        // uses trusted input when a guest resolves (and falls back to the
-        // renderer probe when it can't).
-        return await handlePreviewInputRpc(method, params, id);
       case "orchestrator.spawn_workers":
         return await handleOrchestratorSpawnWorkers(params, id);
       case "orchestrator.spawn_terminals":
@@ -1569,47 +1542,21 @@ async function scopePreviewToCaller(params: Record<string, unknown>): Promise<vo
   else delete params.callerPaneId;
 }
 
-async function handlePreviewOp(
-  method: string,
-  params: Record<string, unknown>,
-  id: JsonRpcId,
-): Promise<JsonRpcResponse> {
-  const op = method.replace(/^preview\./, "") as PreviewOpName;
-  const previewParams: PreviewOpParams = { ...params };
-  try {
-    await scopePreviewToCaller(previewParams);
-    await scopePreviewWorkspace(previewParams, async (runId) => (await getRunStore()).getRun(runId));
-    if (op === "navigate" && typeof previewParams.url === "string") {
-      const reachable = await waitForLoopbackPreviewServer(previewParams.url);
-      if (!reachable) {
-        throw new Error(
-          `Preview server is not accepting connections at ${previewParams.url}. ` +
-          "Start the server (or keep it running) before navigating the Electron preview.",
-        );
-      }
-    }
-    const result = await requestPreviewOp(op, previewParams);
-    return successResponse(id, result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return errorResponse(id, ERR_INTERNAL, message);
-  }
-}
+const PREVIEW_TOOL_HOST: PreviewToolHost = {
+  scopeToCaller: scopePreviewToCaller,
+  getRun: async (runId) => (await getRunStore()).getRun(runId),
+};
 
-async function handlePreviewInputRpc(
+async function handlePreviewToolRpc(
   method: string,
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
-    await scopePreviewToCaller(params);
-    await scopePreviewWorkspace(params, async (runId) => (await getRunStore()).getRun(runId));
-    const result = await handlePreviewInputOp(op, params);
-    return successResponse(id, result);
+    return successResponse(id, await runPreviewTool(method, params, PREVIEW_TOOL_HOST));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return errorResponse(id, ERR_INTERNAL, message);
+    return errorResponse(id, err instanceof PreviewToolParamsError ? ERR_INVALID_PARAMS : ERR_INTERNAL, message);
   }
 }
 
