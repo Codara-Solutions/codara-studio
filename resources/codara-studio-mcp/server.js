@@ -2313,7 +2313,7 @@ async function callTool(params, ctx = {}) {
   }
   try {
     const result = await postJsonRpc(rpc, args, timeoutMs, ctx.signal);
-    return toToolResult(result);
+    return toToolResult(result, rpc);
   } catch (err) {
     // A long poll whose transport died has NOT told us anything about the
     // workers, so we must not fabricate a `reason:"timeout"` worker list. But
@@ -2403,10 +2403,10 @@ async function callRunBatch(args, ctx = {}) {
       const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS, ctx.signal);
       if (result && result.ok === false) throw new Error(result.error || `${action} failed`);
       entry.ok = true;
-      if (action === "screenshot" && result && typeof result.dataUrl === "string") {
+      if (result && typeof result.dataUrl === "string") {
         const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
         if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
-        entry.result = { ...screenshotMetadata(result), captured: Boolean(m) };
+        entry.result = { ...screenshotMetadata(result, true), captured: Boolean(m) };
       } else {
         entry.result = result;
       }
@@ -2427,13 +2427,23 @@ async function callRunBatch(args, ctx = {}) {
   };
 }
 
-function screenshotMetadata(value) {
-  return { url: value.url ?? null, ...Object.fromEntries(
-    ["tabId", "title", "path", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"].filter(key => value[key] !== undefined).map(key => [key, value[key]]),
-  ) };
+const IMAGE_RESULT_FIELDS = ["tabId", "title", "path", "viewport", "imageSize", "scale", "revision", "run_id", "bounds", "nodeIds", "issues", "detailNeeded", "next"];
+
+// The text that travels with an image result. A browser tool's result keeps
+// every field but the image (a diff's changed regions, an element's box), so
+// a tool module adds fields without an edit here; other results keep the
+// listed ones.
+function screenshotMetadata(value, allFields = false) {
+  const keys = IMAGE_RESULT_FIELDS.filter(key => value[key] !== undefined);
+  if (allFields) {
+    for (const key of Object.keys(value)) {
+      if (key !== "url" && key !== "dataUrl" && !keys.includes(key) && value[key] !== undefined) keys.push(key);
+    }
+  }
+  return { url: value.url ?? null, ...Object.fromEntries(keys.map(key => [key, value[key]])) };
 }
 
-function toToolResult(value) {
+function toToolResult(value, rpc = "") {
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
   if (value && typeof value === "object" && typeof value.dataUrl === "string" && value.dataUrl.startsWith("data:image/")) {
@@ -2442,7 +2452,7 @@ function toToolResult(value) {
       return {
         content: [
           { type: "image", mimeType: m[1], data: m[2] },
-          { type: "text", text: JSON.stringify(screenshotMetadata(value)) },
+          { type: "text", text: JSON.stringify(screenshotMetadata(value, rpc.startsWith("preview."))) },
         ],
       };
     }
@@ -2461,11 +2471,6 @@ function mkErr(code, message) {
   return err;
 }
 
-// Pi has a native extension API but no built-in MCP client. Export the exact
-// same roster and call path so Codara's bundled Pi extension can register these
-// tools without duplicating schemas or bypassing the authenticated agent socket.
-// Requiring this module is side-effect free; direct execution retains the stdio
-// MCP behavior used by Claude Code and Codex.
 // Every tool this server defines, by family, whatever roster this process
 // picked. The Capability Center reads it instead of keeping its own list.
 function toolManifest() {
@@ -2487,6 +2492,11 @@ function toolManifest() {
   };
 }
 
+// Pi has a native extension API but no built-in MCP client. Export the exact
+// same roster and call path so Codara's bundled Pi extension can register these
+// tools without duplicating schemas or bypassing the authenticated agent socket.
+// Requiring this module is side-effect free; direct execution retains the stdio
+// MCP behavior used by Claude Code and Codex.
 module.exports = {
   listTools() {
     return TOOLS.map((tool) => ({ ...tool }));

@@ -994,6 +994,15 @@ function sortedEqual(actual, expected, label) {
     const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
     assert.strictEqual(screenshotBatch.content[0].type, "image");
     assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+    // A browser tool's image result keeps every field but the image, so a
+    // tool module can add one (a diff's regions) without editing this server.
+    mockResult = { ...geometry, dataUrl: "data:image/jpeg;base64,cGl4ZWxz", region: { x: 0, y: 0, width: 600, height: 400 }, changed: [{ x: 1, y: 2 }] };
+    const extended = await directBridge.callToolByName("codara_preview_screenshot", {});
+    assert.strictEqual(extended.content[0].mimeType, "image/jpeg");
+    assert.deepStrictEqual(JSON.parse(extended.content[1].text), { ...geometry, region: mockResult.region, changed: mockResult.changed });
+    const imageStep = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "snapshot" }] });
+    assert.strictEqual(imageStep.content[0].type, "image", "any step's image goes out as image content, never as text");
+    assert.doesNotMatch(imageStep.content[1].text, /cGl4ZWxz/);
 
     mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
     process.env.SPARK_RUN_ID = "run-map";
@@ -1004,6 +1013,11 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(whiteboardImage.content[0].type, "image");
     assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
     assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
+    mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 5, layout: { nodes: ["large"] } };
+    process.env.SPARK_RUN_ID = "run-map";
+    const listedOnly = await directBridge.callToolByName("codara_whiteboard_inspect", { baseRevision: 5 });
+    delete process.env.SPARK_RUN_ID;
+    assert.deepStrictEqual(JSON.parse(listedOnly.content[1].text), { url: null, revision: 5 }, "other image results keep only the listed fields");
 
     mockResult = { ok: false, error: "selector did not become visible" };
     const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });
