@@ -87,6 +87,9 @@ export function createTerminalViewportRecovery(
       if (buffer.viewportY < buffer.baseY) restore();
     } else {
       remember();
+      // Back at the bottom outside a gesture (the user scrolled down, or
+      // xterm scrolled there on a keystroke): follow again.
+      if (timer === null && !suspended && position.atBottom) following = true;
     }
   };
   // Native scrolling suppresses xterm's public onScroll event. Register after
@@ -108,6 +111,14 @@ export function createTerminalViewportRecovery(
       following = false;
       suspended = false;
       remember();
+      // A click or keystroke at the bottom must not stop the follow for the
+      // rest of the turn. Once the native gesture has settled, follow again
+      // only if it left the viewport at the bottom.
+      timer = window.setTimeout(() => {
+        timer = null;
+        remember();
+        following = position.atBottom;
+      }, 250);
     },
     restoreSnapshot(viewportFromBottom: number) {
       if (disposed) return;

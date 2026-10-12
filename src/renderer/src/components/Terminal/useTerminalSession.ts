@@ -340,6 +340,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     fallbackSession: null,
   };
 }
+const VIEWPORT_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
 // In-memory cache of the full xterm buffer captured right before a TerminalPane
 // unmounts. Workspace switches can dispose a pane's xterm while its PTY keeps
 // running in main. Stashing the full buffer here and replaying it on the next
@@ -1553,8 +1554,13 @@ export function useTerminalSession({
       viewportRecoveryRef.current = viewportRecovery;
       const scrollSubscription = term.onScroll(() => viewportRecovery.observe());
       const writeSubscription = term.onWriteParsed(() => viewportRecovery.observe());
-      const onViewportInput = () => viewportRecovery.userInput();
-      const viewportInputEvents = ["wheel", "pointerdown", "touchstart", "keydown", "input"] as const;
+      // Only keys that can scroll the viewport count as a scroll gesture;
+      // typing a prompt does not.
+      const onViewportInput = (event: Event) => {
+        if (event instanceof KeyboardEvent && !VIEWPORT_KEYS.has(event.key)) return;
+        viewportRecovery.userInput();
+      };
+      const viewportInputEvents = ["wheel", "pointerdown", "touchstart", "keydown"] as const;
       for (const event of viewportInputEvents) viewportHost.addEventListener(event, onViewportInput, { capture: true, passive: true });
       viewportRecovery.recover();
       cleanups.push(() => {
