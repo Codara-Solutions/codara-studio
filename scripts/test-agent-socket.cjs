@@ -168,10 +168,36 @@ function parkedManagerTurn(runId, overrides = {}) {
 }
 
 async function main() {
+  // One registered Cora-only Claude account, the default. The retired single
+  // login (pi-agent/auth.json) is archived by the accounts migration and
+  // never becomes an account.
   const piRoot = path.join(HOME, "pi-agent");
-  fs.mkdirSync(piRoot, { recursive: true, mode: 0o700 });
+  const accountId = "44444444-4444-4444-8444-444444444444";
+  const accountDir = path.join(piRoot, "accounts", accountId);
+  fs.mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const createdAt = "2026-10-01T00:00:00.000Z";
   fs.writeFileSync(
-    path.join(piRoot, "auth.json"),
+    path.join(piRoot, "account-profiles.json"),
+    JSON.stringify({
+      version: 2,
+      profiles: [{
+        id: accountId,
+        provider: "anthropic",
+        label: "Socket account",
+        createdAt,
+        updatedAt: createdAt,
+        cli: { kind: "none" },
+        cora: "own",
+      }],
+      defaults: { anthropic: accountId },
+      tombstones: [],
+      dismissedSystemOffers: [],
+      pendingPurge: [],
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(accountDir, "auth.json"),
     JSON.stringify({
       anthropic: {
         type: "oauth",

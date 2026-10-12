@@ -2,6 +2,7 @@ import { realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileAtomic } from "./fs-atomic";
+import type { OutsideWriteCapability } from "./outside-write-guard";
 
 // One write queue per agent CLI config file (~/.claude.json, the Codex and
 // Grok config.toml files, a workspace .mcp.json). agent-sync and mcp-installer
@@ -42,7 +43,11 @@ export function withConfigFileLock<T>(path: string, fn: () => Promise<T>): Promi
  * existing permissions. A file that does not exist yet is created owner-only,
  * because these files carry server credentials.
  */
-export async function writeConfigFileAtomic(path: string, content: string, options?: { mode?: number }): Promise<void> {
+export async function writeConfigFileAtomic(
+  path: string,
+  content: string,
+  options?: { mode?: number; outsideWrite?: OutsideWriteCapability },
+): Promise<void> {
   let target = path;
   let mode = options?.mode ?? 0o600;
   try {
@@ -51,5 +56,8 @@ export async function writeConfigFileAtomic(path: string, content: string, optio
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await writeFileAtomic(target, content, { mode });
+  await writeFileAtomic(target, content, {
+    mode,
+    ...(options?.outsideWrite ? { outsideWrite: options.outsideWrite } : {}),
+  });
 }

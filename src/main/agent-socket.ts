@@ -2029,13 +2029,11 @@ async function handleSubscriptionAccounts(
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   await pruneCliSubscriptionAuthSessions();
-  const [auth, { unifiedAccountsReady }, { unifiedAccountsFor }, { UnifiedAccountSessionsError }] =
-    await Promise.all([
-      import("./orchestration/pi-subscription-auth"),
-      import("./orchestration/unified-account-migration"),
-      import("./orchestration/unified-account-registry"),
-      import("./orchestration/unified-account-errors"),
-    ]);
+  const [auth, { unifiedAccountsReady }, { unifiedAccountsFor }] = await Promise.all([
+    import("./orchestration/pi-subscription-auth"),
+    import("./orchestration/unified-account-migration"),
+    import("./orchestration/unified-account-registry"),
+  ]);
   await unifiedAccountsReady();
 
   if (method === "accounts.login.start") {
@@ -2123,18 +2121,12 @@ async function handleSubscriptionAccounts(
     if (!isPiSubscriptionProvider(provider)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
     }
-    // One switch for both halves. A Codex switch that would close sessions
-    // refuses with their count until the caller repeats it with
-    // closeSessions; the count travels in the error message.
-    try {
-      await unifiedAccountsFor(provider).useAccount(profileId, {
-        closeSessions: params.closeSessions === true,
-      });
-    } catch (error) {
-      if (error instanceof UnifiedAccountSessionsError) {
-        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
-      }
-      throw error;
+    // One switch for both halves; nothing closes. "system" puts new
+    // sessions back on the CLI's own login.
+    if (profileId === "system") {
+      await unifiedAccountsFor(provider).useSystemLogin();
+    } else {
+      await unifiedAccountsFor(provider).useAccount(profileId);
     }
     broadcastNativeCliAccountsChangedFromSocket();
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(provider);
@@ -2153,17 +2145,7 @@ async function handleSubscriptionAccounts(
       (profile) => profile.id === profileId,
     );
     if (!current) return errorResponse(id, ERR_INVALID_PARAMS, "account not found");
-    try {
-      await unifiedAccountsFor(current.provider).deleteAccount(profileId, {
-        closeSessions: params.closeSessions === true,
-        ownershipGuard,
-      });
-    } catch (error) {
-      if (error instanceof UnifiedAccountSessionsError) {
-        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
-      }
-      throw error;
-    }
+    await unifiedAccountsFor(current.provider).deleteAccount(profileId, { ownershipGuard });
     broadcastNativeCliAccountsChangedFromSocket();
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(current.provider);
     return successResponse(id, { removed: profileId, overview });

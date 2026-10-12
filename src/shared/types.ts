@@ -661,6 +661,14 @@ export interface PiSubscriptionConnection {
   error?: string;
 }
 
+/** A signed-in System login no account uses yet, offered as one line. Its
+ * email is display-only, like a connection's below, and no token or path
+ * crosses with it. */
+export interface PiSubscriptionSystemOffer {
+  email?: string;
+  apiKey?: boolean;
+}
+
 /** Sanitized local account row. Opaque ids are safe to persist on runs; no
  * provider token or auth path crosses main-process IPC. The identity-derived
  * values allowed here are accountFingerprint and the account's own email
@@ -695,12 +703,15 @@ export interface PiSubscriptionProfileConnection {
   email?: string;
   /**
    * Opaque id of the CLI half of this account (Claude Code, Codex or Grok):
-   * "personal" for the user's own CLI login (Account 1), a managed profile
-   * id otherwise. Absent when the account has no terminal half yet.
+   * "personal" when its terminals use the CLI's own login on this computer
+   * (the System login), a managed profile id otherwise. Absent when the
+   * account has no terminal half.
    */
   cliProfileId?: string;
-  /** Account 1: the row for the user's own CLI login, never deleted from here. */
+  /** The account's terminals use the System login, which Codara never changes. */
   builtIn?: true;
+  /** What Cora holds for this account (see pi-account-profiles.ts). */
+  coraHalf?: "linked" | "own" | "borrowed" | "none";
   /** Token-blind status of the CLI half; absent when there is none. */
   terminal?: {
     connected: boolean;
@@ -730,17 +741,13 @@ export interface PiSubscriptionRenameAccountInput {
 export interface PiSubscriptionMakeDefaultInput {
   provider: PiSubscriptionProvider;
   profileId: string;
-  /**
-   * Codex keeps one sign-in for every terminal, so switching it closes the
-   * running Codex sessions; the switch refuses with their count until the
-   * caller agrees. Anthropic and Grok switches close nothing.
-   */
+  /** Ignored: no account change closes a terminal any more. */
   closeSessions?: boolean;
 }
 
 export interface PiSubscriptionDeleteAccountInput {
   profileId: string;
-  /** Close the terminals still running on this account before deleting it. */
+  /** Ignored: a deleted account's home waits for its terminals to exit. */
   closeSessions?: boolean;
 }
 
@@ -760,8 +767,10 @@ export interface PiSubscriptionProfileLoginRequest {
 }
 
 export interface PiSubscriptionOverview {
-  /** Current sessions a provider-wide account switch would close. */
+  /** Always absent: no account switch closes sessions any more. */
   switchSessionCounts?: Partial<Record<PiSubscriptionProvider, number>>;
+  /** Per provider, the System login an account could be added for. */
+  systemOffers?: Partial<Record<PiSubscriptionProvider, PiSubscriptionSystemOffer>>;
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
   runtimeError?: string;

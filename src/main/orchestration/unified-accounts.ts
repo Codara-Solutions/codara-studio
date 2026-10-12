@@ -1,12 +1,13 @@
-import { watch, type FSWatcher } from "node:fs";
 import { promises as fs } from "node:fs";
+import { basename } from "node:path";
 import type { PiSubscriptionProvider } from "@shared/types";
 import type {
   AccountIdentity,
   AccountProviderAdapter,
   CliProfileStatus,
-  SwitchContext,
 } from "./account-adapters/account-adapter";
+import { isPathInside } from "../outside-write-guard";
+import { purgeManagedPath } from "./cli-account-homes";
 import {
   credentialMirror,
   readPiSide,
@@ -25,11 +26,14 @@ import {
   type PiAccountProfileOwnershipGuard,
 } from "./pi-account-auth-store";
 import {
-  nextDefaultAfterDeletion,
   PiAccountProfileProtectedError,
+  SYSTEM_CLI_PROFILE_ID,
+  type PiAccountCoraHalf,
+  type PiAccountPendingPurge,
   type PiAccountProfile,
 } from "./pi-account-profiles";
 import { loadPiAuthStorage, type PiAuthStorageLoader } from "./pi-auth-storage";
+import { readSystemLogin, type SystemLogin } from "./system-cli-login";
 import {
   UnifiedAccountNotConnectedError,
   UnifiedAccountSessionsError,
@@ -38,32 +42,32 @@ import {
 export { UnifiedAccountNotConnectedError, UnifiedAccountSessionsError };
 
 /**
- * One account, two halves, for any provider. The Pi registry row is the
- * account; its cliProfileId names the CLI half ("personal" for the user's
- * own login in the CLI's default home, a managed profile otherwise). Which
- * CLI, where its slots are and what a switch has to do first is the
- * adapter's business; everything that touches both halves at once lives
- * here, behind one in-process mutation tail so a switch, a share and a
- * delete can never interleave:
+ * One account, up to two halves, for any provider. The Pi registry row is
+ * the account: its `cli` names where terminals get their login (a managed
+ * profile in Codara's home, the System login, or none) and its `cora` what
+ * Cora holds. Which CLI, where its managed home is and what activating an
+ * account means is the adapter's business; everything that touches both
+ * halves at once lives here, behind one in-process mutation tail so a
+ * switch, a share and a delete can never interleave.
  *
- *  - useAccount writes the Pi default and the CLI default in one step with
- *    rollback, after the adapter's switch side effects (Codex closes its
- *    sessions, once the caller agreed) and before them (Codex activates the
- *    marker).
- *  - deleteAccount refuses first (a delete the user then abandons changes
- *    nothing), hands both sides to Account 1 or the oldest remaining
- *    account, unlinks the halves so no racing reconcile can rebuild one,
- *    removes the Pi half, closes only that account's terminals (after
- *    confirmation), then removes the CLI half.
+ * The list changes only through an explicit add, Use in Codara on the
+ * System login, a delete, or the migration. Nothing here watches the
+ * System login, adopts a login it finds, or writes anything of the user's
+ * own: the System login is used by not setting the CLI's home variable.
+ *
+ *  - useAccount sets the Active row and projects it onto the CLI store's
+ *    default; for Claude it also puts the account's login into the live
+ *    slot, which running Claude sessions pick up on their next request.
+ *  - deleteAccount tombstones and removes the row in one write, drops the
+ *    Active pointer (the System login takes over, no hand-off), removes
+ *    Cora's grant and purges the managed home, or queues the purge while a
+ *    terminal still runs in it.
  *  - shareLogin turns a half into a whole in either direction.
- *  - ensureAccountOne creates or pairs the row for the personal login.
  *
  * No path, token or environment leaves this module through IPC; callers get
  * ids and booleans.
  */
 
-const ACCOUNT_ONE_LABEL = "Account 1";
-const PERSONAL_PROBE_INTERVAL_MS = 60_000;
 const GROW_TIMEOUT_MS = 20_000;
 
 export interface UnifiedTerminalStatus {
@@ -78,8 +82,10 @@ export interface UnifiedAccountView {
   coraProfileId: string;
   cliProfileId: string | null;
   label: string;
-  isAccount1: boolean;
+  /** The row uses the CLI's own login on this computer. */
+  isSystem: boolean;
   isDefault: boolean;
+  coraHalf: PiAccountCoraHalf;
   cora: PiAccountProfileAuthStatus;
   terminal: UnifiedTerminalStatus | null;
 }
@@ -93,32 +99,29 @@ export interface UnifiedTerminalOnlyView {
   terminal: UnifiedTerminalStatus;
 }
 
+/** The one-line offer for a System login no row uses. No secret, no fingerprint. */
+export interface UnifiedSystemOffer {
+  email?: string;
+  apiKey?: boolean;
+}
+
 export type PiSubscriptionShareLoginInput =
   | { coraProfileId: string }
   | { cliProfileId: string };
 
-export interface UseAccountOptions {
-  /** Allow the switch to close running sessions of the CLI (Codex only needs this). */
-  closeSessions?: boolean;
-}
-
 export interface DeleteAccountOptions {
-  closeSessions?: boolean;
   ownershipGuard?: PiAccountProfileOwnershipGuard;
 }
 
 export interface DeleteAccountResult {
   deleted: boolean;
-  closedSessionCount: number;
+  /** The managed home waits for the terminals still running in it. */
+  purgePending: boolean;
 }
 
 export interface UnifiedTerminalSessions {
   liveOwnerIds(): ReadonlySet<string>;
-  liveRuntimeSessionCount?(): Promise<number>;
-  disposeProfileSessions(cliProfileId: string): Promise<{ closedSessionCount: number }>;
 }
-
-export type UnifiedSessionShutdown = () => Promise<{ closedSessionCount: number }>;
 
 export interface UnifiedAccountServiceOptions {
   piStore?: PiAccountAuthStore;
@@ -128,12 +131,9 @@ export interface UnifiedAccountServiceOptions {
   /** Wired by the IPC layer; the service itself never imports Electron. */
   broadcast?: () => void;
   sessions?: UnifiedTerminalSessions;
-  /** Closes every session of the CLI before a switch that needs it (Codex). */
-  sessionShutdown?: UnifiedSessionShutdown;
-  /**
-   * Runs after either default moved (a switch, a hand-off, a repair, Account
-   * 1 taking an empty default): the shell pointer is rewritten from it.
-   */
+  /** Test seam: what the System login is signed in as. */
+  readSystemLogin?: (provider: PiSubscriptionProvider) => Promise<SystemLogin>;
+  /** Runs after the Active account moved: the shell pointer is rewritten from it. */
   defaultsChanged?: () => void | Promise<void>;
   log?: (message: string) => void;
 }
@@ -155,6 +155,10 @@ function terminalStatusFrom(
   };
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function defaultInvalidateCaches(): Promise<void> {
   const [{ invalidatePiSubscriptionUsageCache }, { invalidatePiModelCatalogCache }] =
     await Promise.all([import("./pi-subscription-usage"), import("./pi-model-catalog")]);
@@ -170,19 +174,10 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   private resolvedMirror: CredentialMirror | null = null;
   private mirrorSubscribed = false;
   private tail: Promise<void> = Promise.resolve();
-  private personalWatchers: FSWatcher[] = [];
-  private personalProbe: NodeJS.Timeout | null = null;
-  /**
-   * The personal login that turned out to belong to a row already paired
-   * with a managed profile. The probe keeps watching for a different login
-   * but stops re-deriving this one on every event.
-   */
-  private rejectedPersonalLogin: { access: string; fingerprint: string | null } | null = null;
   /** Rows mid-delete: every reconcile entry point answers null for them. */
   private readonly deleting = new Set<string>();
   private broadcastHook: (() => void) | null;
   private sessionsHook: UnifiedTerminalSessions | null;
-  private sessionShutdownHook: UnifiedSessionShutdown | null;
   private readonly defaultsChangedHook: (() => void | Promise<void>) | null;
 
   constructor(adapter: AccountProviderAdapter<Loc, Raw>, options: UnifiedAccountServiceOptions = {}) {
@@ -191,7 +186,6 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     this.options = options;
     this.broadcastHook = options.broadcast ?? null;
     this.sessionsHook = options.sessions ?? null;
-    this.sessionShutdownHook = options.sessionShutdown ?? null;
     this.defaultsChangedHook = options.defaultsChanged ?? null;
   }
 
@@ -212,8 +206,8 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     return this.adapter.leases;
   }
 
-  private get personalId(): string {
-    return this.adapter.personalId;
+  private get systemId(): string {
+    return this.adapter.systemProfileId;
   }
 
   private get mirror(): CredentialMirror {
@@ -260,19 +254,11 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     this.sessionsHook = sessions;
   }
 
-  setSessionShutdown(hook: UnifiedSessionShutdown | null): void {
-    this.sessionShutdownHook = hook;
-  }
-
   /** Best effort and off the mutation path: a pointer write never fails an account mutation. */
   private defaultsChanged(): void {
     try {
       void Promise.resolve(this.defaultsChangedHook?.()).catch((error: unknown) => {
-        this.log(
-          `[accounts] the active-account pointer was not written: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
+        this.log(`[accounts] the active-account pointer was not written: ${errorText(error)}`);
       });
     } catch {
       // Same rule for a hook that throws synchronously.
@@ -288,16 +274,25 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     return run;
   }
 
-  /** The mirror pair for a linked row; null for an unlinked one. */
+  private readSystem(): Promise<SystemLogin> {
+    return (this.options.readSystemLogin ?? readSystemLogin)(this.provider);
+  }
+
+  /**
+   * The mirror pair for a row whose Cora half shares one grant with a
+   * managed CLI half; null for every other row.
+   */
   pairFromProfile(profile: PiAccountProfile): CredentialPair<Loc, Raw> | null {
-    if (profile.provider !== this.provider || !profile.cliProfileId) return null;
+    if (profile.provider !== this.provider) return null;
+    if (profile.cli.kind !== "managed" || profile.cora !== "linked") return null;
+    const cliProfileId = profile.cli.profileId;
     const { authFile } = piAccountProfilePaths(this.piStore.rootDir, profile.id);
     return {
       provider: this.provider,
       coraProfileId: profile.id,
-      cliProfileId: profile.cliProfileId,
+      cliProfileId,
       authFile,
-      location: this.adapter.locate(profile.cliProfileId),
+      location: this.adapter.locate(cliProfileId),
       adapter: this.adapter,
       ...(profile.identityFingerprint ? { identityFingerprint: profile.identityFingerprint } : {}),
     };
@@ -324,6 +319,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   private async readCliCanonical(cliProfileId: string): Promise<CanonicalCredential | null> {
+    if (!this.adapter.isManagedProfileId(cliProfileId)) return null;
     const side = await this.adapter.readCli(this.adapter.locate(cliProfileId));
     return side.kind === "credential" ? this.codec.canonicalFromCli(side.raw) : null;
   }
@@ -360,6 +356,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   async reconcileCliProfile(cliProfileId: string): Promise<ReconcilePairResult | null> {
+    if (!this.adapter.isManagedProfileId(cliProfileId)) return null;
     const watched = await this.mirror.reconcileCliProfile(this.provider, cliProfileId);
     if (watched) return watched;
     const profile = await this.piStore.registry
@@ -381,9 +378,9 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   /**
-   * Terminals per CLI profile. Where every session runs on the live login,
-   * all of them count for the live profile whichever account they started
-   * on, and none for any other.
+   * Terminals per CLI profile. Where every managed session runs in the
+   * live slot, all managed terminals count for the live profile whichever
+   * account they started on, and none for any other managed profile.
    */
   private async sessionCounter(
     profileIds: readonly string[],
@@ -393,12 +390,18 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     }
     const live = await this.adapter.activeCliProfileId?.().catch(() => undefined);
     const owners = new Set<string>();
-    for (const id of new Set([this.personalId, ...profileIds])) {
+    for (const id of profileIds) {
+      if (!this.adapter.isManagedProfileId(id)) continue;
       for (const owner of this.leases.owners(id)) {
         if (owner.startsWith("terminal:")) owners.add(owner);
       }
     }
-    return (cliProfileId) => (cliProfileId === live ? owners.size : 0);
+    return (cliProfileId) =>
+      cliProfileId === this.systemId
+        ? this.liveSessionCount(cliProfileId)
+        : cliProfileId === live
+          ? owners.size
+          : 0;
   }
 
   /** Terminal status per CLI profile id, from one credential read each. */
@@ -413,9 +416,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       }
     } catch (error) {
       this.log(
-        `[accounts] ${this.adapter.labels.cliLabel} profile inspection failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+        `[accounts] ${this.adapter.labels.cliLabel} profile inspection failed: ${errorText(error)}`,
       );
     }
     return statuses;
@@ -452,8 +453,9 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         coraProfileId: profile.id,
         cliProfileId,
         label: profile.label,
-        isAccount1: cliProfileId === this.personalId,
+        isSystem: profile.cli.kind === "system",
         isDefault: inspection.snapshot.defaults[this.provider] === profile.id,
+        coraHalf: profile.cora,
         cora,
         terminal: connection ? terminalStatusFrom(connection, sessions(connection.id)) : null,
       });
@@ -472,215 +474,94 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     return { accounts, terminalOnly };
   }
 
-  private async watchProfile(profile: PiAccountProfile): Promise<void> {
+  private watchProfile(profile: PiAccountProfile): void {
     const pair = this.pairFromProfile(profile);
     if (pair) this.mirror.watch(pair);
   }
 
-  /**
-   * The row for the user's own personal login. Created (or paired with an
-   * existing unlinked row of the same account) the first time the personal
-   * slot holds a credential; nothing happens while it holds none.
-   */
-  async ensureAccountOne(): Promise<PiAccountProfile | null> {
-    return this.withMutation(() => this.ensureAccountOneLocked());
-  }
+  // The System login.
 
-  private async ensureAccountOneLocked(): Promise<PiAccountProfile | null> {
-    const existing = await this.piStore.registry.accountOneProfile(this.provider);
-    if (existing) {
-      await this.watchProfile(existing);
-      if (existing.identityFingerprint) {
-        this.stopPersonalProbe();
-        return existing;
-      }
-      // Registered while the identity was unreachable (offline first
-      // launch). The fingerprint is what folds a later browser sign-in of
-      // the same account into this row instead of a second one, so keep
-      // trying to learn it until it is known.
-      const backfilled = await this.backfillAccountOneIdentity(existing);
-      if (backfilled.identityFingerprint) this.stopPersonalProbe();
-      else this.startPersonalProbe();
-      return backfilled;
-    }
-    const canonical = await this.readCliCanonical(this.personalId);
-    if (!canonical) {
-      this.startPersonalProbe();
-      return null;
-    }
-    if (this.rejectedPersonalLogin?.access === canonical.access) return null;
-    const identity = await this.personalIdentity(canonical);
-    if (
-      this.rejectedPersonalLogin?.fingerprint &&
-      identity.fingerprint === this.rejectedPersonalLogin.fingerprint
-    ) {
-      this.rejectedPersonalLogin = { access: canonical.access, fingerprint: identity.fingerprint };
-      return null;
-    }
+  /**
+   * The offer line for a signed-in System login whose identity no row has
+   * and the user has not dismissed. Read-only: nothing is registered.
+   */
+  async systemOffer(): Promise<UnifiedSystemOffer | null> {
+    const login = await this.readSystem().catch(() => null);
+    if (!login?.signedIn) return null;
     const snapshot = await this.piStore.registry.snapshot();
-    const unlinked = snapshot.profiles.filter(
-      (profile) => profile.provider === this.provider && !profile.cliProfileId,
-    );
-    const match = findMatchingRow(unlinked, identity);
-    let profile: PiAccountProfile;
-    if (match) {
-      profile = await this.piStore.registry.recordCliProfileId(match.id, this.personalId);
-      if (!match.identityFingerprint && identity.fingerprint) {
-        await this.piStore.registry
-          .recordIdentityFingerprint(match.id, identity.fingerprint)
-          .catch(() => undefined);
-      }
-      this.log(
-        `[accounts] paired ${match.id} with the personal ${this.adapter.labels.cliLabel} login by ${
-          match.identityFingerprint && identity.fingerprint ? "fingerprint" : "email"
-        }`,
-      );
-    } else {
-      const registered = await this.piStore.registry.registerProfile({
-        provider: this.provider,
-        label: ACCOUNT_ONE_LABEL,
-        cliProfileId: this.personalId,
-        ...(identity.fingerprint ? { identityFingerprint: identity.fingerprint } : {}),
-        ...(identity.email ? { accountEmail: identity.email } : {}),
-      });
-      profile = registered.profile;
-      if (profile.cliProfileId !== this.personalId) {
-        // The same account is already a managed profile's row; the personal
-        // login stays a plain terminal login rather than a second row.
-        this.rejectedPersonalLogin = {
-          access: canonical.access,
-          fingerprint: identity.fingerprint ?? null,
-        };
-        this.log(
-          `[accounts] the personal ${this.adapter.labels.cliLabel} login belongs to ${profile.id}, which is already paired with a managed profile`,
-        );
+    const rows = snapshot.profiles.filter((profile) => profile.provider === this.provider);
+    if (rows.some((profile) => profile.cli.kind === "system")) return null;
+    if (login.identityFingerprint) {
+      if (rows.some((profile) => profile.identityFingerprint === login.identityFingerprint)) {
         return null;
       }
-      if (registered.created) {
-        await this.writePiCredential(profile.id, canonical);
-        // A new row takes an empty Cora default. When the CLI already rests
-        // on a managed profile, that default is the user's choice and must
-        // not be pulled to personal by a Cora default nobody chose: the
-        // repair step derives the Cora default from the CLI one instead.
-        const cliDefault = (await this.store.snapshot()).defaultProfileId;
-        const coraDefault = (await this.piStore.registry.snapshot()).defaults[this.provider];
-        if (cliDefault !== this.personalId && coraDefault === profile.id) {
-          await this.piStore.registry.setDefaultProfile(this.provider, null);
-        }
+      if (await this.piStore.registry.isSystemOfferDismissed(this.provider, login.identityFingerprint)) {
+        return null;
       }
+    } else if (login.email) {
+      const email = normalizeEmail(login.email);
+      if (rows.some((profile) => normalizeEmail(profile.accountEmail) === email)) return null;
     }
-    this.rejectedPersonalLogin = null;
-    await this.watchProfile(profile);
-    await this.mirror.reconcileNow(profile.id).catch(() => null);
-    if (profile.identityFingerprint) this.stopPersonalProbe();
-    else this.startPersonalProbe();
-    await this.invalidateCaches().catch(() => undefined);
-    // Registering may have taken an empty Cora default; the CLI default is
-    // repaired by the startup pass, but a shell should follow now.
-    this.defaultsChanged();
+    return {
+      ...(login.email ? { email: login.email } : {}),
+      ...(login.apiKey ? { apiKey: true } : {}),
+    };
+  }
+
+  /** Hide the offer until a different identity signs in to the System login. */
+  async dismissSystemOffer(): Promise<void> {
+    const login = await this.readSystem();
+    if (!login.identityFingerprint) return;
+    await this.piStore.registry.dismissSystemOffer(this.provider, login.identityFingerprint);
     this.broadcast();
-    return profile;
   }
 
   /**
-   * Who the personal slot is signed in as. The token is authoritative: the
-   * provider answers for the credential itself, while the CLI's own config
-   * only records whichever login last ran against the personal home (the
-   * retired selector left it naming a managed account). The file is the
-   * offline fallback, and when both answer differently the token wins.
+   * Use in Codara: a row whose terminals use the System login and whose
+   * Cora half is not connected yet. Nothing of the login is read or copied.
    */
-  private async personalIdentity(canonical: CanonicalCredential): Promise<AccountIdentity> {
-    const personal = this.adapter.locate(this.personalId);
-    const [fromToken, fromFile] = await Promise.all([
-      this.adapter.connectTimeIdentity(canonical).catch((): AccountIdentity => ({})),
-      this.adapter.readCliIdentity(personal).catch((): NativeCliAccountIdentity => ({})),
-    ]);
-    if (!fromToken.fingerprint) {
-      return { ...fromToken, ...fromFile, ...(fromToken.email ? { email: fromToken.email } : {}) };
-    }
-    if (fromFile.fingerprint && fromFile.fingerprint !== fromToken.fingerprint) {
-      this.log(
-        `[accounts] the ${this.adapter.labels.cliLabel} config names a different account than the personal login; the login decides`,
-      );
-      return fromToken;
-    }
-    return { ...fromToken, email: fromToken.email ?? fromFile.email };
+  async addSystemAccount(): Promise<PiAccountProfile> {
+    return this.withMutation(async () => {
+      const login = await this.readSystem();
+      const { cliLabel } = this.adapter.labels;
+      if (!login.signedIn) throw new Error(`${cliLabel} is not signed in on this computer`);
+      const existing = await this.piStore.registry.systemProfile(this.provider);
+      if (existing) return existing;
+      if (login.identityFingerprint) {
+        const same = (await this.piStore.registry.listProfiles(this.provider)).find(
+          (profile) => profile.identityFingerprint === login.identityFingerprint,
+        );
+        if (same) throw new Error(`Already added as ${same.label}`);
+      }
+      const { profile } = await this.piStore.registry.registerProfile({
+        provider: this.provider,
+        label: login.email ?? `${cliLabel} login`,
+        cliProfileId: SYSTEM_CLI_PROFILE_ID,
+        cora: "none",
+        explicitUserAdd: true,
+        ...(login.identityFingerprint ? { identityFingerprint: login.identityFingerprint } : {}),
+        ...(login.email ? { accountEmail: login.email } : {}),
+      });
+      await this.invalidateCaches().catch(() => undefined);
+      this.defaultsChanged();
+      this.broadcast();
+      return profile;
+    });
   }
 
-  private async backfillAccountOneIdentity(existing: PiAccountProfile): Promise<PiAccountProfile> {
-    const canonical = await this.readCliCanonical(this.personalId);
-    if (!canonical) return existing;
-    const identity = await this.personalIdentity(canonical);
-    if (!identity.fingerprint) return existing;
-    let profile = existing;
-    try {
-      profile = await this.piStore.registry.recordIdentityFingerprint(
-        existing.id,
-        identity.fingerprint,
-      );
-      if (identity.email && !profile.accountEmail) {
-        profile = await this.piStore.registry.recordAccountEmail(profile.id, identity.email);
-      }
-    } catch (error) {
-      this.log(
-        `[accounts] could not record the identity of Account 1: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return existing;
-    }
-    this.broadcast();
-    return profile;
-  }
+  // Halves.
 
   /**
-   * While no Account 1 row exists, watch the personal slot for a login to
-   * appear. A slot no watcher sees (the Keychain) is probed slowly instead.
-   */
-  private startPersonalProbe(): void {
-    if (this.personalWatchers.length > 0 || this.personalProbe) return;
-    for (const target of this.adapter.personalProbePaths()) {
-      try {
-        const watcher = watch(target.directory, { persistent: false });
-        watcher.on("change", (_event, filename) => {
-          const name = typeof filename === "string" ? filename : filename?.toString();
-          if (target.file !== undefined && name !== undefined && name !== target.file) return;
-          void this.ensureAccountOne().catch(() => null);
-        });
-        watcher.on("error", () => {
-          watcher.close();
-          this.personalWatchers = this.personalWatchers.filter((entry) => entry !== watcher);
-        });
-        this.personalWatchers.push(watcher);
-      } catch {
-        // No personal home yet; the probe below covers its creation.
-      }
-    }
-    if (this.adapter.pollWhenWatchBlind || this.personalWatchers.length === 0) {
-      this.personalProbe = setInterval(() => {
-        void this.ensureAccountOne().catch(() => null);
-      }, PERSONAL_PROBE_INTERVAL_MS);
-      this.personalProbe.unref?.();
-    }
-  }
-
-  private stopPersonalProbe(): void {
-    for (const watcher of this.personalWatchers) watcher.close();
-    this.personalWatchers = [];
-    if (this.personalProbe) clearInterval(this.personalProbe);
-    this.personalProbe = null;
-  }
-
-  /**
-   * Give a row its CLI half from the credential it already holds. Failure
-   * leaves the row unlinked (the card offers Share) and never leaves a
-   * half-built managed directory behind.
+   * Give a row a managed CLI half from the credential it already holds. A
+   * row on the System login keeps it; failure leaves the row without a CLI
+   * half (the card offers Share) and never leaves a half-built managed
+   * home behind.
    */
   async ensureCliHalf(
     coraProfileId: string,
     canonical: CanonicalCredential,
     identity?: AccountIdentity,
-  ): Promise<string> {
+  ): Promise<string | null> {
     return this.withMutation(() => this.ensureCliHalfLocked(coraProfileId, canonical, identity));
   }
 
@@ -695,11 +576,10 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   ): Promise<{ canonical: CanonicalCredential; record: Raw }> {
     let record = this.codec.cliRecordFromCanonical(canonical, null);
     if (record !== null) return { canonical, record };
-    if (!this.adapter.growCliCredential) {
-      throw new Error(
-        `The Cora credential cannot be shared with ${this.adapter.labels.cliLabel}. Run ${this.adapter.labels.loginHint} in a terminal instead.`,
-      );
-    }
+    const refusal = new Error(
+      `The Cora credential cannot be shared with ${this.adapter.labels.cliLabel}. Run ${this.adapter.labels.loginHint} in a terminal instead.`,
+    );
+    if (!this.adapter.growCliCredential) throw refusal;
     const { authFile } = piAccountProfilePaths(this.piStore.rootDir, coraProfileId);
     const grown = await this.adapter.growCliCredential(
       canonical,
@@ -707,11 +587,7 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       AbortSignal.timeout(GROW_TIMEOUT_MS),
     );
     record = this.codec.cliRecordFromCanonical(grown, null);
-    if (record === null) {
-      throw new Error(
-        `The Cora credential cannot be shared with ${this.adapter.labels.cliLabel}. Run ${this.adapter.labels.loginHint} in a terminal instead.`,
-      );
-    }
+    if (record === null) throw refusal;
     return { canonical: grown, record };
   }
 
@@ -719,194 +595,128 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     coraProfileId: string,
     canonical: CanonicalCredential,
     identity?: AccountIdentity,
-  ): Promise<string> {
+  ): Promise<string | null> {
     const profile = await this.requireProfile(coraProfileId);
-    if (profile.cliProfileId) {
-      await this.watchProfile(profile);
-      await this.mirror.reconcileNow(profile.id).catch(() => null);
-      if (identity && profile.cliProfileId !== this.personalId && this.adapter.afterCliHalfWritten) {
+    if (profile.cli.kind === "system") return null;
+    if (profile.cli.kind === "managed") {
+      const cliProfileId = profile.cli.profileId;
+      if (profile.cora !== "linked") {
+        await this.piStore.registry.recordCoraHalf(profile.id, "linked");
+      }
+      const linked = await this.requireProfile(coraProfileId);
+      this.watchProfile(linked);
+      await this.mirror.reconcileNow(linked.id).catch(() => null);
+      if (identity && this.adapter.afterCliHalfWritten) {
         await this.adapter
-          .afterCliHalfWritten(this.adapter.locate(profile.cliProfileId), identity)
+          .afterCliHalfWritten(this.adapter.locate(cliProfileId), identity)
           .catch(() => undefined);
       }
-      return profile.cliProfileId;
+      return cliProfileId;
     }
     const grown = await this.growable(profile.id, canonical);
     const created = await this.store.createProfile({ label: profile.label });
     const cliProfileId = created.profile.id;
     const location = this.adapter.locate(cliProfileId);
     try {
+      await this.adapter.prepareCliHome?.(cliProfileId);
       await this.adapter.writeCli(location, grown.record);
       if (identity && this.adapter.afterCliHalfWritten) {
         await this.adapter.afterCliHalfWritten(location, identity);
       }
-      await this.piStore.registry.recordCliProfileId(profile.id, cliProfileId);
+      await this.piStore.registry.recordCliProfileId(profile.id, cliProfileId, "linked");
     } catch (error) {
       await this.adapter.clearCli(location).catch(() => undefined);
       await this.store.deleteProfile(cliProfileId).catch(() => undefined);
       throw error;
     }
     const linked = await this.requireProfile(coraProfileId);
-    await this.watchProfile(linked);
+    this.watchProfile(linked);
     const snapshot = await this.piStore.registry.snapshot();
     if (snapshot.defaults[this.provider] === linked.id) {
-      // The row was already the Cora default while it had no half, so the
-      // CLI rested on Account 1. The half created now must take the CLI
-      // default with it, or new terminals keep launching on Account 1 until
-      // the next launch repairs the defaults. The half is whole either way;
-      // a CLI that must close sessions first (Codex) stays where it is
-      // until the user presses Use.
-      try {
-        await this.useAccountLocked(linked.id, {});
-      } catch (error) {
-        if (!(error instanceof UnifiedAccountSessionsError)) throw error;
+      // The row was already Active while it had no CLI half, so terminals
+      // ran on the System login; the half created now takes over.
+      await this.applyActive(linked).catch((error: unknown) => {
         this.log(
-          `[accounts] the ${this.adapter.labels.cliLabel} half of ${linked.id} was written, but ${this.adapter.labels.cliLabel} stays on its previous profile until its sessions close: ${error.message}`,
+          `[accounts] the ${this.adapter.labels.cliLabel} half of ${linked.id} was written but not made active: ${errorText(error)}`,
         );
-      }
+      });
+      this.defaultsChanged();
     }
     return cliProfileId;
   }
 
-  /** Switch Cora and the CLI to one account together. */
-  async useAccount(
-    coraProfileId: string,
-    options: UseAccountOptions = {},
-  ): Promise<{ closedSessionCount: number }> {
-    return this.withMutation(() => this.useAccountLocked(coraProfileId, options));
+  // The Active account.
+
+  /**
+   * What the Active row means for the CLI: the per-CLI store's default
+   * follows it (a managed id, or the System login's id), and a CLI with a
+   * live slot (Claude) receives the account's login.
+   */
+  private async applyActive(profile: PiAccountProfile | null): Promise<void> {
+    const target = profile?.cli.kind === "managed" ? profile.cli.profileId : this.systemId;
+    const previousCliDefault = (await this.store.snapshot()).defaultProfileId;
+    await this.store.setDefaultProfile(target);
+    if (target === this.systemId || !this.adapter.activate) return;
+    try {
+      await this.adapter.activate(target);
+    } catch (error) {
+      await this.store.setDefaultProfile(previousCliDefault).catch(() => undefined);
+      throw error;
+    }
   }
 
-  /** Prefer live CLI processes; hosts without an inspector fall back to leases. */
-  private async liveTerminalSessionCount(): Promise<number> {
-    if (this.sessionsHook?.liveRuntimeSessionCount) {
-      return this.sessionsHook.liveRuntimeSessionCount();
-    }
-    this.sweepLeases();
-    const ids = [this.personalId, ...(await this.store.snapshot()).profiles.map((entry) => entry.id)];
-    const owners = new Set<string>();
-    for (const id of ids) {
-      for (const owner of this.leases.owners(id)) {
-        if (owner.startsWith("terminal:")) owners.add(owner);
+  /** Make one account the Active one for Cora and the CLI together. */
+  async useAccount(coraProfileId: string): Promise<void> {
+    return this.withMutation(() => this.useAccountLocked(coraProfileId));
+  }
+
+  private async useAccountLocked(coraProfileId: string): Promise<void> {
+    const profile = await this.requireProfile(coraProfileId);
+    if (profile.cli.kind === "managed") {
+      await this.reconcileProfile(profile.id);
+      const [pi, cli] = await Promise.all([
+        profile.cora === "linked" ? this.readPiCanonical(profile.id) : Promise.resolve(null),
+        this.readCliCanonical(profile.cli.profileId),
+      ]);
+      if (!pi && !cli) {
+        throw new UnifiedAccountNotConnectedError(profile, this.adapter.labels.cliLabel);
       }
     }
-    return owners.size;
-  }
-
-  private switchContext(closeSessions: boolean): SwitchContext {
-    return {
-      closeSessions,
-      liveSessionCount: () => this.liveTerminalSessionCount(),
-      sessionShutdown: this.sessionShutdownHook,
-    };
-  }
-
-  async switchSessionCount(): Promise<number> {
-    return this.adapter.switchSideEffects?.sessionCount(this.switchContext(false)) ?? 0;
-  }
-
-  private async useAccountLocked(
-    coraProfileId: string,
-    options: UseAccountOptions,
-  ): Promise<{ closedSessionCount: number }> {
-    const profile = await this.requireProfile(coraProfileId);
-    await this.reconcileProfile(profile.id);
-    const [pi, cli] = await Promise.all([
-      this.readPiCanonical(profile.id),
-      profile.cliProfileId ? this.readCliCanonical(profile.cliProfileId) : Promise.resolve(null),
-    ]);
-    if (!pi && !cli) {
-      throw new UnifiedAccountNotConnectedError(profile, this.adapter.labels.cliLabel);
-    }
-    const target = profile.cliProfileId ?? this.personalId;
-    let closedSessionCount = 0;
-    if (this.adapter.switchSideEffects) {
-      closedSessionCount = (
-        await this.adapter.switchSideEffects.beforeSwitch(
-          target,
-          this.switchContext(options.closeSessions === true),
-        )
-      ).closedSessionCount;
-      this.sweepLeases();
-    }
-    const before = await this.piStore.registry.snapshot();
-    const previousDefault = before.defaults[this.provider] ?? null;
-    const previousCliDefault = (await this.store.snapshot()).defaultProfileId;
+    const previousDefault = (await this.piStore.registry.snapshot()).defaults[this.provider] ?? null;
     await this.piStore.registry.setDefaultProfile(this.provider, profile.id);
     try {
-      await this.store.setDefaultProfile(target);
+      await this.applyActive(profile);
     } catch (error) {
       await this.piStore.registry
         .setDefaultProfile(this.provider, previousDefault)
         .catch(() => undefined);
       throw error;
     }
-    if (this.adapter.switchSideEffects) {
-      try {
-        // A row without a CLI half rests the CLI on the personal slot, which
-        // may well be signed out (a user who only ever used Studio-managed
-        // logins has no personal login); the Cora half is what is active.
-        await this.adapter.switchSideEffects.afterDefault(target, {
-          allowSignedOut: !profile.cliProfileId,
-        });
-      } catch (error) {
-        await this.store.setDefaultProfile(previousCliDefault).catch(() => undefined);
-        await this.piStore.registry
-          .setDefaultProfile(this.provider, previousDefault)
-          .catch(() => undefined);
-        throw error;
-      }
-    }
     await this.invalidateCaches().catch(() => undefined);
     this.defaultsChanged();
     this.broadcast();
-    return { closedSessionCount };
   }
 
   /**
-   * Follow a sign-in made in a terminal (`/login`, `codex login`) as
-   * another account Codara knows: that account becomes the Active one, and
-   * its row Cora's default, exactly as if it had been picked here. The
-   * login itself is left alone. Returns the CLI profile now live, or null
-   * when nothing changed.
+   * Use the System login for new sessions: its row when the user added one,
+   * otherwise no Active account at all.
    */
-  async followNativeLogin(): Promise<string | null> {
-    if (!this.adapter.detectNativeLogin) return null;
+  async useSystemLogin(): Promise<void> {
     return this.withMutation(async () => {
-      const change = await this.adapter.detectNativeLogin!().catch(() => null);
-      if (!change || !(await change.adopt().catch(() => false))) return null;
-      await this.store.setDefaultProfile(change.to).catch(() => undefined);
-      const row = await this.piStore.registry
-        .profileForCliProfileId(this.provider, change.to)
-        .catch(() => undefined);
+      const row = await this.piStore.registry.systemProfile(this.provider);
       if (row) {
-        await this.piStore.registry.setDefaultProfile(this.provider, row.id).catch(() => undefined);
+        await this.useAccountLocked(row.id);
+        return;
       }
-      this.log(
-        `[accounts] a ${this.adapter.labels.cliLabel} sign-in in a terminal made ${change.to} the Active account`,
-      );
+      await this.piStore.registry.setDefaultProfile(this.provider, null);
+      await this.applyActive(null);
       await this.invalidateCaches().catch(() => undefined);
       this.defaultsChanged();
       this.broadcast();
-      return change.to;
     });
   }
 
-  /**
-   * Make the CLI's live selection follow its store default (the Codex
-   * marker can lag after a crash or a rolled-back switch). A no-op for CLIs
-   * whose default is the selection.
-   */
-  async alignActive(): Promise<void> {
-    if (!this.adapter.activeCliProfileId || !this.adapter.switchSideEffects) return;
-    const [active, snapshot] = await Promise.all([
-      this.adapter.activeCliProfileId(),
-      this.store.snapshot(),
-    ]);
-    if (active === snapshot.defaultProfileId) return;
-    await this.adapter.switchSideEffects.afterDefault(snapshot.defaultProfileId, {
-      allowSignedOut: true,
-    });
-  }
+  // Share.
 
   async shareLogin(
     input: PiSubscriptionShareLoginInput,
@@ -921,6 +731,11 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     coraProfileId: string,
   ): Promise<{ coraProfileId: string; cliProfileId: string }> {
     const profile = await this.requireProfile(coraProfileId);
+    if (profile.cli.kind === "system") {
+      throw new Error(
+        `${profile.label} uses the ${this.adapter.labels.cliLabel} login on this computer; it has nothing to share.`,
+      );
+    }
     const canonical = await this.readPiCanonical(profile.id);
     if (!canonical) {
       throw new UnifiedAccountNotConnectedError(profile, this.adapter.labels.cliLabel);
@@ -929,12 +744,8 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       .connectTimeIdentity(canonical)
       .catch((): AccountIdentity => ({}));
     const cliProfileId = await this.ensureCliHalfLocked(profile.id, canonical, identity);
-    const snapshot = await this.piStore.registry.snapshot();
-    if (snapshot.defaults[this.provider] === profile.id) {
-      await this.useAccountLocked(profile.id, {});
-    } else {
-      this.broadcast();
-    }
+    if (!cliProfileId) throw new Error("This account has no terminal half to share");
+    this.broadcast();
     return { coraProfileId: profile.id, cliProfileId };
   }
 
@@ -958,21 +769,18 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     const identity = await this.adapter
       .readCliIdentity(this.adapter.locate(cliProfileId))
       .catch((): NativeCliAccountIdentity => ({}));
-    const snapshot = await this.piStore.registry.snapshot();
+    const rows = await this.piStore.registry.listProfiles(this.provider);
     const sameAccount = identity.fingerprint
-      ? snapshot.profiles.find(
-          (entry) =>
-            entry.provider === this.provider && entry.identityFingerprint === identity.fingerprint,
-        )
+      ? rows.find((entry) => entry.identityFingerprint === identity.fingerprint)
       : undefined;
-    if (sameAccount?.cliProfileId) {
+    if (sameAccount && sameAccount.cli.kind !== "none") {
       throw new Error(
-        `This sign-in belongs to ${sameAccount.label}, which already has a ${cliLabel} profile.`,
+        `This sign-in belongs to ${sameAccount.label}, which already has a ${cliLabel} login.`,
       );
     }
     let profile: PiAccountProfile;
     if (sameAccount) {
-      profile = await this.piStore.registry.recordCliProfileId(sameAccount.id, cliProfileId);
+      profile = await this.piStore.registry.recordCliProfileId(sameAccount.id, cliProfileId, "linked");
       if (!(await this.readPiCanonical(profile.id))) {
         await this.writePiCredential(profile.id, canonical);
       }
@@ -981,20 +789,18 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
         provider: this.provider,
         label: managed.label,
         cliProfileId,
+        cora: "linked",
+        explicitUserAdd: true,
         ...(identity.fingerprint ? { identityFingerprint: identity.fingerprint } : {}),
         ...(identity.email ? { accountEmail: identity.email } : {}),
       });
       profile = registered.profile;
       await this.writePiCredential(profile.id, canonical);
     }
-    await this.watchProfile(profile);
+    this.watchProfile(profile);
     await this.mirror.reconcileNow(profile.id).catch(() => null);
-    if (cliSnapshot.defaultProfileId === cliProfileId) {
-      await this.useAccountLocked(profile.id, {});
-    } else {
-      await this.invalidateCaches().catch(() => undefined);
-      this.broadcast();
-    }
+    await this.invalidateCaches().catch(() => undefined);
+    this.broadcast();
     return { coraProfileId: profile.id, cliProfileId };
   }
 
@@ -1003,81 +809,41 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     this.leases.sweep(this.sessionsHook.liveOwnerIds());
   }
 
-  private async removeCliHalf(cliProfileId: string): Promise<void> {
-    const location = this.adapter.locate(cliProfileId);
-    const cli = await this.store.snapshot();
-    const live = await this.adapter.activeCliProfileId?.().catch(() => undefined);
-    const holdsDefault = cli.defaultProfileId === cliProfileId;
-    if (holdsDefault || live === cliProfileId) {
-      // The CLI default can lag the Cora default (a rolled-back switch, a
-      // repair that could only log), and a live selection (the Codex
-      // marker) can lag the CLI default. A half still holding either moves
-      // to the active row's half, or to personal, before its slot goes, so
-      // the store never refuses the delete for it and no terminal is left
-      // on a marker naming a profile that no longer exists.
-      const snapshot = await this.piStore.registry.snapshot();
-      const active = snapshot.profiles.find(
-        (profile) => profile.id === snapshot.defaults[this.provider],
-      );
-      const next = !holdsDefault
-        ? cli.defaultProfileId
-        : active?.cliProfileId && active.cliProfileId !== cliProfileId
-          ? active.cliProfileId
-          : this.personalId;
-      if (holdsDefault) await this.store.setDefaultProfile(next);
-      await this.adapter.switchSideEffects
-        ?.afterDefault(next, { allowSignedOut: true })
-        .catch(() => undefined);
-    }
-    await this.store.deleteProfile(cliProfileId);
-    // The directory is gone; this removes what lives outside it (a Keychain
-    // item, a vault copy).
-    await this.adapter.clearCli(location).catch(() => undefined);
+  // Delete.
+
+  /** Whether a terminal still runs in the managed home of a CLI half. */
+  private homeHeld(cliProfileId: string): boolean {
+    if (!this.adapter.managedHome(cliProfileId).holdsSessions) return false;
+    this.sweepLeases();
+    return this.leases.isLeased(cliProfileId);
+  }
+
+  private pendingPurgeFor(cliProfileId: string): PiAccountPendingPurge {
+    return {
+      path: this.adapter.managedHome(cliProfileId).path,
+      reason: `${this.adapter.runtime} terminal still running`,
+    };
   }
 
   /**
-   * Hand the defaults on before a row disappears: Account 1 first, then the
-   * oldest remaining account, so deleting the active account never strands
-   * connected ones behind an empty default. Nothing connected means nothing
-   * to hand to, and both defaults go empty.
+   * Remove a managed CLI half. A home a terminal still runs in (`held`)
+   * loses its store entry now and its directory once the terminal exits;
+   * otherwise the directory goes now. Answers whether it is gone.
    */
-  private async handOffDefault(coraProfileId: string, closeSessions: boolean): Promise<void> {
-    const snapshot = await this.piStore.registry.snapshot();
-    if (snapshot.defaults[this.provider] !== coraProfileId) return;
-    const remaining = snapshot.profiles.filter(
-      (profile) => profile.provider === this.provider && profile.id !== coraProfileId,
-    );
-    while (remaining.length > 0) {
-      const nextId = nextDefaultAfterDeletion(remaining, this.provider);
-      if (!nextId) break;
-      remaining.splice(
-        remaining.findIndex((profile) => profile.id === nextId),
-        1,
-      );
-      try {
-        await this.useAccountLocked(nextId, { closeSessions });
-        return;
-      } catch (error) {
-        // Signed out on both sides (a CLI logout that already reached
-        // Cora): try the next one rather than refusing the delete.
-        if (!(error instanceof UnifiedAccountNotConnectedError)) throw error;
-      }
-    }
-    await this.store.setDefaultProfile(this.personalId);
-    await this.piStore.registry.setDefaultProfile(this.provider, null);
-    // A CLI whose live selection is a marker (Codex) must follow even to a
-    // signed-out personal slot, or a later switch resurrects the deleted
-    // account's live file.
-    await this.adapter.switchSideEffects
-      ?.afterDefault(this.personalId, { allowSignedOut: true })
-      .catch((error) => {
-        this.log(
-          `[accounts] could not hand the ${this.adapter.labels.cliLabel} selection to Account 1: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
-    this.defaultsChanged();
+  private async removeCliHalf(cliProfileId: string, held: boolean): Promise<boolean> {
+    const location = this.adapter.locate(cliProfileId);
+    const home = this.adapter.managedHome(cliProfileId);
+    const cli = await this.store.snapshot();
+    if (cli.defaultProfileId === cliProfileId) await this.store.setDefaultProfile(this.systemId);
+    const live = await this.adapter.activeCliProfileId?.().catch(() => undefined);
+    if (live === cliProfileId) await this.adapter.releaseActive?.(cliProfileId);
+    // What lives outside the directory (a Keychain item, a vault login)
+    // goes now: a running terminal keeps the token it already loaded.
+    await this.adapter.clearCli(location).catch(() => undefined);
+    await this.store.deleteProfile(cliProfileId, held ? { keepDirectory: true } : {});
+    if (held) return false;
+    await purgeManagedPath(home.path, home.accountsRoot);
+    return true;
   }
 
   async deleteAccount(
@@ -1089,94 +855,55 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       if (await options.ownershipGuard?.(profile)) {
         throw new PiAccountProfileProtectedError(profile.id);
       }
-      // Account 1 is the user's own CLI login. Deleting its row removes what
-      // Codara owns (the Cora half and the pairing) and never touches that
-      // login, so the terminal keeps working and no session has to close.
-      // The row comes back, correctly named, the next time the startup pass
-      // reads the personal slot.
-      const personalRow = profile.cliProfileId === this.personalId;
-      const cliProfileId = personalRow ? null : profile.cliProfileId;
-      const closeSessions = options.closeSessions === true;
-      // Sessions that follow the live login never run on the half being
-      // deleted: the hand-off below moves the live login first.
-      const sessionsFollow = this.adapter.sessionsFollowLiveLogin === true;
-      // Every refusal comes before anything moves: the card asks about the
-      // terminals in a second step, and a delete the user then abandons must
-      // not have switched Cora and the CLI to another account.
-      if (cliProfileId && !sessionsFollow) {
-        this.sweepLeases();
-        const owners = this.leases.owners(cliProfileId);
-        const terminals = this.liveSessionCount(cliProfileId);
-        if (owners.length > terminals) {
-          // Only terminals can be closed on the user's behalf; another
-          // owner (a worker run) keeps the CLI half, and the Pi half must
-          // not go while the CLI half cannot.
-          throw new Error(
-            `${this.adapter.labels.cliLabel} is still using this account for a running task. Wait for it to finish, then delete the account.`,
-          );
-        }
-        if (terminals > 0 && (!closeSessions || !this.sessionsHook)) {
-          throw new UnifiedAccountSessionsError(terminals);
-        }
-      }
-      try {
-        await this.handOffDefault(profile.id, closeSessions);
-      } catch (error) {
-        // The hand-off switches the CLI; its refusal is worded for a switch.
-        if (error instanceof UnifiedAccountSessionsError) {
-          throw new UnifiedAccountSessionsError(error.sessionCount, "delete");
-        }
-        throw error;
-      }
+      const wasActive =
+        (await this.piStore.registry.snapshot()).defaults[this.provider] === profile.id;
+      const cliProfileId = profile.cli.kind === "managed" ? profile.cli.profileId : null;
+      const held = cliProfileId !== null && this.homeHeld(cliProfileId);
       const guard = options.ownershipGuard ? { ownershipGuard: options.ownershipGuard } : {};
-      let closedSessionCount = 0;
-      if (!cliProfileId) {
-        // A personal row is watched even though Codara owns no CLI half:
-        // drop the pair first so a reconcile cannot rebuild the Cora half
-        // from the login that stays behind.
-        this.deleting.add(profile.id);
+      let purgePending = held;
+      this.deleting.add(profile.id);
+      try {
+        // Unwatched first, so no reconcile racing the delete can rebuild a
+        // half from the other once its file is gone.
+        await this.mirror.unwatch(profile.id);
+        // The tombstone and the row's removal land in one registry write; a
+        // managed home a terminal still holds is queued in that write too,
+        // so a crash before the purge still purges it at the next boot.
         try {
-          await this.mirror.unwatch(profile.id);
-          await this.piStore.deleteProfile(profile.id, guard);
-        } finally {
-          this.deleting.delete(profile.id);
+          await this.piStore.deleteProfile(profile.id, {
+            ...guard,
+            ...(held && cliProfileId ? { pendingPurge: [this.pendingPurgeFor(cliProfileId)] } : {}),
+          });
+        } catch (error) {
+          this.watchProfile(profile);
+          throw error;
         }
-      } else {
-        // Unlink before either half goes. A reconcile racing the delete (the
-        // usage poller, a Cora launch, the lease-release hook of the
-        // terminals closed below) then resolves no pair and cannot rebuild
-        // the half from the other once its slot is gone; the mirror is
-        // drained so an in-flight read lands first.
-        this.deleting.add(profile.id);
-        try {
-          await this.piStore.registry.recordCliProfileId(profile.id, null);
-          await this.mirror.unwatch(profile.id);
+        if (cliProfileId) {
           try {
-            await this.piStore.deleteProfile(profile.id, guard);
+            await this.removeCliHalf(cliProfileId, held);
           } catch (error) {
-            // The Pi half refused (an active run started meanwhile, an
-            // unreadable run store): the row stays whole, not half-deleted.
-            const restored = await this.piStore.registry
-              .recordCliProfileId(profile.id, cliProfileId)
-              .catch(() => null);
-            if (restored) await this.watchProfile(restored);
-            throw error;
+            // The row is gone either way; what is left of the half is
+            // purged at the next boot.
+            this.log(
+              `[accounts] the ${this.adapter.labels.cliLabel} half of ${profile.id} was not removed yet: ${errorText(error)}`,
+            );
+            if (!held) {
+              await this.piStore.registry
+                .queuePendingPurge([this.pendingPurgeFor(cliProfileId)])
+                .catch(() => undefined);
+              purgePending = true;
+            }
           }
-          if (!sessionsFollow && this.sessionsHook && this.leases.isLeased(cliProfileId)) {
-            closedSessionCount = (await this.sessionsHook.disposeProfileSessions(cliProfileId))
-              .closedSessionCount;
-            this.sweepLeases();
-          }
-          // From here a failure leaves a terminal-only card the user can
-          // delete again, never an account with a missing half.
-          await this.removeCliHalf(cliProfileId);
-        } finally {
-          this.deleting.delete(profile.id);
+        } else if (wasActive) {
+          await this.store.setDefaultProfile(this.systemId).catch(() => undefined);
         }
+      } finally {
+        this.deleting.delete(profile.id);
       }
       await this.invalidateCaches().catch(() => undefined);
+      if (wasActive) this.defaultsChanged();
       this.broadcast();
-      return { deleted: true, closedSessionCount };
+      return { deleted: true, purgePending };
     });
   }
 
@@ -1198,16 +925,47 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       if (!snapshot.profiles.some((entry) => entry.id === cliProfileId)) {
         return { deleted: false };
       }
-      this.sweepLeases();
-      await this.removeCliHalf(cliProfileId);
+      const held = this.homeHeld(cliProfileId);
+      if (held) await this.piStore.registry.queuePendingPurge([this.pendingPurgeFor(cliProfileId)]);
+      await this.removeCliHalf(cliProfileId, held);
       this.broadcast();
       return { deleted: true };
+    });
+  }
+
+  /**
+   * Purge the managed homes of deleted accounts whose terminals have exited.
+   * Runs at boot and whenever a terminal of this CLI releases its lease.
+   */
+  async purgePending(): Promise<string[]> {
+    return this.withMutation(async () => {
+      const snapshot = await this.piStore.registry.snapshot();
+      if (snapshot.pendingPurge.length === 0) return [];
+      const accountsRoot = this.adapter.managedAccountsRoot();
+      this.sweepLeases();
+      const done: string[] = [];
+      for (const entry of snapshot.pendingPurge) {
+        if (!isPathInside(entry.path, accountsRoot)) continue;
+        if (this.leases.isLeased(basename(entry.path))) continue;
+        try {
+          await purgeManagedPath(entry.path, accountsRoot);
+          done.push(entry.path);
+        } catch (error) {
+          this.log(`[accounts] could not remove ${entry.path}: ${errorText(error)}`);
+        }
+      }
+      await this.piStore.registry.completePendingPurge(done);
+      return done;
     });
   }
 
   // Startup pass pieces. Each re-derives its state from disk and is safe to
   // repeat; the migration module orders them.
 
+  /**
+   * A row whose managed half vanished keeps its Cora grant as its own; it
+   * never silently falls back to another login.
+   */
   async clearDanglingLinks(): Promise<string[]> {
     return this.withMutation(async () => {
       const [snapshot, cli] = await Promise.all([
@@ -1217,15 +975,13 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
       const managed = new Set(cli.filter((entry) => entry.managed).map((entry) => entry.id));
       const cleared: string[] = [];
       for (const profile of snapshot.profiles) {
-        if (
-          profile.provider !== this.provider ||
-          !profile.cliProfileId ||
-          profile.cliProfileId === this.personalId ||
-          managed.has(profile.cliProfileId)
-        ) {
-          continue;
-        }
-        await this.piStore.registry.recordCliProfileId(profile.id, null);
+        if (profile.provider !== this.provider || profile.cli.kind !== "managed") continue;
+        if (managed.has(profile.cli.profileId)) continue;
+        await this.piStore.registry.recordCliProfileId(
+          profile.id,
+          null,
+          profile.cora === "linked" ? "own" : profile.cora,
+        );
         await this.mirror.unwatch(profile.id);
         cleared.push(profile.id);
       }
@@ -1234,130 +990,32 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
   }
 
   /**
-   * Pair unlinked rows with managed profiles no row links: equal fingerprints
-   * pair, equal emails pair only when a fingerprint verdict is impossible,
-   * differing fingerprints never pair, first match claims.
+   * Project the Active row onto the CLI store's default, and put its login
+   * into the live slot when the slot lags (a crash between the two writes).
+   * Never moves the Active row itself.
    */
-  async pairHalves(): Promise<
-    Array<{ coraProfileId: string; cliProfileId: string; by: "fingerprint" | "email" }>
-  > {
+  async reprojectDefaults(): Promise<void> {
     return this.withMutation(async () => {
-      const [snapshot, cli] = await Promise.all([
-        this.piStore.registry.snapshot(),
-        this.store.snapshot(),
-      ]);
-      const linked = new Set(
-        snapshot.profiles
-          .filter((profile) => profile.provider === this.provider)
-          .map((profile) => profile.cliProfileId)
-          .filter(Boolean),
-      );
-      const candidates = snapshot.profiles.filter(
-        (profile) => profile.provider === this.provider && !profile.cliProfileId,
-      );
-      const paired: Array<{
-        coraProfileId: string;
-        cliProfileId: string;
-        by: "fingerprint" | "email";
-      }> = [];
-      if (candidates.length === 0) return paired;
-      for (const managed of cli.profiles) {
-        if (linked.has(managed.id)) continue;
-        const identity = await this.adapter
-          .readCliIdentity(this.adapter.locate(managed.id))
-          .catch((): NativeCliAccountIdentity => ({}));
-        const match = findMatchingRow(candidates, identity);
-        if (!match) continue;
-        const by = match.identityFingerprint && identity.fingerprint ? "fingerprint" : "email";
-        const profile = await this.piStore.registry.recordCliProfileId(match.id, managed.id);
-        if (!match.identityFingerprint && identity.fingerprint) {
-          await this.piStore.registry
-            .recordIdentityFingerprint(match.id, identity.fingerprint)
-            .catch(() => undefined);
-        }
-        candidates.splice(candidates.indexOf(match), 1);
-        linked.add(managed.id);
-        this.log(
-          `[accounts] paired ${match.id} with ${this.adapter.labels.cliLabel} profile ${managed.id} by ${by}`,
-        );
-        const pair = this.pairFromProfile(profile);
-        if (pair) await reconcilePair(pair, this.reconcileOptions()).catch(() => null);
-        paired.push({ coraProfileId: match.id, cliProfileId: managed.id, by });
-      }
-      return paired;
-    });
-  }
-
-  /**
-   * Make the CLI default follow the Cora default, or derive one from the
-   * other. A Cora default that names a whole account with a managed half
-   * is the user's choice and the CLI follows it. A Cora default that is
-   * Account 1 or an unlinked row while the CLI rests on a managed profile
-   * was taken by registration or by the old model, in which the two
-   * defaults were independent: a chosen Account 1 would have moved the CLI
-   * to personal with it. The CLI default wins there, so a user's terminals
-   * never switch accounts at first launch: its row becomes the Cora
-   * default, or both stay where they are when no row links it.
-   */
-  async repairDefaults(): Promise<void> {
-    return this.withMutation(async () => {
-      const [snapshot, cli] = await Promise.all([
-        this.piStore.registry.snapshot(),
-        this.store.snapshot(),
-      ]);
-      const rows = snapshot.profiles.filter((profile) => profile.provider === this.provider);
+      const snapshot = await this.piStore.registry.snapshot();
       const defaultId = snapshot.defaults[this.provider];
-      const row = defaultId ? rows.find((profile) => profile.id === defaultId) : undefined;
-      const cliDefaultManaged = cli.defaultProfileId !== this.personalId;
-      const linkedRow = cliDefaultManaged
-        ? rows.find((profile) => profile.cliProfileId === cli.defaultProfileId)
-        : undefined;
-      if (row) {
-        const link = row.cliProfileId ?? this.personalId;
-        if (cli.defaultProfileId === link) {
-          await this.alignActiveLogged();
-          return;
+      const row = defaultId
+        ? snapshot.profiles.find((profile) => profile.id === defaultId) ?? null
+        : null;
+      try {
+        const target = row?.cli.kind === "managed" ? row.cli.profileId : this.systemId;
+        const cli = await this.store.snapshot();
+        if (cli.defaultProfileId !== target) await this.store.setDefaultProfile(target);
+        if (target !== this.systemId && this.adapter.activate && this.adapter.activeCliProfileId) {
+          const live = await this.adapter.activeCliProfileId();
+          if (live !== target) await this.adapter.activate(target);
         }
-        if (cliDefaultManaged && (!row.cliProfileId || row.cliProfileId === this.personalId)) {
-          if (linkedRow) {
-            await this.piStore.registry.setDefaultProfile(this.provider, linkedRow.id);
-          }
-          await this.alignActiveLogged();
-          return;
-        }
-        await this.store.setDefaultProfile(link).catch((error) => {
-          this.log(
-            `[accounts] could not point ${this.adapter.labels.cliLabel} at the active account: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        });
-        await this.alignActiveLogged();
-        return;
+      } catch (error) {
+        this.log(
+          `[accounts] could not point ${this.adapter.labels.cliLabel} at the Active account: ${errorText(error)}`,
+        );
       }
-      const accountOne = rows.find((profile) => profile.cliProfileId === this.personalId);
-      if (!cliDefaultManaged) {
-        if (accountOne) await this.piStore.registry.setDefaultProfile(this.provider, accountOne.id);
-        await this.alignActiveLogged();
-        return;
-      }
-      if (linkedRow) {
-        await this.piStore.registry.setDefaultProfile(this.provider, linkedRow.id);
-      }
-      // An unlinked managed default stays where it is; its card offers Share.
-      await this.alignActiveLogged();
+      this.defaultsChanged();
     });
-  }
-
-  private async alignActiveLogged(): Promise<void> {
-    await this.alignActive().catch((error) => {
-      this.log(
-        `[accounts] could not align the ${this.adapter.labels.cliLabel} selection with its default: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    });
-    this.defaultsChanged();
   }
 
   /** Arm the mirror over every linked pair and reconcile each once. */
@@ -1374,18 +1032,10 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     }
     for (const pair of pairs) this.mirror.watch(pair);
     await this.mirror.reconcileAll(this.provider);
-    if (
-      !snapshot.profiles.some(
-        (profile) => profile.provider === this.provider && profile.cliProfileId === this.personalId,
-      )
-    ) {
-      this.startPersonalProbe();
-    }
     return pairs;
   }
 
   stop(): void {
-    this.stopPersonalProbe();
     for (const pair of this.mirror.watchedPairs(this.provider)) {
       void this.mirror.unwatch(pair.coraProfileId);
     }
@@ -1393,8 +1043,8 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
 }
 
 /**
- * Equal fingerprints pair; equal emails pair only when a fingerprint is
- * missing on at least one side; differing fingerprints never pair.
+ * Equal fingerprints match; equal emails match only when a fingerprint is
+ * missing on at least one side; differing fingerprints never match.
  */
 export function findMatchingRow(
   rows: readonly PiAccountProfile[],

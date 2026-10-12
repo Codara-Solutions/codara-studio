@@ -43,6 +43,10 @@ import {
   RESERVED_MCP_SERVER_NAMES,
   normalizePiMcpServersDetailed,
 } from "./orchestration/pi-mcp-config";
+import { outsideWriteCapability } from "./outside-write-guard";
+
+/** Explicit exception to the outside-write guard: an MCP server or agent setting the user edited in Settings. */
+const AGENT_CONFIG_EDIT = outsideWriteCapability("an MCP server or agent setting the user edited in Settings");
 
 export type { McpServerConfig } from "./mcp-toml";
 
@@ -789,7 +793,7 @@ async function installMcpAssetToRuntime(
       return { error: `${label} already has MCP server '${server.name}'.` };
     }
     await fs.mkdir(dirname(destination), { recursive: true, mode: target === "grok" ? 0o700 : undefined });
-    await writeConfigFileAtomic(destination, ensureTrailingNewline(upsertTomlMcpServer(existing, server, destination)));
+    await writeConfigFileAtomic(destination, ensureTrailingNewline(upsertTomlMcpServer(existing, server, destination)), { outsideWrite: AGENT_CONFIG_EDIT });
     return { error: null };
   });
   if (outcome.error) return { ok: false, installed: [], error: outcome.error };
@@ -1446,7 +1450,7 @@ async function writeCodexManagedMcpServers(
       result.mcp.errors.push(`Could not update ${path} safely: ${check.error}`);
       return [];
     }
-    await writeConfigFileAtomic(path, next);
+    await writeConfigFileAtomic(path, next, { outsideWrite: AGENT_CONFIG_EDIT });
     return syncable.map((server) => server.name);
   });
 }
@@ -1486,7 +1490,7 @@ async function writeClaudeMcpServers(
     }
     if (added.length === 0 || result.dryRun) return added;
     await fs.mkdir(dirname(path), { recursive: true });
-    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n", { outsideWrite: AGENT_CONFIG_EDIT });
     return added;
   });
 }
@@ -1681,7 +1685,7 @@ async function upsertClaudeMcpServer(
     if (replaceName && replaceName !== server.name) delete container[replaceName];
     container[server.name] = renderUserMcpServer(server);
     await fs.mkdir(dirname(path), { recursive: true });
-    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n", { outsideWrite: AGENT_CONFIG_EDIT });
   });
 }
 
@@ -1713,7 +1717,7 @@ async function upsertCodexMcpServer(path: string, server: McpServerConfig, repla
     if (replaceName && replaceName !== server.name) existing = renameTomlMcpServer(existing, replaceName, server.name, path);
     const next = ensureTrailingNewline(upsertTomlMcpServer(existing, server, path));
     await fs.mkdir(dirname(path), { recursive: true });
-    await writeConfigFileAtomic(path, next);
+    await writeConfigFileAtomic(path, next, { outsideWrite: AGENT_CONFIG_EDIT });
   });
 }
 
@@ -1763,7 +1767,7 @@ async function deleteClaudeMcpServer(path: string, name: string, project?: strin
     const container = jsonMcpContainer(parsed, project);
     if (!container || !Object.prototype.hasOwnProperty.call(container, name)) return false;
     delete container[name];
-    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n");
+    await writeConfigFileAtomic(path, JSON.stringify(parsed, null, 2) + "\n", { outsideWrite: AGENT_CONFIG_EDIT });
     return true;
   });
 }
@@ -1774,7 +1778,7 @@ async function deleteCodexMcpServer(path: string, name: string): Promise<boolean
     if (!existing) return false;
     const next = removeTomlMcpServer(existing, name, path);
     if (next === existing) return false;
-    await writeConfigFileAtomic(path, next);
+    await writeConfigFileAtomic(path, next, { outsideWrite: AGENT_CONFIG_EDIT });
     return true;
   });
 }

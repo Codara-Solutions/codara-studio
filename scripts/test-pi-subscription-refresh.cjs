@@ -166,11 +166,15 @@ const stubPlugin = {
                 label: "Account",
                 createdAt: "2026-08-01T00:00:00.000Z",
                 updatedAt: "2026-08-01T00:00:00.000Z",
+                cli: { kind: "managed", profileId: globalThis.__refreshHarness.cliProfileId },
+                cora: "linked",
                 cliProfileId: globalThis.__refreshHarness.cliProfileId,
               };
             },
             async profileForCliProfileId() { return undefined; },
-            async snapshot() { return { version: 1, profiles: [], defaults: {} }; },
+            async snapshot() {
+              return { version: 2, profiles: [], defaults: {}, tombstones: [], dismissedSystemOffers: [], pendingPurge: [] };
+            },
           },
         };
       }
@@ -378,8 +382,8 @@ async function main() {
   });
 
   // The same repair for the two providers whose CLI half is a file the
-  // mirror reads through its codec: a Grok managed home and a Codex vault
-  // slot (the marker names personal, so the managed slot is its vault file).
+  // mirror reads through its codec: a Grok managed home and a Codex managed
+  // home, each with the account's own auth.json.
   const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const jwt = (claims) => `${b64({ alg: "RS256", typ: "JWT" })}.${b64(claims)}.sig`;
   const cases = [
@@ -415,7 +419,7 @@ async function main() {
       provider: "openai-codex",
       profileId: "99999999-9999-4999-8999-999999999999",
       cliProfileId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      terminalFile: path.join(process.env.CODARA_HOME_DIR, "codex-cli", "accounts", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "auth.json"),
+      terminalFile: path.join(process.env.CODARA_HOME_DIR, "codex-cli", "accounts", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "home", "auth.json"),
       terminalContent: (now) =>
         JSON.stringify({
           auth_mode: "chatgpt",

@@ -8,7 +8,6 @@ import {
   terminalStatusesByProvider,
   unifiedAccountsFor,
 } from "./unified-account-registry";
-import { UnifiedAccountSessionsError } from "./unified-account-errors";
 import type {
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
@@ -34,6 +33,7 @@ import {
   setDefaultPiAccountProfile,
   PiOAuthLoginGate,
 } from "./pi-account-auth-store";
+import { SYSTEM_CLI_PROFILE_ID } from "./pi-account-profiles";
 import {
   readAnthropicAccountProfile,
   type AnthropicAccountProfile,
@@ -400,7 +400,7 @@ function compatibilityConnection(
 }
 
 export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> {
-  const [runtimeResult, inspection, terminals, switchSessionCounts] = await Promise.all([
+  const [runtimeResult, inspection, terminals, systemOffers] = await Promise.all([
     // The user's own Pi runs Cora once installed; until then the bundled
     // build does, and the reason the user's is not used is shown beside the
     // Install Pi suggestion.
@@ -428,9 +428,16 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       ),
     inspectPiAccountProfileAuthStore(),
     terminalStatusesByProvider(),
-    Promise.all(PI_SUBSCRIPTION_PROVIDERS.map(async (provider) =>
-      [provider, await unifiedAccountsFor(provider).switchSessionCount().catch(() => undefined)] as const,
-    )).then(Object.fromEntries),
+    Promise.all(
+      PI_SUBSCRIPTION_PROVIDERS.map(
+        async (provider) =>
+          [provider, await unifiedAccountsFor(provider).systemOffer().catch(() => null)] as const,
+      ),
+    ).then((entries) =>
+      Object.fromEntries(entries.filter(([, offer]) => offer !== null)) as NonNullable<
+        PiSubscriptionOverview["systemOffers"]
+      >,
+    ),
   ]);
   const statuses = new Map(inspection.statuses.map((status) => [status.profileId, status]));
   const profiles: PiSubscriptionProfileConnection[] = inspection.snapshot.profiles.map((profile) => {
@@ -459,7 +466,8 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
       ...(accountFingerprint ? { accountFingerprint } : {}),
       ...(email ? { email } : {}),
       ...(cliProfileId ? { cliProfileId } : {}),
-      ...(cliProfileId === "personal" ? { builtIn: true as const } : {}),
+      ...(cliProfileId === SYSTEM_CLI_PROFILE_ID ? { builtIn: true as const } : {}),
+      coraHalf: profile.cora,
       ...(terminal ? { terminal } : {}),
     };
   });
@@ -476,7 +484,7 @@ export async function inspectPiSubscriptions(): Promise<PiSubscriptionOverview> 
     ...(isPiCliInstalling() ? { runtimeInstalling: true } : {}),
     connections,
     profiles,
-    switchSessionCounts,
+    ...(Object.keys(systemOffers).length > 0 ? { systemOffers } : {}),
   };
 }
 
@@ -642,6 +650,8 @@ async function persistCredential(
   const service = unifiedAccountsFor(flow.provider);
   const canonical = service.codec.canonicalFromPi(credential);
   if (canonical) {
+    // A row on the System login gets no copy: its terminals use the CLI's
+    // own login, and the new grant is Cora's alone.
     await service.ensureCliHalf(target.profile.id, canonical, identity).catch((cliError) => {
       console.warn(
         `[accounts] ${service.adapter.labels.cliLabel} half for ${target.profile.id} could not be written (the account is signed in to Cora; the card offers Share): ${safeAuthError(cliError)}`,
@@ -650,14 +660,12 @@ async function persistCredential(
   }
   if (flow.makeDefault) {
     // The credential is stored and the row registered; making the account
-    // active is a separate step that may be refused (a Codex switch has to
-    // close sessions the user has not agreed to close) or fail (the CLI
-    // slot cannot be activated). Neither undoes the sign-in; the card
-    // offers Use.
+    // active is a separate step that may fail (the live slot cannot be
+    // written). That does not undo the sign-in; the card offers Use.
     await service.useAccount(target.profile.id).catch((error: unknown) => {
-      const reason =
-        error instanceof UnifiedAccountSessionsError ? error.message : safeAuthError(error);
-      console.warn(`[accounts] ${target.profile.id} was connected but not made active: ${reason}`);
+      console.warn(
+        `[accounts] ${target.profile.id} was connected but not made active: ${safeAuthError(error)}`,
+      );
     });
   }
   // A newly connected subscription must not read its limits (or its model

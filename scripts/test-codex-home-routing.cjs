@@ -202,7 +202,7 @@ async function main() {
 
     // Inside a CODARA-MANAGED home the same links are the designed state:
     // managed profiles share memories/sessions/config/history with the
-    // personal ~/.codex (native-cli-shared-state.ts), so resolution must
+    // personal ~/.codex (cli-account-homes.ts), so resolution must
     // follow them instead of throwing. The strict rejections above prove
     // non-managed homes keep the old rule.
     const codaraHome = path.join(personalOsHome, ".codarastudio");

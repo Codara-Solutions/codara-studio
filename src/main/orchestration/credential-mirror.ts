@@ -10,10 +10,12 @@ import {
 } from "./pi-auth-storage";
 
 /**
- * Keeps the two halves of one account converged: the Pi credential
- * (pi-agent/accounts/<coraId>/auth.json) and the CLI credential (the slot
- * the provider's adapter locates: a CLAUDE_CONFIG_DIR, a Grok home, a Codex
- * vault or live file).
+ * Keeps the two halves of one managed account converged: the Pi credential
+ * (pi-agent/accounts/<coraId>/auth.json) and the CLI credential in Codara's
+ * own home (the slot the provider's adapter locates: the Claude live slot or
+ * vault, a managed CODEX_HOME or GROK_HOME). Only rows whose Cora half is
+ * "linked" to a managed CLI half are ever paired; the System login is never
+ * read or written here, so neither is any file of the user's own.
  *
  * Both sides refresh the same OAuth grant independently and every provider
  * here rotates or may rotate refresh tokens, so whichever side refreshed
@@ -32,14 +34,11 @@ import {
  *    comparison inside it, so a Pi session refreshing at the same moment is
  *    never clobbered. A CLI write goes through the adapter's atomic store,
  *    re-reading the slot immediately before writing it.
- *  - The personal slot is the user's own login: the mirror updates a
- *    credential that exists there but never creates one, and the only
- *    deletion it propagates is that slot going from credential to none,
- *    which signs Account 1 out of Cora as well.
- *  - A credential that names another account than the row (a `codex login`
- *    as someone else while a managed profile owns the live file) is never
- *    copied in either direction: the row keeps its identity and the mirror
- *    logs the foreign login instead of adopting it.
+ *  - A credential that names another account than the row (a `/login` as
+ *    someone else inside a managed home) is never copied in either
+ *    direction: the row keeps its identity and the mirror logs the foreign
+ *    login instead of adopting it.
+ *  - A managed half that is gone (an account mid-delete) is never rebuilt.
  *  - Unparsable or half-written files are "unreadable", not "empty": the
  *    reconcile retries briefly and never writes on unreadable input.
  *
@@ -141,8 +140,6 @@ export type CliSideRead<Raw> =
  */
 export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
   readonly provider: PiSubscriptionProvider;
-  /** The CLI profile id of the user's own login; that slot is never created. */
-  readonly personalId: string;
   readonly codec: CredentialCodec<Raw>;
   /**
    * Poll cadence for a slot no file watcher can see (the Claude Keychain on
@@ -158,7 +155,8 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
   cliWritePaths(location: Loc): string[];
   /**
    * Serialize the re-read-then-write step against the provider's own slot
-   * mutations (a Codex switch moving auth.json), when it has any.
+   * mutations (a Claude switch moving logins through the live slot), when
+   * it has any.
    */
   lockCli?<T>(location: Loc, operation: () => Promise<T>): Promise<T>;
   /**
@@ -172,30 +170,10 @@ export interface CredentialMirrorAdapter<Loc = unknown, Raw = unknown> {
    * provider records it beside the credential (Claude Code's .claude.json
    * oauthAccount). Providers whose tokens carry the identity answer through
    * fingerprintOf instead; Claude's are opaque, so without this hook a row
-   * paired to the personal slot could not tell that the user logged that
-   * slot into a different account, and would adopt the stranger's token as
-   * its own Cora half.
+   * could not tell that a `/login` in its slot signed in as somebody else,
+   * and would adopt the stranger's token as its own Cora half.
    */
   cliIdentityFingerprint?(location: Loc): Promise<string | undefined>;
-  /**
-   * The personal slot went from credential to none and Cora followed. A
-   * provider that keeps a trailing copy of that slot (the Codex vault)
-   * drops it here, so the logged-out login cannot come back on a switch.
-   */
-  afterPersonalLogout?(location: Loc): Promise<void>;
-  /**
-   * Whether an empty CLI slot is a sign-out the user asked for. Claude Code
-   * also empties a login itself when its refresh token turns out to be spent
-   * (another holder rotated it); that is a login to repair from the fresher
-   * half, not a logout to propagate. Absent means every empty slot counts.
-   */
-  isDeliberateSignOut?(raw: Raw | null): boolean;
-  /**
-   * Whether the personal slot at this location is Codara's to create from
-   * the Cora half. The user's own live login never is; a vault Codara keeps
-   * for Account 1 while another account is live may be.
-   */
-  mayCreatePersonalSlot?(location: Loc): Promise<boolean>;
   /**
    * A CLI slot that held no login was just filled from the Cora half.
    * Providers that record the account beside opaque tokens (Claude) learn
@@ -220,12 +198,6 @@ export interface CredentialPair<Loc = unknown, Raw = unknown> {
   adapter: CredentialMirrorAdapter<Loc, Raw>;
   /** The row's account fingerprint; a CLI credential of another account is never adopted. */
   identityFingerprint?: string;
-}
-
-export function isPersonalPair(
-  pair: Pick<CredentialPair, "cliProfileId" | "adapter">,
-): boolean {
-  return pair.cliProfileId === pair.adapter.personalId;
 }
 
 export type PiSideRead =
@@ -262,12 +234,6 @@ export async function readPiSide(
 
 export interface ReconcilePairOptions {
   loadAuthStorage?: PiAuthStorageLoader;
-  /**
-   * Whether the last observation of the CLI side held a credential. Only the
-   * personal pair consults it: a credential-to-none transition there is a
-   * CLI logout, the one deletion the mirror propagates.
-   */
-  previousCliPresent?: boolean;
   retryDelayMs?: number;
   /**
    * Consulted right before every write. The mirror answers true once the
@@ -281,7 +247,7 @@ export interface ReconcilePairOptions {
 export interface ReconcilePairResult {
   /** "foreign": the CLI side names another account; nothing was written. */
   verdict: CredentialComparison | "unreadable" | "foreign";
-  wrote: "pi" | "cli" | "pi-delete" | null;
+  wrote: "pi" | "cli" | null;
   piPresent: boolean;
   cliPresent: boolean;
 }
@@ -342,7 +308,6 @@ export async function reconcilePair<Loc, Raw>(
     }
   }
   const verdict = compareCredentials(piCanonical, cliCanonical);
-  const personal = isPersonalPair(pair);
   const result: ReconcilePairResult = {
     verdict,
     wrote: null,
@@ -361,35 +326,11 @@ export async function reconcilePair<Loc, Raw>(
   }
   if (verdict === "equal" || verdict === "none") return result;
 
-  let repairPersonal = false;
-  if (verdict === "pi-only" && personal) {
-    // The personal slot belongs to the user. A credential that was there and
-    // is gone now is a CLI logout; one that was never there is not Codara's
-    // to create. A slot the CLI emptied on its own (a spent refresh token)
-    // is neither, and neither is a vault Codara keeps for Account 1: both
-    // are repaired from the Cora half instead.
-    const deliberate = adapter.isDeliberateSignOut?.(cli.raw) ?? true;
-    if (deliberate && options.previousCliPresent === true) {
-      if (!options.cancelled?.()) {
-        const AuthStorage = await (options.loadAuthStorage ?? loadPiAuthStorage)();
-        await AuthStorage.create(pair.authFile).delete(codec.provider);
-        await chmodPrivate(pair.authFile);
-        result.wrote = "pi-delete";
-        await adapter.afterPersonalLogout?.(pair.location).catch(() => undefined);
-      }
-      return result;
-    }
-    repairPersonal =
-      !deliberate ||
-      (await adapter.mayCreatePersonalSlot?.(pair.location).catch(() => false)) === true;
-    if (!repairPersonal) return result;
-  }
-
   if (verdict === "pi-newer" || verdict === "pi-only") {
     let filledEmptySlot = false;
     // A managed half is created by ensureCliHalf alone. Its directory being
     // gone here means the account is mid-delete; writing would resurrect it.
-    if (!personal && !(await adapter.cliSideExists(pair.location))) return result;
+    if (!(await adapter.cliSideExists(pair.location))) return result;
     await lock(async () => {
       // The CLI side has no lock of its own to repeat the comparison under,
       // and the read above can be tens of milliseconds old. Read it again
@@ -403,12 +344,7 @@ export async function reconcilePair<Loc, Raw>(
       const latestVerdict = compareCredentials(piCanonical, latestCanonical);
       result.verdict = latestVerdict;
       result.cliPresent = latestCanonical !== null;
-      if (
-        latestVerdict !== "pi-newer" &&
-        (latestVerdict !== "pi-only" || (personal && !repairPersonal))
-      ) {
-        return;
-      }
+      if (latestVerdict !== "pi-newer" && latestVerdict !== "pi-only") return;
       if (options.cancelled?.()) return;
       const record = codec.cliRecordFromCanonical(piCanonical!, latest.raw);
       if (record === null) {
@@ -672,7 +608,6 @@ export class CredentialMirror {
         ...(this.options.loadAuthStorage
           ? { loadAuthStorage: this.options.loadAuthStorage }
           : {}),
-        ...(state.cliPresent !== undefined ? { previousCliPresent: state.cliPresent } : {}),
         ...(this.options.retryDelayMs !== undefined
           ? { retryDelayMs: this.options.retryDelayMs }
           : {}),
@@ -701,7 +636,7 @@ export class CredentialMirror {
       for (const path of state.pair.adapter.cliWritePaths(state.pair.location)) {
         await this.remember(state, path);
       }
-    } else if (result.wrote === "pi" || result.wrote === "pi-delete") {
+    } else if (result.wrote === "pi") {
       await this.remember(state, state.pair.authFile);
     }
     if (result.wrote) {
@@ -739,8 +674,8 @@ export class CredentialMirror {
       try {
         watcher = watch(target.directory, { persistent: false, recursive: false });
       } catch {
-        // A directory that does not exist yet (a managed profile mid-creation,
-        // a personal home with no login) is picked up by the next rearm.
+        // A directory that does not exist yet (a managed profile mid-creation)
+        // is picked up by the next rearm.
         continue;
       }
       watcher.on("change", (_event, filename) => {

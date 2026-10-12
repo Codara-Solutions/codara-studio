@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { assertCodaraOwnedWrite, type OutsideWriteCapability } from "../outside-write-guard";
 
 /**
  * The one way Codara writes a credential file for any native CLI: a 0600
@@ -89,6 +90,8 @@ export interface AtomicWritePrivateFileOptions {
    * created here is still made 0700.
    */
   privateDirectory?: boolean;
+  /** An explicit, user-requested write into another tool's home. */
+  outsideWrite?: OutsideWriteCapability;
 }
 
 export async function atomicWritePrivateFile(
@@ -96,6 +99,7 @@ export async function atomicWritePrivateFile(
   contents: string | Buffer,
   options: AtomicWritePrivateFileOptions = {},
 ): Promise<void> {
+  assertCodaraOwnedWrite(destination, options.outsideWrite);
   const directory = dirname(destination);
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32" && options.privateDirectory !== false) {
@@ -120,7 +124,11 @@ export async function atomicWritePrivateFile(
 }
 
 /** Remove a private file; a symlink or an unsafe file is left alone and reported. */
-export async function removePrivateFile(path: string): Promise<boolean> {
+export async function removePrivateFile(
+  path: string,
+  outsideWrite?: OutsideWriteCapability,
+): Promise<boolean> {
+  assertCodaraOwnedWrite(path, outsideWrite);
   if (!(await assertPrivateRegularFile(path))) return false;
   await fs.unlink(path);
   return true;

@@ -150,102 +150,23 @@ async function main() {
     [101],
     "Studio's own process tree is never an external session",
   );
-  assert.equal(
-    await shutdown.countExternalNativeCliProcesses("codex", {
-      currentPid: 999,
-      listProcessesAsync: async () => studioRows,
-    }),
-    1,
+  // Codara never signals a CLI process it did not start: an account switch
+  // replaces credentials and leaves every running session alone, so the
+  // module only recognizes sessions and has no way to stop one.
+  for (const gone of [
+    "countExternalNativeCliProcesses",
+    "shutdownExternalNativeCliProcesses",
+  ]) {
+    assert.equal(shutdown[gone], undefined, `${gone} must not exist`);
+  }
+  const source = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "native-cli-process-shutdown.ts"),
+    "utf8",
   );
-  assert.equal(
-    await shutdown.countExternalNativeCliProcesses("codex", {
-      currentPid: 999,
-      listProcesses: () => {
-        throw new Error("ps failed");
-      },
-    }),
-    0,
-    "a failed listing never blocks the switch",
-  );
-
-  const alive = new Set([101, 102]);
-  const signals = [];
-  const result = await shutdown.shutdownExternalNativeCliProcesses("codex", {
-    graceMs: 10,
-    dependencies: {
-      platform: "darwin",
-      currentPid: 999,
-      listProcesses: () =>
-        processRows.filter((entry) => alive.has(entry.pid) || entry.pid === 103),
-      captureTree: () => ({
-        rootPid: 101,
-        members: [
-          { pid: 102, parentPid: 101, startedAt: "B", depth: 1 },
-          { pid: 101, parentPid: 10, startedAt: "A", depth: 0 },
-        ],
-      }),
-      signalTree: (_tree, signal) => {
-        signals.push(signal);
-        if (signal === "SIGHUP") {
-          alive.delete(101);
-          alive.delete(102);
-        }
-        return 2;
-      },
-      treeAlive: () => alive.size > 0,
-      wait: async () => undefined,
-    },
-  });
-  assert.equal(result.closedProcessCount, 1);
-  assert.deepEqual(signals, ["SIGHUP"]);
-
-  await assert.rejects(
-    () =>
-      shutdown.shutdownExternalNativeCliProcesses("grok", {
-        dependencies: {
-          platform: "win32",
-          currentPid: 999,
-          listProcesses: () => [
-            {
-              pid: 201,
-              parentPid: 1,
-              startedAt: "D",
-              command: "grok.exe --yolo",
-            },
-          ],
-        },
-      }),
-    /close external grok sessions/i,
-    "Windows refuses an undocumented hard kill instead of changing auth unsafely",
-  );
-
-  await assert.rejects(
-    () =>
-      shutdown.shutdownExternalNativeCliProcesses("claude", {
-        dependencies: {
-          platform: "darwin",
-          currentPid: 302,
-          listProcesses: () => [
-            {
-              pid: 301,
-              parentPid: 1,
-              startedAt: "E",
-              command: "claude",
-            },
-            {
-              pid: 302,
-              parentPid: 301,
-              startedAt: "F",
-              command: "Codara Studio",
-            },
-          ],
-        },
-      }),
-    /Codara is running inside that CLI session/i,
-  );
+  assert.doesNotMatch(source, /process\.kill|SIGHUP|SIGTERM|SIGKILL|signalTree|taskkill/);
 
   console.log(
-    "PASS native CLI process shutdown: exact vendor matching, app-server exclusion, root de-duplication, graceful POSIX close, and fail-closed platform/ancestor guards",
+    "PASS native CLI process recognition: exact vendor matching, app-server exclusion, root de-duplication, and no way to signal a session",
   );
 }
 

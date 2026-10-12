@@ -25,6 +25,10 @@ import { writeFileAtomic } from "./fs-atomic";
 import { isTransientPath, resolvePythonBinary } from "./hook-installer";
 import { parseTomlText } from "./mcp-toml";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
+import { outsideWriteCapability } from "./outside-write-guard";
+
+/** Explicit exception to the outside-write guard: the Codex notify hook in the user's Codex config. */
+const GLOBAL_NOTIFY_INSTALL = outsideWriteCapability("the Codex notify hook in the user's Codex config");
 
 const SCRIPT_FILENAME = "codara-codex-notify.py";
 const STABLE_DIR_NAME = "codex-hooks";
@@ -261,7 +265,7 @@ async function syncScript(source: string, destination: string): Promise<boolean>
     const current = await fs.readFile(destination, "utf8").catch(() => null);
     if (current !== desired) {
       await fs.mkdir(dirname(destination), { recursive: true });
-      await writeFileAtomic(destination, desired);
+      await writeFileAtomic(destination, desired, { outsideWrite: GLOBAL_NOTIFY_INSTALL });
     }
     await fs.chmod(destination, 0o755).catch(() => undefined);
     return true;
@@ -294,7 +298,7 @@ async function editNotify(
       return { installed: current !== null && isOurs(current), changed: false, reason: "could not edit notify safely" };
     }
     if (text === "" && edited.trim() === "") return { installed, changed: false };
-    await writeConfigFileAtomic(configPath, edited);
+    await writeConfigFileAtomic(configPath, edited, { outsideWrite: GLOBAL_NOTIFY_INSTALL });
     return { installed, changed: true };
   });
 }

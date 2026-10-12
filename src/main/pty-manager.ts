@@ -460,13 +460,15 @@ export interface SpawnOptions {
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeClaudeProfileLease?: () => void;
   /**
-   * Main-process-only Active-account home for a PLAIN shell (no Studio
-   * startup command), so a hand-typed `grok` follows the account switch.
-   * Claude and Codex need none: each switches the login inside one home.
-   * Environment-only: unlike the native*ProfileId fields this takes no lease
-   * and is never persisted; a restored shell re-resolves whatever account is
-   * Active at restore time. Set by spawn() itself, never accepted over IPC.
+   * Main-process-only Active-account homes for a PLAIN shell (no Studio
+   * startup command), so a hand-typed `claude`, `codex` or `grok` runs as
+   * the Active account. Absent for a CLI on the System login.
+   * Environment-only: unlike the native*ProfileId fields these take no lease
+   * and are never persisted; a restored shell re-resolves whatever account
+   * is Active at restore time. Set by spawn() itself, never accepted over IPC.
    */
+  plainShellClaudeConfigDir?: string;
+  plainShellCodexHome?: string;
   plainShellGrokHome?: string;
   /**
    * A plain user shell exports SPARK_FOLLOW_ACTIVE_ACCOUNT=1 so the bundled
@@ -891,6 +893,8 @@ async function spawnWithSessionLock(
     preparedOpts = {
       ...preparedOpts,
       plainShellFollowsActiveAccount: true,
+      ...(selectors?.claudeConfigDir ? { plainShellClaudeConfigDir: selectors.claudeConfigDir } : {}),
+      ...(selectors?.codexHome ? { plainShellCodexHome: selectors.codexHome } : {}),
       ...(selectors?.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
     };
   } else if (
@@ -1389,8 +1393,17 @@ function doSpawn(
       if (typeof value === "string") env[key] = value;
     }
   }
-  if (opts.plainShellGrokHome) {
-    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.plainShellGrokHome);
+  const plainShellSelections: Array<(base: NodeJS.ProcessEnv) => NodeJS.ProcessEnv> = [];
+  const claudeConfigDir = opts.plainShellClaudeConfigDir;
+  if (claudeConfigDir) {
+    plainShellSelections.push((base) => buildClaudeCliProfileEnvironment(base, claudeConfigDir));
+  }
+  const codexHome = opts.plainShellCodexHome;
+  if (codexHome) plainShellSelections.push((base) => buildCodexCliSharedEnvironment(base, codexHome));
+  const grokHome = opts.plainShellGrokHome;
+  if (grokHome) plainShellSelections.push((base) => buildGrokCliProfileEnvironment(base, grokHome));
+  for (const select of plainShellSelections) {
+    const selectedEnv = select(env);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;

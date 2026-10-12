@@ -64,6 +64,10 @@ import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { defaultCodaraHome, codaraHome } from "./codara-home";
 import { claudeConfigDir } from "./orchestration/claude-paths";
+import { outsideWriteCapability } from "./outside-write-guard";
+
+/** Explicit exception to the outside-write guard: Codara's hooks in the user's Claude settings. */
+const GLOBAL_HOOK_INSTALL = outsideWriteCapability("Codara's hooks in the user's Claude settings");
 
 const CLAUDE_SETTINGS_PATH = join(claudeConfigDir(), "settings.json");
 
@@ -256,7 +260,7 @@ async function syncStableHookScript(source: string, destination: string): Promis
     }
     if (current !== desired) {
       await fs.mkdir(dirname(destination), { recursive: true });
-      await writeFileAtomic(destination, desired);
+      await writeFileAtomic(destination, desired, { outsideWrite: GLOBAL_HOOK_INSTALL });
     }
     try {
       // Not strictly needed (we always invoke it through the python binary)
@@ -711,7 +715,7 @@ function alreadyInstalled(
 //
 // The write lands on the file's REAL path: a Codara-managed account shares
 // settings.json with the personal ~/.claude through a symlink (see
-// native-cli-shared-state.ts), and writeFileAtomic's rename-over would
+// cli-account-homes.ts), and writeFileAtomic's rename-over would
 // replace that link with a private copy, silently forking the two accounts'
 // settings. readExistingSettings already follows the link on the read side.
 async function persistSettings(
@@ -724,7 +728,7 @@ async function persistSettings(
     if (raw !== null && raw === payload) return;
     const targetPath = await fs.realpath(settingsPath).catch(() => settingsPath);
     await fs.mkdir(dirname(targetPath), { recursive: true });
-    await writeFileAtomic(targetPath, payload);
+    await writeFileAtomic(targetPath, payload, { outsideWrite: GLOBAL_HOOK_INSTALL });
   } catch (err) {
     console.warn("[hook-installer] failed to write", settingsPath, ":", err);
   }

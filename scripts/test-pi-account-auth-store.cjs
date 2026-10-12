@@ -130,6 +130,7 @@ async function main() {
   fs.writeFileSync(path.join(root, "auth.json"), JSON.stringify(legacy), {
     mode: 0o600,
   });
+  const legacyBefore = fs.readFileSync(path.join(root, "auth.json"), "utf8");
   const idQueue = [IDS.anthropic, IDS.openai, IDS.extra];
   const registry = new Registry(root, {
     idFactory: () => idQueue.shift() || IDS.extra,
@@ -137,12 +138,34 @@ async function main() {
   });
   const store = new PiAccountAuthStore(root, registry);
 
+  // The legacy single login is the accounts migration's to archive; the
+  // store never turns a file it finds into an account on its own.
+  const untouched = await store.inspect();
+  check(
+    "a legacy pi-agent auth.json is never folded into an account",
+    untouched.snapshot.profiles.length === 0 &&
+      untouched.reconciliation.migratedProfileIds.length === 0 &&
+      fs.readFileSync(path.join(root, "auth.json"), "utf8") === legacyBefore,
+    JSON.stringify(untouched),
+  );
+
+  for (const provider of ["anthropic", "openai-codex"]) {
+    const fingerprint = piAccountCredentialIdentityFingerprint(provider, legacy[provider]);
+    const { profile } = await registry.registerProfile({
+      provider,
+      label: provider === "anthropic" ? "Claude" : "Codex",
+      ...(fingerprint ? { identityFingerprint: fingerprint } : {}),
+    });
+    const paths = piAccountProfilePaths(root, profile.id);
+    fs.mkdirSync(paths.configDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(paths.authFile, JSON.stringify({ [provider]: legacy[provider] }), { mode: 0o600 });
+  }
   const first = await store.inspect();
   check(
-    "legacy provider records migrate into one private profile directory each",
+    "registered accounts with their own credential are connected",
     first.snapshot.profiles.length === 2 &&
       first.statuses.every((status) => status.connected) &&
-      first.reconciliation.migratedProfileIds.length === 2,
+      first.reconciliation.migratedProfileIds.length === 0,
     JSON.stringify(first),
   );
   const profileByProvider = new Map(
@@ -162,18 +185,9 @@ async function main() {
         mode(openaiPaths.authFile) === 0o600
       ),
   );
-  const anthropicDisk = JSON.parse(fs.readFileSync(anthropicPaths.authFile, "utf8"));
-  const openaiDisk = JSON.parse(fs.readFileSync(openaiPaths.authFile, "utf8"));
   check(
-    "each auth file contains only its owning provider",
-    Object.keys(anthropicDisk).join(",") === "anthropic" &&
-      Object.keys(openaiDisk).join(",") === "openai-codex",
-  );
-  const remainingLegacy = JSON.parse(fs.readFileSync(path.join(root, "auth.json"), "utf8"));
-  check(
-    "legacy retirement is atomic and preserves unknown provider records",
-    Object.keys(remainingLegacy).join(",") === "futureProvider",
-    JSON.stringify(remainingLegacy),
+    "the legacy file stays exactly as it was",
+    fs.readFileSync(path.join(root, "auth.json"), "utf8") === legacyBefore,
   );
   check(
     "sanitized inspection never contains token material or auth paths",
@@ -182,7 +196,7 @@ async function main() {
   );
   const second = await store.inspect();
   check(
-    "migration is idempotent after supported legacy entries are retired",
+    "inspection is idempotent",
     second.snapshot.profiles.length === 2 &&
       second.reconciliation.migratedProfileIds.length === 0,
   );
@@ -445,14 +459,12 @@ async function main() {
     { mode: 0o600 },
   );
   const corruptStore = new PiAccountAuthStore(corruptRoot);
-  const corruptError = await expectThrows(
-    "corrupt legacy auth fails closed with a fixed safe error",
-    () => corruptStore.inspect(),
-    /not valid JSON/,
-  );
+  const corruptInspection = await corruptStore.inspect();
   check(
-    "corrupt-auth errors never quote token fragments",
-    !String(corruptError && corruptError.message).includes("THIS_MUST_NOT_APPEAR"),
+    "a corrupt legacy auth file is ignored, left alone and never quoted",
+    corruptInspection.snapshot.profiles.length === 0 &&
+      !JSON.stringify(corruptInspection).includes("THIS_MUST_NOT_APPEAR") &&
+      fs.readFileSync(path.join(corruptRoot, "auth.json"), "utf8").includes("THIS_MUST_NOT_APPEAR"),
   );
 
   if (failures) {

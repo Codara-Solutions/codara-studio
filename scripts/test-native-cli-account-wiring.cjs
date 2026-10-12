@@ -343,24 +343,23 @@ assert.match(settingsView, /export function AccountAddPicker\(/);
 assert.match(settingsView, /<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
 assert.match(settingsView, /`Sign in once in your browser\. Cora and \$\{selectedView\.descriptor\.cliLabel\} both use it\.`/);
 
-// The main process owns the Codex shutdown boundary, and only Codex has
-// one: Codara PTYs get a graceful close first, external codex processes are
-// then quiesced, and the service does not move the live slot until that
-// callback resolves. Claude and Grok switches close nothing; each service
-// closes only the panes of the account being deleted.
-assert.match(ipc, /codexAccounts\.setSessionShutdown\(closeEveryCodexSession\)/);
-assert.match(ipc, /pty\.disposeNativeCliRuntimeGraceful\("codex"\)/);
-assert.match(ipc, /shutdownExternalNativeCliProcesses\("codex"\)/);
-assert.doesNotMatch(ipc, /grokAccounts\.setSessionShutdown|anthropicAccounts\.setSessionShutdown/);
-assert.match(ipc, /anthropicAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeClaudeProfileSessions\(profileId\)/);
-assert.match(ipc, /grokAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeGrokProfileSessions\(profileId\)/);
-assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: input\?\.closeSessions === true/);
+// An account change never closes a terminal, Codara's or anyone else's: a
+// switch replaces credentials, and a deleted account's home waits for its
+// terminals to exit. The services only learn from the pty layer which lease
+// owners are still alive.
+assert.doesNotMatch(ipc, /setSessionShutdown|closeEveryCodexSession|shutdownExternalNativeCliProcesses|disposeNativeCliRuntimeGraceful/);
+assert.doesNotMatch(ipc, /disposeNative(?:Claude|Codex|Grok)ProfileSessions/);
+assert.match(ipc, /for \(const accounts of \[anthropicAccounts, codexAccounts, grokAccounts\]\) \{\s*accounts\.setTerminalSessions\(\{ liveOwnerIds: \(\) => pty\.liveSessionOwnerIds\(\) \}\);/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId\);/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useSystemLogin\(\);/);
 assert.match(ipc, /unifiedAccountsFor\(target\.provider\)\.deleteAccount\(profileId, \{/);
 const nativeAccounts = read("src/main/orchestration/native-cli-accounts.ts");
 assert.match(nativeAccounts, /NATIVE_CLI_ACCOUNT_UNIFIED/);
 assert.doesNotMatch(nativeAccounts, /sessionShutdown|prepareLogin|execFile/);
 const socket = read("src/main/agent-socket.ts");
-assert.match(socket, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: params\.closeSessions === true/);
+assert.match(socket, /unifiedAccountsFor\(provider\)\.useAccount\(profileId\);/);
+assert.match(socket, /unifiedAccountsFor\(provider\)\.useSystemLogin\(\);/);
+assert.doesNotMatch(socket, /closeSessions: params\.closeSessions/);
 assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(profileId, \{/);
 assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 

@@ -27,6 +27,8 @@ function profile(id, provider, createdAt) {
     label: `Local ${id.at(-1)}`,
     createdAt,
     updatedAt: createdAt,
+    cli: { kind: "none" },
+    cora: "own",
   };
 }
 
@@ -111,12 +113,15 @@ async function main() {
     globalThis.__piRouter = {
       inspection: {
         snapshot: {
-          version: 1,
+          version: 2,
           profiles,
           defaults: {
             "openai-codex": IDS.codexA,
             anthropic: IDS.claude,
           },
+          tombstones: [],
+          dismissedSystemOffers: [],
+          pendingPurge: [],
         },
         statuses: profiles.map((entry) => ({
           profileId: entry.id,

@@ -105,13 +105,11 @@ import {
   providerForRuntime,
   unifiedAccountsFor,
 } from "./orchestration/unified-account-registry";
-import { UnifiedAccountSessionsError } from "./orchestration/unified-account-errors";
 import { unifiedAccountsReady } from "./orchestration/unified-account-migration";
 import {
   assertPiAccountProfileIsNotActive as assertPiAccountProfileIsNotActiveInRuns,
   PI_ACCOUNT_IN_USE_MESSAGE,
 } from "./orchestration/pi-account-run-guard";
-import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
 import { anthropicAccounts } from "./orchestration/unified-account-registry";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
@@ -679,38 +677,12 @@ export function registerIpc(): void {
   handle("onboarding:check", () => setupService.check());
   handle("onboarding:install", (_event, tool: unknown) => setupService.installTool(tool));
   handle("onboarding:install-status", () => setupService.installStatus());
-  // A Codex switch is a runtime-wide transaction: Codex keeps one sign-in
-  // for every terminal, so first give every Codara-owned Codex terminal the
-  // normal PTY close path so transcripts flush, then close codex sessions
-  // started in other local terminals. Only after both stages settle may the
-  // live slot change. The service asks for consent (with the count) first.
-  const closeEveryCodexSession = async () => {
-    const studio = await pty.disposeNativeCliRuntimeGraceful("codex");
-    const external = await shutdownExternalNativeCliProcesses("codex");
-    return {
-      closedSessionCount:
-        studio.closedSessionCount + external.closedProcessCount,
-    };
-  };
-  codexAccounts.setSessionShutdown(closeEveryCodexSession);
-  // The unified account services close only the terminals of the account
-  // being deleted, and only after the user confirmed it; the pty layer owns
-  // the session table, so it is handed in here. Claude and Grok panes are
-  // per-account; Codex panes all share the live slot.
-  anthropicAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) =>
-      pty.disposeNativeClaudeProfileSessions(profileId),
-  });
-  grokAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) => pty.disposeNativeGrokProfileSessions(profileId),
-  });
-  codexAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    liveRuntimeSessionCount: () => pty.liveNativeCliRuntimeSessionCount("codex"),
-    disposeProfileSessions: () => closeEveryCodexSession(),
-  });
+  // Account changes never close a terminal: a deleted account's home waits
+  // for its terminals to exit. The pty layer owns the session table, so the
+  // services learn which lease owners are still alive from it.
+  for (const accounts of [anthropicAccounts, codexAccounts, grokAccounts]) {
+    accounts.setTerminalSessions({ liveOwnerIds: () => pty.liveSessionOwnerIds() });
+  }
   for (const provider of ["anthropic", "openai-codex", "xai"] as const) {
     unifiedAccountsFor(provider).setBroadcast(() => {
       broadcastPiSubscriptionChanged(provider);
@@ -874,18 +846,40 @@ export function registerIpc(): void {
       await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
-      // One switch for both halves: Cora and the CLI move together. A Codex
-      // switch that would close sessions refuses with their count until the
-      // card asks again with closeSessions; the count travels in the message.
-      try {
-        await unifiedAccountsFor(provider).useAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-        });
-      } catch (error) {
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      // One switch for both halves: Cora and the CLI move together.
+      await unifiedAccountsFor(provider).useAccount(profileId);
       broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  // The System login: new sessions use the CLI's own login, the offer line
+  // adds it as an account, or hides it. None of them touches that login.
+  handle(
+    "pi-subscriptions:use-system-login",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).useSystemLogin();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:add-system-account",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).addSystemAccount();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:dismiss-system-offer",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).dismissSystemOffer();
       return inspectAfterPiAccountMetadataChange(provider);
     },
   );
@@ -899,20 +893,12 @@ export function registerIpc(): void {
         (profile) => profile.id === profileId,
       );
       if (!target) throw new Error(`Pi account profile not found: ${profileId}`);
-      try {
-        await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-          ownershipGuard: async (profile) => {
-            await assertPiAccountProfileIsNotActive(profile.id);
-            return false;
-          },
-        });
-      } catch (error) {
-        // The count travels in the message so the card's second step can say
-        // how many terminals it would close.
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
+        ownershipGuard: async (profile) => {
+          await assertPiAccountProfileIsNotActive(profile.id);
+          return false;
+        },
+      });
       broadcastNativeCliAccountsChanged();
       return inspectAfterPiAccountMetadataChange(target.provider);
     },

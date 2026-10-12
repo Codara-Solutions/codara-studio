@@ -56,9 +56,10 @@ assert.match(ipc, /renamePiAccountProfile/);
 // Every provider's mutations go through its unified service: one switch for
 // both halves, one delete that hands off and closes only that account's
 // terminals, one share in either direction.
-assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId\);/);
 assert.match(ipc, /unifiedAccountsFor\(target\.provider\)\.deleteAccount\(profileId, \{/);
-assert.match(ipc, /closeSessions: input\?\.closeSessions === true/);
+// Switching never closes sessions, so the renderer's closeSessions flag is ignored.
+assert.doesNotMatch(ipc, /closeSessions: input\?\.closeSessions === true/);
 assert.match(ipc, /unifiedAccountsFor\(provider\)\.shareLogin\(\{/);
 assert.doesNotMatch(ipc, /setDefaultPiAccountProfile|deletePiSubscriptionProfile|useAnthropicAccount|deleteAnthropicAccount/);
 assert.match(ipc, /ownershipGuard:\s*async \(profile\)/);
@@ -512,7 +513,7 @@ for (const forbiddenField of [
 // the Keychain.
 const piAuth = read("src/main/orchestration/pi-subscription-auth.ts");
 assert.match(piAuth, /\.\.\.\(cliProfileId \? \{ cliProfileId \} : \{\}\)/);
-assert.match(piAuth, /\.\.\.\(cliProfileId === "personal" \? \{ builtIn: true as const \} : \{\}\)/);
+assert.match(piAuth, /\.\.\.\(cliProfileId === SYSTEM_CLI_PROFILE_ID \? \{ builtIn: true as const \} : \{\}\)/);
 assert.match(piAuth, /\.\.\.\(terminal \? \{ terminal \} : \{\}\)/);
 assert.match(piAuth, /terminalStatusesByProvider\(\)/);
 assert.match(piAuth, /terminals\.get\(profile\.provider\)\?\.get\(cliProfileId\)/);

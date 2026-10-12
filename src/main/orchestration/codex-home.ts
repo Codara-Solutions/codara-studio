@@ -60,7 +60,7 @@ function assertExistingNodeNotSymlink(
  * Like assertExistingNodeNotSymlink, but tolerant of the share links Codara
  * itself plants inside its managed account homes: a managed profile shares
  * sessions/, history.jsonl, and config.toml with the personal ~/.codex via
- * symlinks (see native-cli-shared-state.ts), so inside a Codara-managed home
+ * symlinks (see cli-account-homes.ts), so inside a Codara-managed home
  * a symlink at one of those names is the designed state, not an attack. The
  * link must still resolve to a real node of the expected type; a dangling
  * link behaves as missing. Personal (non-managed) homes keep the strict

@@ -10,7 +10,7 @@
 //   codex  — <codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl
 //   cora   — <codaraHome>/pi-agent/sessions/*.jsonl
 // Codara-managed account profiles SYMLINK their projects/ and sessions/ into
-// the personal home (see native-cli-shared-state.ts), so walking the managed
+// the personal home (see cli-account-homes.ts), so walking the managed
 // roots as well would count the same files twice. For the same reason the walk
 // never descends through a symlink.
 //

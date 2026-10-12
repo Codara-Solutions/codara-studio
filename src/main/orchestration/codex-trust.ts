@@ -12,6 +12,10 @@ import { promises as fs } from "node:fs";
 
 import { writeFileAtomic } from "../fs-atomic";
 import { resolveCodexHomePaths } from "./codex-home";
+import { outsideWriteCapability } from "../outside-write-guard";
+
+/** Explicit exception to the outside-write guard: a project trust entry in the user's Codex config. */
+const PROJECT_TRUST_WRITE = outsideWriteCapability("a project trust entry in the user's Codex config");
 
 // Process-local serialization for the ~/.codex/config.toml read-modify-write
 // so two concurrent spawns for distinct cwds don't race the window and emit
@@ -32,7 +36,7 @@ export async function ensureCodexProjectTrust(
   const { configPath, homeDir } = resolveCodexHomePaths(codexHome);
   // Personal and managed homes can alias ONE config.toml: a Codara-managed
   // account shares its config with the personal ~/.codex through a symlink
-  // (native-cli-shared-state.ts). Key the lock and the trusted-cwd cache by
+  // (cli-account-homes.ts). Key the lock and the trusted-cwd cache by
   // the file's real identity — keyed by the given path, a personal spawn and
   // a managed spawn would run unserialized read-modify-writes on the same
   // file — and hand the real path to the writer so its atomic rename lands on
@@ -94,5 +98,5 @@ async function writeCodexProjectTrustEntry(
   }
   const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
   resolveCodexHomePaths(codexHome);
-  await writeFileAtomic(configPath, `${existing}${sep}\n${entry}`, { mode });
+  await writeFileAtomic(configPath, `${existing}${sep}\n${entry}`, { mode, outsideWrite: PROJECT_TRUST_WRITE });
 }
