@@ -855,7 +855,7 @@ async function dispatch(
       case "workflow.stop":
         return await handleWorkflowStop(params, id);
       case "workflow.resume":
-        return await handleWorkflowResume(params, id);
+        return await handleWorkflowResume(params, id, res);
       case "workflow.save":
         return await handleWorkflowSave(params, id, res);
       case "pane.split":
@@ -5327,8 +5327,28 @@ async function handleWorkflowCheck(params: Record<string, unknown>, id: JsonRpcI
   return successResponse(id, checked);
 }
 
-function describeWorkflowForConsent(meta: WorkflowMeta, estimate: WorkflowEstimate | undefined, caps: WorkflowCaps): string {
+const WORKFLOW_CONSENT_ARGS_CHARS = 600;
+
+function describeWorkflowForConsent(
+  meta: WorkflowMeta,
+  estimate: WorkflowEstimate | undefined,
+  caps: WorkflowCaps,
+  args: unknown,
+): string {
   const lines = [`Cora wants to run the workflow "${meta.name}": ${meta.description}`];
+  // The args steer every prompt the script builds, so the user approves them
+  // too, not only the name and the description the script gives itself.
+  if (args !== undefined && args !== null) {
+    let text: string;
+    try {
+      text = JSON.stringify(args) ?? String(args);
+    } catch {
+      text = String(args);
+    }
+    lines.push(
+      `Args: ${text.length > WORKFLOW_CONSENT_ARGS_CHARS ? `${text.slice(0, WORKFLOW_CONSENT_ARGS_CHARS)}...` : text}`,
+    );
+  }
   if (meta.phases?.length) {
     lines.push(
       `Phases: ${meta.phases.map((phase) => (phase.detail ? `${phase.title} (${phase.detail})` : phase.title)).join(", ")}`,
@@ -5394,7 +5414,7 @@ async function handleWorkflowRun(
     runId: caller.run.id,
     res,
     id,
-    question: describeWorkflowForConsent(checked.meta, checked.estimate, effectiveCaps),
+    question: describeWorkflowForConsent(checked.meta, checked.estimate, effectiveCaps, params.args),
     denyMessage:
       `The user declined, so the workflow "${checked.meta.name}" was not started. ` +
       "Do not retry it; ask the user how they would like to proceed.",
@@ -5410,6 +5430,7 @@ async function handleWorkflowRun(
       source,
       args: params.args,
       caps: effectiveCaps,
+      expectedSourceHash: checked.sourceHash,
       launchedFromRunId: caller.run.id,
     });
     return successResponse(id, {
@@ -5469,14 +5490,50 @@ async function handleWorkflowStop(params: Record<string, unknown>, id: JsonRpcId
   return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id)));
 }
 
-async function handleWorkflowResume(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+async function handleWorkflowResume(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
   const caller = await resolveWorkflowCallerRun(params, id);
   if ("error" in caller) return caller.error;
   const target = await loadWorkflowRunForCaller(caller.run, params, id);
   if ("error" in target) return target.error;
   const driver = await getWorkflowDriver();
+  const useLatestScript = params.use_latest_script === true;
+  let expectedSourceHash: string | undefined;
+  if (useLatestScript) {
+    // The user approved the script the run started with. A newer saved
+    // version is code nobody approved yet (Cora can edit a project workflow
+    // with its file tools), so switching to it asks first.
+    let latest: Awaited<ReturnType<typeof driver.latestWorkflowScript>>;
+    try {
+      latest = await driver.latestWorkflowScript(target.run.id);
+    } catch (err) {
+      return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+    }
+    if (latest?.changed) {
+      const runStore = await getRunStore();
+      const consent = await requestUserConsent({
+        runStore,
+        runId: caller.run.id,
+        res,
+        id,
+        question:
+          `Cora wants to resume the workflow run "${target.run.title}" with the newer saved version of ` +
+          `"${latest.name}": ${latest.description}\nAgents whose prompts are unchanged keep their results; ` +
+          "the rest run again under the new script.\n\nResume with the new version?",
+        denyMessage:
+          `The user declined, so the workflow run was not resumed with the new version of "${latest.name}". ` +
+          "Do not retry it; ask the user how they would like to proceed.",
+        reason: "Resuming with an edited workflow runs code the user has not approved yet.",
+      });
+      if (!consent.approved) return consent.response;
+    }
+    expectedSourceHash = latest?.sourceHash;
+  }
   try {
-    await driver.resumeWorkflowRun(target.run.id, { useLatestScript: params.use_latest_script === true });
+    await driver.resumeWorkflowRun(target.run.id, { useLatestScript, expectedSourceHash });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

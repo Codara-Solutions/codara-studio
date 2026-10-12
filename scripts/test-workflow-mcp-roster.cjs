@@ -3,7 +3,8 @@
 // or an imported pull request's), the socket refuses workflow.* for imported
 // pull requests and blocks the mutating verbs mid-compaction, and
 // workflow.run and workflow.save post the consent question before they start
-// or write anything.
+// or write anything, as does workflow.resume before it switches a run to an
+// edited script; a run starts or resumes only the source the user saw.
 //
 //   node scripts/test-workflow-mcp-roster.cjs
 
@@ -86,6 +87,14 @@ try {
     "workflow.save asks before it writes",
     save.includes("requestUserConsent(") && save.indexOf("requestUserConsent(") < save.indexOf("saveWorkflow("),
   );
+  check("workflow.run starts only the source it checked", /expectedSourceHash: checked\.sourceHash/.test(run));
+  check("the consent question shows the args", /describeWorkflowForConsent\([^)]*params\.args\)/.test(run));
+  const resume = body("handleWorkflowResume");
+  check(
+    "workflow.resume asks before switching to an edited script",
+    resume.includes("requestUserConsent(") && resume.indexOf("requestUserConsent(") < resume.indexOf("resumeWorkflowRun("),
+  );
+  check("workflow.resume pins the script it asked about", /expectedSourceHash/.test(resume.slice(resume.indexOf("resumeWorkflowRun("))));
   const caller = body("resolveWorkflowCallerRun");
   check("a workflow or loom run cannot start workflows", /run\.workflow \|\| run\.automationId/.test(caller));
 } catch (err) {

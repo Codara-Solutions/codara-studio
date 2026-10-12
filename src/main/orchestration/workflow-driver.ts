@@ -303,7 +303,14 @@ export async function checkWorkflow(input: {
     startSandbox: driverEnv().startSandbox,
   });
   if (estimate.error) errors.push({ line: lineOf(estimate.error), message: estimate.error });
-  return { ok: errors.length === 0, meta: resolved.meta, errors, warnings: estimate.warnings, estimate };
+  return {
+    ok: errors.length === 0,
+    meta: resolved.meta,
+    errors,
+    warnings: estimate.warnings,
+    estimate,
+    sourceHash: sha256(resolved.text),
+  };
 }
 
 function lineOf(message: string): number | undefined {
@@ -319,6 +326,11 @@ function errorMessage(err: unknown): string {
 
 export async function startWorkflowRun(input: StartWorkflowRunInput): Promise<RunState> {
   const resolved = await resolveSource({ workflow: input.workflow, source: input.source, cwd: input.cwd });
+  // A saved workflow is read again here, after the user approved what the
+  // check showed; anything (an agent, an editor) may have rewritten it since.
+  if (input.expectedSourceHash && sha256(resolved.text) !== input.expectedSourceHash) {
+    throw new Error(`Workflow ${resolved.meta.name} changed after it was checked; check it again before running it.`);
+  }
   const argsProblem = checkArgs(resolved.meta, input.args);
   if (argsProblem) throw new Error(`Workflow ${resolved.meta.name}: ${argsProblem}`);
   const models = await driverEnv().models();
@@ -780,8 +792,34 @@ export async function cancelWorkflowRun(runId: string, reason = "Workflow cancel
  * can be resumed too, typically after its saved script was fixed and
  * `useLatestScript` copies the fix in.
  */
-export async function resumeWorkflowRun(runId: string, options: { useLatestScript?: boolean } = {}): Promise<void> {
+export async function resumeWorkflowRun(
+  runId: string,
+  options: { useLatestScript?: boolean; expectedSourceHash?: string } = {},
+): Promise<void> {
   if (activeRuns.has(runId)) return;
+  await resumeWorkflowRunInner(runId, options);
+}
+
+/** The saved script a "use latest" resume would switch the run to, and whether it differs. */
+export async function latestWorkflowScript(
+  runId: string,
+): Promise<{ name: string; description: string; changed: boolean; sourceHash: string } | null> {
+  const store = await driverEnv().store();
+  const run = await store.getRun(runId);
+  if (!run?.workflow || run.workflow.ref.source === "inline" || !run.workflow.ref.name) return null;
+  const latest = await resolveSource({ workflow: `${run.workflow.ref.source}:${run.workflow.ref.name}`, cwd: run.workflow.cwd });
+  return {
+    name: latest.meta.name,
+    description: latest.meta.description,
+    changed: sha256(latest.body) !== run.workflow.scriptHash,
+    sourceHash: sha256(latest.text),
+  };
+}
+
+async function resumeWorkflowRunInner(
+  runId: string,
+  options: { useLatestScript?: boolean; expectedSourceHash?: string },
+): Promise<void> {
   const store = await driverEnv().store();
   const run = await store.getRun(runId);
   if (!run?.workflow) throw new Error(`Not a workflow run: ${runId}`);
@@ -792,6 +830,9 @@ export async function resumeWorkflowRun(runId: string, options: { useLatestScrip
   const patch: Partial<WorkflowRunInfo> = { state: "running", error: undefined, finishedAt: undefined };
   if (options.useLatestScript && run.workflow.ref.source !== "inline" && run.workflow.ref.name) {
     const latest = await resolveSource({ workflow: `${run.workflow.ref.source}:${run.workflow.ref.name}`, cwd: run.workflow.cwd });
+    if (options.expectedSourceHash && sha256(latest.text) !== options.expectedSourceHash) {
+      throw new Error(`Workflow ${latest.meta.name} changed after it was approved; ask again before resuming with it.`);
+    }
     writeFileSync(join(dir, "script.js"), latest.text, "utf8");
     patch.scriptHash = sha256(latest.body);
     patch.phases = latest.meta.phases;

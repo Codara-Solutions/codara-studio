@@ -189,6 +189,8 @@ export interface WorkflowCheckResult {
   errors: Array<{ line?: number; message: string }>;
   warnings: string[];
   estimate?: WorkflowEstimate;
+  /** sha256 of the checked source text; a start can insist on running exactly it. */
+  sourceHash?: string;
 }
 
 export interface StartWorkflowRunInput {
@@ -200,6 +202,8 @@ export interface StartWorkflowRunInput {
   source?: string;
   args?: unknown;
   caps?: Partial<WorkflowCaps>;
+  /** Refuse to start when the source no longer hashes to this (it changed after approval). */
+  expectedSourceHash?: string;
   launchedFromRunId?: string;
   seedFromRunId?: string;
   continueChat?: boolean;

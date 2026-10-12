@@ -308,5 +308,5 @@ script that fans work out to many agents; see Workflows in
 | `codara_workflow_status` | A workflow run's progress tree, and its result once it finished. |
 | `codara_workflow_wait` | Waits until a workflow run finishes, stops or needs you. |
 | `codara_workflow_stop` | Stops a workflow run; it can be resumed. |
-| `codara_workflow_resume` | Resumes it; agents that finished are answered from the journal. |
+| `codara_workflow_resume` | Resumes it; agents that finished are answered from the journal. Switching the run to an edited saved script asks you first. |
 | `codara_workflow_save` | Saves a script for you or the project. Asks you first. |

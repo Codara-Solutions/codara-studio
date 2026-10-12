@@ -4,7 +4,8 @@
 // call markers reach the launches, Stop parks the run and Resume answers the
 // finished calls from the journal, and after an app restart recovery journals
 // a report an interrupted agent had already written, parks the run and starts
-// nothing, so Resume pays for no agent twice.
+// nothing, so Resume pays for no agent twice. A saved workflow edited after it
+// was checked or approved does not run.
 //
 //   node scripts/test-workflow-driver.cjs
 
@@ -262,6 +263,40 @@ return [a, b];
     Math.abs(resumed.workflow.spent.usd - 0.03) < 1e-9 && resumed.workflow.spent.inputTokens === 300,
     resumed.workflow.spent,
   );
+
+  // ── Approved source ────────────────────────────────────────────────────
+  {
+    const file = path.join(dirs.userDir, "pinned.js");
+    const v1 = `export const meta = { name: "pinned", description: "v1" };\nreturn await agent("plain");\n`;
+    fs.writeFileSync(file, v1);
+    const checkedV1 = await driver.checkWorkflow({ workflow: "pinned", cwd: base });
+    check("the check reports the source hash", /^[0-9a-f]{64}$/.test(checkedV1.sourceHash ?? ""), checkedV1.sourceHash);
+    fs.writeFileSync(file, v1.replace("v1", "v2"));
+    let startError = "";
+    try {
+      await driver.startWorkflowRun({ workspaceId: "ws", cwd: base, workflow: "pinned", expectedSourceHash: checkedV1.sourceHash });
+    } catch (err) {
+      startError = err.message;
+    }
+    check("a workflow edited after its check does not start", /changed after it was checked/.test(startError), startError);
+
+    fs.writeFileSync(file, v1);
+    const pinned = await driver.startWorkflowRun({ workspaceId: "ws", cwd: base, workflow: "pinned", expectedSourceHash: checkedV1.sourceHash });
+    await driver.waitForWorkflowRun(pinned.id, { timeoutMs: 20_000, pollMs: 25 });
+    store.runs.get(pinned.id).workflow.state = "failed";
+    check("an unedited saved workflow is not a change", (await driver.latestWorkflowScript(pinned.id))?.changed === false);
+    fs.writeFileSync(file, v1.replace(`"plain"`, `"other"`));
+    const latest = await driver.latestWorkflowScript(pinned.id);
+    check("an edited saved workflow is reported as changed", latest?.changed === true, latest);
+    fs.writeFileSync(file, v1.replace(`"plain"`, `"third"`));
+    let resumeError = "";
+    try {
+      await driver.resumeWorkflowRun(pinned.id, { useLatestScript: true, expectedSourceHash: latest.sourceHash });
+    } catch (err) {
+      resumeError = err.message;
+    }
+    check("Resume refuses a script edited after it was approved", /changed after it was approved/.test(resumeError), resumeError);
+  }
 
   // ── Restart recovery ───────────────────────────────────────────────────
   const beforeRestart = store.calls.launches.length;
