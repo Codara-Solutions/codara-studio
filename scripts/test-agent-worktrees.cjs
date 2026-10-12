@@ -362,6 +362,33 @@ async function main() {
     );
     assert.equal((await aw.removeAgentWorktree({ role: "manager", client: "cora", runId: "run-live" }, { workspaceId: owned.workspaceId }, deps)).ok, true);
 
+    // So is the worktree of an agent whose pane is still open, even though
+    // it works there only through absolute paths.
+    const paneOwned = await aw.createAgentWorktree(terminalAgent, { branch: "agent/pane-owned" }, deps);
+    assert.equal(paneOwned.ok, true, JSON.stringify(paneOwned));
+    const otherPane = { role: "studio", client: "codex", paneId: "pane-2" };
+    h.paneWorkspace["pane-2"] = "ws-repo";
+    h.sessionCwds["pane-1"] = repo;
+    const paneRefused = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps);
+    assert.equal(paneRefused.code, "WORKTREE_OWNED_BY_LIVE_AGENT", JSON.stringify(paneRefused));
+    assert.equal(paneRefused.details.ownerPaneId, "pane-1");
+    assert.match(paneRefused.error, /pane-1/);
+    const paneDry = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId, dryRun: true }, deps);
+    assert.equal(paneDry.wouldRemove, false);
+    assert.ok(paneDry.blockers.includes("WORKTREE_OWNED_BY_LIVE_AGENT"));
+    const paneListed = (await aw.listAgentWorktrees(otherPane, {}, deps)).worktrees.find((entry) => entry.workspaceId === paneOwned.workspaceId);
+    assert.equal(paneListed.removable, false, JSON.stringify(paneListed));
+    delete h.sessionCwds["pane-1"];
+    h.terminals = [{ paneId: "pane-1", workspaceId: "ws-elsewhere" }];
+    assert.equal(
+      (await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps)).code,
+      "WORKTREE_OWNED_BY_LIVE_AGENT",
+      "a pane the renderer still shows is open",
+    );
+    h.terminals = [];
+    const paneClosed = await aw.removeAgentWorktree(otherPane, { workspaceId: paneOwned.workspaceId }, deps);
+    assert.equal(paneClosed.ok, true, JSON.stringify(paneClosed));
+
     // A worktree deleted from disk behind Codara's back: the row goes, the
     // branch only when its tip is merged.
     const vanished = await aw.createAgentWorktree(terminalAgent, { branch: "agent/vanished" }, deps);

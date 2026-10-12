@@ -90,6 +90,7 @@ export type WorktreeCode =
   | "WORKTREE_USER_CREATED"
   | "WORKTREE_ORIGIN_MANAGED"
   | "WORKTREE_OWNED_BY_ACTIVE_RUN"
+  | "WORKTREE_OWNED_BY_LIVE_AGENT"
   | "WORKTREE_DETACHED_HEAD"
   | "WORKTREE_BRANCH_MISMATCH"
   | "WORKTREE_LOCKED"
@@ -240,6 +241,7 @@ const MESSAGES: Record<WorktreeCode, string> = {
     "the user created this worktree; agents may only remove worktrees they created",
   WORKTREE_ORIGIN_MANAGED: "this is a GitHub issue or PR workspace",
   WORKTREE_OWNED_BY_ACTIVE_RUN: "the worktree belongs to another active run",
+  WORKTREE_OWNED_BY_LIVE_AGENT: "the worktree belongs to an agent in another terminal that is still open",
   WORKTREE_DETACHED_HEAD: "the worktree is not on its recorded branch",
   WORKTREE_BRANCH_MISMATCH: "the worktree is not on its recorded branch",
   WORKTREE_LOCKED: "the worktree is locked",
@@ -278,6 +280,7 @@ const HINTS: Partial<Record<WorktreeCode, string>> = {
   WORKTREE_RUNNING_PANES:
     "close your own terminals with codara_terminal_close; otherwise wait or ask the user",
   WORKTREE_ACTIVE_RUNS: "wait for the runs to finish or ask the user",
+  WORKTREE_OWNED_BY_LIVE_AGENT: "leave it to that agent, or ask the user",
   WORKTREE_RUNNING_PROCESSES: "stop them, or wait or ask the user",
   WORKTREE_CALLER_INSIDE: "call from the source workspace, or ask the user to delete it from the rail",
   WORKTREE_CHANGED: "retry",
@@ -1165,6 +1168,12 @@ function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
 
+async function paneIsOpen(ctx: VerifyContext, paneId: string): Promise<boolean> {
+  if (ctx.deps.sessionCwd(paneId) !== null) return true;
+  const terminals = await ctx.rendererTerminals;
+  return (terminals ?? []).some((terminal) => terminal.paneId === paneId);
+}
+
 export async function verifyRemovable(
   ctx: VerifyContext,
   workspace: Workspace,
@@ -1203,6 +1212,14 @@ export async function verifyRemovable(
       block("WORKTREE_OWNED_BY_ACTIVE_RUN");
       verdict.details.ownerRunId = owner.id;
     }
+  }
+  // An agent in a pane works in its worktree through absolute paths and
+  // `git -C`, so neither its pane nor its processes sit under the worktree
+  // and the usage checks below cannot see it. Its pane being open is the
+  // only sign that it may still be working there.
+  if (createdBy?.paneId && createdBy.paneId !== caller.paneId && (await paneIsOpen(ctx, createdBy.paneId))) {
+    block("WORKTREE_OWNED_BY_LIVE_AGENT");
+    verdict.details.ownerPaneId = createdBy.paneId;
   }
 
   // Only a path that does not exist reads as already removed; one that cannot
@@ -1487,6 +1504,8 @@ function blockerMessage(verdict: RemovalVerdict, code: WorktreeCode): string {
       return `${verdict.running.processes} processes use the worktree`;
     case "WORKTREE_OWNED_BY_ACTIVE_RUN":
       return `the worktree belongs to active run ${String(d.ownerRunId)}`;
+    case "WORKTREE_OWNED_BY_LIVE_AGENT":
+      return `the worktree belongs to the agent in terminal ${String(d.ownerPaneId)}, which is still open`;
     case "WORKTREE_DETACHED_HEAD":
     case "WORKTREE_BRANCH_MISMATCH":
       return `the worktree is not on its recorded branch '${verdict.branch}'`;
