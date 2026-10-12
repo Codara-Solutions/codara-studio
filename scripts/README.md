@@ -269,7 +269,8 @@ every git Codara spawns),
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
 through the MCP tools: merge proofs, every refusal, recovery refs, the audit
 log, the repository lock and the process scan, against throwaway
-repositories with a fake git config).
+repositories with a fake git config), `test-agent-worktrees-docs` (every
+removal refusal code is documented in `docs/mcp-tools.md`).
 
 ### Notifications
 

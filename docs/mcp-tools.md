@@ -195,8 +195,38 @@ the `blockers` and a `hint`:
   unfinished search cannot rule a nested checkout out. The agent can delete
   that folder itself if it only holds build output or dependencies, such as
   `node_modules/`, and try again;
+- no other owner may still be working in it: a worktree another Cora run
+  created is kept while that run is active, and one an agent in another
+  terminal created is kept while that terminal is open, because such an
+  agent works there through absolute paths and `git -C` and no usage check
+  can see it;
 - no terminal, active Cora run or process uses it, and the caller is not
   inside it.
+
+The `code` is the first blocker; `blockers` lists them all, and a dry run or
+`codara_worktree_list` reports the same codes without removing anything:
+
+| Code | Meaning | What the agent should do |
+|---|---|---|
+| `WORKTREE_USER_CREATED` | You created it and agents may not remove your worktrees. | Ask you. |
+| `WORKTREE_ORIGIN_MANAGED` | It is a GitHub issue or pull-request workspace. | Leave it; you remove it from the rail. |
+| `WORKTREE_OWNED_BY_ACTIVE_RUN` | Another Cora run created it and is still active (`details.ownerRunId`). | Leave it to that run; ask you if it must go now. |
+| `WORKTREE_OWNED_BY_LIVE_AGENT` | An agent in another terminal created it and that terminal is still open (`details.ownerPaneId`). | Leave it to that agent, or ask you. |
+| `WORKTREE_NOT_MANAGED` | The folder cannot be read, so it may still hold work, or it is no longer a git worktree in Codara's worktrees folder. | Ask you. |
+| `WORKTREE_LOCKED` | `git worktree lock` protects it. | Ask you. |
+| `WORKTREE_DETACHED_HEAD`, `WORKTREE_BRANCH_MISMATCH` | It is not on the branch Codara recorded. | Check out that branch again, or ask you. |
+| `WORKTREE_DIRTY` | Uncommitted, untracked or hidden (`assume-unchanged`, `skip-worktree`) changes. | Commit or discard them yourself. |
+| `WORKTREE_OPERATION_IN_PROGRESS` | A merge, rebase, cherry-pick or similar is in progress. | Finish or abort it. |
+| `WORKTREE_IGNORED_FILES` | Ignored files that are not build output or caches. | Move them, or pass `discardIgnoredFiles: true`. |
+| `WORKTREE_SUBMODULES` | A submodule or committed nested repository is checked out. | Ask you. |
+| `WORKTREE_NESTED_REPOSITORY` | Another checkout or worktree sits inside it (`details.nestedRepositories`). | Move or remove it first, or ask you. |
+| `WORKTREE_NESTED_SCAN_INCOMPLETE` | The search for nested checkouts could not finish (`details.unscannedFolder`). | Delete that folder if it only holds build output or dependencies, then retry; otherwise ask you. |
+| `WORKTREE_NOT_MERGED` | The last commit is not merged into the target. | Push and merge it, or ask you to delete it from the rail. |
+| `WORKTREE_TARGET_NOT_FOUND` | The merge target does not exist or cannot be a target. | Pass `target`, the branch it was merged into. |
+| `WORKTREE_RUNNING_PANES` | Terminals are open in it. | Close your own with `codara_terminal_close`; otherwise wait or ask you. |
+| `WORKTREE_ACTIVE_RUNS` | Active Cora runs work in it. | Wait for them to finish, or ask you. |
+| `WORKTREE_RUNNING_PROCESSES` | Processes run in it. | Stop them, or wait or ask you. |
+| `WORKTREE_CALLER_INSIDE` | The caller runs inside it. | Call from the source workspace, or ask you to delete it from the rail. |
 
 Before deleting anything Codara saves the last commit as
 `refs/codara/removed-worktrees/<date>/<workspace id>`, kept for 30 days, and
