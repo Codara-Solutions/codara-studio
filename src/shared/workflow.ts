@@ -5,7 +5,7 @@
 // are shared by main, the renderer and the CLI, so they must stay free of Node
 // and Electron imports.
 
-import type { AgentEffortLevel } from "./types";
+import type { AgentEffortLevel, RunStatus } from "./types";
 
 export type WorkflowSource = "builtin" | "user" | "project" | "inline";
 
@@ -122,6 +122,18 @@ export interface WorkflowRunInfo {
   tree?: WorkflowTreeSnapshot;
   startedAt: string;
   finishedAt?: string;
+}
+
+/** A workflow run as the UI, the CLI and Cora's tools read it. */
+export interface WorkflowRunStatus {
+  runId: string;
+  status: RunStatus;
+  title: string;
+  /** Carries the live tree while the run executes in this app session. */
+  workflow: WorkflowRunInfo;
+  live: boolean;
+  /** The script's return value, once the run is complete and it was asked for. */
+  result?: unknown;
 }
 
 export interface WorkflowCallMarker {

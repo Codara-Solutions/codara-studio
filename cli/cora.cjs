@@ -53,6 +53,9 @@ ${c.bold("SURFACES")}
   whiteboard <run>             the run's whiteboard markdown
   auto list                    automations in the workspace
   auto run|pause|resume|on|off <automation-id>
+  workflow list|show|check|run|status|wait|stop|resume|save
+                               workflows: scripts that fan work out to many
+                               agents (\`cora workflow help\`)
 
 ${c.bold("BENCH")}
   bench [--split train|holdout|all] [--task NAME[,NAME]] [--repeat N] [--keep]
@@ -150,6 +153,10 @@ async function main() {
 
     case "auto":
       return require("./commands/automations.cjs").auto(args, flags);
+
+    case "workflow":
+    case "workflows":
+      return require("./commands/workflow.cjs").workflow(args, flags);
 
     case "bench":
       return require("./commands/bench.cjs").bench(args, flags);

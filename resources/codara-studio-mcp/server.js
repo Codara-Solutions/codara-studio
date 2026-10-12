@@ -663,6 +663,137 @@ const WORKTREE_TOOL_TO_RPC = {
   codara_worktree_remove: "worktree.remove",
 };
 
+// Workflows: a JavaScript script that fans work out to many Cora agents. Only
+// the execute roster carries them; codara_workflow_run and codara_workflow_save
+// ask the user in the chat before anything starts or is written.
+const WORKFLOW_CAPS_PROPERTIES = {
+  max_agents: { type: "number", description: "Default meta.caps or 200, max 1000." },
+  concurrency: { type: "number", description: "Default 4, max 16." },
+  token_ceiling: { type: "number" },
+  usd_ceiling: { type: "number" },
+};
+const WORKFLOW_TOOLS = [
+  {
+    name: "codara_workflow_list",
+    description:
+      "List saved workflows (built-in, user, project) with description, whenToUse, phases and args.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "codara_workflow_get",
+    description: "Fetch one saved workflow's source and meta by name (or source:name).",
+    inputSchema: {
+      type: "object",
+      required: ["name"],
+      properties: { name: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_check",
+    description:
+      "Dry-run a workflow without starting agents: errors with lines, warnings, and an estimate (agents, models, tokens). Call until clean before codara_workflow_run.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Saved workflow; or pass source." },
+        source: { type: "string", description: "Inline script; see the workflows tool guidance." },
+        args: {},
+        ...WORKFLOW_CAPS_PROPERTIES,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_run",
+    description:
+      "Run a saved or inline workflow as its own run after the user approves the estimate in chat; read approved and workflow_run_id. Only when the user asked for a workflow.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        source: { type: "string" },
+        args: {},
+        ...WORKFLOW_CAPS_PROPERTIES,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_status",
+    description:
+      "Workflow run progress per phase, tokens, logs, null agents with reasons, and the result once complete.",
+    inputSchema: {
+      type: "object",
+      required: ["workflow_run_id"],
+      properties: { workflow_run_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_wait",
+    description:
+      "Long-poll until a workflow run stops running or timeout_ms passes; returns status and result.",
+    inputSchema: {
+      type: "object",
+      required: ["workflow_run_id"],
+      properties: {
+        workflow_run_id: { type: "string" },
+        timeout_ms: { type: "number", description: "Default 600000, max 1140000." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_stop",
+    description: "Stop a workflow run; finished agents are kept for resume.",
+    inputSchema: {
+      type: "object",
+      required: ["workflow_run_id"],
+      properties: { workflow_run_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_resume",
+    description:
+      "Resume a paused or failed workflow run; unchanged agents reuse their results. use_latest_script picks up an edited saved workflow.",
+    inputSchema: {
+      type: "object",
+      required: ["workflow_run_id"],
+      properties: { workflow_run_id: { type: "string" }, use_latest_script: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_workflow_save",
+    description:
+      "Save a workflow under meta.name for the user or in this repository's .codara/workflows (scope project), after the user approves.",
+    inputSchema: {
+      type: "object",
+      required: ["source"],
+      properties: {
+        source: { type: "string" },
+        scope: { type: "string", enum: ["user", "project"] },
+        overwrite: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+const WORKFLOW_TOOL_TO_RPC = {
+  codara_workflow_list: "workflow.list",
+  codara_workflow_get: "workflow.get",
+  codara_workflow_check: "workflow.check",
+  codara_workflow_run: "workflow.run",
+  codara_workflow_status: "workflow.status",
+  codara_workflow_wait: "workflow.wait",
+  codara_workflow_stop: "workflow.stop",
+  codara_workflow_resume: "workflow.resume",
+  codara_workflow_save: "workflow.save",
+};
+
 // A run-owned visual explanation surface available in every Cora mode. It is
 // part of the studio roster (rather than Execute-only orchestration) because a
 // Talk-mode explanation can be the best use of a whiteboard too.
@@ -1818,12 +1949,13 @@ if (IS_AUTOMATION_MODE) {
 } else if (IS_EXECUTE_MODE) {
   // EXECUTE_TOOLS already contains codara_ask_user and codara_name_chat, so the
   // execute map is spread LAST and keeps orchestrator.name_chat.
-  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS, ...WORKTREE_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS, ...WORKTREE_TOOLS, ...WORKFLOW_TOOLS];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     ...MANAGER_AUTOMATION_TOOL_TO_RPC,
     ...EXECUTE_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
+    ...WORKFLOW_TOOL_TO_RPC,
   };
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
@@ -1882,6 +2014,11 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_get_automation",
   "codara_wait_for_automation",
   "codara_worktree_list",
+  "codara_workflow_list",
+  "codara_workflow_get",
+  "codara_workflow_check",
+  "codara_workflow_status",
+  "codara_workflow_wait",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
 // data, and a client may auto-approve a tool that says it cannot.
@@ -1978,10 +2115,14 @@ function buildInstructions() {
   return parts.join("\n\n");
 }
 
-// Orchestration RPCs (orchestrator.* / automation.*) get the long HTTP timeout
-// and runId auto-injection; preview + terminal RPCs get the short timeout.
+// Orchestration RPCs (orchestrator.* / automation.* / workflow.*) get the long
+// HTTP timeout and runId auto-injection; preview + terminal RPCs get the short
+// timeout.
 function isOrchestrationRpc(rpc) {
-  return typeof rpc === "string" && (rpc.startsWith("orchestrator.") || rpc.startsWith("automation."));
+  return (
+    typeof rpc === "string" &&
+    (rpc.startsWith("orchestrator.") || rpc.startsWith("automation.") || rpc.startsWith("workflow."))
+  );
 }
 
 // The orchestration RPCs that deliberately hold the socket open with no traffic
@@ -1992,6 +2133,7 @@ const LONG_POLL_RPCS = new Set([
   "orchestrator.wait_for_workers",
   "orchestrator.ask_user",
   "automation.wait",
+  "workflow.wait",
 ]);
 
 function isLongPollRpc(rpc) {

@@ -28,6 +28,7 @@ import {
   type WorkflowMeta,
   type WorkflowRef,
   type WorkflowRunInfo,
+  type WorkflowRunStatus,
 } from "@shared/workflow";
 
 import { resolveBundledResourcePath } from "../bundled-resources";
@@ -817,15 +818,6 @@ export async function discardWorkflowRun(runId: string): Promise<void> {
 
 export function skipWorkflowCall(runId: string, seq: number): boolean {
   return activeRuns.get(runId)?.runtime?.skip(seq) ?? false;
-}
-
-export interface WorkflowRunStatus {
-  runId: string;
-  status: RunState["status"];
-  title: string;
-  workflow: WorkflowRunInfo;
-  live: boolean;
-  result?: unknown;
 }
 
 export async function workflowRunStatus(runId: string, options: { includeResult?: boolean } = {}): Promise<WorkflowRunStatus> {

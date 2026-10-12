@@ -115,6 +115,16 @@ import {
 } from "./orchestration/worker-model-hint";
 import { coraWorkerModelAvailability } from "./orchestration/worker-model-availability";
 import {
+  WORKFLOW_DEFAULTS,
+  clampWorkflowCaps,
+  type WorkflowCaps,
+  type WorkflowEstimate,
+  type WorkflowMeta,
+  type WorkflowRunInfo,
+  type WorkflowRunStatus,
+} from "@shared/workflow";
+import { readWorkflowMeta } from "./orchestration/workflow-meta";
+import {
   constrainedRuntimesForHeadroom,
   headroomForRuntime,
   otherAssignableRuntime,
@@ -555,6 +565,10 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "automation.stop",
   "automation.delete",
   "automation.name_chat",
+  "workflow.run",
+  "workflow.stop",
+  "workflow.resume",
+  "workflow.save",
   "worktree.create",
   "worktree.remove",
 ]);
@@ -580,7 +594,11 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
 ]);
 
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
-  return UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) || method.startsWith("automation.");
+  return (
+    UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) ||
+    method.startsWith("automation.") ||
+    method.startsWith("workflow.")
+  );
 }
 
 async function dispatch(
@@ -821,6 +839,25 @@ async function dispatch(
         return await handleAutomationDelete(params, id, res);
       case "automation.name_chat":
         return await handleAutomationNameChat(params, id);
+      case "workflow.list":
+        return await handleWorkflowList(params, id);
+      case "workflow.get":
+        return await handleWorkflowGet(params, id);
+      case "workflow.check":
+        return await handleWorkflowCheck(params, id);
+      case "workflow.run":
+        // res threads through for the consent gate and its client-gone abort.
+        return await handleWorkflowRun(params, id, res);
+      case "workflow.status":
+        return await handleWorkflowStatus(params, id);
+      case "workflow.wait":
+        return await handleWorkflowWait(params, id, res);
+      case "workflow.stop":
+        return await handleWorkflowStop(params, id);
+      case "workflow.resume":
+        return await handleWorkflowResume(params, id);
+      case "workflow.save":
+        return await handleWorkflowSave(params, id, res);
       case "pane.split":
         // Splitting a pane in an EXISTING tab still needs active-tab/active-pane
         // selection semantics we haven't designed yet. terminal.create (above)
@@ -4974,6 +5011,7 @@ async function requestUserConsent(opts: {
   id: JsonRpcId;
   question: string;
   denyMessage: string;
+  reason?: string;
 }): Promise<{ approved: true } | { approved: false; response: JsonRpcResponse }> {
   const { runStore, runId, res, id, question, denyMessage } = opts;
   if (pendingConsentRuns.has(runId)) {
@@ -5005,7 +5043,7 @@ async function requestUserConsent(opts: {
           { id: "not_now", label: "Not now", description: "Skip this change for now", answer: "Not now" },
         ],
         category: "destructive_irreversible",
-        reason: "Changing an automation requires explicit user approval.",
+        reason: opts.reason ?? "Changing an automation requires explicit user approval.",
         recommendedOptionId: "allow",
         source: "consent_gate",
         resumeStrategy: "active_rpc",
@@ -5098,6 +5136,396 @@ async function requestUserConsent(opts: {
     };
   } finally {
     pendingConsentRuns.delete(runId);
+  }
+}
+
+// ── Workflows (workflow.*) ──────────────────────────────────────────────────
+// Cora proposes a workflow script and runs it only after the user approves it
+// in the chat: workflow.run and workflow.save post the same linked consent
+// question the automation mutators use, with the dry-run estimate in it, so
+// the model cannot start agents or write files on its own say-so.
+
+let workflowDriverMod: typeof import("./orchestration/workflow-driver") | null = null;
+async function getWorkflowDriver(): Promise<typeof import("./orchestration/workflow-driver")> {
+  workflowDriverMod ??= await import("./orchestration/workflow-driver");
+  return workflowDriverMod;
+}
+
+const WORKFLOW_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const WORKFLOW_WAIT_MAX_TIMEOUT_MS = 19 * 60_000;
+const WORKFLOW_WAIT_POLL_MS = 1_000;
+const WORKFLOW_RESULT_MAX_CHARS = 64_000;
+
+async function resolveWorkflowCallerRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<{ run: RunState; cwd: string; workspaceName: string } | { error: JsonRpcResponse }> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return { error: errorResponse(id, ERR_INVALID_PARAMS, "runId is required") };
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`) };
+  if (runProjectPolicyMode(run) === "untrusted-pull-request") {
+    return { error: errorResponse(id, ERR_FORBIDDEN, "workflows are unavailable for an imported pull-request run") };
+  }
+  if (run.workflow || run.automationId) {
+    return { error: errorResponse(id, ERR_FORBIDDEN, "workflows can only be started from a Cora chat") };
+  }
+  const cwd =
+    typeof run.settingsSnapshot?.workspaceCwd === "string" ? (run.settingsSnapshot.workspaceCwd as string) : null;
+  if (!cwd) {
+    return { error: errorResponse(id, ERR_INVALID_PARAMS, "Could not resolve this chat's workspace directory.") };
+  }
+  const snapshotName =
+    typeof run.settingsSnapshot?.workspaceName === "string" ? (run.settingsSnapshot.workspaceName as string).trim() : "";
+  return { run, cwd, workspaceName: snapshotName || "workspace" };
+}
+
+async function loadWorkflowRunForCaller(
+  caller: RunState,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<{ run: RunState } | { error: JsonRpcResponse }> {
+  const workflowRunId = stringParam(params, "workflow_run_id");
+  if (!workflowRunId) return { error: errorResponse(id, ERR_INVALID_PARAMS, "workflow_run_id is required") };
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(workflowRunId);
+  if (!run?.workflow) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Not a workflow run: ${workflowRunId}`) };
+  if (run.workspaceId !== caller.workspaceId) {
+    return { error: errorResponse(id, ERR_INVALID_PARAMS, "That workflow run belongs to a different workspace.") };
+  }
+  return { run };
+}
+
+function workflowCapsParam(params: Record<string, unknown>): Partial<WorkflowCaps> {
+  const caps: Partial<WorkflowCaps> = {};
+  const maxAgents = optionalNumberParam(params, "max_agents");
+  const concurrency = optionalNumberParam(params, "concurrency");
+  const tokenCeiling = optionalNumberParam(params, "token_ceiling");
+  const usdCeiling = optionalNumberParam(params, "usd_ceiling");
+  if (maxAgents !== null) caps.maxAgents = maxAgents;
+  if (concurrency !== null) caps.concurrency = concurrency;
+  if (tokenCeiling !== null) caps.tokenCeiling = tokenCeiling;
+  if (usdCeiling !== null) caps.usdCeiling = usdCeiling;
+  return caps;
+}
+
+function compactTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+function summarizeWorkflowTree(info: WorkflowRunInfo): Record<string, unknown> {
+  const phases = (info.tree?.phases ?? []).map((phase) => {
+    const count = (status: string) => phase.calls.filter((call) => call.status === status).length;
+    return {
+      title: phase.title,
+      agents: phase.calls.length,
+      done: count("done"),
+      running: count("running"),
+      queued: count("queued"),
+      nulls: count("null") + count("skipped") + count("error"),
+      cached: phase.calls.filter((call) => call.cached).length,
+    };
+  });
+  const problems = (info.tree?.phases ?? [])
+    .flatMap((phase) => phase.calls)
+    .filter((call) => (call.status === "null" || call.status === "error") && call.note)
+    .slice(0, 10)
+    .map((call) => ({ seq: call.seq, label: call.label, status: call.status, note: call.note }));
+  return {
+    phases,
+    problems,
+    latest_logs: (info.tree?.logs ?? []).slice(-5),
+    ...(info.tree?.memoryWait ? { waiting_for_memory: info.tree.memoryWait } : {}),
+  };
+}
+
+function workflowStatusPayload(status: WorkflowRunStatus): Record<string, unknown> {
+  const info = status.workflow;
+  let result: unknown;
+  let resultTruncated = false;
+  if (status.result !== undefined) {
+    const text = JSON.stringify(status.result ?? null);
+    if (text.length > WORKFLOW_RESULT_MAX_CHARS) {
+      result = `${text.slice(0, WORKFLOW_RESULT_MAX_CHARS)}...`;
+      resultTruncated = true;
+    } else {
+      result = status.result;
+    }
+  }
+  return {
+    workflow_run_id: status.runId,
+    name: info.name,
+    state: info.state,
+    agents: info.counts,
+    tokens: info.spent.inputTokens + info.spent.outputTokens,
+    usd: Math.round(info.spent.usd * 100) / 100,
+    ...(info.error ? { error: info.error } : {}),
+    ...summarizeWorkflowTree(info),
+    ...(result !== undefined ? { result, ...(resultTruncated ? { result_truncated: true } : {}) } : {}),
+  };
+}
+
+async function handleWorkflowList(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const driver = await getWorkflowDriver();
+  const list = await driver.listWorkflows(caller.cwd);
+  return successResponse(id, {
+    workflows: list.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      source: entry.source,
+      ...(entry.meta
+        ? {
+            description: entry.meta.description,
+            when_to_use: entry.meta.whenToUse,
+            phases: entry.meta.phases?.map((phase) => phase.title),
+            args: entry.meta.args,
+          }
+        : {}),
+      ...(entry.error ? { error: entry.error } : {}),
+      ...(entry.shadowed ? { shadowed: true } : {}),
+    })),
+  });
+}
+
+async function handleWorkflowGet(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "name is required");
+  const driver = await getWorkflowDriver();
+  const entry = await driver.getWorkflow(name, caller.cwd);
+  if (!entry) return errorResponse(id, ERR_INVALID_PARAMS, `No saved workflow named ${name}`);
+  return successResponse(id, {
+    id: entry.id,
+    name: entry.name,
+    source: entry.source,
+    meta: entry.meta ?? null,
+    ...(entry.error ? { error: entry.error } : {}),
+    source_text: entry.source_text,
+  });
+}
+
+async function handleWorkflowCheck(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  const source = typeof params.source === "string" ? params.source : undefined;
+  if (!name && !source) return errorResponse(id, ERR_INVALID_PARAMS, "name or source is required");
+  const driver = await getWorkflowDriver();
+  const checked = await driver.checkWorkflow({
+    workflow: name ?? undefined,
+    source,
+    args: params.args,
+    caps: workflowCapsParam(params),
+    cwd: caller.cwd,
+  });
+  return successResponse(id, checked);
+}
+
+function describeWorkflowForConsent(meta: WorkflowMeta, estimate: WorkflowEstimate | undefined, caps: WorkflowCaps): string {
+  const lines = [`Cora wants to run the workflow "${meta.name}": ${meta.description}`];
+  if (meta.phases?.length) {
+    lines.push(
+      `Phases: ${meta.phases.map((phase) => (phase.detail ? `${phase.title} (${phase.detail})` : phase.title)).join(", ")}`,
+    );
+  }
+  if (estimate) {
+    lines.push(
+      `Agents: about ${estimate.agents}${estimate.unbounded ? " or more" : ""} (stops at ${caps.maxAgents}), ` +
+        `${caps.concurrency} at a time`,
+    );
+    if (estimate.models.length > 0) {
+      lines.push(
+        `Models: ${estimate.models
+          .map((entry) => `${entry.model} ${entry.effort} x${entry.agents}${entry.connected ? "" : " (not connected)"}`)
+          .join(", ")}`,
+      );
+    }
+    if (estimate.isolated > 0) lines.push(`Isolated agents: ${estimate.isolated}, each on its own codara/wf/ branch`);
+    if (estimate.heavy > 0) lines.push(`Heavy agents (builds, full test runs): ${estimate.heavy}, one at a time`);
+    lines.push(
+      `Rough tokens: ${compactTokenCount(estimate.tokens.low)} to ${compactTokenCount(estimate.tokens.high)}` +
+        (estimate.usd.high > 0 ? ` (about $${estimate.usd.low} to $${estimate.usd.high} at API prices)` : ""),
+    );
+    for (const warning of estimate.warnings.slice(0, 4)) lines.push(`Note: ${warning}`);
+  }
+  if (caps.tokenCeiling !== null) lines.push(`Token ceiling: ${compactTokenCount(caps.tokenCeiling)}`);
+  if (caps.usdCeiling !== null) lines.push(`USD ceiling: $${caps.usdCeiling}`);
+  lines.push("", "Run this workflow?");
+  return lines.join("\n");
+}
+
+async function handleWorkflowRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  const source = typeof params.source === "string" ? params.source : undefined;
+  if (!name && !source) return errorResponse(id, ERR_INVALID_PARAMS, "name or source is required");
+  const driver = await getWorkflowDriver();
+  const caps = workflowCapsParam(params);
+  const checked = await driver.checkWorkflow({ workflow: name ?? undefined, source, args: params.args, caps, cwd: caller.cwd });
+  if (!checked.ok || !checked.meta) {
+    return successResponse(id, {
+      approved: false,
+      started: false,
+      message: "The workflow did not pass its check, so nothing was asked or started. Fix these errors first.",
+      errors: checked.errors,
+      warnings: checked.warnings,
+    });
+  }
+  const effectiveCaps = clampWorkflowCaps(caps, {
+    concurrency: checked.meta.caps?.concurrency ?? WORKFLOW_DEFAULTS.concurrency,
+    maxAgents: checked.meta.caps?.maxAgents ?? WORKFLOW_DEFAULTS.maxAgents,
+    tokenCeiling: null,
+    usdCeiling: null,
+  });
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: caller.run.id,
+    res,
+    id,
+    question: describeWorkflowForConsent(checked.meta, checked.estimate, effectiveCaps),
+    denyMessage:
+      `The user declined, so the workflow "${checked.meta.name}" was not started. ` +
+      "Do not retry it; ask the user how they would like to proceed.",
+    reason: "Running a workflow starts many agents and needs explicit user approval.",
+  });
+  if (!consent.approved) return consent.response;
+  try {
+    const run = await driver.startWorkflowRun({
+      workspaceId: caller.run.workspaceId,
+      workspaceName: caller.workspaceName,
+      cwd: caller.cwd,
+      workflow: name ?? undefined,
+      source,
+      args: params.args,
+      caps: effectiveCaps,
+      launchedFromRunId: caller.run.id,
+    });
+    return successResponse(id, {
+      approved: true,
+      started: true,
+      workflow_run_id: run.id,
+      message:
+        "The user approved; the workflow is running as its own run. Wait for it with codara_workflow_wait, " +
+        "or end your turn and check later with codara_workflow_status.",
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleWorkflowStatus(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id, { includeResult: true })));
+}
+
+async function handleWorkflowWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const requested = optionalNumberParam(params, "timeout_ms");
+  const timeoutMs =
+    requested && requested > 0 ? Math.min(requested, WORKFLOW_WAIT_MAX_TIMEOUT_MS) : WORKFLOW_WAIT_DEFAULT_TIMEOUT_MS;
+  const driver = await getWorkflowDriver();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (clientGone(res)) return errorResponse(id, ERR_INTERNAL, "workflow wait aborted: client disconnected");
+    const status = await driver.workflowRunStatus(target.run.id, { includeResult: true });
+    if (status.workflow.state !== "running") {
+      return successResponse(id, { reason: "settled", ...workflowStatusPayload(status) });
+    }
+    if (Date.now() >= deadline) return successResponse(id, { reason: "timeout", ...workflowStatusPayload(status) });
+    await new Promise<void>((resolve) => setTimeout(resolve, WORKFLOW_WAIT_POLL_MS));
+  }
+}
+
+async function handleWorkflowStop(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  await driver.stopWorkflowRun(target.run.id, "Stopped by Cora");
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id)));
+}
+
+async function handleWorkflowResume(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  try {
+    await driver.resumeWorkflowRun(target.run.id, { useLatestScript: params.use_latest_script === true });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id)));
+}
+
+async function handleWorkflowSave(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const source = typeof params.source === "string" ? params.source : "";
+  const scope = params.scope === "project" ? "project" : "user";
+  let meta: WorkflowMeta;
+  try {
+    meta = readWorkflowMeta(source);
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+  const where =
+    scope === "project"
+      ? `into this repository at .codara/workflows/${meta.name}.js (it will show up in git)`
+      : "to your workflows in Codara";
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: caller.run.id,
+    res,
+    id,
+    question:
+      `Cora wants to save the workflow "${meta.name}" ${where}` +
+      `${params.overwrite === true ? ", replacing the existing one" : ""}.\n${meta.description}\n\nSave it?`,
+    denyMessage: `The user declined, so the workflow "${meta.name}" was not saved.`,
+    reason: "Saving a workflow writes a file and needs explicit user approval.",
+  });
+  if (!consent.approved) return consent.response;
+  try {
+    const driver = await getWorkflowDriver();
+    const saved = await driver.saveWorkflow({
+      sourceText: source,
+      scope,
+      cwd: caller.cwd,
+      overwrite: params.overwrite === true,
+    });
+    return successResponse(id, { approved: true, saved: { id: saved.id, name: saved.name, source: saved.source } });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
 }
 

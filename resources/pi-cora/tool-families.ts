@@ -22,7 +22,8 @@ export type StudioToolFamily =
   | "whiteboard"
   | "board"
   | "automations"
-  | "worktrees";
+  | "worktrees"
+  | "workflows";
 
 export const STUDIO_TOOL_FAMILIES: readonly StudioToolFamily[] = [
   "browser",
@@ -31,6 +32,7 @@ export const STUDIO_TOOL_FAMILIES: readonly StudioToolFamily[] = [
   "board",
   "automations",
   "worktrees",
+  "workflows",
 ];
 
 export const STUDIO_TOOL_LOADER_NAME = "codara_tools";
@@ -42,6 +44,7 @@ export function studioToolFamily(name: string): StudioToolFamily | null {
   if (name.startsWith("codara_board_")) return "board";
   if (/^codara_[a-z_]*automation/.test(name)) return "automations";
   if (name.startsWith("codara_worktree_")) return "worktrees";
+  if (name.startsWith("codara_workflow_")) return "workflows";
   return null;
 }
 
@@ -58,6 +61,7 @@ const FAMILY_SIGNALS: Record<StudioToolFamily, RegExp> = {
   automations:
     /\b(?:automations?|loom|schedul(?:e|ed|ing)|cron|recurring|nightly|daily|hourly|weekly|every (?:day|night|hour|morning|evening|week|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d+\s*(?:min(?:ute)?s?|hours?|days?)))\b/i,
   worktrees: /\bwork ?trees?\b|codara_worktree_/i,
+  workflows: /\bworkflows?\b|codara_workflow_/i,
 };
 
 interface BranchEntryLike {
@@ -193,4 +197,23 @@ paths or git -C) and run setupCommand there when it is set. Once the branch
 is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or
 in use and never forces; act on its code and hint, and ask the user rather
 than deleting work yourself. codara_worktree_list shows what is removable.`,
+  workflows: `Workflows: a script that runs many agents. Shape:
+  export const meta = { name: "kebab-name", description: "...", phases: [{ title: "Find" }], args: {JSON Schema} };
+  phase("Find");
+  const found = await parallel(items.map((item) => () => agent("prompt", { label, schema })));
+  return { ... };
+Top-level await and return work. agent(prompt, opts) resolves to the agent's
+summary, or to its result when opts.schema (an object JSON Schema) is given;
+it resolves null when the agent fails, never throws for that. opts: label,
+phase, schema, model, effort, access ('full' | 'edits' | 'readonly'),
+agentType ('worker' | 'verifier' | 'researcher'), isolation: 'worktree' (own
+branch per agent, use for parallel writers), heavy (builds, full test
+suites: one at a time), timeoutMinutes, compactAt, envelope. parallel(thunks)
+never rejects (a throw becomes null); pipeline(items, ...stages) streams each
+item through the stages with no barrier; log(msg) narrates. The script must
+be deterministic: no Math.random, Date.now, timers, fetch or files; agents do
+all I/O. Scout the work list inline first, write prompts that stand alone,
+then codara_workflow_check until clean, then codara_workflow_run (the user
+approves its estimate in the chat). Wait with codara_workflow_wait or report
+the run id and end your turn. Saved workflows: codara_workflow_list.`,
 };

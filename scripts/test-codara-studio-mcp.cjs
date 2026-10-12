@@ -56,6 +56,17 @@ const TERMINAL_TOOLS = [
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
 const WORKTREE_TOOLS = ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove"];
+const WORKFLOW_TOOLS = [
+  "codara_workflow_list",
+  "codara_workflow_get",
+  "codara_workflow_check",
+  "codara_workflow_run",
+  "codara_workflow_status",
+  "codara_workflow_wait",
+  "codara_workflow_stop",
+  "codara_workflow_resume",
+  "codara_workflow_save",
+];
 // A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
 // own terminal agent gets the explicit notification and the worktree tools
 // instead.
@@ -259,6 +270,7 @@ function sortedEqual(actual, expected, label) {
         ...EXECUTE_TOOLS,
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
         ...WORKTREE_TOOLS,
+        ...WORKFLOW_TOOLS,
       ],
       "execute roster mismatch",
     );
