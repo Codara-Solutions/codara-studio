@@ -11,6 +11,7 @@
 
 import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
+import { createPreviewNames } from "@shared/preview-names";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
@@ -222,7 +223,7 @@ async function snapshot(params: Record<string, unknown>): Promise<unknown> {
   const mode = readString(params, "mode") ?? "outline";
   const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
   const tab = requireTab(params);
-  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()})`;
+  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()}, ${createPreviewNames.toString()})`;
   const value = await runGuestScript(tab.handle, code);
   return value;
 }

@@ -40,7 +40,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 70 },
       description:
-        "Read the page as a compact outline with @references, labels, values, and states. Pass an @reference as the selector of other browser tools. Hidden content is omitted. selector scopes to a section; since=<previous snapshotId> returns only the diff when smaller. Re-read after a stale reference; use a screenshot for visual content.",
+        "Read the page as a compact outline: @references, labels, values, states, link targets. Pass an @reference as another tool's selector. selector scopes it; since=<snapshotId> returns only the diff when smaller. Re-read after a stale reference; screenshot for visuals.",
       inputSchema: {
         type: "object",
         properties: {
