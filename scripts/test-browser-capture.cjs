@@ -242,8 +242,20 @@ async function recorder(lib, home) {
   const target = { ref: "tab-a", session, workspaceId: "ws-rec", captureViewport: async () => { throw new Error("not used"); } };
   const changes = [];
   const off = lib.onRecordingChange((change) => changes.push(change));
+  // Frames left behind by a recording the app never finished are dropped;
+  // a recent folder may still be in use.
+  const framesRoot = path.join(home, "workspace-data", "ws-rec", "browser", "recording-frames");
+  fs.mkdirSync(path.join(framesRoot, "crashed"), { recursive: true });
+  fs.writeFileSync(path.join(framesRoot, "crashed", "000000.png"), "x");
+  const hourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(path.join(framesRoot, "crashed"), hourAgo, hourAgo);
+  fs.mkdirSync(path.join(framesRoot, "recent"));
   const started = await lib.startRecording(target, lib.normalizeRecordOptions({ fps: 10, maxWidth: 160 }), deps);
   assert.equal(started.recording, true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(fs.existsSync(path.join(framesRoot, "crashed")), false, "stale frames are removed");
+  assert.equal(fs.existsSync(path.join(framesRoot, "recent")), true);
+  fs.rmdirSync(path.join(framesRoot, "recent"));
   assert.equal((await lib.startRecording(target, lib.normalizeRecordOptions({}), deps)).already, true, "a second start reports the running recording");
   assert.ok(session.sent.includes("Page.startScreencast"));
   const frame = (rgb) => encodePng(solid(lib, 32, 24, rgb)).toString("base64");
@@ -288,6 +300,20 @@ async function recorder(lib, home) {
   assert.match(fallback.note, /ffmpeg/);
   const fallbackFrames = decodeGif(fs.readFileSync(fallback.path)).frames;
   assert.equal(fallbackFrames.length, 2, "identical captures are stored once");
+
+  // An ffmpeg that cannot encode (here node, which rejects ffmpeg's flags)
+  // still leaves the flow as a GIF, with no half-written WebM beside it.
+  const broken = fakeSession("tab-d");
+  const brokenTarget = { ref: "tab-d", session: broken, workspaceId: "ws-rec", captureViewport: async () => encodePng(solid(lib, 20, 20, [5, 5, 5])) };
+  await lib.startRecording(brokenTarget, lib.normalizeRecordOptions({ fps: 5, format: "webm" }), { ...deps, ffmpeg: () => process.execPath });
+  broken.emit("Page.screencastFrame", { data: frame([7, 7, 7]), sessionId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const rescued = await lib.stopRecording(brokenTarget);
+  assert.equal(rescued.format, "gif");
+  assert.match(rescued.note, /WebM encoding failed/);
+  assert.ok(fs.existsSync(rescued.path));
+  const recordings = path.join(home, "workspace-data", "ws-rec", "browser", "recordings");
+  assert.deepEqual(fs.readdirSync(recordings).filter((name) => name.endsWith(".webm")), []);
 
   // The time limit stops a forgotten recording; the next stop returns it.
   const limited = fakeSession("tab-c");

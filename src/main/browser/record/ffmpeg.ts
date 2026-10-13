@@ -7,6 +7,7 @@ import { existsSync, promises as fs } from "node:fs";
 import { delimiter, join } from "node:path";
 
 const COMMON_LOCATIONS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "C:\\ffmpeg\\bin"];
+const ENCODE_TIMEOUT_MS = 180_000;
 
 /** The ffmpeg to use: CODARA_FFMPEG, then PATH, then the usual install folders; null when there is none. */
 export function findFfmpeg(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -33,11 +34,20 @@ function run(ffmpeg: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     let stderr = "";
+    // A stuck ffmpeg would leave the recording stopping forever.
+    const timer = setTimeout(() => child.kill("SIGKILL"), ENCODE_TIMEOUT_MS);
     child.stderr.on("data", (chunk) => {
       stderr = (stderr + chunk).slice(-2_000);
     });
-    child.once("error", reject);
-    child.once("exit", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.trim().split("\n").pop() ?? ""}`))));
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited ${code ?? signal}: ${stderr.trim().split("\n").pop() ?? ""}`));
+    });
   });
 }
 

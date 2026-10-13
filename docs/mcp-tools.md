@@ -210,8 +210,8 @@ repository.
   `stop: true` to encode and get `path`, `bytes`, `frames`, `durationMs` and
   `size`. Frames come from the page's own paint events, so a still page costs
   nothing; a GIF stores only what changed between frames. WebM needs
-  `ffmpeg` on `PATH` (or `CODARA_FFMPEG`); without it the recording is saved
-  as a GIF and the result says so.
+  `ffmpeg` on `PATH` (or `CODARA_FFMPEG`); without it, or when it cannot
+  encode, the recording is saved as a GIF and the result's `note` says so.
 
 The user has the same features in the browser pane's toolbar: the
 responsive view (phone, tablet and desktop side by side, sizes editable, one

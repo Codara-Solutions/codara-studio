@@ -10,7 +10,7 @@
 // worker thread, WebM with the user's ffmpeg when there is one.
 
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { workspaceDataDir } from "../../workspace-data";
 import { browserArtifactDir, writeBrowserArtifact } from "../artifacts";
@@ -39,6 +39,8 @@ export const RECORD_MAX = { fps: 15, maxSeconds: 120, maxWidth: 1920 };
 export const RECORD_MAX_BYTES = 256 * 1024 * 1024;
 /** How long a final frame stays up before a GIF loops. */
 const FINAL_FRAME_MS = 1_000;
+/** Frame folders older than this belong to no running recording. */
+const STALE_FRAMES_MS = 30 * 60 * 1000;
 /** Without a screencast frame by then, the tab is not painting: capture it instead. */
 const SCREENCAST_GRACE_MS = 700;
 
@@ -253,6 +255,7 @@ export async function startRecording(target: RecordTarget, options: RecordOption
   active.set(key, rec);
   try {
     await fs.mkdir(rec.dir, { recursive: true });
+    void dropStaleFrames(dirname(rec.dir));
     rec.cleanups.push(target.session.on("Page.screencastFrame", (params) => {
       void target.session.send("Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {});
       if (rec.stopping || typeof params.data !== "string") return;
@@ -286,6 +289,21 @@ export async function startRecording(target: RecordTarget, options: RecordOption
   rec.cleanups.push(() => clearTimeout(limit));
   emit({ key, tabId: target.ref, recording: true });
   return status(rec);
+}
+
+/**
+ * Frame folders a recording never cleaned up (the app quit or crashed while
+ * it ran) would otherwise stay on disk for good. A folder still being written
+ * or encoded is younger than the longest recording.
+ */
+async function dropStaleFrames(parent: string): Promise<void> {
+  const live = new Set([...active.values()].map((rec) => rec.dir));
+  for (const name of await fs.readdir(parent).catch(() => [] as string[])) {
+    const dir = join(parent, name);
+    if (live.has(dir)) continue;
+    const stat = await fs.stat(dir).catch(() => null);
+    if (stat && Date.now() - stat.mtimeMs > STALE_FRAMES_MS) await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function finishOnItsOwn(rec: Recording, reason: string): Promise<void> {
@@ -379,11 +397,19 @@ async function encode(rec: Recording, endAt: number, stoppedBy?: string): Promis
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const path = join(dir, `${stamp}-${rec.target.ref.replace(/[^A-Za-z0-9._-]+/g, "-")}.webm`);
       const frames = rec.frames.map((frame, i) => ({ file: frame.file, durationMs: times[i] }));
-      await encodeWebm(ffmpeg, frames, path, rec.dir, rec.options.fps, size);
-      const bytes = (await fs.stat(path)).size;
-      return { ...base, path, format: "webm", mimeType: "video/webm", bytes };
+      // The frames are deleted once this returns, so an ffmpeg that cannot
+      // encode them (no VP8 or VP9, a broken install) must not lose the flow.
+      try {
+        await encodeWebm(ffmpeg, frames, path, rec.dir, rec.options.fps, size);
+        const bytes = (await fs.stat(path)).size;
+        return { ...base, path, format: "webm", mimeType: "video/webm", bytes };
+      } catch (error) {
+        await fs.rm(path, { force: true }).catch(() => {});
+        note = `WebM encoding failed (${error instanceof Error ? error.message : String(error)}); saved a GIF instead.`;
+      }
+    } else {
+      note = "WebM needs ffmpeg on PATH (or CODARA_FFMPEG); saved a GIF instead.";
     }
-    note = "WebM needs ffmpeg on PATH (or CODARA_FFMPEG); saved a GIF instead.";
   }
   const worker = startGifWorker(size.width, size.height);
   try {
