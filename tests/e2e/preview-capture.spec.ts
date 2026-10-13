@@ -1,12 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
@@ -60,11 +61,36 @@ function toolEnv(home: string, runId: string): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Runs one codara-studio tool the way an MCP client does and returns its content blocks. */
-async function mcpCall(home: string, runId: string, name: string, args: Record<string, unknown>) {
-  const script = `require(${JSON.stringify(SERVER)}).callToolByName(${JSON.stringify(name)}, ${JSON.stringify(args)}).then((r) => process.stdout.write(JSON.stringify(r)), (e) => { console.error(e); process.exit(1); })`;
-  const { stdout } = await promisify(execFile)(process.execPath, ["-e", script], { env: toolEnv(home, runId), maxBuffer: 64 * 1024 * 1024 });
-  return JSON.parse(stdout) as { isError?: boolean; content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+type ToolResult = { isError?: boolean; content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+
+/** The codara-studio MCP server over stdio, as any agent's MCP client starts it. */
+async function mcpServer(home: string, runId: string) {
+  const child = spawn(process.execPath, [SERVER], { env: toolEnv(home, runId), stdio: ["pipe", "pipe", "inherit"] });
+  const replies = new Map<number, (message: { result?: unknown; error?: { message: string } }) => void>();
+  createInterface({ input: child.stdout! }).on("line", (line) => {
+    try {
+      const message = JSON.parse(line);
+      replies.get(message.id)?.(message);
+    } catch {
+      /* not a reply */
+    }
+  });
+  let id = 0;
+  const send = (method: string, params: Record<string, unknown>) => new Promise<any>((done, fail) => {
+    const current = ++id;
+    replies.set(current, (message) => (message.error ? fail(new Error(message.error.message)) : done(message.result)));
+    child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", id: current, method, params })}\n`);
+  });
+  await send("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "any-agent", version: "1" } });
+  child.stdin!.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  return {
+    tools: async () => (await send("tools/list", {})).tools as Array<{ name: string; description: string; inputSchema: unknown }>,
+    call: (name: string, args: Record<string, unknown>) => send("tools/call", { name, arguments: args }) as Promise<ToolResult>,
+    close: () => {
+      child.stdin!.end();
+      child.kill();
+    },
+  };
 }
 
 async function cora(home: string, runId: string, args: string[]): Promise<string> {
@@ -109,6 +135,7 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     return response.result;
   };
   const artifacts = join(home, "workspace-data", "ws-capture", "browser");
+  let mcp: Awaited<ReturnType<typeof mcpServer>> | null = null;
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
@@ -185,6 +212,13 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     const asRun = (method: string, params: Record<string, unknown>, timeoutMs?: number) => request(method, { ...params, runId }, timeoutMs);
     await asRun("preview.wait_for", { tabId, selector: "#box" });
     expect(await page.locator("webview").evaluateAll((els) => els.filter((el) => getComputedStyle(el).visibility === "visible").length)).toBe(1);
+    // The agent works while the user is elsewhere: the window is minimized and hidden.
+    await app.evaluate(({ BrowserWindow }) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.minimize();
+        window.hide();
+      }
+    });
 
     // Screenshot options.
     const compact = await asRun("preview.screenshot", { tabId });
@@ -293,20 +327,23 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     const systemDark = await app.evaluate(({ nativeTheme }) => nativeTheme.shouldUseDarkColors);
     expect((await asRun("preview.evaluate", { tabId, code: 'matchMedia("(prefers-color-scheme: dark)").matches' })).value).toBe(systemDark);
 
-    // The same tools through the MCP server and `cora tool`.
-    const mcpShot = await mcpCall(home, runId, "codara_preview_screenshot", { tabId, selector: "#hero" });
+    // The same tools through the MCP server over stdio and `cora tool`.
+    mcp = await mcpServer(home, runId);
+    const captureTools = (await mcp.tools()).filter((tool) => /^codara_preview_(screenshot|compare|record)$/.test(tool.name));
+    expect(captureTools.map((tool) => tool.name).sort()).toEqual(["codara_preview_compare", "codara_preview_record", "codara_preview_screenshot"]);
+    expect(JSON.stringify(captureTools)).not.toMatch(/claude/i);
+    const mcpShot = await mcp.call("codara_preview_screenshot", { tabId, selector: "#hero" });
     expect(mcpShot.isError).toBeFalsy();
     expect(mcpShot.content.find((block) => block.type === "image")?.mimeType).toBe("image/jpeg");
     const mcpText = JSON.parse(mcpShot.content.find((block) => block.type === "text")!.text!);
     expect(existsSync(mcpText.path)).toBe(true);
     expect(mcpText.dataUrl).toBeUndefined();
-    const mcpSizes = await mcpCall(home, runId, "codara_preview_compare", { tabId, mode: "sizes", sizes: ["phone", "1024x768"] });
+    const mcpSizes = await mcp.call("codara_preview_compare", { tabId, mode: "sizes", sizes: ["phone", "1024x768"] });
     expect(mcpSizes.content.filter((block) => block.type === "image")).toHaveLength(1);
     const printed = await cora(home, runId, ["preview_compare", "--tabId", tabId, "--name", "home"]);
     expect(JSON.parse(printed).path).toMatch(/home-diff\.jpg$/);
 
     // Recording with every window hidden: the agent starts and stops it.
-    await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.hide(); });
     const started = await asRun("preview.record", { tabId, fps: 8, maxWidth: 480 });
     expect(started.recording).toBe(true);
     expect(await asRun("preview.record", { tabId })).toMatchObject({ recording: true, already: true });
@@ -321,13 +358,14 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     expect(gif.path).toContain(join(artifacts, "recordings"));
     expect(statSync(gif.path).size).toBe(gif.bytes);
     await expect(asRun("preview.record", { tabId, stop: true })).rejects.toThrow(/is not being recorded/);
-    const viaMcp = await mcpCall(home, runId, "codara_preview_record", { tabId, maxSeconds: 1, format: "gif" });
+    const viaMcp = await mcp.call("codara_preview_record", { tabId, maxSeconds: 1, format: "gif" });
     expect(JSON.parse(viaMcp.content[0].text!).recording).toBe(true);
     await new Promise((done) => setTimeout(done, 1600));
-    const limited = JSON.parse((await mcpCall(home, runId, "codara_preview_record", { tabId, stop: true })).content[0].text!);
+    const limited = JSON.parse((await mcp.call("codara_preview_record", { tabId, stop: true })).content[0].text!);
     expect(limited).toMatchObject({ format: "gif", stoppedBy: expect.stringMatching(/maxSeconds/) });
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible() || window.isFocused()))).toBe(false);
   } finally {
+    mcp?.close();
     await app.close();
     await fixture.close();
     await rm(root, { recursive: true, force: true });
