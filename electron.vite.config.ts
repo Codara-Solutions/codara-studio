@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { build as esbuild } from "esbuild";
 import type { Plugin } from "vite";
 import packageJson from "./package.json";
+import { applyStudioCsp } from "./src/main/studio-csp";
 
 function developmentVersion(): string {
   try {
@@ -47,6 +48,15 @@ function workflowSandboxWorkerPlugin(): Plugin {
         alias: { "@shared": resolve(__dirname, "src/shared") },
       });
     },
+  };
+}
+
+// Runs after every other HTML transform (Vite's client and the React refresh
+// preamble included) so the policy it writes hashes the final inline scripts.
+function studioCspPlugin(): Plugin {
+  return {
+    name: "codara-studio-csp",
+    transformIndexHtml: { order: "post", handler: (html) => applyStudioCsp(html) },
   };
 }
 
@@ -101,7 +111,7 @@ export default defineConfig(({ command }) => ({
         command === "serve" ? developmentVersion() : packageJson.version,
       ),
     },
-    plugins: [react()],
+    plugins: [react(), studioCspPlugin()],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),

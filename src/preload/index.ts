@@ -34,6 +34,9 @@ import type {
   GitSplitPlanResult,
 } from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
+import { chromeLinkApi } from "./areas/chrome-link";
+import { serversApi } from "./areas/servers";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1148,6 +1151,14 @@ const api = {
     }): Promise<SavedWorkflowSummary> => ipcRenderer.invoke("workflows:save", input),
     remove: (ref: string, cwd?: string): Promise<boolean> => ipcRenderer.invoke("workflows:delete", { ref, cwd }),
   },
+  // Send to an agent of any runtime, a Cora chat, or the workspace inbox
+  // (src/main/agent-delivery.ts).
+  agentDelivery: {
+    deliver: (request: AgentDeliveryRequest): Promise<AgentDeliveryResult> =>
+      ipcRenderer.invoke("agent:deliver", request),
+    inboxPending: (workspaceId: string, paneId?: string | null): Promise<number> =>
+      ipcRenderer.invoke("agent:inboxPending", { workspaceId, paneId: paneId ?? null }),
+  },
   pty: {
     spawn: (args: {
       id: string;
@@ -1736,6 +1747,8 @@ const api = {
       webFrame.setZoomLevel(clamped);
     },
   },
+  servers: serversApi,
+  chromeLink: chromeLinkApi,
 };
 
 function isBrowserUrl(url: string): boolean {

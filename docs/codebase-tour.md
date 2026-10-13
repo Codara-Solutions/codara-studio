@@ -290,16 +290,39 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
   `tabs/PreviewStack.tsx` holds one per preview tab. `Preview/registry.ts`
   tracks the open tabs.
 - **Agents drive it** with the `codara_preview_*` MCP tools
-  ([mcp-tools.md](./mcp-tools.md)). In `server.js`, `PREVIEW_TOOL_TO_RPC`
-  maps each tool to a `preview.*` socket method. `agent-socket.ts` sends
-  each call to one of two executors:
+  ([mcp-tools.md](./mcp-tools.md)). Each tool is defined in a module under
+  `resources/codara-studio-mcp/tools/` (`browser-core.cjs`,
+  `browser-input.cjs`, ...), which names the `preview.*` socket method it
+  calls; `tools/index.cjs` collects them for `server.js`. On the app side
+  `src/main/preview-tools/` holds one handler table per area, which
+  `agent-socket.ts` consults before its own switch. The handlers use one of
+  two executors:
   - DOM work (navigate, snapshot, click, type, evaluate, screenshot) goes
     through `preview-bridge.ts` to `components/Preview/previewRpc.ts` in the
     renderer, which uses `domActions.ts` and `domSnapshot.ts`.
-  - Trusted input (scroll, hover, mouse, drag, keys, upload) and console or
-    network capture run in main, in `preview-input.ts`, over the Chrome
-    DevTools Protocol.
+  - Trusted input (scroll, hover, mouse, drag, keys, upload) runs in main,
+    in `preview-input.ts`, over the Chrome DevTools Protocol.
+  - Every tab has one DevTools protocol session (`src/main/browser/`):
+    `cdp-session.ts` is the transport-agnostic session (ref-counted domains,
+    re-attach, bounded buffers), `preview-cdp.ts` creates it over
+    `webContents.debugger` as Chromium attaches the guest, and
+    `recorders/` keep console and network from the tab's first request.
+  - Tools address a tab through `browser/targets.ts`: a `BrowserTarget`
+    (session, evaluate, background-safe viewport capture) resolved from the
+    `tabId` (`browser/tab-ref.ts`: a Codara tab id or `chrome:<tabId>`).
+    New features build on it with `browser/screenshot.ts` (crop, scale,
+    JPEG, element and full-page shots), `browser/locator.ts` with
+    `shared/preview-locator.ts` (refs, unique selectors, boxes, names), and
+    `browser/artifacts.ts` (files under `workspace-data/<workspace>/`).
+- **Sending to an agent.** `src/main/agent-delivery.ts` pastes into a pane's
+  agent of any runtime (unsubmitted unless the user pressed Send), adds to a
+  Cora chat, or queues for `codara_preview_inbox`; attachments become files
+  named by path. The renderer calls it through `window.spark.agentDelivery`.
+  Agents without MCP use the same tools with `cora tool`
+  (`cli/commands/tool.cjs`), which Codara's panes have on PATH.
 - **Safety.** `index.ts` hardens every `<webview>` (`will-attach-webview`).
+  `browser/guest-chords.ts` forwards chord keys from a page to the app's
+  shortcuts.
   `guest-popups.ts` turns `window.open` into in-app tabs.
   `main-window-trust.ts` tells trusted senders apart from guest pages.
   `navigation-allowlist.ts` keeps the main window on the app's own page.
@@ -421,7 +444,7 @@ Debugging:
 | A keyboard shortcut or command | `src/renderer/src/shortcuts/commands.ts` (`COMMANDS`) | The handler in `App.tsx`; [shortcuts-and-settings.md](./shortcuts-and-settings.md) |
 | A setting | `AppSettings` in `src/shared/types.ts`, defaults in `src/main/storage.ts` | `components/SettingsDialog.tsx` |
 | Something the UI asks main to do | A `handle("...")` in `src/main/ipc.ts` | The matching method in `src/preload/index.ts`. `test-ipc-gate-default` fails if a handler skips the trusted-sender gate. |
-| A tool agents can call | `resources/codara-studio-mcp/server.js` (schema, roster, tool-to-method map) | The method in `dispatch` in `src/main/agent-socket.ts`; [mcp-tools.md](./mcp-tools.md); `test-codara-studio-mcp` |
+| A tool agents can call | A module in `resources/codara-studio-mcp/tools/` (browser tools and other studio tools; the contract is in `tools/index.cjs`), or `server.js` for the orchestration rosters | The method in `dispatch` in `src/main/agent-socket.ts`; [mcp-tools.md](./mcp-tools.md); `test-codara-studio-mcp`, `test-mcp-tool-manifest` |
 | What Cora says or how she plans | `resources/pi-cora/prompt.ts` (`buildCoraPiSystemPrompt`) | `resources/orchestration/manager-profile.json`; `test-manager-playbooks`, `test-prompt-punctuation` |
 | What workers are told or allowed to do | `src/main/orchestration/worker-prompt.ts` (`renderWorkerPrompt`) | `resources/pi-cora/worker.ts`, `worker-policy.ts` |
 | Run states, pause and resume, recovery | `run-store.ts` | `run-lifecycle.ts`, `step-lifecycle.ts`, `manager-turn-policy.ts`; the regression suites in [scripts/README.md](../scripts/README.md#cora-runs-the-run-store-and-the-manager) |
@@ -431,7 +454,7 @@ Debugging:
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
-| The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | `agent-socket.ts` preview handlers |
+| The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | The socket handlers in `src/main/preview-tools/` (one table per area, merged in `index.ts`); `test-preview-tools-routing` |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |

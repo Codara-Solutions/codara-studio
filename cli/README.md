@@ -31,6 +31,28 @@ a 30 fps clock with four-tick frame holds, plus live phase and turn timers.
 Cora redraws only when the visible frame changes, keeping that motion smooth
 without spending CPU repainting idle screens.
 
+## Tools for any agent
+
+`cora tool` calls the codara-studio tools from a shell, for agents without an
+MCP client and for scripts. It loads the same server module as MCP clients,
+so the tools, the caller's workspace and the results are the same
+(see [docs/mcp-tools.md](../docs/mcp-tools.md)).
+
+```sh
+cora tool list
+cora tool help preview_wait_for
+cora tool preview_navigate --url http://localhost:5173/
+cora tool preview_find '{"query":"the search button"}'      # ranked @references
+cora tool preview_click --selector @e12
+cora tool preview_wait_for --url /results --load networkidle
+cora tool preview_wait_for --selector h1 --fresh              # only an h1 added since the click
+cora tool preview_wait_for --hmr                              # after saving a file
+cora tool preview_key --key Mod+K                             # the page's palette, never Codara's
+cora tool preview_dialog                                      # open dialogs and the policy
+cora tool preview_dialog --accept true --promptText "Ada"
+cora tool preview_dialog --policy dismiss
+```
+
 ## Layout
 
 - `cora.cjs` — entry point: arg parsing, help, dispatch.

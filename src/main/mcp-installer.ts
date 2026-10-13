@@ -30,6 +30,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import type {
@@ -104,72 +105,24 @@ function isSandboxedHome(): boolean {
   return override.startsWith(tmp) || override.startsWith("/tmp/") || override.startsWith("/private/tmp/");
 }
 
-// Tool rosters kept in sync with resources/codara-studio-mcp/server.js so the
-// Capability Center can show "N tools" without spawning the server. The global
-// entry exposes the STUDIO roster; the orchestration tools are added only in
-// per-run execute/automation spawns, but are listed here so the built-in card
-// reflects everything the server can do.
-const SPARK_STUDIO_TOOLS = [
-  // Preview (drive the live <preview> tab).
-  "codara_preview_list",
-  "codara_preview_navigate",
-  "codara_preview_snapshot",
-  "codara_preview_click",
-  "codara_preview_type",
-  "codara_preview_press_key",
-  "codara_preview_evaluate",
-  "codara_preview_wait_for",
-  "codara_preview_screenshot",
-  "codara_preview_mouse",
-  "codara_preview_scroll",
-  "codara_preview_hover",
-  "codara_preview_drag",
-  "codara_preview_key",
-  "codara_preview_upload",
-  "codara_preview_console",
-  "codara_preview_network",
-  "codara_preview_resize",
-  "codara_preview_run",
-  // Terminal (open + drive agent-owned terminal tabs).
-  "codara_terminal_create",
-  "codara_terminal_run",
-  "codara_terminal_list",
-  "codara_terminal_write",
-  "codara_terminal_read",
-  "codara_terminal_close",
-  // Terminal agents outside a Cora chat.
-  "codara_notify_user",
-];
-
-const SPARK_ORCHESTRATION_TOOLS = [
-  // Execute-mode worker orchestration (per-run SPARK_MCP_MODE=execute).
-  "codara_spawn_terminals",
-  "codara_spawn_workers",
-  "codara_ask_user",
-  "codara_complete",
-  "codara_name_chat",
-  "codara_request_next_iteration",
-  "codara_get_worker_status",
-  "codara_wait_for_workers",
-  "codara_message_workers",
-  "codara_check_messages",
-  // Automation-mode architect roster (per-run SPARK_MCP_MODE=automation).
-  "codara_list_automations",
-  "codara_get_automation",
-  "codara_create_automation",
-  "codara_update_automation",
-  "codara_run_automation",
-  "codara_wait_for_automation",
-  "codara_set_automation_enabled",
-  "codara_pause_automation",
-  "codara_resume_automation",
-  "codara_stop_automation",
-  "codara_delete_automation",
-];
-
-// The full tool surface for the Capability Center's built-in card (dedup keeps
-// codara_ask_user / codara_name_chat from double-counting).
-const SPARK_BUILTIN_TOOLS = [...new Set([...SPARK_STUDIO_TOOLS, ...SPARK_ORCHESTRATION_TOOLS])];
+// The Capability Center's "N tools" badge: every tool the server can expose,
+// read from the server's own manifest so the card never drifts from it
+// (scripts/test-mcp-tool-manifest.cjs). Requiring the script has no side
+// effects; only running it starts the stdio server.
+let builtinToolNamesCache: string[] | null = null;
+function builtinToolNames(): string[] {
+  if (builtinToolNamesCache) return builtinToolNamesCache;
+  try {
+    const server = createRequire(__filename)(resolveServerScript()) as {
+      toolManifest?: () => Record<string, string[]>;
+    };
+    builtinToolNamesCache = [...new Set(Object.values(server.toolManifest?.() ?? {}).flat())];
+  } catch (err) {
+    console.warn("[mcp-installer] could not read the codara-studio tool manifest:", err);
+    return [];
+  }
+  return builtinToolNamesCache;
+}
 
 const CLAUDE_USER_CONFIG = claudeUserConfigFile();
 
@@ -1148,8 +1101,8 @@ function builtinMeta(): SparkBuiltinMeta[] {
       serverName: SERVER_NAME,
       summary: "Drive the preview tab, open agent terminals, and orchestrate workers",
       detail:
-        "Codara's built-in MCP server. Codara passes it to the Claude Code and Codex sessions it starts, so verifier and worker agents can click, type, snapshot, screenshot and run JS against the exact <preview> DOM you see, and open and drive agent-owned terminal tabs. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build and run automations (looms). Your own Claude Code and Codex configuration is not changed.",
-      tools: SPARK_BUILTIN_TOOLS,
+        "Codara's built-in MCP server. Codara passes it to every agent session it starts (Claude Code, Codex, Grok and Cora), so agents can click, type, snapshot, screenshot and run JS against the exact browser tab you see, and open and drive agent-owned terminal tabs. Agents without MCP support reach the same tools from a Codara terminal with `cora tool`. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build and run automations (looms). Your own CLI configuration is not changed.",
+      tools: builtinToolNames(),
     },
   ];
 }

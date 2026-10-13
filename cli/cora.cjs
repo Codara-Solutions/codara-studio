@@ -76,6 +76,11 @@ ${c.bold("APP")}
   read <paneId> [--lines N]    read a terminal pane
   rpc <method> [params-json]   raw JSON-RPC escape hatch
 
+${c.bold("TOOLS")}  the codara-studio tools, for agents without MCP
+  tool list                    browser, terminal, worktree and other tools here
+  tool help <name>             a tool's description and arguments
+  tool <name> [json] [--arg v] call it; images are saved and their paths printed
+
 ${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
 
   <run> accepts a full id or any unique prefix.
@@ -181,6 +186,11 @@ async function main() {
       console.log(flags.json ? JSON.stringify(result, null, 2) : result.text);
       return;
     }
+
+    case "tool":
+    case "tools":
+      // Tool arguments are the tool's own flags, so they skip parseArgs.
+      return require("./commands/tool.cjs").tool(rest);
 
     case "rpc": {
       const { rpcRaw } = require("./lib/rpc.cjs");

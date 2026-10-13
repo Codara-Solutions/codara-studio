@@ -8,6 +8,7 @@ import {
 } from "react";
 import { withPreviewCapturePaint } from "./capturePaint";
 import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
+import PageDialogOverlay from "./PageDialogOverlay";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
@@ -105,6 +106,8 @@ export interface BrowserPaneHandle {
 }
 
 interface Props {
+  /** The browser tab this pane shows; its page dialogs open over it. */
+  tabId?: string;
   url: string;
   visible: boolean;
   onUrlChange: (url: string) => void;
@@ -114,7 +117,7 @@ interface Props {
 }
 
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
-  { url, visible, onUrlChange, onReady },
+  { tabId, url, visible, onUrlChange, onReady },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -789,6 +792,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           </>
         ) : null}
         <PreviewCursor control={control} />
+        <PageDialogOverlay tabId={tabId} />
         <DrawOverlay
           active={drawing}
           busy={drawingBusy}

@@ -24,7 +24,11 @@ fs.writeFileSync(
   JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }),
 );
 
-const PREVIEW_TOOLS = [
+// The browser tools ship from the modules in resources/codara-studio-mcp/tools/
+// (test-mcp-tool-manifest.cjs checks their contract), so every roster below
+// takes the browser list from that registry. These are the tools that must
+// never disappear from it.
+const CORE_PREVIEW_TOOLS = [
   "codara_preview_list",
   "codara_preview_navigate",
   "codara_preview_snapshot",
@@ -45,6 +49,10 @@ const PREVIEW_TOOLS = [
   "codara_preview_resize",
   "codara_preview_run",
 ];
+const PREVIEW_TOOLS = require(path.join(__dirname, "..", "resources", "codara-studio-mcp", "tools", "index.cjs"))
+  .toolRegistry()
+  .tools.map((tool) => tool.name);
+for (const name of CORE_PREVIEW_TOOLS) assert.ok(PREVIEW_TOOLS.includes(name), `${name} is missing from the browser tool modules`);
 const TERMINAL_TOOLS = [
   "codara_terminal_run",
   "codara_terminal_create",
@@ -74,8 +82,11 @@ const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, 
 const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
-// Code, Codex and Grok session pays for on every request.
-const LIST_BUDGET = { studio: 20_000, run: 30_000, worker: 26_000, execute: 85_000, automation: 60_000 };
+// Code, Codex and Grok session pays for on every request. Each roster carries
+// every tool module, so these move with TOOL_MODULES_BUDGET in
+// test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
+// round that added the Chrome extension, audits and captures).
+const LIST_BUDGET = { studio: 29_000, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -975,7 +986,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
 
-    const geometry = { url: "http://127.0.0.1:4173/", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
+    const geometry = { url: "http://127.0.0.1:4173/", path: "/codara/workspace-data/ws/browser/screenshots/shot.png", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
     mockResult = { ...geometry, dataUrl: "data:image/png;base64,cGl4ZWxz" };
     const screenshot = await directBridge.callToolByName("codara_preview_screenshot", {});
     assert.strictEqual(screenshot.content[0].type, "image");
@@ -983,6 +994,15 @@ function sortedEqual(actual, expected, label) {
     const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
     assert.strictEqual(screenshotBatch.content[0].type, "image");
     assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+    // A browser tool's image result keeps every field but the image, so a
+    // tool module can add one (a diff's regions) without editing this server.
+    mockResult = { ...geometry, dataUrl: "data:image/jpeg;base64,cGl4ZWxz", region: { x: 0, y: 0, width: 600, height: 400 }, changed: [{ x: 1, y: 2 }] };
+    const extended = await directBridge.callToolByName("codara_preview_screenshot", {});
+    assert.strictEqual(extended.content[0].mimeType, "image/jpeg");
+    assert.deepStrictEqual(JSON.parse(extended.content[1].text), { ...geometry, region: mockResult.region, changed: mockResult.changed });
+    const imageStep = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "snapshot" }] });
+    assert.strictEqual(imageStep.content[0].type, "image", "any step's image goes out as image content, never as text");
+    assert.doesNotMatch(imageStep.content[1].text, /cGl4ZWxz/);
 
     mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
     process.env.SPARK_RUN_ID = "run-map";
@@ -993,6 +1013,11 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(whiteboardImage.content[0].type, "image");
     assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
     assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
+    mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 5, layout: { nodes: ["large"] } };
+    process.env.SPARK_RUN_ID = "run-map";
+    const listedOnly = await directBridge.callToolByName("codara_whiteboard_inspect", { baseRevision: 5 });
+    delete process.env.SPARK_RUN_ID;
+    assert.deepStrictEqual(JSON.parse(listedOnly.content[1].text), { url: null, revision: 5 }, "other image results keep only the listed fields");
 
     mockResult = { ok: false, error: "selector did not become visible" };
     const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });

@@ -4,10 +4,8 @@
     <meta charset="utf-8" />
     <title>Codara Studio</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: file:; media-src 'self' blob: file:; connect-src 'self' ws://localhost:* http://localhost:*; script-src 'self'; worker-src 'self' blob:"
-    />
+    <!-- The Content-Security-Policy is written at the top of <head> at build
+         and dev time from src/main/studio-csp.ts. -->
     <link rel="icon" type="image/png" href="/favicon.png" />
     <!-- Inter + JetBrains Mono are bundled via @fontsource imports in
          main.tsx — no network font fetch, works fully offline. -->

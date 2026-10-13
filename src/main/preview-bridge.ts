@@ -37,7 +37,6 @@ export type PreviewOpName =
   | "click"
   | "type"
   | "press_key"
-  | "wait_for"
   | "screenshot"
   | "url"
   // Renderer-side webview-element resize (changes the guest viewport).
@@ -45,7 +44,11 @@ export type PreviewOpName =
   // Internal: resolve the picked tab's guest webContents id (+ viewport/dpr)
   // so the main-side computer-use executor can drive it directly. Not an MCP
   // tool — only preview-input.ts calls it.
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  // Show a page's alert/confirm/prompt in its tab; answers with the user's
+  // choice (browser/preview-dialogs.ts). dialog_hide takes it down.
+  | "dialog_show"
+  | "dialog_hide";
 
 export interface PreviewOpParams {
   tabId?: string | null;

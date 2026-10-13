@@ -206,6 +206,18 @@ async function main() {
     assert.equal(parseToml(workerArgs[1]).mcp_servers["codara-studio"].env.SPARK_MCP_MODE, "worker");
   });
 
+  await check("Claude and Codex start the same server, with the same environment, for every roster", async () => {
+    for (const mode of ["studio", "execute", "automation", "worker"]) {
+      const claude = JSON.parse(fs.readFileSync(path.join(dir, "claude", `mcp-${mode}.json`), "utf8")).mcpServers["codara-studio"];
+      const codex = JSON.parse(JSON.stringify(parseToml(launch.codexStudioServerOverride(mode)).mcp_servers["codara-studio"]));
+      assert.deepEqual(
+        { command: codex.command, args: codex.args, env: codex.env },
+        { command: claude.command, args: claude.args, env: claude.env },
+        `${mode}: the same tools for every runtime`,
+      );
+    }
+  });
+
   await check("Codex trust is per launch and survives dots, quotes and non-ASCII in the path", async () => {
     const quoted = "/tmp/it's/a.b";
     const quotedTrust = launch.codexTrustOverride(quoted);

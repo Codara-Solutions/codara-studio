@@ -1,8 +1,14 @@
 import type { createPreviewDOM } from "@shared/preview-dom";
+import type { createPreviewNames } from "@shared/preview-names";
 
-// Executed in the guest, with the factory passed explicitly across the boundary.
-export function snapshotProbe(opts: { mode: string; maxBytes: number; selector?: string | null; since?: string | null }, createDOM: typeof createPreviewDOM) {
+// Executed in the guest, with the factories passed explicitly across the boundary.
+export function snapshotProbe(
+  opts: { mode: string; maxBytes: number; selector?: string | null; since?: string | null },
+  createDOM: typeof createPreviewDOM,
+  createNames: typeof createPreviewNames,
+) {
   const dom = createDOM();
+  const names = createNames();
   const encoder = new TextEncoder();
   const limit = Number.isFinite(opts.maxBytes) ? Math.max(1, Math.min(100_000, Math.floor(opts.maxBytes))) : 12_000;
   const lines: string[] = [];
@@ -36,8 +42,11 @@ export function snapshotProbe(opts: { mode: string; maxBytes: number; selector?:
     // Focusable containers (dialogs, panels, tables) still expose their children.
     const leaf = /^(a|button|input|textarea|select|summary|img|iframe|h[1-6])$/.test(tag) ||
       el.matches("[contenteditable=\"true\"], [role=\"button\"], [role=\"checkbox\"], [role=\"link\"], [role=\"tab\"], [role=\"switch\"], [role=\"textbox\"]");
-    const name = clean(el.getAttribute("aria-label") || labelledBy || labels || el.getAttribute("alt") || el.getAttribute("title") || (tag === "input" && role === "button" ? (el as HTMLInputElement).value : "") ||
+    const ownName = clean(el.getAttribute("aria-label") || labelledBy || labels || el.getAttribute("alt") || el.getAttribute("title") || (tag === "input" && role === "button" ? (el as HTMLInputElement).value : "") ||
       (leaf ? (el as HTMLElement).innerText : ownText));
+    // An icon-only link or button is named by its icon, or by where it goes.
+    const name = ownName || (control && leaf ? names.fallbackName(el) : "");
+    const target = tag === "a" ? names.linkTarget(el) : null;
     let emitted = false;
     if (dom.visible(el) && (role || control || (name && tag !== "label"))) {
       const parts = [role || (control ? "control" : "text")];
@@ -57,6 +66,7 @@ export function snapshotProbe(opts: { mode: string; maxBytes: number; selector?:
         value: option.value, label: option.label,
         ...(option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled) ? { disabled: true } : {}),
       })))}`);
+      if (target) parts.push(`-> ${target.length > 160 ? `${target.slice(0, 160)}...` : target}`);
       if (tag === "iframe") parts.push("(frame content requires visual inspection)");
       add("  ".repeat(depth) + parts.join(" "));
       emitted = true;
