@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { withPreviewCapturePaint } from "./capturePaint";
+import { holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
 import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
@@ -96,6 +96,9 @@ export interface BrowserPaneHandle {
   isReady: () => boolean;
   executeJavaScript: (code: string) => Promise<unknown>;
   capturePngDataUrl: () => Promise<string>;
+  // Keeps a background guest rendering frames until release runs, for
+  // measurements that need paints (Core Web Vitals, INP).
+  holdPaint: () => { background: boolean; release: () => void };
   // The guest webContents id, used by the main-side computer-use executor to
   // drive trusted input against this exact <webview>. Null until dom-ready.
   getWebContentsId: () => number | null;
@@ -590,6 +593,12 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           throw new Error("preview tab is not ready");
         }
         return wv.executeJavaScript(code, false);
+      },
+      holdPaint: () => {
+        const wv = getLiveWebview();
+        if (!wv) throw new Error("preview tab is not ready");
+        const hold = holdPreviewCapturePaint(wv);
+        return { background: hold.changed, release: hold.release };
       },
       capturePngDataUrl: async () => {
         const wv = getLiveWebview();

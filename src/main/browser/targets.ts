@@ -42,6 +42,12 @@ export interface BrowserTarget {
   captureViewport(): Promise<Buffer>;
   /** Show the agent's activity on the tab (the preview cursor); a no-op where there is none. */
   showActivity(action: string, point?: { x: number; y: number }): Promise<void>;
+  /**
+   * Keep a background tab rendering frames for at most ms, for measurements
+   * that need paints. background says whether the tab needed it. Absent
+   * where the backend cannot.
+   */
+  keepPainting?(ms: number): Promise<{ background: boolean; release: () => Promise<void> }>;
 }
 
 export interface BrowserTabSummary {
