@@ -25,6 +25,8 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
+    "src/renderer/src/components/Preview/domSnapshot.ts",
+    "src/renderer/src/components/Preview/domActions.ts",
     "electron.vite.config.ts"
   ]
 }

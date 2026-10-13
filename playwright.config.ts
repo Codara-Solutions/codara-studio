@@ -12,6 +12,10 @@ import { restoreUserZdotdir, sanitizeElectronViteDevEnv } from "./src/main/env-s
 // Assigned rather than forced, so a debugging run can watch the window with
 // SPARK_E2E_BACKGROUND=0 npx playwright test.
 process.env.SPARK_E2E_BACKGROUND ??= "1";
+// A test app listening on the Chrome extension's ports would answer the
+// user's own browser in place of their Codara. The spec that covers the link
+// turns it back on, on a port of its own.
+process.env.CODARA_CHROME_LINK ??= "0";
 
 // A run started from a Codara pane inherits the pane's environment, and the
 // test app must see what a plain terminal would give it instead:
