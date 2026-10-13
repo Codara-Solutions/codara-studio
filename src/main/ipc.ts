@@ -478,6 +478,7 @@ import { isPiSubscriptionProvider } from "../shared/agent-families";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerChromeLinkIpc } from "./browser/chrome";
+import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
@@ -3999,6 +4000,7 @@ export function registerIpc(): void {
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
   registerChromeLinkIpc(handle);
+  registerPointIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

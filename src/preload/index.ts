@@ -36,6 +36,7 @@ import type {
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
 import { chromeLinkApi } from "./areas/chrome-link";
+import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
 import type {
   CoraMemoryItem,
@@ -1749,6 +1750,7 @@ const api = {
   },
   servers: serversApi,
   chromeLink: chromeLinkApi,
+  point: pointApi,
 };
 
 function isBrowserUrl(url: string): boolean {
