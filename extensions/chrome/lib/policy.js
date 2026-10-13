@@ -124,6 +124,11 @@ const NEVER_EXACT = new Set([
   "Storage.setCookies",
   "Page.close",
   "Page.crash",
+  // Loads any URL with the profile's cookies and hands back the body, past
+  // CORS and the blocked sites.
+  "Network.loadNetworkResource",
+  // Points the tab's downloads at any folder on the user's disk.
+  "Page.setDownloadBehavior",
 ]);
 const NEVER_PREFIXES = ["Browser.", "SystemInfo.", "Tethering.", "Extensions.", "PWA.", "BluetoothEmulation."];
 const TARGET_ALLOWED = new Set(["Target.getTargetInfo", "Target.setAutoAttach", "Target.setDiscoverTargets"]);
@@ -135,6 +140,50 @@ export function cdpPermission(method) {
   if (name.startsWith("Target.") && !TARGET_ALLOWED.has(name)) return "never";
   if (STORAGE_EXACT.has(name) || STORAGE_PREFIXES.some((prefix) => name.startsWith(prefix))) return "storage";
   return "allow";
+}
+
+// Where a cookie or storage command can point besides the tab's own page.
+function storageScopes(params) {
+  const out = [];
+  const take = (value) => {
+    if (typeof value === "string" && value) out.push(value);
+  };
+  const walk = (value) => {
+    if (!value || typeof value !== "object") return;
+    for (const key of ["url", "domain", "origin", "securityOrigin", "storageKey"]) take(value[key]);
+    for (const nested of ["storageId", "storageBucket"]) walk(value[nested]);
+  };
+  if (!params || typeof params !== "object") return out;
+  walk(params);
+  if (Array.isArray(params.urls)) params.urls.forEach(take);
+  if (Array.isArray(params.cookies)) params.cookies.forEach(walk);
+  return out;
+}
+
+function scopeHost(scope) {
+  // A storage key is the origin, then partition data after a caret.
+  const text = scope.split("^")[0];
+  const parsed = parseUrl(/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text.replace(/^\./, "")}`);
+  return parsed ? parsed.hostname.toLowerCase().replace(/\.$/, "") : null;
+}
+
+/**
+ * Why a cookie or storage command reaches past the tab it was granted on,
+ * or null. The per-tab permission covers that tab's site (its host, the
+ * domains above it and the hosts below it), never another site and never
+ * a blocked one.
+ */
+export function storageScopeError(params, tabUrl, rules) {
+  const tab = parseUrl(tabUrl);
+  const tabHost = tab ? tab.hostname.toLowerCase().replace(/\.$/, "") : "";
+  for (const scope of storageScopes(params)) {
+    const host = scopeHost(scope);
+    const related = host && tabHost && (host === tabHost || tabHost.endsWith(`.${host}`) || host.endsWith(`.${tabHost}`));
+    if (!related) return `${scope} is not this tab's site; the cookie and storage permission covers ${tabHost || "the tab's page"} only.`;
+    const rule = blockingRule(`https://${host}/`, rules);
+    if (rule) return `${scope} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`;
+  }
+  return null;
 }
 
 /** The URL a command would load in the tab, so a blocked site is refused before it loads. */

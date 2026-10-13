@@ -54,9 +54,12 @@ tools it uses for its own browser tabs.
   never usable.
 - Cookies and site storage (`Network.getCookies`, `DOMStorage.*`,
   `IndexedDB.*`, `Fetch.*` and similar) need **Allow cookie and storage
-  access** for that tab. Without it, cookie headers are removed from network
-  events. Profile-wide cookie reads, clearing browser data, closing tabs it
-  did not open and every `Browser.*` and `Target.*` command that would reach
+  access** for that tab, and reach only that tab's site: another site's
+  cookies or storage, or a blocked site's, are refused even with it.
+  Without it, cookie headers are removed from network events. Profile-wide
+  cookie reads, clearing browser data, closing tabs it did not open, loading
+  other URLs with your cookies (`Network.loadNetworkResource`), redirecting
+  downloads and every `Browser.*` and `Target.*` command that would reach
   other tabs are always refused. Script an agent runs in a shared tab
   (`codara_preview_evaluate`) sees what the page's own scripts see, such as
   `localStorage` and non-HttpOnly cookies, but never HttpOnly cookies; share

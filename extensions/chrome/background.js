@@ -22,6 +22,7 @@ import {
   isTabShared,
   parseBlockedSites,
   redactCdpEvent,
+  storageScopeError,
 } from "./lib/policy.js";
 
 const SESSION_DEFAULTS = {
@@ -171,6 +172,10 @@ async function relayCommand(request) {
     throw new Error(
       `Cookies and site storage of ${agentTabId(tab.id)} need the user's permission: turn on "Allow cookie and storage access" for this tab in the Codara extension popup.`,
     );
+  }
+  if (permission === "storage") {
+    const outside = storageScopeError(request.params, tab.url, rules);
+    if (outside) throw new Error(outside);
   }
   const url = commandUrl(method, request.params);
   if (url) {

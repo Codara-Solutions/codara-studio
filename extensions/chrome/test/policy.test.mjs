@@ -10,6 +10,7 @@ import {
   isTabShared,
   parseBlockedSites,
   redactCdpEvent,
+  storageScopeError,
 } from "../lib/policy.js";
 
 export function run() {
@@ -48,7 +49,23 @@ export function run() {
   for (const method of ["Network.getAllCookies", "Storage.getCookies", "Network.clearBrowserCookies", "Storage.clearDataForOrigin", "Browser.close", "Target.createTarget", "Target.attachToTarget", "Page.close"]) {
     assert.equal(cdpPermission(method), "never", method);
   }
+  for (const method of ["Network.loadNetworkResource", "Page.setDownloadBehavior"]) {
+    assert.equal(cdpPermission(method), "never", `${method} reaches past the tab`);
+  }
   assert.equal(cdpPermission("Target.getTargetInfo"), "allow");
+
+  // The cookie and storage permission covers the tab's own site only.
+  const page = "https://app.example.com/inbox";
+  assert.equal(storageScopeError({}, page, defaults), null, "no scope: the tab's own page");
+  assert.equal(storageScopeError({ urls: ["https://app.example.com/", "https://cdn.app.example.com/x"] }, page, defaults), null);
+  assert.equal(storageScopeError({ name: "sid", value: "1", domain: ".example.com" }, page, defaults), null, "a parent domain is the same site");
+  assert.equal(storageScopeError({ storageId: { securityOrigin: "https://app.example.com", isLocalStorage: true } }, page, defaults), null);
+  assert.equal(storageScopeError({ storageKey: "https://app.example.com/^0https://example.com" }, page, defaults), null);
+  assert.match(storageScopeError({ urls: ["https://app.example.com/", "https://mail.other.com/"] }, page, defaults), /mail\.other\.com.*not this tab's site/);
+  assert.match(storageScopeError({ securityOrigin: "https://www.paypal.com" }, page, defaults), /not this tab's site/);
+  assert.match(storageScopeError({ cookies: [{ name: "a", value: "b", url: "https://evil.test/" }] }, page, defaults), /evil\.test/);
+  assert.match(storageScopeError({ storageBucket: { storageKey: "https://other.org/" } }, page, defaults), /other\.org/);
+  assert.match(storageScopeError({ urls: ["https://www.paypal.com/"] }, "https://paypal.com/", defaults), /blocked sites/, "a blocked site stays blocked");
   assert.equal(commandUrl("Page.navigate", { url: "https://a.b/" }), "https://a.b/");
   assert.equal(commandUrl("Runtime.evaluate", { expression: "1" }), null);
 

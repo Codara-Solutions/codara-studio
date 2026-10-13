@@ -167,9 +167,11 @@ own. With two browsers paired, ids carry the browser:
   browser pages are refused with a message saying why; so is navigating a
   shared tab to a blocked site.
 - Cookie and site-storage reads through the DevTools protocol (including
-  HttpOnly cookies) need the user's per-tab permission in the popup, and
-  without it cookie headers are removed from network events; profile-wide
-  cookie reads and commands that reach other tabs are always refused. Page
+  HttpOnly cookies) need the user's per-tab permission in the popup and
+  reach only that tab's site; without it cookie headers are removed from
+  network events. Profile-wide cookie reads, credentialed loads of other
+  URLs, download redirection and commands that reach other tabs are always
+  refused. Page
   script from `codara_preview_evaluate` sees only what the page's own
   scripts see.
 - Readonly Pi workers may look at a shared tab but not navigate or resize it.
