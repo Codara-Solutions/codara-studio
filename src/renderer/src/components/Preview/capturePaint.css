@@ -3,3 +3,9 @@
   opacity: 0 !important;
   pointer-events: none !important;
 }
+
+/* A lease can last a whole performance trace; what it reveals stays inert
+   even where a child (a drawing overlay) asks for pointer events. */
+[data-preview-capture-paint] * {
+  pointer-events: none !important;
+}

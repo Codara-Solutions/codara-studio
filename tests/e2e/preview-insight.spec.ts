@@ -140,6 +140,22 @@ test("audits and performance tools work on a background tab with the window hidd
 
     const started = await request("preview.performance", { tabId, action: "start" });
     expect(started.tracing).toBe(true);
+    // The trace keeps the background tab rendering for up to a minute; the
+    // revealed layers stay invisible and take no click meant for what the
+    // user sees.
+    const leased = await page.evaluate(() => {
+      const held = document.querySelectorAll("[data-preview-capture-paint]").length;
+      const hits: string[] = [];
+      for (let x = 4; x < innerWidth; x += 24) {
+        for (let y = 4; y < innerHeight; y += 24) {
+          const element = document.elementFromPoint(x, y);
+          if (element?.closest("[data-preview-capture-paint]")) hits.push(`${x},${y} ${element.tagName} ${element.className}`);
+        }
+      }
+      return { held, hits: hits.slice(0, 5) };
+    });
+    expect(leased.held).toBeGreaterThan(0);
+    expect(leased.hits).toEqual([]);
     await request("preview.mouse", { tabId, selector: "#slow" });
     const stopped = await request("preview.performance", { tabId, action: "stop" }, 60_000);
     expect(stopped.trace.longTasks.count).toBeGreaterThanOrEqual(1);
