@@ -108,19 +108,22 @@ const SOURCE_MAP_URL = /\/[/*][#@]\s*sourceMappingURL=([^\s*'"]+)\s*(?:\*\/)?\s*
 
 /** The sourceMappingURL comment at the end of a script, resolved against the script URL. */
 export function sourceMappingUrl(code: string, scriptUrl: string): string | null {
-  const tail = code.slice(-4096).trimEnd();
-  const lines = tail.split("\n");
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 4); i--) {
-    const match = SOURCE_MAP_URL.exec(lines[i].trim());
-    if (!match) continue;
-    if (match[1].startsWith("data:")) return match[1];
-    try {
-      return new URL(match[1], scriptUrl).href;
-    } catch {
-      return null;
-    }
+  // Found from the last comment rather than in a fixed-size tail: an inline
+  // map (Vite serves every module with one) is one line far longer than any
+  // tail worth slicing.
+  const at = code.lastIndexOf("sourceMappingURL=");
+  if (at < 0) return null;
+  const lineStart = code.lastIndexOf("\n", at) + 1;
+  const rest = code.slice(lineStart).trimEnd().split("\n");
+  if (rest.length > 4) return null;
+  const match = SOURCE_MAP_URL.exec(rest[0].trim());
+  if (!match) return null;
+  if (match[1].startsWith("data:")) return match[1];
+  try {
+    return new URL(match[1], scriptUrl).href;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 export function parseDataUrlJson(url: string): RawMap | null {
@@ -134,21 +137,38 @@ export function parseDataUrlJson(url: string): RawMap | null {
 
 export type TextFetcher = (url: string) => Promise<string | null>;
 
-/** Fetches scripts and maps for the lookups, keeping the last few. */
+/**
+ * Fetches scripts and maps for the lookups, keeping the last few for a short
+ * while. Entries expire because a dev server serves an edited module under
+ * the same URL (webpack and Next chunks never change name), so an old map
+ * would point a later pick at the wrong line, and because a decoded bundle
+ * map can take tens of megabytes that should not stay alive between picks.
+ */
 export class SourceMapResolver {
-  private readonly cache = new Map<string, Promise<SourceMapLookup | null>>();
+  private readonly cache = new Map<string, { pending: Promise<SourceMapLookup | null>; expires: number }>();
 
-  constructor(private readonly fetchText: TextFetcher, private readonly capacity = 24) {}
+  constructor(
+    private readonly fetchText: TextFetcher,
+    private readonly capacity = 12,
+    private readonly maxAgeMs = 20_000,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   async lookup(scriptUrl: string): Promise<SourceMapLookup | null> {
     const key = scriptUrl;
-    let pending = this.cache.get(key);
-    if (!pending) {
-      pending = this.load(scriptUrl).catch(() => null);
-      this.cache.set(key, pending);
+    const time = this.now();
+    for (const [url, entry] of this.cache) if (entry.expires <= time) this.cache.delete(url);
+    let entry = this.cache.get(key);
+    if (!entry) {
+      entry = { pending: this.load(scriptUrl).catch(() => null), expires: time + this.maxAgeMs };
+      this.cache.set(key, entry);
       while (this.cache.size > this.capacity) this.cache.delete(this.cache.keys().next().value as string);
+      const created = entry;
+      setTimeout(() => {
+        if (this.cache.get(key) === created) this.cache.delete(key);
+      }, this.maxAgeMs).unref?.();
     }
-    return pending;
+    return entry.pending;
   }
 
   async original(scriptUrl: string, line: number, column: number): Promise<OriginalPosition | null> {

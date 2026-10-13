@@ -87,6 +87,32 @@ async function sourceMaps(lib) {
   assert.equal(lib.sourceMappingUrl("x\n//# sourceMappingURL=app.js.map\n", "http://h/a/app.js"), "http://h/a/app.js.map");
   assert.equal(lib.sourceMappingUrl("x\n/*# sourceMappingURL=data:application/json;base64,e30= */", "http://h/a.css"), "data:application/json;base64,e30=");
   assert.equal(lib.sourceMappingUrl("no map here", "http://h/a.js"), null);
+  assert.equal(lib.sourceMappingUrl("//# sourceMappingURL=a.map\nx\ny\nz\nw\n", "http://h/a.js"), null, "a comment far from the end is not the script's map");
+
+  // A real-sized module: Vite serves it with one inline map line that is far
+  // longer than the tail of a small file.
+  const big = [CARD_TSX, ...Array.from({ length: 300 }, (_, i) => `export const value${i}: string = "line ${i}".repeat(${i % 7});`)].join("\n");
+  const served = await esbuild.transform(big, { loader: "tsx", sourcemap: "inline", sourcefile: "Big.tsx" });
+  const mapLine = served.code.trimEnd().split("\n").pop();
+  assert.ok(mapLine.length > 10_000, "the inline map line is long");
+  assert.match(lib.sourceMappingUrl(served.code, "http://dev.local/src/Big.tsx"), /^data:application\/json;base64,/);
+  const servedLines = served.code.split("\n");
+  const bigLine = servedLines.findIndex((text) => text.includes("card-marker")) + 1;
+  const bigResolver = new lib.SourceMapResolver(async () => served.code);
+  const bigOriginal = await bigResolver.original("http://dev.local/src/Big.tsx", bigLine, servedLines[bigLine - 1].indexOf('"card-marker"') + 1);
+  assert.equal(bigOriginal && bigOriginal.line, 5, "a long inline map still maps the frame");
+
+  // A dev server serves an edited module under the same URL, so a cached map
+  // expires instead of answering for the old code.
+  let clock = 0;
+  let fetches = 0;
+  const expiring = new lib.SourceMapResolver(async () => (fetches++, out.code), 12, 1_000, () => clock);
+  await expiring.original("http://dev.local/src/Card.js", line, column);
+  await expiring.original("http://dev.local/src/Card.js", line, column);
+  assert.equal(fetches, 1, "a second pick soon after reuses the map");
+  clock = 5_000;
+  await expiring.original("http://dev.local/src/Card.js", line, column);
+  assert.equal(fetches, 2, "an old map is fetched again");
   assert.deepEqual(lib.decodeMappings("AAAA,CAAC;AACA"), [[[0, 0, 0, 0], [1, 0, 0, 1]], [[0, 0, 1, 1]]]);
 
   // Bundler and served URLs become paths.
