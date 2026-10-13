@@ -32,6 +32,8 @@ const PROBE_TIMEOUT_MS = 1_500;
 const NETWORK_IDLE_MS = 500;
 /** A click that navigates starts loading a moment after it returns. */
 const ACTION_SETTLE_MS = 250;
+/** A requested navigation starts loading within this, or it was abandoned. */
+const REQUESTED_NAVIGATION_MS = 3_000;
 /** A hot update counts if it came after the last action or this recently. */
 const HMR_LOOKBACK_MS = 10_000;
 const HMR_QUIET_MS = 300;
@@ -90,12 +92,17 @@ export function normalizeWaitRequest(params: Record<string, unknown>): WaitReque
   return request;
 }
 
-/** Whether href is the URL a wait names: exact (or a path on this origin), a glob with *, or /regex/. */
+/**
+ * Whether href is the URL a wait names: exact (or a path on this origin), a
+ * glob with *, or /regex/. A path with a trailing slash looks like /regex/
+ * too, so only a pattern with a regex character is read as one, and its path
+ * reading still counts: "/dashboard/" must not match ".../login?next=/dashboard/".
+ */
 export function matchUrl(pattern: string, href: string): boolean {
   const p = pattern.trim();
-  if (p.length > 2 && p.startsWith("/") && p.endsWith("/")) {
+  if (p.length > 2 && p.startsWith("/") && p.endsWith("/") && /[\\^$.|?*+()[\]{}]/.test(p.slice(1, -1))) {
     try {
-      return new RegExp(p.slice(1, -1)).test(href);
+      if (new RegExp(p.slice(1, -1)).test(href)) return true;
     } catch {
       /* not a valid expression: treat it as a path */
     }
@@ -178,15 +185,28 @@ export function waitProbe(
   } else {
     elements = Array.from(document.querySelectorAll(args.selector));
   }
-  const baseline = host[Symbol.for("codara.preview.baseline")] as { seen: WeakSet<Element>; texts?: WeakMap<Element, string> } | undefined;
-  // A framework that re-renders in place keeps the element and swaps its text.
-  const isFresh = (el: Element) => !baseline || !baseline.seen.has(el) || (baseline.texts?.has(el) === true && baseline.texts.get(el) !== el.textContent);
+  const baseline = host[Symbol.for("codara.preview.baseline")] as {
+    seen: WeakSet<Element>;
+    texts?: WeakMap<Element, string>;
+    textOf?: (el: Element) => string | null;
+    pageText?: string;
+  } | undefined;
   const regex = args.text && args.text.length > 2 && args.text.startsWith("/") && args.text.endsWith("/") ? new RegExp(args.text.slice(1, -1), "i") : null;
   const wanted = args.text?.toLowerCase().replace(/\s+/g, " ") ?? null;
+  const matchesText = (text: string) => (regex ? regex.test(text) : text.toLowerCase().includes(wanted ?? ""));
+  // The wanted text was nowhere on the page at the last action, so whatever
+  // element shows it now (body, for a text-only wait) shows something new.
+  const textIsNew = wanted !== null && typeof baseline?.pageText === "string" && !matchesText(baseline.pageText);
+  // A framework that re-renders in place keeps the element and swaps its text.
+  const isFresh = (el: Element) =>
+    !baseline ||
+    !baseline.seen.has(el) ||
+    (baseline.texts?.has(el) === true && baseline.texts.get(el) !== (baseline.textOf ? baseline.textOf(el) : el.textContent)) ||
+    (textIsNew && baseline.texts?.has(el) !== true);
   const hasText = (el: Element) => {
     if (wanted === null) return true;
     const own = ((el as HTMLElement).innerText ?? el.textContent ?? "").replace(/\s+/g, " ").trim();
-    return regex ? regex.test(own) : own.toLowerCase().includes(wanted);
+    return matchesText(own);
   };
   const visible = elements.filter((el) => dom.visible(el));
   const candidates = (args.fresh ? elements.filter(isFresh) : elements).filter(hasText);
@@ -214,9 +234,46 @@ export function waitProbe(
   return probe;
 }
 
+// Stringified into the page; may use only page globals. Records which
+// elements exist now and, for the ones a framework retitles in place, their
+// text: every heading, control, label and live region, then any element with
+// a short text of its own, up to 20,000 elements in all whatever the page's
+// size. The page's text is kept (up to 1,000,000 characters) so a text wait
+// can tell that its text is new.
+function markBaseline(): boolean {
+  const LIMIT = 20_000;
+  const MAX_TEXT = 300;
+  const TARGETS = "h1,h2,h3,h4,h5,h6,button,a,label,summary,legend,caption,th,option,output,[role=heading],[role=button],[role=link],[role=tab],[role=status],[role=alert],[aria-live]";
+  const textOf = (el: Element): string | null => {
+    if (el.matches(TARGETS)) {
+      const text = el.textContent ?? "";
+      return text.length <= MAX_TEXT ? text : null;
+    }
+    let own = "";
+    for (const node of Array.from(el.childNodes)) if (node.nodeType === 3) own += node.nodeValue ?? "";
+    return own.trim() && own.length <= MAX_TEXT ? own : null;
+  };
+  const all = document.querySelectorAll("*");
+  const texts = new WeakMap<Element, string>();
+  const targets = document.querySelectorAll(TARGETS);
+  for (let i = 0; i < targets.length && i < LIMIT; i++) {
+    const text = textOf(targets[i]);
+    if (text !== null) texts.set(targets[i], text);
+  }
+  for (let i = 0, kept = Math.min(targets.length, LIMIT); i < all.length && kept < LIMIT; i++) {
+    if (texts.has(all[i]) || all[i].matches(TARGETS)) continue;
+    const text = textOf(all[i]);
+    if (text === null) continue;
+    texts.set(all[i], text);
+    kept++;
+  }
+  const pageText = (document.body?.textContent ?? "").slice(0, 1_000_000).replace(/\s+/g, " ").toLowerCase();
+  (window as unknown as Record<symbol, unknown>)[Symbol.for("codara.preview.baseline")] = { at: Date.now(), seen: new WeakSet(Array.from(all)), texts, textOf, pageText };
+  return true;
+}
+
 /** Page expression that records which elements exist now, for fresh waits. */
-export const MARK_BASELINE_EXPRESSION =
-  "(() => { const all = document.querySelectorAll('*'); const texts = new WeakMap(); if (all.length <= 4000) for (const el of all) { const t = el.textContent; if (t.length <= 300) texts.set(el, t); } window[Symbol.for('codara.preview.baseline')] = { at: Date.now(), seen: new WeakSet(all), texts }; return true; })()";
+export const MARK_BASELINE_EXPRESSION = `(${markBaseline.toString()})()`;
 
 export interface Verdict {
   ok: boolean;
@@ -244,7 +301,11 @@ export function checkWait(
     if (!matchUrl(request.url, href)) waiting.push(`url is ${href || "unknown"}`);
   }
   if (request.load) {
-    const pendingNavigation = activity.navigationRequestedAt > 0 || activity.loadingStartedAt > activity.loadingStoppedAt;
+    // A request no load followed within a few seconds was abandoned, whatever
+    // event (or none) said so.
+    const requested = activity.navigationRequestedAt > 0 &&
+      (activity.loadingStartedAt >= activity.navigationRequestedAt || now - activity.navigationRequestedAt < REQUESTED_NAVIGATION_MS);
+    const pendingNavigation = requested || activity.loadingStartedAt > activity.loadingStoppedAt;
     const settling = activity.lastActionAt > 0 && now - activity.lastActionAt < ACTION_SETTLE_MS;
     const ready = probe?.readyState ?? "unknown";
     if (pendingNavigation) waiting.push("a navigation is still loading");

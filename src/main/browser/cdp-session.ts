@@ -101,6 +101,7 @@ export class CdpSession {
   private readonly sticky: Set<string>;
   private readonly unsubscribe: Array<() => void> = [];
   private readonly detachListeners = new Set<(reason: string) => void>();
+  private readonly disposeListeners = new Set<() => void>();
   private readonly reattachDelayMs: number;
   private disposed = false;
   private lastAttachError: string | null = null;
@@ -189,6 +190,13 @@ export class CdpSession {
     return () => this.detachListeners.delete(listener);
   }
 
+  /** Fires once when the session ends for good: its tab closed or its page was replaced. */
+  onDispose(listener: () => void): () => void {
+    if (this.disposed) return () => {};
+    this.disposeListeners.add(listener);
+    return () => this.disposeListeners.delete(listener);
+  }
+
   /** A named buffer that lives as long as the session (and moves with the tab). */
   ring<T>(name: string, capacity: number): RingBuffer<T> {
     let ring = this.rings.get(name);
@@ -219,6 +227,17 @@ export class CdpSession {
         this.transport.detach();
       } catch {
         /* the target may already be gone */
+      }
+    }
+    // Last, so what a listener sends fails at once instead of reaching a
+    // target that is going away.
+    const ending = [...this.disposeListeners];
+    this.disposeListeners.clear();
+    for (const listener of ending) {
+      try {
+        listener();
+      } catch {
+        /* one listener's failure does not keep the others from running */
       }
     }
   }

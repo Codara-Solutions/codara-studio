@@ -6,8 +6,10 @@
 // is in the background or the window is minimized.
 //
 // Emulation here is the protocol's own device metrics and media features;
-// a tab's other emulation settings (network, CPU) are left alone.
+// a tab's other emulation settings (network, CPU) are left alone, and the
+// agent's own media and metrics emulation is put back afterwards.
 
+import { currentEmulation, holdEmulation } from "../emulation";
 import type { BrowserTarget } from "../targets";
 import { blit, createBitmap, cropBitmap, drawText, scaleBitmap, strokeRect, TEXT_HEIGHT, textWidth, type Bitmap } from "./bitmap";
 import type { BitmapCodec } from "./codec";
@@ -121,9 +123,14 @@ async function captureAt(
     screenHeight: preset.height,
     ...(surface ? { viewport: { x: 0, y: 0, width: preset.width, height: preset.height, scale: zoom } } : {}),
   });
+  // The call replaces every feature, so the agent's own emulation rides along.
+  const own = currentEmulation(target);
   await session.send("Emulation.setEmulatedMedia", {
     media: "",
-    features: [{ name: "prefers-color-scheme", value: scheme ?? "" }],
+    features: [
+      { name: "prefers-color-scheme", value: scheme ?? own.colorScheme ?? "" },
+      { name: "prefers-reduced-motion", value: own.reducedMotion === null ? "" : own.reducedMotion ? "reduce" : "no-preference" },
+    ],
   });
   // Layout and media-query listeners run asynchronously; timers keep
   // running in a background tab, animation frames do not.
@@ -177,14 +184,14 @@ export function captureSizes(
     const scroll = await target.evaluate<{ x: number; y: number }>("({ x: scrollX, y: scrollY })").catch(() => null);
     const surface = surfaceBound(target) ? await surfaceMetrics(target) : null;
     const shots: Array<{ preset: SizePreset; scheme: ColorScheme | null; bitmap: Bitmap }> = [];
+    const releaseEmulation = holdEmulation(target.session);
     const releasePaint = await holdGuestPaint(target.session);
     try {
       for (const scheme of schemes) {
         for (const preset of sizes) shots.push({ preset, scheme, bitmap: await captureAt(target, preset, scheme, codec, surface) });
       }
     } finally {
-      await target.session.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
-      await target.session.send("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-color-scheme", value: "" }] }).catch(() => {});
+      await releaseEmulation();
       if (scroll) await target.evaluate(`scrollTo(${Number(scroll.x) || 0}, ${Number(scroll.y) || 0})`).catch(() => {});
       releasePaint();
     }

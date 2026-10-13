@@ -165,9 +165,8 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
       })));
     });
     await expect.poll(async () => (await frameState()).map((frame) => frame.page)).toEqual([[390, 1, expect.any(Boolean)], [820, 1, expect.any(Boolean)], [1440, 1, expect.any(Boolean)]]);
-    for (const frame of await frameState()) {
-      const preset = Number(/:(\d+)x/.exec(frame.key ?? "")?.[1]);
-      expect(frame.onScreen).toBeLessThan(preset);
+    for (const [index, frame] of (await frameState()).entries()) {
+      expect(frame.onScreen).toBeLessThan([390, 820, 1440][index]);
     }
     // Scrolling one frame scrolls the others to the same point of the page.
     const scrollFractions = () => page.evaluate(async () => {
@@ -184,8 +183,63 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     await responsive.getByRole("radio", { name: "Light" }).click();
     await expect.poll(async () => (await frameState()).map((frame) => (frame.page as unknown[])[2])).toEqual([false, false, false]);
     await responsive.getByRole("radio", { name: "Auto" }).click();
-    await responsive.getByRole("button", { name: "Close the responsive view" }).click();
+
+    // Editing sizes changes each frame in place: a rename or a new width
+    // keeps the frame's guest, and two identical sizes are two frames.
+    const frameIds = () => page.evaluate(() => Array.from(document.querySelectorAll("webview[data-responsive-frame]")).map((frame) => ({
+      key: frame.getAttribute("data-responsive-frame"),
+      id: (frame as HTMLElement & { getWebContentsId(): number }).getWebContentsId(),
+    })));
+    const before = await frameIds();
+    await responsive.getByRole("button", { name: "Edit sizes" }).click();
+    const editor = responsive.getByRole("dialog", { name: "Edit sizes" });
+    await expect(editor).toBeVisible();
+    const phoneName = editor.getByLabel("Name").first();
+    await phoneName.fill("");
+    await phoneName.pressSequentially("Pixel 8");
+    await expect(responsive.getByTestId("responsive-frame").first()).toContainText("Pixel 8");
+    const phoneWidth = editor.getByLabel("Width").first();
+    await phoneWidth.fill("412");
+    await phoneWidth.press("Enter");
+    await expect.poll(async () => ((await frameState())[0].page as unknown[])[0]).toBe(412);
+    expect(await frameIds()).toEqual(before);
+    await editor.getByRole("button", { name: "Add size" }).click();
+    await editor.getByRole("button", { name: "Add size" }).click();
+    await expect(responsive.getByTestId("responsive-frame")).toHaveCount(5);
+    const grown = await frameIds();
+    expect(new Set(grown.map((frame) => frame.key)).size).toBe(5);
+    expect(new Set(grown.map((frame) => frame.id)).size).toBe(5);
+    expect(grown.slice(0, 3)).toEqual(before);
+    await editor.getByRole("button", { name: "Reset" }).click();
+    await expect(responsive.getByTestId("responsive-frame")).toHaveCount(3);
+
+    // Escape in the editor closes the editor only.
+    await editor.getByLabel("Name").first().focus();
+    await page.keyboard.press("Escape");
+    await expect(editor).toHaveCount(0);
+    await expect(responsive).toBeVisible();
+    await expect(responsive.getByRole("button", { name: "Edit sizes" })).toBeFocused();
+    // An Escape something else already took, or one pressed outside this
+    // pane, leaves the view open.
+    await page.evaluate(() => window.addEventListener("keydown", (event) => event.preventDefault(), { capture: true, once: true }));
+    await page.keyboard.press("Escape");
+    await expect(responsive).toBeVisible();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await page.keyboard.press("Escape");
+    await expect(responsive).toBeVisible();
+    await responsive.getByRole("radio", { name: "Auto" }).focus();
+    await page.keyboard.press("Escape");
     await expect(responsive).toHaveCount(0);
+
+    // Pointing works on the page itself, so it closes the side-by-side view.
+    await page.getByRole("button", { name: "Responsive view" }).click();
+    await expect(responsive).toBeVisible();
+    await page.getByRole("button", { name: /Point at an element/ }).click();
+    await expect(responsive).toHaveCount(0);
+    const picker = page.getByTestId("point-picker");
+    await expect(picker).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
 
     await record.click();
     await expect(record).toHaveAttribute("aria-pressed", "true");

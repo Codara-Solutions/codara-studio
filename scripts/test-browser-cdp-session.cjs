@@ -123,7 +123,15 @@ async function sessionLogic(lib) {
   assert.deepEqual(other.ring("console", 3).toArray(), [4, 5, 0], "a replaced guest keeps the tab's history before its own entries, still bounded");
   assert.equal(other.ring("console", 3).dropped, 3);
 
+  // A closed tab ends the session without a detach event; whoever holds
+  // work on it (a recording) hears it once, with the session already closed.
+  const ended = [];
+  session.onDispose(() => ended.push(session.isDisposed));
+  const dropped = session.onDispose(() => ended.push("removed"));
+  dropped();
   session.dispose();
+  session.dispose();
+  assert.deepEqual(ended, [true], "dispose listeners run once, after the session closed");
   assert.equal(transport.attached, false, "disposing detaches");
   await assert.rejects(session.send("Runtime.evaluate", {}), /tab closed/);
   transport.emit("Page.loadEventFired", { timestamp: 2 });
@@ -158,6 +166,25 @@ async function attachRecovery(lib) {
   transport.drop("target crashed");
   await tick(30);
   assert.equal(transport.attached, true, "other detaches still re-attach on their own");
+
+  // Runtime.enable and Log.enable replay earlier messages with their
+  // original timestamps after a re-attach: the console keeps one of each.
+  const say = (text, timestamp) => transport.emit("Runtime.consoleAPICalled", { type: "log", args: [{ type: "string", value: text }], timestamp });
+  const fail = (text, timestamp) => transport.emit("Runtime.exceptionThrown", { timestamp, exceptionDetails: { text: "Uncaught", exception: { description: text } } });
+  const logEntry = (text, timestamp) => transport.emit("Log.entryAdded", { entry: { level: "error", text, source: "network", timestamp } });
+  say("saved", 1_000.5);
+  fail("Error: boom", 1_001.25);
+  logEntry("GET /x 404", 1_002);
+  say("saved", 1_003.75);
+  transport.drop("target crashed");
+  await tick(30);
+  say("saved", 1_000.5);
+  fail("Error: boom", 1_001.25);
+  logEntry("GET /x 404", 1_002);
+  say("saved", 1_003.75);
+  const logged = lib.consoleRing(session).toArray();
+  assert.deepEqual(logged.map((entry) => entry.message), ["saved", "Error: boom", "GET /x 404", "saved"], "replayed entries are not recorded again; a repeat at a new time is");
+  assert.equal(logged[1].at, new Date(1_001.25).toISOString(), "an exception keeps the time it was thrown");
   session.dispose();
 
   // Redirect hops share a request id; evicting the first hop keeps the last one indexed.
@@ -228,6 +255,10 @@ async function recordersAgainstChromium(lib) {
     const after = Date.now() + 5_000;
     while (Date.now() < after && !lib.consoleRing(session).toArray().some((entry) => entry.message === "after reattach")) await tick(50);
     assert.ok(lib.consoleRing(session).toArray().some((entry) => entry.message === "after reattach"), "recording resumes after a re-attach");
+    const recorded = lib.consoleRing(session).toArray();
+    assert.equal(recorded.filter((entry) => entry.message.startsWith("boot")).length, 1, "the replay after the re-attach adds no copies");
+    assert.equal(recorded.filter((entry) => entry.message === "careful").length, 1);
+    assert.equal(recorded.filter((entry) => /late failure/.test(entry.message)).length, 1);
     session.dispose();
   } finally {
     server.close();

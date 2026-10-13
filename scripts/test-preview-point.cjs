@@ -317,6 +317,8 @@ async function inChromium(lib, label) {
     assert.match(comment, /has <div> "in" @\S+ #box-area/);
     assert.match(comment, /2\. \(no note\); arrow from page 300,300 to 420,410/);
     assert.match(comment, /in <span> "in" @\S+ #inner/);
+    // A pane without MCP (or `cora inbox`) is told how to act on it, as a pick is.
+    assert.match(comment, /Use tabId "tab-9" with the codara_preview tools \(or `cora tool`\)\.$/);
 
     // The picker overlay's page helpers, as the renderer sends them: the
     // hover helper installs once and answers in page pixels plus the scale

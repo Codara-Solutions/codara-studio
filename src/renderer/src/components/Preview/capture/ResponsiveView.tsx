@@ -11,6 +11,18 @@ import { CloseIcon } from "../../icons";
 
 interface EditablePreset extends CaptureSizePreset {
   enabled: boolean;
+  // Names and sizes change while the user edits them and two sizes may be
+  // the same, so a frame is known by this id: its guest lives as long as the
+  // size does, and edits apply to it in place.
+  id: string;
+}
+
+function newSizeId(): string {
+  return `size-${crypto.randomUUID()}`;
+}
+
+function defaultSizes(): EditablePreset[] {
+  return DEFAULT_CAPTURE_SIZES.map((size) => ({ ...size, enabled: true, id: newSizeId() }));
 }
 
 type SchemeChoice = "auto" | "light" | "dark";
@@ -35,14 +47,20 @@ function readSizes(): EditablePreset[] {
           height: clampSide(value.height),
           mobile: value.mobile === true,
           enabled: value.enabled !== false,
+          id: typeof value.id === "string" && value.id ? value.id : newSizeId(),
         }];
       });
+      const ids = new Set<string>();
+      for (const size of sizes) {
+        if (ids.has(size.id)) size.id = newSizeId();
+        ids.add(size.id);
+      }
       if (sizes.length) return sizes;
     }
   } catch {
     /* stored sizes are a convenience; the defaults stand in */
   }
-  return DEFAULT_CAPTURE_SIZES.map((size) => ({ ...size, enabled: true }));
+  return defaultSizes();
 }
 
 function writeSizes(sizes: EditablePreset[]): void {
@@ -112,6 +130,8 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
   const [sizes, setSizes] = useState<EditablePreset[]>(readSizes);
   const [scheme, setScheme] = useState<SchemeChoice>(readScheme);
   const [editing, setEditing] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const editButtonRef = useRef<HTMLButtonElement | null>(null);
   const areaRef = useRef<HTMLDivElement | null>(null);
   const [area, setArea] = useState({ width: 0, height: 0 });
   const frames = useRef(new Map<string, FrameHandle>());
@@ -130,9 +150,23 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
     return () => observer.disconnect();
   }, []);
 
+  // Escape is this view's only while focus is in its pane and nothing else
+  // took the key first: a dialog, menu or popover that closes on Escape must
+  // not also close the view under it, nor another pane's Escape.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !editing) onClose();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const root = rootRef.current;
+      const pane = root?.closest("[data-browser-pane]") ?? root;
+      if (!pane || !(event.target instanceof Node) || !pane.contains(event.target)) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      event.preventDefault();
+      if (editing) {
+        setEditing(false);
+        editButtonRef.current?.focus();
+      } else {
+        onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -174,8 +208,11 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
 
   return (
     <div
+      ref={rootRef}
       data-testid="responsive-view"
-      style={{ position: "absolute", inset: 0, zIndex: 4, display: "flex", flexDirection: "column", background: "var(--bg)" }}
+      // Focusable, so a click on the view itself keeps Escape in this pane.
+      tabIndex={-1}
+      style={{ position: "absolute", inset: 0, zIndex: 4, display: "flex", flexDirection: "column", background: "var(--bg)", outline: "none" }}
     >
       <div
         style={{
@@ -193,7 +230,7 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap", minWidth: 0, flex: 1 }}>
           {sizes.map((size, index) => (
             <button
-              key={`${size.name}-${index}`}
+              key={size.id}
               type="button"
               aria-pressed={size.enabled}
               title={`${size.enabled ? "Hide" : "Show"} ${size.name}`}
@@ -206,7 +243,7 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
               </span>
             </button>
           ))}
-          <button type="button" onClick={() => setEditing((open) => !open)} style={chipStyle(editing)} aria-expanded={editing}>
+          <button ref={editButtonRef} type="button" onClick={() => setEditing((open) => !open)} style={chipStyle(editing)} aria-expanded={editing}>
             Edit sizes
           </button>
         </div>
@@ -252,22 +289,19 @@ export default function ResponsiveView({ url, onNavigate, onClose }: Props) {
         {shown.length === 0 ? (
           <div className="spark-empty__body" style={{ alignSelf: "center" }}>Pick at least one size above.</div>
         ) : (
-          shown.map((size) => {
-            const key = `${size.name}:${size.width}x${size.height}`;
-            return (
-              <ResponsiveFrame
-                key={key}
-                frameKey={key}
-                size={size}
-                scale={scale}
-                url={url}
-                colorScheme={scheme === "auto" ? null : scheme}
-                frames={frames.current}
-                onScrolled={onScrolled}
-                onNavigated={onFrameNavigated}
-              />
-            );
-          })
+          shown.map((size) => (
+            <ResponsiveFrame
+              key={size.id}
+              frameKey={size.id}
+              size={size}
+              scale={scale}
+              url={url}
+              colorScheme={scheme === "auto" ? null : scheme}
+              frames={frames.current}
+              onScrolled={onScrolled}
+              onNavigated={onFrameNavigated}
+            />
+          ))
         )}
       </div>
     </div>
@@ -436,7 +470,7 @@ function SizeEditor({ sizes, onChange, onClose }: { sizes: EditablePreset[]; onC
         <span>Mobile</span>
         <span />
         {sizes.map((size, index) => (
-          <SizeRow key={index} size={size} onChange={(patch) => update(index, patch)} onRemove={sizes.length > 1 ? () => onChange(sizes.filter((_, i) => i !== index)) : undefined} />
+          <SizeRow key={size.id} size={size} onChange={(patch) => update(index, patch)} onRemove={sizes.length > 1 ? () => onChange(sizes.filter((_, i) => i !== index)) : undefined} />
         ))}
       </div>
       <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
@@ -444,11 +478,11 @@ function SizeEditor({ sizes, onChange, onClose }: { sizes: EditablePreset[]; onC
           type="button"
           className="spark-btn"
           disabled={sizes.length >= 6}
-          onClick={() => onChange([...sizes, { name: "Custom", width: 1024, height: 768, mobile: false, enabled: true }])}
+          onClick={() => onChange([...sizes, { name: "Custom", width: 1024, height: 768, mobile: false, enabled: true, id: newSizeId() }])}
         >
           Add size
         </button>
-        <button type="button" className="spark-btn" onClick={() => onChange(DEFAULT_CAPTURE_SIZES.map((size) => ({ ...size, enabled: true })))}>
+        <button type="button" className="spark-btn" onClick={() => onChange(defaultSizes())}>
           Reset
         </button>
       </div>

@@ -230,6 +230,15 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
     await page.keyboard.press("Control+Shift+E");
     const picker = page.getByTestId("point-picker");
     await expect(picker).toBeVisible();
+    // The outline keeps the keys while it is open. Escape closes it and
+    // gives them back to the picker, which stays open.
+    await picker.getByRole("button", { name: "Outline", exact: true }).click();
+    const outline = page.getByTestId("point-outline");
+    await expect(outline.getByPlaceholder("Filter by text, tag or @ref")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(outline).toHaveCount(0);
+    await expect(picker).toBeVisible();
+    await expect(picker).toBeFocused();
     const cta = await pointOnPage(fixture, tabId, "#cta", '[data-testid="point-picker"]');
     await page.mouse.move(cta.x, cta.y, { steps: 4 });
     await expect(page.locator(".cp-tag")).toContainText("button#cta.cta");
@@ -247,6 +256,17 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
     await expect(composer.getByTestId("point-element").first()).toContainText("src/Hero.tsx:3:5");
     await composer.getByLabel("Note for the agent").fill("Make the button blue");
     await chooseDestination(page, /Agent inbox/);
+    // Closing the Send-to menu, by a choice or by Escape, gives focus back to
+    // its button; Escape closes only the menu.
+    const destination = page.locator(".cp-dest");
+    await expect(destination).toBeFocused();
+    await destination.click();
+    const menu = page.getByRole("listbox", { name: "Send to" });
+    await expect(menu).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(destination).toBeFocused();
+    await expect(composer).toBeVisible();
     await composer.getByRole("button", { name: "Queue", exact: true }).click();
     await expect(page.getByTestId("point-notice")).toContainText("Queued in Agent inbox");
     await expect(composer).toHaveCount(0);
@@ -337,7 +357,12 @@ test("a comment drawn on a frozen page reaches the inbox with page coordinates, 
     await page.mouse.down();
     await page.mouse.move(title.x, title.y, { steps: 8 });
     await page.mouse.up();
-    await page.getByLabel("Note for mark 2").press("Enter");
+    // Escape on a mark's note leaves the note and keeps the layer's keys.
+    await page.getByLabel("Note for mark 2").press("Escape");
+    await expect(overlay).toBeVisible();
+    await expect(overlay).toBeFocused();
+    await page.keyboard.press("b");
+    await expect(overlay.getByRole("button", { name: "Box", exact: true })).toHaveAttribute("aria-pressed", "true");
     await overlay.getByLabel("Overall note").fill("two things");
     await chooseDestination(page, /Agent inbox/);
     await overlay.getByRole("button", { name: "Queue", exact: true }).click();

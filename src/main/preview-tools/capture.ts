@@ -8,9 +8,9 @@
 import { isCompareOptionError, runCompare } from "../browser/capture/compare";
 import { nativeBitmapCodec } from "../browser/capture/codec";
 import { SizesOptionError } from "../browser/capture/sizes";
-import { appRecordDeps, normalizeRecordOptions, RecordOptionError, startRecording, stopRecording } from "../browser/record/recorder";
+import { appRecordDeps, normalizeRecordOptions, RecordOptionError, claimRecording, startRecording, stopRecording } from "../browser/record/recorder";
 import { captureScreenshot, normalizeScreenshotRequest, ScreenshotOptionError, type ScreenshotResult } from "../browser/screenshot";
-import { resolveBrowserTarget } from "../browser/targets";
+import { resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
 import { PreviewToolParamsError, type PreviewToolTable } from "./types";
 
 /** Compact by default: any model reads a 1280 px JPEG for a fraction of a full-size PNG. */
@@ -52,7 +52,15 @@ async function compare(params: Record<string, unknown>): Promise<unknown> {
 async function record(params: Record<string, unknown>): Promise<unknown> {
   return asParamsError(async () => {
     const options = params.stop === true ? null : normalizeRecordOptions(params);
-    const target = await resolveBrowserTarget(params);
+    let target: BrowserTarget;
+    try {
+      target = await resolveBrowserTarget(params);
+    } catch (error) {
+      // The tab closed during the recording: its result is still kept.
+      const done = !options && typeof params.tabId === "string" ? claimRecording(params.tabId) : null;
+      if (done) return done;
+      throw error;
+    }
     if (!options) return stopRecording(target);
     const started = await startRecording(target, options, appRecordDeps(nativeBitmapCodec()));
     return {

@@ -165,6 +165,21 @@ export function startPageActivity(session: CdpSession): void {
   session.on("Page.frameRequestedNavigation", (params) => {
     if (isMain(params.frameId)) activity.navigationRequestedAt = Date.now();
   });
+  // A requested navigation can be abandoned without any loading event: the
+  // page's beforeunload was answered "Stay" (or dismissed by the dialog
+  // policy), or the request was dropped before it started. Nothing else
+  // clears the request then, and every later load wait would report it.
+  let beforeUnloadOpen = false;
+  session.on("Page.javascriptDialogOpening", (params) => {
+    beforeUnloadOpen = params.type === "beforeunload";
+  });
+  session.on("Page.javascriptDialogClosed", (params) => {
+    if (beforeUnloadOpen && params.result === false) activity.navigationRequestedAt = 0;
+    beforeUnloadOpen = false;
+  });
+  session.on("Page.frameClearedScheduledNavigation", (params) => {
+    if (isMain(params.frameId) && activity.loadingStartedAt < activity.navigationRequestedAt) activity.navigationRequestedAt = 0;
+  });
   session.on("Page.frameStartedLoading", (params) => {
     if (isMain(params.frameId)) activity.loadingStartedAt = Date.now();
   });

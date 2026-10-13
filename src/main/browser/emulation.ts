@@ -215,6 +215,9 @@ export function normalizeEmulationRequest(params: Record<string, unknown>): Emul
 
 const states = new WeakMap<CdpSession, EmulationState>();
 const watched = new WeakSet<CdpSession>();
+// Sessions whose media and metrics another caller drives for a while (the
+// sizes capture); the resize watcher must not put the tab's own back then.
+const held = new WeakMap<CdpSession, number>();
 
 export function currentEmulation(target: { session: CdpSession }): EmulationState {
   return { ...(states.get(target.session) ?? emptyEmulation()) };
@@ -336,7 +339,7 @@ function watchSession(session: CdpSession): void {
     timer = setTimeout(() => {
       timer = null;
       const state = states.get(session);
-      if (!state || session.isDisposed || !session.isAttached()) return;
+      if (!state || held.has(session) || session.isDisposed || !session.isAttached()) return;
       if (!state.viewport && state.deviceScaleFactor === null && state.mobile === null) return;
       void metricsHold(session, state)
         .then(async (holds) => {
@@ -401,6 +404,31 @@ export async function applyEmulation(
 
 export async function resetEmulation(target: { session: CdpSession }): Promise<void> {
   await applyEmulation(target, {}, { reset: true });
+}
+
+/**
+ * Lets a caller set the tab's media features and device metrics itself (the
+ * sizes capture) without the resize watcher fighting it. The release puts
+ * the tab's own emulation back: Emulation.setEmulatedMedia replaces every
+ * feature at once, so a capture that set only the color scheme has also
+ * dropped reduced motion, and the state here still says both are in force.
+ */
+export function holdEmulation(session: CdpSession): () => Promise<void> {
+  held.set(session, (held.get(session) ?? 0) + 1);
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    const count = (held.get(session) ?? 1) - 1;
+    if (count > 0) held.set(session, count);
+    else held.delete(session);
+    const state = states.get(session) ?? emptyEmulation();
+    await session.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+    await sendGroup(session, "media", state).catch(() => {});
+    if (state.viewport || state.deviceScaleFactor !== null || state.mobile !== null) {
+      await sendGroup(session, "metrics", state).catch(() => {});
+    }
+  };
 }
 
 const CAPTURE_TIMEOUT_MS = 3_000;

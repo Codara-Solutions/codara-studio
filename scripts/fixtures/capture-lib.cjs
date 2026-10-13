@@ -29,6 +29,7 @@ async function loadCaptureLib() {
         export * from "./capture/paint";
         export * from "./locator";
         export * from "./cdp-session";
+        export { applyEmulation, currentEmulation, holdEmulation } from "./emulation";
         export { evaluateOverCdp } from "./targets";
       `,
       resolveDir: path.join(ROOT, "src/main/browser"),

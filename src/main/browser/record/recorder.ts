@@ -141,11 +141,15 @@ interface Recording {
   cleanups: Array<() => void>;
   release: (() => Promise<void>) | null;
   stopping: Promise<RecordingResult> | null;
+  /** A stop call already has the result, so it is not kept for the next one. */
+  claimed?: boolean;
 }
 
 const active = new Map<string, Recording>();
-// Results of recordings that stopped on their own, kept for the next call.
-const unclaimed = new Map<string, RecordingResult | Error>();
+// Results of recordings that stopped on their own, kept for the next call,
+// by session key. The tab's ref finds one whose session is gone: a tab that
+// closed resolves to no session, but its id is what the agent passes.
+const unclaimed = new Map<string, { ref: string; outcome: RecordingResult | Error }>();
 const UNCLAIMED_LIMIT = 20;
 const listeners = new Set<(change: RecordingChange) => void>();
 
@@ -230,6 +234,7 @@ export async function startRecording(target: RecordTarget, options: RecordOption
   const existing = active.get(key);
   if (existing && !existing.stopping) return { ...status(existing), already: true };
   unclaimed.delete(key);
+  for (const [other, entry] of unclaimed) if (entry.ref === target.ref) unclaimed.delete(other);
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
   const rec: Recording = {
     key,
@@ -262,6 +267,9 @@ export async function startRecording(target: RecordTarget, options: RecordOption
       rec.sawScreencast = true;
       rec.latest = { data: Buffer.from(params.data, "base64"), seq: ++rec.seq };
     }));
+    // A tab that closed (or whose page was replaced) ends its session for
+    // good without a detach event, and nothing more will come from it.
+    rec.cleanups.push(target.session.onDispose(() => void finishOnItsOwn(rec, "the tab closed")));
     rec.cleanups.push(target.session.onDetach(() => {
       // The session re-attaches on its own (a crash, another client); the
       // screencast does not, so ask again once it is back.
@@ -310,9 +318,9 @@ async function finishOnItsOwn(rec: Recording, reason: string): Promise<void> {
   if (rec.stopping) return;
   try {
     const result = await finish(rec, reason);
-    unclaimed.set(rec.key, result);
+    if (!rec.claimed) unclaimed.set(rec.key, { ref: rec.target.ref, outcome: result });
   } catch (error) {
-    unclaimed.set(rec.key, error instanceof Error ? error : new Error(String(error)));
+    if (!rec.claimed) unclaimed.set(rec.key, { ref: rec.target.ref, outcome: error instanceof Error ? error : new Error(String(error)) });
   }
   while (unclaimed.size > UNCLAIMED_LIMIT) unclaimed.delete(unclaimed.keys().next().value as string);
 }
@@ -321,14 +329,37 @@ async function finishOnItsOwn(rec: Recording, reason: string): Promise<void> {
 export async function stopRecording(target: Pick<RecordTarget, "session" | "ref">): Promise<RecordingResult> {
   const key = target.session.key;
   const rec = active.get(key);
-  if (rec) return finish(rec);
+  if (rec) {
+    rec.claimed = true;
+    return finish(rec);
+  }
   const done = unclaimed.get(key);
   if (done) {
     unclaimed.delete(key);
-    if (done instanceof Error) throw done;
-    return done;
+    if (done.outcome instanceof Error) throw done.outcome;
+    return done.outcome;
   }
+  const byRef = claimRecording(target.ref);
+  if (byRef) return byRef;
   throw new RecordOptionError(`${target.ref} is not being recorded. Start a recording first.`);
+}
+
+/**
+ * The recording of the tab with this id when its session is gone (the tab
+ * closed during it), once; null when there is none.
+ */
+export function claimRecording(ref: string): Promise<RecordingResult> | null {
+  for (const rec of active.values()) {
+    if (rec.target.ref !== ref || !rec.stopping || rec.claimed) continue;
+    rec.claimed = true;
+    return rec.stopping;
+  }
+  for (const [key, entry] of unclaimed) {
+    if (entry.ref !== ref) continue;
+    unclaimed.delete(key);
+    return entry.outcome instanceof Error ? Promise.reject(entry.outcome) : Promise.resolve(entry.outcome);
+  }
+  return null;
 }
 
 function finish(rec: Recording, stoppedBy?: string): Promise<RecordingResult> {

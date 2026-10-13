@@ -212,6 +212,14 @@ function DestinationMenu({
     if (position) menuRef.current?.focus();
   }, [position]);
 
+  // The menu took focus when it opened. Once it closes, by a choice or by
+  // Escape, focus goes back to its button, so the keys of the composer or
+  // the comment dock keep working; a click elsewhere keeps its own focus.
+  useEffect(() => () => {
+    const active = document.activeElement;
+    if (!active || active === document.body || menuRef.current?.contains(active)) anchor?.focus();
+  }, [anchor]);
+
   // Esc closes only the menu, wherever focus is: the popover the menu belongs
   // to closes on Esc too, and would otherwise take the user's draft with it.
   useEffect(() => {

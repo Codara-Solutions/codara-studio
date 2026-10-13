@@ -61,6 +61,11 @@ function urls() {
   assert.equal(matchUrl("/profile\\?tab=\\d/", href), true, "regex");
   assert.equal(matchUrl("/^https:/", href), false);
   assert.equal(matchUrl("/(/", "http://x/("), true, "an invalid regex falls back to a path");
+  // A path with a trailing slash is a path, not a regex that matches the sign-in redirect.
+  assert.equal(matchUrl("/dashboard/", "http://localhost:5173/login?next=/dashboard/"), false);
+  assert.equal(matchUrl("/dashboard/", "http://localhost:5173/dashboard/"), true);
+  assert.equal(matchUrl("/dashboard/", "http://localhost:5173/dashboard"), true);
+  assert.equal(matchUrl("/admin/users/", "http://localhost:8000/admin/users/?page=2"), true);
 }
 
 function hmrSignals() {
@@ -101,6 +106,8 @@ function verdicts() {
 
   const load = normalizeWaitRequest({ load: "load" });
   assert.deepEqual(checkWait(load, activity({ navigationRequestedAt: 99_000 }), probe(), now, now).waiting, ["a navigation is still loading"]);
+  assert.equal(checkWait(load, activity({ navigationRequestedAt: 90_000 }), probe(), now, now).ok, true, "a request no load followed was abandoned");
+  assert.deepEqual(checkWait(load, activity({ navigationRequestedAt: 90_000, loadingStartedAt: 91_000 }), probe(), now, now).waiting, ["a navigation is still loading"]);
   assert.deepEqual(checkWait(load, activity({ lastActionAt: now - 100 }), probe(), now, now).waiting, ["the last action just happened"]);
   assert.deepEqual(checkWait(load, activity(), probe({ readyState: "interactive" }), now, now).waiting, ["document.readyState is interactive"]);
   assert.equal(checkWait(normalizeWaitRequest({ load: "domcontentloaded" }), activity(), probe({ readyState: "interactive" }), now, now).ok, true);
@@ -150,6 +157,11 @@ const PAGES = {
     <button id="fetch" onclick="setTimeout(() => fetch('/delay?ms=700'), 50)">Fetch</button>
     <button id="churn" onclick="let n = 0; const t = setInterval(() => { document.title = 'n' + n; document.body.dataset.n = ++n; if (n > 12) clearInterval(t); }, 50)">Churn</button>`,
   "/next": `<!doctype html><title>Next</title><h1>Next page</h1>`,
+  "/big": `<!doctype html><title>Big</title><h1>Dashboard</h1><p id="status"></p>
+    <button id="retitle" onclick="setTimeout(() => { document.querySelector('h1').textContent = 'Retitled'; }, 300)">Retitle</button>
+    <main>${"<div><span>row</span><span>cell</span></div>".repeat(3000)}</main>`,
+  "/guarded": `<!doctype html><title>Guarded</title><h1>Unsaved</h1><a id="leave" href="/next">Leave</a>
+    <script>window.guard = (event) => { event.preventDefault(); event.returnValue = ""; }; addEventListener("beforeunload", guard);</script>`,
   "/slow": `<!doctype html><title>Slow</title><h1>Slow</h1><img src="/delay?ms=900">`,
   "/stream": `<!doctype html><title>Stream</title><h1>Stream</h1><script>new EventSource('/sse');</script>`,
   "/framed": `<!doctype html><title>Framed</title><h1>Framed</h1>
@@ -209,6 +221,30 @@ async function inChromium() {
     assert.equal(loaded.url, server.url("/slow"));
     assert.ok(loaded.waitedMs >= 800, `load waited for the image (${loaded.waitedMs} ms)`);
 
+    // A link click the page's beforeunload keeps ("Stay") leaves no navigation
+    // pending. The page needs a user gesture before it may ask.
+    await navigate(target, server.url("/guarded"));
+    const dialogs = [];
+    const offDialog = page.session.on("Page.javascriptDialogOpening", (params) => {
+      dialogs.push(params.type);
+      void page.session.send("Page.handleJavaScriptDialog", { accept: false }).catch(() => {});
+    });
+    try {
+      await page.session.send("Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1, button: "left", clickCount: 1 }).catch(() => {});
+      await page.session.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 1, y: 1, button: "left", clickCount: 1 }).catch(() => {});
+      await lib.markAgentAction({});
+      await target.evaluate("setTimeout(() => document.getElementById('leave').click(), 0)");
+      await sleep(600);
+    } finally {
+      if (typeof offDialog === "function") offDialog();
+    }
+    assert.deepEqual(dialogs, ["beforeunload"], "the page asked before leaving");
+    assert.equal(lib.pageActivity(page.session).navigationRequestedAt, 0, "the declined navigation is not pending");
+    const stayed = await wait({ load: "load", timeoutMs: 1000 });
+    assert.equal(stayed.ok, true, JSON.stringify(stayed));
+    assert.equal(stayed.url, server.url("/guarded"));
+    await target.evaluate("removeEventListener('beforeunload', guard)");
+
     // networkidle: a fetch after the click is waited for
     await navigate(target, server.url("/"));
     await act("document.getElementById('fetch').click()");
@@ -253,6 +289,24 @@ async function inChromium() {
     const missing = await wait({ selector: "#nope", timeoutMs: 200 });
     assert.equal(missing.error, "Timed out after 200 ms waiting for #nope visible. Seen: #nope is not visible: no element matches.");
     await assert.rejects(wait({ selector: "h1[", timeoutMs: 1000 }), /not a valid selector/);
+
+    // An app page far past a few thousand elements still sees a heading
+    // retitled in place.
+    await navigate(target, server.url("/big"));
+    assert.ok(await target.evaluate("document.querySelectorAll('*').length") > 9000);
+    await act("document.getElementById('retitle').click()");
+    const bigRetitled = await wait({ selector: "h1", fresh: true, timeoutMs: 3000 });
+    assert.equal(bigRetitled.ok, true, JSON.stringify(bigRetitled));
+    assert.equal(bigRetitled.element.text, "Retitled");
+    // text with fresh: the text is new on the page, whatever element (body, for
+    // a text-only wait) shows it; text that was already there is not.
+    await act("setTimeout(() => { document.getElementById('status').textContent = 'Saved'; }, 300)");
+    const saved = await wait({ text: "Saved", fresh: true, timeoutMs: 3000 });
+    assert.equal(saved.ok, true, JSON.stringify(saved));
+    assert.ok(saved.waitedMs >= 200, `it waited for the text (${saved.waitedMs} ms)`);
+    await lib.markAgentAction({});
+    const stale = await wait({ text: "Saved", fresh: true, timeoutMs: 200 });
+    assert.equal(stale.ok, false, "text already on the page at the last action is not fresh");
 
     // stable DOM
     await navigate(target, server.url("/"));

@@ -279,8 +279,14 @@ export default function CommentOverlay({ tabId, workspaceId, run, capture, onClo
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      if (editing !== null) setEditing(null);
-      else onClose();
+      if (editing !== null) {
+        // The note that had focus goes away; the layer keeps the keys
+        // (Escape, B, A, P, Mod+Z) working without a click.
+        setEditing(null);
+        layerRef.current?.focus();
+      } else {
+        onClose();
+      }
       return;
     }
     if (typing) return;

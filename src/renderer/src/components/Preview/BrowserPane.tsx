@@ -465,6 +465,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const startPointing = useCallback(
     (mode: "pick" | "comment") => {
       if (!getLiveWebview()) return;
+      // Picking and commenting work on the main page, which the responsive
+      // view hides under frames laid out at other sizes.
+      setResponsive(false);
       setPointNotice(null);
       setPointMode((current) => {
         if (current === mode || (mode === "pick" && current === "compose")) return null;
@@ -675,6 +678,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
 
   return (
     <div
+      data-browser-pane
       style={{
         position: "absolute",
         inset: 0,
@@ -741,7 +745,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             tabId={tabId}
             workspaceId={workspaceId}
             responsive={responsive}
-            onToggleResponsive={() => setResponsive((on) => !on)}
+            onToggleResponsive={() => {
+              if (!responsive) stopPointing();
+              setResponsive(!responsive);
+            }}
             getWebview={getLiveWebview}
           />
         }

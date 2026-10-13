@@ -289,6 +289,10 @@ export default function PointPicker({ run, mode, selection, onSelectionChange, o
             setHover(info);
           }}
           onToggle={(info) => toggle(info, true)}
+          onClose={() => {
+            setOutlineOpen(false);
+            layerRef.current?.focus();
+          }}
         />
       ) : null}
     </div>
@@ -301,12 +305,14 @@ function OutlinePanel({
   hostWidth,
   onHover,
   onToggle,
+  onClose,
 }: {
   run: RunInPage;
   selectedRefs: ReadonlySet<string>;
   hostWidth: number;
   onHover: (info: HoverInfo | null) => void;
   onToggle: (info: HoverInfo) => void;
+  onClose: () => void;
 }) {
   const [rows, setRows] = useState<OutlineRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -333,7 +339,15 @@ function OutlinePanel({
       onPointerDown={(event) => event.stopPropagation()}
       onPointerMove={(event) => event.stopPropagation()}
       onWheel={(event) => event.stopPropagation()}
-      onKeyDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        // The layer reads arrows, Space and Enter as picking keys, so none of
+        // the panel's keys reach it; Escape closes the panel here instead.
+        event.stopPropagation();
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onClose();
+        }
+      }}
     >
       <input
         className="cp-note cp-note--line cp-outline__search"

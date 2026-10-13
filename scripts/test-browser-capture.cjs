@@ -135,6 +135,59 @@ function sizes(lib) {
   assert.deepEqual(pixel(sheet, desktop.box.x + desktop.box.width + 5 > sheet.width - 1 ? 2 : desktop.box.x + desktop.box.width + 5, 2), [226, 229, 234], "the sheet background");
 }
 
+// A sizes capture drives the tab's media and metrics itself, then puts back
+// the agent's own dark mode, reduced motion and device size, and the resize
+// watcher stays out of its way meanwhile.
+async function sizesKeepEmulation(lib) {
+  const sent = [];
+  const listeners = new Map();
+  const session = {
+    key: "chrome:test-sizes",
+    isDisposed: false,
+    isAttached: () => true,
+    hold() {},
+    onDetach() { return () => {}; },
+    on(method, listener) { listeners.set(method, listener); return () => listeners.delete(method); },
+    async send(method, params) {
+      if (method === "Runtime.evaluate") return { result: { value: [2560, 1] } };
+      sent.push([method, params]);
+      if (method === "Page.captureScreenshot") {
+        return { data: encodePng(solid(lib, params.clip.width, params.clip.height, [200, 200, 200])).toString("base64") };
+      }
+      return {};
+    },
+  };
+  const target = {
+    kind: "chrome",
+    session,
+    async evaluate(expression) {
+      // The page's frame resizes under the capture's own override, while it settles.
+      if (expression.includes("getBoundingClientRect")) listeners.get("Page.frameResized")?.({});
+      if (expression.includes("scrollX")) return { x: 0, y: 0 };
+      return undefined;
+    },
+  };
+  await lib.applyEmulation(target, { colorScheme: "dark", reducedMotion: true, viewport: { width: 412, height: 915 }, deviceScaleFactor: 2, mobile: true });
+  sent.length = 0;
+  const shots = await lib.captureSizes(target, lib.normalizeSizes(["phone"]), [null], pngBitmapCodec);
+  assert.equal(shots.length, 1);
+  const media = sent.filter(([method]) => method === "Emulation.setEmulatedMedia").map(([, params]) => params.features);
+  assert.deepEqual(media[0], [
+    { name: "prefers-color-scheme", value: "dark" },
+    { name: "prefers-reduced-motion", value: "reduce" },
+  ], "the capture keeps the agent's own scheme and reduced motion");
+  assert.deepEqual(media.at(-1), media[0], "and sends them again afterwards");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const metrics = sent.filter(([method]) => method.includes("DeviceMetrics"));
+  assert.deepEqual(metrics.slice(-2), [
+    ["Emulation.clearDeviceMetricsOverride", undefined],
+    ["Emulation.setDeviceMetricsOverride", { width: 412, height: 915, deviceScaleFactor: 2, mobile: true }],
+  ], "the agent's device size comes back last, not cleared");
+  assert.equal(metrics.filter(([method]) => method === "Emulation.setDeviceMetricsOverride").length, 2, "the resize watcher did not restore metrics under the capture");
+  assert.deepEqual(lib.currentEmulation(target).viewport, { width: 412, height: 915 });
+  await lib.applyEmulation(target, {}, { reset: true });
+}
+
 async function gif(lib) {
   const width = 40;
   const height = 30;
@@ -199,10 +252,19 @@ async function gif(lib) {
 
 function fakeSession(key) {
   const listeners = new Map();
+  const disposeListeners = new Set();
   const sent = [];
   return {
     key,
     sent,
+    onDispose(listener) {
+      disposeListeners.add(listener);
+      return () => disposeListeners.delete(listener);
+    },
+    dispose() {
+      for (const listener of [...disposeListeners]) listener();
+      disposeListeners.clear();
+    },
     async send(method, params) {
       sent.push(method);
       return {};
@@ -325,6 +387,35 @@ async function recorder(lib, home) {
   const late = await lib.stopRecording(limitedTarget);
   assert.match(late.stoppedBy, /maxSeconds/);
   assert.ok(fs.existsSync(late.path));
+
+  // A tab that closes mid-recording ends its session without a detach. The
+  // recording finishes then, not at its time limit, and a stop that names
+  // the closed tab (which no longer resolves to a session) gets it, once.
+  const closing = fakeSession("preview-guest:41");
+  const closingTarget = { ref: "tab-e", session: closing, workspaceId: "ws-rec", captureViewport: async () => { throw new Error("This browser tab closed."); } };
+  await lib.startRecording(closingTarget, lib.normalizeRecordOptions({ maxSeconds: 60, fps: 5 }), deps);
+  closing.emit("Page.screencastFrame", { data: frame([4, 4, 4]), sessionId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const closedAt = Date.now();
+  closing.dispose();
+  const claimed = await lib.claimRecording("tab-e");
+  assert.ok(Date.now() - closedAt < 5_000, "it finished when the tab closed");
+  assert.equal(claimed.stoppedBy, "the tab closed");
+  assert.ok(fs.existsSync(claimed.path));
+  assert.equal(lib.claimRecording("tab-e"), null, "the result is handed out once");
+  assert.equal(lib.recordingStatus(closingTarget), null);
+
+  // When nobody asked yet, the result waits under the tab's id.
+  const closing2 = fakeSession("preview-guest:42");
+  const closingTarget2 = { ...closingTarget, ref: "tab-f", session: closing2 };
+  await lib.startRecording(closingTarget2, lib.normalizeRecordOptions({ maxSeconds: 60, fps: 5 }), deps);
+  closing2.emit("Page.screencastFrame", { data: frame([6, 6, 6]), sessionId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  closing2.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const kept = await lib.claimRecording("tab-f");
+  assert.equal(kept.stoppedBy, "the tab closed");
+  assert.equal(lib.claimRecording("tab-f"), null);
 }
 
 async function screenshotFormats(lib) {
@@ -406,6 +497,7 @@ async function guestPaint(lib) {
     diffs(lib);
     await baselines(lib, home);
     sizes(lib);
+    await sizesKeepEmulation(lib);
     await gif(lib);
     await recorder(lib, home);
     await screenshotFormats(lib);

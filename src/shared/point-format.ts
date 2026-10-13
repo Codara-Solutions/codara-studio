@@ -201,7 +201,7 @@ export function formatCommentText(
     return lines.join("\n");
   });
   parts.push(blocks.join("\n"));
-  parts.push(`Viewport ${inspection.viewport.width}x${inspection.viewport.height} CSS px. Use tabId "${inspection.tabId}" with the codara_preview tools.`);
+  parts.push(`Viewport ${inspection.viewport.width}x${inspection.viewport.height} CSS px. Use tabId "${inspection.tabId}" with the codara_preview tools (or \`cora tool\`).`);
   return plainTerminalText(parts.join("\n\n"));
 }
 

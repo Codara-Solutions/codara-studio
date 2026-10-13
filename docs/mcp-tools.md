@@ -376,11 +376,18 @@ from a real user's.
   - `selector` with `state` (`visible` by default, `attached`, `hidden`), and
     `fresh: true` to count only elements added since the agent's last action
     or whose text changed since then, so `h1` cannot match the page a click
-    is leaving, also when a framework re-renders the same `h1` in place;
+    is leaving, also when a framework re-renders the same `h1` in place.
+    Text changes are tracked for headings, controls, labels and live regions,
+    then for elements with a short text of their own (up to 300 characters),
+    for at most 20,000 elements per page. With `text`, `fresh` also counts an
+    element whose text was nowhere on the page at the last action, so
+    `text: "Saved", fresh: true` waits for a new "Saved";
   - `text`: the matched element's text contains this, or matches `/regex/`
     (alone it watches the whole page), for example `selector: "h1"` with
     `text: "Pricing"`;
-  - `url`: exact URL, a path on the same origin, a `*` glob, or `/regex/`;
+  - `url`: exact URL, a path on the same origin, a `*` glob, or `/regex/`
+    (read as a regex only when it holds a regex character such as `.`, `\`,
+    `^` or `(`, so `/dashboard/` is the path);
   - `navigation: true`: a navigation committed since the last action;
   - `load`: `domcontentloaded`, `load`, or `networkidle` (loaded, then 500 ms
     without requests; open WebSockets and EventSources do not count);

@@ -88,9 +88,25 @@ export function startConsoleRecorder(session: CdpSession): void {
   if (recording.has(session)) return;
   recording.add(session);
   const ring = consoleRing(session);
-  const record = (entry: ConsoleEntry, origin: { contextId?: number; method: string }) => {
+  // Runtime.enable and Log.enable replay what the page already logged, with
+  // the original timestamps, each time the session enables them again (after
+  // a re-attach or a reconnect of the Chrome link). An entry seen before at
+  // the same timestamp is that replay, not something new. The key leaves out
+  // the rendered message: a replay carries its objects without previews.
+  const seen = new Set<string>();
+  const firstSeen = (method: string, timestamp: unknown, text: string) => {
+    if (typeof timestamp !== "number") return true;
+    const key = `${method}|${timestamp}|${text}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (seen.size > CONSOLE_RING_CAP * 2) seen.delete(seen.values().next().value as string);
+    return true;
+  };
+  const record = (entry: ConsoleEntry, origin: { contextId?: number; method: string }, timestamp: unknown, stable: string) => {
+    if (!firstSeen(origin.method, timestamp, `${entry.level}|${entry.source}|${entry.line}|${stable}`)) return;
     if (keepConsoleEntry(entry, { ...origin, defaultContexts })) ring.push(entry);
   };
+  const at = (timestamp: unknown) => new Date(typeof timestamp === "number" ? timestamp : Date.now()).toISOString();
   // Execution contexts that are a frame's main world; console calls from a
   // preload's isolated world carry another context id.
   const defaultContexts = new Set<number>();
@@ -109,8 +125,8 @@ export function startConsoleRecorder(session: CdpSession): void {
       level: LEVELS[type] ?? "info",
       message: args.map(describe).join(" "),
       ...topFrame(params.stackTrace as StackLike | undefined),
-      at: new Date(typeof params.timestamp === "number" ? params.timestamp : Date.now()).toISOString(),
-    }, { contextId: typeof params.executionContextId === "number" ? params.executionContextId : undefined, method: "Runtime.consoleAPICalled" });
+      at: at(params.timestamp),
+    }, { contextId: typeof params.executionContextId === "number" ? params.executionContextId : undefined, method: "Runtime.consoleAPICalled" }, params.timestamp, `${args.length}|${typeof args[0]?.value === "object" ? args[0]?.type : String(args[0]?.value)}`);
   });
   session.on("Runtime.exceptionThrown", (params) => {
     const details = (params.exceptionDetails ?? {}) as {
@@ -127,18 +143,18 @@ export function startConsoleRecorder(session: CdpSession): void {
       message: details.exception?.description ?? details.text ?? "Uncaught exception",
       line: frame.line ?? (typeof details.lineNumber === "number" ? details.lineNumber + 1 : null),
       source: frame.source ?? details.url ?? null,
-      at: new Date().toISOString(),
-    }, { contextId: details.executionContextId, method: "Runtime.exceptionThrown" });
+      at: at(params.timestamp),
+    }, { contextId: details.executionContextId, method: "Runtime.exceptionThrown" }, params.timestamp, details.text ?? "");
   });
   session.on("Log.entryAdded", (params) => {
-    const entry = (params.entry ?? {}) as { level?: string; text?: string; url?: string; lineNumber?: number; source?: string };
+    const entry = (params.entry ?? {}) as { level?: string; text?: string; url?: string; lineNumber?: number; source?: string; timestamp?: number };
     record({
       level: LEVELS[entry.level ?? "info"] ?? "info",
       message: entry.text ?? "",
       line: typeof entry.lineNumber === "number" ? entry.lineNumber + 1 : null,
       source: entry.url ?? null,
-      at: new Date().toISOString(),
-    }, { method: `Log.entryAdded:${entry.source ?? "other"}` });
+      at: at(entry.timestamp),
+    }, { method: `Log.entryAdded:${entry.source ?? "other"}` }, entry.timestamp, entry.text ?? "");
   });
   session.hold("Runtime");
   session.hold("Log");
