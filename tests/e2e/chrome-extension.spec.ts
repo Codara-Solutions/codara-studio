@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron, chromium, type BrowserContext, type Worker } from "playwright";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -13,6 +13,7 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
 const EXTENSION = resolve(__dirname, "../../extensions/chrome");
 const CORA = resolve(__dirname, "../../cli/cora.cjs");
+const MCP_SERVER = resolve(__dirname, "../../resources/codara-studio-mcp/server.js");
 const SESSION = "ada-session-7f3c";
 
 // The extension API inside the service worker and its pages.
@@ -46,6 +47,54 @@ function accountSite(request: IncomingMessage, response: ServerResponse): void {
   }
   response.end(`<!doctype html><title>Public ${url.pathname}</title><h1>Public page</h1>`);
 }
+
+interface McpContent {
+  type: string;
+  text?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+// The codara-studio MCP server over stdio, as Claude Code, Codex, Grok and
+// Cora launch it: one JSON-RPC object per line each way.
+function mcpClient(home: string): { call(method: string, params?: Record<string, unknown>): Promise<any>; tool(name: string, args: Record<string, unknown>): Promise<{ isError?: boolean; content: McpContent[] }>; close(): void } {
+  const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [MCP_SERVER], {
+    env: { ...process.env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_USER_DATA_DIR: home, SPARK_MCP_MODE: "" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const waiting = new Map<number, { resolve(value: any): void; reject(error: Error): void }>();
+  let buffered = "";
+  let nextId = 1;
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    buffered += chunk;
+    let index;
+    while ((index = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, index).trim();
+      buffered = buffered.slice(index + 1);
+      if (!line) continue;
+      const message = JSON.parse(line);
+      const waiter = typeof message.id === "number" ? waiting.get(message.id) : undefined;
+      if (!waiter) continue;
+      waiting.delete(message.id);
+      if (message.error) waiter.reject(new Error(message.error.message));
+      else waiter.resolve(message.result);
+    }
+  });
+  const call = (method: string, params: Record<string, unknown> = {}) =>
+    new Promise<any>((done, fail) => {
+      const id = nextId++;
+      waiting.set(id, { resolve: done, reject: fail });
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    });
+  return {
+    call,
+    tool: (name, args) => call("tools/call", { name, arguments: args }),
+    close: () => child.kill(),
+  };
+}
+
+const textOf = (result: { content: McpContent[] }): string => result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 
 // Extensions load only in a full Chromium: the headless shell Playwright also
 // installs ignores --load-extension.
@@ -206,6 +255,54 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     expect(saved).toMatchObject({ tabId, url: `${origin}/account`, mimeType: "image/png" });
     expect(existsSync(saved.path), stdout).toBe(true);
 
+    // The same tools through the MCP server over stdio, on the tab while it
+    // sits in the background of its window: another tab is in front.
+    const mcp = mcpClient(userDataDir);
+    try {
+      await mcp.call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } });
+      const roster = await mcp.call("tools/list");
+      const names = roster.tools.map((tool: { name: string }) => tool.name);
+      expect(names).toEqual(expect.arrayContaining(["codara_preview_chrome", "codara_preview_list", "codara_preview_snapshot", "codara_preview_screenshot", "codara_preview_run"]));
+      expect(JSON.stringify(roster.tools.filter((tool: { name: string }) => tool.name.startsWith("codara_preview_")))).not.toMatch(/claude/i);
+
+      const windowId = await worker.evaluate((id) => chrome.tabs.get(id).then((tab: { windowId: number }) => tab.windowId), accountTab);
+      await worker.evaluate((id) => chrome.tabs.create({ windowId: id, url: "about:blank", active: true }), windowId);
+      const isActive = () => worker.evaluate((id) => chrome.tabs.get(id).then((tab: { active: boolean }) => tab.active), accountTab);
+      await expect.poll(isActive).toBe(false);
+
+      const status = await mcp.tool("codara_preview_chrome", { action: "status" });
+      expect(status.isError).toBeFalsy();
+      expect(JSON.parse(textOf(status))).toMatchObject({ connected: true, tabs: [{ id: tabId, kind: "chrome", url: `${origin}/account` }] });
+      const listedTabs = JSON.parse(textOf(await mcp.tool("codara_preview_list", {}))).tabs;
+      expect(listedTabs).toEqual(expect.arrayContaining([expect.objectContaining({ id: tabId, kind: "chrome", title: "Account", url: `${origin}/account` })]));
+
+      const typed = await mcp.tool("codara_preview_type", { tabId, selector: "#note", text: "in the background", clearFirst: true });
+      expect(typed.isError, textOf(typed)).toBeFalsy();
+      const batch = await mcp.tool("codara_preview_run", {
+        tabId,
+        steps: [
+          { action: "click", selector: "#save" },
+          { action: "wait_for", selector: "#done" },
+          { action: "evaluate", code: "document.querySelector('#out').textContent" },
+        ],
+      });
+      expect(batch.isError, textOf(batch)).toBeFalsy();
+      expect(textOf(batch)).toContain("saved in the background");
+      expect(await isActive()).toBe(false);
+
+      const picture = await mcp.tool("codara_preview_screenshot", { tabId });
+      expect(picture.isError, textOf(picture)).toBeFalsy();
+      const image = picture.content.find((part) => part.type === "image");
+      expect(image?.data?.length ?? 0).toBeGreaterThan(100);
+      const pictureMeta = JSON.parse(textOf(picture));
+      expect(pictureMeta).toMatchObject({ tabId, url: `${origin}/account` });
+      expect(pictureMeta.path.startsWith(join(userDataDir, "workspace-data"))).toBe(true);
+      expect(existsSync(pictureMeta.path)).toBe(true);
+      expect(JSON.stringify(picture)).not.toContain(SESSION);
+    } finally {
+      mcp.close();
+    }
+
     // Codara logs who did what, and the popup names the agent.
     const state = await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
     const tools = state.activity.filter((entry: { tab: string }) => entry.tab === tabId).map((entry: { tool: string }) => entry.tool);
@@ -235,15 +332,29 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(request("preview.navigate", { tabId, url: `http://localhost:${sitePort}/bank` })).rejects.toThrow(/blocked/);
     await expect(account.getByText("Signed in as Ada")).toBeVisible();
 
+    // Chrome stops an idle MV3 service worker. The extension comes back on
+    // its own (the alarm or the next event), pairs again with its stored
+    // token and the shared tab works without the user doing anything.
+    const browserCdp = await browser.newCDPSession(other);
+    const { targetInfos } = await browserCdp.send("Target.getTargets");
+    const serviceWorker = targetInfos.find((info: { type: string; url: string }) => info.type === "service_worker" && info.url.startsWith(`chrome-extension://${extensionId}/`));
+    expect(serviceWorker).toBeTruthy();
+    await browserCdp.send("Target.closeTarget", { targetId: (serviceWorker as { targetId: string }).targetId });
+    await expect.poll(async () => (await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state())).browsers[0].connected, { timeout: 15_000 }).toBe(false);
+    await popup.reload();
+    await expect.poll(async () => (await codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state())).browsers[0].connected, { timeout: 60_000 }).toBe(true);
+    await expect.poll(async () => JSON.stringify(await request("preview.snapshot", { tabId }).catch((error) => String(error))), { timeout: 15_000 }).toContain("Signed in as Ada");
+
     // Disconnect in Codara: the extension forgets its token and every tab is out of reach.
     const linkId = state.browsers[0].linkId;
     await codara.evaluate((id) => (window as unknown as { spark: any }).spark.chromeLink.disconnect(id), linkId);
     await expect(popup.locator("#status")).toHaveText("Not connected");
-    expect(await worker.evaluate(() => chrome.storage.local.get({ token: null }).then((stored: { token: string | null }) => stored.token))).toBeNull();
+    // Playwright does not hand over a restarted worker; the popup reaches the same extension APIs.
+    expect(await popup.evaluate(() => chrome.storage.local.get({ token: null }).then((stored: { token: string | null }) => stored.token))).toBeNull();
     await expect(request("preview.snapshot", { tabId })).rejects.toThrow(/No Chrome browser is connected/);
     const { tabs } = await request("preview.list");
     expect(tabs.some((tab: { kind?: string }) => tab.kind === "chrome")).toBe(false);
-    await expect.poll(() => worker.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), accountTab)).not.toBe("AI");
+    await expect.poll(() => popup.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), accountTab)).not.toBe("AI");
   } finally {
     await browser?.close().catch(() => undefined);
     await app.close();
