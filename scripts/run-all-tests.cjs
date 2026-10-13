@@ -14,6 +14,10 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
+// Suites that boot Electron (test-agent-socket and friends) would otherwise
+// open their windows on the desktop of whoever is using the machine.
+require("./virtual-display.cjs").useVirtualDisplay();
+
 const dir = __dirname;
 const filter = process.argv[2] ? new RegExp(process.argv[2]) : null;
 const tests = fs
