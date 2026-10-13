@@ -19,9 +19,9 @@ const { parseToolArgs, renderResult, fullName } = require(path.join(ROOT, "cli",
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 
-function run(args, env) {
+function run(args, env, command = "tool") {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [CLI, "tool", ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [CLI, command, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -91,6 +91,24 @@ function run(args, env) {
     assert.equal(inbox.code, 0, inbox.stderr);
     assert.deepEqual(calls.at(-1).params.peek, true);
     assert.equal(JSON.parse(inbox.stdout).content[0].type, "text");
+
+    // `cora inbox` and `cora inspect` are the same calls under short names.
+    const pulled = await run(["--peek", "--limit", "3", "--json"], env, "inbox");
+    assert.equal(pulled.code, 0, pulled.stderr);
+    assert.equal(calls.at(-1).method, "preview.inbox");
+    assert.equal(calls.at(-1).params.peek, true);
+    assert.equal(calls.at(-1).params.limit, 3);
+    const described = await run(["#cta", "--tabId", "tab-2"], env, "inspect");
+    assert.equal(described.code, 0, described.stderr);
+    assert.equal(calls.at(-1).method, "preview.inspect");
+    assert.equal(calls.at(-1).params.ref, "#cta");
+    assert.equal(calls.at(-1).params.tabId, "tab-2");
+    await run(["--x", "12", "--y", "40"], env, "inspect");
+    assert.equal(calls.at(-1).params.x, 12);
+    assert.equal(calls.at(-1).params.y, 40);
+    const bare = await run([], env, "inspect");
+    assert.equal(bare.code, 2);
+    assert.match(bare.stderr, /usage: cora inspect/);
 
     const unknown = await run(["preview_teleport"], env);
     assert.equal(unknown.code, 2);

@@ -36,7 +36,8 @@ async function resolvePreviewTarget(ref: BrowserTabRef | null, params: Record<st
     kind: "preview",
     ref: formatTabRef({ kind: "preview", tabId }),
     session,
-    workspaceId: typeof params.workspaceId === "string" ? params.workspaceId : null,
+    // A caller outside any pane sends no workspace; the tab still belongs to one.
+    workspaceId: typeof params.workspaceId === "string" ? params.workspaceId : info.workspaceId ?? null,
     async info(): Promise<BrowserTargetInfo> {
       const metrics = await target
         .evaluate<{ width: number; height: number; dpr: number }>(

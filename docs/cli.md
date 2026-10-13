@@ -163,7 +163,8 @@ their workspace.
 without an MCP client and for scripts. It runs in a Codara terminal, acts on
 that terminal's workspace, and answers like an MCP call; images and long
 bodies are saved under Codara's workspace data folder and their paths printed.
-The `codara_` prefix of a tool name is optional. Flag values are read as JSON
+The `codara_` prefix of a tool name is optional, and every command takes
+`--json` for the raw result. Flag values are read as JSON
 when they parse, otherwise as text, and a flag with no value is true.
 [mcp-tools.md](mcp-tools.md) describes every tool.
 
@@ -172,6 +173,8 @@ when they parse, otherwise as text, and a flag with no value is true.
 | `tool list` | Lists the tools. |
 | `tool help <name>` | One tool's description and arguments. |
 | `tool <name> ['{"arg":1}'] [--arg value ...]` | Calls a tool. |
+| `inbox [--peek] [--limit N]` | What the user picked or commented on in a Codara browser tab and sent to the inbox, oldest first. Read items are removed unless `--peek`. Same as `tool preview_inbox`. |
+| `inspect <@ref\|selector> [--tabId ID]` | Describes an element to edit it: selector, box model, styles, CSS rules, source `file:line`, and a cropped image saved as a file. `--x N --y N` names a point instead. Same as `tool preview_inspect`. |
 
 ```sh
 cora tool preview_network --failed                       # failed requests of your tab

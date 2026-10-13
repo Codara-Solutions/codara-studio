@@ -1,53 +1,70 @@
 import React, { createContext, useContext } from "react";
 
-// Where a preview-mode selection (inspect pick / draw screenshot) can be
-// shipped to from the routing menu. The menu shows a fixed set of "chat"
-// and "new worker" entries plus a dynamic list of currently-open workers.
+// Where something the user sends from a browser tab (picked elements, a
+// comment drawn on the page, a tab reference) can land: the agent in any
+// terminal pane, a Cora chat, a new Cora chat, or the workspace inbox that
+// any agent pulls with codara_preview_inbox. App.tsx builds the list and the
+// route; sends to a pane, chat or inbox go through main's delivery service
+// (src/main/agent-delivery.ts), so every runtime gets the same text and
+// file paths.
 
-export type RoutingDestinationKind =
-  | "chat-new"
-  | "chat-current"
-  | "worker-new-claude"
-  | "worker-new-codex"
-  | "worker-existing";
+export type RoutingDestinationKind = "pane" | "chat" | "chat-new" | "inbox";
 
 export interface RoutingDestination {
-  // Stable id used by SelectionRouteMenu when calling route(). For
-  // worker-existing entries this encodes the attemptId / paneId.
+  // "pane:<paneId>", "chat:<runId>", "chat-new" or "inbox".
   id: string;
   kind: RoutingDestinationKind;
-  // Visible row text. Worker rows are labelled "Claude · <chat name>"
-  // (or "Manual Claude" when the pane was launched by the user directly).
   label: string;
-  // Optional secondary label shown to the right of `label` in muted text.
+  // Muted text after the label ("focused", "open", "any agent pulls it").
   sublabel?: string;
-  // Greyed-out entries the user can see but not pick (e.g. "Send to current
-  // chat" when there is no active chat).
   disabled?: boolean;
   disabledReason?: string;
-  // Visual grouping. The menu renders a thin divider between groups.
-  group: "chat" | "worker-new" | "worker-existing";
+  group: "agents" | "chat" | "inbox";
+  paneId?: string;
+  runId?: string;
+}
+
+export interface SelectionAttachment {
+  /** File name the agent sees. */
+  name: string;
+  mimeType?: string;
+  /** Base64 contents. */
+  data?: string;
+  /** A file under Codara's workspace data folder. */
+  sourcePath?: string;
 }
 
 export interface SelectionPayload {
-  // Where this payload came from. Drives whether the "draw" branch (image
-  // attachment / file URL in worker prompts) is taken on send.
-  source: "inspect" | "draw";
-  // Composed prompt text. Identical for every destination — chat routes
-  // pass it as the message body, worker routes type it into the agent.
+  // What produced it; the inbox lists it and the menu titles itself with it.
+  source: "inspect" | "draw" | "tab";
+  // The full text the agent receives. The delivery service appends one
+  // "Attached: <path>" line per attachment.
   text: string;
-  // For "draw" mode only: the absolute OS path of the saved annotated PNG.
-  // Chat routes pass it as an image attachment; worker routes already have
-  // the raw path baked into `text`, so this is unused there.
-  imagePath?: string;
-  // Same image as a file:// URL — handy when callers want to surface a
-  // clickable link.
-  imageFileUrl?: string;
+  attachments?: SelectionAttachment[];
+  // The browser tab it came from, as the id agents pass back.
+  tabId?: string;
+  url?: string;
+}
+
+export interface RouteOptions {
+  // Press Enter after pasting into a pane. Only the explicit Send does.
+  submit?: boolean;
+}
+
+export interface RouteResult {
+  outcome: "pasted" | "chat" | "queued" | "started";
+  // The destination's label, for a confirmation.
+  label: string;
 }
 
 export interface SelectionRoutingApi {
-  destinations: RoutingDestination[];
-  route: (payload: SelectionPayload, destinationId: string) => Promise<void>;
+  workspaceId: string | null;
+  // The menu for a send from this browser tab: every pane and chat, the
+  // chat of the run that owns the tab, the inbox, and the default pick.
+  destinationsFor: (tabId: string | null) => { destinations: RoutingDestination[]; defaultId: string };
+  route: (payload: SelectionPayload, destinationId: string, options?: RouteOptions) => Promise<RouteResult>;
+  // Who drives the tab, in words ("Codex · Terminal 2", "Cora chat · Fix nav").
+  tabSession: (tabId: string) => string | null;
 }
 
 const SelectionRoutingContext = createContext<SelectionRoutingApi | null>(null);
@@ -74,4 +91,9 @@ export function useSelectionRouting(): SelectionRoutingApi {
     );
   }
   return ctx;
+}
+
+/** The routing API when one is mounted; previews rendered outside App (tests, storybooks) have none. */
+export function useOptionalSelectionRouting(): SelectionRoutingApi | null {
+  return useContext(SelectionRoutingContext);
 }

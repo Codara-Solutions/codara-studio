@@ -479,6 +479,7 @@ import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
+import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
@@ -4001,6 +4002,7 @@ export function registerIpc(): void {
   registerServersIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
+  registerPointIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

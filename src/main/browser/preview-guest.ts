@@ -12,6 +12,7 @@ import { bindPreviewTabGuest } from "./preview-cdp";
 export interface PreviewGuestInfo {
   webContentsId: number;
   tabId: string;
+  workspaceId?: string | null;
   url: string | null;
   viewport: { width: number; height: number } | null;
   devicePixelRatio: number;

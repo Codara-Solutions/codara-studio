@@ -167,6 +167,12 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     const forB = await handler({ workspaceId: "ws-1", callerPaneId: "pane-b", limit: 5 }, "preview.inbox");
     assert.deepEqual(forB.items.map((item) => item.text), ["two"]);
     await assert.rejects(handler({}, "preview.inbox"), /No workspace/);
+    await live.deliver({ workspaceId: "ws-1", target: { kind: "inbox" }, text: "three", source: "picker" });
+    const forWorker = await handler({ workspaceId: "ws-1", runId: "run-1" }, "preview.inbox");
+    assert.deepEqual(forWorker.items.map((item) => item.text), ["three"]);
+    assert.equal(forWorker.kept, true);
+    assert.equal(live.pending("ws-1", "pane-a"), 1, "a run worker without a pane leaves workspace items for the user's agent");
+    assert.deepEqual((await handler({ workspaceId: "ws-1", callerPaneId: "pane-a" }, "preview.inbox")).items.map((item) => item.text), ["three"]);
 
     // Old items expire and the queue stays bounded.
     advance(lib.INBOX_TTL_MS + 1);

@@ -248,7 +248,9 @@ build).
 
 `test-preview-*` (auto-open, capture-paint, input-references, keyboard,
 navigation, registry, workspace, tools-routing: every tool's socket method has
-one handler and `chrome:` ids are gated), `test-browser-pane-webview-liveness`,
+one handler, `chrome:` ids are gated and results name the tab they acted on;
+point: the element probe, source maps, source files and the workspace search,
+crops, regions under comments and the text agents receive), `test-browser-pane-webview-liveness`,
 `test-browser-storage-boundary`, `test-guest-popups`, `test-browser-targets`
 (tab ids and target backends), `test-browser-cdp-session` (the shared
 DevTools protocol session and its console and network recorders),
@@ -349,7 +351,8 @@ is deleted, stopped, cancelled or ends its automation settles its question),
 
 These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
-`test-enumerate-open-workers`,
+`test-agent-destinations` (where a pick, a comment or a tab reference from a
+browser tab can be sent, and the default),
 `test-dock-layout`, `test-split-drop`, `test-tab-reorder`,
 `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,
 `test-workspace-colors`, `test-explorer-clipboard`, `test-file-tree-marquee`,

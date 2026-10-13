@@ -124,7 +124,6 @@ import type {
 import { isRunOwnedTab } from "./tabs/types";
 import {
   createManualAgentLaunchWorker,
-  isPaneAgentInjectable,
   mergeTerminalRuntimeState,
   terminalAgentCensus,
 } from "./tabs/terminalAgentState";
@@ -155,16 +154,8 @@ import { applyWorkspaceAccent } from "./lib/workspace-accent";
 import { useTheme } from "./theme/theme-context";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
-import {
-  SelectionRoutingProvider,
-  type RoutingDestination,
-  type SelectionPayload,
-  type SelectionRoutingApi,
-} from "./routing/SelectionRoutingContext";
-import {
-  enumerateOpenWorkers,
-  workerMenuLabel,
-} from "./routing/enumerate-open-workers";
+import { SelectionRoutingProvider } from "./routing/SelectionRoutingContext";
+import { useSelectionRoutingApi } from "./routing/useSelectionRoutingApi";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
@@ -230,6 +221,7 @@ let rendererReadySignaled = false;
 // history popover; only the workspace tab strip is forced to this constant so
 // short prompts ("hello") don't surface as truncated "He..." labels.
 const CHAT_TAB_LABEL = "Cora";
+const NO_DETECTED_AGENTS: Readonly<Record<string, true>> = {};
 
 // The label is the same for every chat, so hovering is how parallel chats are
 // told apart: the run's title and what it is doing.
@@ -5217,6 +5209,22 @@ export default function App() {
   // the keystroke. Cross-module side-effects (focus the chat composer, ask
   // other panels to toggle) are broadcast as `spark:*` CustomEvents so
   // listeners can wire up without prop drilling.
+  // The browser tab on screen (or docked in the focused cell) starts pointing
+  // or commenting; BrowserPane listens for its own tab id.
+  const dispatchBrowserPoint = useCallback(
+    (mode: "pick" | "comment") => {
+      let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+      if (active?.kind === "terminal") {
+        const pane = findLeafByPaneId(active.root, active.activePaneId);
+        const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
+        active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
+      }
+      if (!active || active.kind !== "preview") return;
+      window.dispatchEvent(new CustomEvent("spark:browser-point", { detail: { tabId: active.id, mode } }));
+    },
+    [activeVisibleTabId, visibleWorkbenchTabs],
+  );
+
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
@@ -5465,6 +5473,8 @@ export default function App() {
         if (!/\.(md|markdown|mdown|mkd|mkdn)$/i.test(active.path)) return;
         window.dispatchEvent(new CustomEvent("spark:markdown.togglePreview"));
       },
+      "browser.pickElement": () => dispatchBrowserPoint("pick"),
+      "browser.comment": () => dispatchBrowserPoint("comment"),
     }),
     [
       handleNewBalancedTerminalPane,
@@ -5479,6 +5489,7 @@ export default function App() {
       handleToggleLeft,
       handleToggleRight,
       activeVisibleTabId,
+      dispatchBrowserPoint,
       tabs,
       visibleWorkbenchTabs,
     ],
@@ -5914,246 +5925,21 @@ export default function App() {
 
   // ── Selection routing (preview overlays) ──────────────────────────────
   //
-  // The browser pane's inspector + draw overlays each produce a
-  // SelectionPayload (text prompt, optionally an annotated PNG path). The
-  // SelectionRouteMenu calls route() with one of the destinations below to
-  // ship that payload at:
-  //   - a brand-new Codara chat (startAutopilot with the payload pre-filled)
-  //   - the currently-focused Codara chat (addRunMessage)
-  //   - a freshly-spawned Claude Code or Codex worker pane (new pane with
-  //     autorun + delayed pty.inject once the agent REPL settles)
-  //   - any currently-running CLI worker pane (pty.inject)
-  //
-  // Image attachments only travel on the chat destinations. PTYs are text
-  // only, so worker routes embed the saved PNG's absolute path in the prompt
-  // and the CLI agent reads the file off disk.
-
-  // Spawn a fresh worker pane in the same way the keyboard shortcut does
-  // (handleNewWorkerPane). Returns the new pane id so the caller can later
-  // inject a prompt once the agent is up; null if no terminal tab exists
-  // and we had to fall back to creating a whole new tab (no stable id).
-  const spawnRoutedWorkerPane = useCallback(
-    (autorun: string): string | null => {
-      const { command: launchCommand, makeSession } = prepareWorkerLaunch(autorun);
-      const launchRuntime = runtimeFromAgentSessionLaunchCommand(launchCommand);
-      const t = tabsRef.current;
-      const active = t.tabs.find((tab) => tab.id === t.activeId);
-      const target =
-        active?.kind === "terminal"
-          ? active
-          : // Skip run-scoped worker tabs (hidden unless their run is active).
-            t.tabs.find((tab) => tab.kind === "terminal" && tab.scope?.kind !== "workers");
-      if (!target || target.kind !== "terminal") {
-        const seedCwd = activeWorkspace?.cwd ?? undefined;
-        t.newTerminalTab(seedCwd, launchCommand, {
-          agentSession: makeSession(seedCwd),
-          manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime, launchCommand),
-        });
-        return null;
-      }
-      const paneId = makeId("pane");
-      const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
-      const cwd =
-        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
-        activeLeaf?.cwd ??
-        activeWorkspace?.cwd ??
-        undefined;
-      const added = t.addPaneInTab(target.id, paneId, {
-        cwd,
-        autorun: launchCommand,
-        agentSession: makeSession(cwd),
-        worker: launchRuntime
-          ? createManualAgentLaunchWorker(launchRuntime, paneId)
-          : undefined,
-      });
-      if (!added) {
-        t.newTerminalTab(cwd, launchCommand, {
-          agentSession: makeSession(cwd),
-          manualAgentRuntime: launchRuntime ?? undefined,
-          color: workerTabBrandColor(launchRuntime, launchCommand),
-        });
-        return null;
-      }
-      t.setActiveTab(target.id);
-      t.setActiveTerminalPane(target.id, paneId);
-      return paneId;
-    },
-    [activeWorkspace?.cwd, prepareWorkerLaunch],
-  );
-
-  // Wait for a freshly spawned worker pane's CLI agent to enter its REPL
-  // before typing our prompt at it. The seeded worker metadata paints the
-  // starting chip before launch, so only detector-confirmed alt-screen state
-  // proves that injection is safe. Keep the timeout for failed or slow boots.
-  const waitForAgentReady = useCallback(
-    (paneId: string, timeoutMs = 30000): Promise<void> =>
-      new Promise((resolve) => {
-        const start = Date.now();
-        const tick = () => {
-          for (const tab of tabsRef.current.tabs) {
-            if (tab.kind !== "terminal") continue;
-            const leaf = findLeafByPaneId(tab.root, paneId);
-            if (
-              isPaneAgentInjectable(
-                leaf?.worker,
-                paneRuntimeRef.current.get(paneId),
-              )
-            ) {
-              resolve();
-              return;
-            }
-          }
-          if (Date.now() - start > timeoutMs) {
-            resolve();
-            return;
-          }
-          window.setTimeout(tick, 250);
-        };
-        tick();
-      }),
-    [],
-  );
-
-  const routingDestinations = useMemo<RoutingDestination[]>(() => {
-    const list: RoutingDestination[] = [];
-    list.push({
-      id: "chat-new",
-      kind: "chat-new",
-      label: "New Cora chat",
-      group: "chat",
-      disabled: !activeWorkspace,
-      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
-    });
-    const currentRun = activeRunId ? runs.find((r) => r.id === activeRunId) ?? null : null;
-    list.push({
-      id: "chat-current",
-      kind: "chat-current",
-      label: currentRun ? "Send to current chat" : "Send to current chat",
-      sublabel: currentRun?.title,
-      group: "chat",
-      disabled: !currentRun,
-      disabledReason: currentRun ? undefined : "No chat is currently focused.",
-    });
-    list.push({
-      id: "worker-new-claude",
-      kind: "worker-new-claude",
-      label: "New Claude Code worker",
-      group: "worker-new",
-      disabled: !activeWorkspace,
-      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
-    });
-    list.push({
-      id: "worker-new-codex",
-      kind: "worker-new-codex",
-      label: "New Codex worker",
-      group: "worker-new",
-      disabled: !activeWorkspace,
-      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
-    });
-    const openWorkers = enumerateOpenWorkers(visibleWorkbenchTabs, runs).filter(
-      (worker) => {
-        for (const tab of visibleWorkbenchTabs) {
-          if (tab.kind !== "terminal") continue;
-          const leaf = findLeafByPaneId(tab.root, worker.injectId);
-          if (
-            isPaneAgentInjectable(
-              leaf?.worker,
-              paneRuntimeRef.current.get(worker.injectId),
-            )
-          ) {
-            return true;
-          }
-        }
-        return false;
-      },
-    );
-    for (const worker of openWorkers) {
-      list.push({
-        id: `worker-existing-${worker.injectId}`,
-        kind: "worker-existing",
-        label: workerMenuLabel(worker),
-        sublabel: worker.source === "spark" ? undefined : "manual",
-        group: "worker-existing",
-      });
-    }
-    return list;
-  }, [activeWorkspace, activeRunId, runs, visibleWorkbenchTabs]);
-
-  const routeSelection = useCallback(
-    async (payload: SelectionPayload, destinationId: string) => {
-      if (destinationId === "chat-new") {
-        const ws = activeWorkspace;
-        if (!ws) throw new Error("No workspace.");
-        const attachments = payload.imagePath
-          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
-          : undefined;
-        const run = await window.spark.orchestration.startAutopilot({
-          workspaceId: ws.id,
-          workspaceName: ws.name,
-          cwd: ws.cwd,
-          initialUserNote: payload.text,
-          initialUserNoteClientMessageId: makeId("client-msg"),
-          initialAttachments: attachments,
-        });
-        // Bind the selection to the originating workspace: the user may have
-        // switched away during the startAutopilot await.
-        handleSelectRun(run.id, ws.id);
-        void refreshRunsFor(ws.id);
-        return;
-      }
-      if (destinationId === "chat-current") {
-        const runId = activeRunIdRef.current;
-        if (!runId) throw new Error("No active chat.");
-        const attachments = payload.imagePath
-          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
-          : undefined;
-        await window.spark.orchestration.addRunMessage({
-          runId,
-          clientMessageId: makeId("client-msg"),
-          author: "user",
-          kind: "note",
-          message: payload.text,
-          attachments,
-        });
-        return;
-      }
-      if (destinationId === "worker-new-claude" || destinationId === "worker-new-codex") {
-        const autorun =
-          destinationId === "worker-new-claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
-        const paneId = spawnRoutedWorkerPane(autorun);
-        if (!paneId) {
-          // Fell back to a fresh tab; the leaf was created internally and we
-          // don't have a handle to inject into. Skip the auto-prompt — the
-          // user can paste the text manually if they want.
-          return;
-        }
-        // Fire-and-forget so the menu can close immediately; the agent boot
-        // takes seconds and we don't want to block the UI on it.
-        void (async () => {
-          await waitForAgentReady(paneId);
-          try {
-            await window.spark.pty.inject(paneId, payload.text, { submit: true });
-          } catch {
-            /* pane may have been closed; nothing to recover */
-          }
-        })();
-        return;
-      }
-      if (destinationId.startsWith("worker-existing-")) {
-        const injectId = destinationId.slice("worker-existing-".length);
-        await window.spark.pty.inject(injectId, payload.text, { submit: true });
-        return;
-      }
-      throw new Error(`Unknown routing destination: ${destinationId}`);
-    },
-    [activeWorkspace, handleSelectRun, refreshRunsFor, spawnRoutedWorkerPane, waitForAgentReady],
-  );
-
-  const routingApi = useMemo<SelectionRoutingApi>(
-    () => ({ destinations: routingDestinations, route: routeSelection }),
-    [routingDestinations, routeSelection],
-  );
+  // Picked elements, comments drawn on a page and tab references go to the
+  // agent in any terminal pane, a Cora chat or the workspace inbox. The menu
+  // and the send live in routing/useSelectionRoutingApi.ts.
+  const routingApi = useSelectionRoutingApi({
+    activeWorkspace,
+    runs,
+    activeRunId,
+    tabs: visibleWorkbenchTabs,
+    activeTab: activeViewTab,
+    activePaneId: activeViewPaneId,
+    detectedAgents: terminalAgents[tabs.tabsWorkspaceId ?? ""] ?? NO_DETECTED_AGENTS,
+    paneRuntime: paneRuntimeRef,
+    selectRun: handleSelectRun,
+    refreshRuns: refreshRunsFor,
+  });
 
   if (bootError) {
     return (

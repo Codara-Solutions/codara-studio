@@ -80,6 +80,9 @@ ${c.bold("TOOLS")}  the codara-studio tools, for agents without MCP
   tool list                    browser, terminal, worktree and other tools here
   tool help <name>             a tool's description and arguments
   tool <name> [json] [--arg v] call it; images are saved and their paths printed
+  inbox [--peek --limit N]     what the user picked or commented on for you
+  inspect <@ref|selector>      describe an element to edit it: box model, styles,
+          [--x N --y N --tabId ID]  CSS rules, source file:line, image
 
 ${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
 
@@ -185,6 +188,13 @@ async function main() {
       const result = await rpc(flags, "terminal.read", params);
       console.log(flags.json ? JSON.stringify(result, null, 2) : result.text);
       return;
+    }
+
+    case "inbox":
+    case "inspect": {
+      const point = require("./commands/point.cjs");
+      const parsed = point.parsePointArgs(rest);
+      return point[command](parsed.args, parsed.flags);
     }
 
     case "tool":

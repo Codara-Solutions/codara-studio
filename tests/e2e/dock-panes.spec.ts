@@ -619,7 +619,7 @@ test("a pane can hover into a browser tab and cancel or complete a split", async
   }
 });
 
-test("a split browser copies inspected elements and annotated screenshot references for terminals", async () => {
+test("a split browser copies a picked element and a comment on the page for terminals", async () => {
   test.setTimeout(120_000);
   const { app, page, pageUrl } = await launch();
   try {
@@ -627,67 +627,80 @@ test("a split browser copies inspected elements and annotated screenshot referen
     await dockBrowserPane(page, pageUrl);
     const guestId = await page.evaluate(() =>
       (document.querySelector("webview") as HTMLElement & { getWebContentsId(): number }).getWebContentsId());
-    await page.getByRole("button", { name: "Inspect an element", exact: true }).dispatchEvent("click");
-    await expect.poll(() => app.evaluate(async ({ webContents }, id) =>
-      webContents.fromId(id)!.executeJavaScript('document.documentElement.classList.contains("__spark-inspector-active")'), guestId)).toBe(true);
-    await app.evaluate(async ({ webContents }, id) => {
-      await webContents.fromId(id)!.executeJavaScript(`
-        const heading = document.querySelector("h1");
-        heading.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-        heading.click();
-      `);
-    }, guestId);
-    await page.getByPlaceholder("Describe the change you want. Copy or send to a destination.").fill("Make the heading smaller");
-    await page.getByRole("button", { name: "Copy description", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Copied!", exact: true })).toBeVisible();
+    const headingAt = async (layer: string) => {
+      const rect = await app.evaluate(async ({ webContents }, id) =>
+        webContents.fromId(id)!.executeJavaScript(
+          "(() => { const r = document.querySelector('h1').getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()"),
+      guestId) as { x: number; y: number; width: number; height: number };
+      const host = (await page.locator(layer).boundingBox())!;
+      return { x: host.x + rect.x + Math.min(rect.width / 2, 40), y: host.y + rect.y + rect.height / 2, rect, host };
+    };
+
+    await page.getByRole("button", { name: /Point at an element/ }).click();
+    await expect(page.getByTestId("point-picker")).toBeVisible();
+    const heading = await headingAt('[data-testid="point-picker"]');
+    await page.mouse.move(heading.x, heading.y, { steps: 3 });
+    await expect(page.locator(".cp-tag")).toContainText("h1");
+    // In a narrow split the hint covers the heading, so it moves out of the way.
+    await expect(page.locator(".cp-hint")).toHaveAttribute("data-edge", "bottom");
+    await page.mouse.click(heading.x, heading.y);
+    const composer = page.getByTestId("point-composer");
+    await expect(composer.getByTestId("point-element")).toHaveCount(1, { timeout: 20_000 });
+    await composer.getByLabel("Note for the agent").fill("Make the heading smaller");
+    await composer.getByRole("button", { name: "Copy", exact: true }).click();
+    await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 15_000 })
+      .toContain("[Codara] Picked element on");
     const description = await app.evaluate(({ clipboard }) => clipboard.readText());
-    expect(description).toContain("<h1>");
     expect(description).toContain(pageUrl);
     expect(description).toContain("dock-probe");
     expect(description).toContain("Make the heading smaller");
-    expect(description).not.toContain("__spark-inspector");
-    const selector = JSON.parse(description.match(/selector: ("(?:[^"\\]|\\.)*")/)![1]);
+    const selector = description.match(/selector: (.+)/)![1].trim();
     expect(await app.evaluate(async ({ webContents }, { id, selector }) =>
       webContents.fromId(id)!.executeJavaScript(`document.querySelector(${JSON.stringify(selector)})?.tagName`),
     { id: guestId, selector })).toBe("H1");
-    await page.screenshot({ path: test.info().outputPath("inspect-copy.png") });
-    await page.getByRole("button", { name: "Cancel", exact: true }).click();
-    await page.getByRole("button", { name: "Draw on the page", exact: true }).dispatchEvent("click");
-    const canvas = page.locator('canvas').filter({ visible: true }).last();
-    const bounds = (await canvas.boundingBox())!;
-    const point = { pointerId: 3, pointerType: "mouse", clientX: bounds.x + 40, clientY: bounds.y + 50 };
-    await page.mouse.move(point.clientX, point.clientY);
+    const crop = description.match(/image: (.+\.jpg)/)?.[1];
+    expect(crop).toBeTruthy();
+    expect((await readFile(crop!)).subarray(0, 2).toString("hex")).toBe("ffd8");
+    await composer.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(composer).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Comment on the page/ }).click();
+    const overlay = page.getByTestId("comment-overlay");
+    await expect(overlay).toBeVisible();
+    const target = await headingAt('[data-testid="comment-overlay"]');
+    const left = target.host.x + target.rect.x - 8;
+    const top = target.host.y + target.rect.y - 8;
+    await page.mouse.move(left, top);
     await page.mouse.down();
-    await page.mouse.move(point.clientX + 100, point.clientY, { steps: 10 });
+    await page.mouse.move(left + 140, top + target.rect.height + 16, { steps: 10 });
     await page.mouse.up();
-    await page.getByPlaceholder("Add context for the agent").fill("Adjust the highlighted spacing");
-    await page.getByRole("button", { name: "Copy screenshot reference", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Copied!", exact: true })).toBeVisible();
+    await page.getByLabel("Note for mark 1").fill("Adjust the highlighted spacing");
+    await page.getByLabel("Note for mark 1").press("Enter");
+    await app.evaluate(({ clipboard }) => clipboard.writeText(""));
+    await overlay.getByRole("button", { name: "Copy", exact: true }).click();
+    await expect.poll(() => app.evaluate(({ clipboard }) => clipboard.readText()), { timeout: 15_000 })
+      .toContain("Attached: ");
     const reference = await app.evaluate(({ clipboard }) => clipboard.readText());
+    expect(reference).toContain("1 comment");
     expect(reference).toContain("Adjust the highlighted spacing");
-    const imagePath = reference.match(/annotated screenshot: "([^"]+)"/)?.[1];
+    const imagePath = reference.match(/Attached: (.+\.jpg)/)?.[1];
     expect(imagePath).toBeTruthy();
-    const png = await readFile(imagePath!);
-    expect(png.subarray(1, 4).toString()).toBe("PNG");
-    expect(png.readUInt32BE(16)).toBeGreaterThan(100);
-    expect(png.readUInt32BE(20)).toBeGreaterThan(100);
     const redPixels = await app.evaluate(({ nativeImage }, savedPath) => {
       const bitmap = nativeImage.createFromPath(savedPath).toBitmap();
       let count = 0;
       for (let i = 0; i < bitmap.length; i += 4) {
-        if (bitmap[i + 2] > 220 && bitmap[i + 1] < 100 && bitmap[i] < 100) count++;
+        if (bitmap[i + 2] > 200 && bitmap[i + 1] < 110 && bitmap[i] < 110) count++;
       }
       return count;
     }, imagePath!);
     expect(redPixels).toBeGreaterThan(100);
-    await page.screenshot({ path: test.info().outputPath("annotation-copy.png") });
+    await page.keyboard.press("Escape");
     await settle(page);
     await expect(page.locator(".spark-terminal-pane:visible")).toHaveCount(1);
   } finally {
     await app.close();
   }
 });
-
 
 test("Explorer pins on double-click and opens two Markdown files side by side", async () => {
   test.setTimeout(120_000);

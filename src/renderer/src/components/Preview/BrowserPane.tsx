@@ -11,13 +11,17 @@ import { holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint
 import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
 import PageDialogOverlay from "./PageDialogOverlay";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
-import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
-import DrawOverlay from "./DrawOverlay";
 import CaptureActions from "./capture/CaptureActions";
 import ResponsiveView from "./capture/ResponsiveView";
+import PointPicker, { type PickedElement } from "./point/PointPicker";
+import PointComposer from "./point/PointComposer";
+import CommentOverlay from "./point/CommentOverlay";
+import type { RunInPage } from "./point/pageScripts";
+import "./point/point.css";
 import { GlobeIcon } from "../icons";
-import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
-import { pathToFileUrl } from "../../lib/pathToFileUrl";
+import type { PointInspection } from "@shared/point-format";
+import { formatTabReference } from "@shared/point-format";
+import { useOptionalSelectionRouting } from "../../routing/SelectionRoutingContext";
 
 // BrowserPane wraps Electron's <webview> tag for preview tabs. We use
 // <webview> over <iframe> because it sidesteps X-Frame-Options/CSP and
@@ -113,8 +117,9 @@ export interface BrowserPaneHandle {
 
 interface Props {
   /**
-   * The browser tab this pane shows. Its page dialogs open over it, and a
-   * recording started from the toolbar is named after it.
+   * The id agents pass as tabId. Page dialogs open over this tab, picks and
+   * comments name it, and a recording started from the toolbar is named
+   * after it.
    */
   tabId?: string;
   url: string;
@@ -125,13 +130,14 @@ interface Props {
   // Fires once the guest is dom-ready and its webContents id is known, so the
   // host can announce the tab to main (wiring console capture early).
   onReady?: (webContentsId: number) => void;
-  // So a recording started from the toolbar is saved in the workspace's data
-  // folder.
+  // Where a recording or pick details started from this pane are saved.
   workspaceId?: string | null;
 }
 
+type PointMode = "pick" | "compose" | "comment";
+
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
-  { tabId, url, partition, visible, onUrlChange, onReady, workspaceId },
+  { tabId, url, partition, visible, onUrlChange, onReady, workspaceId = null },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -142,11 +148,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [canGoForward, setCanGoForward] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [currentUrl, setCurrentUrl] = useState(url);
-  const [inspecting, setInspecting] = useState(false);
-  const [inspectorPick, setInspectorPick] = useState<InspectorPick | null>(null);
-  const [drawing, setDrawing] = useState(false);
-  const [drawingBusy, setDrawingBusy] = useState(false);
   const [responsive, setResponsive] = useState(false);
+  const [pointMode, setPointMode] = useState<PointMode | null>(null);
+  const [picked, setPicked] = useState<PickedElement[]>([]);
+  const [inspection, setInspection] = useState<PointInspection | null>(null);
+  const [inspectError, setInspectError] = useState<string | null>(null);
+  const [inspectLoading, setInspectLoading] = useState(false);
+  const [pointNotice, setPointNotice] = useState<string | null>(null);
+  const [hostSize, setHostSize] = useState({ width: 0, height: 0 });
+  const routing = useOptionalSelectionRouting();
   const [control, setControl] = useState<PreviewControl | null>(null);
   const cursorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showAgentCursor = useCallback((next: PreviewControl | null) => {
@@ -355,7 +365,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setDomReady(false);
       setCanGoBack(false);
       setCanGoForward(false);
-      setInspecting(false);
+      setPointMode(null);
       const reason = e.details?.reason?.trim();
       setError(
         reason
@@ -371,27 +381,11 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     // webContents and pushes a synthetic KeyboardEvent up through the
     // preload onto `window`.
 
-    // `ipc-message` is the channel the inspector preload uses to ship picks
-    // back to the host via `sendToHost`. We only care about our two events
-    // here; anything else from the embedded page is ignored.
-    const onIpcMessage = (e: { channel: string; args: unknown[] }) => {
-      if (e.channel === "spark:inspector:picked") {
-        const payload = e.args?.[0] as InspectorPick | undefined;
-        if (payload && typeof payload === "object") {
-          setInspecting(false);
-          setInspectorPick(payload);
-        }
-      } else if (e.channel === "spark:inspector:cancelled") {
-        setInspecting(false);
-      }
-    };
-
     wv.addEventListener("dom-ready", onDomReady);
     wv.addEventListener("did-navigate", onDidNavigate);
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
     wv.addEventListener("render-process-gone", onRenderProcessGone);
-    wv.addEventListener("ipc-message", onIpcMessage);
 
     return () => {
       // Detach our listeners; intentionally do NOT remove the webview
@@ -402,7 +396,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
       wv.removeEventListener("render-process-gone", onRenderProcessGone);
-      wv.removeEventListener("ipc-message", onIpcMessage);
     };
   }, [hasUrl, preloadReady, inspectorPreloadUrl]);
 
@@ -426,97 +419,154 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     }
   }, [url, domReady, getLiveWebview]);
 
-  // Toggle inspect mode by signalling the webview's preload. Turning it on
-  // also turns off draw mode so the two never compete for pointer events.
-  const toggleInspect = useCallback(() => {
-    const wv = getLiveWebview();
-    if (!wv) return;
-    setInspecting((prev) => {
-      const next = !prev;
-      try {
-        wv.send?.("spark:inspector:toggle", next);
-      } catch {
-        /* webview not yet ready; user can retry */
-      }
-      if (next) {
-        setDrawing(false);
-        setInspectorPick(null);
-      }
-      return next;
-    });
-  }, [getLiveWebview]);
-
-  // Toggle draw mode. We don't tell the webview about this — the canvas
-  // sits on top of the embedded page and just intercepts pointer events.
-  const toggleDraw = useCallback(() => {
-    setDrawing((prev) => {
-      const next = !prev;
-      if (next) {
-        setInspecting(false);
-        try {
-          getLiveWebview()?.send?.("spark:inspector:toggle", false);
-        } catch {
-          /* ignore */
-        }
-      }
-      return next;
-    });
-  }, [getLiveWebview]);
-
-  // Compose an inspector pick + the user's note into a SelectionPayload.
-  // The routing menu (opened by InspectorOverlay) decides where the payload
-  // lands — chat composer, a new Codara chat, or an open CLI worker.
-  const buildInspectorPayload = useCallback(
-    (pick: InspectorPick, note: string): SelectionPayload => {
-      const url = pick.url || currentUrl || urlRef.current;
-      const details = [
-        pick.selector ? `selector: ${JSON.stringify(pick.selector)}` : "",
-        pick.text ? `text: ${JSON.stringify(pick.text)}` : "",
-      ].filter(Boolean);
-      const noteSuffix = note ? `: ${note}` : "";
-      const message =
-        `Regarding the <${pick.tagName}>` +
-        (url ? ` at ${url}` : "") +
-        (details.length ? ` (${details.join(", ")})` : "") +
-        noteSuffix;
-      return { source: "inspect", text: message };
-    },
-    [currentUrl],
-  );
-
-  // Capture the embedded page, composite the drawing canvas on top, write
-  // the PNG to <tmp>/spark-drawings via the main process, and return a
-  // SelectionPayload referencing the saved file. Worker prompts use the raw
-  // absolute path so CLI agents can hand it directly to local image tools.
-  // The routing menu (opened by DrawOverlay) picks the destination after
-  // this resolves.
-  const prepareDrawingPayload = useCallback(
-    async (drawingDataUrl: string, note: string): Promise<SelectionPayload | null> => {
+  // Page scripts for the picker and comments. Failures stay inside the page
+  // and come back as a value: a rejected executeJavaScript logs a main-process
+  // stack per call, and the picker calls on every pointer move.
+  const runInPage = useCallback<RunInPage>(
+    async (code) => {
       const wv = getLiveWebview();
-      if (!wv) return null;
-      setDrawingBusy(true);
-      try {
-        const captured = await wv.capturePage?.();
-        const pageDataUrl = captured?.toDataURL?.() ?? null;
-        const composed = await composeDrawingOverScreenshot(pageDataUrl, drawingDataUrl);
-        const savedPath = await window.spark.drawing.save({ dataUrl: composed });
-        const fileUrl = pathToFileUrl(savedPath);
-        const message =
-          `See this annotated screenshot: "${savedPath}"` + (note ? ` - ${note}` : "");
-        return {
-          source: "draw",
-          text: message,
-          imagePath: savedPath,
-          imageFileUrl: fileUrl,
-        };
-      } catch (err) {
-        setError(`Could not save drawing: ${(err as Error).message}`);
-        return null;
-      } finally {
-        setDrawingBusy(false);
-      }
+      if (!wv?.executeJavaScript) throw new Error("The page is still loading.");
+      const wrapped = `(async () => { try { return { ok: true, value: await (${code}\n) }; } catch (err) { return { ok: false, error: String((err && err.message) || err) }; } })()`;
+      const outcome = (await wv.executeJavaScript(wrapped, false)) as { ok: boolean; value?: unknown; error?: string } | null;
+      if (!outcome?.ok) throw new Error(outcome?.error ?? "The page did not answer.");
+      return outcome.value;
     },
     [getLiveWebview],
+  );
+
+  const capturePage = useCallback(async (): Promise<string> => {
+    const wv = getLiveWebview();
+    if (!wv || !wv.capturePage) throw new Error("preview tab is not ready");
+    return withPreviewCapturePaint(wv, async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let img: CapturedImage | undefined;
+        try {
+          img = await Promise.race([
+            wv.capturePage?.(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new Error("capture timed out")), 4_000);
+            }),
+          ]);
+        } catch (err) {
+          throw new Error(`preview screenshot failed: ${(err as Error)?.message || String(err)}`);
+        } finally {
+          clearTimeout(timer);
+        }
+        const size = img?.getSize?.();
+        const dataUrl = size?.width && size?.height ? img?.toDataURL?.() : "";
+        if (dataUrl && dataUrl.length > 256) return dataUrl;
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+      throw new Error("preview screenshot unavailable: the browser returned an empty frame. Check navigation with codara_preview_snapshot before retrying.");
+    });
+  }, [getLiveWebview]);
+
+  const startPointing = useCallback(
+    (mode: "pick" | "comment") => {
+      if (!getLiveWebview()) return;
+      setPointNotice(null);
+      setPointMode((current) => {
+        if (current === mode || (mode === "pick" && current === "compose")) return null;
+        if (mode === "pick") {
+          setPicked([]);
+          setInspection(null);
+          setInspectError(null);
+        }
+        return mode;
+      });
+    },
+    [getLiveWebview],
+  );
+
+  const stopPointing = useCallback(() => {
+    setPointMode(null);
+    setPicked([]);
+    setInspection(null);
+    setInspectError(null);
+  }, []);
+
+  // A finished pick is described by main (styles, rules, source files,
+  // crops) through the same inspection the agent tool uses.
+  const inspectPicked = useCallback(
+    async (selection: PickedElement[]) => {
+      if (!selection.length) return;
+      setPointMode("compose");
+      if (!tabId || !workspaceId) {
+        setInspectError("This browser tab is not in an open workspace.");
+        return;
+      }
+      setInspectLoading(true);
+      setInspectError(null);
+      try {
+        const result = await window.spark.point.inspect({ workspaceId, tabId, selectors: selection.map((item) => item.ref), crops: "data" });
+        setInspection(result);
+      } catch (err) {
+        setInspectError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setInspectLoading(false);
+      }
+    },
+    [tabId, workspaceId],
+  );
+
+  const removePicked = useCallback((ref: string) => {
+    setPicked((list) => list.filter((item) => item.ref !== ref));
+    setInspection((current) => current ? { ...current, elements: current.elements.filter((element) => element.ref !== ref) } : current);
+  }, []);
+
+  const finishPointing = useCallback((outcome: { message: string }) => {
+    stopPointing();
+    setPointNotice(outcome.message);
+  }, [stopPointing]);
+
+  useEffect(() => {
+    if (!pointNotice) return;
+    const timer = setTimeout(() => setPointNotice(null), 3200);
+    return () => clearTimeout(timer);
+  }, [pointNotice]);
+
+  // The Mod+Shift+E / Mod+Shift+X shortcuts name the tab they are for.
+  useEffect(() => {
+    if (!tabId) return;
+    const onPoint = (event: Event) => {
+      const detail = (event as CustomEvent<{ tabId?: string; mode?: "pick" | "comment" }>).detail;
+      if (detail?.tabId === tabId && (detail.mode === "pick" || detail.mode === "comment")) startPointing(detail.mode);
+    };
+    window.addEventListener("spark:browser-point", onPoint);
+    return () => window.removeEventListener("spark:browser-point", onPoint);
+  }, [startPointing, tabId]);
+
+  useEffect(() => {
+    if (!visible && pointMode) stopPointing();
+  }, [pointMode, stopPointing, visible]);
+
+  useEffect(() => {
+    const host = containerRef.current;
+    if (!host) return;
+    const measure = () => setHostSize({ width: host.clientWidth, height: host.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  const copyTabReference = useCallback(
+    async (detail: "id" | "full") => {
+      if (!tabId) return;
+      let title = "";
+      try {
+        title = getLiveWebview()?.getTitle?.() ?? "";
+      } catch {
+        /* not dom-ready */
+      }
+      const text = detail === "id"
+        ? tabId
+        : formatTabReference({ tabId, url: currentUrl || urlRef.current, title, session: routing?.tabSession(tabId) ?? null });
+      await window.spark.clipboard.writeText(text);
+      setPointNotice(detail === "id" ? `Copied ${tabId}` : `Copied ${tabId} with its URL and session`);
+    },
+    [currentUrl, getLiveWebview, routing, tabId],
   );
 
   useImperativeHandle(
@@ -618,37 +668,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         const hold = holdPreviewCapturePaint(wv);
         return { background: hold.changed, release: hold.release };
       },
-      capturePngDataUrl: async () => {
-        const wv = getLiveWebview();
-        if (!wv || !wv.capturePage) {
-          throw new Error("preview tab is not ready");
-        }
-        return withPreviewCapturePaint(wv, async () => {
-          for (let attempt = 0; attempt < 2; attempt += 1) {
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            let img: CapturedImage | undefined;
-            try {
-              img = await Promise.race([
-                wv.capturePage?.(),
-                new Promise<never>((_, reject) => {
-                  timer = setTimeout(() => reject(new Error("capture timed out")), 4_000);
-                }),
-              ]);
-            } catch (err) {
-              throw new Error(`preview screenshot failed: ${(err as Error)?.message || String(err)}`);
-            } finally {
-              clearTimeout(timer);
-            }
-            const size = img?.getSize?.();
-            const dataUrl = size?.width && size?.height ? img?.toDataURL?.() : "";
-            if (dataUrl && dataUrl.length > 256) return dataUrl;
-            if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 120));
-          }
-          throw new Error("preview screenshot unavailable: the browser returned an empty frame. Check navigation with codara_preview_snapshot before retrying.");
-        });
-      },
+      capturePngDataUrl: capturePage,
     }),
-    [currentUrl, getLiveWebview, url, visible],
+    [capturePage, currentUrl, getLiveWebview, url, visible],
   );
 
   return (
@@ -668,8 +690,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         url={currentUrl || url}
         canGoBack={canGoBack}
         canGoForward={canGoForward}
-        inspecting={inspecting}
-        drawing={drawing}
+        pointing={pointMode === "pick" || pointMode === "compose"}
+        commenting={pointMode === "comment"}
+        tabId={tabId ?? null}
         onSubmit={(next) => {
           if (!next) return;
           const wv = getLiveWebview();
@@ -708,8 +731,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         onOpenExternal={(target) => {
           if (target) void window.spark.openInSystemBrowser?.(target);
         }}
-        onToggleInspect={toggleInspect}
-        onToggleDraw={toggleDraw}
+        onTogglePoint={() => startPointing("pick")}
+        onToggleComment={() => startPointing("comment")}
+        onCopyTabId={(detail) => void copyTabReference(detail)}
         captureTools={
           <CaptureActions
             url={currentUrl || url}
@@ -866,18 +890,51 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             onClose={() => setResponsive(false)}
           />
         ) : null}
-        <DrawOverlay
-          active={drawing}
-          busy={drawingBusy}
-          preparePayload={prepareDrawingPayload}
-          onClose={() => setDrawing(false)}
-        />
-        {inspectorPick ? (
-          <InspectorOverlay
-            pick={inspectorPick}
-            buildPayload={(note) => buildInspectorPayload(inspectorPick, note)}
-            onCancel={() => setInspectorPick(null)}
+        {pointMode === "pick" || pointMode === "compose" ? (
+          <PointPicker
+            run={runInPage}
+            mode={pointMode === "pick" ? "pick" : "passive"}
+            selection={picked}
+            onSelectionChange={setPicked}
+            onFinish={(selection) => void inspectPicked(selection)}
+            onCancel={stopPointing}
           />
+        ) : null}
+        {pointMode === "compose" && tabId ? (
+          <PointComposer
+            tabId={tabId}
+            workspaceId={workspaceId}
+            inspection={inspection}
+            loading={inspectLoading}
+            error={inspectError}
+            anchor={picked[0] ? {
+              left: picked[0].info.rect.x / (picked[0].info.scale || 1),
+              top: picked[0].info.rect.y / (picked[0].info.scale || 1),
+              width: picked[0].info.rect.width / (picked[0].info.scale || 1),
+              height: picked[0].info.rect.height / (picked[0].info.scale || 1),
+            } : null}
+            hostSize={hostSize}
+            onRemove={removePicked}
+            onAddMore={() => setPointMode("pick")}
+            onClose={stopPointing}
+            onDone={finishPointing}
+          />
+        ) : null}
+        {pointMode === "comment" && tabId ? (
+          <CommentOverlay
+            tabId={tabId}
+            workspaceId={workspaceId}
+            run={runInPage}
+            capture={capturePage}
+            onClose={stopPointing}
+            onDone={finishPointing}
+          />
+        ) : null}
+        {pointNotice ? (
+          <div className="cp-toast spark-glass--strong spark-overlay-surface" role="status" data-testid="point-notice">
+            <span className="cp-toast__dot" aria-hidden />
+            {pointNotice}
+          </div>
         ) : null}
       </div>
     </div>
@@ -943,42 +1000,6 @@ function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
       </button>
     </div>
   );
-}
-
-// Composite the freehand drawing canvas onto a copy of the page screenshot.
-// Both inputs are PNG data URLs; the output is a single PNG data URL sized
-// to the screenshot. If the screenshot is missing (capturePage failed or
-// returned nothing usable), we fall back to the drawing alone — better than
-// dropping the user's annotation on the floor.
-async function composeDrawingOverScreenshot(
-  pageDataUrl: string | null,
-  drawingDataUrl: string,
-): Promise<string> {
-  if (!pageDataUrl) return drawingDataUrl;
-  const [pageImage, drawingImage] = await Promise.all([
-    loadImage(pageDataUrl),
-    loadImage(drawingDataUrl),
-  ]);
-  const canvas = document.createElement("canvas");
-  canvas.width = pageImage.naturalWidth || pageImage.width;
-  canvas.height = pageImage.naturalHeight || pageImage.height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return pageDataUrl;
-  ctx.drawImage(pageImage, 0, 0, canvas.width, canvas.height);
-  // The drawing canvas is the same logical size as the visible page but
-  // backed by a devicePixelRatio scale; drawing it stretched to the
-  // screenshot dimensions keeps the strokes aligned with the captured pixels.
-  ctx.drawImage(drawingImage, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/png");
-}
-
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Could not load image."));
-    img.src = src;
-  });
 }
 
 export default BrowserPane;
