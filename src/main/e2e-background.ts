@@ -19,25 +19,19 @@ export const E2E_BACKGROUND = process.env.SPARK_E2E_BACKGROUND === "1";
 
 /**
  * Keep an e2e app from reaching the person at the machine at all: no window on
- * the desktop, no sound. Must run before the app is ready, because Ozone picks
- * its platform once, while the browser process starts.
+ * the desktop, no sound. Must run before the app is ready.
  *
- * setOpacity, which hides the window on macOS and Windows, is a no-op on
- * Linux, so every spec flashed a real window onto the desktop there. The
- * headless Ozone backend never creates a native surface, yet the compositor
- * still produces frames, so requestAnimationFrame, capturePage and Playwright
- * screenshots keep working. Muting audio silences the notification chimes the
- * renderer synthesizes without changing which events reach it, so specs can
- * still assert on them.
+ * On Linux the window itself is kept off the desktop by the runner, which
+ * points DISPLAY at a private Xvfb server (scripts/virtual-display.cjs):
+ * setOpacity is a no-op there, and Chromium's headless Ozone backend is no
+ * substitute, because this Electron segfaults creating a window on it and
+ * choosing it from here is too late to take effect anyway. Muting audio
+ * silences the notification chimes the renderer synthesizes without changing
+ * which events reach it, so specs can still assert on them.
  */
 export function isolateE2eFromDesktop(): void {
   if (!E2E_BACKGROUND) return;
   app.commandLine.appendSwitch("mute-audio");
-  // Only takes effect when the launch passed no Ozone switch: one on the
-  // command line wins (x11 puts a real window on screen, and headless passed
-  // that way crashes the app), which is why scripts/test-e2e-desktop-
-  // isolation.cjs keeps every spec from passing one.
-  if (process.platform === "linux") app.commandLine.appendSwitch("ozone-platform", "headless");
 }
 
 /**
