@@ -158,3 +158,25 @@ The `app.*` methods reachable through `cora rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
 and in packaged builds only when the app was started with
 `CODARA_DEV_TOOLS=1`.
+
+### Browser capture from a shell
+
+`cora tool` calls the same browser tools an MCP client gets (see
+[mcp-tools.md](mcp-tools.md#screenshots-visual-diffs-sizes-and-recordings)),
+so an agent without MCP support can capture the page from its Codara pane.
+Each call prints the result as JSON; images and recordings are files, and
+their `path` is in the output.
+
+```sh
+cora tool preview_screenshot --fullPage --maxWidth 800        # compact JPEG of the whole page
+cora tool preview_screenshot --selector @e12 --format png     # one element
+cora tool preview_screenshot '{"clip":{"x":0,"y":0,"width":320,"height":200},"scale":2}'
+cora tool preview_compare --mode baseline --name home         # before a change
+cora tool preview_compare --name home                         # after: percent, regions, diff image path
+cora tool preview_compare --mode sizes --colorScheme both     # phone, tablet, desktop in one image
+cora tool preview_record --format gif                         # start; drive the flow, then:
+cora tool preview_record --stop                               # the GIF's path
+```
+
+Add `--tabId <id>` (from `cora tool preview_list`) to act on a tab other
+than the agent's own.

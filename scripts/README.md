@@ -61,7 +61,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
-| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs` | Install it with `npx playwright install chromium`. |
+| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-capture-chromium.cjs` | Install it with `npx playwright install chromium`. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
@@ -252,6 +252,13 @@ DevTools protocol session and its console and network recorders) and
 `test-browser-screenshot-locator` (crop and scale math, saved files, and
 selectors, boxes and names in a real page). The last two run in Playwright's
 Chromium through `scripts/fixtures/cdp-chromium.cjs` and print SKIP without it.
+`test-browser-capture` covers the capture features without a browser (pixel
+diff and regions, baselines on disk, the sizes sheet, the GIF encoder on its
+worker thread, the recorder's sampling and limits), and
+`test-browser-capture-chromium` runs them on a real page (element, full-page
+and zoomed shots, a diff across a reload, sizes in light and dark,
+recordings, and WebM when `ffmpeg` is installed); it prints SKIP without
+Chromium too.
 
 ### Security boundaries and packaging
 
