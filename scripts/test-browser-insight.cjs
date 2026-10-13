@@ -348,7 +348,7 @@ async function inChromium(lib) {
     assert.equal(afterClick.inp.estimated, undefined, "a visible tab reports event timing");
     // The in-page measurement that stands in where the browser reports no
     // event timing sees the same click.
-    const measured = await lib.evaluateInWorld(perfTarget.session, "[...globalThis.__codaraVitals.measured.values()].map((entry) => ({ name: entry.name, ms: entry.duration, processing: entry.processingEnd - entry.processingStart, target: entry.target && entry.target.id }))");
+    const measured = await lib.evaluateInWorld(perfTarget.session, "[...globalThis.__codaraVitals.measured.values()].map((entry) => ({ name: entry.name, ms: entry.duration, processing: entry.processingEnd - entry.processingStart, target: entry.target && entry.target.deref() && entry.target.deref().id }))");
     assert.ok(measured.some((entry) => entry.name === "click" && entry.ms >= 250 && entry.processing >= 250 && entry.target === "slow"), JSON.stringify(measured));
 
     // A traced reload.
@@ -383,8 +383,17 @@ async function inChromium(lib) {
     assert.match(stopped.summary, /^Interaction \(\d+ s\): .*INP \d+ ms (needs improvement|poor) \(click on #slow\)/);
     assert.ok(fs.existsSync(stopped.path));
 
+    // Elements the user clicked and the page then removed are garbage: the
+    // vitals observer must not keep them alive as detached DOM for the
+    // snapshot to blame on the page.
+    await perfTarget.evaluate(`(() => { for (let i = 0; i < 12; i++) { const button = document.createElement("button"); button.className = "gone"; button.textContent = "Delete"; button.onclick = () => button.remove(); document.body.appendChild(button); } return true; })()`);
+    for (let i = 0; i < 12; i += 1) await click(perfTarget, "button.gone");
+    await sleep(1_200);
+    assert.equal(await perfTarget.evaluate("document.querySelectorAll('button.gone').length"), 0);
+
     // Memory over time and a snapshot.
     const memory = await lib.measureMemory(perfTarget, 1_000, true);
+    assert.ok(!memory.snapshot.detached.top.some((name) => /class="gone".* x([2-9]|\d\d)/.test(name)), `clicked elements are not retained: ${JSON.stringify(memory.snapshot.detached)}`);
     assert.equal(memory.action, "memory");
     assert.ok(memory.heap.samples.length >= 2);
     assert.ok(memory.page.after.nodes > 0);

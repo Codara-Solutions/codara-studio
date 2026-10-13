@@ -17,15 +17,19 @@ const states = new WeakMap<CdpSession, VitalsState>();
 
 // Stringified into the page's insight world; keep everything inside.
 function installVitalsObserver(): boolean {
-  type Kept = { entry: PerformanceEntry; at: number };
-  type Interaction = { name: string; duration: number; startTime: number; processingStart: number; processingEnd: number; target: Node | null };
+  // Nodes are held weakly and entries copied: a strong reference from here
+  // would keep removed elements alive, and a heap snapshot would then blame
+  // the page for detached DOM this observer retained.
+  type Interaction = { name: string; duration: number; startTime: number; processingStart: number; processingEnd: number; target: WeakRef<Node> | null };
+  type Shift = { startTime: number; value: number; sources: Array<{ node: WeakRef<Node> | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }> };
+  type Frame = { startTime: number; duration: number; blockingDuration: number; scripts: Array<{ sourceURL?: string; sourceFunctionName?: string; invoker?: string; duration: number }> };
   type State = {
-    lcp: PerformanceEntry | null;
-    shifts: Array<PerformanceEntry & { value: number; hadRecentInput: boolean; sources?: Array<{ node?: Node | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }> }>;
+    lcp: { startTime: number; size: number; url: string; element: WeakRef<Element> | null } | null;
+    shifts: Shift[];
     interactions: Map<number, Interaction>;
     measured: Map<number, Interaction>;
-    longTasks: Kept[];
-    frames: PerformanceEntry[];
+    longTasks: Array<{ startTime: number; duration: number }>;
+    frames: Frame[];
     mark: number;
     painted: boolean;
     lastInput: number;
@@ -45,12 +49,19 @@ function installVitalsObserver(): boolean {
   observe("paint", () => {
     state.painted = true;
   });
+  const weak = <T extends object>(value: T | null | undefined) => (value ? new WeakRef(value) : null);
   observe("largest-contentful-paint", (entry) => {
-    state.lcp = entry;
+    const lcp = entry as PerformanceEntry & { size: number; url?: string; element?: Element | null };
+    state.lcp = { startTime: lcp.startTime, size: lcp.size, url: lcp.url ?? "", element: weak(lcp.element) };
   });
   observe("layout-shift", (entry) => {
-    const shift = entry as State["shifts"][number];
-    if (!shift.hadRecentInput && state.shifts.length < 500) state.shifts.push(shift);
+    const shift = entry as PerformanceEntry & { value: number; hadRecentInput: boolean; sources?: Array<{ node?: Node | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }> };
+    if (shift.hadRecentInput || state.shifts.length >= 500) return;
+    state.shifts.push({
+      startTime: shift.startTime,
+      value: shift.value,
+      sources: (shift.sources ?? []).map((source) => ({ node: weak(source.node), previousRect: source.previousRect, currentRect: source.currentRect })),
+    });
   });
   // One interaction is several events (pointerdown, pointerup, click); its
   // duration is the longest one's, and its target the first one that has
@@ -82,7 +93,7 @@ function installVitalsObserver(): boolean {
       startTime: event.startTime,
       processingStart: event.processingStart,
       processingEnd: event.processingEnd,
-      target: event.target ?? null,
+      target: weak(event.target),
     });
   };
   observe("event", onEvent, { durationThreshold: 16 });
@@ -99,7 +110,7 @@ function installVitalsObserver(): boolean {
         state.lastInput = Math.max(state.lastInput, event.timeStamp);
       }
       const id = measuredId;
-      const record: Interaction = { name: type, duration: 0, startTime: event.timeStamp, processingStart: performance.now(), processingEnd: 0, target: event.target as Node | null };
+      const record: Interaction = { name: type, duration: 0, startTime: event.timeStamp, processingStart: performance.now(), processingEnd: 0, target: weak(event.target as Node | null) };
       setTimeout(() => {
         record.processingEnd = performance.now();
         let done = false;
@@ -118,10 +129,17 @@ function installVitalsObserver(): boolean {
   }
   observe("first-input", onEvent);
   observe("longtask", (entry) => {
-    if (state.longTasks.length < 300) state.longTasks.push({ entry, at: entry.startTime });
+    if (state.longTasks.length < 300) state.longTasks.push({ startTime: entry.startTime, duration: entry.duration });
   });
   observe("long-animation-frame", (entry) => {
-    if (state.frames.length < 300) state.frames.push(entry);
+    const frame = entry as PerformanceEntry & { blockingDuration?: number; scripts?: Frame["scripts"] };
+    if (state.frames.length >= 300) return;
+    state.frames.push({
+      startTime: frame.startTime,
+      duration: frame.duration,
+      blockingDuration: frame.blockingDuration ?? 0,
+      scripts: (frame.scripts ?? []).map((script) => ({ sourceURL: script.sourceURL, sourceFunctionName: script.sourceFunctionName, invoker: script.invoker, duration: script.duration })),
+    });
   });
   return true;
 }
@@ -220,21 +238,22 @@ export interface RawVitals {
 // Stringified into the insight world; reads what installVitalsObserver kept.
 function readVitalsProbe(args: Record<string, never>, locator: PreviewLocator): RawVitals {
   void args;
-  type Interaction = { name: string; duration: number; startTime: number; processingStart: number; processingEnd: number; target: Node | null };
-  type Shift = PerformanceEntry & { value: number; sources?: Array<{ node?: Node | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }> };
+  type Interaction = { name: string; duration: number; startTime: number; processingStart: number; processingEnd: number; target: WeakRef<Node> | null };
+  type Shift = { startTime: number; value: number; sources: Array<{ node: WeakRef<Node> | null; previousRect: DOMRectReadOnly; currentRect: DOMRectReadOnly }> };
   type State = {
-    lcp: (PerformanceEntry & { size: number; url?: string; element?: Element | null; renderTime?: number; loadTime?: number }) | null;
+    lcp: { startTime: number; size: number; url: string; element: WeakRef<Element> | null } | null;
     shifts: Shift[];
     interactions: Map<number, Interaction>;
     measured: Map<number, Interaction>;
-    longTasks: Array<{ entry: PerformanceEntry; at: number }>;
-    frames: Array<PerformanceEntry & { blockingDuration?: number; scripts?: Array<{ sourceURL?: string; sourceFunctionName?: string; invoker?: string; duration: number }> }>;
+    longTasks: Array<{ startTime: number; duration: number }>;
+    frames: Array<{ startTime: number; duration: number; blockingDuration: number; scripts: Array<{ sourceURL?: string; sourceFunctionName?: string; invoker?: string; duration: number }> }>;
     mark: number;
   };
   const state = (globalThis as unknown as { __codaraVitals?: State }).__codaraVitals;
   if (!state) throw new Error("The vitals observer is not running in this page.");
   const round = (value: number) => Math.round(value * 10) / 10;
-  const describe = (node: Node | null | undefined): RawElement | null => {
+  const describe = (ref: WeakRef<Node> | null | undefined): RawElement | null => {
+    const node = ref?.deref();
     if (!node) return null;
     const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
     if (!el) return null;
@@ -269,20 +288,21 @@ function readVitalsProbe(args: Record<string, never>, locator: PreviewLocator): 
     }
     if (current.value > worst.value) worst = { value: current.value, entries: [...current.entries] };
   }
-  const byNode = new Map<Node, { score: number; from: DOMRectReadOnly; to: DOMRectReadOnly }>();
+  const byNode = new Map<Node, { ref: WeakRef<Node>; score: number; from: DOMRectReadOnly; to: DOMRectReadOnly }>();
   for (const shift of worst.entries) {
-    for (const source of shift.sources ?? []) {
-      if (!source.node) continue;
-      const known = byNode.get(source.node);
+    for (const source of shift.sources) {
+      const node = source.node?.deref();
+      if (!node) continue;
+      const known = byNode.get(node);
       if (known) known.score += shift.value;
-      else byNode.set(source.node, { score: shift.value, from: source.previousRect, to: source.currentRect });
+      else byNode.set(node, { ref: source.node!, score: shift.value, from: source.previousRect, to: source.currentRect });
     }
   }
   const clsElements = [...byNode.entries()]
     .sort((a, b) => b[1].score - a[1].score)
     .slice(0, 5)
-    .map(([node, info]) => {
-      const element = describe(node);
+    .map(([, info]) => {
+      const element = describe(info.ref);
       return element ? { ...element, score: Math.round(info.score * 1000) / 1000, from: rect(info.from), to: rect(info.to) } : null;
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
@@ -293,7 +313,7 @@ function readVitalsProbe(args: Record<string, never>, locator: PreviewLocator): 
   // INP: the slowest interaction, or the 98th percentile once there are 50 or more.
   const chosen = interactions[Math.min(interactions.length - 1, Math.floor(interactions.length / 50))];
 
-  const tasks = state.longTasks.filter((task) => task.at >= mark);
+  const tasks = state.longTasks.filter((task) => task.startTime >= mark);
   const lcp = state.lcp && state.lcp.startTime >= mark ? state.lcp : null;
   return {
     url: location.href,
@@ -324,19 +344,19 @@ function readVitalsProbe(args: Record<string, never>, locator: PreviewLocator): 
     } : null,
     longTasks: {
       count: tasks.length,
-      totalMs: Math.round(tasks.reduce((sum, task) => sum + task.entry.duration, 0)),
-      blockingMs: Math.round(tasks.reduce((sum, task) => sum + Math.max(0, task.entry.duration - 50), 0)),
-      longest: [...tasks].sort((a, b) => b.entry.duration - a.entry.duration).slice(0, 3).map((task) => ({ atMs: Math.round(task.at), ms: Math.round(task.entry.duration) })),
+      totalMs: Math.round(tasks.reduce((sum, task) => sum + task.duration, 0)),
+      blockingMs: Math.round(tasks.reduce((sum, task) => sum + Math.max(0, task.duration - 50), 0)),
+      longest: [...tasks].sort((a, b) => b.duration - a.duration).slice(0, 3).map((task) => ({ atMs: Math.round(task.startTime), ms: Math.round(task.duration) })),
     },
     frames: state.frames
       .filter((frame) => frame.startTime >= mark)
-      .sort((a, b) => (b.blockingDuration ?? 0) - (a.blockingDuration ?? 0))
+      .sort((a, b) => b.blockingDuration - a.blockingDuration)
       .slice(0, 3)
       .map((frame) => ({
         atMs: Math.round(frame.startTime),
         ms: Math.round(frame.duration),
-        blockingMs: Math.round(frame.blockingDuration ?? 0),
-        scripts: (frame.scripts ?? [])
+        blockingMs: Math.round(frame.blockingDuration),
+        scripts: [...frame.scripts]
           .sort((a, b) => b.duration - a.duration)
           .slice(0, 2)
           .map((script) => ({
