@@ -13,8 +13,10 @@ import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
+import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
   ensurePreviewTab,
+  findPreviewTabByWebContentsId,
   findReusablePreviewTab,
   listPreviewTabs,
   pickPreviewTab,
@@ -34,7 +36,9 @@ type PreviewOpName =
   | "screenshot"
   | "url"
   | "resize"
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  | "dialog_show"
+  | "dialog_hide";
 
 interface BridgeRequest {
   reqId: string;
@@ -108,6 +112,16 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return resize(req.params);
     case "get_web_contents_id":
       return getWebContentsId(req.params);
+    case "dialog_show": {
+      // A dialog during a tab's first load arrives before the tab announced
+      // its guest, so main may not know the tab id yet.
+      const dialog = req.params.dialog as PageDialogView & { webContentsId?: number };
+      const tabId = dialog?.tabId || (typeof dialog?.webContentsId === "number" ? findPreviewTabByWebContentsId(dialog.webContentsId)?.id : undefined);
+      return tabId ? showPageDialog({ ...dialog, tabId }) : null;
+    }
+    case "dialog_hide":
+      closePageDialog(readString(req.params, "id") ?? "");
+      return { ok: true };
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }
@@ -321,6 +335,8 @@ async function resize(params: Record<string, unknown>): Promise<unknown> {
   return { ok: true, ...applied, tabId: tab.id };
 }
 
+const METRICS_TIMEOUT_MS = 400;
+
 // Internal — only the main-side computer-use executor calls this. Resolves the
 // picked tab's guest webContents id plus viewport metrics so trusted-input
 // coordinates can be mapped against capturePage screenshots.
@@ -335,10 +351,15 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   let viewport: { width: number; height: number } | null = null;
   let devicePixelRatio = 1;
   try {
-    const metrics = (await runGuestScript(
-      tab.handle,
-      "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
-    )) as { width: number; height: number; dpr: number } | null;
+    // Bounded: a page held by an open alert or confirm answers no script, and
+    // resolving the tab must not hang with it (main reports the dialog).
+    const metrics = (await Promise.race([
+      runGuestScript(
+        tab.handle,
+        "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve(null), METRICS_TIMEOUT_MS)),
+    ])) as { width: number; height: number; dpr: number } | null;
     if (metrics) {
       viewport = { width: metrics.width, height: metrics.height };
       devicePixelRatio = metrics.dpr || 1;

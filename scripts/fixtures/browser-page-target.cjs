@@ -1,7 +1,7 @@
 "use strict";
 // A BrowserTarget (src/main/browser/targets.ts) over a real Chromium page, for
 // unit suites that drive the browser tools' main-process code: one CdpSession
-// with the console, network and activity recorders running, as
+// with the console, network, dialog and activity recorders running, as
 // preview-cdp.ts sets up for a Codara tab, plus a local http server for
 // fixture pages.
 //
@@ -25,6 +25,7 @@ function bundleBrowser(contents) {
         export { CdpSession } from "./cdp-session";
         export { startConsoleRecorder, consoleRing } from "./recorders/console";
         export { startNetworkRecorder } from "./recorders/network";
+        export { startDialogRecorder, dialogState } from "./recorders/dialogs";
         export { startPageActivity, pageActivity } from "./page-activity";
         export { registerBrowserBackend } from "./targets";
         ${contents}
@@ -80,6 +81,7 @@ async function openPage(chromium, lib, url, ref = "tab-1") {
   const session = new lib.CdpSession(`test:${targetId}`, transport);
   lib.startConsoleRecorder(session);
   lib.startNetworkRecorder(session);
+  lib.startDialogRecorder(session);
   lib.startPageActivity(session);
   const target = {
     kind: "preview",

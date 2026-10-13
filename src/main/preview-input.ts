@@ -26,6 +26,7 @@ import { ipcMain, webContents, type WebContents } from "electron";
 import { createPreviewDOM } from "../shared/preview-dom";
 import type { CdpSession } from "./browser/cdp-session";
 import { registerGuestChordReports, withAgentKeys } from "./browser/guest-chords";
+import { registerPreviewDialogs } from "./browser/preview-dialogs";
 import { bindPreviewTabGuest, previewCdpSession } from "./browser/preview-cdp";
 import { resolvePreviewGuest, type PreviewGuestInfo } from "./browser/preview-guest";
 import { consoleRing } from "./browser/recorders/console";
@@ -61,6 +62,7 @@ export function registerPreviewInput(): void {
   if (registered) return;
   registered = true;
   registerGuestChordReports();
+  registerPreviewDialogs();
   ipcMain.on(
     "preview-bridge:announce",
     (event, payload: { tabId?: string; webContentsId?: number }) => {

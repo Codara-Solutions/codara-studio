@@ -105,6 +105,7 @@ const FENCE_BRIDGE_SHELL = [
 // screenshots, snapshots, console, and network inspection stay available).
 const FENCE_BRIDGE_MUTATING = [
   "codara_preview_click",
+  "codara_preview_dialog",
   "codara_preview_drag",
   "codara_preview_key",
   "codara_preview_mouse",

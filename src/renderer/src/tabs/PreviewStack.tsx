@@ -207,6 +207,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
           >
             <BrowserPane
               ref={getHandleRef(t)}
+              tabId={t.id}
               url={t.url}
               visible={visible}
               onUrlChange={getUrlCallback(t.id)}

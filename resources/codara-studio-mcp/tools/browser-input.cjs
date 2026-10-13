@@ -12,7 +12,7 @@ module.exports = {
       name: "codara_preview_mouse",
       rpc: "preview.mouse",
       description:
-        "Trusted mouse input (event.isTrusted=true) at a selector's center or at viewport CSS-pixel coordinates: click, dblclick, rightclick, down, or up.",
+        "Trusted mouse input at a selector's center or viewport CSS-pixel x, y: click, dblclick, rightclick, down or up.",
       inputSchema: {
         type: "object",
         properties: {
@@ -31,7 +31,7 @@ module.exports = {
       rpc: "preview.scroll",
       step: { order: 90 },
       description:
-        "Trusted mouse-wheel scroll at a selector's center or at CSS-pixel coordinates. Positive deltaY scrolls down.",
+        "Trusted wheel scroll at a selector's center or CSS-pixel x, y. Positive deltaY scrolls down.",
       inputSchema: {
         type: "object",
         properties: {
@@ -50,7 +50,7 @@ module.exports = {
       rpc: "preview.hover",
       step: { order: 100 },
       description:
-        "Trusted mouse move over a selector's center or CSS-pixel coordinates, triggering real :hover styles, tooltips, and mouseenter handlers.",
+        "Trusted mouse move over a selector's center or CSS-pixel x, y: real :hover styles, tooltips, mouseenter.",
       inputSchema: {
         type: "object",
         properties: {
@@ -106,11 +106,29 @@ module.exports = {
       },
     },
     {
+      name: "codara_preview_dialog",
+      rpc: "preview.dialog",
+      description:
+        "Answer the page's alert, confirm, prompt or beforeunload (accept, promptText), or list open ones. policy: ask (dismissed after autoMs, default 30000), accept or dismiss.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          accept: { type: "boolean" },
+          promptText: { type: "string" },
+          id: { type: "string" },
+          policy: { type: "string", enum: ["ask", "accept", "dismiss"] },
+          autoMs: { type: "number" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "codara_preview_upload",
       rpc: "preview.upload",
       annotations: { openWorld: true },
       description:
-        "Set the files of an <input type=file>. paths are absolute paths on this machine; the page receives their contents, so only upload files the task needs.",
+        "Set the files of an <input type=file> to absolute local paths. The page gets their contents: upload only what the task needs.",
       inputSchema: {
         type: "object",
         required: ["selector", "paths"],

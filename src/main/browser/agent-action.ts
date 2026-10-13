@@ -4,6 +4,7 @@
 // which waits with fresh:true compare against (wait.ts).
 
 import { noteAgentAction } from "./page-activity";
+import { dialogState } from "./recorders/dialogs";
 import { resolveBrowserTarget, type BrowserTarget } from "./targets";
 import { MARK_BASELINE_EXPRESSION } from "./wait";
 
@@ -29,6 +30,8 @@ export async function markAgentAction(params: Record<string, unknown>): Promise<
   const target = await callTarget(params);
   if (!target) return;
   noteAgentAction(target.session);
+  // A page held by a dialog runs no script; the baseline would only time out.
+  if (dialogState(target.session).pending().length) return;
   await new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, BASELINE_TIMEOUT_MS);
     const done = () => {
