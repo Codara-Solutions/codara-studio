@@ -210,7 +210,9 @@ browser session shared with no other tab, which agent calls never pick unless
 given its `tabId`. Pages it opens in new tabs share its session. `discard`
 closes those tabs and wipes the session. On a
 Chrome tab, cookies are read-only and only local and session storage can be
-cleared.
+cleared. The live sign-ins of the user's own browser are never handed out:
+on a Chrome tab, HttpOnly cookie values and the cookie and authorization
+headers of its requests stay redacted even with `redact: false`.
 
 `codara_preview_url` is no longer listed (`codara_preview_list` returns every
 tab's URL and title) but stays callable for agents that still use it. Outside

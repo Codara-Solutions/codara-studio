@@ -230,7 +230,10 @@ async function exportHar(target: BrowserTarget, entries: NetworkEntry[], params:
 }
 
 /** codara_preview_network: list, one request in detail, or a HAR export. */
-export async function networkTool(target: BrowserTarget, params: Record<string, unknown>): Promise<unknown> {
+export async function networkTool(target: BrowserTarget, rawParams: Record<string, unknown>): Promise<unknown> {
+  // Cookie and authorization headers in the user's own browser carry live
+  // sign-ins that page scripts cannot read, so they stay redacted there.
+  const params = target.kind === "chrome" && rawParams.redact === false ? { ...rawParams, redact: true } : rawParams;
   const session = target.session;
   if (params.clear === true) {
     clearNetwork(session);

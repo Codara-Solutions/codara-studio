@@ -231,7 +231,13 @@ export async function readStorage(
   if (areas.includes("cookies")) {
     if (page.origin) {
       const cookies = await cookiesFor(target, page.url);
-      result.cookies = cookies.map((cookie) => describeCookie(cookie, options.redact));
+      // In the user's own browser an HttpOnly cookie is a live sign-in the
+      // page's scripts cannot read either, so it is never handed out.
+      const keep = (cookie: CdpCookie) => options.redact || (target.kind === "chrome" && cookie.httpOnly);
+      result.cookies = cookies.map((cookie) => describeCookie(cookie, keep(cookie)));
+      if (!options.redact && target.kind === "chrome" && cookies.some((cookie) => cookie.httpOnly)) {
+        result.note = "HttpOnly cookie values of your own browser stay redacted.";
+      }
     } else {
       result.cookies = [];
     }

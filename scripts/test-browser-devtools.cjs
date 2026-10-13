@@ -411,6 +411,32 @@ async function storageOnUserBrowser(lib) {
   await assert.rejects(lib.clearStorage(target, { area: "indexeddb" }), /own browser/);
   const local = await lib.clearStorage(target, { area: "local" });
   assert.deepEqual(local.removed, { localStorage: 2 }, "the page's own local storage may be cleared on a shared tab");
+
+  // redact=false never hands out the live sign-ins of the user's own browser.
+  const reader = {
+    ...target,
+    session: {
+      async send(method) {
+        assert.equal(method, "Network.getCookies");
+        return { cookies: [
+          { name: "SID", value: "live-session", domain: "mail.example", path: "/", expires: -1, httpOnly: true, secure: true },
+          { name: "theme", value: "dark", domain: "mail.example", path: "/", expires: -1, httpOnly: false, secure: false },
+        ] };
+      },
+    },
+  };
+  const cookies = await lib.readStorage(reader, { area: "cookies", redact: false });
+  assert.deepEqual(cookies.cookies.map((cookie) => [cookie.name, cookie.value]), [["SID", "[redacted] (12 chars)"], ["theme", "dark"]]);
+  assert.match(cookies.note, /HttpOnly/);
+  const { session, emit } = fakeNetSession(lib);
+  emit("Network.requestWillBeSent", { requestId: "9", type: "Fetch", timestamp: 1, request: { url: "https://mail.example/api", method: "GET", headers: { Authorization: "Bearer live", Cookie: "SID=live-session" } } });
+  const shared = { ...target, session };
+  const detail = await lib.networkTool(shared, { id: "9", redact: false, body: false });
+  assert.equal(detail.request.requestHeaders.Authorization, "[redacted]");
+  assert.equal(detail.request.requestHeaders.Cookie, "[redacted]");
+  const own = await lib.networkTool({ ...shared, kind: "preview" }, { id: "9", redact: false, body: false });
+  assert.equal(own.request.requestHeaders.Authorization, "Bearer live", "a Codara tab's own requests may be read in full");
+  session.dispose();
 }
 
 function targetFor(lib, session, ref = "tab-1") {
