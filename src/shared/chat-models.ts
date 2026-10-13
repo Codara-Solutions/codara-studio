@@ -214,6 +214,7 @@ export function clampEffort(
 export function buildVisibleGroups({
   piCatalog = [],
   openRouterModels = [],
+  allGenerations = false,
 }: {
   /** Models Pi reports as usable by the connected subscriptions right now.
    * Merged under the curated rows so a model released after this build is
@@ -221,6 +222,9 @@ export function buildVisibleGroups({
   piCatalog?: PiCatalogModel[];
   /** User-verified OpenRouter favorites from Settings. */
   openRouterModels?: string[];
+  /** Every model the subscriptions serve, not only the current lineup
+   * (the picker's Edit list, where the user chooses what to show). */
+  allGenerations?: boolean;
 }): ChatBackendGroup[] {
   const groups: ChatBackendGroup[] = [];
   // Pi is bundled and version-pinned with Studio. OAuth readiness is checked
@@ -231,11 +235,12 @@ export function buildVisibleGroups({
   // two filtered lists instead would reorder the group before its deliberate
   // presentation sort.
   const piMerged = mergePiModels(PI_MODELS, piCatalog);
-  const modelsFor = (family: "claude" | "codex" | "grok") =>
-    keepCurrentGeneration(
-      piMerged.filter((model) => familyForModelId(decomposeModelId(model.id).baseId) === family),
-      family === "codex" ? "openai" : family === "claude" ? "anthropic" : "xai",
-    );
+  const modelsFor = (family: "claude" | "codex" | "grok") => {
+    const all = piMerged.filter((model) => familyForModelId(decomposeModelId(model.id).baseId) === family);
+    return allGenerations
+      ? all
+      : keepCurrentGeneration(all, family === "codex" ? "openai" : family === "claude" ? "anthropic" : "xai");
+  };
   // Split by model family rather than listing one flat model collection.
   // OpenAI leads the picker while the default is resolved independently.
   groups.push({

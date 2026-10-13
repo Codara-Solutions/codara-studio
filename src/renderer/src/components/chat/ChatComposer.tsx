@@ -33,6 +33,7 @@ import DismissErrorButton from "./DismissErrorButton";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import { readModelVisibility, shownModelGroups } from "./composer/model-visibility";
 import { prefillDraft } from "./composer/prefill-draft";
 import ProfilePicker from "./composer/ProfilePicker";
 import CapabilitiesButton from "./composer/CapabilitiesButton";
@@ -42,7 +43,6 @@ import {
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
   EFFORT_LABELS,
-  buildVisibleGroups,
   composeModelId,
   clampEffort,
   decomposeModelId,
@@ -445,7 +445,7 @@ export default function ChatComposer({
         // A pick that landed while this was in flight outranks every loaded
         // default, including an older preference read.
         if (selectorsChosenRef.current) return;
-        const groups = buildVisibleGroups({ piCatalog, openRouterModels });
+        const groups = shownModelGroups(piCatalog, openRouterModels, readModelVisibility());
         const first = resolvePreferredChatModel(
           groups,
           preferredModel,
@@ -1287,10 +1287,11 @@ export default function ChatComposer({
       // cache), which turned the chord into a dead key. The menu has the same
       // contract — it paints the curated rows immediately and folds the live
       // catalog in whenever it lands.
-      const models = buildVisibleGroups({
-        piCatalog: piCatalogRef.current,
-        openRouterModels: openRouterModelsRef.current,
-      }).flatMap(
+      const models = shownModelGroups(
+        piCatalogRef.current,
+        openRouterModelsRef.current,
+        readModelVisibility(),
+      ).flatMap(
         (group) => group.models,
       );
       if (models.length === 0) return;

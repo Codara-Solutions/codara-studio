@@ -210,6 +210,26 @@ test("the model picker shows one provider at a time and hides models the user un
     await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" })).toHaveCount(0);
     await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Sol" })).toBeVisible();
 
+    // Edit list offers every model the subscription serves, including an
+    // older generation the default lineup leaves out, and ticking adds it.
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("pi-models:catalog");
+      ipcMain.handle("pi-models:catalog", () => [
+        { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai-codex", reasoning: true },
+        { id: "gpt-5.2", label: "GPT-5.2", provider: "openai-codex", reasoning: true },
+      ]);
+    });
+    await page.keyboard.press("Escape");
+    await trigger.click();
+    await tabs.filter({ hasText: "OpenAI" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toHaveCount(0);
+    await menu.getByRole("button", { name: "Edit list" }).click();
+    const older = menu.getByRole("option").filter({ hasText: "GPT-5.2" });
+    await expect(older).toHaveAttribute("aria-selected", "false");
+    await older.click();
+    await menu.getByRole("button", { name: "Done" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toBeVisible();
+
     // The choice survives closing the picker and reloading the window.
     await page.keyboard.press("Escape");
     await page.reload();
@@ -218,6 +238,7 @@ test("the model picker shows one provider at a time and hides models the user un
     await tabs.filter({ hasText: "OpenAI" }).click();
     await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Sol" })).toBeVisible();
     await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" })).toHaveCount(0);
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toBeVisible();
   } finally {
     await app.close();
   }

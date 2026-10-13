@@ -11,6 +11,15 @@ import {
   type ChatModelOption,
 } from "./types";
 import AnchoredMenu from "./AnchoredMenu";
+import {
+  allModelGroups,
+  isModelShown,
+  modelVisibilityKey,
+  readModelVisibility,
+  shownModelGroups,
+  writeModelVisibility,
+  type ModelVisibility,
+} from "./model-visibility";
 import { openAccountsSettings, useCoraAccountReadiness } from "../account-readiness";
 
 interface Props {
@@ -58,9 +67,21 @@ export default function ModelThinkingPicker({
   const [openRouterModels, setOpenRouterModels] = useState<string[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const { usableProviders } = useCoraAccountReadiness();
-  const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog, openRouterModels });
+  const [visibility, setVisibility] = useState<ModelVisibility>(readModelVisibility);
   const activeCompoundId = composeModelId(activeModelId, false);
-  const activeOption = groups
+  const isActive = (model: ChatModelOption) =>
+    model.id === activeCompoundId && model.backend === activeBackend;
+  const allGroups: ChatBackendGroup[] = allModelGroups(piCatalog, openRouterModels);
+  const groups: ChatBackendGroup[] = shownModelGroups(piCatalog, openRouterModels, visibility, isActive);
+  const lineup = new Set(
+    buildVisibleGroups({ piCatalog, openRouterModels }).flatMap((group) => group.models.map(modelVisibilityKey)),
+  );
+  const toggleShown = (model: ChatModelOption) => {
+    const next = { ...visibility, [modelVisibilityKey(model)]: !isModelShown(model, lineup, visibility) };
+    setVisibility(next);
+    writeModelVisibility(next);
+  };
+  const activeOption = allGroups
     .filter((group) => group.backend === activeBackend)
     .flatMap((group) => group.models)
     .find((model) => model.id === activeCompoundId);
@@ -158,6 +179,9 @@ export default function ModelThinkingPicker({
         ) : (
           <ModelPicker
             groups={groups}
+            allGroups={allGroups}
+            isShown={(model) => isModelShown(model, lineup, visibility)}
+            onToggleShown={toggleShown}
             activeBackend={activeBackend}
             activeCompoundId={activeCompoundId}
             usableProviders={usableProviders}
@@ -173,27 +197,7 @@ export default function ModelThinkingPicker({
   );
 }
 
-const HIDDEN_MODELS_KEY = "codara.modelPicker.hidden";
 const PROVIDER_TAB_KEY = "codara.modelPicker.provider";
-
-const modelKey = (model: ChatModelOption) => `${model.backend}:${model.id}`;
-
-function readHiddenModels(): Set<string> {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(HIDDEN_MODELS_KEY) ?? "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function writeHiddenModels(hidden: ReadonlySet<string>): void {
-  try {
-    localStorage.setItem(HIDDEN_MODELS_KEY, JSON.stringify([...hidden]));
-  } catch {
-    // Storage can be unavailable; the choice then lasts for this window only.
-  }
-}
 
 function readProviderTab(): string | null {
   try {
@@ -207,19 +211,27 @@ function writeProviderTab(key: string): void {
   try {
     localStorage.setItem(PROVIDER_TAB_KEY, key);
   } catch {
-    // See writeHiddenModels.
+    // Storage can be unavailable; the tab then resets next time.
   }
 }
 
 function ModelPicker({
   groups,
+  allGroups,
+  isShown,
+  onToggleShown,
   activeBackend,
   activeCompoundId,
   usableProviders,
   onPick,
   onConnect,
 }: {
+  /** What the picker lists: the user's choices applied to the catalog. */
   groups: ChatBackendGroup[];
+  /** Every model the subscriptions serve, for Edit list. */
+  allGroups: ChatBackendGroup[];
+  isShown: (model: ChatModelOption) => boolean;
+  onToggleShown: (model: ChatModelOption) => void;
   activeBackend: ChatBackendKind;
   activeCompoundId: string;
   /** Null while account state is unknown: nothing is marked unconnected. */
@@ -229,11 +241,14 @@ function ModelPicker({
 }) {
   const isActive = (model: ChatModelOption) =>
     model.id === activeCompoundId && model.backend === activeBackend;
-  const filled = groups.filter((group) => group.models.length > 0);
+  const [editing, setEditing] = useState(false);
+  // A provider keeps its tab while every model of it is hidden, so Edit list
+  // can bring them back.
+  const filled = (editing ? allGroups : groups).filter((group) =>
+    allGroups.some((full) => full.key === group.key && full.models.length > 0),
+  );
   const hasModels = filled.length > 0;
   const activeGroupKey = filled.find((group) => group.models.some(isActive))?.key;
-  const [hidden, setHidden] = useState<Set<string>>(readHiddenModels);
-  const [editing, setEditing] = useState(false);
   const [tab, setTab] = useState<string | null>(() => activeGroupKey ?? readProviderTab());
   // Opens on the current model's provider; a tab the user picked is
   // remembered for when no model of the list is current.
@@ -243,13 +258,6 @@ function ModelPicker({
   const chooseTab = (key: string) => {
     setTab(key);
     writeProviderTab(key);
-  };
-  const toggleHidden = (model: ChatModelOption) => {
-    const next = new Set(hidden);
-    if (next.has(modelKey(model))) next.delete(modelKey(model));
-    else next.add(modelKey(model));
-    setHidden(next);
-    writeHiddenModels(next);
   };
 
   return (
@@ -294,11 +302,7 @@ function ModelPicker({
           const provider = group.models[0] ? subscriptionForChatModel(group.models[0]) : null;
           const unconnected =
             usableProviders !== null && provider !== null && !usableProviders.has(provider);
-          // The current model stays listed even when hidden, so the picker
-          // never loses track of what is selected.
-          const rows = editing
-            ? group.models
-            : group.models.filter((model) => isActive(model) || !hidden.has(modelKey(model)));
+          const rows = group.models;
           return (
             <div
               key={group.key}
@@ -329,15 +333,15 @@ function ModelPicker({
               {rows.map((model) => {
                 const active = isActive(model);
                 if (editing) {
-                  const shown = !hidden.has(modelKey(model));
+                  const shown = isShown(model);
                   return (
                     <button
-                      key={modelKey(model)}
+                      key={modelVisibilityKey(model)}
                       type="button"
                       role="option"
                       aria-selected={shown}
                       className="composer-picker-row composer-picker-row-toggle"
-                      onClick={() => toggleHidden(model)}
+                      onClick={() => onToggleShown(model)}
                     >
                       <span>{model.label}</span>
                       <span className={`composer-picker-check${shown ? " is-on" : ""}`} aria-hidden>
@@ -348,7 +352,7 @@ function ModelPicker({
                 }
                 return (
                   <button
-                    key={modelKey(model)}
+                    key={modelVisibilityKey(model)}
                     type="button"
                     role="option"
                     aria-selected={active}
