@@ -3332,6 +3332,72 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   font-size: 11px;
   font-weight: 650;
 }
+.composer-picker-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.composer-picker-edit {
+  appearance: none;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 500 10px/1.4 var(--font-sans);
+  cursor: default;
+}
+.composer-picker-edit:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.composer-picker-edit:focus-visible,
+.composer-provider-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.composer-provider-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 5px 5px 0;
+  overflow-x: auto;
+}
+.composer-provider-tab {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 10.5px/1.3 var(--font-sans);
+  cursor: default;
+}
+.composer-provider-tab:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.composer-provider-tab.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent-edge);
+  color: var(--ink);
+}
+.composer-picker-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--accent-ink, #fff);
+  font-size: 9px;
+}
+.composer-picker-check.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
 .composer-picker-title.is-substep {
   border-top: 1px solid var(--rule-soft);
   border-bottom: 0;
