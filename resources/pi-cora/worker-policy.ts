@@ -98,6 +98,8 @@ const FENCE_BRIDGE_SHELL = [
   "codara_terminal_read",
   "codara_terminal_list",
   "codara_terminal_close",
+  // servers stream: starts and stops the workspace's dev servers.
+  "codara_terminal_servers",
   "codara_preview_evaluate",
   "codara_preview_run",
 ];

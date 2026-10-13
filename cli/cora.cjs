@@ -80,6 +80,9 @@ ${c.bold("TOOLS")}  the codara-studio tools, for agents without MCP
   tool list                    browser, terminal, worktree and other tools here
   tool help <name>             a tool's description and arguments
   tool <name> [json] [--arg v] call it; images are saved and their paths printed
+  server list|start|stop|restart|logs|save|forget [id] [--command C --port N]
+                               this workspace's dev servers, kept running by
+                               Codara apart from any agent (\`cora server help\`)
 
 ${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
 
@@ -191,6 +194,10 @@ async function main() {
     case "tools":
       // Tool arguments are the tool's own flags, so they skip parseArgs.
       return require("./commands/tool.cjs").tool(rest);
+
+    case "server":
+    case "servers":
+      return require("./commands/servers.cjs").servers(rest);
 
     case "rpc": {
       const { rpcRaw } = require("./lib/rpc.cjs");
