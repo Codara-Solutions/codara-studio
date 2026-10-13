@@ -197,6 +197,13 @@ export function isAgentOwnedPreviewTab(tabId: string): boolean {
   return agentPaneOwners.has(tabId);
 }
 
+/** Who drives a tab: the run it belongs to, or the terminal pane whose agent opened it. */
+export function previewTabOwner(tabId: string): { runId: string | null; paneId: string | null } | null {
+  const runId = entries.get(tabId)?.runId ?? null;
+  const paneId = agentPaneOwners.get(tabId) ?? null;
+  return runId || paneId ? { runId, paneId } : null;
+}
+
 // A tab a page opened belongs to whoever owned the page's tab.
 export function inheritPreviewTabOwner(tabId: string, sourceTabId: string): void {
   const paneId = agentPaneOwners.get(sourceTabId);

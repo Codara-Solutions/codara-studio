@@ -7,6 +7,7 @@ import { isRemotePath } from "../../../shared/remote";
 import type { PointInspection } from "../../../shared/point-format";
 import type { PointRegionInput } from "../../../shared/preview-point";
 import type { IpcHandle } from "../../ipc";
+import { writeBrowserArtifact } from "../artifacts";
 import { resolveBrowserTarget } from "../targets";
 import { inspectPage, MAX_INSPECTED_ELEMENTS, MAX_REGIONS, type PointInspectRequest } from "./inspect";
 
@@ -51,6 +52,33 @@ export async function inspectFromRenderer(request: PointInspectIpcRequest): Prom
   return inspectPage(target, { selectors, regions, clearAttribute, crops, workspaceRoot: await workspaceRootFor(workspaceId) });
 }
 
+export interface PointSaveImageRequest {
+  workspaceId: string;
+  label: string;
+  mimeType: "image/jpeg" | "image/png";
+  /** Base64. */
+  data: string;
+}
+
+const MAX_SAVED_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Saves an image the picker or a comment made (an element crop, an annotated
+ * screenshot) under the workspace's browser screenshots, for text the user
+ * copies: a copied path must outlive the popover.
+ */
+export async function saveImageFromRenderer(request: PointSaveImageRequest): Promise<string> {
+  const workspaceId = typeof request?.workspaceId === "string" && request.workspaceId ? request.workspaceId : null;
+  if (!workspaceId) throw new Error("Open a workspace first.");
+  const ext = request.mimeType === "image/png" ? "png" : request.mimeType === "image/jpeg" ? "jpg" : null;
+  if (!ext || typeof request.data !== "string") throw new Error("Only JPEG and PNG images can be saved.");
+  const data = Buffer.from(request.data, "base64");
+  if (!data.length || data.length > MAX_SAVED_IMAGE_BYTES) throw new Error("The image is empty or too large to save.");
+  const label = typeof request.label === "string" ? request.label.slice(0, 60) : "image";
+  return writeBrowserArtifact(workspaceId, "screenshots", { label, ext, data });
+}
+
 export function registerPointIpc(handle: IpcHandle): void {
   handle("point:inspect", async (_event, request: PointInspectIpcRequest) => inspectFromRenderer(request));
+  handle("point:saveImage", async (_event, request: PointSaveImageRequest) => saveImageFromRenderer(request));
 }

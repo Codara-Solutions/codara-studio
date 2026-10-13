@@ -54,7 +54,9 @@ export type CommandId =
   | "agent.openModelPicker"
   | "agent.openEffortPicker"
   | "chat.stop"
-  | "markdown.togglePreview";
+  | "markdown.togglePreview"
+  | "browser.pickElement"
+  | "browser.comment";
 
 export type CommandGroup =
   | "General"
@@ -444,5 +446,20 @@ export const COMMANDS: Command[] = [
     label: "Toggle markdown preview",
     group: "View",
     defaultChords: [mod("v", { shift: true })],
+  },
+  {
+    // Mod+Shift+E sits next to Mod+E (new browser tab) and is otherwise free.
+    // The focused browser tab, or the one docked in the focused cell, reacts.
+    id: "browser.pickElement",
+    label: "Point at an element to send to an agent",
+    group: "View",
+    defaultChords: [mod("e", { shift: true })],
+  },
+  {
+    // Mod+Shift+X ("mark"): Alt chords are dead keys on macOS layouts.
+    id: "browser.comment",
+    label: "Comment on the browser page",
+    group: "View",
+    defaultChords: [mod("x", { shift: true })],
   },
 ];

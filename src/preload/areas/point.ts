@@ -15,6 +15,16 @@ export interface PointInspectRequest {
   crops?: "none" | "data" | "file" | "both";
 }
 
+export interface PointSaveImageRequest {
+  workspaceId: string;
+  label: string;
+  mimeType: "image/jpeg" | "image/png";
+  /** Base64. */
+  data: string;
+}
+
 export const pointApi = {
   inspect: (request: PointInspectRequest): Promise<PointInspection> => ipcRenderer.invoke("point:inspect", request),
+  /** Saves under the workspace's browser screenshots and returns the path. */
+  saveImage: (request: PointSaveImageRequest): Promise<string> => ipcRenderer.invoke("point:saveImage", request),
 };

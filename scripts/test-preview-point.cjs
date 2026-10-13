@@ -131,6 +131,8 @@ function fixturePage(port) {
 <footer><a id="attr" href="/about" data-inspector-relative-path="src/Footer.tsx" data-inspector-line="9" data-inspector-column="3">About</a></footer>
 <section class="pricing-card"><h2 id="plain">Choose your plan</h2></section>
 <div id="box-area" style="position:absolute;left:400px;top:300px;width:200px;height:120px;background:#eee"><span id="inner" style="display:block;width:60px;height:30px">in</span></div>
+<div class="plan-card"><b>Pro</b><i>For teams</i></div>
+<div class="css-1x2y3z"><b>Free</b><i>For one</i></div>
 <script>
   function Hero() {} function App() {}
   const btn = document.getElementById("react-btn");
@@ -274,6 +276,33 @@ async function inChromium(lib, label) {
     assert.match(comment, /has <div> "in" @\S+ #box-area/);
     assert.match(comment, /2\. \(no note\); arrow from page 300,300 to 420,410/);
     assert.match(comment, /in <span> "in" @\S+ #inner/);
+
+    // The picker overlay's page helpers, as the renderer sends them: the
+    // hover helper installs once and answers in page pixels plus the scale
+    // back to the overlay; the outline lists pickable elements with refs
+    // the inspection resolves.
+    const factories = `${lib.createPreviewLocator.toString()}, ${lib.createPreviewDOM.toString()}`;
+    const hover = (call) => target.evaluate(`(window.__codaraPointHover || (${lib.installHoverProbe.toString()})(${factories}))(${JSON.stringify(call)})`);
+    const box = react.box;
+    const atButton = await hover({ op: "at", x: (box.x + box.width / 2) / 2, y: (box.y + box.height / 2) / 2, hostWidth: 500 });
+    assert.equal(atButton.ref, react.ref, `${label}: the hover helper and the inspection share refs`);
+    assert.equal(atButton.scale, 2, "a 500px overlay over a 1000px page maps at 2");
+    assert.equal(atButton.label, "button#react-btn.cta");
+    assert.deepEqual(atButton.padding, [8, 16, 8, 16]);
+    assert.equal(await target.evaluate("typeof window.__codaraPointHover"), "function", "installed for later moves");
+    const parent = await hover({ op: "parent", ref: react.ref, hostWidth: 1000 });
+    assert.equal(parent.label, "div#hero.wrap");
+    assert.equal((await hover({ op: "child", ref: parent.ref, hostWidth: 1000 })).ref, react.ref);
+    const outline = await target.evaluate(`(${lib.outlineProbe.toString()})({ max: 200 }, (${lib.createPreviewLocator.toString()})(${lib.createPreviewDOM.toString()}))`);
+    const row = outline.rows.find((r) => r.ref === react.ref);
+    assert.ok(row, `${label}: the outline lists the button`);
+    assert.equal(row.label, "button#react-btn.cta");
+    assert.equal(row.name, "Get started");
+    assert.ok(row.depth > outline.rows.find((r) => r.label === "div#hero.wrap").depth, "rows are indented under what holds them");
+    assert.equal(outline.truncated, false);
+    assert.ok(outline.rows.some((r) => r.label === "div.plan-card"), "a container with a written class name is listed");
+    assert.ok(!outline.rows.some((r) => r.label.includes("css-1x2y3z")), "a hashed class name does not make a container notable");
+    assert.equal((await target.evaluate(`(${lib.outlineProbe.toString()})({ max: 2 }, (${lib.createPreviewLocator.toString()})(${lib.createPreviewDOM.toString()}))`)).truncated, true);
   } finally {
     server.close();
     await chromium.close();
@@ -304,6 +333,9 @@ function formatting(lib) {
       export * from "./source-files";
       export * from "./inspect";
       export * from "../../../shared/point-format";
+      export { installHoverProbe, outlineProbe } from "../../../shared/preview-point";
+      export { createPreviewLocator } from "../../../shared/preview-locator";
+      export { createPreviewDOM } from "../../../shared/preview-dom";
     `;
     const lib = await bundle(source);
     await sourceMaps(lib);

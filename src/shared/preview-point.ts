@@ -653,3 +653,59 @@ export function installHoverProbe(createLocator: typeof createPreviewLocator, cr
   host.__codaraPointHover = helper;
   return helper;
 }
+
+/** One row of the picker's outline: an element worth pointing at, indented under the rows that hold it. */
+export interface OutlineRow {
+  ref: string;
+  depth: number;
+  /** tag#id.class, as the hover label shows it. */
+  label: string;
+  role: string;
+  name: string;
+}
+
+/**
+ * The page as a short tree for picking without the mouse: landmarks,
+ * headings, controls, images, list items, elements with an id or their own
+ * text, and named containers (a hand-written class around several elements,
+ * like a card). Elements the user cannot see are skipped with their subtree.
+ */
+export function outlineProbe(args: { max?: number }, locator: ReturnType<typeof createPreviewLocator>): { rows: OutlineRow[]; truncated: boolean } {
+  const max = Math.max(1, Math.min(1000, args.max ?? 400));
+  const rows: OutlineRow[] = [];
+  let truncated = false;
+  const clean = (text: string | null | undefined) => (text ?? "").replace(/\s+/g, " ").trim();
+  const skip = /^(SCRIPT|STYLE|NOSCRIPT|META|LINK|TEMPLATE|svg|path)$/i;
+  const notable = /^(header|nav|main|aside|footer|section|article|form|dialog|h[1-6]|a|button|input|select|textarea|label|img|video|canvas|li|table|figure|summary)$/;
+  // Hashed names from CSS modules and CSS-in-JS say nothing about the element.
+  const named = (name: string) =>
+    /^[A-Za-z][\w-]{1,40}$/.test(name) &&
+    !/\d{3}|^(css|sc|jsx|svelte|emotion)-|__[a-zA-Z0-9]{5,}$|[_-](?=[a-z]*\d)(?=\d*[a-z])[a-z0-9]{5,}$/i.test(name);
+  const walk = (el: Element, depth: number) => {
+    if (truncated || skip.test(el.tagName)) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return;
+    const tag = el.tagName.toLowerCase();
+    const ownText = clean(Array.from(el.childNodes).filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join(" "));
+    const include = locator.dom.visible(el) &&
+      (notable.test(tag) || el.id !== "" || el.hasAttribute("role") || el.hasAttribute("data-testid") || ownText.length > 0 ||
+        (el.children.length > 1 && Array.from(el.classList).some(named)));
+    if (include) {
+      if (rows.length >= max) {
+        truncated = true;
+        return;
+      }
+      const classes = Array.from(el.classList).filter((name) => /^[A-Za-z][\w-]{0,40}$/.test(name)).slice(0, 2);
+      rows.push({
+        ref: locator.ref(el),
+        depth,
+        label: tag + (el.id ? `#${el.id}` : "") + (classes.length ? `.${classes.join(".")}` : ""),
+        role: locator.role(el),
+        name: (locator.accessibleName(el) || ownText).slice(0, 80),
+      });
+    }
+    for (const child of Array.from(el.children)) walk(child, depth + (include ? 1 : 0));
+  };
+  walk(document.body, 0);
+  return { rows, truncated };
+}

@@ -310,6 +310,66 @@ export function DrawIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function MoveEdgeIcon({ size = 14 }: { size?: number }) {
+  // A bar with arrows above and below: "move this bar to the other edge".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2.5 7 H11.5" />
+      <path d="M7 1.5 V4.5 M5.5 3 L7 1.5 L8.5 3" />
+      <path d="M7 9.5 V12.5 M5.5 11 L7 12.5 L8.5 11" />
+    </svg>
+  );
+}
+
+export function CommentIcon({ size = 14 }: { size?: number }) {
+  // A speech bubble with a box inside: "mark this part of the page and say why".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2.5 2.5 H11.5 V9.5 H6 L3.5 11.8 V9.5 H2.5 Z" />
+      <path d="M5 5 H9" />
+      <path d="M5 7 H7.5" />
+    </svg>
+  );
+}
+
+export function TabIdIcon({ size = 14 }: { size?: number }) {
+  // A hash mark: the id agents pass as tabId.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+    >
+      <path d="M5.5 2.5 L4.5 11.5" />
+      <path d="M9.5 2.5 L8.5 11.5" />
+      <path d="M2.5 5.2 H11.8" />
+      <path d="M2.2 8.8 H11.5" />
+    </svg>
+  );
+}
+
 export function HistoryIcon({ size = 14 }: { size?: number }) {
   // A clock face with a counter-clockwise arrow — the universal "history"
   // glyph. Used on the Codara chat header's Chats button to open the
