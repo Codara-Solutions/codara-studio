@@ -13,6 +13,14 @@ import { restoreUserZdotdir, sanitizeElectronViteDevEnv } from "./src/main/env-s
 // SPARK_E2E_BACKGROUND=0 npx playwright test.
 process.env.SPARK_E2E_BACKGROUND ??= "1";
 
+// On Linux the run's windows open on a private Xvfb display instead of the
+// desktop (scripts/virtual-display.cjs). The runner starts it while loading
+// this file; workers load it again and inherit the same display.
+const { useVirtualDisplay } = require("./scripts/virtual-display.cjs") as {
+  useVirtualDisplay: (env?: NodeJS.ProcessEnv) => string | null;
+};
+useVirtualDisplay();
+
 // A run started from a Codara pane inherits the pane's environment, and the
 // test app must see what a plain terminal would give it instead:
 // - electron-vite's dev wiring: ELECTRON_RENDERER_URL alone makes the test
