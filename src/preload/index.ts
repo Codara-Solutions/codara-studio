@@ -35,6 +35,7 @@ import type {
 } from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
+import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { serversApi } from "./areas/servers";
 import type {
@@ -1749,6 +1750,7 @@ const api = {
   },
   servers: serversApi,
   chromeLink: chromeLinkApi,
+  capture: captureApi,
 };
 
 function isBrowserUrl(url: string): boolean {

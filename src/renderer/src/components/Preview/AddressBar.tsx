@@ -71,6 +71,8 @@ interface Props {
   onOpenExternal: (url: string) => void;
   onToggleInspect: () => void;
   onToggleDraw: () => void;
+  /** Capture controls (responsive view, record), rendered after Draw. */
+  captureTools?: React.ReactNode;
 }
 
 const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
@@ -88,6 +90,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     onOpenExternal,
     onToggleInspect,
     onToggleDraw,
+    captureTools,
   },
   ref,
 ) {
@@ -448,6 +451,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
             active={drawing}
             onClick={onToggleDraw}
           />
+          {captureTools}
           <ChromeButton
             label={<ExternalLinkIcon size={13} />}
             title="Open in system browser"
