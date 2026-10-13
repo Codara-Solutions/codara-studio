@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
-// Dev servers and the status view (src/main/servers/). Drives the real keeper with real child processes and
+// Dev servers, the status view and per-runtime launch arguments
+// (src/main/servers/). Drives the real keeper with real child processes and
 // a fixture HTTP server on free ports, so these hold for real:
 //
 //   - a started server is remembered (command, cwd, port, env NAMES, the URL
@@ -19,6 +20,9 @@
 //     URLs of other processes, and adopts the pane for the workspace
 //   - an adopted agent terminal survives its run's cleanup and stays
 //     writable by its run and by agents without a run, never by another run
+//   - launch arguments: shell syntax and Codara's own flags are refused,
+//     the Chrome toggle adds --chrome to Claude Code only, and nothing is
+//     written outside Codara's home
 //   - `cora server` maps onto codara_terminal_servers with the caller's pane
 //
 //   node scripts/test-servers.cjs
@@ -621,6 +625,82 @@ async function main() {
     assert.deepEqual(status.snapshotActivities("ws-1").map((entry) => [entry.id, entry.startedAt]), [["rec-1", 5_000]]);
     done();
     assert.deepEqual(status.snapshotActivities("ws-1"), []);
+  });
+
+  const launch = await load(
+    `
+      export * from "./agent-launch-integration";
+      export * from "./servers/launch-args";
+    `,
+    "launch",
+  );
+
+  await check("launch arguments: one line of flags, quoted values, nothing a shell would run", async () => {
+    assert.deepEqual(launch.checkLaunchArgs("claude", `--model opus --append-system-prompt "be brief; really"`), {
+      ok: true,
+      argv: ["--model", "opus", "--append-system-prompt", "be brief; really"],
+      error: null,
+    });
+    assert.deepEqual(launch.checkLaunchArgs("codex", "--search -c model_reasoning_effort=high").argv, ["--search", "-c", "model_reasoning_effort=high"]);
+    for (const [runtime, text, pattern] of [
+      ["claude", "--verbose; rm -rf ~", /shell syntax/],
+      ["claude", "--x $(whoami)", /shell syntax/],
+      ["claude", '--x "$HOME"', /never expanded/],
+      ["claude", "--x 'open", /not closed/],
+      ["claude", "--x\n--y", /one line/],
+      ["claude", "fix the bug", /Start with a flag/],
+      ["claude", "--settings mine.json", /set by Codara/],
+      ["claude", "--mcp-config=x.json", /set by Codara/],
+      ["codex", "-c mcp_servers.codara-studio.command=x", /set by Codara/],
+      ["codex", "--config=notify=[]", /set by Codara/],
+      ["grok", "--resume abc", /set by Codara/],
+      ["pi", "--mode rpc", /set by Codara/],
+    ]) {
+      const verdict = launch.checkLaunchArgs(runtime, text);
+      assert.equal(verdict.ok, false, `${runtime} ${JSON.stringify(text)}`);
+      assert.match(verdict.error, pattern, `${runtime} ${JSON.stringify(text)}`);
+    }
+    assert.equal(launch.checkLaunchArgs("claude", `--x ${"y".repeat(1_001)}`).ok, false);
+  });
+
+  await check("launch arguments reach each launch and the typed-command files, nothing else", async () => {
+    await launch.writeIntegrationFiles({
+      home: CODARA,
+      python: "python3",
+      pythonAvailable: true,
+      hookScriptSource: path.join(ROOT, "resources", "claude-hooks", "codara-hook.py"),
+      notifyScriptSource: path.join(ROOT, "resources", "codex-hooks", "codara-codex-notify.py"),
+    });
+    const dir = path.join(CODARA, "integrations");
+    assert.equal(fs.readFileSync(path.join(dir, "grok", "args.txt"), "utf8"), "");
+    const before = launch.claudeLaunchArgs({ userArgs: [] });
+    assert.ok(!before.includes("--chrome"));
+
+    await assert.rejects(launch.saveLaunchArgsSettings({ args: { claude: "--verbose && curl x" }, claudeChrome: false }), /claude: /);
+    await launch.saveLaunchArgsSettings({
+      args: { claude: "--verbose", codex: "--search", grok: "--disable-web-search", pi: "--thinking high" },
+      claudeChrome: true,
+    });
+    await launch.writeShellArgsFiles();
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }).slice(before.length), ["--verbose", "--chrome"]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: ["mcp", "list"] }), [], "a management command got flags");
+    assert.deepEqual(launch.codexLaunchArgs({ userArgs: [] }).slice(-1), ["--search"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("grok", { userArgs: ["fix the bug"] }), ["--disable-web-search"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("grok", { userArgs: ["login"] }), []);
+    assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: [] }), ["--thinking", "high"]);
+    assert.deepEqual(launch.plainAgentLaunchArgs("pi", { userArgs: ["install", "x"] }), []);
+    const typed = (cli) => fs.readFileSync(path.join(dir, cli, "args.txt"), "utf8").split("\n").filter(Boolean);
+    assert.deepEqual(typed("claude").slice(-2), ["--verbose", "--chrome"]);
+    assert.deepEqual(typed("grok"), ["--disable-web-search"]);
+    assert.deepEqual(typed("pi"), ["--thinking", "high"]);
+
+    await launch.saveLaunchArgsSettings({ args: { claude: "--no-chrome" }, claudeChrome: true });
+    assert.ok(!launch.claudeLaunchArgs({ userArgs: [] }).includes("--chrome"), "--chrome next to --no-chrome");
+    await launch.saveLaunchArgsSettings({ args: {}, claudeChrome: false });
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), before);
+    assert.deepEqual(fs.readdirSync(HOME), [], "something was written into the user's home");
+    const saved = JSON.parse(fs.readFileSync(path.join(CODARA, "agent-launch-args.json"), "utf8"));
+    assert.deepEqual(saved, { version: 1, args: {}, claudeChrome: false });
   });
 
   await check("cora server maps onto codara_terminal_servers with the caller's pane", async () => {

@@ -58,6 +58,7 @@ import {
   claudeLaunchArgs,
   codexLaunchArgs,
   integrationFilesReady,
+  plainAgentLaunchArgs,
 } from "./agent-launch-integration";
 import { mintPaneSocketCapability } from "./agent-socket-capabilities";
 import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
@@ -782,7 +783,7 @@ async function spawnWithSessionLock(
         ? claudeLaunchArgs({ userArgs })
         : parsedStartup.runtime === "codex"
           ? codexLaunchArgs({ userArgs, trustCwd: opts.cwd })
-          : [];
+          : plainAgentLaunchArgs("grok", { userArgs });
     resolvedStartup = formatManualAgentStartup(
       { ...parsedStartup, childArgv: [argv0, ...injected, ...userArgs] },
       binary,

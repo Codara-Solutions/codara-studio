@@ -1,11 +1,20 @@
-// Boot and IPC entry of the dev-server keeper and the status view. index.ts and ipc.ts call these once, so the
+// Boot and IPC entry of the dev-server keeper, the status view and the
+// per-runtime launch arguments. index.ts and ipc.ts call these once, so the
 // work behind them never edits either shared file. The renderer side is
 // window.spark.servers (src/preload/areas/servers.ts).
 
 import { app } from "electron";
 
-import type { DevServerSaveInput, DevServerStartInput } from "@shared/servers";
+import {
+  LAUNCH_ARG_RUNTIMES,
+  type DevServerSaveInput,
+  type DevServerStartInput,
+  type LaunchArgRuntime,
+  type LaunchArgsSettings,
+} from "@shared/servers";
+import { writeShellArgsFiles } from "../agent-launch-integration";
 import type { IpcHandle } from "../ipc";
+import { checkLaunchArgs, readLaunchArgsSettings, saveLaunchArgsSettings } from "./launch-args";
 import {
   activeWorkspaceId,
   serverKeeper,
@@ -60,4 +69,17 @@ export function registerServersIpc(handle: IpcHandle): void {
   });
   handle("servers:save", (_event, input: DevServerSaveInput) => serverKeeper().save({ ...input, workspaceId: workspaceIdOf(input) }));
   handle("servers:forget", (_event, input: unknown) => serverKeeper().forget(workspaceIdOf(input), idOf(input)));
+
+  handle("servers:launchArgs:get", () => readLaunchArgsSettings());
+  handle("servers:launchArgs:check", (_event, input: { runtime?: unknown; text?: unknown }) => {
+    const runtime = input?.runtime as LaunchArgRuntime;
+    if (!(LAUNCH_ARG_RUNTIMES as readonly string[]).includes(runtime)) throw new Error("unknown runtime");
+    return checkLaunchArgs(runtime, typeof input.text === "string" ? input.text : "");
+  });
+  handle("servers:launchArgs:set", async (_event, input: LaunchArgsSettings) => {
+    const saved = await saveLaunchArgsSettings(input);
+    // A `claude`, `codex`, `grok` or `pi` typed in a pane reads these files.
+    await writeShellArgsFiles();
+    return saved;
+  });
 }

@@ -36,6 +36,15 @@ async function loadIndex() {
   return require(outfile);
 }
 
+// The Startup flags section of the Accounts page lives in its own file; its
+// per-CLI rows take their titles from a table rather than a literal prop.
+function launchArgsRows() {
+  const source = read(path.join(COMPONENTS, "settings", "launch-args", "LaunchArgsSection.tsx"));
+  const table = [...source.matchAll(/title: "([^"]+)", placeholder:/g)].map((match) => ({ name: match[1] }));
+  assert.ok(table.length >= 4, "LaunchArgsSection lists a row per CLI");
+  return [...renderedRows(source), ...table];
+}
+
 // Which page each function of SettingsDialog.tsx draws on. A function that
 // renders setting rows must be listed, or the coverage check fails.
 const DIALOG_FUNCTION_TABS = {
@@ -164,6 +173,9 @@ async function main() {
     for (const row of renderedRows(behavior)) {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
     }
+    for (const row of launchArgsRows()) {
+      if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (LaunchArgsSection.tsx)`);
+    }
     assert.deepEqual(missing, [], `rows without a search entry:\n  ${missing.join("\n  ")}`);
   });
 
@@ -186,6 +198,7 @@ async function main() {
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );
+    for (const row of launchArgsRows()) rendered.agents.add(row.name);
     rendered.capabilities = new Set([
       ...renderedRows(read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"))).map((row) => row.name),
       "Auto-compact context at",
@@ -258,6 +271,9 @@ async function main() {
     assert.equal(top("fringe"), "Fringe");
     assert.equal(top("auto compact"), "Auto-compact context at");
     assert.equal(top("fast mode"), "Fast mode");
+    assert.equal(top("connect to chrome"), "Connect to Chrome");
+    assert.equal(top("codex flags"), "Codex flags");
+    assert.equal(top("launch arguments"), "Startup flags");
     assert.equal(top("open links in"), "Open links in");
     assert.equal(top("restore sessions"), "Resume running agent sessions when Codara reopens");
     assert.equal(top("remote access"), "Allow remote access");

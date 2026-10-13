@@ -1,5 +1,5 @@
 // window.spark.servers: the renderer side of src/main/servers/ (running dev
-// servers and the status view). Kept out of index.ts so its
+// servers, the status view, launch arguments). Kept out of index.ts so its
 // owner adds calls here only.
 
 import { ipcRenderer } from "electron";
@@ -10,6 +10,9 @@ import type {
   DevServerStartInput,
   DevServerStartReply,
   DevServerStatus,
+  LaunchArgRuntime,
+  LaunchArgsCheck,
+  LaunchArgsSettings,
   StatusSnapshot,
 } from "@shared/servers";
 
@@ -30,5 +33,11 @@ export const serversApi = {
     const wrapped = (_event: unknown, payload: { workspaceId: string }): void => listener(payload);
     ipcRenderer.on("servers:changed", wrapped);
     return () => ipcRenderer.removeListener("servers:changed", wrapped);
+  },
+  launchArgs: {
+    get: (): Promise<LaunchArgsSettings> => ipcRenderer.invoke("servers:launchArgs:get"),
+    check: (runtime: LaunchArgRuntime, text: string): Promise<LaunchArgsCheck> =>
+      ipcRenderer.invoke("servers:launchArgs:check", { runtime, text }),
+    set: (settings: LaunchArgsSettings): Promise<LaunchArgsSettings> => ipcRenderer.invoke("servers:launchArgs:set", settings),
   },
 };
