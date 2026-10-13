@@ -9,3 +9,11 @@
 [data-preview-capture-paint] * {
   pointer-events: none !important;
 }
+
+/* Only the chain down to the guest needs to be visible to compose it. Its
+   siblings (the address bar, toolbars) stay hidden, so Tab cannot move the
+   user's focus into controls nobody can see. The guest's own frame lives in
+   the webview's shadow root, which this selector does not reach. */
+[data-preview-capture-paint] *:not([data-preview-capture-paint]) {
+  visibility: hidden !important;
+}

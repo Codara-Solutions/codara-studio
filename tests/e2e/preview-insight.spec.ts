@@ -152,10 +152,16 @@ test("audits and performance tools work on a background tab with the window hidd
           if (element?.closest("[data-preview-capture-paint]")) hits.push(`${x},${y} ${element.tagName} ${element.className}`);
         }
       }
-      return { held, hits: hits.slice(0, 5) };
+      // Nor can Tab reach a control there: revealed but invisible, it would
+      // take the user's typing.
+      const focusable = Array.from(document.querySelectorAll<HTMLElement>("[data-preview-capture-paint] :is(input, button, textarea, select, a[href], [tabindex])"))
+        .filter((element) => getComputedStyle(element).visibility === "visible")
+        .map((element) => `${element.tagName} ${element.getAttribute("aria-label") ?? element.className}`);
+      return { held, hits: hits.slice(0, 5), focusable: focusable.slice(0, 5) };
     });
     expect(leased.held).toBeGreaterThan(0);
     expect(leased.hits).toEqual([]);
+    expect(leased.focusable).toEqual([]);
     await request("preview.mouse", { tabId, selector: "#slow" });
     const stopped = await request("preview.performance", { tabId, action: "stop" }, 60_000);
     expect(stopped.trace.longTasks.count).toBeGreaterThanOrEqual(1);
