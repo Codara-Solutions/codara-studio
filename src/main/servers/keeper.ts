@@ -77,9 +77,15 @@ interface Live {
   startedAt: number;
   exitCode: number | null;
   log: string;
-  /** Characters dropped from the front of `log`; a cursor is an absolute offset. */
+  /**
+   * Offset of the first character of `log`. A cursor is an absolute offset
+   * that keeps growing across restarts of the server, so a reader following
+   * by cursor gets the new process's output from its start.
+   */
   dropped: number;
   env: Record<string, string>;
+  /** The span of the log last written to a file, so a reader polling an idle server rewrites nothing. */
+  written: { from: number; end: number; path: string } | null;
   detach: () => void;
 }
 
@@ -125,6 +131,8 @@ export function createServerKeeper(deps: KeeperDeps) {
   const live = new Map<string, Live>();
   /** Env values of this app session, by server; never written anywhere. */
   const envValues = new Map<string, Record<string, string>>();
+  /** Where the next process's log offsets start, per server, once an earlier one is gone. */
+  const logEnds = new Map<string, number>();
   const autoStarted = new Set<string>();
   const queues = new Map<string, Promise<unknown>>();
 
@@ -386,8 +394,9 @@ export function createServerKeeper(deps: KeeperDeps) {
       startedAt,
       exitCode: null,
       log: "",
-      dropped: 0,
+      dropped: Math.max(logEnds.get(key(workspaceId, id)) ?? 0, current ? current.dropped + current.log.length : 0),
       env: values,
+      written: null,
       detach: () => undefined,
     };
     live.set(key(workspaceId, id), entry);
@@ -426,6 +435,7 @@ export function createServerKeeper(deps: KeeperDeps) {
     if (!isRunning(entry)) {
       if (entry) {
         entry.detach();
+        logEnds.set(key(workspaceId, id), entry.dropped + entry.log.length);
         live.delete(key(workspaceId, id));
       }
       return { server: await statusOf(workspaceId, spec), alreadyStopped: true };
@@ -438,6 +448,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       await deps.stopPane(entry!.paneId, entry!.pid);
     }
     entry!.detach();
+    logEnds.set(key(workspaceId, id), entry!.dropped + entry!.log.length);
     live.delete(key(workspaceId, id));
     deps.changed(workspaceId);
     return { server: await statusOf(workspaceId, spec), alreadyStopped: false };
@@ -472,10 +483,15 @@ export function createServerKeeper(deps: KeeperDeps) {
       };
     }
     const end = entry.dropped + entry.log.length;
-    const from = typeof since === "number" && Number.isFinite(since) ? Math.max(entry.dropped, Math.min(end, Math.floor(since))) : entry.dropped;
+    // A cursor past the end comes from before Codara restarted: all of this run's output is new.
+    const from =
+      typeof since === "number" && Number.isFinite(since) && since <= end ? Math.max(entry.dropped, Math.floor(since)) : entry.dropped;
     const text = plainTerminalText(entry.log.slice(from - entry.dropped));
     if (text.length <= LOG_REPLY_CHARS) return { id, paneId: entry.paneId, text, cursor: end, truncated: false };
-    const fullPath = await deps.writeLog(workspaceId, id, text);
+    const written = entry.written;
+    const fullPath =
+      written && written.from === from && written.end === end ? written.path : await deps.writeLog(workspaceId, id, text);
+    entry.written = { from, end, path: fullPath };
     return {
       id,
       paneId: entry.paneId,
@@ -603,6 +619,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       log: "",
       dropped: 0,
       env: {},
+      written: null,
       detach: () => undefined,
     });
     deps.changed(input.workspaceId);

@@ -18,6 +18,7 @@ import "./status.css";
 // closed the chip only needs its counts, which a change event also refreshes.
 const OPEN_POLL_MS = 2_000;
 const CLOSED_POLL_MS = 15_000;
+const LOG_VIEW_CHARS = 20_000;
 
 type TabOwner = ReturnType<typeof previewTabOwners>[number];
 
@@ -111,12 +112,23 @@ function LogsView({ workspaceId, id }: { workspaceId: string; id: string }) {
 
   useEffect(() => {
     let live = true;
+    let cursor: number | undefined;
+    // Each poll asks only for what came after the last one: a full read would
+    // write the whole log to its file again every few seconds.
     const load = () => {
       void window.spark.servers
-        .logs(workspaceId, id)
+        .logs(workspaceId, id, cursor)
         .then((next) => {
           if (!live) return;
-          setLogs(next);
+          const first = cursor === undefined;
+          cursor = next.cursor;
+          setLogs((previous) =>
+            first || !previous
+              ? next
+              : next.text
+                ? { ...next, text: (previous.text + next.text).slice(-LOG_VIEW_CHARS), fullPath: next.fullPath ?? previous.fullPath }
+                : previous,
+          );
           setError(null);
         })
         .catch((reason) => {

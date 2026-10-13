@@ -206,6 +206,7 @@ function fakeSessions() {
 function keeperWith(lib, store, sessions, extra = {}) {
   const changes = [];
   const stopped = [];
+  const logWrites = [];
   const keeper = lib.createServerKeeper({
     store,
     spawn: (input) => sessions.spawn(input),
@@ -229,6 +230,7 @@ function keeperWith(lib, store, sessions, extra = {}) {
       const file = path.join(CODARA, "workspace-data", workspaceId, "servers", `${id}.log`);
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
       await fs.promises.writeFile(file, text);
+      logWrites.push(file);
       return file;
     },
     async stopPane(paneId, pid) {
@@ -240,7 +242,7 @@ function keeperWith(lib, store, sessions, extra = {}) {
     env: {},
     ...extra,
   });
-  return { keeper, changes, stopped };
+  return { keeper, changes, stopped, logWrites };
 }
 
 async function main() {
@@ -322,7 +324,7 @@ async function main() {
   const external = http.createServer((_req, res) => res.end("held"));
   try {
     const store = lib.createServerStore();
-    const { keeper, stopped } = keeperWith(lib, store, sessions);
+    const { keeper, stopped, logWrites } = keeperWith(lib, store, sessions);
     const port = await freePort();
     const command = `exec node ${JSON.stringify(FIXTURE)} ${port}`;
     let first;
@@ -446,6 +448,10 @@ async function main() {
       assert.ok(logs.text.length < 4_200, `${logs.text.length} chars in a reply`);
       assert.ok(logs.fullPath.startsWith(path.join(CODARA, "workspace-data", "ws-1")), logs.fullPath);
       assert.ok(fs.readFileSync(logs.fullPath, "utf8").length > 9_000);
+      const writes = logWrites.length;
+      const idle = await keeper.logs("ws-1", "flood");
+      assert.equal(idle.fullPath, logs.fullPath);
+      assert.equal(logWrites.length, writes, "an unchanged log was written again");
       await keeper.stop("ws-1", "flood");
     });
 
@@ -470,9 +476,14 @@ async function main() {
 
     await check("restart keeps this session's env values; a crash shows its exit code", async () => {
       await keeper.start({ workspaceId: "ws-1", id: "web" });
+      const before = await keeper.logs("ws-1", "web");
       const restarted = await keeper.restart("ws-1", "web");
       assert.equal(restarted.ready, true);
       assert.match((await keeper.logs("ws-1", "web")).text, /token=set/);
+      const followed = await keeper.logs("ws-1", "web", before.cursor);
+      assert.match(followed.text, /token=set/, "a reader following by cursor missed the restarted process's output");
+      assert.ok(followed.cursor > before.cursor);
+      assert.match((await keeper.logs("ws-1", "web", followed.cursor + 1_000_000)).text, /token=set/, "a cursor from before an app restart reads it all");
       const session = sessions.sessions.get(restarted.server.paneId);
       process.kill(session.child.pid, "SIGKILL");
       assert.ok(await until(async () => (await keeper.list("ws-1")).find((server) => server.id === "web").state === "exited"));
