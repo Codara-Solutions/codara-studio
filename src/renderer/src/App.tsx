@@ -4872,6 +4872,17 @@ export default function App() {
     return () => window.removeEventListener("spark:open-browser-url", handler);
   }, [openInSparkBrowser]);
 
+  // The status view's Open on a browser tab or an agent's terminal: only a
+  // tab of the workspace on screen, which is the one the view lists.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const tabId = (event as CustomEvent<{ tabId?: unknown }>).detail?.tabId;
+      if (typeof tabId === "string" && tabs.tabs.some((tab) => tab.id === tabId)) setActiveTabStable(tabId);
+    };
+    window.addEventListener("spark:focus-tab", handler);
+    return () => window.removeEventListener("spark:focus-tab", handler);
+  }, [setActiveTabStable, tabs.tabs]);
+
   // Expose a tab-creation entry point to the preview registry so the
   // spark-preview MCP bridge can auto-open a preview tab when a sub-agent
   // calls navigate without one already being open. The registered fn returns
