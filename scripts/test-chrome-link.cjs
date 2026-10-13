@@ -308,6 +308,14 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   await until(() => second.tabs.size === 0, "the stop");
   await assert.rejects(lib.resolveBrowserTarget({ tabId: "chrome:5" }), /stopped agents in chrome:5 from the browser's debugging bar/);
 
+  // The link outlives the tab's session: dropping the session takes its listeners off the link.
+  assert.equal(second.detachListeners.size, 1);
+  assert.equal(second.closeListeners.size, 1);
+  backend.syncTabs(second);
+  assert.equal(second.detachListeners.size, 0, "a stopped tab's session leaves no detach listener behind");
+  assert.equal(second.closeListeners.size, 0, "nor a close listener");
+  await assert.rejects(lib.resolveBrowserTarget({ tabId: "chrome:5" }), /stopped agents in chrome:5/, "the reason survives the session");
+
   // Two browsers: ids carry the browser, and a bare id that both have is ambiguous.
   const edge = extension(port, { id: EXT_B, answer });
   await edge.opened;

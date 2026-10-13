@@ -192,8 +192,7 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
   forgetLink(link: ChromeLink): void {
     for (const [key, entry] of this.sessions) {
       if (entry.link !== link) continue;
-      entry.session.dispose({ detach: false });
-      this.sessions.delete(key);
+      this.drop(key, entry);
     }
   }
 
@@ -203,20 +202,25 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
       if (entry.link !== link) continue;
       const tab = link.tabs.get(entry.tabId);
       if (tab && !tab.blocked) continue;
-      entry.session.dispose({ detach: false });
-      this.sessions.delete(key);
+      this.drop(key, entry);
     }
   }
 
   dispose(): void {
-    for (const entry of this.sessions.values()) entry.session.dispose({ detach: false });
-    this.sessions.clear();
+    for (const [key, entry] of this.sessions) this.drop(key, entry);
+  }
+
+  private drop(key: string, entry: SessionEntry): void {
+    entry.session.dispose({ detach: false });
+    entry.transport.release();
+    this.sessions.delete(key);
   }
 
   private session(link: ChromeLink, tabId: number): SessionEntry {
     const key = `${link.linkId}/${tabId}`;
     const existing = this.sessions.get(key);
     if (existing && existing.link === link && !existing.session.isDisposed) return existing;
+    if (existing) this.drop(key, existing);
     const transport = chromeRelayTransport(link, tabId);
     const session = new CdpSession(`chrome:${key}`, transport);
     session.onDetach((reason) => this.stopReasons.set(key, reason));

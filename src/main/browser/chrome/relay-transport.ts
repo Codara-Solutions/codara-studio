@@ -8,6 +8,8 @@ import type { ChromeLink } from "./link";
 export interface ChromeRelayTransport extends CdpTransport {
   /** Why the tab detached last (canceled_by_user, target_closed, blocked_site, unshared, link_closed). */
   readonly lastDetachReason: string | null;
+  /** Stop listening to the link, once the session over this transport is gone. */
+  release(): void;
 }
 
 export function chromeRelayTransport(link: ChromeLink, tabId: number): ChromeRelayTransport {
@@ -20,11 +22,18 @@ export function chromeRelayTransport(link: ChromeLink, tabId: number): ChromeRel
     lastDetachReason = reason;
     for (const listener of detachListeners) listener(reason);
   };
-  link.onDetached((detachedTab, reason) => {
+  // The link outlives every session on it (tabs are shared, stopped and
+  // shared again), so each transport takes its listeners back on release.
+  const offDetached = link.onDetached((detachedTab, reason) => {
     if (detachedTab === tabId) notifyDetach(reason);
   });
-  link.onClose(() => notifyDetach("link_closed"));
+  const offClose = link.onClose(() => notifyDetach("link_closed"));
   return {
+    release() {
+      offDetached();
+      offClose();
+      detachListeners.clear();
+    },
     get lastDetachReason() {
       return lastDetachReason;
     },
