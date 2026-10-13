@@ -249,6 +249,9 @@ function networkLogic(lib) {
     initiator: { type: "script", stack: { callFrames: [{ url: "http://x/app.js", lineNumber: 9 }] } },
     request: { url: "http://x/start", method: "GET", headers: { "User-Agent": "parsed" } },
   });
+  emit("Network.responseReceivedExtraInfo", { requestId: "1", headers: { Location: "/final", "Set-Cookie": "hop=0" } });
+  // The next hop's raw headers can come before the hop itself.
+  emit("Network.requestWillBeSentExtraInfo", { requestId: "1", headers: { Cookie: "sid=abc; hop=0" } });
   emit("Network.requestWillBeSent", {
     requestId: "1",
     timestamp: 100.05,
@@ -267,9 +270,12 @@ function networkLogic(lib) {
   emit("Network.responseReceivedExtraInfo", { requestId: "1", headers: { "Set-Cookie": "a=1\nb=2", "Content-Type": "application/json" } });
   emit("Network.loadingFinished", { requestId: "1", timestamp: 100.1, encodedDataLength: 321 });
   emit("Network.requestWillBeSent", { requestId: "2", type: "Fetch", timestamp: 101, request: { url: "http://x/api", method: "POST", headers: { Authorization: "Bearer t" }, postData: "{\"a\":1}", hasPostData: true } });
+  // Raw headers can also come after everything else about the request.
+  emit("Network.requestWillBeSentExtraInfo", { requestId: "2", headers: { Cookie: "sid=abc" } });
   emit("Network.loadingFailed", { requestId: "2", timestamp: 101.2, errorText: "net::ERR_CONNECTION_REFUSED", type: "Fetch" });
   emit("Network.requestWillBeSent", { requestId: "3", type: "Image", timestamp: 102, request: { url: "http://x/missing.png", method: "GET" } });
   emit("Network.responseReceived", { requestId: "3", response: { status: 404, mimeType: "text/plain", headers: {} } });
+  emit("Network.requestWillBeSentExtraInfo", { requestId: "3", headers: { Cookie: "sid=abc" } });
 
   const rows = lib.networkRing(session).toArray();
   assert.deepEqual(rows.map((row) => [row.id, row.url, row.status]), [
@@ -281,6 +287,10 @@ function networkLogic(lib) {
   const [hop, final, post, missing] = rows;
   assert.equal(hop.redirectedTo, "http://x/final");
   assert.equal(hop.requestHeaders.Cookie, "sid=abc", "raw request headers that came first are merged");
+  assert.equal(final.requestHeaders.Cookie, "sid=abc; hop=0", "a hop's raw headers that came before it are its own");
+  assert.equal(hop.responseHeaders["Set-Cookie"], "hop=0", "each hop keeps its own raw response headers");
+  assert.equal(post.requestHeaders.Cookie, "sid=abc", "raw request headers that came late are merged");
+  assert.equal(missing.requestHeaders.Cookie, "sid=abc", "raw request headers that came after the response are merged");
   assert.equal(hop.requestHeaders["User-Agent"], "UA", "raw headers win over parsed ones");
   assert.deepEqual(hop.initiator, { type: "script", url: "http://x/app.js", line: 10 });
   assert.equal(hop.at, new Date(1_700_000_000_000).toISOString());
@@ -316,6 +326,37 @@ function networkLogic(lib) {
   assert.equal(lib.findNetworkEntry(session, "1"), null);
   session.dispose();
   return rows;
+}
+
+function navigationAbandons(lib) {
+  const { session, emit } = fakeNetSession(lib);
+  const request = (requestId, loaderId, type, url, frameId = "main") =>
+    emit("Network.requestWillBeSent", { requestId, loaderId, frameId, type, timestamp: 1, request: { url, method: "GET", headers: {} } });
+  request("L1", "L1", "Document", "http://x/");
+  emit("Network.responseReceived", { requestId: "L1", type: "Document", response: { status: 200, headers: {} } });
+  emit("Network.loadingFinished", { requestId: "L1", timestamp: 2 });
+  request("a", "L1", "Fetch", "http://x/slow");
+  request("b", "L1", "Fetch", "http://x/late");
+  request("c", "F1", "Fetch", "http://x/frame", "child");
+  // The page navigates while its fetches are in flight.
+  request("L2", "L2", "Document", "http://x/next");
+  const pendingBefore = lib.networkRing(session).toArray().filter((row) => !row.finished).map((row) => row.id);
+  assert.deepEqual(pendingBefore, ["a", "b", "c", "L2"], "nothing is abandoned before the new document answers");
+  emit("Network.responseReceived", { requestId: "L2", type: "Document", response: { status: 200, headers: {} } });
+  const row = (id) => lib.findNetworkEntry(session, id);
+  assert.equal(row("a").errorText, lib.ABANDONED_BY_NAVIGATION, "the old document's unfinished fetch ends with it");
+  assert.deepEqual(lib.networkRow(row("a")).error, lib.ABANDONED_BY_NAVIGATION);
+  assert.equal(row("c").finished, false, "another frame's request is not touched");
+  assert.equal(row("L2").failed, false, "the new document's own request is not touched");
+  // A fetch the old document still completed is reported as finished after all.
+  emit("Network.loadingFinished", { requestId: "b", timestamp: 3, encodedDataLength: 10 });
+  assert.equal(row("b").failed, false);
+  assert.equal(row("b").errorText, null);
+  assert.deepEqual(
+    lib.networkRing(session).toArray().filter((entry) => lib.isFailedRequest(entry)).map((entry) => entry.id),
+    ["a"],
+  );
+  session.dispose();
 }
 
 async function harLogic(lib, rows) {
@@ -566,6 +607,7 @@ async function againstChromium(lib) {
     await emulationBookkeeping(lib);
     const rows = networkLogic(lib);
     await harLogic(lib, rows);
+    navigationAbandons(lib);
     storageLogic(lib);
     await storageOnUserBrowser(lib);
     await againstChromium(lib);

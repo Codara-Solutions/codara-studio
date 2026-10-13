@@ -66,7 +66,13 @@ export interface NetworkEntry {
   /** Where a redirect hop went; its body is the next hop's. */
   redirectedTo: string | null;
   finished: boolean;
+  /** The frame and the document load the request belongs to. */
+  frameId: string | null;
+  loaderId: string | null;
 }
+
+/** Why a request of a document that was replaced never finished. */
+export const ABANDONED_BY_NAVIGATION = "net::ERR_ABORTED (the page navigated away)";
 
 export function networkRing(session: CdpSession): RingBuffer<NetworkEntry> {
   return session.ring<NetworkEntry>(NETWORK_RING, NETWORK_RING_CAP);
@@ -74,10 +80,28 @@ export function networkRing(session: CdpSession): RingBuffer<NetworkEntry> {
 
 interface RecorderState {
   byId: Map<string, NetworkEntry>;
+  /** Every recorded row by its own id, redirect hops included. */
+  rows: Map<string, NetworkEntry>;
   hops: Map<string, number>;
-  // ExtraInfo events can arrive before the event they complete.
+  // ExtraInfo events can arrive before or after the event they complete,
+  // and a redirect's hops share one request id: the nth ExtraInfo of a
+  // request id belongs to its nth hop, so they are keyed by row id.
   requestExtra: Map<string, Record<string, string>>;
   responseExtra: Map<string, Record<string, string>>;
+  requestExtraSeen: Map<string, number>;
+  responseExtraSeen: Map<string, number>;
+}
+
+function rowId(requestId: string, hop: number): string {
+  return hop ? `${requestId}~${hop}` : requestId;
+}
+
+/** The row id the next ExtraInfo event of this request id belongs to. */
+function nextExtraRow(seen: Map<string, number>, requestId: string): string {
+  const hop = seen.get(requestId) ?? 0;
+  seen.set(requestId, hop + 1);
+  while (seen.size > PENDING_EXTRA_CAP * 5) seen.delete(seen.keys().next().value as string);
+  return rowId(requestId, hop);
 }
 
 const states = new WeakMap<CdpSession, RecorderState>();
@@ -180,10 +204,10 @@ function applyResponse(entry: NetworkEntry, response: ResponseLike, state: Recor
   entry.fromCache = Boolean(response.fromDiskCache || response.fromServiceWorker || response.fromPrefetchCache);
   entry.timing = timingOf(response.timing) ?? entry.timing;
   let headers = headersOf(response.headers);
-  const extra = state.responseExtra.get(entry.requestId);
+  const extra = state.responseExtra.get(entry.id);
   if (extra) {
     headers = mergeHeaders(headers, extra);
-    state.responseExtra.delete(entry.requestId);
+    state.responseExtra.delete(entry.id);
   }
   entry.responseHeaders = headers;
 }
@@ -191,17 +215,29 @@ function applyResponse(entry: NetworkEntry, response: ResponseLike, state: Recor
 export function startNetworkRecorder(session: CdpSession): void {
   if (states.has(session)) return;
   const ring = networkRing(session);
-  const state: RecorderState = { byId: new Map(), hops: new Map(), requestExtra: new Map(), responseExtra: new Map() };
+  const state: RecorderState = {
+    byId: new Map(),
+    rows: new Map(),
+    hops: new Map(),
+    requestExtra: new Map(),
+    responseExtra: new Map(),
+    requestExtraSeen: new Map(),
+    responseExtraSeen: new Map(),
+  };
   states.set(session, state);
   const { byId } = state;
   const track = (entry: NetworkEntry) => {
     const dropped = ring.push(entry);
     // A redirect's hops share one request id; only the newest hop is indexed.
+    if (dropped && state.rows.get(dropped.id) === dropped) state.rows.delete(dropped.id);
     if (dropped && byId.get(dropped.requestId) === dropped) {
       byId.delete(dropped.requestId);
       state.hops.delete(dropped.requestId);
+      state.requestExtraSeen.delete(dropped.requestId);
+      state.responseExtraSeen.delete(dropped.requestId);
     }
     byId.set(entry.requestId, entry);
+    state.rows.set(entry.id, entry);
   };
   session.on("Network.requestWillBeSent", (params) => {
     const requestId = String(params.requestId ?? "");
@@ -228,16 +264,17 @@ export function startNetworkRecorder(session: CdpSession): void {
     } else {
       state.hops.delete(requestId);
     }
+    const id = rowId(requestId, hop);
     let requestHeaders = headersOf(request.headers);
-    const extra = state.requestExtra.get(requestId);
+    const extra = state.requestExtra.get(id);
     if (extra) {
       requestHeaders = mergeHeaders(requestHeaders, extra);
-      state.requestExtra.delete(requestId);
+      state.requestExtra.delete(id);
     }
     const postData = typeof request.postData === "string" ? request.postData.slice(0, POST_DATA_CAP) : null;
     const wallTime = num(params.wallTime);
     track({
-      id: hop ? `${requestId}~${hop}` : requestId,
+      id,
       requestId,
       url: typeof request.url === "string" ? request.url + (request.urlFragment ?? "") : "",
       method: typeof request.method === "string" ? request.method : null,
@@ -262,31 +299,49 @@ export function startNetworkRecorder(session: CdpSession): void {
       timing: null,
       redirectedTo: null,
       finished: false,
+      frameId: str(params.frameId),
+      loaderId: str(params.loaderId),
     });
   });
   session.on("Network.requestWillBeSentExtraInfo", (params) => {
-    const requestId = String(params.requestId ?? "");
+    const id = nextExtraRow(state.requestExtraSeen, String(params.requestId ?? ""));
     const headers = headersOf(params.headers);
-    const entry = byId.get(requestId);
-    if (entry && !entry.responseHeaders) entry.requestHeaders = mergeHeaders(entry.requestHeaders, headers);
-    else remember(state.requestExtra, requestId, headers);
+    const entry = state.rows.get(id);
+    if (entry) entry.requestHeaders = mergeHeaders(entry.requestHeaders, headers);
+    else remember(state.requestExtra, id, headers);
   });
   session.on("Network.responseReceived", (params) => {
     const entry = byId.get(String(params.requestId ?? ""));
     if (!entry) return;
     applyResponse(entry, (params.response ?? {}) as ResponseLike, state);
     entry.type = str(params.type) ?? entry.type;
+    // A document about to replace its frame's previous one ends that
+    // document's unfinished requests, and Chromium reports no failure for
+    // them; without this they would stay pending for good.
+    if (entry.type === "Document" && entry.frameId && entry.loaderId) {
+      for (const row of ring.toArray()) {
+        if (row.finished || row.frameId !== entry.frameId || !row.loaderId || row.loaderId === entry.loaderId) continue;
+        row.failed = true;
+        row.finished = true;
+        row.errorText = ABANDONED_BY_NAVIGATION;
+      }
+    }
   });
   session.on("Network.responseReceivedExtraInfo", (params) => {
-    const requestId = String(params.requestId ?? "");
+    const id = nextExtraRow(state.responseExtraSeen, String(params.requestId ?? ""));
     const headers = headersOf(params.headers);
-    const entry = byId.get(requestId);
+    const entry = state.rows.get(id);
     if (entry?.responseHeaders) entry.responseHeaders = mergeHeaders(entry.responseHeaders, headers);
-    else remember(state.responseExtra, requestId, headers);
+    else remember(state.responseExtra, id, headers);
   });
   session.on("Network.loadingFinished", (params) => {
     const entry = byId.get(String(params.requestId ?? ""));
     if (!entry) return;
+    // The old document outlived the new one's response long enough to finish it.
+    if (entry.errorText === ABANDONED_BY_NAVIGATION) {
+      entry.failed = false;
+      entry.errorText = null;
+    }
     entry.finished = true;
     entry.endTime = num(params.timestamp) ?? entry.endTime;
     entry.encodedBytes = num(params.encodedDataLength) ?? entry.encodedBytes;
@@ -312,9 +367,12 @@ export function clearNetwork(session: CdpSession): void {
   const state = states.get(session);
   if (!state) return;
   state.byId.clear();
+  state.rows.clear();
   state.hops.clear();
   state.requestExtra.clear();
   state.responseExtra.clear();
+  state.requestExtraSeen.clear();
+  state.responseExtraSeen.clear();
 }
 
 /** The row an agent named by its id, or the newest hop of a protocol request id. */

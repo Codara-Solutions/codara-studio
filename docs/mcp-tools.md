@@ -172,7 +172,9 @@ the initiator, the request body and the response body (`body: false` leaves
 the response body out). Text
 and JSON bodies are decoded and cut to a few thousand characters, with the
 full text saved to a file; a binary body is saved to a file and summarized.
-Each hop of a redirect is its own request. `har: true` writes a HAR 1.2 file
+Each hop of a redirect is its own request, and a request the page left
+unfinished by navigating away is listed as failed with
+`net::ERR_ABORTED (the page navigated away)` instead of staying pending. `har: true` writes a HAR 1.2 file
 of the filtered requests (bodies included up to 1 MB each) and returns its
 path. Cookie, Set-Cookie, Authorization and Proxy-Authorization headers are
 replaced with `[redacted]` in details and HAR files unless `redact: false` is

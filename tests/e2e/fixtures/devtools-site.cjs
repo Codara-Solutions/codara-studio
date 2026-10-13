@@ -53,6 +53,15 @@ function route(req, res) {
     res.end(PIXEL);
     return;
   }
+  if (url.pathname === "/slow") {
+    // Still in flight when a test navigates the page away.
+    setTimeout(() => {
+      if (res.writableEnded || res.destroyed) return;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("slow");
+    }, 5_000).unref();
+    return;
+  }
   if (url.pathname === "/ua") {
     // A phone lays out a page without a viewport meta tag 980px wide.
     res.writeHead(200, { "content-type": "text/html" });

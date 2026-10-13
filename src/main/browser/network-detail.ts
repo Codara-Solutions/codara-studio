@@ -196,7 +196,12 @@ async function requestDetail(target: BrowserTarget, entry: NetworkEntry, params:
     }
   } catch (error) {
     // The page dropped the body (evicted from its buffers, or a navigation cleared them).
-    detail.body = { unavailable: error instanceof Error ? error.message : String(error) };
+    const message = error instanceof Error ? error.message : String(error);
+    detail.body = {
+      unavailable: /no resource with given identifier/i.test(message)
+        ? "the page no longer holds this body: it navigated or reloaded since, or its buffer dropped it"
+        : message,
+    };
   }
   return detail;
 }

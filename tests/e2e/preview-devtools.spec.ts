@@ -73,8 +73,21 @@ test("network detail, emulation and storage work on a background tab through the
     // Everything below runs with the window hidden: an agent works while the user is elsewhere.
     await app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.hide(); });
 
+    // Opening a tab loads its page once, recorded from the start.
+    const documents = async () => (await request("preview.network", { tabId, runId, type: "document" })).requests
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .map((entry: any) => new URL(entry.url).pathname);
+    expect(await documents()).toEqual(["/ua"]);
+    // A request still in flight when the page navigates away ends with it.
+    await request("preview.evaluate", { tabId, runId, code: "void fetch('/slow')" });
+    await expect.poll(async () => (await request("preview.network", { tabId, runId, filter: "/slow" })).requests.length).toBe(1);
+
     // Network: list, filters, one request in detail, HAR export.
     await request("preview.navigate", { url: `${origin}/`, runId, tabId });
+    expect(await documents()).toEqual(["/ua", "/"]);
+    const slow = (await request("preview.network", { tabId, runId, filter: "/slow" })).requests[0];
+    expect(slow.pending).toBeUndefined();
+    expect(slow.error).toMatch(/ERR_ABORTED/);
     await request("preview.evaluate", { tabId, runId, code: "window.__done", awaitPromise: true });
     await expect.poll(async () => {
       const list = await request("preview.network", { tabId, runId, filter: origin });
@@ -89,7 +102,7 @@ test("network detail, emulation and storage work on a background tab through the
     expect(row("/unreachable").error).toMatch(/ERR_/);
     const failed = await coraTool("preview_network", { tabId, failed: true, filter: "/" }, runId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    expect(failed.requests.map((entry: any) => new URL(entry.url).pathname).sort()).toEqual(["/api/missing", "/unreachable"]);
+    expect(failed.requests.map((entry: any) => new URL(entry.url).pathname).sort()).toEqual(["/api/missing", "/slow", "/unreachable"]);
     const echo = await request("preview.network", { tabId, runId, id: row("/api/echo").id });
     expect(echo.request.status).toBe(201);
     expect(echo.request.requestHeaders.authorization).toBe("[redacted]");
