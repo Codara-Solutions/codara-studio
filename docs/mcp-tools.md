@@ -143,12 +143,39 @@ workspace on screen.
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
+| `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab, `close` a tab an agent opened, `activate` a shared tab. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
 returns it (`preview:<id>` is accepted too), or `chrome:<tabId>` for a tab of
 the user's own Chrome reached through the Codara extension. Without a
 `tabId` a call uses the caller's own Codara tab, never a Chrome tab, and an
 imported pull request's run may not use Chrome tabs at all.
+
+### The user's own browser
+
+With the Codara extension loaded in Chrome, Edge, Brave or another Chromium
+browser and paired (Settings > General > Chrome extension, see
+`extensions/chrome/README.md`), every tool above that takes a `tabId` also
+works on a tab the user shared from the extension's popup: the snapshot's
+`@references`, typing, trusted input, waits, screenshots, console, network
+and resize behave as on a Codara tab, with the user's signed-in sessions.
+`codara_preview_list` adds the shared tabs (`kind: "chrome"`) after Codara's
+own. With two browsers paired, ids carry the browser:
+`chrome:<linkId>/<tabId>`.
+
+- A tab that is not shared, a tab on the extension's blocked-sites list and
+  browser pages are refused with a message saying why; so is navigating a
+  shared tab to a blocked site.
+- Cookies and site storage need the user's per-tab permission in the popup;
+  profile-wide cookie reads and commands that reach other tabs are always
+  refused.
+- `codara_preview_chrome` `open` needs the popup's "Let agents open new
+  tabs", and `close` only closes tabs an agent opened.
+- Every call is logged with the agent that made it, in Settings and in
+  `<codara home>/chrome-link/activity.jsonl`; the popup shows which agent
+  used each tab last.
+- An imported pull request's run may not use the user's browser at all, and
+  Pi workers that may not change the app do not get `codara_preview_chrome`.
 
 Large results stay out of the agent's context: images and long bodies are
 written under `<codara home>/workspace-data/<workspace>/`, never into the

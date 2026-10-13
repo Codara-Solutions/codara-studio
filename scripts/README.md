@@ -245,13 +245,25 @@ build).
 
 `test-preview-*` (auto-open, capture-paint, input-references, keyboard,
 navigation, registry, workspace, tools-routing: every tool's socket method has
-one handler and `chrome:` ids are gated), `test-browser-pane-webview-liveness`,
+one handler, `chrome:` ids are gated and every tab tool has a Chrome
+handler), `test-browser-pane-webview-liveness`,
 `test-browser-storage-boundary`, `test-guest-popups`, `test-browser-targets`
 (tab ids and target backends), `test-browser-cdp-session` (the shared
 DevTools protocol session and its console and network recorders) and
 `test-browser-screenshot-locator` (crop and scale math, saved files, and
 selectors, boxes and names in a real page). The last two run in Playwright's
 Chromium through `scripts/fixtures/cdp-chromium.cjs` and print SKIP without it.
+
+The Chrome extension link: `test-chrome-extension` (the extension's own
+tests in `extensions/chrome/test/`: sharing and blocked-site rules, which
+DevTools protocol commands need the cookie permission or are always refused,
+cookie redaction, the link client against a fake Codara, the store zip, and
+that the packaged app and Settings ship the same files) and
+`test-chrome-link` (Codara's side in `src/main/browser/chrome/`: origin and
+host checks, pairing with the code and Allow, tokens bound to one extension,
+shared and blocked tabs, the relayed protocol, the activity log and
+`codara_preview_chrome`, unpairing). The real extension in Playwright's
+Chromium is `tests/e2e/chrome-extension.spec.ts`.
 
 ### Security boundaries and packaging
 

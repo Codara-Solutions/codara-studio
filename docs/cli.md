@@ -145,6 +145,24 @@ their workspace.
 | `bench list` | Shows the suite's tasks. |
 | `bench history` | Shows the score history. |
 
+### Tools
+
+| Command | What it does |
+|---|---|
+| `tool list` | Lists the Codara tools available here (the ones MCP clients see). |
+| `tool help <name>` | Prints one tool's description and arguments. |
+| `tool <name> ['{"arg":"value"}'] [--arg value ...]` | Calls a tool, for agents without an MCP client. The `codara_` prefix is optional; images are saved to files and their paths printed. |
+
+The browser tools reach the tabs of the user's own browser through the
+Codara extension (see [mcp-tools.md](mcp-tools.md#the-users-own-browser)):
+
+```sh
+cora tool preview_chrome --action status       # paired browsers and shared chrome: tabs
+cora tool preview_snapshot --tabId chrome:1234567
+cora tool preview_click --tabId chrome:1234567 --selector @e12
+cora tool preview_screenshot --tabId chrome:1234567
+```
+
 ### App
 
 | Command | What it does |
