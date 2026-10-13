@@ -414,6 +414,9 @@ const noInput = {};
   assert.equal(blocked("codara_preview_navigate", { tabId: "preview:3", url: "http://x" }), undefined, "readonly navigates Codara tabs");
   assert.equal(blocked("codara_preview_navigate", { tabId: "chrome:12", url: "http://x" })?.block, true, "readonly may not navigate the user's browser");
   assert.equal(blocked("codara_preview_resize", { tabId: "chrome:work-1a2b/12", width: 400, height: 800 })?.block, true, "readonly may not resize the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", network: "offline" })?.block, true, "readonly may not emulate on the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", device: "iPhone" })?.block, true, "readonly may not set a device on the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "preview:3", network: "offline" }), undefined, "readonly emulates on Codara tabs");
   assert.equal(blocked("codara_preview_snapshot", { tabId: "chrome:12" }), undefined, "readonly reads the user's shared tab");
   assert.equal(blocked("codara_ask_user"), undefined, "readonly keeps ask_user");
 }
@@ -1400,6 +1403,16 @@ const noInput = {};
     assert.ok(byFamily[family] > 0, `the manager roster has ${family} tools`);
     assert.ok(families.STUDIO_FAMILY_GUIDANCE[family].length > 0);
   }
+  // Pi never receives the MCP initialize text, so its own prompts steer dev
+  // servers to the kept-server tool and keep terminal tabs for watchers.
+  assert.match(families.STUDIO_FAMILY_GUIDANCE.terminal, /Dev servers: list the workspace's saved ones with codara_terminal_servers/);
+  assert.match(families.STUDIO_FAMILY_GUIDANCE.terminal, /start watchers and anything else that does not exit with\s+codara_terminal_create/);
+  assert.match(extension.CORA_PROCESS_RULE, /Start a dev server with\s+codara_terminal_servers/);
+  assert.match(extension.CORA_PROCESS_RULE, /Start a watcher or any other command that does not exit in a terminal\s+tab with codara_terminal_create/);
+  assert.equal(extension.coraProcessRule(true), extension.CORA_PROCESS_RULE);
+  assert.doesNotMatch(extension.coraProcessRule(false), /codara_terminal_servers/, "a worker fenced from the servers tool is not sent to it");
+  assert.match(extension.coraProcessRule(false), /Start it in a terminal\s+tab with codara_terminal_create/);
+  assert.match(workerExtensionSource, /coraProcessRule\(!fence\.has\("codara_terminal_servers"\)\)/);
   for (const core of ["codara_spawn_workers", "codara_complete", "codara_ask_user", "codara_remember", "codara_wait_for_workers"]) {
     assert.equal(families.studioToolFamily(core), null, `${core} is never deferred`);
   }

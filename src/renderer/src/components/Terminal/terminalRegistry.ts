@@ -69,6 +69,20 @@ export function listShareableStudioTerminals(): ShareableStudioTerminal[] {
   return listShareableStudioTerminalsFn();
 }
 
+type ListDeliverablePanesFn = () => Array<{ paneId: string; workspaceId: string }>;
+let listDeliverablePanesFn: ListDeliverablePanesFn | null = null;
+
+export function setListDeliverablePanesFn(fn: ListDeliverablePanesFn | null): void {
+  listDeliverablePanesFn = fn;
+}
+
+export function listDeliverablePanes(): Array<{ paneId: string; workspaceId: string }> {
+  if (!listDeliverablePanesFn) {
+    throw new Error("Studio terminal inventory is not ready.");
+  }
+  return listDeliverablePanesFn();
+}
+
 type CreateAgentTerminalFn = (
   input: CreateAgentTerminalInput,
 ) => Promise<CreateAgentTerminalResult> | CreateAgentTerminalResult;

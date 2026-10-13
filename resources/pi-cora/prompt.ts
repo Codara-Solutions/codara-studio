@@ -40,13 +40,28 @@ export const CORA_BROWSER_WORKFLOW = `For browser tasks, navigate and read a sna
   or resizing. Keep operations in this run's workspace.`;
 
 // Pi's bash tool has no default timeout, so a dev server started there never
-// returns and the turn hangs until the 25 minute tool watchdog.
-export const CORA_PROCESS_RULE = `Never run a server, watcher, or any other command that does not exit
-  in bash: the call never returns and the turn hangs. Start it in a terminal
-  tab with codara_terminal_create (retention "service" only when the user
+// returns and the turn hangs until the 25 minute tool watchdog. Pi never
+// receives the MCP initialize instructions that steer other agents to the
+// kept servers, so the same steering lives here; a worker fenced from
+// codara_terminal_servers gets the terminal-tab wording only.
+export function coraProcessRule(serversTool: boolean): string {
+  const servers = serversTool
+    ? ` Start a dev server with
+  codara_terminal_servers: list the workspace's saved ones and start one by
+  id, or start a new one with its command. Codara keeps it running across
+  restarts, never starts a second copy, and answers alreadyRunning when it is
+  up. Start a watcher or any other command that does not exit in a terminal
+  tab with codara_terminal_create`
+    : ` Start it in a terminal
+  tab with codara_terminal_create`;
+  return `Never run a server, watcher, or any other command that does not exit
+  in bash: the call never returns and the turn hangs.${servers} (retention "service" only when the user
   needs it afterwards), poll codara_terminal_read for the ready line, then
   check it with codara_preview_navigate. Pass bash a timeout for anything
   else that might block.`;
+}
+
+export const CORA_PROCESS_RULE = coraProcessRule(true);
 
 const VOICE = `How you write to the user:
 - The chat renders GitHub-flavored markdown. Short paragraphs (3 sentences

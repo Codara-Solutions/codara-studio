@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
 
-import { installAgentDelivery } from "./agent-delivery";
+import { installAgentDelivery, resolvePaneWorkspace, type PaneWorkspaceEntry } from "./agent-delivery";
 import { assertAllowedReadPathResolved } from "./fs-sandbox";
 import * as pty from "./pty-manager";
 import { noteTerminalUserInput, terminalAgentStateSnapshot } from "./terminal-agent-notify";
@@ -22,11 +22,12 @@ function isInside(root: string, target: string): boolean {
 
 export function registerAgentDelivery(): void {
   installAgentDelivery({
-    async paneWorkspace(paneId) {
-      const watched = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId);
-      if (watched) return watched.workspaceId;
-      const listed = await requestTerminalOp<{ paneId: string; workspaceId: string }[]>("list", {}, { timeoutMs: 5_000 }).catch(() => []);
-      return (Array.isArray(listed) ? listed : []).find((entry) => entry.paneId === paneId)?.workspaceId ?? null;
+    paneWorkspace(paneId) {
+      return resolvePaneWorkspace(
+        paneId,
+        () => terminalAgentStateSnapshot(),
+        () => requestTerminalOp<PaneWorkspaceEntry[]>("panes", {}, { timeoutMs: 5_000 }),
+      );
     },
     async pasteIntoPane(paneId, text, submit) {
       pty.inject(paneId, text, { submit });

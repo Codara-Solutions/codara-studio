@@ -123,7 +123,9 @@ const FENCE_BRIDGE_MUTATING = [
 // Navigation and resizing stay open to readonly workers on Codara's own tabs,
 // but on a tab of the user's browser (a chrome: tabId) they act inside the
 // user's signed-in session, where loading a URL can change account state.
-const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize"]);
+// Emulation (device size, offline network, CPU, user agent) stays on the
+// user's tab after the worker ends, the same lasting change resize makes.
+const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize", "emulate"]);
 
 function isUserBrowserTab(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase().startsWith("chrome:");
@@ -265,7 +267,7 @@ export function fenceDecision(
     if (FENCE_READONLY_USER_BROWSER.has(action) && isUserBrowserTab((input as { tabId?: unknown }).tabId)) {
       return {
         block: true,
-        reason: "This readonly worker may look at a tab of the user's own browser but not navigate or resize it. Use the remaining tools, or note the limitation in your final report.",
+        reason: "This readonly worker may look at a tab of the user's own browser but not navigate, resize or emulate on it. Use the remaining tools, or note the limitation in your final report.",
       };
     }
   }

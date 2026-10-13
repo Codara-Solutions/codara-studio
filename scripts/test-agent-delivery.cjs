@@ -21,6 +21,7 @@ async function load() {
     stdin: {
       contents: `
         export * from "./agent-delivery";
+        export { deliverablePanes } from "../renderer/src/routing/agent-destinations";
         export { inboxPreviewTools } from "./preview-tools/inbox";
       `,
       resolveDir: path.join(ROOT, "src/main"),
@@ -176,6 +177,40 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     assert.equal(forWorker.kept, true);
     assert.equal(live.pending("ws-1", "pane-a"), 1, "a run worker without a pane leaves workspace items for the user's agent");
     assert.deepEqual((await handler({ workspaceId: "ws-1", callerPaneId: "pane-a" }, "preview.inbox")).items.map((item) => item.text), ["three"]);
+
+    // A Cora worker's pane is offered under its attempt id. The agent monitor
+    // skips workers and knows the leaf only by its pane id, and the phone-share
+    // inventory leaves workers and phone panes out, so the workspace comes from
+    // the renderer's full pane inventory.
+    const workerLeaf = {
+      kind: "leaf",
+      paneId: "leaf-w",
+      worker: { runtime: "claude", runId: "run-1", workerTaskId: "task-1", attemptId: "attempt-9", source: "spark", state: "running" },
+    };
+    const inventory = lib.deliverablePanes([
+      { workspaceId: "ws-1", tabs: [
+        { kind: "terminal", id: "workers", title: "Workers", root: workerLeaf },
+        { kind: "terminal", id: "phone", title: "Phone", root: { kind: "leaf", paneId: "pane-phone", origin: { kind: "phone", deviceName: "Phone" } } },
+        { kind: "preview", id: "tab-1", title: "localhost", url: "http://localhost:5173" },
+      ] },
+      { workspaceId: "ws-2", tabs: [{ kind: "terminal", id: "other", title: "Other", root: { ...workerLeaf, paneId: "leaf-z", worker: { ...workerLeaf.worker, attemptId: "attempt-z" } } }] },
+    ]);
+    assert.deepEqual(inventory, [
+      { paneId: "attempt-9", workspaceId: "ws-1" },
+      { paneId: "pane-phone", workspaceId: "ws-1" },
+      { paneId: "attempt-z", workspaceId: "ws-2" },
+    ]);
+    const watchedOnlyByPane = () => [{ paneId: "pane-a", workspaceId: "ws-1" }];
+    const toWorker = lib.createAgentDelivery({
+      ...deps,
+      paneWorkspace: (paneId) => lib.resolvePaneWorkspace(paneId, watchedOnlyByPane, async () => inventory),
+    });
+    const sentToWorker = await toWorker.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "attempt-9" }, text: "Fix the nav", source: "picker" });
+    assert.equal(sentToWorker.outcome, "pasted");
+    assert.deepEqual(log.at(-1), { paste: "attempt-9", text: "Fix the nav", submit: false });
+    assert.equal((await toWorker.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-phone" }, text: "x", source: "picker" })).outcome, "pasted");
+    await assert.rejects(toWorker.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "attempt-z" }, text: "x", source: "picker" }), /another workspace/);
+    assert.equal(await lib.resolvePaneWorkspace("gone", watchedOnlyByPane, async () => { throw new Error("renderer down"); }), null);
 
     // Old items expire and the queue stays bounded.
     advance(lib.INBOX_TTL_MS + 1);

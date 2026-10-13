@@ -11,6 +11,7 @@ import {
   closeAgentTerminal,
   createAgentTerminal,
   forgetExternalTerminalSize,
+  listDeliverablePanes,
   listShareableStudioTerminals,
   getWorkspaceAgentCounts,
   setExternalTerminalSize,
@@ -63,6 +64,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return getWorkspaceAgentCounts();
     case "list":
       return listShareableStudioTerminals();
+    case "panes":
+      return listDeliverablePanes();
     case "create":
       return create(req.params);
     case "destroy":

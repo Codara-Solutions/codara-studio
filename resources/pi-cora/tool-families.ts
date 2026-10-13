@@ -132,8 +132,11 @@ export function toolPromptSnippet(description: string, maxChars = 100): string {
 export const STUDIO_FAMILY_GUIDANCE: Record<StudioToolFamily, string> = {
   browser: `Browser: codara_preview_* drives only Codara Studio's built-in Browser tab.
 Use trusted mouse/key/scroll/hover/drag tools for native input when needed.`,
-  terminal: `Terminal tabs: start servers, watchers, and anything that does not exit
-with codara_terminal_create (retention "service" only when the user needs it
+  terminal: `Dev servers: list the workspace's saved ones with codara_terminal_servers and
+start one by id, or start a new one there with its command. Codara keeps it
+running across restarts and never starts a second copy.
+Terminal tabs: start watchers and anything else that does not exit with
+codara_terminal_create (retention "service" only when the user needs it
 afterwards), poll codara_terminal_read for the ready line, then verify with the
 Browser. Close temporary terminals with codara_terminal_close when done.`,
   whiteboard: `Whiteboard: build an explanation through investigation, draft, inspection,

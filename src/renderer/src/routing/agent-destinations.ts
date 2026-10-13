@@ -46,6 +46,31 @@ export function leafInjectId(leaf: TerminalLeaf): string {
   return leaf.worker?.source === "spark" && leaf.worker.attemptId ? leaf.worker.attemptId : leaf.paneId;
 }
 
+export interface DeliverablePane {
+  paneId: string;
+  workspaceId: string;
+}
+
+/**
+ * Every pane paneDestinations can offer, in every workspace layout, keyed the
+ * way delivery addresses it. Main checks a send's workspace against this, so
+ * it must include the Cora worker and phone-origin panes that the phone-share
+ * inventory leaves out.
+ */
+export function deliverablePanes(layouts: ReadonlyArray<{ workspaceId: string; tabs: readonly Tab[] }>): DeliverablePane[] {
+  const out: DeliverablePane[] = [];
+  for (const layout of layouts) {
+    for (const tab of layout.tabs) {
+      if (tab.kind !== "terminal") continue;
+      for (const leaf of leaves(tab.root)) {
+        if (leaf.content?.type === "tab") continue;
+        out.push({ paneId: leafInjectId(leaf), workspaceId: layout.workspaceId });
+      }
+    }
+  }
+  return out;
+}
+
 export interface PaneDestination extends RoutingDestination {
   kind: "pane";
   paneId: string;

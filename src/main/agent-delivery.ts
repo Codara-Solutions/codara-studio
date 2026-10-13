@@ -46,6 +46,29 @@ export interface AgentDeliveryDeps {
   now?(): number;
 }
 
+export interface PaneWorkspaceEntry {
+  paneId: string;
+  workspaceId: string;
+}
+
+/**
+ * The workspace of a pane delivery may address, by the id paneDestinations
+ * offers it under. The agent monitor is checked first because it answers
+ * without a renderer round trip, but it skips Cora workers and is keyed by
+ * the leaf's pane id rather than a worker's attempt id, so the renderer's
+ * full pane inventory decides everything else.
+ */
+export async function resolvePaneWorkspace(
+  paneId: string,
+  watched: () => readonly PaneWorkspaceEntry[],
+  inventory: () => Promise<readonly PaneWorkspaceEntry[]>,
+): Promise<string | null> {
+  const seen = watched().find((entry) => entry.paneId === paneId);
+  if (seen) return seen.workspaceId;
+  const listed = await inventory().catch((): readonly PaneWorkspaceEntry[] => []);
+  return (Array.isArray(listed) ? listed : []).find((entry) => entry.paneId === paneId)?.workspaceId ?? null;
+}
+
 interface QueuedItem extends AgentInboxItem {
   workspaceId: string;
   paneId: string | null;

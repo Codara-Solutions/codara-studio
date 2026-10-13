@@ -12,7 +12,7 @@ import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
-import { CORA_REPLY_LANGUAGE, CORA_BROWSER_WORKFLOW, CORA_PROCESS_RULE } from "./prompt";
+import { CORA_REPLY_LANGUAGE, CORA_BROWSER_WORKFLOW, coraProcessRule } from "./prompt";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { toolPromptSnippet } from "./tool-families";
 import { createRepeatedCallGuard } from "./repeat-guard";
@@ -129,7 +129,7 @@ function registerScratchpadTool(pi: ExtensionAPI, persistPath = ""): void {
 function directTaskSystemPrompt(
   systemPrompt: string,
   mcpSuffix: string,
-  terminalTools: boolean,
+  processRule: string | null,
 ): string {
   return `${systemPrompt}
 
@@ -164,8 +164,8 @@ You are Cora, handling one user request directly.
   phone. Omit tabId to open or reuse this run's Browser tab. Check the tool
   result before claiming success or saying browser access is unavailable.
   Use web tools only when current external facts are actually needed; read a
-  given URL with fetch_url.${terminalTools ? `
-- ${CORA_PROCESS_RULE}` : ""}
+  given URL with fetch_url.${processRule ? `
+- ${processRule}` : ""}
 - This direct lane cannot edit the whiteboard or board, create or change
   automations, or ask the user a blocking question. When a request needs a
   tool you do not have, say so and what Cora can do instead; never fall back
@@ -185,7 +185,7 @@ You are Cora, handling one user request directly.
 
 // A workflow agent's caller is a script, not a person: no chat voice, no
 // memory writes, no worktree management, and the result goes back verbatim.
-function workflowTaskSystemPrompt(systemPrompt: string, mcpSuffix: string, terminalTools: boolean): string {
+function workflowTaskSystemPrompt(systemPrompt: string, mcpSuffix: string, processRule: string | null): string {
   return `${systemPrompt}
 
 You are one Cora agent inside a workflow: a script called you like a function
@@ -200,8 +200,8 @@ and is waiting for your return value.
   packages, weaken tests, or delete data unless the task explicitly asks.
 - Never invent evidence. When you cannot finish, say why in the summary and
   submit status blocked or failed.
-- You cannot ask anyone a question; nobody reads chat output from this lane.${terminalTools ? `
-- ${CORA_PROCESS_RULE}` : ""}
+- You cannot ask anyone a question; nobody reads chat output from this lane.${processRule ? `
+- ${processRule}` : ""}
 - When finished, call submit_result exactly once. Its result (or summary when
   the tool has no result parameter) is returned to the script as data.${mcpSuffix}`;
 }
@@ -409,6 +409,7 @@ export default function coraPiWorkerExtension(pi: ExtensionAPI) {
     !untrustedPullRequest &&
     !fence.has("codara_terminal_create") &&
     (!directTask || process.env.CODARA_PI_DIRECT_STUDIO_TOOLS === "1");
+  const processRule = terminalTools ? coraProcessRule(!fence.has("codara_terminal_servers")) : null;
   let mcp: McpBridgeHandle | null = null;
 
   // Studio renews the Claude login; this process never spends its refresh token.
@@ -447,9 +448,9 @@ Security contract:
 - Write the mandatory final-report.json at the exact path from the task prompt
   before ending.`
       : workflowTask
-      ? workflowTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "", terminalTools)
+      ? workflowTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "", processRule)
       : directTask
-      ? directTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "", terminalTools)
+      ? directTaskSystemPrompt(systemPrompt, mcp?.promptSuffix() ?? "", processRule)
       : `${systemPrompt}
 
 You are a Cora engineering worker running inside Codara Studio's Pi
@@ -468,8 +469,8 @@ Worker contract:
   (navigate, snapshot, evaluate, console, network) instead of guessing.
 - Close temporary agent terminals before final verification. Leave one open
   only when the user explicitly needs the live service, and record its pane id
-  in followups[] so the remaining process is intentional rather than orphaned.${terminalTools ? `
-- ${CORA_PROCESS_RULE}` : ""}
+  in followups[] so the remaining process is intentional rather than orphaned.${processRule ? `
+- ${processRule}` : ""}
 - For web research, use the web_search tool rather than fetching pages with
   curl or driving the preview browser, and cite the sources it returns. To
   read a specific URL (docs the task links, an API reference), use fetch_url. If

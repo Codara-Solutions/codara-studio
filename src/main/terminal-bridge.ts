@@ -34,7 +34,8 @@ import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 // and "resize" keeps a phone-owned xterm grid in lockstep with its PTY. The
 // caller can supply trusted phone-origin metadata or use the default tint.
 // "overlay" covers an existing pane with a temporary terminal (pane.open) and
-// "closeOverlay" drops one whose PTY never started.
+// "closeOverlay" drops one whose PTY never started. "panes" lists every
+// terminal pane with its workspace, the agents in them or not.
 export type TerminalOpName =
   | "create"
   | "destroy"
@@ -42,7 +43,8 @@ export type TerminalOpName =
   | "list"
   | "agentCounts"
   | "overlay"
-  | "closeOverlay";
+  | "closeOverlay"
+  | "panes";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

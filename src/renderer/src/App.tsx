@@ -72,10 +72,12 @@ import {
 import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
+  setListDeliverablePanesFn,
   setListShareableStudioTerminalsFn,
   setWorkspaceAgentCounts,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
+import { deliverablePanes } from "./routing/agent-destinations";
 import { forgetTerminalSessionMemory } from "./components/Terminal/useTerminalSession";
 import {
   alternateScreenPanesRevision,
@@ -4953,6 +4955,16 @@ export default function App() {
   // disappeared, or was retitled.
   const sharedTerminalFingerprintRef = useRef<string | null>(null);
   useEffect(() => {
+    const workspaceLayouts = (): Array<{ workspaceId: string; tabs: Tab[] }> => {
+      const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
+      if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
+        layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
+      }
+      for (const layout of tabs.inactiveWorkspaceLayouts) {
+        if (validWorkspaceIds.has(layout.workspaceId)) layouts.push(layout);
+      }
+      return layouts;
+    };
     const listShareableTerminals = (): Array<{
       paneId: string;
       tabId: string;
@@ -4961,13 +4973,7 @@ export default function App() {
       cwd?: string;
       profile: "shell" | "claude" | "codex" | "grok";
     }> => {
-      const layouts: Array<{ workspaceId: string; tabs: Tab[] }> = [];
-      if (tabs.tabsWorkspaceId && validWorkspaceIds.has(tabs.tabsWorkspaceId)) {
-        layouts.push({ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs });
-      }
-      for (const layout of tabs.inactiveWorkspaceLayouts) {
-        if (validWorkspaceIds.has(layout.workspaceId)) layouts.push(layout);
-      }
+      const layouts = workspaceLayouts();
       const shared: Array<{
         paneId: string;
         tabId: string;
@@ -5002,6 +5008,7 @@ export default function App() {
       return shared;
     };
     setListShareableStudioTerminalsFn(listShareableTerminals);
+    setListDeliverablePanesFn(() => deliverablePanes(workspaceLayouts()));
     // Push-notify main when the phone-visible inventory changes. Main owns
     // debouncing and fan-out; this stays a bare ping so a burst of tab
     // operations costs a string compare per commit, nothing more.
@@ -5112,6 +5119,7 @@ export default function App() {
     });
     return () => {
       setListShareableStudioTerminalsFn(null);
+      setListDeliverablePanesFn(null);
       setCreateAgentTerminalFn(null);
       setCloseAgentTerminalFn(null);
     };
