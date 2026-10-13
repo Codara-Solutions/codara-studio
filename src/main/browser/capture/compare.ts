@@ -14,6 +14,7 @@ import {
   type BaselineMeta,
   type DiffRegion,
 } from "../diff";
+import { locateElement } from "../locator";
 import { captureScreenshot, normalizeScreenshotRequest, ScreenshotOptionError, type ImageCodec, type Rect } from "../screenshot";
 import type { BrowserTarget } from "../targets";
 import { fitSize, scaleBitmap, type Bitmap } from "./bitmap";
@@ -33,6 +34,8 @@ export interface CompareCodecs {
 
 /** Regions listed in a result; the image shows every one. */
 export const MAX_LISTED_REGIONS = 12;
+/** Baselines a list returns, newest first. */
+export const MAX_LISTED_BASELINES = 30;
 
 interface OutputImage {
   format: ImageFormat;
@@ -76,7 +79,20 @@ async function captureLossless(
   return captureScreenshot(target, request, { bitmap: codecs.bitmap, ...(codecs.image ? { codec: codecs.image } : {}) });
 }
 
-function captureOptions(params: Record<string, unknown>): { fullPage: boolean; selector: string | null; clip: Rect | null } | null {
+type CaptureOptions = { fullPage: boolean; selector: string | null; clip: Rect | null };
+
+/**
+ * An @reference names an element only until the page reloads, so what a
+ * baseline keeps, and the default name a diff looks up, use the element's
+ * own selector.
+ */
+async function stableCapture(target: BrowserTarget, capture: CaptureOptions): Promise<CaptureOptions> {
+  if (!capture.selector?.startsWith("@")) return capture;
+  const element = await locateElement(target, capture.selector);
+  return element.selector ? { ...capture, selector: element.selector } : capture;
+}
+
+function captureOptions(params: Record<string, unknown>): CaptureOptions | null {
   if (params.fullPage === undefined && params.selector === undefined && params.clip === undefined) return null;
   const request = normalizeScreenshotRequest({ fullPage: params.fullPage, selector: params.selector, clip: params.clip });
   return { fullPage: request.fullPage, selector: request.selector, clip: request.clip };
@@ -112,7 +128,11 @@ function nameParam(params: Record<string, unknown>): string | null {
 
 export async function runCompare(target: BrowserTarget, params: Record<string, unknown>, codecs: CompareCodecs): Promise<Record<string, unknown>> {
   const mode = params.mode ?? "diff";
-  if (mode === "list") return { mode, baselines: await listBaselines(target.workspaceId) };
+  if (mode === "list") {
+    const all = await listBaselines(target.workspaceId);
+    const newest = [...all].sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt))).slice(0, MAX_LISTED_BASELINES);
+    return { mode, baselines: newest, ...(all.length > newest.length ? { moreBaselines: all.length - newest.length } : {}) };
+  }
   if (mode === "sizes") return sizes(target, params, codecs.bitmap);
   if (mode === "baseline") return baseline(target, params, codecs);
   if (mode === "diff") return diff(target, params, codecs);
@@ -120,7 +140,7 @@ export async function runCompare(target: BrowserTarget, params: Record<string, u
 }
 
 async function baseline(target: BrowserTarget, params: Record<string, unknown>, codecs: CompareCodecs): Promise<Record<string, unknown>> {
-  const capture = captureOptions(params) ?? { fullPage: false, selector: null, clip: null };
+  const capture = await stableCapture(target, captureOptions(params) ?? { fullPage: false, selector: null, clip: null });
   const shot = await captureLossless(target, capture, codecs);
   const name = nameParam(params) ?? defaultBaselineName({ url: shot.url, viewport: shot.viewport, ...capture });
   const previous = await loadBaseline(target.workspaceId, name).catch(() => null);
@@ -150,7 +170,8 @@ async function baseline(target: BrowserTarget, params: Record<string, unknown>, 
 async function diff(target: BrowserTarget, params: Record<string, unknown>, codecs: CompareCodecs): Promise<Record<string, unknown>> {
   const codec = codecs.bitmap;
   const requested = nameParam(params);
-  const override = captureOptions(params);
+  const requestedCapture = captureOptions(params);
+  const override = requestedCapture ? await stableCapture(target, requestedCapture) : null;
   let stored = requested ? await loadBaseline(target.workspaceId, requested) : null;
   if (!requested) {
     const info = await target.info();

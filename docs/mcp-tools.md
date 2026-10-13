@@ -193,8 +193,9 @@ repository.
   up to 12 `regions` (CSS pixel boxes, largest first) and a highlighted
   image: the new capture faded, changed pixels in magenta, each region
   boxed. `threshold` (0 to 1, default 0.1) sets how different a color must
-  be to count. Baselines survive reloads and restarts; `mode: "list"` lists
-  them. `fullPage`, `selector` and `clip` choose what is compared.
+  be to count. Baselines survive reloads and restarts (one taken by `@ref`
+  keeps the element's CSS selector); `mode: "list"` lists the newest 30.
+  `fullPage`, `selector` and `clip` choose what is compared.
 - **Sizes side by side.** `mode: "sizes"` lays the same tab out at each size
   in turn (`sizes`: `phone` 390x844, `tablet` 820x1180, `desktop` 1440x900,
   or `WIDTHxHEIGHT`; the three presets by default), optionally in

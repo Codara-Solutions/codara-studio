@@ -119,6 +119,21 @@ async function compare(lib, target, codecs) {
   assert.deepEqual(listed.baselines.map((meta) => meta.name).sort(), ["hero box", saved.name].sort());
   await assert.rejects(lib.runCompare(target, { name: "nope" }, codecs), (error) => error instanceof lib.CompareOptionError && /hero box/.test(error.message));
   await target.evaluate("document.getElementById('box').style.boxShadow = ''");
+
+  // A reference dies with the page that handed it out: baselines taken by
+  // @reference, named or not, still compare after a reload.
+  const boxRef = () => lib.runLocator(target, (_args, locator) => locator.ref(document.getElementById("box")), {});
+  const byRef = await lib.runCompare(target, { mode: "baseline", name: "box by ref", selector: await boxRef() }, codecs);
+  assert.equal(byRef.imageSize.width, 120);
+  const unnamed = await lib.runCompare(target, { mode: "baseline", selector: await boxRef() }, codecs);
+  assert.match(unnamed.name, /-#box$/, `the default name uses the element's selector: ${unnamed.name}`);
+  await target.session.send("Page.reload");
+  await waitFor(async () => (await target.evaluate("document.readyState")) === "complete" && (await target.evaluate("!!document.getElementById('tall')")), "the second reload");
+  const refDiff = await lib.runCompare(target, { name: "box by ref", format: "png" }, codecs);
+  assert.equal(refDiff.percent, 0, "the named baseline found its element again");
+  const unnamedDiff = await lib.runCompare(target, { selector: await boxRef(), format: "png" }, codecs);
+  assert.equal(unnamedDiff.name, unnamed.name, "a fresh reference finds the same default-named baseline");
+  assert.equal(unnamedDiff.percent, 0);
 }
 
 async function sizes(lib, target, codecs) {

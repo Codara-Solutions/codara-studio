@@ -27,6 +27,7 @@ async function loadCaptureLib() {
         export * from "./record/ffmpeg";
         export * from "./record/recorder";
         export * from "./capture/paint";
+        export * from "./locator";
         export * from "./cdp-session";
         export { evaluateOverCdp } from "./targets";
       `,
