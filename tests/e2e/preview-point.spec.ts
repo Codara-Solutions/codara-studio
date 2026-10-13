@@ -258,6 +258,13 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
     expect(item.text).toContain("selector: #cta");
     expect(item.text).toContain("source: src/Hero.tsx:3:5");
     expect(item.text).toContain("rules: .cta");
+    const detailsPath = /Every style, CSS rule and source candidate: (\S+\.json)/.exec(item.text)?.[1];
+    expect(detailsPath, "the text names the file with the full details").toBeTruthy();
+    expect(detailsPath!.startsWith(join(fixture.home, "workspace-data"))).toBe(true);
+    const details = JSON.parse(await readFile(detailsPath!, "utf8"));
+    expect(details.tabId).toBe(tabId);
+    expect(details.elements.map((element: { selector: string }) => element.selector)).toEqual(["#cta", "#title"]);
+    expect(details.elements[0].rules.some((rule: { declarations: string }) => /border-radius: 6px/.test(rule.declarations))).toBe(true);
     expect(item.text).not.toMatch(/claude/i);
     expect(item.paths).toHaveLength(2);
     for (const path of item.paths) {

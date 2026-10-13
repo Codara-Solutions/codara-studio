@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { formatPickText, sourceLabel, type InspectedElement, type PointInspection } from "@shared/point-format";
+import { formatPickText, pickDetails, sourceLabel, type InspectedElement, type PointInspection } from "@shared/point-format";
 import type { SelectionAttachment, SelectionPayload } from "../../../routing/SelectionRoutingContext";
 import { CloseIcon } from "../../icons";
 import SendControls, { type SendOutcome } from "./SendControls";
 
 // The popover a pick opens: each picked element with its crop and where it
 // lives in the source, a note, and where to send it. The text the agent gets
-// is formatPickText (src/shared/point-format.ts); the crops travel as files.
+// is formatPickText (src/shared/point-format.ts); the crops travel as files
+// and the full details are saved to a file the text names.
 
 interface Props {
   tabId: string;
@@ -62,6 +63,9 @@ export default function PointComposer({ tabId, workspaceId, inspection, loading,
   const prepare = useCallback(
     async (purpose: "deliver" | "copy"): Promise<SelectionPayload> => {
       if (!inspection || !inspection.elements.length) throw new Error("Nothing is picked.");
+      if (!workspaceId) throw new Error("Open a workspace first.");
+      const plain = { ...inspection, elements: inspection.elements.map((element) => ({ ...element, crop: undefined })) };
+      const detailsPath = await window.spark.point.saveDetails({ workspaceId, label: "picked-elements", details: pickDetails(plain) }).catch(() => null);
       if (purpose === "deliver") {
         // The delivery service saves the crops and lists their paths after
         // the text, so the blocks do not name a path of their own.
@@ -69,10 +73,8 @@ export default function PointComposer({ tabId, workspaceId, inspection, loading,
         inspection.elements.forEach((element, index) => {
           if (element.crop?.data) attachments.push({ name: `element-${index + 1}.jpg`, mimeType: element.crop.mimeType, data: element.crop.data });
         });
-        const text = formatPickText({ ...inspection, elements: inspection.elements.map((element) => ({ ...element, crop: undefined })) }, note);
-        return { source: "inspect", text, attachments, tabId: inspection.tabId, url: inspection.url };
+        return { source: "inspect", text: formatPickText(plain, note, { detailsPath }), attachments, tabId: inspection.tabId, url: inspection.url };
       }
-      if (!workspaceId) throw new Error("Open a workspace first.");
       const saved = await Promise.all(
         inspection.elements.map(async (element, index) => {
           if (!element.crop?.data || element.crop.path) return element;
@@ -80,7 +82,7 @@ export default function PointComposer({ tabId, workspaceId, inspection, loading,
           return { ...element, crop: { ...element.crop, path } };
         }),
       );
-      return { source: "inspect", text: formatPickText({ ...inspection, elements: saved }, note), tabId: inspection.tabId, url: inspection.url };
+      return { source: "inspect", text: formatPickText({ ...inspection, elements: saved }, note, { detailsPath }), tabId: inspection.tabId, url: inspection.url };
     },
     [inspection, note, workspaceId],
   );

@@ -4,7 +4,8 @@ import type { PointElement, PointRegionHit } from "./preview-point";
 // hints to files, and the short text an agent receives for it. The same
 // text goes to every runtime (a paste into a CLI agent's prompt, a Cora chat
 // message, an inbox item), so it is plain text that reads well in a
-// terminal: one block per element, details in an attached JSON file.
+// terminal: one block per element, with the full details in a JSON file
+// under Codara's workspace data folder that the text names.
 
 export interface ResolvedSource {
   /** Workspace-relative when inside the workspace. */
@@ -135,13 +136,29 @@ function where(inspection: Pick<PointInspection, "url" | "tabId">): string {
   return `${inspection.url} (tab ${inspection.tabId})`;
 }
 
+/**
+ * Everything known about picked elements, for the file the text names:
+ * every style and the declarations of each CSS rule, all source hints and
+ * candidates, the search hints. Image bytes stay out; images are files of
+ * their own.
+ */
+export function pickDetails(inspection: PointInspection): Record<string, unknown> {
+  const { regions: _regions, missing, ...page } = inspection;
+  return {
+    ...page,
+    elements: inspection.elements.map(({ crop, ...element }) => ({ ...element, ...(crop?.path ? { image: crop.path } : {}) })),
+    ...(missing.length ? { missing } : {}),
+  };
+}
+
 /** The text sent for picked elements. Files are listed by the delivery service after it. */
-export function formatPickText(inspection: PointInspection, note: string): string {
+export function formatPickText(inspection: PointInspection, note: string, options: { detailsPath?: string | null } = {}): string {
   const count = inspection.elements.length;
   const head = `[Codara] ${count === 1 ? "Picked element" : `Picked ${count} elements`} on ${where(inspection)}`;
   const parts = [head];
   if (note.trim()) parts.push(`Note: ${note.trim()}`);
   parts.push(inspection.elements.map((element, i) => formatElementBlock(element, i + 1)).join("\n"));
+  if (options.detailsPath) parts.push(`Every style, CSS rule and source candidate: ${options.detailsPath}`);
   parts.push(`Use tabId "${inspection.tabId}" and the refs above with the codara_preview tools (or \`cora tool\`); refs last until the page reloads.`);
   return parts.join("\n\n");
 }

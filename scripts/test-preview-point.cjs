@@ -292,6 +292,18 @@ async function inChromium(lib, label) {
     assert.match(text, /source: not reported by the page; likely src\/Pricing\.tsx:2 \(text "Choose your plan"/);
     assert.match(text, /image: \//);
     assert.ok(!/claude/i.test(text));
+    assert.ok(!/Every style/.test(text), "no details line without a saved file");
+    assert.match(lib.formatPickText(inspection, "", { detailsPath: "/data/picked.json" }), /Every style, CSS rule and source candidate: \/data\/picked\.json/);
+
+    // The details file keeps what the text summarizes away, without image bytes.
+    const details = lib.pickDetails({ ...inspection, elements: [react, plain] });
+    assert.equal(details.tabId, "tab-9");
+    assert.equal(details.elements.length, 2);
+    assert.ok(details.elements[0].rules.some((rule) => /border-radius: 6px/.test(rule.declarations)), "rule declarations are kept");
+    assert.equal(details.elements[0].image, react.crop.path);
+    assert.equal(details.elements[1].candidates[0].file, "src/Pricing.tsx");
+    assert.ok(!JSON.stringify(details).includes(react.crop.data), "image bytes stay out of the details");
+    assert.equal(details.regions, undefined);
 
     const comment = lib.formatCommentText(inspection, [
       { kind: "box", x: 390, y: 290, width: 220, height: 140, note: "make this smaller" },

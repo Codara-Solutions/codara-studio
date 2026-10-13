@@ -78,7 +78,30 @@ export async function saveImageFromRenderer(request: PointSaveImageRequest): Pro
   return writeBrowserArtifact(workspaceId, "screenshots", { label, ext, data });
 }
 
+export interface PointSaveDetailsRequest {
+  workspaceId: string;
+  label: string;
+  details: Record<string, unknown>;
+}
+
+const MAX_DETAILS_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Saves the full description of picked elements, which the text sent to an
+ * agent only summarizes, under the workspace's browser snapshots.
+ */
+export async function saveDetailsFromRenderer(request: PointSaveDetailsRequest): Promise<string> {
+  const workspaceId = typeof request?.workspaceId === "string" && request.workspaceId ? request.workspaceId : null;
+  if (!workspaceId) throw new Error("Open a workspace first.");
+  if (!request.details || typeof request.details !== "object" || Array.isArray(request.details)) throw new Error("Nothing to save.");
+  const data = Buffer.from(JSON.stringify(request.details, null, 1), "utf8");
+  if (data.length > MAX_DETAILS_BYTES) throw new Error("The details are too large to save.");
+  const label = typeof request.label === "string" ? request.label.slice(0, 60) : "details";
+  return writeBrowserArtifact(workspaceId, "snapshots", { label, ext: "json", data });
+}
+
 export function registerPointIpc(handle: IpcHandle): void {
   handle("point:inspect", async (_event, request: PointInspectIpcRequest) => inspectFromRenderer(request));
   handle("point:saveImage", async (_event, request: PointSaveImageRequest) => saveImageFromRenderer(request));
+  handle("point:saveDetails", async (_event, request: PointSaveDetailsRequest) => saveDetailsFromRenderer(request));
 }
