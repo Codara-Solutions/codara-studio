@@ -82,7 +82,7 @@ async function runServers(params: Record<string, unknown>): Promise<unknown> {
           ...(result.alreadyRunning ? { alreadyRunning: true } : {}),
           ...(result.output ? { output: result.output } : {}),
           next: result.server.paneId
-            ? `logs with id "${result.server.id}" (or codara_terminal_read paneId ${result.server.paneId}) shows its output`
+            ? `logs with id "${result.server.id}" (or codara_terminal_read paneId ${result.server.paneId}) shows its output; codara_terminal_write to that paneId answers its prompts`
             : undefined,
         };
       }

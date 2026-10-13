@@ -1730,7 +1730,12 @@ function buildInstructions() {
   }
   if (listed.has("codara_terminal_run")) {
     parts.push(
-      "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start servers and watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+      "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_terminal_servers")) {
+    parts.push(
+      "Dev servers: list the workspace's saved ones with codara_terminal_servers and start them by id, or start a new one there with its command. Codara keeps them running when you exit or restart, and never starts a second copy. A server started in your own shell ends with your session.",
     );
   }
   if (listed.has("codara_whiteboard_get") || listed.has("codara_board_get")) {

@@ -253,6 +253,7 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
+    assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
     const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
