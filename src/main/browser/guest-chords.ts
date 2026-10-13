@@ -151,6 +151,10 @@ let registered = false;
 export function registerGuestChordReports(): void {
   if (registered) return;
   registered = true;
+  // Ungated by the main-window sender gate on purpose (ON_OPT_OUT in
+  // scripts/test-ipc-gate-default.cjs): the sender is a preview guest, which
+  // that gate refuses. guestRouter() admits only a real guest's top frame, and
+  // a report can only settle a chord the user really pressed in that guest.
   ipcMain.on(GUEST_CHORD_READY_CHANNEL, (event) => guestRouter(event)?.reporterReady());
   ipcMain.on(GUEST_CHORD_REPORT_CHANNEL, (event, payload: Partial<ChordReport> | undefined) => {
     if (!payload || typeof payload.key !== "string") return;

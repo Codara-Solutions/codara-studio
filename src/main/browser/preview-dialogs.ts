@@ -88,6 +88,10 @@ let registered = false;
 export function registerPreviewDialogs(): void {
   if (registered) return;
   registered = true;
+  // Ungated by the main-window sender gate on purpose (ON_OPT_OUT in
+  // scripts/test-ipc-gate-default.cjs): the sender is a preview guest, which
+  // that gate refuses. onPageDialog admits only a real guest's top frame, and
+  // a guest can only open a dialog of its own page.
   ipcMain.on(DIALOG_CHANNEL, onPageDialog);
   onTrustedPreviewGuestAttached((guest) => {
     guest.on("will-prevent-unload", (event) => onBeforeUnload(guest, event));
