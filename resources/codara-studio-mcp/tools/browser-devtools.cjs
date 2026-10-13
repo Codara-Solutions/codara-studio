@@ -1,6 +1,6 @@
 "use strict";
 
-// Browser DevTools: console, network, emulation and viewport size.
+// Browser DevTools: console, network, emulation, storage and viewport size.
 // Entries follow the contract in ./index.cjs.
 
 module.exports = {
@@ -67,6 +67,25 @@ module.exports = {
           mobile: { type: "boolean" },
           touch: { type: "boolean" },
           reset: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "codara_preview_storage",
+      rpc: "preview.storage",
+      description:
+        "Read or change the tab origin's storage. get (default) lists every area; set writes name=value in area cookies, local or session; clear empties area (default all) or one name. fresh opens url in a new logged-out tab with a temporary session and returns its tabId; discard closes it and wipes its data. Secrets are redacted unless redact=false.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          action: { type: "string", enum: ["get", "set", "clear", "fresh", "discard"] },
+          area: { type: "string", enum: ["cookies", "local", "session", "indexeddb", "cache"] },
+          name: { type: "string" },
+          value: { type: "string" },
+          url: { type: "string" },
+          redact: { type: "boolean" },
         },
         additionalProperties: false,
       },

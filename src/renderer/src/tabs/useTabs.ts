@@ -566,6 +566,24 @@ function persistBackgroundPreviews(workspaceId: string, tabs: Tab[]): void {
   }
 }
 
+function forgetBackgroundPreview(workspaceId: string, id: TabId): void {
+  const key = storageKey(workspaceId);
+  if (!key) return;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return;
+    const saved = migratePersisted(JSON.parse(raw) as PersistedShape);
+    if (!saved?.tabs?.some((tab) => tab.id === id)) return;
+    window.localStorage.setItem(key, JSON.stringify({
+      ...saved,
+      tabs: saved.tabs.filter((tab) => tab.id !== id),
+      activeId: saved.activeId === id ? null : saved.activeId,
+    }));
+  } catch {
+    // Match normal layout persistence when storage is unavailable or full.
+  }
+}
+
 function stripTransientTerminalState(tabs: Tab[], persistAgentState: boolean): Tab[] {
   let changed = false;
   const next = tabs.flatMap((tab): Tab[] => {
@@ -1303,7 +1321,7 @@ export interface UseTabsApi {
   // openers (dev-server URL auto-detect, the MCP preview bridge) pass
   // focus:false so a preview never yanks the user off their chat — the tab
   // still appears in the workspace tab strip to click into.
-  newPreviewTab: (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean }) => TabId;
+  newPreviewTab: (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string }) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
   // false for the background "ensure the active chat has a tab" effect.
@@ -1351,6 +1369,7 @@ export interface UseTabsApi {
   setActiveEditorPath: (path: string) => void;
   setActiveRunId: (runId: string | null) => void;
   setPreviewUrl: (id: TabId, url: string) => void;
+  closePreviewTab: (id: TabId) => void;
   registerDispose: (id: TabId, fn: () => void) => void;
 }
 
@@ -3270,7 +3289,7 @@ export function useTabs(
   }, []);
 
   const newPreviewTab = useCallback(
-    (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean }): TabId => {
+    (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string }): TabId => {
       const id = makeId("preview");
       const tab: PreviewTab = {
         id,
@@ -3278,6 +3297,7 @@ export function useTabs(
         title: titleFromUrl(url),
         url,
         ...(options?.runId ? { runId: options.runId } : {}),
+        ...(options?.partition ? { partition: options.partition } : {}),
       };
       const targetWorkspaceId = options?.workspaceId;
       if (targetWorkspaceId && targetWorkspaceId !== tabsWorkspaceIdRef.current) {
@@ -3932,6 +3952,21 @@ export function useTabs(
     }
   }, []);
 
+  // A preview tab may live in a workspace that is not on screen (an agent
+  // discarding the logged-out tab it opened there), which closeTab cannot see.
+  const closePreviewTab = useCallback((id: TabId) => {
+    closeTab(id);
+    for (const [workspaceId, live] of liveWorkspaceTabsRef.current) {
+      if (workspaceId === tabsWorkspaceIdRef.current || !live.tabs.some((tab) => tab.id === id && tab.kind === "preview")) continue;
+      const tabs = pruneDockCellsFor(live.tabs.filter((tab) => tab.id !== id), id);
+      const next = { tabs, activeId: live.activeId === id ? nearestFreeTabId(tabs, live.tabs.findIndex((tab) => tab.id === id)) : live.activeId };
+      liveWorkspaceTabsRef.current.set(workspaceId, next);
+      forgetBackgroundPreview(workspaceId, id);
+      preloadedWorkspaceTabsRef.current.delete(workspaceId);
+      setInactiveWorkspaceLayouts((current) => upsertInactiveWorkspaceLayout(current, { workspaceId, ...next }));
+    }
+  }, [closeTab]);
+
   // Compatibility helper for older callers: null hides Runs entirely; an id
   // shows the one chat-scoped Runs tab.
   const setActiveRunId = useCallback((runId: string | null) => {
@@ -4037,6 +4072,7 @@ export function useTabs(
       setActiveEditorPath,
       setActiveRunId,
       setPreviewUrl,
+      closePreviewTab,
       registerDispose,
     }),
     // The callbacks are stable for this hook instance's lifetime; only the

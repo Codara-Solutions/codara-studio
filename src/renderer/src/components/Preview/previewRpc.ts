@@ -13,6 +13,7 @@ import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions";
+import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import {
   ensurePreviewTab,
   findReusablePreviewTab,
@@ -35,7 +36,9 @@ type PreviewOpName =
   | "screenshot"
   | "url"
   | "resize"
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  | "open_isolated"
+  | "close_isolated";
 
 interface BridgeRequest {
   reqId: string;
@@ -111,6 +114,10 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return resize(req.params);
     case "get_web_contents_id":
       return getWebContentsId(req.params);
+    case "open_isolated":
+      return openIsolatedTab(req.params);
+    case "close_isolated":
+      return closeIsolatedTab(req.params);
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }

@@ -45,7 +45,11 @@ export type PreviewOpName =
   // Internal: resolve the picked tab's guest webContents id (+ viewport/dpr)
   // so the main-side computer-use executor can drive it directly. Not an MCP
   // tool — only preview-input.ts calls it.
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  // A logged-out tab in its own temporary partition, and closing one
+  // (browser/fresh-tabs.ts wipes its data).
+  | "open_isolated"
+  | "close_isolated";
 
 export interface PreviewOpParams {
   tabId?: string | null;

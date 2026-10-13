@@ -65,6 +65,7 @@ import {
   findPreviewTabByWebContentsId,
   inheritPreviewTabOwner,
   isAgentOwnedPreviewTab,
+  setClosePreviewTabFn,
   setLocatePaneWorkspaceFn,
   setOpenPreviewTabFn,
 } from "./components/Preview/registry";
@@ -861,6 +862,7 @@ export default function App() {
     setActiveTab: setActiveTabStable,
     newTerminalTab,
     newPreviewTab,
+    closePreviewTab,
     addDraftChatTab,
     newWhiteboardTab,
     hideRunsTabs,
@@ -4804,12 +4806,17 @@ export default function App() {
           workspaceId: source.workspaceId,
           runId: source.runId,
           focus: onScreen && !options?.background,
+          // A logged-out tab's links stay logged out.
+          ...(source.partition ? { partition: source.partition } : {}),
         });
         inheritPreviewTabOwner(id, source.id);
         return;
       }
-      if (options?.forceNew) {
-        newPreviewTab(url, options.background ? { focus: false } : undefined);
+      if (options?.forceNew || source?.partition) {
+        newPreviewTab(url, {
+          ...(options?.background ? { focus: false } : {}),
+          ...(source?.partition ? { partition: source.partition } : {}),
+        });
         return;
       }
       // A run's browser tab is the run's to drive, and one a terminal agent
@@ -4880,9 +4887,10 @@ export default function App() {
   useEffect(() => {
     // Background opens preserve the user's current selection. The caller's
     // workspace and run identity must not follow whichever chat is selected.
-    setOpenPreviewTabFn((url, runId, workspaceId) =>
-      newPreviewTab(url, { runId, workspaceId, focus: false }),
+    setOpenPreviewTabFn((url, runId, workspaceId, options) =>
+      newPreviewTab(url, { runId, workspaceId, focus: false, partition: options?.partition }),
     );
+    setClosePreviewTabFn(closePreviewTab);
     // An agent with no run works in the workspace of the pane it runs in.
     setLocatePaneWorkspaceFn((paneId) => {
       const current = tabsRef.current;
@@ -4911,10 +4919,11 @@ export default function App() {
     });
     return () => {
       setOpenPreviewTabFn(null);
+      setClosePreviewTabFn(null);
       setLocatePaneWorkspaceFn(null);
       setPaneOverlayHostLocator(null);
     };
-  }, [newPreviewTab]);
+  }, [newPreviewTab, closePreviewTab]);
 
   // Shared terminal bridge: an MCP client or the Remote Access service asks
   // for a new terminal tab; we mint an origin-marked, UNFOCUSED tab
