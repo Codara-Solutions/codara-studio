@@ -4,6 +4,7 @@
 // the extension link) alike. Backends register themselves; the preview one
 // is always there, the Chrome one while a browser is connected.
 
+import { noteActedTab } from "./acted-tab";
 import type { CdpSession } from "./cdp-session";
 import { BrowserTabRefError, parseTabRef, type BrowserTabRef } from "./tab-ref";
 
@@ -85,7 +86,9 @@ export async function resolveBrowserTarget(params: Record<string, unknown>): Pro
     }
     throw new Error("Codara's browser is not ready yet. Retry in a moment.");
   }
-  return backend.resolve(ref, params);
+  const target = await backend.resolve(ref, params);
+  noteActedTab(target.ref);
+  return target;
 }
 
 /** Run a protocol Runtime.evaluate and unwrap its value or exception. */

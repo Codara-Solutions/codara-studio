@@ -16,7 +16,7 @@ const ROOT = path.resolve(__dirname, "..");
 async function loadPreviewTools(stubs) {
   const out = await esbuild.build({
     stdin: {
-      contents: `export * from "./index"; export { registerBrowserBackend } from "../browser/targets";`,
+      contents: `export * from "./index"; export { registerBrowserBackend, resolveBrowserTarget } from "../browser/targets"; export { recordActedTab, withActedTab } from "../browser/acted-tab";`,
       resolveDir: path.join(ROOT, "src/main/preview-tools"),
       loader: "ts",
     },
@@ -92,8 +92,9 @@ async function loadPreviewTools(stubs) {
 
   // Tab ids: preview:<id> is the bare id, chrome:<id> reaches only handlers
   // that can drive a Chrome tab, and only for callers allowed to.
-  await tools.runPreviewTool("preview.snapshot", { tabId: "preview:tab-9" }, host);
+  const named9 = await tools.runPreviewTool("preview.snapshot", { tabId: "preview:tab-9" }, host);
   assert.equal(calls.at(-1).params.tabId, "tab-9");
+  assert.equal(named9.tabId, "tab-9", "a result names the tab it acted on");
   const reaching = calls.length;
   await assert.rejects(
     tools.runPreviewTool("preview.snapshot", { tabId: "chrome:12" }, host),
@@ -117,6 +118,28 @@ async function loadPreviewTools(stubs) {
   const runListed = await tools.runPreviewTool("preview.list", { runId: "run-live" }, host);
   assert.deepEqual(runListed.tabs, [], "a caller that may not use the user's browser does not see its tabs");
   unregister();
+
+  // The tab a call resolved is recorded in the call's async context, so a
+  // result names it even when the handler's own value does not.
+  const unregisterPreview = tools.registerBrowserBackend({
+    kind: "preview",
+    async resolve(ref) { return { kind: "preview", ref: ref?.tabId ?? "tab-5", workspaceId: null }; },
+  });
+  const acted = await tools.recordActedTab(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    await tools.resolveBrowserTarget({});
+    await tools.resolveBrowserTarget({ tabId: "tab-6" });
+    return { ok: true };
+  });
+  assert.deepEqual(acted, { value: { ok: true }, tabId: "tab-5" }, "the first tab resolved is the one reported");
+  assert.equal((await tools.recordActedTab(async () => ({ ok: true }))).tabId, null);
+  unregisterPreview();
+  assert.deepEqual(tools.withActedTab({ value: 1 }, "tab-2"), { tabId: "tab-2", value: 1 });
+  assert.deepEqual(tools.withActedTab({ tabId: "tab-3" }, "tab-2"), { tabId: "tab-3" }, "a result that names its tab keeps it");
+  assert.deepEqual(tools.withActedTab({ tabs: [] }, "tab-2"), { tabs: [] }, "a list of tabs is not one tab's result");
+  assert.deepEqual(tools.withActedTab([1], "tab-2"), [1]);
+  assert.equal(tools.withActedTab("text", "tab-2"), "text");
+  assert.deepEqual(tools.withActedTab({ value: 1 }, null), { value: 1 });
 
   // A screenshot is also a file in the workspace's data folder, for agents
   // that cannot read image content.

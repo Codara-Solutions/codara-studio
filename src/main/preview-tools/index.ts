@@ -6,6 +6,7 @@
 // The MCP side mirrors this layout: resources/codara-studio-mcp/tools/ holds
 // one module per area and names the method each tool calls here.
 
+import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { capturePreviewTools } from "./capture";
@@ -62,6 +63,16 @@ export function previewToolMethods(): string[] {
 }
 
 export async function runPreviewTool(
+  method: string,
+  params: Record<string, unknown>,
+  host: PreviewToolHost,
+): Promise<unknown> {
+  if (!method.startsWith("preview.")) return dispatchPreviewTool(method, params, host);
+  const { value, tabId } = await recordActedTab(() => dispatchPreviewTool(method, params, host));
+  return withActedTab(value, tabId ?? (typeof params.tabId === "string" ? params.tabId : null));
+}
+
+async function dispatchPreviewTool(
   method: string,
   params: Record<string, unknown>,
   host: PreviewToolHost,

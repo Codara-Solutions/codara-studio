@@ -52,6 +52,18 @@ interface BridgeResponse {
 
 let registered = false;
 
+// The tab each request acted on, keyed by its params object, so the response
+// names it even when the op's own result does not.
+const actedTabs = new WeakMap<object, string>();
+
+function stampActedTab(result: unknown, tabId: string | undefined): unknown {
+  if (!tabId || !result || typeof result !== "object" || Array.isArray(result)) return result;
+  if (Object.getPrototypeOf(result) !== Object.prototype) return result;
+  const record = result as Record<string, unknown>;
+  if ("tabId" in record || "tabs" in record) return result;
+  return { tabId, ...record };
+}
+
 export function registerPreviewRpcHandler(): void {
   if (registered) return;
   registered = true;
@@ -67,7 +79,7 @@ export function registerPreviewRpcHandler(): void {
       params: raw.params as BridgeRequest["params"],
     };
     try {
-      const result = await dispatch(req);
+      const result = stampActedTab(await dispatch(req), req.params ? actedTabs.get(req.params) : undefined);
       previewBridge.sendResponse({ reqId: req.reqId, ok: true, result } satisfies BridgeResponse);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -140,6 +152,7 @@ function requireTab(params: Record<string, unknown>) {
     );
   }
   showPreviewControl(tab, { action: "Working", runId });
+  actedTabs.set(params, tab.id);
   return tab;
 }
 
@@ -362,6 +375,7 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   return {
     webContentsId,
     tabId: tab.id,
+    workspaceId: tab.workspaceId,
     url: tab.handle.getURL(),
     viewport,
     devicePixelRatio,
