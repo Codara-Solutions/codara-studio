@@ -7,7 +7,9 @@
 // - guardPageDialogs (src/main/browser/dialog-guard.ts) on a real Chromium
 //   page over the protocol path: a click that opens a confirm returns at
 //   once with the dialog, other calls fail fast and say what to answer,
-//   console still works, results carry dialogs answered by the policy.
+//   console still works, results carry dialogs answered by the policy;
+// - a target whose backend starts only console and network recording (the
+//   Chrome link) gets dialog and page activity recording from its first call.
 // The preload path of a Codara tab and the in-pane card are covered by
 // tests/e2e/preview-agent-input.spec.ts.
 //
@@ -216,6 +218,46 @@ async function inChromium() {
     await dialogs.answer(dialogs.pending()[0].id, { accept: true }, "agent");
     for (let i = 0; i < 100 && !(await target.evaluate("location.search").catch(() => "")).includes("second"); i++) await sleep(25);
     assert.equal(await target.evaluate("location.search"), "?second", "accepting leaves the page");
+
+    // A backend that starts only console and network recording (the Chrome
+    // link) has its dialogs tracked from the first call on.
+    const { targetId: bareId } = await chromium.newPage(server.url("/"));
+    const bare = new lib.CdpSession("test:bare", chromium.transportFor(bareId));
+    lib.startConsoleRecorder(bare);
+    lib.startNetworkRecorder(bare);
+    const bareTarget = {
+      ...target,
+      kind: "chrome",
+      ref: "chrome:7",
+      session: bare,
+      async evaluate(expression) {
+        const result = await bare.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+        return result.result?.value;
+      },
+    };
+    const unregisterChrome = lib.registerBrowserBackend({ kind: "chrome", resolve: async () => bareTarget });
+    try {
+      const chromeCall = (method, run) => lib.guardPageDialogs(method, { tabId: "chrome:7" }, run);
+      assert.deepEqual(await chromeCall("preview.snapshot", async () => ({ ok: true })), { ok: true });
+      await sleep(200);
+      // Untracked, the click would hang until someone answered the dialog.
+      const chromeOpened = await Promise.race([
+        chromeCall("preview.click", () => bareTarget.evaluate("document.getElementById('del').click(), ({ ok: true })")),
+        sleep(3000).then(() => ({ hung: true })),
+      ]);
+      assert.match(chromeOpened.note ?? "", /opened a confirm dialog/, JSON.stringify(chromeOpened));
+      const chromeDialogs = lib.dialogState(bare);
+      assert.equal(await chromeDialogs.answer(chromeDialogs.pending()[0].id, { accept: true }, "agent"), true);
+      for (let i = 0; i < 40 && (await bareTarget.evaluate("document.body.dataset.confirm ?? null")) !== "true"; i++) await sleep(25);
+      assert.equal(await bareTarget.evaluate("document.body.dataset.confirm ?? null"), "true");
+      await bare.send("Page.navigate", { url: server.url("/?chrome") });
+      for (let i = 0; i < 40 && !lib.pageActivity(bare).navigations.length; i++) await sleep(25);
+      assert.deepEqual(lib.pageActivity(bare).navigations.map((nav) => nav.url), [server.url("/?chrome")], "its navigations are recorded for waits");
+    } finally {
+      unregisterChrome();
+      bare.dispose({ detach: true });
+      void chromium.send("Target.closeTarget", { targetId: bareId }).catch(() => {});
+    }
   } finally {
     unregister();
     page.close();
