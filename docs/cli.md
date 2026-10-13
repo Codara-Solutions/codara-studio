@@ -48,6 +48,18 @@ cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime cod
 cora agent message <run> all "Re-check the acceptance criteria"
 ```
 
+Agents without MCP support call the same browser, terminal and worktree
+tools through `cora tool` (see [MCP tools](mcp-tools.md)):
+
+```sh
+cora tool list
+cora tool preview_audit --kind accessibility     # axe-core failures with @refs
+cora tool preview_audit --kind quality           # performance, best-practice and SEO checks
+cora tool preview_performance --action load      # traced reload with Core Web Vitals
+cora tool preview_performance --action start     # then interact, then --action stop
+cora tool preview_performance --action memory --ms 5000 --snapshot
+```
+
 ## Command reference
 
 ### Sessions
@@ -153,6 +165,7 @@ their workspace.
 | `read <paneId> [--lines N]` | Prints the recent output of a terminal pane. |
 | `ws prune` | Removes workspaces whose folder no longer exists. |
 | `rpc <method> [params-json]` | Calls any socket method directly. |
+| `tool list \| help <name> \| <name> [args-json] [--arg value]` | Calls a codara-studio tool from any Codara terminal, with the same tool set and results as an MCP call. |
 
 The `app.*` methods reachable through `cora rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
