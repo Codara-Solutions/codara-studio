@@ -1,8 +1,9 @@
 // Page reading and DOM actions, run by the renderer against the picked tab
-// (components/Preview/previewRpc.ts) through the preview bridge. Waits run
-// in main against any browser target.
+// (components/Preview/previewRpc.ts) through the preview bridge. Waits and
+// "find by description" run in main against any browser target.
 
 import { callTarget, markAgentAction } from "../browser/agent-action";
+import { findElements } from "../browser/find";
 import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
 import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
 import { requestPreviewOp, type PreviewOpName } from "../preview-bridge";
@@ -67,6 +68,15 @@ async function waitFor(params: Record<string, unknown>): Promise<unknown> {
   }
 }
 
+async function find(params: Record<string, unknown>): Promise<unknown> {
+  const query = typeof params.query === "string" ? params.query.trim() : "";
+  if (!query) throw new PreviewToolParamsError('find needs a query, for example "the search button".');
+  const target = await requireTarget(params);
+  const result = await findElements(target, query, typeof params.limit === "number" ? params.limit : undefined);
+  if (result.count) return result;
+  return { ...result, hint: "Nothing matched. Try other words, or read the page with codara_preview_snapshot." };
+}
+
 export const corePreviewTools: PreviewToolTable = {
   "preview.list": list,
   "preview.navigate": acting(navigate),
@@ -76,4 +86,5 @@ export const corePreviewTools: PreviewToolTable = {
   "preview.click": acting(rendererOp("click")),
   "preview.type": acting(rendererOp("type")),
   "preview.wait_for": { run: waitFor, targets: "any" },
+  "preview.find": { run: find, targets: "any" },
 };

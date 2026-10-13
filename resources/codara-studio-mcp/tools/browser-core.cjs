@@ -155,6 +155,24 @@ module.exports = {
         additionalProperties: false,
       },
     },
+    {
+      name: "codara_preview_find",
+      rpc: "preview.find",
+      annotations: { readOnly: true },
+      step: { order: 65, properties: { query: { type: "string" } } },
+      description:
+        "Find elements by description (\"the search button\"): ranked @references with role, name and box, for click or type.",
+      inputSchema: {
+        type: "object",
+        required: ["query"],
+        properties: {
+          tabId: { type: "string" },
+          query: { type: "string" },
+          limit: { type: "number", description: "Default 5." },
+        },
+        additionalProperties: false,
+      },
+    },
     // Callable for agents and prompts that already use it, but no longer
     // listed: codara_preview_list returns every tab's URL and title.
     { name: "codara_preview_url", rpc: "preview.url", hidden: true },
