@@ -120,7 +120,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect.poll(async () => request("app.info").then(() => true).catch(() => false)).toBe(true);
 
     browser = await chromium.launchPersistentContext(profile, {
-      executablePath,
+      executablePath: executablePath ?? undefined,
       headless: true,
       args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
     });
@@ -202,6 +202,22 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     const tools = state.activity.filter((entry: { tab: string }) => entry.tab === tabId).map((entry: { tool: string }) => entry.tool);
     expect(tools).toEqual(expect.arrayContaining(["codara_preview_snapshot", "codara_preview_type", "codara_preview_click", "codara_preview_screenshot"]));
     await expect(popup.locator("#tab-usage")).toContainText("codara_preview_screenshot");
+
+    // Tabs in the user's browser: opening needs the popup's switch, and an
+    // agent closes only the tabs it opened.
+    expect(await request("preview.chrome", { action: "status" })).toMatchObject({ connected: true, browsers: [{ sharedTabs: 1, mayOpenTabs: false }] });
+    await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/open new tabs/);
+    await popup.locator("#allow-open").check();
+    await expect.poll(async () => (await request("preview.chrome", { action: "status" })).browsers[0].mayOpenTabs).toBe(true);
+    const opened = await request("preview.chrome", { action: "open", url: `${origin}/opened` });
+    expect(opened).toMatchObject({ ok: true, url: `${origin}/opened`, title: "Public /opened" });
+    expect(JSON.stringify(await request("preview.snapshot", { tabId: opened.tabId }))).toContain("Public page");
+    await request("preview.chrome", { action: "activate", tabId });
+    expect(await worker.evaluate((id) => chrome.tabs.get(id).then((tab: { active: boolean }) => tab.active), accountTab)).toBe(true);
+    await expect(request("preview.chrome", { action: "close", tabId })).rejects.toThrow(/not opened by an agent/);
+    await request("preview.chrome", { action: "close", tabId: opened.tabId });
+    await expect.poll(() => browser?.pages().some((page) => page.url().endsWith("/opened"))).toBe(false);
+    await expect(account.getByText("Signed in as Ada")).toBeVisible();
 
     // An unshared tab, and a shared tab on a blocked site, are refused.
     await expect(request("preview.snapshot", { tabId: `chrome:${otherTab}` })).rejects.toThrow(/is not shared with agents/);
