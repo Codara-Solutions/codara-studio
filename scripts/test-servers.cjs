@@ -659,6 +659,15 @@ async function main() {
     pane2("Visit http://localhost:6000/\n");
     await sleep(10);
     assert.equal(learned.length, 5, "an agent CLI's command line was taken for a server's");
+
+    // `codex login` listens on its own callback port and prints that URL.
+    const bashLogin = taps.get("pane-bash");
+    bashLogin("\x1b]133;D;0\x1b\\");
+    commands.set(1455, { command: "/home/u/.npm/bin/codex-x86_64-unknown-linux-musl login", cwd: "/repo" });
+    holders.set(1455, { pid: 1455, paneId: "pane-bash" });
+    bashLogin("\x1b]133;C\x1b\\Starting local login server on http://localhost:1455.\n");
+    await sleep(10);
+    assert.equal(learned.length, 5, "an agent CLI's own login server was learned as a dev server");
     learner.dispose();
     assert.equal(learner.watchedCount(), 0);
   });

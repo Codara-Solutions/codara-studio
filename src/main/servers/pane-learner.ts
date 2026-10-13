@@ -10,7 +10,7 @@
 // PowerShell) when there is one, and otherwise from the listening process's
 // command line (bash sends no report, and an agent's tool runs no prompt).
 
-import { runtimeFromCommandLine } from "@shared/agent-patterns";
+import { runtimeFromCommandLine, runtimeFromProcessCommand } from "@shared/agent-patterns";
 
 import { completeLines, findLocalUrls, shellReports } from "./detect";
 
@@ -109,6 +109,9 @@ export function createPaneLearner(deps: PaneLearnerDeps) {
         if (!command && holder) {
           const info = await deps.processCommand(holder.pid).catch(() => null);
           if (!info) return;
+          // An agent CLI listening itself (the login callback `codex login`
+          // prints, say) is not a server to start again.
+          if (runtimeFromProcessCommand(info.command) || runtimeFromCommandLine(info.command)) return;
           command = info.command;
           cwd = info.cwd ?? cwd;
         }
