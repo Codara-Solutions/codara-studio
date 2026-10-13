@@ -232,6 +232,14 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await popup.locator("#ask-no").click();
     await expect(popup.locator("#ask")).toBeHidden();
     await expect(popup.locator("#share-all")).not.toBeChecked();
+    // Allowing after the popup's 1 s refresh redrew the switch still turns it on.
+    await popup.locator("#share-all").check();
+    await popup.waitForTimeout(1_500);
+    await popup.locator("#ask-yes").click();
+    await expect(popup.locator("#share-all")).toBeChecked();
+    await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(true);
+    await popup.locator("#share-all").uncheck();
+    await expect.poll(() => popup.evaluate(() => chrome.runtime.sendMessage({ type: "state" }).then((view: { shareAll: boolean }) => view.shareAll))).toBe(false);
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string }) => tab.id);

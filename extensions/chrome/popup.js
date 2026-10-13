@@ -142,7 +142,7 @@ function render() {
 
   $("more").hidden = false;
   $("share-window").checked = view.windowShared;
-  $("share-all").checked = view.shareAll;
+  if (!pendingAnswer) $("share-all").checked = view.shareAll;
   $("allow-open").checked = view.allowOpen;
 
   $("shared").hidden = view.shared.length === 0;
@@ -176,11 +176,13 @@ async function start() {
   $("share-window").addEventListener("change", (event) => void act("shareWindow", { on: event.target.checked }));
   $("share-all").addEventListener("change", async (event) => {
     const box = event.target;
-    if (box.checked && !(await ask("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.", "Share every tab"))) {
+    // Read the intent now: the 1 s refresh redraws the switch while the question is open.
+    const on = box.checked;
+    if (on && !(await ask("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.", "Share every tab"))) {
       box.checked = false;
       return;
     }
-    void act("shareAll", { on: box.checked });
+    void act("shareAll", { on });
   });
   $("ask-yes").addEventListener("click", () => pendingAnswer?.(true));
   $("ask-no").addEventListener("click", () => pendingAnswer?.(false));
