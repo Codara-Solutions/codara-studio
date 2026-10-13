@@ -125,18 +125,20 @@ workspace on screen.
 |---|---|
 | `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL and which one is active. |
 | `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. |
-| `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors. Can return only what changed since a previous snapshot. |
+| `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors, link targets (`-> /path`) and names for icon-only links and buttons. Can return only what changed since a previous snapshot. |
 | `codara_preview_click` | Clicks one element by `@reference` or unique CSS selector. |
 | `codara_preview_type` | Types into a field, or picks an option in a native dropdown. |
 | `codara_preview_press_key` | Sends a key (Enter, Escape, Tab, arrows, a character) to the focused element or a selector. |
 | `codara_preview_evaluate` | Runs JavaScript in the page and returns the result. |
-| `codara_preview_wait_for` | Waits until a selector is attached, visible or hidden. |
+| `codara_preview_wait_for` | Waits for page conditions: a selector (optionally only elements added since the last action), a URL, a committed navigation, load or network idle, a quiet DOM, or a finished dev-server hot update. A timeout says what it saw. |
+| `codara_preview_find` | Finds elements by description ("the search button") and returns ranked `@references` with role, name and box. |
 | `codara_preview_screenshot` | Captures the tab as a PNG, with the scale needed to turn image pixels into page coordinates. The image is also saved under Codara's workspace data folder and its `path` returned. |
 | `codara_preview_mouse` | Trusted mouse input (click, double-click, right-click, down, up) at a selector or coordinates. |
 | `codara_preview_scroll` | Scrolls with a trusted mouse-wheel event. |
 | `codara_preview_hover` | Moves the mouse over an element, triggering real hover styles and tooltips. |
 | `codara_preview_drag` | Trusted drag from one point or element to another. |
-| `codara_preview_key` | Trusted keyboard input with optional modifiers. |
+| `codara_preview_key` | Trusted keyboard input: a key, a character or a chord such as `Control+K` or `Mod+Shift+P`. Only the page receives it, never Codara's own shortcuts. |
+| `codara_preview_dialog` | Lists the page's open alert, confirm, prompt and beforeunload dialogs, answers one, or sets the tab's policy for dialogs nobody answers. |
 | `codara_preview_upload` | Sets the files of an `<input type=file>`. |
 | `codara_preview_console` | Reads the tab's console messages, recorded since the tab opened. |
 | `codara_preview_network` | Reads the tab's network requests, recorded since the tab opened. |
@@ -163,6 +165,62 @@ Tips for agents: call `codara_preview_navigate` first, read the page with
 `codara_preview_run` for multi-step flows. The trusted tools (`mouse`,
 `scroll`, `hover`, `drag`, `key`) produce input the page cannot tell apart
 from a real user's.
+
+### Keys, waits, dialogs and finding elements
+
+- **Keys.** `codara_preview_key` takes `key: "Control+K"` (or `key: "k"` with
+  `modifiers: ["control"]`). `Mod` is Meta on macOS and Control elsewhere.
+  Chords an agent sends go only to the page, so a page's own Ctrl+K palette
+  opens and Codara's does not, with the window hidden or unfocused too. When
+  the user presses a chord inside a page, the page sees it first; Codara acts
+  on it only when the page did not handle it (did not call
+  `preventDefault`), except Ctrl+W (Cmd+W on macOS) and Ctrl+Tab, which stay
+  Codara's.
+- **Waits.** `codara_preview_wait_for` conditions combine, and all must hold:
+  - `selector` with `state` (`visible` by default, `attached`, `hidden`), and
+    `fresh: true` to count only elements added since the agent's last action,
+    so `h1` cannot match the page a click is leaving;
+  - `url`: exact URL, a path on the same origin, a `*` glob, or `/regex/`;
+  - `navigation: true`: a navigation committed since the last action;
+  - `load`: `domcontentloaded`, `load`, or `networkidle` (loaded, then 500 ms
+    without requests; open WebSockets and EventSources do not count);
+  - `stableMs`: no DOM change for that long;
+  - `hmr: true`: the dev server's hot update or reload finished and the page
+    settled (Vite, webpack, Next.js Fast Refresh and Parcel client messages
+    and update requests). A build error the dev server reports ends the wait
+    at once with the error.
+
+  The timeout is 5 s by default, 15 s with `navigation`, `load` or `hmr`, and
+  at most 50 s. A timeout returns `ok: false` with what it saw, for example
+  `Seen: h1 is not visible (fresh): 1 element match but all existed before
+  your last action`.
+- **Dialogs.** A page's alert, confirm, prompt or beforeunload never leaves a
+  call hanging. A call that opens one returns at once with the dialog in
+  `dialogs`. While it is open, calls that need the page fail and name it.
+  Every result also carries `dialogsAnswered` for dialogs the user or the
+  policy answered since the agent last heard. `codara_preview_dialog` with no
+  arguments lists open dialogs and the policy; `accept: true|false` (and
+  `promptText`) answers the oldest, or the one named by `id`. The default
+  policy `ask` shows the dialog over the tab for the user and dismisses it
+  after `autoMs` (30 s); `accept` and `dismiss` answer at once. A
+  beforeunload under `ask` lets an agent's own navigation leave the page and
+  keeps the page otherwise.
+- **Find.** `codara_preview_find` scores visible elements against the words
+  of `query` (accessible name, role, text, placeholder, aria and title,
+  nearby label, icon names such as svg titles and icon classes, ids and test
+  ids, link targets), with common synonyms (search and magnifier, close and
+  x, settings and gear). A role word in the query (button, link, field)
+  must agree with the element. It returns up to `limit` (5) candidates with
+  `ref`, `selector`, `role`, `name`, `box` and `why`; pass the `ref` to click
+  or type.
+- **Console.** The console tool reports what the page logged. Electron's own
+  security and deprecation warnings and messages from isolated worlds (Codara's
+  preload, extensions) are left out.
+
+Agents without MCP run the same tools from a Codara terminal with
+`cora tool preview_find '{"query":"the search button"}'`,
+`cora tool preview_wait_for --url /done --load networkidle` or
+`cora tool preview_dialog --accept true`.
 
 ## Terminals
 

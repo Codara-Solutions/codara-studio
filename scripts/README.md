@@ -61,7 +61,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
-| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs` | Install it with `npx playwright install chromium`. |
+| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
@@ -252,6 +252,20 @@ DevTools protocol session and its console and network recorders) and
 `test-browser-screenshot-locator` (crop and scale math, saved files, and
 selectors, boxes and names in a real page). The last two run in Playwright's
 Chromium through `scripts/fixtures/cdp-chromium.cjs` and print SKIP without it.
+
+What agents do on a page: `test-preview-key-chords` (chord notation, the case
+and codes of chord keys, and which of the user's chords stay in the page),
+`test-preview-waits` (codara_preview_wait_for: url, navigation, load,
+networkidle, fresh elements, a quiet DOM, hot updates, timeout messages),
+`test-preview-dialogs` (dialog policies and the guard that keeps a dialog
+from freezing a call), `test-preview-find-outline` (find by description, link
+targets and icon names in the outline) and `test-preview-console-filter`.
+All but the first drive a real Chromium through
+`scripts/fixtures/browser-page-target.cjs`, which wraps a page as a
+BrowserTarget with the tab recorders running. `test-studio-csp` checks the
+Content-Security-Policy of Codara's own window through Vite's dev transform
+and in Chromium; `tests/e2e/preview-agent-input.spec.ts` covers all of it in
+the built app over the socket, the stdio MCP server and `cora tool`.
 
 ### Security boundaries and packaging
 
