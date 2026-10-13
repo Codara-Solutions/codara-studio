@@ -141,14 +141,53 @@ workspace on screen.
 | `codara_preview_console` | Reads the tab's console messages, recorded since the tab opened. |
 | `codara_preview_network` | Reads the tab's network requests, recorded since the tab opened. |
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
-| `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. |
+| `codara_preview_inspect` | Describes one element (an `@reference`, a unique selector, or `x`,`y` in viewport CSS pixels) for editing it: selector, role, name and text, box model, the computed styles that matter, the CSS rules that set them with their stylesheet, the DOM path, the component names and the source file and line, and a cropped image (also saved as a file, its `path` returned). |
+| `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. Read items are removed, except when a Cora run reads the workspace's items: those stay for the agent the user works with. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
 returns it (`preview:<id>` is accepted too), or `chrome:<tabId>` for a tab of
 the user's own Chrome reached through the Codara extension. Without a
 `tabId` a call uses the caller's own Codara tab, never a Chrome tab, and an
-imported pull request's run may not use Chrome tabs at all.
+imported pull request's run may not use Chrome tabs at all. Every result that
+acted on one tab names it in a `tabId` field, so an agent that called without
+one learns the id to pass next time. The user copies a tab's id from the tab
+id button in the browser's address bar (its menu also copies the URL and who
+drives the tab) or from the tab's context menu.
+
+### Pointing at the page
+
+The user can show an agent what they mean instead of describing it:
+
+- **Point at an element** (the crosshair button, or Ctrl/Cmd+Shift+E). Hovering
+  draws the element's box model (margin, border, padding, content) and its
+  tag. A click picks it; Shift-click picks several; Up and Down walk to the
+  parent and the first child; the Outline button lists the page as a tree to
+  pick from without the mouse. The popover shows each element's crop and its
+  source file, takes a note, and sends to any agent pane, a Cora chat or the
+  inbox.
+- **Comment on the page** (the speech-bubble button, or Ctrl/Cmd+Shift+X).
+  Boxes, arrows and freehand marks over the live page, or over a frozen
+  screenshot of it, each with its own note.
+
+The agent receives plain text that reads the same in every runtime, with the
+images as files: a pick gives one block per element (selector, source
+`file:line`, box, styles, rules, text, `@reference`), a comment gives each
+mark's page coordinates, its note and the elements under it, and one
+annotated screenshot whose numbers match the list. A send to a terminal pane
+is a bracketed paste into the agent's prompt; **Paste** leaves it unsent for
+the user to add to, **Send** also presses Enter. A send to the inbox waits
+for `codara_preview_inbox`.
+
+Where a source file comes from, in order: React's `_debugSource` (React 18 and
+earlier), React 19 owner stacks mapped through the dev server's source maps,
+Vue's component `__file`, Svelte's `__svelte_meta`, Angular's
+`ng.getOwningComponent`, `data-*` attributes that dev plugins add
+(react-dev-inspector, LocatorJS, `data-source`, `data-file`, `data-loc`),
+and, when the page reports nothing, a search of the workspace for the
+component name, the element's id, test id, label, text and classes (reported
+as "likely" candidates). Positions in served code are mapped through the
+script's source map, inline or fetched from the dev server.
 
 Large results stay out of the agent's context: images and long bodies are
 written under `<codara home>/workspace-data/<workspace>/`, never into the

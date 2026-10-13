@@ -44,6 +44,8 @@ the Keybindings tab and that file call it.
 | Zoom out | Mod+- or Mod+Shift+- | `view.zoomOut` |
 | Reset zoom | Mod+0 | `view.zoomReset` |
 | Toggle markdown preview | Mod+Shift+V | `markdown.togglePreview` |
+| Point at an element to send to an agent (browser tab) | Mod+Shift+E | `browser.pickElement` |
+| Comment on the browser page | Mod+Shift+X | `browser.comment` |
 
 ### Tabs
 
