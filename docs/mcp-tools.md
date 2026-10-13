@@ -172,7 +172,9 @@ The user can show an agent what they mean instead of describing it:
 
 The agent receives plain text that reads the same in every runtime, with the
 images as files: a pick gives one block per element (selector, source
-`file:line`, box, styles, rules, text, `@reference`), a comment gives each
+`file:line`, box, styles, rules, text, `@reference`) and the path of a JSON
+file with everything the blocks summarize (every style, each rule's
+declarations, all source candidates), a comment gives each
 mark's page coordinates, its note and the elements under it, and one
 annotated screenshot whose numbers match the list. A send to a terminal pane
 is a bracketed paste into the agent's prompt; **Paste** leaves it unsent for
