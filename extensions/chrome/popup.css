@@ -187,3 +187,19 @@ li {
 li .tab-title {
   font-weight: 500;
 }
+
+button.accent {
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.row.end {
+  justify-content: flex-end;
+}
+
+.ask {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

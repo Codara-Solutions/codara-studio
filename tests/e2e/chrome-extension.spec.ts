@@ -218,8 +218,20 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/is not shared with agents/);
 
     // The user shares the signed-in tab from the popup.
-    await popup.locator("#share-tab").check();
+    // One button shares the tab and copies the id the user hands an agent.
+    await expect(popup.locator("#copy-id")).toHaveText("Share and copy id");
+    await popup.locator("#copy-id").click();
+    await expect(popup.locator("#share-tab")).toBeChecked();
+    await expect(popup.locator("#copy-id")).toHaveText(/Copy tab id|Copied/);
     await expect(popup.locator("#tab-id")).toHaveText(`chrome:${accountTab}`);
+
+    // Sharing every tab asks inside the popup (a native confirm is clipped
+    // by the popup's size); cancelling leaves it off.
+    await popup.locator("#share-all").check();
+    await expect(popup.locator("#ask")).toBeVisible();
+    await popup.locator("#ask-no").click();
+    await expect(popup.locator("#ask")).toBeHidden();
+    await expect(popup.locator("#share-all")).not.toBeChecked();
     await expect.poll(async () => {
       const { tabs } = await request("preview.list");
       return tabs.filter((tab: { kind?: string }) => tab.kind === "chrome").map((tab: { id: string }) => tab.id);

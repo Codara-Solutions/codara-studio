@@ -47,6 +47,26 @@ async function copy(text, button) {
   }, 1200);
 }
 
+// window.confirm() in a toolbar popup opens a native dialog wider than the
+// popup, which clips its buttons, so questions are asked inside the page.
+let pendingAnswer = null;
+
+function ask(text, yesLabel) {
+  pendingAnswer?.(false);
+  $("ask-text").textContent = text;
+  $("ask-yes").textContent = yesLabel;
+  $("ask").hidden = false;
+  $("ask").scrollIntoView({ block: "nearest" });
+  $("ask-yes").focus();
+  return new Promise((resolve) => {
+    pendingAnswer = (answer) => {
+      pendingAnswer = null;
+      $("ask").hidden = true;
+      resolve(answer);
+    };
+  });
+}
+
 function renderShared(list) {
   const holder = $("shared-list");
   holder.replaceChildren();
@@ -113,6 +133,8 @@ function render() {
     $("share-tab").checked = tab.shared;
     $("share-tab").disabled = tab.restricted;
     $("tab-shared").hidden = !tab.shared || Boolean(tab.blocked);
+    $("tab-copy").hidden = tab.restricted || Boolean(tab.blocked) || !connected;
+    $("copy-id").textContent = tab.shared ? "Copy tab id" : "Share and copy id";
     $("tab-id").textContent = tab.agentId;
     $("tab-usage").textContent = usageText(tab);
     $("share-storage").checked = tab.storage;
@@ -152,19 +174,33 @@ async function start() {
   $("share-tab").addEventListener("change", (event) => void act("shareTab", { on: event.target.checked }));
   $("share-storage").addEventListener("change", (event) => void act("setStorage", { on: event.target.checked }));
   $("share-window").addEventListener("change", (event) => void act("shareWindow", { on: event.target.checked }));
-  $("share-all").addEventListener("change", (event) => {
-    if (event.target.checked && !confirm("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.")) {
-      event.target.checked = false;
+  $("share-all").addEventListener("change", async (event) => {
+    const box = event.target;
+    if (box.checked && !(await ask("Let agents use every tab in this browser, including ones you open later? Sites on your blocked list stay off.", "Share every tab"))) {
+      box.checked = false;
       return;
     }
-    void act("shareAll", { on: event.target.checked });
+    void act("shareAll", { on: box.checked });
+  });
+  $("ask-yes").addEventListener("click", () => pendingAnswer?.(true));
+  $("ask-no").addEventListener("click", () => pendingAnswer?.(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && pendingAnswer) {
+      event.preventDefault();
+      pendingAnswer(false);
+    }
   });
   $("allow-open").addEventListener("change", (event) => void act("setAllowOpen", { on: event.target.checked }));
   $("stop-all").addEventListener("click", () => void act("stopAll"));
-  $("copy-id").addEventListener("click", (event) => void copy($("tab-id").textContent, event.currentTarget));
+  $("copy-id").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    // An id is only useful to an agent once the tab is shared.
+    if (!view?.current?.shared) await act("shareTab", { on: true });
+    if (view?.current?.shared) await copy(view.current.agentId, button);
+  });
   $("open-options").addEventListener("click", () => void chrome.runtime.openOptionsPage());
-  $("unpair").addEventListener("click", () => {
-    if (confirm("Disconnect this browser from Codara? Agents lose access to every tab until you connect again.")) void act("unpair");
+  $("unpair").addEventListener("click", async () => {
+    if (await ask("Disconnect this browser from Codara? Agents lose access to every tab until you connect again.", "Disconnect")) void act("unpair");
   });
 
   await refresh();
