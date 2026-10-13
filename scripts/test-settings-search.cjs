@@ -164,6 +164,9 @@ async function main() {
     for (const row of renderedRows(behavior)) {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
     }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) {
+      if (!findable("general", row.name)) missing.push(`general › ${row.name} (ChromeLinkSection.tsx)`);
+    }
     assert.deepEqual(missing, [], `rows without a search entry:\n  ${missing.join("\n  ")}`);
   });
 
@@ -183,6 +186,7 @@ async function main() {
       rendered[tab] = (rendered[tab] ?? new Set());
       for (const row of renderedRows(body)) rendered[tab].add(row.name);
     }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.general.add(row.name);
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );

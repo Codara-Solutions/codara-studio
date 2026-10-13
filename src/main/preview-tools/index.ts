@@ -6,10 +6,11 @@
 // The MCP side mirrors this layout: resources/codara-studio-mcp/tools/ holds
 // one module per area and names the method each tool calls here.
 
+import { noteChromeToolCall } from "../browser/chrome/activity";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { capturePreviewTools } from "./capture";
-import { chromeTargetTools } from "./chrome";
+import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
@@ -30,6 +31,7 @@ const TABLES: readonly PreviewToolTable[] = [
   insightPreviewTools,
   pointPreviewTools,
   serverTools,
+  chromeLinkTools,
 ];
 
 function mergeTables(tables: readonly PreviewToolTable[]): Map<string, PreviewToolEntry> {
@@ -85,6 +87,8 @@ export async function runPreviewTool(
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
+  // Every call that reaches the user's own browser is logged with its agent.
+  noteChromeToolCall(method, params);
   if (entry.targets === "any") return entry.run(params, method, host);
   const chrome = CHROME_HANDLERS.get(method);
   if (chrome) return chrome.run(params, method, host);

@@ -97,8 +97,19 @@ async function loadPreviewTools(stubs) {
   const reaching = calls.length;
   await assert.rejects(
     tools.runPreviewTool("preview.snapshot", { tabId: "chrome:12" }, host),
-    (error) => error instanceof tools.PreviewToolParamsError && /cannot drive a Chrome tab yet/.test(error.message),
+    /No Chrome browser is connected/,
+    "a Chrome tab id reaches the Chrome version of the tool, which needs a connected browser",
   );
+  // Every browser tool that names a tab works on a Chrome tab: either its
+  // handler resolves any target, or chrome.ts has its Chrome version.
+  for (const method of named) {
+    if (!method.startsWith("preview.") || ["preview.list", "preview.inbox"].includes(method)) continue;
+    await assert.rejects(
+      tools.runPreviewTool(method, { tabId: "chrome:12", action: "close" }, host),
+      (error) => !/cannot drive a Chrome tab yet/.test(error.message),
+      `${method} has no Chrome version`,
+    );
+  }
   await assert.rejects(tools.runPreviewTool("preview.click", { tabId: "chrome:twelve" }, host), /not a Chrome tab id/);
   await assert.rejects(
     tools.runPreviewTool("preview.click", { tabId: "chrome:12", runId: "run-live" }, host),

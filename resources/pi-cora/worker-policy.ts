@@ -111,6 +111,8 @@ const FENCE_BRIDGE_MUTATING = [
   "codara_preview_press_key",
   "codara_preview_type",
   "codara_preview_upload",
+  // chrome stream: opens, closes and brings forward tabs of the user's own browser.
+  "codara_preview_chrome",
 ];
 
 function fenceAccess(env: WorkerEnv): "edits" | "readonly" | undefined {

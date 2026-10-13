@@ -108,6 +108,7 @@ import {
   type SettingsTab,
 } from "./settings/settings-index";
 import { bindToggle } from "./settings/setting-toggles";
+import ChromeLinkSection from "./chrome/ChromeLinkSection";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -1327,6 +1328,8 @@ function GeneralSettings({
               {...bindToggle("closeTabsOnMiddleClick", preferences, setPreference)}
             />
           </SettingsSection>
+
+          <ChromeLinkSection />
 
           <SettingsSection
             title="Notifications"
