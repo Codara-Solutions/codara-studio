@@ -145,6 +145,8 @@ workspace on screen.
 | `codara_preview_emulate` | Emulates color scheme, reduced motion, network speed, CPU slowdown and a device (viewport, pixel ratio, mobile, touch, user agent) for one tab, until reset. |
 | `codara_preview_storage` | Reads, sets and clears the tab's cookies, localStorage, sessionStorage, IndexedDB and Cache Storage; opens and discards a logged-out tab. |
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
+| `codara_preview_audit` | Audits the page: `kind: "accessibility"` (axe-core) or `kind: "quality"` (performance, best-practice and SEO checks). |
+| `codara_preview_performance` | Core Web Vitals, traced page loads and interactions, and memory with heap snapshots. |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
 
@@ -215,6 +217,53 @@ Chrome tab, cookies are read-only and only local and session storage can be
 cleared. The live sign-ins of the user's own browser are never handed out:
 on a Chrome tab, HttpOnly cookie values and the cookie and authorization
 headers of its requests stay redacted even with `redact: false`.
+
+### Audits and performance
+
+Both tools work on a background tab, with Codara's window unfocused or
+hidden, and never select the tab or show the window. Each result starts with
+a one-line `summary`; the full report or the raw file is written under
+`<codara home>/workspace-data/<workspace>/browser/` and returned as `path`.
+
+`codara_preview_audit` with `kind: "accessibility"` (the default) runs
+axe-core 4.13 in an isolated world the page cannot reach, against WCAG 2.0 to
+2.2 A and AA plus best practices. Failures are grouped by rule (most severe
+first, up to 12 rules and 5 elements each) with each element's `@reference`,
+selector and, for contrast, the measured ratio and colors (`2.32:1, needs
+4.5:1 (#aaaaaa on #ffffff, 9.0pt (12px), normal)`). Rules axe could not
+decide are under `review`. Cross-origin iframes are not audited.
+
+`kind: "quality"` is not Lighthouse: Lighthouse needs a browser-wide
+DevTools endpoint, reloads and throttles the page and clears its storage, and
+weighs hundreds of megabytes, so Codara runs its own checks on the page as it
+is, from the DOM, resource timing and the tab's console and network records.
+It scores three groups out of 100 (pass 1, warning 0.5): performance (server
+response, render-blocking resources, DOM size, image sizing and dimensions,
+offscreen images, text compression, page weight), best practices (HTTPS,
+mixed content, console errors, failed requests, deprecations, doctype,
+charset, viewport, image aspect ratio) and SEO (title, meta description, HTTP
+status, robots, `lang`, link text, crawlable links, canonical, structured
+data, image alt, legible font sizes). Each failure names the offending items.
+
+`codara_preview_performance` takes an `action`:
+
+| Action | What it does |
+|---|---|
+| `vitals` | LCP with its element, CLS with the elements that shifted, INP with the slowest interaction and its phases, FCP and TTFB, and long tasks, for the current document. |
+| `load` | Reloads the tab while tracing it, then reports the vitals, main-thread time by category, long tasks with their cause and the slowest scripts. `ms` caps the wait for the load event (default 15000). |
+| `start`, then `stop` | Traces an interaction: start, drive the page with the other tools, then stop for INP, layout shifts and long tasks in that window. A trace stops by itself after 60 s. |
+| `memory` | JS heap use sampled over `ms` (up to 30000) with garbage collection at both ends, plus DOM node, listener and document counts. `snapshot: true` also saves a `.heapsnapshot` and summarizes it: largest classes, top retainers with their path from the window, and detached DOM nodes. |
+
+Trace files (`.json`) and heap snapshots open in Chrome DevTools (Performance
+and Memory panels). Each workspace keeps its newest ones, up to 2 GB together;
+older files are deleted as new ones arrive. A background tab renders no frames, so while a load or
+interaction is measured Codara lets it render without showing it; paint times
+can then run later than in a foreground tab, and the result says so. Chromium
+reports no event timing for a tab that is not on screen, so INP there is
+measured in the page (input to the next animation frame) and marked
+`estimated`. A tab in a window that is hidden while the tab is the selected
+one, or a background tab of Chrome, may paint nothing during a load; the
+result then has no LCP or FCP and a note says why.
 
 `codara_preview_url` is no longer listed (`codara_preview_list` returns every
 tab's URL and title) but stays callable for agents that still use it. Outside

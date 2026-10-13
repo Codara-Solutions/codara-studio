@@ -40,15 +40,32 @@ export async function writeBrowserArtifact(
   const random = Math.random().toString(36).slice(2, 6);
   const file = join(dir, `${stamp}-${random}-${slug(input.label)}.${input.ext.replace(/^\./, "")}`);
   await fs.writeFile(file, input.data);
-  void pruneArtifacts(dir).catch(() => {});
+  void pruneArtifacts(dir, ARTIFACT_BYTES_KEPT[kind]).catch(() => {});
   return file;
 }
 
-async function pruneArtifacts(dir: string): Promise<void> {
+/**
+ * Kinds whose files run to hundreds of megabytes (traces and heap
+ * snapshots) also keep to a byte budget, so a count alone cannot fill the
+ * disk. The newest file always stays: it may still be streaming in.
+ */
+export const ARTIFACT_BYTES_KEPT: Partial<Record<BrowserArtifactKind, number>> = {
+  traces: 2 * 1024 * 1024 * 1024,
+};
+
+export async function pruneArtifacts(dir: string, maxBytes?: number): Promise<void> {
   const names = (await fs.readdir(dir)).sort();
-  const excess = names.length - ARTIFACTS_KEPT_PER_KIND;
-  for (const name of names.slice(0, Math.max(0, excess))) {
+  const excess = Math.max(0, names.length - ARTIFACTS_KEPT_PER_KIND);
+  for (const name of names.slice(0, excess)) {
     await fs.rm(join(dir, name), { force: true });
+  }
+  if (maxBytes === undefined) return;
+  const kept = names.slice(excess).reverse();
+  let total = 0;
+  for (const [index, name] of kept.entries()) {
+    const size = await fs.stat(join(dir, name)).then((stat) => stat.size, () => 0);
+    total += size;
+    if (index > 0 && total > maxBytes) await fs.rm(join(dir, name), { force: true });
   }
 }
 

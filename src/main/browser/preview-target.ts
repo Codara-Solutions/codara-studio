@@ -67,6 +67,18 @@ async function resolvePreviewTarget(ref: BrowserTabRef | null, params: Record<st
     async showActivity(action, point) {
       await requestPreviewOp("activity", { ...routing(params, tabId), action, ...point }).catch(() => {});
     },
+    async keepPainting(ms) {
+      // A background guest renders no frames, so it reports no paints and no
+      // interaction latency until its host is composed again.
+      const lease = await requestPreviewOp<{ leaseId?: string; background?: boolean }>("paint", { ...routing(params, tabId), hold: true, ms });
+      const leaseId = lease?.leaseId;
+      return {
+        background: lease?.background === true,
+        release: async () => {
+          if (leaseId) await requestPreviewOp("paint", { hold: false, leaseId }).catch(() => {});
+        },
+      };
+    },
   };
   return target;
 }

@@ -38,6 +38,8 @@ export type PreviewOpName =
   | "type"
   | "press_key"
   | "screenshot"
+  // Internal: keep a background tab rendering during a performance trace.
+  | "paint"
   | "url"
   // Renderer-side webview-element resize (changes the guest viewport).
   | "resize"

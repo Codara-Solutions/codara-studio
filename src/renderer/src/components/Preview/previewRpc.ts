@@ -35,6 +35,7 @@ type PreviewOpName =
   | "type"
   | "press_key"
   | "screenshot"
+  | "paint"
   | "url"
   | "resize"
   | "get_web_contents_id"
@@ -111,6 +112,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return pressKey(req.params);
     case "screenshot":
       return screenshot(req.params);
+    case "paint":
+      return paint(req.params);
     case "resize":
       return resize(req.params);
     case "get_web_contents_id":
@@ -329,6 +332,30 @@ async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   const scale = viewport && viewport.width > 0 && viewport.height > 0
     ? { x: imageSize.width / viewport.width, y: imageSize.height / viewport.height } : null;
   return { dataUrl, tabId: tab.id, url: tab.handle.getURL(), title: tab.handle.getTitle(), viewport, imageSize, scale };
+}
+
+// A lease outlives no measurement: main releases it when a trace ends, and
+// the timer releases it when main never does (a crash, a lost reply).
+const PAINT_LEASE_MAX_MS = 90_000;
+const paintLeases = new Map<string, () => void>();
+
+function paint(params: Record<string, unknown>): unknown {
+  const leaseId = readString(params, "leaseId");
+  if (params.hold === false) {
+    if (leaseId) paintLeases.get(leaseId)?.();
+    return { ok: true };
+  }
+  const tab = requireTab(params);
+  const { background, release } = tab.handle.holdPaint();
+  const id = `paint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const timer = setTimeout(() => end(), Math.min(readNumber(params, "ms") ?? PAINT_LEASE_MAX_MS, PAINT_LEASE_MAX_MS));
+  const end = () => {
+    clearTimeout(timer);
+    paintLeases.delete(id);
+    release();
+  };
+  paintLeases.set(id, end);
+  return { leaseId: id, tabId: tab.id, background };
 }
 
 async function resize(params: Record<string, unknown>): Promise<unknown> {
