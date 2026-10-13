@@ -827,10 +827,12 @@ function TabBar({
             (id) => id !== menuTab.id && tabs.find((t) => t.id === id)?.kind === "chat",
           );
         const canDock = canDockTab(menuTab) && !chatDockTaken;
-        if (!path && !canDock) return null;
+        const browserTabId = menuTab.kind === "preview" ? menuTab.id : null;
+        if (!path && !canDock && !browserTabId) return null;
         return (
           <TabContextMenu
             path={path}
+            browserTabId={browserTabId}
             x={tabMenu.x}
             y={tabMenu.y}
             onOpenInSplit={canDock ? () => onOpenInSplit(menuTab.id) : undefined}
@@ -1686,9 +1688,9 @@ function PickerItem({
           {glyph}
         </span>
       )}
-      <span style={{ flex: 1 }}>{label}</span>
+      <span style={{ flex: 1, whiteSpace: "nowrap" }}>{label}</span>
       {hint && (
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={hint}>
           {hint}
         </span>
       )}
@@ -1767,12 +1769,15 @@ function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
 // long enough to fire.
 function TabContextMenu({
   path,
+  browserTabId,
   x,
   y,
   onOpenInSplit,
   onDismiss,
 }: {
   path: string | null;
+  // A browser tab's id, the one agents pass as tabId.
+  browserTabId: string | null;
   x: number;
   y: number;
   onOpenInSplit?: () => void;
@@ -1809,6 +1814,16 @@ function TabContextMenu({
           onClick={() => {
             onDismiss();
             void window.spark.fs.revealInOS(path).catch(() => {});
+          }}
+        />
+      )}
+      {browserTabId && (
+        <PickerItem
+          label="Copy tab id"
+          hint={browserTabId}
+          onClick={() => {
+            onDismiss();
+            void window.spark.clipboard.writeText(browserTabId).catch(() => {});
           }}
         />
       )}
