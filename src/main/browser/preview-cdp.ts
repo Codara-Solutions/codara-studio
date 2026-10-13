@@ -21,6 +21,7 @@ import { onTrustedPreviewGuestAttached } from "../main-window-trust";
 import { CdpSession, type CdpTransport, type RingBuffer } from "./cdp-session";
 import { startPageActivity } from "./page-activity";
 import { startConsoleRecorder } from "./recorders/console";
+import { startDialogRecorder } from "./recorders/dialogs";
 import { startNetworkRecorder } from "./recorders/network";
 
 const sessions = new Map<number, CdpSession>();
@@ -70,6 +71,7 @@ export function previewCdpSession(wc: WebContents): CdpSession {
   sessions.set(wcId, session);
   startConsoleRecorder(session);
   startNetworkRecorder(session);
+  startDialogRecorder(session, { beforeUnload: "host" });
   startPageActivity(session);
   wc.once("destroyed", () => {
     const tabId = tabOfGuest.get(wcId);

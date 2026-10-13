@@ -6,6 +6,7 @@
 // The MCP side mirrors this layout: resources/codara-studio-mcp/tools/ holds
 // one module per area and names the method each tool calls here.
 
+import { guardPageDialogs } from "../browser/dialog-guard";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { capturePreviewTools } from "./capture";
@@ -81,13 +82,14 @@ export async function runPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
-  if (ref?.kind !== "chrome") return entry.run(params, method, host);
+  // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
+  if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
-  if (entry.targets === "any") return entry.run(params, method, host);
+  if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   const chrome = CHROME_HANDLERS.get(method);
-  if (chrome) return chrome.run(params, method, host);
+  if (chrome) return guardPageDialogs(method, params, () => chrome.run(params, method, host));
   throw new PreviewToolParamsError(
     `${method.replace(/^preview\./, "codara_preview_")} cannot drive a Chrome tab yet. Use a Codara browser tab for it.`,
   );
