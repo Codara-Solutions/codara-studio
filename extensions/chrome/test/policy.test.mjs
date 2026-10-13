@@ -4,10 +4,12 @@ import {
   DEFAULT_BLOCKED_SITES,
   blockingRule,
   cdpPermission,
+  childSessionError,
   commandUrl,
   isBlockedUrl,
   isRestrictedUrl,
   isTabShared,
+  openedTabAnswer,
   parseBlockedSites,
   redactCdpEvent,
   storageScopeError,
@@ -53,6 +55,17 @@ export function run() {
     assert.equal(cdpPermission(method), "never", `${method} reaches past the tab`);
   }
   assert.equal(cdpPermission("Target.getTargetInfo"), "allow");
+  for (const method of ["Target.setAutoAttach", "Target.setDiscoverTargets", "Target.sendMessageToTarget"]) {
+    assert.equal(cdpPermission(method), "never", `${method} reaches frames, workers or other tabs`);
+  }
+  assert.equal(childSessionError({ type: "cdp", tabId: 5, method: "Runtime.evaluate" }), null);
+  assert.match(childSessionError({ type: "cdp", tabId: 5, method: "Runtime.evaluate", sessionId: "frame-1" }), /frames and workers are not reachable/);
+
+  // A tab an agent opened that ended on a blocked site says nothing about it.
+  assert.deepEqual(openedTabAnswer(9, { url: "https://news.example/a", title: "News" }, "https://news.example/", defaults), { tabId: 9, url: "https://news.example/a", title: "News" });
+  assert.deepEqual(openedTabAnswer(9, { url: "https://www.paypal.com/myaccount", title: "PayPal: Summary" }, "https://short.example/x", defaults), { tabId: 9, url: "", title: "", blocked: true });
+  assert.deepEqual(openedTabAnswer(9, { url: "https://short.example/x", pendingUrl: "https://www.paypal.com/", title: "" }, "https://short.example/x", defaults), { tabId: 9, url: "", title: "", blocked: true });
+  assert.deepEqual(openedTabAnswer(9, null, "https://news.example/", defaults), { tabId: 9, url: "https://news.example/", title: "" });
 
   // The cookie and storage permission covers the tab's own site only.
   const page = "https://app.example.com/inbox";

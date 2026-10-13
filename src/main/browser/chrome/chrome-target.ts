@@ -184,6 +184,7 @@ export class ChromeTargetBackend implements BrowserTargetBackend {
       // The browser's own debugging bar and the extension's badge show the
       // tab is controlled; there is no in-page cursor to move.
       async showActivity() {},
+      storageAllowed: () => (link.tabs.get(tab.tabId) ?? tab).storage === true,
     };
     return target;
   }

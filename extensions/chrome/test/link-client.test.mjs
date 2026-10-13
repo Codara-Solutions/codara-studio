@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { createECDH } from "node:crypto";
 import { createServer } from "node:net";
 import { WebSocketServer } from "ws";
 
-import { LinkClient, linkProof, sha256Hex } from "../lib/link-client.js";
+import { LinkClient, linkProof, pairCommitment, pairedToken, pairingCode, sessionSealer, sha256Hex } from "../lib/link-client.js";
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -38,35 +39,63 @@ export async function run() {
   const stranger = await listen((socket) => socket.on("message", () => socket.send(JSON.stringify({ hello: "world" }))));
   const hellos = [];
   const answers = [];
+  const heard = [];
+  const codes = [];
+  const shown = [];
   let codaraSocket = null;
+  let issued = null;
   let mode = "pair";
+  // Sealed frames carry their place in the stream, so each side seals and
+  // opens one frame at a time.
+  const toBrowser = (socket, message) => {
+    socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => socket.send(await socket.sealer.seal(message)));
+    return socket.outbox;
+  };
   const codara = await listen((socket) => {
     codaraSocket = socket;
-    socket.on("message", async (raw) => {
-      const message = JSON.parse(String(raw));
+    let inbox = Promise.resolve();
+    socket.on("message", (raw) => {
+      heard.push(String(raw));
+      inbox = inbox.then(() => receive(JSON.parse(String(raw)))).catch(() => socket.close());
+    });
+    const receive = async (frame) => {
+      const message = socket.sealer ? await socket.sealer.open(frame) : frame;
       if (message.type === "hello") {
         hellos.push(message);
         if (mode === "deny") {
           socket.send(JSON.stringify({ type: "denied", message: "The user declined." }));
-        } else if (message.linkId === "chrome-ab12" && message.nonce) {
-          const secret = await sha256Hex("t".repeat(64));
+        } else if (message.linkId === "chrome-ab12" && message.nonce && issued) {
+          const secret = await sha256Hex(issued);
           const nonce = "c".repeat(32);
           socket.challenge = { secret, nonce, theirs: message.nonce };
           socket.send(JSON.stringify({ type: "challenge", nonce, proof: await linkProof(secret, "codara", message.nonce, nonce) }));
         } else if (message.pair) {
-          socket.send(JSON.stringify({ type: "pairing", code: "483 921" }));
-          setTimeout(() => socket.send(JSON.stringify({ type: "paired", token: "t".repeat(64), linkId: "chrome-ab12" })), 50);
+          const ecdh = createECDH("prime256v1");
+          socket.pairing = { ecdh, key: ecdh.generateKeys("hex"), commit: message.pairCommit };
+          socket.send(JSON.stringify({ type: "pairing", key: socket.pairing.key }));
         } else {
           socket.send(JSON.stringify({ type: "unpaired" }));
         }
+      } else if (message.type === "pair_key") {
+        const { ecdh, key, commit } = socket.pairing;
+        assert.equal(await pairCommitment(message.key), commit, "the key is the one the hello committed to");
+        issued = await pairedToken(ecdh.computeSecret(message.key, "hex", "hex"), message.key, key);
+        codes.push(await pairingCode(message.key, key));
+        const sealer = await sessionSealer(await sha256Hex(issued), message.key, key, "codara");
+        setTimeout(() => {
+          socket.send(JSON.stringify({ type: "paired", linkId: "chrome-ab12" }));
+          socket.sealer = sealer;
+        }, 50);
       } else if (message.type === "auth") {
         const { secret, nonce, theirs } = socket.challenge;
         const ok = message.proof === (await linkProof(secret, "browser", nonce, theirs));
-        socket.send(JSON.stringify(ok ? { type: "welcome", protocol: 1, linkId: "chrome-ab12", app: { name: "Codara", version: "9.9.9" } } : { type: "unpaired" }));
+        const sealer = ok ? await sessionSealer(secret, theirs, nonce, "codara") : null;
+        socket.send(JSON.stringify(ok ? { type: "welcome", protocol: 2, linkId: "chrome-ab12", app: { name: "Codara", version: "9.9.9" } } : { type: "unpaired" }));
+        socket.sealer = sealer;
       } else if (message.id !== undefined) {
         answers.push(message);
       }
-    });
+    };
   });
   // A second Codara (another install, a test run) that never paired this browser.
   const otherHellos = [];
@@ -116,7 +145,10 @@ export async function run() {
       if (request.method === "Boom.fail") throw new Error("refused by the user's choice");
       return { echoed: request.method };
     },
-    onStatus: (status) => statuses.push(status.state),
+    onStatus: (status) => {
+      statuses.push(status.state);
+      if (status.code) shown.push(status.code);
+    },
   });
 
   await client.connect();
@@ -126,18 +158,38 @@ export async function run() {
   await client.connect({ pair: true });
   await until(() => client.status.state === "connected", "pairing");
   assert.ok(statuses.includes("pairing"), "the code was shown while Codara waited for Allow");
-  assert.equal(token, "t".repeat(64), "the token Codara issued is stored");
+  assert.equal(codes.length, 1);
+  assert.deepEqual(shown, codes, "the browser shows the code Codara derived from both keys");
+  assert.match(issued, /^[0-9a-f]{64}$/);
+  assert.equal(token, issued, "both sides derived the same token");
   assert.equal(client.status.port, codara.address().port, "the closed port and the stranger were skipped");
-  assert.deepEqual({ ...hellos[0], protocol: undefined }, {
-    type: "hello", protocol: undefined, browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.0.0" }, pair: true,
+  assert.match(hellos[0].pairCommit, /^[0-9a-f]{64}$/);
+  assert.deepEqual({ ...hellos[0], protocol: undefined, pairCommit: undefined }, {
+    type: "hello", protocol: undefined, browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.0.0" }, pair: true, pairCommit: undefined,
   });
 
-  codaraSocket.send(JSON.stringify({ id: 1, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} }));
-  codaraSocket.send(JSON.stringify({ id: 2, type: "cdp", tabId: 5, method: "Boom.fail" }));
+  await toBrowser(codaraSocket, { id: 1, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} });
+  await toBrowser(codaraSocket, { id: 2, type: "cdp", tabId: 5, method: "Boom.fail" });
   await until(() => answers.length === 2, "two answers");
   assert.deepEqual(answers.find((a) => a.id === 1), { id: 1, result: { echoed: "Runtime.evaluate" } });
   assert.deepEqual(answers.find((a) => a.id === 2), { id: 2, error: { message: "refused by the user's choice" } });
   assert.equal(client.send({ type: "tabs", tabs: [] }), true);
+  const answerFrames = heard.slice(-2).map((raw) => JSON.parse(raw));
+  assert.ok(answerFrames.every((frame) => typeof frame.sealed === "string" && Object.keys(frame).length === 1), "answers leave sealed");
+
+  // Something on the path injects a request of its own, then replays one of
+  // Codara's frames: neither reaches a tab, and each ends the link.
+  const before = requests.length;
+  codaraSocket.send(JSON.stringify({ id: 7, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} }));
+  await until(() => client.status.state === "offline", "the drop on an unsealed frame");
+  await until(() => client.status.state === "connected", "the reconnect after the drop", 8000);
+  const replayed = await codaraSocket.sealer.seal({ id: 8, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} });
+  codaraSocket.send(replayed);
+  await until(() => requests.length === before + 1, "the sealed request");
+  codaraSocket.send(replayed);
+  await until(() => client.status.state === "offline", "the drop on a replayed frame");
+  assert.equal(requests.length, before + 1, "the injected and replayed requests never reached a tab");
+  await until(() => client.status.state === "connected", "the reconnect after the replay", 8000);
 
   // Codara restarts: the client reconnects on its own with the token, past
   // the Codara that does not know it.
@@ -153,17 +205,18 @@ export async function run() {
   ];
   codaraSocket.close();
   await until(() => client.status.state === "offline", "the loss");
-  await until(() => client.status.state === "connected" && hellos.length === 2, "the reconnect", 8000);
-  assert.equal(hellos[1].linkId, "chrome-ab12");
-  assert.match(hellos[1].nonce, /^[0-9a-f]{32}$/);
-  assert.equal(hellos[1].pair, false);
+  const hellosBefore = hellos.length;
+  await until(() => client.status.state === "connected" && hellos.length === hellosBefore + 1, "the reconnect", 8000);
+  assert.equal(hellos.at(-1).linkId, "chrome-ab12");
+  assert.match(hellos.at(-1).nonce, /^[0-9a-f]{32}$/);
+  assert.equal(hellos.at(-1).pair, false);
   assert.equal(client.status.port, codara.address().port, "only the Codara that proved the pairing is used");
   assert.equal(client.status.app.version, "9.9.9");
   assert.equal(otherHellos.at(-1).linkId, "chrome-ab12", "the other Codara was asked first");
-  assert.equal(token, "t".repeat(64), "and its unpaired answer did not cost the token");
+  assert.equal(token, issued, "and its unpaired answer did not cost the token");
   assert.deepEqual(impostorHeard.map((message) => message.type), ["hello", "hello", "hello", "hello"], "the impostors got a hello and nothing more");
   assert.equal(requests.filter((request) => request.id === 99).length, 0, "an unproven pairing offer never reaches a tab");
-  assert.ok(!JSON.stringify([...hellos, ...otherHellos, ...impostorHeard]).includes("t".repeat(64)), "the token never crosses the socket");
+  assert.ok(!JSON.stringify([...heard, ...otherHellos, ...impostorHeard]).includes(issued), "the token never crosses the socket");
 
   // Connect pressed again while paired: the Codara that proves the pairing
   // wins over a program offering a new pairing on an earlier port.
@@ -175,7 +228,7 @@ export async function run() {
   await until(() => client.status.state === "connected", "the proven reconnect");
   assert.equal(client.status.port, codara.address().port);
   assert.equal(client.status.linkId, "chrome-ab12");
-  assert.equal(token, "t".repeat(64), "the hijacker's token was never stored");
+  assert.equal(token, issued, "the hijacker's token was never stored");
 
   // A refusal from a program on the only port is shown, and retried later.
   ports = [refuser.address().port];
@@ -189,12 +242,12 @@ export async function run() {
   ports = [other.address().port];
   codaraSocket.close();
   await until(() => client.status.state === "unpaired", "the unknown answer");
-  assert.equal(token, "t".repeat(64));
+  assert.equal(token, issued);
   ports = [codara.address().port];
   await until(() => client.status.state === "connected", "the reconnect to the right Codara", 8000);
 
   // Disconnect in Codara revokes the token; nothing reconnects.
-  codaraSocket.send(JSON.stringify({ type: "revoked" }));
+  await toBrowser(codaraSocket, { type: "revoked" });
   await until(() => client.status.state === "unpaired", "the revoke");
   assert.equal(token, null);
   const hellosAtRevoke = hellos.length;
@@ -214,5 +267,5 @@ export async function run() {
   refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, and drops the link on an unsealed or replayed frame";
 }

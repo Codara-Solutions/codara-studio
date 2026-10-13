@@ -1,7 +1,10 @@
 // The extension's end of the Codara link: finds Codara on its loopback
-// ports, proves it holds the pairing secret (or asks to pair when the user
+// ports, proves it holds the pairing secret (or pairs over ECDH when the user
 // pressed Connect), answers Codara's requests and keeps the socket busy
 // enough that the MV3 service worker is not suspended while connected.
+// Every frame after the handshake is sealed (Sealer), so a program relaying
+// the handshake from an earlier port can neither read nor drive the session.
+// src/main/browser/chrome/protocol.ts describes the wire format.
 // Everything browser-specific is passed in, so the tests drive it in Node.
 
 import { DEFAULT_PORTS, LINK_PATH, PROTOCOL } from "./policy.js";
@@ -64,8 +67,18 @@ export class LinkClient {
   }
 
   send(message) {
-    if (!this.socket || this.socket.readyState !== 1) return false;
-    this.socket.send(JSON.stringify(message));
+    const socket = this.socket;
+    if (!socket || socket.readyState !== 1) return false;
+    if (!socket.sealer) {
+      socket.send(JSON.stringify(message));
+      return true;
+    }
+    // Sealing is asynchronous and each frame's counter is its place in the
+    // stream, so frames leave one at a time in the order they were sent.
+    socket.outbox = (socket.outbox ?? Promise.resolve()).then(async () => {
+      const frame = await socket.sealer.seal(message);
+      if (socket.readyState === 1) socket.send(frame);
+    }).catch(() => {});
     return true;
   }
 
@@ -115,7 +128,9 @@ export class LinkClient {
       let settled = false;
       let socket;
       let proven = false;
+      let session = null;
       const nonce = pairing ? randomNonce() : null;
+      const keys = pair ? pairKeys() : null;
       const finish = (outcome) => {
         if (settled) return;
         settled = true;
@@ -138,16 +153,27 @@ export class LinkClient {
       }
       socket.onopen = async () => {
         const hello = await this.deps.hello();
-        socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true }));
+        const commit = keys ? { pairCommit: await pairCommitment((await keys).key) } : {};
+        socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true, ...commit }));
       };
       socket.onerror = () => finish("next");
       socket.onclose = () => {
         if (!settled) finish("next");
         else if (this.socket === socket) this.lost();
       };
-      socket.onmessage = async (event) => {
-        const message = parse(event.data);
+      const frame = async (data) => {
+        let message = parse(data);
         if (!message) return;
+        if (socket.sealer) {
+          try {
+            message = await socket.sealer.open(message);
+          } catch {
+            // Not the next frame Codara sealed: the path is not trusted.
+            socket.close();
+            if (this.socket === socket) this.lost();
+            return;
+          }
+        }
         if (!settled && message.type === "challenge" && pairing && !proven) {
           // Answer only a Codara that proved it holds this pairing's secret:
           // whatever else sits on the port gets nothing it could replay.
@@ -160,6 +186,7 @@ export class LinkClient {
             return;
           }
           proven = true;
+          session = { secret, first: nonce, second: String(message.nonce) };
           socket.send(JSON.stringify({ type: "auth", proof: await linkProof(secret, "browser", String(message.nonce), nonce) }));
           return;
         }
@@ -190,10 +217,33 @@ export class LinkClient {
             finish("unknown");
             return;
           }
+          if (message.type === "pairing") {
+            const codaraKey = String(message.key ?? "");
+            if (!keys || !PUBLIC_KEY.test(codaraKey)) {
+              socket.close();
+              finish("next");
+              return;
+            }
+            // Revealed only now, after Codara sent its key: a relay had to
+            // pick its keys before it could see this one.
+            const own = await keys;
+            socket.pairing = { privateKey: own.privateKey, extensionKey: own.key, codaraKey };
+            socket.send(JSON.stringify({ type: "pair_key", key: own.key }));
+            message = { type: "pairing", code: await pairingCode(own.key, codaraKey) };
+          }
+          if (message.type === "welcome") socket.sealer = await sessionSealer(session.secret, session.first, session.second);
           this.adopt(socket, port);
           finish(message.type === "welcome" || message.type === "pairing" ? "ok" : "stop");
         }
-        void this.handle(message);
+        // Requests are answered side by side; everything else in order.
+        if (message.id !== undefined && REQUEST_TYPES.has(message.type)) void this.handle(message);
+        else await this.handle(message);
+      };
+      // One frame at a time: opening a sealed frame is asynchronous, and a
+      // frame opens only after the one before it.
+      let frames = Promise.resolve();
+      socket.onmessage = (event) => {
+        frames = frames.then(() => frame(event.data)).catch(() => {});
       };
     });
   }
@@ -222,12 +272,24 @@ export class LinkClient {
       case "pairing":
         this.setStatus({ state: "pairing", code: message.code ?? null, error: null });
         return;
-      case "paired":
-        await this.deps.savePairing(message.token, message.linkId);
+      case "paired": {
+        const socket = this.socket;
+        const pairing = socket?.pairing;
+        if (!pairing || typeof message.linkId !== "string") {
+          this.lost();
+          return;
+        }
+        // Both sides derive the token from the exchange; it is never sent.
+        const shared = await sharedSecret(pairing.privateKey, pairing.codaraKey);
+        const token = await pairedToken(shared, pairing.extensionKey, pairing.codaraKey);
+        socket.pairing = null;
+        socket.sealer = await sessionSealer(await sha256Hex(token), pairing.extensionKey, pairing.codaraKey);
+        await this.deps.savePairing(token, message.linkId);
         this.attempt = 0;
         this.setStatus({ state: "connected", code: null, linkId: message.linkId ?? null, app: message.app ?? null, error: null });
         this.deps.onConnected?.();
         return;
+      }
       case "denied":
         this.disconnect("denied");
         this.setStatus({ error: message.message ?? "Codara declined the connection." });
@@ -311,9 +373,103 @@ export class LinkClient {
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const PUBLIC_KEY = /^04[0-9a-f]{128}$/;
 
 function hex(bytes) {
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function fromHex(text) {
+  const bytes = new Uint8Array(text.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(text.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+
+function base64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function fromBase64(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function hmac(keyText, message) {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(keyText), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", key, encoder.encode(message));
+}
+
+/** A fresh P-256 key pair for one pairing; the public key as uncompressed hex. */
+export async function pairKeys() {
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  return { privateKey: pair.privateKey, key: hex(await crypto.subtle.exportKey("raw", pair.publicKey)) };
+}
+
+export function pairCommitment(extensionKey) {
+  return sha256Hex(`codara-pair-commit|${extensionKey}`);
+}
+
+/** The code both screens show, from both keys (protocol.ts pairingCode). */
+export async function pairingCode(extensionKey, codaraKey) {
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(`codara-pair-code|${extensionKey}|${codaraKey}`));
+  const digits = String(new DataView(digest).getUint32(0) % 1_000_000).padStart(6, "0");
+  return `${digits.slice(0, 3)} ${digits.slice(3)}`;
+}
+
+export async function sharedSecret(privateKey, codaraKey) {
+  const theirs = await crypto.subtle.importKey("raw", fromHex(codaraKey), { name: "ECDH", namedCurve: "P-256" }, false, []);
+  return hex(await crypto.subtle.deriveBits({ name: "ECDH", public: theirs }, privateKey, 256));
+}
+
+export async function pairedToken(sharedHex, extensionKey, codaraKey) {
+  return hex(await hmac(sharedHex, `codara-pair-token|${extensionKey}|${codaraKey}`));
+}
+
+/** The sealer for one session, keyed as protocol.ts linkSessionKey. */
+export async function sessionSealer(secretHex, first, second, role = "browser") {
+  const raw = await hmac(secretHex, `codara-session|${first}|${second}`);
+  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return new Sealer(key, role);
+}
+
+/** AES-256-GCM per frame, the IV being the sender's direction and frame count (protocol.ts LinkSealer). */
+export class Sealer {
+  constructor(key, role) {
+    this.key = key;
+    this.role = role;
+    this.sent = 0n;
+    this.received = 0n;
+  }
+
+  iv(role, count) {
+    const iv = new Uint8Array(12);
+    const view = new DataView(iv.buffer);
+    view.setUint32(0, role === "codara" ? 0 : 1);
+    view.setBigUint64(4, count);
+    return iv;
+  }
+
+  async seal(message) {
+    const iv = this.iv(this.role, this.sent);
+    this.sent += 1n;
+    return JSON.stringify({ sealed: base64(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, this.key, encoder.encode(JSON.stringify(message)))) });
+  }
+
+  async open(frame) {
+    if (!frame || typeof frame.sealed !== "string") throw new Error("an unsealed frame");
+    const iv = this.iv(this.role === "codara" ? "browser" : "codara", this.received);
+    const text = decoder.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, this.key, fromBase64(frame.sealed)));
+    this.received += 1n;
+    const message = JSON.parse(text);
+    if (!message || typeof message !== "object") throw new Error("a frame that is not an object");
+    return message;
+  }
 }
 
 function randomNonce() {

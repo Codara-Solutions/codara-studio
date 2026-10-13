@@ -49,6 +49,11 @@ export interface BrowserTarget {
    * where the backend cannot.
    */
   keepPainting?(ms: number): Promise<{ background: boolean; release: () => Promise<void> }>;
+  /**
+   * Whether the user allowed cookie and storage access on this tab now.
+   * Only a tab of the user's own browser has it; absent means allowed.
+   */
+  storageAllowed?(): boolean;
 }
 
 export interface BrowserTabSummary {

@@ -2,28 +2,38 @@
 // (extensions/chrome/). One WebSocket per browser profile at
 // ws://127.0.0.1:<port>/codara-chrome; every frame is one JSON object.
 //
-//   ext -> {type:"hello", protocol, browser, extension, linkId?, nonce?, pair}
+//   ext -> {type:"hello", protocol, browser, extension, linkId?, nonce?, pair, pairCommit?}
 //   codara -> {type:"challenge", nonce, proof}                 known linkId
 //   ext -> {type:"auth", proof}
 //   codara -> {type:"welcome", protocol, linkId, app}          the proof matched
-//   codara -> {type:"pairing", code}                           pair asked, not paired
-//   codara -> {type:"paired", token, linkId, app}              the user allowed it
+//   codara -> {type:"pairing", key}                            pair asked, not paired
+//   ext -> {type:"pair_key", key}
+//   codara -> {type:"paired", linkId, app}                     the user allowed it
 //   codara -> {type:"denied", message} | {type:"unpaired"}     then close
 //
-// The token never crosses the socket after pairing. Each side proves it
-// holds the pairing secret with an HMAC over both nonces (linkProof), and
-// the extension checks Codara's proof before it answers, so a program that
-// took Codara's port first (another OS user's, say) learns nothing it could
-// replay and never gets to drive a tab.
+// The token never crosses the socket. Pairing is an ECDH exchange (P-256):
+// the extension commits to its key in the hello and reveals it only after
+// Codara sent its own, and both sides show a code made from both keys, so a
+// program relaying the exchange (one on an earlier port of the range) gets
+// two different codes and cannot pick keys that make them agree. Both sides
+// derive the token from the shared secret. Later connections prove the
+// pairing both ways with an HMAC over both nonces (linkProof); the extension
+// checks Codara's proof before it answers.
+//
+// Every frame after welcome or paired is sealed with AES-256-GCM under a key
+// derived from the pairing secret and that handshake's nonces (or keys), one
+// counter per direction (LinkSealer). A program relaying the handshake can
+// neither read the session nor add, drop, replay or reorder a frame: the
+// first frame that does not open ends the link.
 //
 // After that the extension reports the tabs the user shared ("tabs"),
 // relays chrome.debugger events ("cdp_event", "detached") and answers
 // Codara's requests ({id, type, ...} -> {id, result} | {id, error}). Codara
 // tells it which agent used a tab ("usage") and can revoke the pairing.
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-export const CHROME_LINK_PROTOCOL = 1;
+export const CHROME_LINK_PROTOCOL = 2;
 export const CHROME_LINK_PORTS: readonly number[] = [47615, 47616, 47617, 47618, 47619];
 export const CHROME_LINK_PATH = "/codara-chrome";
 /** chrome-extension://<32 letters a-p>; Edge, Brave and the other Chromium browsers send the same. */
@@ -78,10 +88,78 @@ export function proofMatches(expected: string, actual: unknown): boolean {
   return timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
 }
 
-/** "483 921": six digits, grouped so both screens read the same at a glance. */
-export function pairingCode(random: () => number = Math.random): string {
-  const digits = String(Math.floor(random() * 1_000_000)).padStart(6, "0");
+/** An uncompressed P-256 public key, hex. */
+export const LINK_PUBLIC_KEY = /^04[0-9a-f]{128}$/;
+export const LINK_COMMIT = /^[0-9a-f]{64}$/;
+
+const sha256 = (text: string) => createHash("sha256").update(text).digest();
+
+/** What the extension sends in its hello before it reveals its key. */
+export function pairCommitment(extensionKey: string): string {
+  return sha256(`codara-pair-commit|${extensionKey}`).toString("hex");
+}
+
+/** "483 921": six digits from both keys, grouped so both screens read the same at a glance. */
+export function pairingCode(extensionKey: string, codaraKey: string): string {
+  const digits = String(sha256(`codara-pair-code|${extensionKey}|${codaraKey}`).readUInt32BE(0) % 1_000_000).padStart(6, "0");
   return `${digits.slice(0, 3)} ${digits.slice(3)}`;
+}
+
+/** The token both sides derive from the ECDH shared secret (hex). */
+export function pairedToken(sharedHex: string, extensionKey: string, codaraKey: string): string {
+  return createHmac("sha256", sharedHex).update(`codara-pair-token|${extensionKey}|${codaraKey}`).digest("hex");
+}
+
+/** The session key for the frames after a handshake, from the pairing secret (hex SHA-256 of the token). */
+export function linkSessionKey(secretHex: string, first: string, second: string): Buffer {
+  return createHmac("sha256", secretHex).update(`codara-session|${first}|${second}`).digest();
+}
+
+export class LinkSealError extends Error {}
+
+/**
+ * AES-256-GCM over each frame. The IV is the sender's direction and its
+ * frame count, so a frame opens only as the next one from the other side.
+ * extensions/chrome/lib/link-client.js does the same with WebCrypto.
+ */
+export class LinkSealer {
+  private sent = 0n;
+  private received = 0n;
+
+  constructor(private readonly key: Buffer, private readonly role: "codara" | "browser") {}
+
+  private iv(role: "codara" | "browser", count: bigint): Buffer {
+    const iv = Buffer.alloc(12);
+    iv.writeUInt32BE(role === "codara" ? 0 : 1, 0);
+    iv.writeBigUInt64BE(count, 4);
+    return iv;
+  }
+
+  seal(message: Record<string, unknown>): string {
+    const cipher = createCipheriv("aes-256-gcm", this.key, this.iv(this.role, this.sent++));
+    const body = Buffer.concat([cipher.update(JSON.stringify(message), "utf8"), cipher.final(), cipher.getAuthTag()]);
+    return JSON.stringify({ sealed: body.toString("base64") });
+  }
+
+  /** The next frame from the other side; throws LinkSealError for anything else. */
+  open(frame: unknown): Record<string, unknown> {
+    const sealed = frame && typeof frame === "object" ? (frame as { sealed?: unknown }).sealed : undefined;
+    if (typeof sealed !== "string") throw new LinkSealError("an unsealed frame");
+    const body = Buffer.from(sealed, "base64");
+    if (body.length < 16) throw new LinkSealError("a short frame");
+    let text: string;
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", this.key, this.iv(this.role === "codara" ? "browser" : "codara", this.received));
+      decipher.setAuthTag(body.subarray(body.length - 16));
+      text = Buffer.concat([decipher.update(body.subarray(0, body.length - 16)), decipher.final()]).toString("utf8");
+    } catch {
+      throw new LinkSealError("a frame that does not open");
+    }
+    this.received += 1n;
+    const message = JSON.parse(text) as unknown;
+    if (!message || typeof message !== "object") throw new LinkSealError("a frame that is not an object");
+    return message as Record<string, unknown>;
+  }
 }
 
 /** A short id for one paired browser, used in chrome:<linkId>/<tabId>. */

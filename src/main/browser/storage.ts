@@ -221,10 +221,23 @@ function itemsOf(raw: unknown, redact: boolean): Record<string, unknown> {
   return items.length > ITEMS_SHOWN ? { count: items.length, shown: ITEMS_SHOWN, items: shown } : { count: items.length, items: shown };
 }
 
+// The extension holds back the protocol's cookie and storage commands until
+// the user allows them on the tab, but page storage is read and written by
+// script in the page, which it cannot tell apart from any other evaluate.
+// So the same permission is checked here before page storage is read in full
+// or changed.
+function requireStoragePermission(target: BrowserTarget): void {
+  if (target.kind !== "chrome" || !target.storageAllowed || target.storageAllowed()) return;
+  throw new StorageParamsError(
+    `Cookies and site storage of ${target.ref} need the user's permission: they turn on "Allow cookie and storage access" for this tab in the Codara extension popup.`,
+  );
+}
+
 export async function readStorage(
   target: BrowserTarget,
   options: { area: StorageArea | null; redact: boolean },
 ): Promise<Record<string, unknown>> {
+  if (!options.redact) requireStoragePermission(target);
   const page = await pageOrigin(target);
   const areas = options.area ? [options.area] : [...STORAGE_AREAS];
   const result: Record<string, unknown> = { ok: true, tabId: target.ref, url: page.url, origin: page.origin ?? "none" };
@@ -274,9 +287,10 @@ export async function setStorageItem(
   }
   if (typeof options.name !== "string" || !options.name) throw new StorageParamsError("set needs a name.");
   const value = typeof options.value === "string" ? options.value : options.value === undefined ? "" : JSON.stringify(options.value);
+  if (area === "cookies") refuseOnUserBrowser(target, "change cookies");
+  requireStoragePermission(target);
   const page = await pageOrigin(target);
   if (area === "cookies") {
-    refuseOnUserBrowser(target, "change cookies");
     if (!page.origin) throw new StorageParamsError("Cookies need an http or https page.");
     const result = await target.session.send<{ success?: boolean }>("Network.setCookie", {
       name: options.name,
@@ -330,6 +344,7 @@ export async function clearStorage(
   if (target.kind === "chrome" && areas.some((area) => area !== "local" && area !== "session")) {
     refuseOnUserBrowser(target, "clear cookies, IndexedDB or caches");
   }
+  requireStoragePermission(target);
   const page = await pageOrigin(target);
   const removed: Record<string, number> = {};
   for (const area of areas) {

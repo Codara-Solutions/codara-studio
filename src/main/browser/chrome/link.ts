@@ -3,7 +3,7 @@
 
 import type { WebSocket } from "ws";
 
-import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo } from "./protocol";
+import { sanitizeTabs, type ChromeBrowserInfo, type ChromeRequestType, type ChromeTabInfo, type LinkSealer } from "./protocol";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -34,6 +34,7 @@ export class ChromeLink {
     readonly extensionId: string,
     readonly extensionVersion: string,
     private readonly socket: Pick<WebSocket, "send" | "close" | "readyState">,
+    private readonly sealer: LinkSealer,
   ) {}
 
   get isOpen(): boolean {
@@ -57,13 +58,18 @@ export class ChromeLink {
   send(message: Record<string, unknown>): void {
     if (this.closed) return;
     try {
-      this.socket.send(JSON.stringify(message));
+      this.socket.send(this.sealer.seal(message));
     } catch {
       // A socket closing under us reports through close().
     }
   }
 
-  /** A frame from the extension after the handshake. */
+  /** A raw frame from the extension after the handshake; throws LinkSealError when it does not open. */
+  open(frame: unknown): Record<string, unknown> {
+    return this.sealer.open(frame);
+  }
+
+  /** A frame from the extension after the handshake, opened. */
   handle(message: Record<string, unknown>): void {
     if (typeof message.id === "number" && !("type" in message)) {
       const waiter = this.pending.get(message.id);

@@ -3,7 +3,7 @@
 // need the per-tab cookie and storage permission, and what an event must not
 // carry without it. No chrome.* here, so the tests run it in Node.
 
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 export const DEFAULT_PORTS = [47615, 47616, 47617, 47618, 47619];
 export const LINK_PATH = "/codara-chrome";
 
@@ -131,7 +131,31 @@ const NEVER_EXACT = new Set([
   "Page.setDownloadBehavior",
 ]);
 const NEVER_PREFIXES = ["Browser.", "SystemInfo.", "Tethering.", "Extensions.", "PWA.", "BluetoothEmulation."];
-const TARGET_ALLOWED = new Set(["Target.getTargetInfo", "Target.setAutoAttach", "Target.setDiscoverTargets"]);
+// Auto-attach would open sessions on the tab's frames and workers, and
+// discovery reports every other target in the browser: neither passes the
+// tab's sharing and blocked-sites checks, so only the tab's own info is read.
+const TARGET_ALLOWED = new Set(["Target.getTargetInfo"]);
+
+/**
+ * Why a request may not go to a session inside the tab (a frame or worker,
+ * whose site the blocked-sites list never checked), or null.
+ */
+export function childSessionError(request) {
+  if (request?.sessionId === undefined || request?.sessionId === null) return null;
+  return "Agents use the tab's own page only: its frames and workers are not reachable in your own browser.";
+}
+
+/**
+ * What the agent learns about a tab it opened. A page that redirected to a
+ * blocked site tells it nothing: not where it ended, nor its title.
+ */
+export function openedTabAnswer(tabId, current, requested, rules) {
+  const url = current?.url || requested;
+  if (blockingRule(url, rules) || (current?.pendingUrl && blockingRule(current.pendingUrl, rules))) {
+    return { tabId, url: "", title: "", blocked: true };
+  }
+  return { tabId, url, title: current?.title ?? "" };
+}
 
 /** "allow", "storage" (needs the tab's cookie and storage permission) or "never". */
 export function cdpPermission(method) {

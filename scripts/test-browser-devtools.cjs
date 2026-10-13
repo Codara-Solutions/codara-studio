@@ -412,6 +412,30 @@ async function storageOnUserBrowser(lib) {
   const local = await lib.clearStorage(target, { area: "local" });
   assert.deepEqual(local.removed, { localStorage: 2 }, "the page's own local storage may be cleared on a shared tab");
 
+  // Page storage goes through script in the page, which the extension cannot
+  // gate, so the tab's storage permission is checked here: without it the
+  // page's storage is neither read in full nor changed.
+  let allowed = false;
+  const unshared = {
+    ...target,
+    storageAllowed: () => allowed,
+    async evaluate() {
+      throw new Error("must not reach the page");
+    },
+  };
+  for (const [label, call] of [
+    ["get redact=false", () => lib.readStorage(unshared, { area: "local", redact: false })],
+    ["set local", () => lib.setStorageItem(unshared, { area: "local", name: "a", value: "b" })],
+    ["set session", () => lib.setStorageItem(unshared, { area: "session", name: "a", value: "b" })],
+    ["clear local", () => lib.clearStorage(unshared, { area: "local" })],
+    ["remove one", () => lib.clearStorage(unshared, { area: "session", name: "a" })],
+  ]) {
+    await assert.rejects(call(), /chrome:7 need the user's permission/, label);
+  }
+  allowed = true;
+  const permitted = { ...unshared, async evaluate() { return { removed: 1 }; } };
+  assert.deepEqual((await lib.clearStorage(permitted, { area: "local" })).removed, { localStorage: 1 }, "allowed once the user turns it on");
+
   // redact=false never hands out the live sign-ins of the user's own browser.
   const reader = {
     ...target,

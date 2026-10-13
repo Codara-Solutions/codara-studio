@@ -4,9 +4,9 @@
 // extension's origin with a loopback Host, so neither a web page nor a DNS
 // rebinding can open it. A new browser pairs only after the user allowed it
 // in Codara with the code both sides show; the token it then keeps is bound
-// to that extension id.
+// to that extension id. protocol.ts describes the handshake.
 
-import { randomBytes } from "node:crypto";
+import { createECDH, randomBytes } from "node:crypto";
 import { createServer, STATUS_CODES, type IncomingMessage, type Server } from "node:http";
 import type { Duplex } from "node:stream";
 
@@ -19,10 +19,16 @@ import {
   CHROME_LINK_PORTS,
   CHROME_LINK_PROTOCOL,
   EXTENSION_ORIGIN,
+  LINK_COMMIT,
   LINK_NONCE,
+  LINK_PUBLIC_KEY,
   LOOPBACK_HOST,
+  LinkSealer,
   linkIdFor,
   linkProof,
+  linkSessionKey,
+  pairCommitment,
+  pairedToken,
   pairingCode,
   proofMatches,
   sanitizeBrowserInfo,
@@ -52,6 +58,9 @@ interface PairingEntry {
   socket: WebSocket;
   timer: ReturnType<typeof setTimeout>;
   version: string;
+  /** Derived on both sides from the ECDH exchange; never sent. */
+  token: string;
+  sessionKey: Buffer;
   adopt(link: ChromeLink): void;
 }
 
@@ -136,20 +145,19 @@ export class ChromeLinkServer {
     if (!entry) return false;
     this.pairings.delete(id);
     clearTimeout(entry.timer);
-    const token = randomBytes(32).toString("hex");
     const taken = new Set(this.options.store.list().map((link) => link.linkId));
     const linkId = linkIdFor(entry.pending.browser.name, taken);
     const now = new Date().toISOString();
     this.options.store.add({
       linkId,
-      tokenSha256: hashToken(token),
+      tokenSha256: hashToken(entry.token),
       extensionId: entry.pending.extensionId,
       browser: entry.pending.browser,
       pairedAt: now,
       lastSeenAt: now,
     });
-    entry.socket.send(JSON.stringify({ type: "paired", token, linkId, app: this.options.app }));
-    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version));
+    entry.socket.send(JSON.stringify({ type: "paired", linkId, app: this.options.app }));
+    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version, new LinkSealer(entry.sessionKey, "codara")));
     this.emitChange();
     return true;
   }
@@ -237,8 +245,17 @@ export class ChromeLinkServer {
       }
       this.alive.set(ws, true);
       if (link) {
-        if (message.type === "unpair") this.unpair(link.linkId);
-        else link.handle(message);
+        let opened: Record<string, unknown>;
+        try {
+          opened = link.open(message);
+        } catch {
+          // Not the next frame the extension sealed: something on the path
+          // added, dropped or changed one, so this socket is not trusted.
+          this.drop(link, 4005, "unsealed frame");
+          return;
+        }
+        if (opened.type === "unpair") this.unpair(link.linkId);
+        else link.handle(opened);
         return;
       }
       if (message.type === "ping") {
@@ -315,7 +332,8 @@ export class ChromeLinkServer {
         }
         this.options.store.add({ ...paired, browser, lastSeenAt: new Date().toISOString() });
         ws.send(JSON.stringify({ type: "welcome", protocol: CHROME_LINK_PROTOCOL, linkId: paired.linkId, app: this.options.app }));
-        adopt(this.open(ws, paired.linkId, browser, extensionId, version));
+        const sealer = new LinkSealer(linkSessionKey(paired.tokenSha256, clientNonce, serverNonce), "codara");
+        adopt(this.open(ws, paired.linkId, browser, extensionId, version, sealer));
       });
       ws.send(JSON.stringify({ type: "challenge", nonce: serverNonce, proof: linkProof(paired.tokenSha256, "codara", clientNonce, serverNonce) }));
       return;
@@ -324,15 +342,60 @@ export class ChromeLinkServer {
       this.refuse(ws, { type: "unpaired" });
       return;
     }
-    if (this.pairings.size >= MAX_PENDING_PAIRINGS) {
+    const busy = () => this.pairings.size >= MAX_PENDING_PAIRINGS;
+    if (busy()) {
       this.refuse(ws, { type: "denied", message: "Codara already has pairing requests waiting. Answer them first." });
       return;
     }
+    const commit = typeof message.pairCommit === "string" && LINK_COMMIT.test(message.pairCommit) ? message.pairCommit : "";
+    if (!commit) {
+      this.refuse(ws, { type: "denied", message: "The pairing request was incomplete. Update the Codara extension." });
+      return;
+    }
+    const ecdh = createECDH("prime256v1");
+    const codaraKey = ecdh.generateKeys("hex");
+    expectAuth((answer) => {
+      const extensionKey = typeof answer.key === "string" ? answer.key : "";
+      let shared = "";
+      if (answer.type === "pair_key" && LINK_PUBLIC_KEY.test(extensionKey) && pairCommitment(extensionKey) === commit) {
+        try {
+          shared = ecdh.computeSecret(extensionKey, "hex", "hex");
+        } catch {
+          shared = "";
+        }
+      }
+      if (!shared) {
+        this.refuse(ws, { type: "denied", message: "The pairing request did not match what the browser announced." });
+        return;
+      }
+      if (busy()) {
+        this.refuse(ws, { type: "denied", message: "Codara already has pairing requests waiting. Answer them first." });
+        return;
+      }
+      const token = pairedToken(shared, extensionKey, codaraKey);
+      this.awaitApproval(ws, {
+        browser,
+        extensionId,
+        version,
+        adopt,
+        code: pairingCode(extensionKey, codaraKey),
+        token,
+        sessionKey: linkSessionKey(hashToken(token), extensionKey, codaraKey),
+      });
+    });
+    ws.send(JSON.stringify({ type: "pairing", key: codaraKey }));
+  }
+
+  private awaitApproval(
+    ws: WebSocket,
+    request: Pick<PairingEntry, "version" | "token" | "sessionKey" | "adopt"> & { browser: ChromeBrowserInfo; extensionId: string; code: string },
+  ): void {
+    const { browser, extensionId, version, adopt, code, token, sessionKey } = request;
     const timeoutMs = this.options.pairingTimeoutMs ?? 120_000;
     const now = Date.now();
     const pending: PendingPairing = {
       id: randomBytes(8).toString("hex"),
-      code: pairingCode(),
+      code,
       browser,
       extensionId,
       requestedAt: new Date(now).toISOString(),
@@ -340,18 +403,17 @@ export class ChromeLinkServer {
     };
     const timer = setTimeout(() => this.deny(pending.id, "Nobody allowed the connection in Codara in time."), timeoutMs);
     timer.unref?.();
-    this.pairings.set(pending.id, { pending, socket: ws, timer, version, adopt });
-    ws.send(JSON.stringify({ type: "pairing", code: pending.code }));
+    this.pairings.set(pending.id, { pending, socket: ws, timer, version, token, sessionKey, adopt });
     for (const listener of this.pairingListeners) listener({ ...pending });
     this.emitChange();
   }
 
-  private open(ws: WebSocket, linkId: string, browser: ChromeBrowserInfo, extensionId: string, version: string): ChromeLink {
+  private open(ws: WebSocket, linkId: string, browser: ChromeBrowserInfo, extensionId: string, version: string, sealer: LinkSealer): ChromeLink {
     const previous = this.live.get(linkId);
     // The same browser reconnected (its service worker restarted): the new
     // socket replaces the old one.
     if (previous) this.drop(previous, 4002, "replaced");
-    const link = new ChromeLink(linkId, browser, extensionId, version, ws);
+    const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer);
     this.live.set(linkId, link);
     link.onTabs(() => this.emitChange());
     for (const listener of this.upListeners) listener(link);

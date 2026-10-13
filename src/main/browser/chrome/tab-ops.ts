@@ -11,6 +11,7 @@ import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
 import { clickProbe, typeProbe } from "../../../renderer/src/components/Preview/domActions";
 import { parseKeyChord, previewKeyEvents } from "../../preview-keyboard";
+import { applyEmulation } from "../emulation";
 import { consoleRing } from "../recorders/console";
 import { clearNetwork, networkRing } from "../recorders/network";
 import { captureScreenshot, normalizeScreenshotRequest, type ImageCodec } from "../screenshot";
@@ -212,11 +213,38 @@ export async function drag(target: BrowserTarget, params: Params): Promise<unkno
   return { ok: true, from, to, steps };
 }
 
+// Keys reach a page in a background tab or an unfocused window only with
+// focus emulated. It is on only while keys are sent: left on, the user's own
+// tab would report focus (and keep :focus) while they work elsewhere, and a
+// mail or chat app would hold back its notifications. Overlapping calls share
+// one enable.
+const focusHolds = new WeakMap<object, { count: number; ready: Promise<unknown> }>();
+
+async function withFocusEmulated<T>(target: BrowserTarget, run: () => Promise<T>): Promise<T> {
+  const session = target.session;
+  let hold = focusHolds.get(session);
+  if (hold) hold.count += 1;
+  else {
+    hold = { count: 1, ready: session.send("Emulation.setFocusEmulationEnabled", { enabled: true }) };
+    focusHolds.set(session, hold);
+  }
+  try {
+    await hold.ready;
+    return await run();
+  } finally {
+    hold.count -= 1;
+    if (hold.count === 0 && focusHolds.get(session) === hold) {
+      focusHolds.delete(session);
+      await session.send("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
+    }
+  }
+}
+
 async function dispatchKey(target: BrowserTarget, key: string, modifiers: string[], text: string | null): Promise<void> {
   const events = previewKeyEvents(key, modifiers, text);
-  // Keys reach a page in a background tab or an unfocused window only with focus emulated.
-  await target.session.send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const event of events) await target.session.send("Input.dispatchKeyEvent", event);
+  await withFocusEmulated(target, async () => {
+    for (const event of events) await target.session.send("Input.dispatchKeyEvent", event);
+  });
 }
 
 export async function key(target: BrowserTarget, params: Params): Promise<unknown> {
@@ -303,8 +331,11 @@ export async function resize(target: BrowserTarget, params: Params): Promise<unk
   const height = num(params, "height");
   if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
   // The user's window keeps its size; the page lays out at the asked size.
-  await target.session.send("Emulation.setDeviceMetricsOverride", { width: Math.round(width), height: Math.round(height), deviceScaleFactor: 0, mobile: false });
-  return { ok: true, width: Math.round(width), height: Math.round(height), tabId: target.ref, emulated: true };
+  // It is the tab's emulated viewport, so emulate reset clears it and the
+  // emulation state no longer names a device it replaced.
+  const viewport = { width: Math.round(width), height: Math.round(height) };
+  await applyEmulation(target, { viewport, mobile: false });
+  return { ok: true, ...viewport, tabId: target.ref, emulated: true };
 }
 
 let codec: ImageCodec | undefined;

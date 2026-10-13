@@ -17,9 +17,11 @@ import {
   agentTabId,
   blockingRule,
   cdpPermission,
+  childSessionError,
   commandUrl,
   isRestrictedUrl,
   isTabShared,
+  openedTabAnswer,
   parseBlockedSites,
   redactCdpEvent,
   storageScopeError,
@@ -164,6 +166,8 @@ async function handleRequest(request) {
 }
 
 async function relayCommand(request) {
+  const child = childSessionError(request);
+  if (child) throw new Error(child);
   const tab = await usableTab(request.tabId);
   const method = String(request.method ?? "");
   const permission = cdpPermission(method);
@@ -184,8 +188,7 @@ async function relayCommand(request) {
     if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   }
   if (!state.attached.includes(tab.id)) throw new Error(`${agentTabId(tab.id)} is not attached.`);
-  const target = request.sessionId ? { tabId: tab.id, sessionId: request.sessionId } : { tabId: tab.id };
-  return (await chrome.debugger.sendCommand(target, method, request.params ?? {})) ?? {};
+  return (await chrome.debugger.sendCommand({ tabId: tab.id }, method, request.params ?? {})) ?? {};
 }
 
 async function openTab(request) {
@@ -207,7 +210,7 @@ async function openTab(request) {
   // The tab list goes out before the answer, so Codara knows the tab is
   // shared by the time the agent uses its id.
   await refresh();
-  return { tabId: tab.id, url: current?.url ?? url, title: current?.title ?? "" };
+  return openedTabAnswer(tab.id, current, url, rules);
 }
 
 function handleMessage(message) {
@@ -254,6 +257,8 @@ function isBlockedEvent(method, params) {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!state || typeof source.tabId !== "number" || !state.attached.includes(source.tabId)) return;
+  // A frame's or worker's session never passed the blocked-sites check.
+  if (source.sessionId) return;
   if (method === "Page.frameNavigated" && !params?.frame?.parentId && blockingRule(params?.frame?.url, rules)) {
     void detachTab(source.tabId).then(() => link.send({ type: "detached", tabId: source.tabId, reason: "blocked_site" }));
     return;
@@ -264,7 +269,6 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     tabId: source.tabId,
     method,
     params: redactCdpEvent(method, params, state.storageTabs.includes(source.tabId)),
-    ...(source.sessionId ? { sessionId: source.sessionId } : {}),
   });
 });
 

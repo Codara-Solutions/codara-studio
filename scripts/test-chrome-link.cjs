@@ -1,7 +1,8 @@
 "use strict";
 // The Chrome extension link in main (src/main/browser/chrome/): who may
-// connect, pairing with a code and Allow, tokens bound to one extension and
-// proven both ways without crossing the socket,
+// connect, pairing over ECDH with a code from both keys and Allow, tokens
+// bound to one extension and proven both ways without crossing the socket,
+// sealed frames after the handshake,
 // shared and blocked tabs, the DevTools protocol relayed to a shared tab, the
 // activity log with the agent's name, codara_preview_chrome, and unpairing.
 // A fake extension speaks the wire protocol; the real one, in a real
@@ -38,6 +39,10 @@ async function load() {
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
         `export { consoleRing } from "../recorders/console";`,
         `export { navigate } from "./tab-ops";`,
+        `export { chromeTargetTools } from "../../preview-tools/chrome";`,
+        `export { pageActivity } from "../page-activity";`,
+        `export { currentEmulation, resetEmulation } from "../emulation";`,
+        `export { MARK_BASELINE_EXPRESSION } from "../wait";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -54,6 +59,7 @@ async function load() {
 }
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const host0 = () => ({ mayUseUserBrowser: async () => true });
 
 async function until(check, label, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -75,25 +81,56 @@ function freePort() {
   });
 }
 
-/** A fake extension: records what Codara sends and answers requests with `answer`. */
+/**
+ * A fake extension: records what Codara sends and answers requests with
+ * `answer`. It speaks the sealed wire protocol with the extension's own
+ * crypto (extensions/chrome/lib/link-client.js), so both ends are checked
+ * against each other.
+ */
 function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-chrome", answer } = {}) {
   const socket = new WebSocket(`ws://127.0.0.1:${port}${urlPath}`, {
     origin: origin === undefined ? `chrome-extension://${id}` : origin,
     headers: host ? { host } : {},
   });
-  const ext = { socket, received: [], closed: false, status: null };
-  socket.on("message", async (raw) => {
-    const message = JSON.parse(String(raw));
+  const ext = { socket, received: [], frames: [], closed: false, closeCode: null, status: null, sealer: null, token: null, failure: null };
+  let inbox = Promise.resolve();
+  let outbox = Promise.resolve();
+  const receive = async (frame) => {
+    const { pairedToken, sessionSealer, sha256Hex, sharedSecret } = await extensionCrypto;
+    const message = ext.sealer ? await ext.sealer.open(frame) : frame;
+    // The sealer is in place before anything waiting on this frame runs, so
+    // whatever the test sends next leaves sealed.
+    if (message.type === "paired" && ext.pairing) {
+      const { privateKey, extensionKey, codaraKey } = ext.pairing;
+      ext.token = await pairedToken(await sharedSecret(privateKey, codaraKey), extensionKey, codaraKey);
+      ext.sealer = await sessionSealer(await sha256Hex(ext.token), extensionKey, codaraKey);
+    }
+    if (message.type === "welcome" && ext.session) {
+      ext.sealer = await sessionSealer(ext.session.secret, ext.session.first, ext.session.second);
+    }
     ext.received.push(message);
     if (message.id !== undefined && answer) {
-      try {
-        socket.send(JSON.stringify({ id: message.id, result: (await answer(message)) ?? {} }));
-      } catch (error) {
-        socket.send(JSON.stringify({ id: message.id, error: { message: error.message } }));
-      }
+      void (async () => {
+        try {
+          ext.send({ id: message.id, result: (await answer(message)) ?? {} });
+        } catch (error) {
+          ext.send({ id: message.id, error: { message: error.message } });
+        }
+      })();
     }
+  };
+  socket.on("message", (raw) => {
+    const frame = JSON.parse(String(raw));
+    ext.frames.push(frame);
+    inbox = inbox.then(() => receive(frame)).catch((error) => {
+      ext.failure = error;
+      socket.close();
+    });
   });
-  socket.on("close", () => (ext.closed = true));
+  socket.on("close", (code) => {
+    ext.closed = true;
+    ext.closeCode = code;
+  });
   socket.on("unexpected-response", (_req, res) => {
     ext.status = res.statusCode;
     ext.closed = true;
@@ -104,9 +141,28 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
     socket.on("close", () => resolve(false));
     socket.on("unexpected-response", () => resolve(false));
   });
-  ext.send = (message) => socket.send(JSON.stringify(message));
-  ext.hello = (extra = {}) => ext.send({ type: "hello", protocol: 1, browser: { name: "Google Chrome", version: "141.0" }, extension: { id, version: "1.0.0" }, ...extra });
+  ext.send = (message) => {
+    const sealer = ext.sealer;
+    outbox = outbox.then(async () => socket.send(sealer ? await sealer.seal(message) : JSON.stringify(message)));
+    return outbox;
+  };
+  ext.raw = (text) => socket.send(text);
+  ext.hello = (extra = {}) => ext.send({ type: "hello", protocol: 2, browser: { name: "Google Chrome", version: "141.0" }, extension: { id, version: "1.0.0" }, ...extra });
   ext.next = (type) => until(() => ext.received.find((message) => message.type === type), type);
+  // The extension's side of pairing: commit to a key, reveal it after
+  // Codara's, and show the code derived from both.
+  ext.pair = async (extra = {}, { reveal } = {}) => {
+    const { pairCommitment, pairKeys, pairingCode } = await extensionCrypto;
+    const own = await pairKeys();
+    ext.hello({ pair: true, pairCommit: await pairCommitment(own.key), ...extra });
+    const offer = await ext.next("pairing");
+    assert.match(offer.key, /^04[0-9a-f]{128}$/);
+    assert.equal(offer.code, undefined, "Codara does not send a code; both sides derive it");
+    const key = reveal ?? own.key;
+    ext.pairing = { privateKey: own.privateKey, extensionKey: key, codaraKey: offer.key };
+    ext.send({ type: "pair_key", key });
+    return pairingCode(key, offer.key);
+  };
   // The extension's side of the handshake, with the extension's own proof code.
   ext.login = async ({ token, linkId }, { lie = false } = {}) => {
     const { linkProof, sha256Hex } = await extensionCrypto;
@@ -115,6 +171,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
     const challenge = await ext.next("challenge");
     const secret = await sha256Hex(token);
     assert.equal(challenge.proof, await linkProof(secret, "codara", nonce, challenge.nonce), "Codara proves it holds the pairing");
+    ext.session = { secret, first: nonce, second: challenge.nonce };
     ext.send({ type: "auth", proof: lie ? "0".repeat(64) : await linkProof(secret, "browser", challenge.nonce, nonce) });
   };
   return ext;
@@ -166,9 +223,9 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   server.onPairingRequest((pairing) => pairingRequests.push(pairing));
   const denied = extension(port);
   await denied.opened;
-  denied.hello({ pair: true });
-  const { code } = await denied.next("pairing");
+  const code = await denied.pair();
   assert.match(code, /^\d{3} \d{3}$/);
+  await until(() => pairingRequests.length === 1, "the pairing request");
   assert.equal(pairingRequests[0].code, code, "Codara shows the code the extension shows");
   assert.equal(pairingRequests[0].browser.name, "Google Chrome");
   server.deny(server.pendingPairings()[0].id);
@@ -176,9 +233,21 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
 
   const late = extension(port);
   await late.opened;
-  late.hello({ pair: true });
-  await late.next("pairing");
+  await late.pair();
   assert.match((await late.next("denied")).message, /in time/, "nobody answered");
+
+  // A relay that swaps in its own key cannot reveal one the browser committed
+  // to, and a hello without a commitment is not a pairing request.
+  const swapped = extension(port);
+  await swapped.opened;
+  const { pairKeys } = await extensionCrypto;
+  await swapped.pair({}, { reveal: (await pairKeys()).key });
+  assert.match((await swapped.next("denied")).message, /did not match/);
+  const uncommitted = extension(port);
+  await uncommitted.opened;
+  uncommitted.hello({ pair: true });
+  assert.match((await uncommitted.next("denied")).message, /incomplete/);
+  assert.equal(server.pendingPairings().length, 0, "neither reached the user");
 
   const ups = [];
   const downs = [];
@@ -191,21 +260,24 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
       if (String(message.params.expression).includes("innerWidth")) return { result: { value: { url: "https://mail.example/", title: "Mail", width: 800, height: 600, dpr: 2 } } };
       return { result: { value: 42 } };
     }
+    if (message.type === "open" && message.url.includes("redirects-to-bank")) return { tabId: 98, url: "", title: "", blocked: true };
     if (message.type === "open") return { tabId: 99, url: message.url, title: "Opened" };
     return {};
   };
   const chrome = extension(port, { answer });
   await chrome.opened;
-  chrome.hello({ pair: true });
-  await chrome.next("pairing");
+  const chromeCode = await chrome.pair();
+  await until(() => server.pendingPairings()[0]?.code === chromeCode, "the matching code in Codara");
   assert.equal(server.approve(server.pendingPairings()[0].id), true);
   const paired = await chrome.next("paired");
-  assert.match(paired.token, /^[0-9a-f]{64}$/);
+  assert.equal(paired.token, undefined, "the token never crosses the socket");
+  const token = chrome.token;
+  assert.match(token, /^[0-9a-f]{64}$/);
   assert.match(paired.linkId, /^chrome-[0-9a-f]{4}$/);
   assert.deepEqual(ups, [paired.linkId]);
   const saved = fs.readFileSync(storeFile, "utf8");
-  assert.ok(!saved.includes(paired.token), "only a hash of the token is stored");
-  assert.ok(saved.includes(lib.hashToken(paired.token)));
+  assert.ok(!saved.includes(token), "only a hash of the token is stored");
+  assert.ok(saved.includes(lib.hashToken(token)), "Codara derived the same token");
   assert.equal((fs.statSync(storeFile).mode & 0o777).toString(8), "600");
 
   // The pairing works only for the extension it was issued to, and only with its secret.
@@ -219,7 +291,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   await assert.rejects(guesser.login({ token: "0".repeat(64), linkId: paired.linkId }), /proves it holds the pairing/, "a wrong secret cannot check Codara's proof");
   const liar = extension(port);
   await liar.opened;
-  await liar.login(paired, { lie: true });
+  await liar.login({ token, linkId: paired.linkId }, { lie: true });
   await liar.next("unpaired");
   assert.ok(!liar.received.some((message) => message.type === "welcome"), "a wrong proof is refused");
 
@@ -249,6 +321,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.equal(target.kind, "chrome");
   assert.equal(target.ref, "chrome:12");
   assert.equal(target.workspaceId, "ws-1");
+  assert.equal(target.storageAllowed(), false, "page storage follows the tab's storage permission");
   assert.equal(await target.evaluate("6 * 7"), 42);
   assert.deepEqual(answers[0], { id: answers[0].id, type: "attach", tabId: 12 }, "the tab is attached on first use");
   const enabled = answers.filter((m) => m.type === "cdp" && /\.enable$/.test(m.method)).map((m) => m.method);
@@ -260,6 +333,33 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   await until(() => lib.consoleRing(target.session).size === 1, "the console entry");
   assert.equal(lib.consoleRing(target.session).toArray()[0].message, "careful");
   assert.equal((await lib.resolveBrowserTarget({ tabId: "chrome:12" })).session, target.session, "one session per tab");
+
+  // An agent action on a Chrome tab is stamped first, as on a Codara tab, so
+  // a fresh wait or one for the navigation a click started has its baseline.
+  const tools = lib.chromeTargetTools;
+  const sentFrom = (start) => answers.slice(start).filter((m) => m.type === "cdp").map((m) => m.method);
+  const beforeAction = answers.length;
+  await tools["preview.evaluate"]({ tabId: "chrome:12", code: "6 * 7" }, "preview.evaluate", host0());
+  assert.ok(lib.pageActivity(target.session).lastActionAt > 0, "the action is stamped on the tab");
+  const evaluated = answers.slice(beforeAction).filter((m) => m.method === "Runtime.evaluate");
+  assert.equal(evaluated[0].params.expression, lib.MARK_BASELINE_EXPRESSION, "the baseline is taken before the action runs");
+
+  // resize is the tab's emulated viewport: emulate reset clears it.
+  const beforeResize = answers.length;
+  assert.deepEqual(await tools["preview.resize"]({ tabId: "chrome:12", width: 500, height: 400 }, "preview.resize", host0()), { ok: true, width: 500, height: 400, tabId: "chrome:12", emulated: true });
+  assert.deepEqual(lib.currentEmulation(target).viewport, { width: 500, height: 400 });
+  await lib.resetEmulation(target);
+  assert.deepEqual(sentFrom(beforeResize), ["Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride"], "reset takes the resize back");
+
+  // Focus is emulated only while keys are sent.
+  const beforeKey = answers.length;
+  await tools["preview.press_key"]({ tabId: "chrome:12", key: "Enter" }, "preview.press_key", host0());
+  const keyed = sentFrom(beforeKey).filter((method) => method.startsWith("Emulation.") || method.startsWith("Input."));
+  assert.equal(keyed[0], "Emulation.setFocusEmulationEnabled");
+  assert.equal(keyed.at(-1), "Emulation.setFocusEmulationEnabled");
+  assert.ok(keyed.slice(1, -1).length > 0 && keyed.slice(1, -1).every((method) => method === "Input.dispatchKeyEvent"));
+  const focusFlags = answers.slice(beforeKey).filter((m) => m.method === "Emulation.setFocusEmulationEnabled").map((m) => m.params.enabled);
+  assert.deepEqual(focusFlags, [true, false], "the user's tab stops reporting focus once the keys are sent");
 
   // Activity: every call is logged with its agent, and the extension hears who used the tab.
   lib.setChromeActivityFile(activityFile);
@@ -291,6 +391,9 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.deepEqual(await lib.chromeLinkTool({ action: "open", url: "https://a.example/" }, "preview.chrome", host), { ok: true, tabId: "chrome:99", url: "https://a.example/", title: "Opened" });
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "open", url: "https://a.example/" });
   assert.equal(lib.recentChromeActivity()[0].detail, "opened https://a.example/");
+  const toBank = await lib.chromeLinkTool({ action: "open", url: "https://a.example/redirects-to-bank" }, "preview.chrome", host);
+  assert.deepEqual({ ...toBank, note: undefined }, { ok: true, tabId: "chrome:98", url: "", title: "", blocked: true, note: undefined }, "a tab that ended on a blocked site is not described");
+  assert.match(toBank.note, /blocked for agents/);
   await lib.chromeLinkTool({ action: "activate", tabId: "chrome:12" }, "preview.chrome", host);
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "activate", tabId: 12 });
   await assert.rejects(lib.chromeLinkTool({ action: "close", tabId: "tab-3" }, "preview.chrome", host), /tabId of a Chrome tab/);
@@ -298,7 +401,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   // The extension refuses: the error reaches the agent as is.
   const refusing = extension(port, { answer: async () => { throw new Error("Cookies and site storage of chrome:5 need the user's permission"); } });
   await refusing.opened;
-  await refusing.login(paired);
+  await refusing.login({ token, linkId: paired.linkId });
   await refusing.next("welcome");
   await until(() => downs.length === 1, "the replaced link going down");
   refusing.send({ type: "tabs", tabs: [{ tabId: 5, windowId: 1, url: "https://shop.example/", title: "Shop", active: true }] });
@@ -324,8 +427,8 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   // Two browsers: ids carry the browser, and a bare id that both have is ambiguous.
   const edge = extension(port, { id: EXT_B, answer });
   await edge.opened;
-  edge.hello({ pair: true, browser: { name: "Microsoft Edge", version: "141" } });
-  await edge.next("pairing");
+  await edge.pair({ browser: { name: "Microsoft Edge", version: "141" } });
+  await until(() => server.pendingPairings().length === 1, "the second pairing request");
   server.approve(server.pendingPairings()[0].id);
   const edgePaired = await edge.next("paired");
   assert.match(edgePaired.linkId, /^edge-[0-9a-f]{4}$/);
@@ -353,6 +456,36 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.deepEqual(store.list(), []);
   const persisted = new lib.ChromeLinkStore(storeFile);
   assert.deepEqual(persisted.list(), [], "a restarted Codara knows no browser");
+
+  // Past the handshake every frame is sealed. Something on the path that
+  // relayed the handshake can read nothing, and a frame it adds or replays
+  // ends the link before Codara acts on it.
+  const sealedExt = extension(port, { answer });
+  await sealedExt.opened;
+  await sealedExt.pair();
+  await until(() => server.pendingPairings().length === 1, "the pairing to seal");
+  server.approve(server.pendingPairings()[0].id);
+  const sealedPaired = await sealedExt.next("paired");
+  sealedExt.send({ type: "tabs", tabs: [{ tabId: 21, windowId: 1, url: "https://z.example/", title: "Z", active: true }] });
+  const sealedLink = await until(() => server.link(sealedPaired.linkId)?.tabs.has(21) && server.link(sealedPaired.linkId), "the sealed tab list");
+  await (await lib.resolveBrowserTarget({ tabId: "chrome:21" })).evaluate("1");
+  const afterPaired = sealedExt.frames.slice(sealedExt.frames.findIndex((frame) => frame.type === "paired") + 1);
+  assert.ok(afterPaired.length > 0 && afterPaired.every((frame) => typeof frame.sealed === "string" && Object.keys(frame).length === 1), "Codara's frames after paired are sealed");
+  sealedExt.raw(JSON.stringify({ type: "tabs", tabs: [{ tabId: 22, windowId: 1, url: "https://evil.example/", title: "Evil", active: true }] }));
+  await until(() => sealedExt.closed, "the drop on an unsealed frame");
+  assert.equal(sealedExt.closeCode, 4005);
+  assert.ok(!sealedLink.tabs.has(22), "the injected frame was not acted on");
+  assert.equal(server.link(sealedPaired.linkId), null);
+  const replay = extension(port, { answer });
+  await replay.opened;
+  await replay.login({ token: sealedExt.token, linkId: sealedPaired.linkId });
+  await replay.next("welcome");
+  const frame = await replay.sealer.seal({ type: "tabs", tabs: [{ tabId: 23, windowId: 1, url: "https://z.example/", title: "Z", active: true }] });
+  replay.raw(frame);
+  await until(() => server.link(sealedPaired.linkId)?.tabs.has(23), "the sealed frame");
+  replay.raw(frame);
+  await until(() => replay.closed, "the drop on a replayed frame");
+  assert.equal(replay.closeCode, 4005);
 
   unregister();
   await server.stop();
@@ -382,7 +515,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   const navigated = await lib.navigate({ ref: "chrome:12", session: pageSession, info: async () => ({ url: "https://a.example/next", title: "Next" }) }, { url: "https://a.example/next" });
   assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false });
   assert.ok(Date.now() - navigateStarted < 2_000, "navigate waited for the load event, not its timeout");
-  console.log("chrome link: origin and host checks, pairing with code and Allow, bound tokens, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
+  console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {
   console.error(error);

@@ -133,9 +133,13 @@ and network from the moment a tab opens). Codara tabs use
 A Chrome tab is never used unless an agent names it, and never for an
 imported pull request. The extension (`extensions/chrome/`) reaches Codara
 over a loopback WebSocket that accepts only `chrome-extension://` origins
-and a token the user allowed with a pairing code, and it enforces the user's
-choices itself: only shared tabs, never a blocked site, cookies and storage
-only with a per-tab permission, and no command that reaches other tabs. Large results (screenshots, bodies, traces) go to
+and a pairing the user allowed with a code derived from both sides' ECDH
+keys; every frame after the handshake is encrypted and authenticated
+(`chrome/protocol.ts`). The extension enforces the user's choices itself:
+only shared tabs and never their frames' or workers' sessions, never a
+blocked site, cookies and storage only with a per-tab permission (Codara
+checks the same permission before its storage tool touches page storage),
+and no command that reaches other tabs. Large results (screenshots, bodies, traces) go to
 `<codaraHome>/workspace-data/<workspace>/` and the tool returns the path.
 
 What the user sends from the UI (a picked element, a comment, a screenshot)
