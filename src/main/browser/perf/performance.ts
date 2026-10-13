@@ -210,10 +210,17 @@ export async function measureLoad(target: BrowserTarget, waitMs: number): Promis
 
 export async function startInteractionTrace(target: BrowserTarget): Promise<Record<string, unknown>> {
   await ensureVitalsObserver(target.session);
-  await markVitals(target.session);
   const frameId = await mainFrameId(target.session).catch(() => null);
-  await releaseInteractionPaint(target);
+  // A start while a trace runs is refused before it moves that trace's mark
+  // or drops its paint lease.
   await startTrace(target, { frameId, label: "interaction" });
+  try {
+    await markVitals(target.session);
+  } catch (error) {
+    await discardTrace(target);
+    throw error;
+  }
+  await releaseInteractionPaint(target);
   interactionPaint.set(target.ref, await holdPaint(target, TRACE_MAX_MS + 10_000));
   return {
     tabId: target.ref,

@@ -369,12 +369,19 @@ async function inChromium(lib) {
 
     // A traced interaction.
     await assert.rejects(lib.stopInteractionTrace(perfTarget), /No trace is running/);
+    let paintReleases = 0;
+    perfTarget.keepPainting = async () => ({ background: true, release: async () => { paintReleases += 1; } });
     const started = await lib.startInteractionTrace(perfTarget);
     assert.equal(started.tracing, true);
-    await assert.rejects(lib.startInteractionTrace(perfTarget), /already running/);
     await click(perfTarget, "#slow");
     await sleep(400);
+    // A refused second start leaves the running trace's window and paint lease alone.
+    await assert.rejects(lib.startInteractionTrace(perfTarget), /already running/);
+    assert.equal(paintReleases, 0, "the running trace keeps its paint lease");
     const stopped = await lib.stopInteractionTrace(perfTarget);
+    delete perfTarget.keepPainting;
+    assert.equal(paintReleases, 1, "stop releases the lease once");
+    assert.ok(stopped.notes.some((note) => /in the background/.test(note)), JSON.stringify(stopped.notes));
     assert.equal(stopped.action, "stop");
     assert.ok(stopped.inp.ms >= 250 && stopped.inp.interactions >= 1, JSON.stringify(stopped));
     assert.equal(stopped.lcp, undefined, "an interaction window reports no page-load metrics");
