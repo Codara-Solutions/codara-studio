@@ -8,6 +8,7 @@
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { gitChildEnv } from "../../git-env";
 
 export interface SourceFileLocation {
   /** Workspace-relative when it is inside the workspace, else as the page named it. */
@@ -116,7 +117,7 @@ export interface WorkspaceFiles {
 
 function gitListFiles(root: string): Promise<string[] | null> {
   return new Promise((done) => {
-    execFile("git", ["-C", root, "ls-files", "-co", "--exclude-standard"], { timeout: 4_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
+    execFile("git", ["-C", root, "ls-files", "-co", "--exclude-standard"], { env: gitChildEnv(), timeout: 4_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) done(null);
       else done(stdout.split("\n").filter(Boolean));
     });
