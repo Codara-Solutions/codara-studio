@@ -166,9 +166,13 @@ own. With two browsers paired, ids carry the browser:
 - A tab that is not shared, a tab on the extension's blocked-sites list and
   browser pages are refused with a message saying why; so is navigating a
   shared tab to a blocked site.
-- Cookies and site storage need the user's per-tab permission in the popup;
-  profile-wide cookie reads and commands that reach other tabs are always
-  refused.
+- Cookie and site-storage reads through the DevTools protocol (including
+  HttpOnly cookies) need the user's per-tab permission in the popup, and
+  without it cookie headers are removed from network events; profile-wide
+  cookie reads and commands that reach other tabs are always refused. Page
+  script from `codara_preview_evaluate` sees only what the page's own
+  scripts see.
+- Readonly Pi workers may look at a shared tab but not navigate or resize it.
 - `codara_preview_chrome` `open` needs the popup's "Let agents open new
   tabs", and `close` only closes tabs an agent opened.
 - Every call is logged with the agent that made it, in Settings and in

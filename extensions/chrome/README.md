@@ -54,7 +54,10 @@ tools it uses for its own browser tabs.
   access** for that tab. Without it, cookie headers are removed from network
   events. Profile-wide cookie reads, clearing browser data, closing tabs it
   did not open and every `Browser.*` and `Target.*` command that would reach
-  other tabs are always refused.
+  other tabs are always refused. Script an agent runs in a shared tab
+  (`codara_preview_evaluate`) sees what the page's own scripts see, such as
+  `localStorage` and non-HttpOnly cookies, but never HttpOnly cookies; share
+  only tabs whose page you would let an agent script.
 - Opening a new tab needs **Let agents open new tabs**; such a tab is shared
   automatically and only those tabs can be closed by an agent.
 - Codara logs every tool call with the agent that made it (Settings > General
