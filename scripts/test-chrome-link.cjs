@@ -272,6 +272,10 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   const logged = fs.readFileSync(activityFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual({ ...logged[0], at: 0 }, { at: 0, tool: "codara_preview_click", tab: "chrome:12", agent: "Codex in pane p1", workspaceId: "ws-1" });
   assert.equal(lib.recentChromeActivity()[0].tool, "codara_preview_click");
+  lib.noteChromeToolCall("preview.navigate", { tabId: "chrome:12", url: "https://a.example/next" });
+  assert.equal(lib.recentChromeActivity()[0].detail, "to https://a.example/next", "the log says where an agent took the tab");
+  lib.noteChromeToolCall("preview.type", { tabId: "chrome:12", selector: "#pw", text: "hunter2" });
+  assert.ok(!JSON.stringify(lib.recentChromeActivity()).includes("hunter2"), "typed text stays out of the log");
 
   // codara_preview_chrome.
   const host = { mayUseUserBrowser: async (params) => params.runId !== "untrusted" };

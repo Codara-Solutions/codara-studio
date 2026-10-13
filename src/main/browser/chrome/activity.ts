@@ -80,6 +80,15 @@ export function recordChromeActivity(entry: ChromeActivityEntry): void {
   });
 }
 
+// What a call aimed at, where that is not something the user typed: a
+// URL an agent loads or a tab action. Typed text and evaluated code stay
+// out of the log, since they can carry what the user is signed in with.
+function callDetail(method: string, params: Record<string, unknown>): string | undefined {
+  if (method === "preview.navigate" && typeof params.url === "string") return `to ${params.url.slice(0, 300)}`;
+  if (method === "preview.chrome" && typeof params.action === "string") return params.action.slice(0, 20);
+  return undefined;
+}
+
 /** One browser tool call that named a Chrome tab, as the socket dispatches it. */
 export function noteChromeToolCall(method: string, params: Record<string, unknown>): ChromeActivityEntry | null {
   let ref;
@@ -96,6 +105,8 @@ export function noteChromeToolCall(method: string, params: Record<string, unknow
     agent: chromeAgentLabel(params),
     workspaceId: typeof params.workspaceId === "string" ? params.workspaceId : null,
   };
+  const detail = callDetail(method, params);
+  if (detail) entry.detail = detail;
   recordChromeActivity(entry);
   try {
     usageSink?.(entry, { tabId: ref.tabId, linkId: ref.linkId });
