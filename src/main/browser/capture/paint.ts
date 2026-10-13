@@ -67,6 +67,9 @@ export async function holdGuestPaint(session: Pick<CdpSession, "key">): Promise<
   const held = await new Promise<boolean>((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
+      // A pane that answers late still took the lease, and nothing else
+      // would release it: its guest would keep painting while hidden.
+      send({ reqId, webContentsId, hold: false });
       resolve(false);
     }, ACK_TIMEOUT_MS);
     pending.set(reqId, (value) => {

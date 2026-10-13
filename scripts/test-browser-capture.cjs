@@ -380,14 +380,20 @@ async function guestPaint(lib) {
     assert.equal(value, 7);
     assert.deepEqual([...order, sent.at(-1).hold], [true, false], "the capture runs inside the lease");
 
-    // No pane owns the guest: the capture goes ahead without a lease.
+    // No pane answers in time: the capture goes ahead without a lease, and
+    // a pane that took it late is told to let it go.
     answer = false;
     const before = sent.length;
     const started = Date.now();
     const orphan = await lib.holdGuestPaint({ key: "preview-guest:43" });
     assert.ok(Date.now() - started >= 1000);
+    assert.deepEqual(sent.slice(before).map(({ webContentsId, hold }) => ({ webContentsId, hold })), [
+      { webContentsId: 43, hold: true },
+      { webContentsId: 43, hold: false },
+    ]);
+    assert.equal(sent.at(-1).reqId, sent.at(-2).reqId);
     orphan();
-    assert.equal(sent.length, before + 1, "nothing to release when no pane held it");
+    assert.equal(sent.length, before + 2, "the no-op release sends nothing more");
   } finally {
     lib.setGuestPaintTransport(null);
   }
