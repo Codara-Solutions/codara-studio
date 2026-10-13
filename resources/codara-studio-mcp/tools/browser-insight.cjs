@@ -23,5 +23,22 @@ module.exports = {
         additionalProperties: false,
       },
     },
+    {
+      name: "codara_preview_performance",
+      rpc: "preview.performance",
+      description:
+        "Measure the tab's Core Web Vitals, traces and memory. vitals: LCP, CLS, INP, FCP, TTFB with elements. load: trace a reload. start, then stop: trace an interaction. memory: heap over ms; snapshot=true adds a heap snapshot with top retainers. Trace files open in DevTools.",
+      inputSchema: {
+        type: "object",
+        required: ["action"],
+        properties: {
+          tabId: { type: "string" },
+          action: { type: "string", enum: ["vitals", "load", "start", "stop", "memory"] },
+          ms: { type: "number", description: "load: wait limit. memory: sample time." },
+          snapshot: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
   ],
 };
