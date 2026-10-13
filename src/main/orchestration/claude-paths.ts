@@ -136,27 +136,28 @@ export async function assertSafeClaudeStoragePath(
     if (index >= 0) cursor = join(cursor, pieces[index]);
     // By position, since a followed shared link moves cursor off target's path.
     const isLeaf = options.includeLeaf && index === pieces.length - 1 && checkedTarget === target;
-    const stat = await fs.lstat(cursor).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    const lstatOrNull = (path: string) =>
+      fs.lstat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+        throw error;
+      });
+    let stat = await lstatOrNull(cursor);
+    if (stat?.isSymbolicLink()) {
+      const shared = index === 0 ? await sharedPersonalEntry(root, pieces[0], cursor) : null;
+      if (!shared) throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      // Judge the user's own entry instead (a folder like projects or a file
+      // like history.jsonl); below it no further link is allowed.
+      cursor = shared;
+      stat = await lstatOrNull(cursor);
+      if (stat?.isSymbolicLink()) {
+        throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      }
+    }
     if (!stat) {
       if (isLeaf && options.requireLeaf) {
         throw new Error("Claude transcript does not exist.");
       }
       break;
-    }
-    if (stat.isSymbolicLink()) {
-      const shared = index === 0 ? await sharedPersonalEntry(root, pieces[0], cursor) : null;
-      if (!shared) throw new Error("Claude storage path contains a symbolic-link ancestor.");
-      // Continue below the user's own entry, where no further link is allowed.
-      cursor = shared;
-      const sharedStat = await fs.lstat(cursor).catch(() => null);
-      if (!sharedStat) break;
-      if (!sharedStat.isDirectory()) {
-        throw new Error("Claude storage ancestor is not a directory.");
-      }
-      continue;
     }
     if (!isLeaf && !stat.isDirectory()) {
       throw new Error("Claude storage ancestor is not a directory.");

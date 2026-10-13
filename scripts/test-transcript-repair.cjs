@@ -45,6 +45,7 @@ async function main() {
     inspectClaudeTranscriptTail,
     repairClaudeTranscriptTail,
     resolveSafeClaudeTranscriptPath,
+    assertSafeClaudeStoragePath,
   } = require(outfile);
 
   let failures = 0;
@@ -196,6 +197,17 @@ async function main() {
   check(
     "a managed home finds transcripts through its link to the personal projects",
     throughShared === path.join(liveHome, "projects", encoded, `${sessionId}.jsonl`),
+  );
+  // The session list reads history.jsonl, a shared FILE link.
+  fs.writeFileSync(path.join(personalHome, "history.jsonl"), "{}\n", "utf8");
+  fs.symlinkSync(path.join(personalHome, "history.jsonl"), path.join(liveHome, "history.jsonl"));
+  const history = await assertSafeClaudeStoragePath(liveHome, path.join(liveHome, "history.jsonl"), {
+    includeLeaf: true,
+    leafType: "file",
+  }).catch((error) => error);
+  check(
+    "a managed home reads history.jsonl through its link to the personal home",
+    history === path.join(liveHome, "history.jsonl"),
   );
   const strayHome = path.join(codaraHome, "claude-cli", "accounts", "x", "home");
   fs.mkdirSync(strayHome, { recursive: true });
