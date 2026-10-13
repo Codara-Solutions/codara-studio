@@ -41,6 +41,7 @@ import { setManagedGrokConfigTransform } from "./orchestration/cli-account-homes
 import { runGlobalConfigCleanup } from "./global-config-cleanup";
 import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
+import { isFreshPartition } from "../shared/browser-partition";
 import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
@@ -852,7 +853,17 @@ function createWindow(): void {
   // below only reaffirm Electron's own defaults for a webview guest (node off,
   // isolation on); they are defense in depth, not the mechanism. We do NOT
   // newly toggle sandbox here: that would change the guest's process model.
-  mainWindow.webContents.on("will-attach-webview", (_event, webPreferences, params) => {
+  mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    // A guest runs in the default session or in a logged-out tab's own
+    // in-memory partition. Any other name could be a `persist:` one that
+    // writes to disk or is shared with something else, and dropping the
+    // attribute would put a tab meant to be logged out into the user's
+    // signed-in session, so such a guest is refused.
+    if (params.partition && !isFreshPartition(params.partition)) {
+      logMain("security", `refused a browser tab in partition ${JSON.stringify(params.partition)}`);
+      event.preventDefault();
+      return;
+    }
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
     webPreferences.contextIsolation = true;

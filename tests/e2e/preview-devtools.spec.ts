@@ -221,6 +221,26 @@ test("network detail, emulation and storage work on a background tab through the
     const leftover = await app.evaluate(async ({ session }, name) => (await session.fromPartition(name).cookies.get({})).length, partition as string);
     expect(leftover).toBe(0);
 
+    // A browser tab in any other partition is refused before it loads; the
+    // same element without one attaches, so the check is not vacuous.
+    const strayGuests = () => app.evaluate(({ webContents, session }) => {
+      const stray = session.fromPartition("persist:elsewhere");
+      const guests = webContents.getAllWebContents().filter((wc) => wc.getType() === "webview");
+      return { stray: guests.filter((wc) => wc.session === stray).length, plain: guests.filter((wc) => wc.getURL().includes("?control")).length };
+    });
+    await page.evaluate((url) => {
+      for (const partition of ["persist:elsewhere", null]) {
+        const webview = document.createElement("webview");
+        if (partition) webview.setAttribute("partition", partition);
+        webview.className = "stray-webview";
+        webview.src = partition ? `${url}?stray` : `${url}?control`;
+        document.body.append(webview);
+      }
+    }, `${origin}/ua`);
+    await expect.poll(async () => (await strayGuests()).plain).toBe(1);
+    expect((await strayGuests()).stray).toBe(0);
+    await page.evaluate(() => document.querySelectorAll(".stray-webview").forEach((webview) => webview.remove()));
+
     const cleared = await request("preview.storage", { tabId, runId, action: "clear" });
     expect(cleared.removed).toMatchObject({ cookies: 2, localStorage: 1 });
     expect(await cookieNames(tabId)).toEqual([]);
