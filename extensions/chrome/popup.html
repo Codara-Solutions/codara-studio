@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Codara</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <img src="icons/icon-32.png" alt="" width="20" height="20" />
+      <strong>Codara</strong>
+      <span id="status" class="pill" data-state="idle">Not connected</span>
+    </header>
+
+    <section id="connect" class="card" hidden>
+      <p id="connect-text">Connect this browser to Codara so agents can use the tabs you share.</p>
+      <p id="pairing" class="pairing" hidden>
+        Allow this code in Codara:
+        <span id="pairing-code" class="code"></span>
+      </p>
+      <p id="connect-error" class="error" hidden></p>
+      <button id="connect-button" type="button" class="primary">Connect to Codara</button>
+    </section>
+
+    <section id="this-tab" class="card" hidden>
+      <h2>This tab</h2>
+      <div class="tab-title" id="tab-title"></div>
+      <p id="tab-note" class="note" hidden></p>
+      <label class="row">
+        <span>Let agents use this tab</span>
+        <input id="share-tab" type="checkbox" role="switch" />
+      </label>
+      <div id="tab-shared" hidden>
+        <div class="row">
+          <code id="tab-id"></code>
+          <button id="copy-id" type="button">Copy id</button>
+        </div>
+        <p id="tab-usage" class="note"></p>
+        <label class="row">
+          <span>Allow cookie and storage access</span>
+          <input id="share-storage" type="checkbox" role="switch" />
+        </label>
+      </div>
+    </section>
+
+    <section id="more" class="card" hidden>
+      <h2>Share more</h2>
+      <label class="row">
+        <span>All tabs in this window</span>
+        <input id="share-window" type="checkbox" role="switch" />
+      </label>
+      <label class="row">
+        <span>Every tab in this browser</span>
+        <input id="share-all" type="checkbox" role="switch" />
+      </label>
+      <label class="row">
+        <span>Let agents open new tabs</span>
+        <input id="allow-open" type="checkbox" role="switch" />
+      </label>
+    </section>
+
+    <section id="shared" class="card" hidden>
+      <div class="row">
+        <h2>Shared tabs</h2>
+        <button id="stop-all" type="button" class="danger">Stop all</button>
+      </div>
+      <ul id="shared-list"></ul>
+    </section>
+
+    <footer class="bar">
+      <button id="open-options" type="button" class="link">Blocked sites</button>
+      <button id="unpair" type="button" class="link" hidden>Disconnect</button>
+    </footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
