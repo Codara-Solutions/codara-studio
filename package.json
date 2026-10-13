@@ -206,6 +206,7 @@
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.11.5",
     "ajv": "8.20.0",
+    "axe-core": "4.13.0",
     "croner": "^10.0.1",
     "docx-preview": "^0.4.0",
     "electron-updater": "^6.8.9",
