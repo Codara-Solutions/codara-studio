@@ -297,7 +297,7 @@ ${mcp?.promptSuffix() ?? ""}`,
       label: "Codara · tools",
       description:
         `Load Codara Studio tool families for this chat before their first use. Families: ${loadableFamilies.join(", ")}. ` +
-        "browser drives the built-in Browser tab (codara_preview_*); terminal opens terminal tabs for servers and commands the user watches (codara_terminal_*); " +
+        "browser drives Codara's Browser tabs and the user's shared Chrome tabs (codara_preview_*); terminal opens terminal tabs for servers and commands the user watches (codara_terminal_*); " +
         "whiteboard builds visual explanations (codara_whiteboard_*); board manages this chat's task cards (codara_board_*); " +
         "automations creates, runs, and manages recurring automations; worktrees creates isolated worktrees and removes merged ones; " +
         "workflows checks, runs and saves scripts that fan work out to many agents. Returns the activated tools and how to use them.",

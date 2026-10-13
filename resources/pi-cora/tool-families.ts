@@ -130,7 +130,8 @@ export function toolPromptSnippet(description: string, maxChars = 100): string {
 }
 
 export const STUDIO_FAMILY_GUIDANCE: Record<StudioToolFamily, string> = {
-  browser: `Browser: codara_preview_* drives only Codara Studio's built-in Browser tab.
+  browser: `Browser: codara_preview_* drives Codara Studio's Browser tabs and the tabs the
+user shared from their own Chrome (ids like chrome:123; codara_preview_list shows both).
 Use trusted mouse/key/scroll/hover/drag tools for native input when needed.`,
   terminal: `Dev servers: list the workspace's saved ones with codara_terminal_servers and
 start one by id, or start a new one there with its command. Codara keeps it

@@ -126,7 +126,7 @@ assert.doesNotMatch(automation, /Call codara_complete/);
 assert.match(deep, /Deep execution policy/);
 assert.match(deep, /actively seek a counterexample/);
 assert.match(execute, /codara_whiteboard_update/);
-assert.match(execute, /Codara Studio's built-in Browser tab/);
+assert.match(execute, /Codara Studio's Browser tabs and the tabs\s+the user shared from their own Chrome/);
 assert.match(execute, /codara_preview_\*/);
 const studioToolNames = new Set(studioBridge.listTools().map((tool) => tool.name));
 assert.equal(studioToolNames.has("codara_whiteboard_get"), true);

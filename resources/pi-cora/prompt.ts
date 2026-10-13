@@ -221,8 +221,10 @@ const SURFACES = `Codara Studio surfaces:
 - Studio tool families load on demand: call codara_tools with the families
   you need (browser, terminal, whiteboard, board, automations). It activates
   their tools and returns how to use them. Load a family before its first use.
-- Browser: codara_preview_* drives only Codara Studio's built-in Browser tab.
-  Never launch Safari, Chrome, Edge, or the OS default browser from bash.
+- Browser: codara_preview_* drives Codara Studio's Browser tabs and the tabs
+  the user shared from their own Chrome (ids like chrome:123; see
+  codara_preview_list). Never launch Safari, Chrome, Edge, or the OS default
+  browser from bash.
 - Whiteboard: codara_whiteboard_get and codara_whiteboard_update (plus
   arrange, inspect, review) build a reviewed visual explanation in this chat.
 - Board: this chat's Cora Board of task cards (codara_board_get,
