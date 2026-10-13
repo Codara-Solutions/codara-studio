@@ -94,6 +94,8 @@ function extensionFor(mimeType) {
 /**
  * Turns an MCP tool result into printable lines. Image blocks become files
  * under the Codara home, unless the result already names the file it saved.
+ * Text loses its control characters: an error can quote a web page, and an
+ * escape sequence in it would act on the terminal that prints it.
  */
 function renderResult(result, { outDir, now = Date.now() } = {}) {
   const lines = [];
@@ -110,7 +112,7 @@ function renderResult(result, { outDir, now = Date.now() } = {}) {
   let index = 0;
   for (const block of result.content || []) {
     if (block.type === "text") {
-      lines.push(block.text);
+      lines.push(String(block.text).replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ""));
     } else if (block.type === "image" && typeof block.data === "string") {
       if (named.size) continue;
       fs.mkdirSync(outDir, { recursive: true });

@@ -115,7 +115,7 @@ assert.match(
 const ptyManager = read("src/main/pty-manager.ts");
 assert.match(
   ptyManager,
-  /opts\?: \{ submit\?: boolean; stashDraft\?: boolean \}[\s\S]*?if \(opts\?\.stashDraft\) write\(id, "\\x13"\);[\s\S]*?write\(id, `\\x1b\[200~/,
+  /opts\?: \{ submit\?: boolean; stashDraft\?: boolean \}[\s\S]*?if \(opts\?\.stashDraft\) write\(id, "\\x13"\);[\s\S]*?write\(id, bracketedPaste\(text\)\)/,
 );
 assert.match(read("src/main/ipc.ts"), /stashDraft: args\.stashDraft === true/);
 assert.match(read("src/preload/index.ts"), /stashDraft: opts\?\.stashDraft/);

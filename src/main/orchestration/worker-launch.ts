@@ -11,6 +11,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerArtifactPaths, WorkerReport, WorkerTask } from "@shared/types";
 import { stripAnsiWorkerTap, workerSubmitTurnStarted } from "@shared/agent-patterns";
+import { pasteBody, plainTerminalText } from "@shared/terminal-text";
 import * as pty from "../pty-manager";
 import { workerReportStatusOf } from "./worker-report";
 
@@ -216,6 +217,9 @@ export async function pasteAndSubmit(
   const body = promptText.replace(/\r\n?/g, "\n").trim();
   if (!body) return true;
   if (runtime === "claude" || runtime === "codex") {
+    // The prompt can quote page text the user sent to Cora; a paste marker
+    // inside it would end the paste early and type the rest as keystrokes.
+    const pasted = pasteBody(body);
     const PASTE_BEGIN = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
 
@@ -239,7 +243,7 @@ export async function pasteAndSubmit(
     try {
       handle.write(PASTE_BEGIN);
       await delay(25);
-      handle.write(body);
+      handle.write(pasted);
       await delay(25);
       handle.write(PASTE_END);
       // Let the TUI commit the bracketed paste into its input box before the
@@ -271,9 +275,11 @@ export async function pasteAndSubmit(
   }
   // Manual / shell runtimes: just dump the prompt as text into pwsh as a
   // here-string comment so the user can read it. They drive the work
-  // themselves and write the final-report.json by hand.
+  // themselves and write the final-report.json by hand. These lines are
+  // typed, not pasted, so a control character in them (Ctrl+U, ESC) would
+  // edit the line and could turn the comment into a command.
   handle.write(`# Prompt:\r`);
-  for (const line of body.split("\n")) {
+  for (const line of plainTerminalText(body).split("\n")) {
     handle.write(`# ${line}\r`);
   }
   return true;

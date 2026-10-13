@@ -13,6 +13,7 @@ import type {
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
+import { bracketedPaste } from "@shared/terminal-text";
 import {
   restoreUserZdotdir,
   sanitizeAppImageChildEnv,
@@ -2197,15 +2198,13 @@ export function inject(
 ): void {
   if (!sessions.has(id)) return;
   if (opts?.stashDraft) write(id, "\x13");
-  // ConPTY corrupts NULs, so strip them. Also strip any bracketed-paste
-  // start/end markers (CSI 200~ / CSI 201~) the payload itself contains: this
-  // helper OWNS the paste wrap, so a marker inside `text` can only break out of
-  // it — a stray CSI 201~ would end the paste early and make the following bytes
-  // (a CR, raw CSI) execute as live keystrokes, defeating submit:false and
-  // letting injected content force-submit. Neutering them keeps the wrap intact
-  // so the single trailing CR below is the only way to submit.
-  const sanitized = text.replace(/\x00/g, "").replace(/\x1b\[20[01]~/g, "");
-  write(id, `\x1b[200~${sanitized}\x1b[201~`);
+  // This helper OWNS the paste wrap, so a marker inside `text` can only break
+  // out of it: a stray CSI 201~ would end the paste early and make the
+  // following bytes (a CR, raw CSI) execute as live keystrokes, defeating
+  // submit:false and letting injected content force-submit. bracketedPaste
+  // removes every marker (and NULs, which ConPTY corrupts), so the single
+  // trailing CR below is the only way to submit.
+  write(id, bracketedPaste(text));
   const submit = opts?.submit ?? true;
   if (submit) write(id, "\r");
 }

@@ -142,7 +142,10 @@ What the user sends from the UI (a picked element, a comment, a screenshot)
 goes through `agent-delivery.ts`: one bracketed paste into the chosen pane's
 agent, whatever its runtime, not submitted unless the user pressed Send; a
 message in a Cora chat; or an inbox an agent pulls with
-`codara_preview_inbox`.
+`codara_preview_inbox`. Page text in it (element names, text, titles) loses
+its control characters first, and every bracketed paste Codara writes goes
+through `src/shared/terminal-text.ts`, which removes paste markers until none
+is left, so text from a page can never end the paste and run as keystrokes.
 
 `SPARK_MCP_MODE` picks the roster once, at startup:
 

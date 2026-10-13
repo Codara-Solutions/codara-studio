@@ -18,6 +18,7 @@ import type {
   AgentDeliveryResult,
   AgentInboxItem,
 } from "../shared/agent-delivery";
+import { plainTerminalText } from "../shared/terminal-text";
 import { workspaceDataDir } from "./workspace-data";
 
 export const MAX_DELIVERY_TEXT_CHARS = 200_000;
@@ -136,7 +137,7 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
     async deliver(request) {
       const workspaceId = typeof request.workspaceId === "string" ? request.workspaceId.trim() : "";
       if (!workspaceId) throw new AgentDeliveryError("workspaceId is required.");
-      const rawText = typeof request.text === "string" ? request.text : "";
+      const rawText = typeof request.text === "string" ? plainTerminalText(request.text) : "";
       if (rawText.length > MAX_DELIVERY_TEXT_CHARS) throw new AgentDeliveryError("The message is too long to send.");
       const attachments = Array.isArray(request.attachments) ? request.attachments : [];
       if (!rawText.trim() && !attachments.length) throw new AgentDeliveryError("Nothing to send.");

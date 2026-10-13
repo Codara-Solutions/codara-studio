@@ -32,6 +32,7 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import { formatPaneExitLine } from "@shared/pane-format";
+import { pasteBody } from "@shared/terminal-text";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
@@ -1159,10 +1160,11 @@ export function useTerminalSession({
       // chip. A plain shell that has NOT enabled the mode (e.g. a bare command
       // line, or one mid-typing) gets the raw bytes so the token still lands at
       // the cursor like typed input. Null bytes are stripped because shells
-      // reject them and ConPTY can corrupt the stream around them.
+      // reject them and ConPTY can corrupt the stream around them, and paste
+      // markers are removed so nothing inside can end the paste early.
       const writeTokenRespectingBracketMode = (raw: string) => {
         if (readOnlyRef.current || inputBlockedRef.current) return;
-        const sanitized = raw.replace(/\x00/g, "");
+        const sanitized = pasteBody(raw);
         if (!sanitized) return;
         const bracketed = termRef.current?.modes.bracketedPasteMode ?? false;
         const payload = bracketed ? `\x1b[200~${sanitized}\x1b[201~` : sanitized;
@@ -1177,7 +1179,7 @@ export function useTerminalSession({
         onUserInputRef.current?.();
         void (async () => {
           const text = await window.spark.clipboard.readText();
-          const sanitized = (text ?? "").replace(/\x00/g, "");
+          const sanitized = pasteBody(text ?? "");
           const pasteText = () => {
             void window.spark.pty.write(sessionId, `\x1b[200~${sanitized}\x1b[201~`);
           };
@@ -1516,8 +1518,20 @@ export function useTerminalSession({
           if (searchInput && event.target === searchInput) return;
           const data = event.clipboardData;
           if (!data) return;
-          // Any usable text on the clipboard → defer to xterm's native paste.
-          if (data.getData("text")?.trim()) return;
+          const text = data.getData("text");
+          if (text?.trim()) {
+            // xterm brackets the text as it is, so text copied from a web page
+            // could end the paste with its own CSI 201~ and type the rest as
+            // keystrokes. Such text is pasted without its markers instead.
+            const body = pasteBody(text);
+            if (body !== text) {
+              event.preventDefault();
+              event.stopPropagation();
+              termRef.current?.paste(body);
+            }
+            // Any other usable text → defer to xterm's native paste.
+            return;
+          }
           const hasImage =
             Array.from(data.items ?? []).some(
               (item) => item.kind === "file" && item.type.startsWith("image/"),

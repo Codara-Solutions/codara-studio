@@ -48,6 +48,11 @@ function run(args, env, command = "tool") {
     ['{"path":"/saved.png"}'],
     "an image the result already saved is not written twice",
   );
+  assert.deepEqual(
+    renderResult({ isError: true, content: [{ type: "text", text: "Uncaught Error: hi\x1b]52;c;ZXZpbA==\x07\r\n\x9b2J done" }] }, { outDir: out }),
+    ["Uncaught Error: hi]52;c;ZXZpbA==\n2J done"],
+    "page text in a result cannot act on the terminal printing it",
+  );
   fs.rmSync(out, { recursive: true, force: true });
 
   // The real CLI against a fake Codara.

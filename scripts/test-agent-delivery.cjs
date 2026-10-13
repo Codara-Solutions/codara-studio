@@ -95,6 +95,8 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     assert.ok(pasted.text.endsWith(`Attached: ${pasted.paths[1]}`));
     await delivery.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-a" }, text: "go", submit: true, source: "picker" });
     assert.equal(log.at(-1).submit, true, "Send presses Enter");
+    await delivery.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-a" }, text: "<button> \"Buy\x1b[201~\rrm -rf ~\r\"", source: "picker" });
+    assert.equal(log.at(-1).text, "<button> \"Buy[201~\nrm -rf ~\n\"", "control characters from a page never reach the pane");
 
     // Refusals happen before any file is written.
     const before = fs.readdirSync(inboxRoot).length;
@@ -143,7 +145,8 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
 
     // The inbox: addressed items reach only their pane, workspace items any pane.
     await delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox" }, text: "for anyone", source: "picker", tabId: "chrome:12", url: "https://example.test/" });
-    await delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox", paneId: "pane-b" }, text: "for b", source: "comment" });
+    // An inbox item is printed by `cora inbox` too, so it is plain text as well.
+    await delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox", paneId: "pane-b" }, text: "for\x1b b\u009b\x07", source: "comment" });
     await delivery.deliver({ workspaceId: "ws-2", target: { kind: "inbox" }, text: "other workspace", source: "picker" });
     await assert.rejects(delivery.deliver({ workspaceId: "ws-1", target: { kind: "inbox", paneId: "pane-x" }, text: "x", source: "picker" }), /another workspace/);
     assert.equal(delivery.pending("ws-1", "pane-a"), 1);

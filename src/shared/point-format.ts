@@ -1,4 +1,5 @@
 import type { PointElement, PointRegionHit } from "./preview-point";
+import { plainTerminalText } from "./terminal-text";
 
 // What pointing at the page produces once main has mapped the page's source
 // hints to files, and the short text an agent receives for it. The same
@@ -160,7 +161,7 @@ export function formatPickText(inspection: PointInspection, note: string, option
   parts.push(inspection.elements.map((element, i) => formatElementBlock(element, i + 1)).join("\n"));
   if (options.detailsPath) parts.push(`Every style, CSS rule and source candidate: ${options.detailsPath}`);
   parts.push(`Use tabId "${inspection.tabId}" and the refs above with the codara_preview tools (or \`cora tool\`); refs last until the page reloads.`);
-  return parts.join("\n\n");
+  return plainTerminalText(parts.join("\n\n"));
 }
 
 function annotationLine(annotation: PointAnnotation, scroll: { x: number; y: number }): string {
@@ -201,7 +202,7 @@ export function formatCommentText(
   });
   parts.push(blocks.join("\n"));
   parts.push(`Viewport ${inspection.viewport.width}x${inspection.viewport.height} CSS px. Use tabId "${inspection.tabId}" with the codara_preview tools.`);
-  return parts.join("\n\n");
+  return plainTerminalText(parts.join("\n\n"));
 }
 
 export interface TabReference {
@@ -219,5 +220,5 @@ export function formatTabReference(tab: TabReference): string {
   if (tab.session) lines.push(`session: ${tab.session}`);
   if (tab.workspace) lines.push(`workspace: ${tab.workspace}`);
   lines.push(`Pass "tabId": "${tab.tabId}" to any codara_preview tool, or --tabId ${tab.tabId} to \`cora tool\`.`);
-  return lines.join("\n");
+  return plainTerminalText(lines.join("\n"));
 }
