@@ -5,6 +5,10 @@ import { SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
 
+function sharedCount(browser: ChromeLinkBrowserState): number {
+  return browser.tabs.filter((tab) => !tab.blocked).length;
+}
+
 /**
  * Settings > General > Chrome extension: how to install the extension in
  * Chrome, Edge, Brave or another Chromium browser, the browsers paired with
@@ -124,7 +128,7 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                     {browser.connected ? "" : " (not connected)"}
                   </div>
                   <div className="st-device__meta">
-                    {`${browser.tabs.filter((tab) => !tab.blocked).length} shared tab${browser.tabs.length === 1 ? "" : "s"}, paired ${formatWhen(browser.pairedAt)}, last seen ${browser.connected ? "now" : formatWhen(browser.lastSeenAt)}`}
+                    {`${sharedCount(browser)} shared tab${sharedCount(browser) === 1 ? "" : "s"}, paired ${formatWhen(browser.pairedAt)}, last seen ${browser.connected ? "now" : formatWhen(browser.lastSeenAt)}`}
                   </div>
                   {browser.tabs.length > 0 ? (
                     <ul className="chrome-tabs">
