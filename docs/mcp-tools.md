@@ -40,6 +40,17 @@ Every runtime gets the same tool set for the same kind of session;
 `test-agent-launch-integration` holds the Claude and Codex launches to the
 same server command and environment.
 
+**Startup flags** (Settings > Accounts) adds flags of your own to each Claude
+Code, Codex, Grok or Pi launch from Codara, after Codara's own, and nowhere
+else: they are kept in `<codara home>/agent-launch-args.json` and never written
+into a CLI's config. A field takes flags only, quoted values allowed; shell
+syntax (`;`, `|`, `$(...)`, backticks) and the flags Codara sets itself
+(`--settings`, `--mcp-config`, `--resume` and the like, Codex's
+`mcp_servers.codara-studio` and `notify` keys) are refused. **Connect to
+Chrome** starts Claude Code with `--chrome`, its own link to your Chrome. Codex,
+Grok and Pi have no such flag; they reach a browser through Codara's browser
+tools and the Chrome extension.
+
 The managed entries carry a version marker; when it changes, Codara rewrites
 them on the next launch. The Codex entry also sets `tool_timeout_sec = 660`
 and `startup_timeout_sec = 20`, because Codex gives up on a tool after 60
@@ -177,6 +188,56 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 | `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
 | `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
+
+### Dev servers
+
+`codara_terminal_servers` (socket method `terminal.servers`) is in every set
+that has the terminal tools, and the `cora server` command runs the same tool
+from a shell. It acts on the caller's workspace: the one its pane sits in, or
+the workspace on screen for a caller outside every pane. It is refused to a
+Cora run on an imported pull request from an untrusted source, since it starts
+commands.
+
+A server it starts runs in a terminal session that Codara's main process owns,
+not in the agent's pane or process tree and not tied to a Cora run. Restarting,
+closing or ending the agent therefore leaves it running, and the next agent, a
+restarted one included, reaches it by id. Quitting Codara stops it.
+
+| `action` | What it does |
+|---|---|
+| `list` | Every remembered server of the workspace: `id`, `state` (`running`, `pane` when it runs in a terminal pane, `stopped`, `exited` with `exitCode`), `health` (a TCP connect to its port: `up`, `down`, `unknown`), `url`, `port`, `command`, `cwd`, `envNames`, `missingEnv` and `paneId`. |
+| `start` | Starts a saved server by `id`, or a new one from `command` with optional `cwd` (relative to the workspace), `port`, `url`, `env` and `autoStart`. A server already running under that id or with the same command and folder comes back with `alreadyRunning: true` instead of a second copy. A port something else answers on is refused with what holds it: another server of the workspace, a process in one of your terminal panes, or a pid. Waits up to 15 seconds for the port or the printed URL and reports `ready`; when the process ends first, `output` holds its last lines. |
+| `stop`, `restart` | Stops a server (a learned one by ending its process, leaving the pane's shell or agent alone) or stops and starts it again. |
+| `logs` | Output without escape codes and a `cursor`; pass it back as `since` for only what came after. A reply holds at most 4,000 characters; longer output is written to `<codara home>/workspace-data/<workspace>/servers/<id>.log` and its path returned. |
+| `save` | Edits a saved server: `command`, `cwd`, `port`, `url`, `autoStart`. |
+| `forget` | Stops a server and removes it from the list. |
+
+What is remembered lives in Codara's own data folder
+(`<codara home>/workspace-data/<workspace>/servers/servers.json`), never in the
+repository: commands, folders, ports, URLs and the NAMES of the environment
+variables a server was started with. Values passed in `env` stay in memory for
+that app session only; after a restart, `missingEnv` names what a start would
+lack. The URL is learned from the server's own output and can be edited with
+`save` or in the status view.
+
+Servers started by hand or by an agent in a terminal pane are learned too: when
+a local URL appears in a pane's output and the process listening on that port
+runs in that pane, the server is listed with state `pane`. Its command comes
+from the shell's report (zsh and PowerShell send one) or from the listening
+process's command line (bash, or an agent CLI's own shell tool). A pane an agent
+opened with `codara_terminal_create` then belongs to the workspace instead of
+the agent's run: the run finishing no longer closes it, and it stays writable
+by that run and by agents without a run. A `pane` server is never started a
+second time while it answers.
+
+A server marked `autoStart` starts the first time its workspace opens in an
+app session.
+
+The status view in the status bar (the **STATUS** chip) shows the same servers
+with their health, which agents in the workspace's panes reached Codara's
+tools (each codara-studio server reports itself once its client has
+initialized), the browser tabs each agent or run drives, and recordings in
+progress, with open, stop, start, restart, logs, edit and copy-id actions.
 
 ## Notifications
 

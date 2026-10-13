@@ -31,6 +31,28 @@ a 30 fps clock with four-tick frame holds, plus live phase and turn timers.
 Cora redraws only when the visible frame changes, keeping that motion smooth
 without spending CPU repainting idle screens.
 
+## Dev servers
+
+`cora server` keeps the workspace's dev servers running apart from any agent,
+so they survive an agent restarting or finishing. It is a face over the
+`codara_terminal_servers` tool (see `docs/mcp-tools.md`): it acts on the
+workspace of the pane it runs in, with the same rules and results.
+
+```
+cora server list                                  # id, state, port check, URL
+cora server start web --command "pnpm dev" --port 3000 --autoStart
+cora server start web                             # a saved one; never a second copy
+cora server logs web --follow                     # plain output, polled by cursor
+cora server restart web
+cora server stop web
+cora server save web --url http://localhost:3000/admin
+cora server forget web
+```
+
+`--env '{"API_URL":"http://localhost:4000"}'` passes values for that start only;
+Codara stores the names, never the values. A busy port is refused with what
+holds it. `--json` prints the raw tool result.
+
 ## Layout
 
 - `cora.cjs` — entry point: arg parsing, help, dispatch.
